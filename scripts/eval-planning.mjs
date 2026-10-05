@@ -51,16 +51,31 @@ const {
 } = await import("./eval-planning/report.mjs");
 const { loadReviewFixtures, prepareVariants, reviewVariant, variantPlan } =
   await import("./eval-planning/review.mjs");
+const { composePairedPlanningModel, readReviewerPlanning } = await import(
+  "./eval-planning/pairing.mjs"
+);
+const {
+  createGate,
+  gradesFailure,
+  planFailure,
+  retrySummary,
+  reviewFailure,
+  withRetries,
+} = await import("./eval-planning/retry.mjs");
 
 const usage = `Usage:
   node scripts/eval-planning.mjs --config FACTORY_CONFIG --output NEW_DIR
     [--cases DIR ...] [--target CHECKOUT] [--case NAME ...] [--repeat N]
-    [--parallel N] [--planning-model MODULE] [--judge JUDGE_JSON ...]
-    [--judge-transport MODULE] [--allow-unsandboxed-judges]
+    [--parallel N] [--planning-model MODULE | --reviewer-config FACTORY_CONFIG]
+    [--judge JUDGE_JSON ...] [--judge-transport MODULE]
+    [--allow-unsandboxed-judges]
+    [--max-retries N] [--max-wait MINUTES] [--retry-wait SECONDS]
   node scripts/eval-planning.mjs --review-only --config FACTORY_CONFIG --output NEW_DIR
     [--fixtures DIR] [--case NAME ...] [--repeat N] [--parallel N]
-    [--planning-model MODULE] [--judge JUDGE_JSON ...] [--judge-transport MODULE]
+    [--planning-model MODULE | --reviewer-config FACTORY_CONFIG]
+    [--judge JUDGE_JSON ...] [--judge-transport MODULE]
     [--allow-unsandboxed-judges]
+    [--max-retries N] [--max-wait MINUTES] [--retry-wait SECONDS]
   node scripts/eval-planning.mjs --compare A/report.json B/report.json [--output DIR]`;
 
 function fail(message) {
@@ -73,6 +88,39 @@ function positiveInteger(value, name) {
   if (!Number.isSafeInteger(number) || number <= 0)
     fail(`--${name} must be a positive integer`);
   return number;
+}
+
+function nonNegativeInteger(value, name) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0)
+    fail(`--${name} must be a non-negative integer`);
+  return number;
+}
+
+function positiveNumber(value, name) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0)
+    fail(`--${name} must be a positive number`);
+  return number;
+}
+
+/**
+ * Run an attempt again after a provider usage limit or a network outage, with
+ * every lane held for the wait. The final result carries what was waited.
+ */
+async function retrying(common, label, attempt, failureOf) {
+  const { result, retries, exhausted } = await withRetries(attempt, {
+    failureOf,
+    gate: common.gate,
+    ...common.retry,
+    onRetry: (retry, count) =>
+      console.error(
+        `${label}: ${retry.kind}, waiting ${Number((retry.waitMs / 1000).toFixed(1))}s before retry ${count}/${common.retry.maxRetries}: ${retry.detail}`,
+      ),
+  });
+  if (retries.length) result.retries = [...(result.retries ?? []), ...retries];
+  if (exhausted) result.retriesExhausted = true;
+  return result;
 }
 
 async function runAll(tasks, parallel, start) {
@@ -92,6 +140,8 @@ async function runAll(tasks, parallel, start) {
 function runOne(evalCase, repeat, options) {
   const id = `${evalCase.name}-${repeat}`;
   const directory = join(options.output, "runs", id);
+  // A retry starts from nothing, as the first attempt did.
+  rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   const spec = join(directory, "spec.json");
   writeFileSync(
@@ -101,6 +151,7 @@ function runOne(evalCase, repeat, options) {
         ...evalCase,
         config: options.config,
         planningModule: options.planningModule,
+        reviewerPlanning: options.reviewerPlanning,
         judges: options.judges.map((judge) => judge.path),
         judgeTransport: options.judgeTransport,
         allowUnsandboxedJudges: options.allowUnsandboxedJudges,
@@ -201,6 +252,26 @@ function refuse(common, error) {
   fail(error instanceof Error ? error.message : String(error));
 }
 
+/** The reviewer pairing, when `--reviewer-config` replaced the planner's own. */
+function pairing(common) {
+  return common.reviewerPlanning
+    ? {
+        reviewer: {
+          path: common.reviewerConfigPath,
+          planning: common.reviewerPlanning,
+        },
+      }
+    : {};
+}
+
+const retryOptions = (common) => ({
+  maxRetries: common.retry.maxRetries,
+  maxWaitMinutes: common.retry.maxWaitMs / 60_000,
+  ...(common.retry.baseSeconds === undefined
+    ? {}
+    : { waitSeconds: common.retry.baseSeconds }),
+});
+
 function judgeSummaries(common) {
   return common.judges.map((judge) => ({
     name: judge.name,
@@ -289,9 +360,14 @@ async function planMode(values, common) {
     })),
   );
   const runs = await runAll(tasks, common.parallel, ({ evalCase, repeat }) =>
-    runOne(evalCase, repeat, common),
+    retrying(
+      common,
+      `${evalCase.name}-${repeat}`,
+      () => runOne(evalCase, repeat, common),
+      planFailure,
+    ),
   );
-  const summary = summarizePlanRuns(runs);
+  const summary = summarizePlanRuns(runs, common.gate.pausedMs);
   const report = {
     schemaVersion: 2,
     mode: "plan",
@@ -301,10 +377,12 @@ async function planMode(values, common) {
     config: { path: common.configPath, planning: common.config.planning },
     ...(common.config.autonomy ? { autonomy: common.config.autonomy } : {}),
     ...(common.planningModule ? { planningModule: common.planningModule } : {}),
+    ...pairing(common),
     judges: judgeSummaries(common),
     ...judgeIsolation(common),
     repeat: common.repeat,
     parallel: common.parallel,
+    retry: retryOptions(common),
     summary,
     units: summary.cases,
     runs,
@@ -381,7 +459,12 @@ async function reviewMode(values, common) {
             config: entry.config,
             directory,
           })
-        : composePlanningModel(entry.config);
+        : common.reviewerPlanning
+          ? await composePairedPlanningModel(
+              entry.config,
+              common.reviewerPlanning,
+            )
+          : composePlanningModel(entry.config);
     }
   } catch (error) {
     refuse(common, error);
@@ -402,11 +485,11 @@ async function reviewMode(values, common) {
     tasks,
     common.parallel,
     async ({ entry, variant, repeat }) => {
-      const run = await reviewVariant(
-        entry.model,
-        entry.fixture,
-        variant,
-        repeat,
+      const run = await retrying(
+        common,
+        `${entry.fixture.name}/${variant.variant} #${repeat}`,
+        () => reviewVariant(entry.model, entry.fixture, variant, repeat),
+        reviewFailure,
       );
       if (variant.rule) run.rule = variant.rule;
       run.unitDigest = createHash("sha256")
@@ -428,12 +511,25 @@ async function reviewMode(values, common) {
   rmSync(join(common.output, "checkouts"), { recursive: true, force: true });
   if (common.judges.length)
     await runAll(tasks, common.parallel, async ({ entry, variant }, index) => {
-      runs[index].judges = await gradeInIsolation(
-        common.judges,
-        judgeInput(variantPlan(variant), entry.facts),
-        common.judgeTransport,
-        { allowUnsandboxed: common.allowUnsandboxedJudges },
+      const target = runs[index];
+      // Only the judge call repeats: the review is already in hand.
+      const graded = await retrying(
+        common,
+        `${entry.fixture.name}/${variant.variant} #${target.repeat} judges`,
+        async () => ({
+          judges: await gradeInIsolation(
+            common.judges,
+            judgeInput(variantPlan(variant), entry.facts),
+            common.judgeTransport,
+            { allowUnsandboxed: common.allowUnsandboxedJudges },
+          ),
+        }),
+        (outcome) => gradesFailure(outcome.judges),
       );
+      target.judges = graded.judges;
+      if (graded.retries)
+        target.retries = [...(target.retries ?? []), ...graded.retries];
+      if (graded.retriesExhausted) target.retriesExhausted = true;
     });
   const refusals = prepared.flatMap((entry) =>
     entry.variants
@@ -444,7 +540,7 @@ async function reviewMode(values, common) {
         reason: variant.refused,
       })),
   );
-  const summary = summarizeReviewRuns(runs, refusals);
+  const summary = summarizeReviewRuns(runs, refusals, common.gate.pausedMs);
   const report = {
     schemaVersion: 2,
     mode: "review",
@@ -452,10 +548,12 @@ async function reviewMode(values, common) {
     finishedAt: new Date().toISOString(),
     config: { path: common.configPath, planning: common.config.planning },
     ...(common.planningModule ? { planningModule: common.planningModule } : {}),
+    ...pairing(common),
     judges: judgeSummaries(common),
     ...judgeIsolation(common),
     repeat: common.repeat,
     parallel: common.parallel,
+    retry: retryOptions(common),
     summary,
     units: summary.units,
     runs,
@@ -531,6 +629,10 @@ async function main() {
         default: String(Math.max(1, Math.floor(availableParallelism() / 4))),
       },
       "planning-model": { type: "string" },
+      "reviewer-config": { type: "string" },
+      "max-retries": { type: "string", default: "8" },
+      "max-wait": { type: "string", default: "360" },
+      "retry-wait": { type: "string" },
       judge: { type: "string", multiple: true, default: [] },
       "judge-transport": { type: "string" },
       "allow-unsandboxed-judges": { type: "boolean" },
@@ -556,6 +658,16 @@ async function main() {
     return path;
   };
   const planningModule = moduleOption("planning-model");
+  if (values["reviewer-config"] && planningModule)
+    fail("--reviewer-config and --planning-model both replace the reviewer");
+  let reviewerPlanning;
+  if (values["reviewer-config"]) {
+    try {
+      reviewerPlanning = await readReviewerPlanning(values["reviewer-config"]);
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error));
+    }
+  }
   const judgeTransportModule = moduleOption("judge-transport");
   if (judgeTransportModule && !values.judge.length)
     fail("--judge-transport needs --judge");
@@ -584,6 +696,19 @@ async function main() {
     output,
     outputExisted: existed,
     planningModule,
+    reviewerPlanning,
+    reviewerConfigPath:
+      values["reviewer-config"] && resolve(values["reviewer-config"]),
+    retry: {
+      maxRetries: nonNegativeInteger(values["max-retries"], "max-retries"),
+      maxWaitMs: positiveNumber(values["max-wait"], "max-wait") * 60_000,
+      ...(values["retry-wait"] === undefined
+        ? {}
+        : {
+            baseSeconds: positiveNumber(values["retry-wait"], "retry-wait"),
+          }),
+    },
+    gate: createGate(),
     judges,
     judgeTransport: judgeTransportModule,
     allowUnsandboxedJudges,

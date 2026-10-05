@@ -421,7 +421,7 @@ test("review-only mode reports recall per seeded defect and the false-positive r
     const markdown = readFileSync(join(output, "summary.md"), "utf8");
     assert.match(
       markdown,
-      /\| missing-dependency \| 6 \| 0% \[0–\d+\] \(0\/6, 3 units\) \|/,
+      /\| missing-dependency \| 6 \| 0% \[0–\d+\] \(0\/6, 3 units\) \| – \|/,
     );
     assert.match(
       markdown,
@@ -643,6 +643,246 @@ test("planning that never validates a correction is a question, not an error", (
     assert.equal(report.summary.overall.errors, 0);
     assert.equal(report.summary.overall.question.successes, 1);
     assert.equal(report.summary.overall.question.total, 1);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+/** Environment for the flaky `--planning-model` modules. */
+const flaky = (work, message, failures) => ({
+  FLAKY_STATE: join(work, "calls"),
+  FLAKY_MESSAGE: message,
+  FLAKY_FAILURES: String(failures),
+});
+
+test("a usage limit or an outage backs off, resumes the run and records the wait", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-retry-"));
+  try {
+    writeFileSync(join(work, "calls"), "");
+    const output = join(work, "out");
+    const { status, stderr } = runStatus(
+      [
+        "--config",
+        writeConfig(work),
+        "--output",
+        output,
+        "--case",
+        "native-stack-chain",
+        "--retry-wait",
+        "0.05",
+        "--planning-model",
+        support("eval-flaky-planner.mjs"),
+      ],
+      flaky(
+        work,
+        "Claude planning ended with success (stop_reason stop_sequence): You've hit your session limit \u00b7 resets 2:40pm",
+        2,
+      ),
+    );
+    assert.equal(status, 0);
+    assert.match(
+      stderr,
+      /native-stack-chain-1: usage-limit, waiting [\d.]+s before retry 1\/8/,
+    );
+    const report = readReport(output);
+    const [entry] = report.runs;
+    // The third attempt planned; the two usage limits are recorded, not scored.
+    assert.equal(entry.outcome, "plan");
+    assert.deepEqual(
+      entry.retries.map(({ kind, waitMs }) => [kind, waitMs]),
+      [
+        ["usage-limit", 50],
+        ["usage-limit", 100],
+      ],
+    );
+    assert.match(entry.retries[0].detail, /hit your session limit/);
+    assert.equal(entry.retriesExhausted, undefined);
+    const { overall } = report.summary;
+    assert.equal(overall.errors, 0);
+    assert.equal(overall.productionClean.successes, 1);
+    assert.deepEqual(
+      { ...overall.retries, pausedMs: undefined },
+      {
+        runs: 1,
+        retries: 2,
+        exhausted: 0,
+        byKind: { "usage-limit": 2 },
+        pausedMs: undefined,
+      },
+    );
+    assert.ok(overall.retries.pausedMs >= 150);
+    assert.deepEqual(report.retry, {
+      maxRetries: 8,
+      maxWaitMinutes: 360,
+      waitSeconds: 0.05,
+    });
+    assert.match(
+      readFileSync(join(output, "summary.md"), "utf8"),
+      /\| Infrastructure retries \| 2 retries over 1 runs \(2 usage-limit\)/,
+    );
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("a network outage is retried, a bounded number of times", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-outage-"));
+  try {
+    writeFileSync(join(work, "calls"), "");
+    const output = join(work, "out");
+    const { status } = runStatus(
+      [
+        "--config",
+        writeConfig(work),
+        "--output",
+        output,
+        "--case",
+        "single-item",
+        "--max-retries",
+        "1",
+        "--retry-wait",
+        "0.01",
+        "--planning-model",
+        support("eval-flaky-planner.mjs"),
+      ],
+      flaky(
+        work,
+        "API Error: Can't reach the API server \u2014 check your internet or DNS (EAI_AGAIN)",
+        5,
+      ),
+    );
+    // One retry, then the run stays an infrastructure error and is reported.
+    assert.equal(status, 1);
+    const report = readReport(output);
+    const [entry] = report.runs;
+    assert.equal(entry.outcome, "error");
+    assert.equal(entry.retries.length, 1);
+    assert.equal(entry.retries[0].kind, "network");
+    assert.equal(entry.retriesExhausted, true);
+    assert.equal(readFileSync(join(work, "calls"), "utf8").length, 2);
+    assert.equal(report.summary.overall.retries.exhausted, 1);
+    assert.equal(report.summary.overall.errors, 1);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("a failure that is not an outage or a limit is not retried", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-noretry-"));
+  try {
+    writeFileSync(join(work, "calls"), "");
+    const output = join(work, "out");
+    const { status } = runStatus(
+      [
+        "--config",
+        writeConfig(work),
+        "--output",
+        output,
+        "--case",
+        "single-item",
+        "--retry-wait",
+        "0.01",
+        "--planning-model",
+        support("eval-flaky-planner.mjs"),
+      ],
+      flaky(work, "The planner returned something strange", 5),
+    );
+    assert.equal(status, 1);
+    const [entry] = readReport(output).runs;
+    assert.equal(entry.outcome, "error");
+    assert.equal(entry.retries, undefined);
+    assert.equal(readFileSync(join(work, "calls"), "utf8").length, 1);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("a review that hits an outage is retried in review-only mode", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-review-eval-retry-"));
+  try {
+    writeFileSync(join(work, "calls"), "");
+    const output = join(work, "out");
+    const { status } = runStatus(
+      [
+        "--review-only",
+        "--config",
+        writeConfig(work),
+        "--output",
+        output,
+        "--case",
+        "media-lfs-thumbnail",
+        "--parallel",
+        "1",
+        "--retry-wait",
+        "0.01",
+        "--planning-model",
+        support("eval-flaky-review-model.mjs"),
+      ],
+      flaky(work, "getaddrinfo EAI_AGAIN api.anthropic.com", 2),
+    );
+    assert.equal(status, 0);
+    const report = readReport(output);
+    assert.equal(report.summary.errors, 0);
+    const retried = report.runs.filter((entry) => entry.retries);
+    assert.equal(retried.length, 1);
+    assert.deepEqual(
+      retried[0].retries.map(({ kind }) => kind),
+      ["network", "network"],
+    );
+    assert.equal(report.summary.retries.retries, 2);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("retry, wait and reviewer options are checked before any model call", () => {
+  const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-pairing-"));
+  try {
+    const config = writeConfig(work);
+    const args = (...extra) => [
+      "--config",
+      config,
+      "--output",
+      join(work, `out-${extra.join("").replace(/\W/g, "")}`),
+      ...extra,
+    ];
+    const refused = (extra, pattern) => {
+      const { status, stderr } = runStatus(args(...extra));
+      assert.equal(status, 2);
+      assert.match(stderr, pattern);
+    };
+    refused(
+      ["--max-retries=-1"],
+      /--max-retries must be a non-negative integer/,
+    );
+    refused(["--max-wait", "0"], /--max-wait must be a positive number/);
+    refused(["--retry-wait", "soon"], /--retry-wait must be a positive number/);
+    refused(
+      ["--reviewer-config", join(work, "missing.json")],
+      /--reviewer-config .*missing\.json: ENOENT/,
+    );
+    writeFileSync(join(work, "no-planning.json"), JSON.stringify({}));
+    refused(
+      ["--reviewer-config", join(work, "no-planning.json")],
+      /no `planning` block/,
+    );
+    writeFileSync(
+      join(work, "bad-planning.json"),
+      JSON.stringify({ planning: { kind: "nonsense" } }),
+    );
+    refused(
+      ["--reviewer-config", join(work, "bad-planning.json")],
+      /--reviewer-config .*bad-planning\.json: /,
+    );
+    refused(
+      [
+        "--reviewer-config",
+        config,
+        "--planning-model",
+        support("eval-fixture-planner.mjs"),
+      ],
+      /both replace the reviewer/,
+    );
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

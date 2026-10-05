@@ -4,6 +4,7 @@
 // metrics: they are counted, never scored.
 import { createHash } from "node:crypto";
 import { DEFECTS } from "./mutations.mjs";
+import { retrySummary } from "./retry.mjs";
 import {
   byCluster,
   clusteredRate,
@@ -98,6 +99,10 @@ export function reviewRunMetrics(run) {
   };
   if (scored(run)) {
     metrics[good ? "falsePositive" : "recall"] = bit(run.flagged);
+    // Of the reviews that flagged the plan, whether a finding named the
+    // mutated item; absent when its findings carry no itemIds to check.
+    if (!good && typeof run.located === "boolean")
+      metrics.namesItem = bit(run.located);
   }
   for (const grade of run.judges ?? []) {
     const value = verdict(run, grade.judge);
@@ -172,7 +177,7 @@ export const planUnitDigest = (run) =>
   sha256(JSON.stringify([run.objectiveDigest ?? null, run.commit ?? null]));
 
 /** Plan-mode summary: per case and overall; intervals cluster by case. */
-export function summarizePlanRuns(runs) {
+export function summarizePlanRuns(runs, pausedMs = 0) {
   const rate = (list, test) =>
     clusteredRate(byCluster(list, (run) => run.case, test));
   const valid = runs.filter((run) => run.outcome !== "error");
@@ -186,6 +191,7 @@ export function summarizePlanRuns(runs) {
       cases: new Set(runs.map((run) => run.case)).size,
       errors: runs.length - valid.length,
       judgeErrors: judgeErrors(runs),
+      retries: retrySummary(runs, pausedMs),
       productionClean: rate(valid, (run) => run.outcome === "plan"),
       question: rate(valid, (run) => run.outcome === "question"),
       expectationMet: rate(
@@ -245,7 +251,7 @@ export function summarizePlanRuns(runs) {
  * Review-only summary: recall per defect and the false-positive rate, over
  * reviews with a usable verdict; intervals cluster by fixture.
  */
-export function summarizeReviewRuns(runs, refusals) {
+export function summarizeReviewRuns(runs, refusals, pausedMs = 0) {
   const rate = (list, test) =>
     clusteredRate(byCluster(list, (run) => run.fixture, test));
   const order = DEFECTS.map((defect) => defect.id);
@@ -286,6 +292,12 @@ export function summarizeReviewRuns(runs, refusals) {
         rule: all[0]?.rule,
         runs: list.length,
         recall: rate(list, (run) => run.flagged),
+        // Of the flagging reviews whose findings can be checked, how often
+        // one named the mutated item. Null interval when none carry itemIds.
+        located: rate(
+          list.filter((run) => typeof run.located === "boolean"),
+          (run) => run.located,
+        ),
         invalid: all.filter((run) => run.review === "invalid").length,
         judgeRecall: judgeRates(all),
       };
@@ -294,6 +306,7 @@ export function summarizeReviewRuns(runs, refusals) {
     refusedByCode: refusals,
     errors: runs.filter((run) => run.review === "error").length,
     judgeErrors: judgeErrors(runs),
+    retries: retrySummary(runs, pausedMs),
   };
 }
 
@@ -450,6 +463,11 @@ function header(report, unit) {
   const { planning } = report.config;
   return [
     `Config \`${report.config.path}\`: planning \`${planning.kind}\`, planner ${planning.planner?.model ?? "?"}/${planning.planner?.reasoningEffort ?? "?"}, reviewer ${planning.reviewer?.model ?? "?"}/${planning.reviewer?.reasoningEffort ?? "?"}${report.planningModule ? `, planning model module \`${report.planningModule}\`` : ""}.`,
+    ...(report.reviewer
+      ? [
+          `Reviewer paired from \`${report.reviewer.path}\`: planning \`${report.reviewer.planning.kind}\`, reviewer ${report.reviewer.planning.reviewer?.model ?? "?"}/${report.reviewer.planning.reviewer?.reasoningEffort ?? "?"}. Graph and result review use it; planning and diagnosis use the planner above.`,
+        ]
+      : []),
     report.judges.length
       ? `Judges: ${report.judges.map((judge) => `\`${judge.name}\` (${judge.model.kind} ${judge.model.model}/${judge.model.reasoningEffort}, digest \`${judge.digest.slice(0, 12)}\`)`).join(", ")}.`
       : "No judge.",
@@ -459,6 +477,17 @@ function header(report, unit) {
     `Repeat ${report.repeat}, ${report.startedAt} to ${report.finishedAt}.`,
     "",
     `Rates show the rate, a 95% interval clustered by ${unit}, the run count and the number of units (${unit}s). Repeats of one ${unit} are not independent, so the interval is the wider of a ${unit}-level bootstrap and a Wilson interval on the ${unit} count.`,
+  ];
+}
+
+/** One line on infrastructure retries; none when nothing waited. */
+function retryLines(retries) {
+  if (!retries?.runs && !retries?.exhausted) return [];
+  const kinds = Object.entries(retries.byKind)
+    .map(([kind, count]) => `${count} ${kind}`)
+    .join(", ");
+  return [
+    `| Infrastructure retries | ${retries.retries} retries over ${retries.runs} runs (${kinds || "none"}); all runs waited ${Math.round(retries.pausedMs / 1000)}s in total; ${retries.exhausted} runs still failing after the retry limit |`,
   ];
 }
 
@@ -482,6 +511,7 @@ export function planMarkdown(report) {
     "| Measure | Value |",
     "| --- | --- |",
     `| Runs | ${overall.runs} over ${overall.cases} cases; ${overall.errors} infrastructure errors (excluded below); ${overall.judgeErrors} judge errors |`,
+    ...retryLines(overall.retries),
     `| Production review clean | ${percent(overall.productionClean)} |`,
     `| Stopped for an operator | ${percent(overall.question)} |`,
     ...overall.judges.map(
@@ -562,11 +592,13 @@ export function reviewMarkdown(report) {
     "",
     `Recall: the production reviewer returned at least one finding for a plan with one injected defect. Invalid and errored reviews have no verdict and are excluded from recall and false positives.${summary.judges.length ? ` Judge recall lists ${summary.judges.join(" / ")}.` : ""}`,
     "",
-    "| Defect | Reviews | Recall | Invalid reviews | Judge recall |",
-    "| --- | --- | --- | --- | --- |",
+    "Names the item: of the reviews that flagged the plan with findings that carry `itemIds`, how often one named the item the defect was injected into. A dash means no such review, or a plan-wide defect.",
+    "",
+    "| Defect | Reviews | Recall | Names the item | Invalid reviews | Judge recall |",
+    "| --- | --- | --- | --- | --- | --- |",
     ...summary.defects.map(
       (row) =>
-        `| ${row.defect} | ${row.runs} | ${percent(row.recall)} | ${row.invalid} | ${judgeCell(row.judgeRecall)} |`,
+        `| ${row.defect} | ${row.runs} | ${percent(row.recall)} | ${percent(row.located)} | ${row.invalid} | ${judgeCell(row.judgeRecall)} |`,
     ),
     "",
     `Known-good plans: ${summary.good.runs} reviews, false-positive rate ${percent(summary.good.falsePositive)}, ${summary.good.invalid} invalid; judge false-positive rate ${judgeCell(summary.good.judgeFalsePositive)}.`,
@@ -587,6 +619,13 @@ export function reviewMarkdown(report) {
         (row) =>
           `- ${row.fixture} / ${row.defect}: ${row.reason.split("\n")[0]}`,
       ),
+    );
+  if (summary.retries.runs || summary.retries.exhausted)
+    lines.push(
+      "",
+      "| Measure | Value |",
+      "| --- | --- |",
+      ...retryLines(summary.retries),
     );
   if (summary.errors || summary.judgeErrors)
     lines.push(

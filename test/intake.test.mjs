@@ -1209,6 +1209,41 @@ test("a rate-limited read before compilation waits for GitHub instead of pausing
     assert.ok(reads[2] >= Date.parse(faultOf(held).retryAt));
   }));
 
+test("the pause between observations ends only once the logical clock passed the hold (#817)", async () => {
+  const { pauseObservation } = await import("../dist/intake.js");
+  let now = 1_000;
+  let timers = 0;
+  // Each timer ends with the clock one logical millisecond short of the
+  // wait it was given, as a real timer can.
+  const clock = {
+    now: () => now,
+    realDelay: (ms) => {
+      timers++;
+      now += ms > 1 ? ms - 1 : ms;
+      return 0;
+    },
+  };
+  const registered = [];
+  await pauseObservation(100, 1_500, (wake) => registered.push(wake), clock);
+  assert.ok(now >= 1_500);
+  assert.equal(timers, 2);
+  assert.equal(registered.at(-1), undefined);
+  // A wake ends the pause at once, short of the hold.
+  now = 1_000;
+  timers = 0;
+  const woken = pauseObservation(
+    100,
+    5_000,
+    (wake) => {
+      registered.push(wake);
+      if (wake) wake();
+    },
+    { now: () => now, realDelay: () => 60_000 },
+  );
+  await woken;
+  assert.equal(now, 1_000);
+});
+
 test("drain ends an intake wait on a GitHub rate limit at once (#641)", async () =>
   fixture(async (f) => {
     await f.application.enqueueIntake([1]);

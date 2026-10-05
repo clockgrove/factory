@@ -774,25 +774,48 @@ export async function runIntake(
         // Unavailable: wait below for GitHub, as an idle observation does.
         if (!unavailable) continue;
       }
-      const wait = Math.max(
+      await pauseObservation(
         queuePollSeconds(config) * 1000,
-        heldUntil - time.now(),
+        heldUntil,
+        (handler) => {
+          wake = handler;
+        },
       );
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => {
-          wake = undefined;
-          resolve();
-        }, time.realDelay(wait));
-        wake = () => {
-          clearTimeout(timer);
-          wake = undefined;
-          resolve();
-        };
-      });
     }
   } finally {
     process.off("SIGTERM", onHandoff);
     await closeServer();
     releaseControllerLock(lockPath, lock);
   }
+}
+
+/**
+ * The pause between observations: one poll, or until GitHub may answer again,
+ * whichever is later. A timer ends on whole real milliseconds, which can fall
+ * short of the hold on the logical clock; the pause ends only once the clock
+ * has passed the hold, or when the registered wake is called (#817).
+ */
+export async function pauseObservation(
+  pollMs: number,
+  heldUntil: number,
+  register: (wake: (() => void) | undefined) => void,
+  clock: { now: () => number; realDelay: (ms: number) => number } = time,
+): Promise<void> {
+  let woken = false;
+  let wait = Math.max(pollMs, heldUntil - clock.now());
+  do {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        register(undefined);
+        resolve();
+      }, clock.realDelay(wait));
+      register(() => {
+        clearTimeout(timer);
+        register(undefined);
+        woken = true;
+        resolve();
+      });
+    });
+    wait = heldUntil - clock.now();
+  } while (!woken && wait > 0);
 }

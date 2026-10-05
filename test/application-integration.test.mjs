@@ -608,6 +608,137 @@ ${commands.map((command) => `- \`${command}\``).join("\n")}
   });
 });
 
+/** An Objective whose one Work Item validates with the frozen pnpm install, then `pnpm check`. */
+async function installFixture(name, shim, assertRun) {
+  await fixture(name, async (root) => {
+    const target = createTarget(root);
+    const bin = join(root, "bin");
+    const installs = join(root, "installs");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "pnpm"),
+      `#!/bin/sh\nif [ "$1" = install ]; then echo run >> ${JSON.stringify(installs)}; ${shim.install}; exit 0; fi\n${shim.script}\n`,
+    );
+    chmodSync(join(bin, "pnpm"), 0o755);
+    const commands = [
+      "pnpm install --frozen-lockfile --ignore-scripts",
+      "pnpm check",
+    ];
+    const criterion = "The frozen install and check pass at the exact tree.";
+    const work = item("install-item", { path: "package.json" });
+    work.acceptance = [criterion];
+    work.ownedPaths = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"];
+    work.validation = commands.map((command) => ({
+      command,
+      provenance: "source-declared",
+      source: "OBJECTIVE",
+    }));
+    const graph = { objective, baseSha: target.baseSha, items: [work] };
+    const planningModel = {
+      async generateStructured(request) {
+        return withCoverage(request, structuredClone(graph));
+      },
+      async reviewGraph(request) {
+        return { packetId: request.reviewPacket.id, findings: [] };
+      },
+      async reviewResult(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: resultFindings(
+            request,
+            request.criteria.map((reviewed) => ({
+              criterion: reviewed,
+              verdict: "pass",
+              source: "Command pass evidence",
+              quote: request.commands[0].command,
+              detail: "The command receipts prove the commands passed.",
+              question: "",
+            })),
+          ),
+        };
+      },
+    };
+    const descriptor = {
+      config: factoryConfig(target.checkout, `example/${name}`, "regular", 1),
+      graph,
+      objectiveBody: `# Install classification
+
+## Work Item
+
+- ${criterion}
+- ${commands.map((command) => `\`${command}\``).join("\n- ")}
+
+## Acceptance
+
+- ${criterion}
+${commands.map((command) => `- \`${command}\``).join("\n")}
+`,
+      fakeRoot: join(root, "fake"),
+      planningModel,
+      actions: {
+        "install-item": {
+          files: [
+            {
+              path: "package.json",
+              text: '{"name":"install-fixture","private":true,"scripts":{"check":"true"}}\n',
+            },
+            {
+              path: "pnpm-lock.yaml",
+              text: "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n",
+            },
+            { path: "pnpm-workspace.yaml", text: "packages: []\n" },
+          ],
+        },
+      },
+    };
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath}`;
+    try {
+      const { application } = makeApplication(descriptor);
+      const finished = await application.runObjective(objective);
+      const count = existsSync(installs)
+        ? readFileSync(installs, "utf8").trim().split("\n").length
+        : 0;
+      await assertRun(finished, count);
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+}
+
+test("a dependency install that fails in validation repeats without charging a repair (#839)", async () => {
+  const marker = '$(dirname "$0")/../install-failed';
+  await installFixture(
+    "install-transient",
+    {
+      // The first install fails like a registry timeout; the repeat succeeds.
+      install: `if [ ! -e "${marker}" ]; then : > "${marker}"; echo "ERR_PNPM_TARBALL_FETCH operation timed out" >&2; exit 1; fi`,
+      script: "exit 0",
+    },
+    (finished, installs) => {
+      // The failed install, its repeat, then the final validation's install.
+      assert.equal(installs, 3);
+      assert.equal(finished.finalValidation.passed, true);
+      assert.equal(finished.work["install-item"].status, "done");
+      assert.equal(consumption(finished).implementationRepairs, 0);
+      assert.equal(finished.work["install-item"].recovery, undefined);
+    },
+  );
+});
+
+test("a failing check after a successful install is still an implementation failure (#839)", async () => {
+  await installFixture(
+    "install-then-check",
+    { install: "true", script: "echo check failed >&2; exit 1" },
+    (finished, installs) => {
+      assert.equal(installs, 1);
+      const work = finished.work["install-item"];
+      assert.equal(work.status, "failed");
+      assert.equal(work.recovery.failure.classification, "implementation");
+    },
+  );
+});
+
 test("application retries capacity for exact Work Item and final review requests without replaying work", async () => {
   await fixture("review-capacity-retry", async (root) => {
     const original = Codex.prototype.startThread;

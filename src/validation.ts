@@ -2456,10 +2456,15 @@ export async function validateTree(
         durationMs: Date.now() - started,
         output,
       });
-      if (result.status !== 0)
-        throw new CandidateValidationFailure(
-          `Validation command failed (${result.status}): ${check}: ${output}`,
-        );
+      if (result.status !== 0) {
+        const detail = `Validation command failed (${result.status}): ${check}: ${output}`;
+        // The dependency install is the controller's own bootstrap step, not
+        // the candidate's behavior: its failure leaves the code unjudged, so it
+        // repeats like any environment fault and charges no repair (#839).
+        if (check.trim() === PINNED_PNPM_BOOTSTRAP)
+          throw new StepFault(transient(detail, false));
+        throw new CandidateValidationFailure(detail);
+      }
       evidence.commands.push({
         index,
         command: check,

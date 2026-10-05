@@ -1,38 +1,54 @@
 ---
 name: setup
-description: Set up Factory for a target repository through one guided configuration-only or explicitly consented verified background flow.
+description: Set up Factory for a target repository, either configuration only or a verified background service that runs a queue of Objectives.
 ---
 
 # Factory setup
 
-Use this skill on a target repository. Follow contributor instructions when building Factory itself; never target Factory source, rebuild or archive repositories.
+Set up the installed Factory CLI for a target repository. `factory help` lists the exact options and is the authority over this skill. Never target Factory's own source, rebuild or archive repositories.
 
-Resolve the operator's intended outcome first. Recommend background operation on a supported Linux/WSL systemd user host when the request is to keep processing approved work. Honor an install-only or “do not start work” request with configuration-only setup. Package download alone grants no service or execution consent. Reuse positive choices, authority and limits already supplied in this session; ask together only for genuinely missing choices. Do not make registration, startup and verification separate operator chores.
+## Choose the outcome
 
-Inspect `factory help` and the existing binding before writing. Confirm the GitHub `OWNER/REPO`, trusted absolute checkout, any requested positive worker concurrency (omit `--concurrency` to size workers and scheduling from the host; report the returned `capacity`), regular or native-stack delivery, and any role model/reasoning choices. Read the target's instructions. Reuse a matching existing configuration; preserve conflicting state and report it rather than deleting or inventing another root. Fresh configuration persists explicit defaults when no model choices were supplied: planner `gpt-5.6-sol` with `medium` reasoning, reviewer `gpt-5.6-sol` with `medium` reasoning, and worker `gpt-5.6-luna` with `medium` reasoning. For Claude planning and review (`--planning claude-agent-sdk`), ask for both models; it uses the operator's Claude Code login (`claude auth login`) and needs no API key; a headless service may optionally bind `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` with `--credential-file`. Keep configuration, credentials, state and the immutable installed package outside the target repository. Retain that exact package until supported upgrade/uninstall; do not register a scratch directory scheduled for cleanup.
+- **Configuration only:** the request says install, configure, or "do not start work". No service.
+- **Background:** the request is to keep processing approved work. It needs a Linux or WSL systemd user manager, and the service keeps running after the terminal closes.
 
-During an explicitly authorized Objective's graph projection, Factory establishes the target role labels `factory:objective` and `factory:work-item`. The Objective receives the first; every compiled work, QA and aggregate issue receives the second. Missing repository labels use neutral `ededed` color. Existing colors, descriptions and unrelated issue labels remain intact. Archived or ambiguous role labels stop projection for an operator decision; Factory does not rename or unarchive them. Initial Work Items become native children of their Objective, and aggregate children attach to their aggregate. Dependency edges remain separate from parent links. Labels and hierarchy describe context; they grant no execution authority. Configuration-only and observation-only setup do not write these target labels.
+Running `setup --background` is the service consent. It grants no provider spending and runs no Objective. Reuse choices the operator already gave. Ask once, together, for what is missing.
 
-Use the installed guided entry point when available:
+## Gather
+
+- GitHub `OWNER/REPO` and the trusted absolute checkout path. Read the target's instructions.
+- Optional: `--concurrency N` (omit it and Factory sizes workers from the host), `--delivery regular|native-stack`, `--network host|off`, and role models with `--planning-model`, `--review-model`, `--worker-model` plus matching `--*-reasoning`.
+- For `--planning claude-agent-sdk`, ask for the planning and review models. It uses the operator's `claude auth login`.
+
+A fresh configuration persists these defaults when no model choices are given: planner `gpt-5.6-sol` with `medium` reasoning, reviewer `gpt-5.6-sol` with `medium` reasoning, and worker `gpt-5.6-luna` with `medium` reasoning.
+
+Keep configuration, credentials and state outside the target repository. Reuse a matching existing configuration. If the binding conflicts, report it and stop, because deleting state or choosing another root hides the conflict.
+
+## Run
 
 ```sh
-factory setup --background --repository OWNER/REPO --checkout ABSOLUTE_PATH \
-  [--concurrency N] --config ABSOLUTE_PRIVATE_CONFIG
+factory setup --config-only --repository OWNER/REPO --checkout ABSOLUTE_PATH [--config PATH]
+factory setup --background --repository OWNER/REPO --checkout ABSOLUTE_PATH [--config PATH]
 ```
 
-For an existing matching configuration, omit installation choices already bound. Pass selected role options, delivery or network policy when creating a fresh configuration. Running `setup --background` is the service consent; it takes no consent, actor or reason flags, and it grants no provider spending. An idle service with an empty queue observes GitHub, reports unapproved candidate IDs and waits model-free. Polling defaults to 30 seconds; set `queue.pollSeconds` in the configuration only for an operator-selected interval.
+Use exactly one. For a matching existing configuration, leave out the options it already binds. Background setup also runs the model-free readiness checks. Pass `--outside-directory ABSOLUTE_EXISTING_DIRECTORY` if home is inside the checkout or writable by the worker. A service takes provider credentials only as `--credential-file NAME=ABSOLUTE_PRIVATE_FILE`, one per credential.
 
-When the same request includes explicitly authorized execution, queue each Objective the operator selected with `factory queue add N [N ...]`. They run within the configuration's [autonomy limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#limit-unattended-work); invent no spending, repair or concurrency limits. Configuration remains authoritative for providers, permissions and source disclosure. Discovery, labels and service consent never select another Objective. Setup runs the model-free readiness checks (the same ones a first `factory run` makes), not model calls as probes. For the local Codex harness, the outside-write probe defaults to your home directory. It first proves that the controller can write there, then checks that the configured worker refuses the write. Use `--outside-directory ABSOLUTE_EXISTING_DIRECTORY` to select another directory you own when home is within the checkout or is writable by the worker. An unsuitable location blocks setup; Factory does not change the worker policy or try other directories. Other harnesses need their supported readiness surface; unavailable readiness stays blocked. Provider credentials for a supervised service use owner-private `--credential-file NAME=ABSOLUTE_PRIVATE_FILE` bindings, one per required credential, and do not prove account access.
+## Check the result
 
-For configuration only:
+The command prints JSON and sets its exit status.
+
+- `configured`: configuration-only setup is finished.
+- `ready`: the service is active and its owner verified. Report the binding, the poll interval (`queue.pollSeconds`, default 30), the queued IDs or idle reason, and that sleep pauses and shutdown stops the service.
+- `blocked`: names the failed stage. Fix the stated prerequisite and repeat the same command. Never remove completed stages to get past it.
+
+An idle service with an empty queue makes no model calls.
+
+## Queue work
+
+Only for Objectives the operator named:
 
 ```sh
-factory setup --config-only --repository OWNER/REPO \
-  --checkout ABSOLUTE_PATH [--concurrency N] --config ABSOLUTE_PRIVATE_CONFIG
+factory queue add N [N ...]
 ```
 
-This outcome remains usable without a supported user manager and stops before execution or service activation. Older artifacts without `setup` retain their documented `install` surface for configuration only; do not claim the new guided background outcome from a manually assembled substitute.
-
-Inspect the returned JSON and exit status. Background completion requires `status: ready`, an active enabled service and exact verified owner/control connection. Report repository/configuration binding, retained artifact path, poll interval, queued IDs or idle reason, and sleep/shutdown/logout limits. A configuration file or registered unit alone is incomplete setup. A blocked result identifies the failed stage and stages already completed. Preserve them, inspect `factory status`, resolve the stated prerequisite through supported controls and repeat the same flow. Never silently resume paused/draining work, reset allowances, revive terminal work or remove evidence. Artifact changes use supported drain/compatibility/upgrade operations; unresolved ownership remains fenced.
-
-Later Objectives use `factory queue add N [N ...] --config CONFIG`. The current authenticated owner takes them without a second controller or queue, in the order added; an Objective already queued keeps its place, and terminal work never replays. The service stays idle after the queue finishes. `factory queue list|remove N|pause|resume|drain` manage the queue; `factory supervisor start|stop [--disable]|upgrade --cli PATH|uninstall` manage the service. No administrator or linger changes are part of setup. Ordinary target setup needs no contributor release fixture or new provider.
+They run one at a time, in the order added, within the [autonomy limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#autonomy-limits). Labels and discovery never select an Objective. Manage the queue with `factory queue list|remove N|pause|resume|drain` and the service with `factory supervisor start|stop [--disable]|upgrade --cli ABSOLUTE_INSTALLED_CLI|uninstall`. Day-to-day operation is the `director` skill.

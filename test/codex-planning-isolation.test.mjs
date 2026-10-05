@@ -291,3 +291,119 @@ test("a Codex shell sees its workspace, never the operator's HOME or git directo
   for (const entry of [operator, join(operator, ".config", "gh")])
     assert.throws(() => scratch("write", `${entry}:/usr/bin`));
 });
+
+// A worker runs a target's own checks that read git (#841): its linked
+// worktree's git metadata is mounted read-only, and nothing else of the
+// checkout's git directory.
+test("a Codex worker reads its own worktree's git metadata and cannot change it", {
+  skip:
+    sandboxBinary() || process.env.FACTORY_REQUIRE_SANDBOX === "1"
+      ? false
+      : "bubblewrap with unprivileged user namespaces is not usable here",
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-codex-git-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const operator = join(root, "operator");
+  const hosts = join(operator, ".config", "gh", "hosts.yml");
+  mkdirSync(dirname(hosts), { recursive: true });
+  writeFileSync(hosts, "operator-secret\n");
+  const checkout = join(operator, "code", "target");
+  const state = join(operator, ".local", "state", "clockgrove-factory");
+  const git = (...args) => {
+    const result = spawnSync("git", args, { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  mkdirSync(checkout, { recursive: true });
+  git("init", "-q", "-b", "main", checkout);
+  writeFileSync(join(checkout, "tracked.txt"), "one\n");
+  git("-C", checkout, "add", ".");
+  git(
+    "-C",
+    checkout,
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@example.com",
+    "commit",
+    "-qm",
+    "base",
+  );
+  const workspace = join(state, "item-a");
+  git("-C", checkout, "worktree", "add", "-q", workspace, "-b", "item-a");
+  git(
+    "-C",
+    checkout,
+    "worktree",
+    "add",
+    "-q",
+    join(state, "item-b"),
+    "-b",
+    "item-b",
+  );
+  const head = git("-C", workspace, "rev-parse", "HEAD");
+  const common = join(checkout, ".git");
+  const codex = join(
+    dirname(
+      createRequire(import.meta.url).resolve("@openai/codex/package.json"),
+    ),
+    "bin",
+    "codex.js",
+  );
+  const run = (script) => {
+    const home = createCodexHome({
+      source: { PATH: "/usr/bin:/bin", HOME: operator },
+      config: "",
+      sandbox: { directory: workspace, workspace: "write", network: false },
+    });
+    try {
+      return spawnSync(
+        process.execPath,
+        [codex, "sandbox", "--", "sh", "-c", script],
+        { cwd: workspace, env: home.env, encoding: "utf8" },
+      );
+    } finally {
+      home.dispose();
+    }
+  };
+  const read = (script) => {
+    const result = run(script);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+
+  // Read-only git works in the worktree.
+  assert.equal(read("git ls-files --cached -z"), "tracked.txt\0");
+  assert.equal(read("git status --short"), "");
+  assert.equal(read("git log -1 --format=%H"), `${head}\n`);
+  writeFileSync(join(workspace, "tracked.txt"), "two\n");
+  assert.equal(read("git status --short"), " M tracked.txt\n");
+  assert.match(read("git diff --stat"), /tracked\.txt \| 2/);
+
+  // Git metadata cannot change, and the bytes never reach the host.
+  const refused = [
+    "git -c user.name=t -c user.email=t@example.com commit -qam change",
+    "git update-ref refs/heads/planted HEAD",
+    `touch ${join(common, "objects", "planted")}`,
+    `echo x >> ${join(common, "config")}`,
+  ];
+  for (const script of refused) assert.notEqual(run(script).status, 0, script);
+  run(`echo x > ${join(common, "planted")}`);
+  assert.equal(git("-C", workspace, "rev-parse", "HEAD"), head);
+  assert.equal(git("-C", checkout, "branch", "--list", "planted"), "");
+  assert.equal(existsSync(join(common, "objects", "planted")), false);
+  assert.equal(existsSync(join(common, "planted")), false);
+  assert.doesNotMatch(readFileSync(join(common, "config"), "utf8"), /^x$/m);
+
+  // Another worktree's metadata, hooks, reflogs and logins stay unmounted.
+  for (const path of [
+    join(common, "worktrees", "item-b", "HEAD"),
+    join(common, "hooks"),
+    join(common, "logs"),
+    hosts,
+  ]) {
+    const denied = run(`ls ${path} && cat ${path}`);
+    assert.notEqual(denied.status, 0, path);
+    assert.doesNotMatch(denied.stdout, /operator-secret|ref:/);
+  }
+});

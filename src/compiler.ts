@@ -607,7 +607,7 @@ interface StructuredCall {
 }
 
 export const CODEX_PLANNING_PROVIDER = "openai-codex-sdk";
-export const CODEX_PLANNING_ADAPTER = "@openai/codex-sdk@0.156.0";
+export const CODEX_PLANNING_ADAPTER = "@openai/codex-sdk@0.160.0";
 
 /**
  * Codex SDK transport: a read-only, never-approving, tool-free thread per

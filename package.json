@@ -75,7 +75,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "0.129.0",
     "@octokit/core": "^7.0.8",
-    "@openai/codex-sdk": "0.156.0",
+    "@openai/codex-sdk": "0.160.0",
     "@secretlint/node": "13.0.5",
     "@secretlint/secretlint-rule-preset-recommend": "^13.0.5",
     "tar": "7.5.22",

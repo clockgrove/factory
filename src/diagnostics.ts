@@ -296,7 +296,7 @@ export class DiagnosticEmitter {
             invocationId: observation.invocationId,
             providerAttempt: observation.providerAttempt ?? 1,
             phase: observation.phase,
-            adapter: observation.adapter ?? "@openai/codex-sdk@0.156.0",
+            adapter: observation.adapter ?? "@openai/codex-sdk@0.160.0",
             configured: {
               provider: observation.provider ?? "openai-codex-sdk",
               model: observation.model ?? "not-exposed",

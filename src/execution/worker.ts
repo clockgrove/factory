@@ -110,7 +110,7 @@ export async function runCodexWorker(
   const sandbox = { workspace: "write", network: network === "host" } as const;
   const home = createCodexHome({
     config: "",
-    sandbox,
+    sandbox: { ...sandbox, directory: request.worktree },
     keep: allowedSecretNames,
   });
   const codex = new Codex({ env: home.env });

@@ -672,7 +672,11 @@ class CodexPlanningTransport implements PlanningTransport {
       args.tree
         ? {
             config: CODEX_TREE_REVIEW_CONFIG,
-            sandbox: { workspace: "read", network: false },
+            sandbox: {
+              directory: args.tree,
+              workspace: "read",
+              network: false,
+            },
           }
         : { config: CODEX_PLANNING_CONFIG },
     );

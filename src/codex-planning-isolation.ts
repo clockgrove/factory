@@ -1,7 +1,10 @@
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
   existsSync,
@@ -9,7 +12,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 /**
  * Factory's own Codex configuration for planning and review: no shell, file,
@@ -64,6 +67,8 @@ const ENVIRONMENT = [
 
 /** What a Codex shell may do in its working directory and on the network. */
 export interface CodexSandbox {
+  /** The thread's working directory. */
+  directory: string;
   workspace: "read" | "write";
   network: boolean;
 }
@@ -80,15 +85,114 @@ function codexRuntimeDirectory(): string {
   );
 }
 
+const real = (path: string) =>
+  existsSync(path) ? realpathSync(path) : resolve(path);
+const within = (path: string, directory: string) =>
+  path === directory ||
+  path.startsWith(directory.endsWith(sep) ? directory : directory + sep);
+
+/** The git directory a linked worktree points at: the checkout's `.git`. */
+function linkedGitDirectory(workspace: string): string[] {
+  try {
+    const link = /^gitdir: (.+)$/m.exec(
+      readFileSync(join(workspace, ".git"), "utf8"),
+    );
+    if (!link) return [];
+    const directory = resolve(workspace, link[1]!);
+    const common = join(directory, "commondir");
+    return [
+      existsSync(common)
+        ? resolve(directory, readFileSync(common, "utf8").trim())
+        : directory,
+    ];
+  } catch {
+    // No `.git`, or a checkout whose `.git` directory the profile keeps read-only.
+    return [];
+  }
+}
+
+/**
+ * The directories a worker's shell reads, never writes, so the tools on its
+ * PATH run: every PATH directory, and the directory of the real file behind
+ * each link in one. A directory named `bin` or `sbin` stands for its install
+ * prefix, where a tool keeps its libraries, unless the prefix is a hidden
+ * directory (`~/.local`, `~/.cargo`: settings and logins live there).
+ *
+ * Nothing here may show the operator's HOME as a whole, a login (SSH, gh,
+ * Codex, Claude, Copilot), Factory's config or state, or the checkout's git
+ * directory. A PATH directory that would is a configuration error; a link
+ * that leads into one is left unmounted, so that tool does not run.
+ */
+function toolchainDirectories(
+  source: NodeJS.ProcessEnv,
+  workspace: string,
+): string[] {
+  const home = real(source.HOME || homedir());
+  const config = source.XDG_CONFIG_HOME || join(home, ".config");
+  const state = source.XDG_STATE_HOME || join(home, ".local", "state");
+  const sealed = [
+    join(home, ".ssh"),
+    join(home, ".claude"),
+    join(home, ".copilot"),
+    source.CODEX_HOME || join(home, ".codex"),
+    join(config, "gh"),
+    join(config, "clockgrove-factory"),
+    join(state, "clockgrove-factory"),
+    ...linkedGitDirectory(workspace),
+  ].map(real);
+  const exposes = (directory: string) =>
+    within(home, directory) ||
+    sealed.some((path) => within(path, directory) || within(directory, path));
+  const root = (directory: string) => {
+    const prefix = dirname(directory);
+    if (
+      ["bin", "sbin"].includes(basename(directory)) &&
+      !basename(prefix).startsWith(".") &&
+      !exposes(prefix)
+    )
+      return prefix;
+    return exposes(directory) ? undefined : directory;
+  };
+  const roots = new Set<string>();
+  for (const entry of (source.PATH ?? "").split(":")) {
+    // A relative entry resolves inside the worktree, which is mounted.
+    if (!isAbsolute(entry) || !existsSync(entry)) continue;
+    const directory = realpathSync(entry);
+    if (!statSync(directory).isDirectory() || within(directory, workspace))
+      continue;
+    const mount = root(directory);
+    if (!mount)
+      throw new Error(
+        `PATH entry ${entry} would show Codex workers your HOME, a login or Factory's own files. Remove it from the PATH Factory runs with, or move its tools to a directory of their own.`,
+      );
+    // A linked PATH directory is mounted under the name the PATH uses too.
+    roots.add(mount).add(resolve(entry));
+    for (const item of readdirSync(directory, { withFileTypes: true })) {
+      if (!item.isSymbolicLink()) continue;
+      const target = real(join(directory, item.name));
+      if (!statSync(target, { throwIfNoEntry: false })?.isFile()) continue;
+      // A link into a login directory stays unmounted: that tool does not run.
+      const linked = root(dirname(target));
+      if (linked) roots.add(linked);
+    }
+  }
+  return [...roots].filter(
+    (mount) =>
+      ![...roots].some((other) => other !== mount && within(mount, other)),
+  );
+}
+
 /**
  * A Codex permission profile: shell commands see only the platform paths
  * Codex calls `:minimal`, the Codex runtime, the working directory (its
  * `.git` entry read-only) and, when they may write, the private HOME and
- * TMPDIR. Nothing else is mounted: not the operator's HOME, logins, SSH keys
- * or gh config, nor Factory's state or the checkout's git directory.
+ * TMPDIR plus the PATH's toolchains, read-only. Nothing else is mounted: not
+ * the operator's HOME, logins, SSH keys or gh config, nor Factory's state or
+ * the checkout's git directory.
  */
 function permissionProfile(
   sandbox: CodexSandbox,
+  source: NodeJS.ProcessEnv,
   home: string,
   temporary: string,
 ): string {
@@ -97,7 +201,13 @@ function permissionProfile(
     `":minimal" = "read"`,
     `${path(codexRuntimeDirectory())} = "read"`,
     ...(sandbox.workspace === "write"
-      ? [`${path(home)} = "write"`, `${path(temporary)} = "write"`]
+      ? [
+          ...toolchainDirectories(source, real(sandbox.directory)).map(
+            (directory) => `${path(directory)} = "read"`,
+          ),
+          `${path(home)} = "write"`,
+          `${path(temporary)} = "write"`,
+        ]
       : []),
   ];
   // Name resolution: /etc/resolv.conf often links outside `:minimal`
@@ -148,7 +258,7 @@ export function createCodexHome(options: {
     writeFileSync(
       join(codexHome, "config.toml"),
       options.sandbox
-        ? `default_permissions = "factory"\n${options.config}\n${permissionProfile(options.sandbox, home, temporary)}`
+        ? `default_permissions = "factory"\n${options.config}\n${permissionProfile(options.sandbox, source, home, temporary)}`
         : options.config,
     );
     const login = join(

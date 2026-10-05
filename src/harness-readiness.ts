@@ -102,7 +102,11 @@ export async function probeCodexReadiness(
   const home = createCodexHome({
     source: env,
     config: "",
-    sandbox: { workspace: "write", network: input.network === "host" },
+    sandbox: {
+      directory: workspace,
+      workspace: "write",
+      network: input.network === "host",
+    },
     keep: input.allowedSecretNames,
   });
   const child = spawn(

@@ -8,6 +8,7 @@ import {
   readdirSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -198,6 +199,39 @@ test("a Codex shell sees its workspace, never the operator's HOME or git directo
     join(workspace, ".git"),
     `gitdir: ${join(operator, "checkout", ".git")}\n`,
   );
+  // Toolchains on the PATH, under HOME: a user bin directory with a link to a
+  // package beside it, and an install prefix whose wrapper runs a sibling.
+  const userBin = join(operator, ".local", "bin");
+  const packaged = join(operator, ".local", "lib", "packaged");
+  const prefix = join(operator, "tools", "kit-1.0");
+  const checkoutBin = join(operator, "checkout", "bin");
+  for (const directory of [
+    userBin,
+    packaged,
+    join(prefix, "bin"),
+    join(prefix, "libexec"),
+    checkoutBin,
+  ])
+    mkdirSync(directory, { recursive: true });
+  writeFileSync(join(packaged, "data"), "packaged-tool\n");
+  writeFileSync(
+    join(packaged, "packaged"),
+    `#!/bin/sh\nexec cat "${join(packaged, "data")}"\n`,
+    { mode: 0o755 },
+  );
+  symlinkSync(join(packaged, "packaged"), join(userBin, "packaged"));
+  writeFileSync(join(prefix, "libexec", "kit-real"), "#!/bin/sh\necho kit\n", {
+    mode: 0o755,
+  });
+  writeFileSync(
+    join(prefix, "bin", "kit"),
+    `#!/bin/sh\nexec "${join(prefix, "libexec", "kit-real")}"\n`,
+    { mode: 0o755 },
+  );
+  // A link on the PATH that leads into a login directory shows nothing.
+  symlinkSync(secrets[0], join(userBin, "hosts"));
+  secrets.push(join(userBin, "hosts"));
+  const path = `${userBin}:${join(prefix, "bin")}:${checkoutBin}:/usr/bin:/bin`;
   const codex = join(
     dirname(
       createRequire(import.meta.url).resolve("@openai/codex/package.json"),
@@ -205,12 +239,18 @@ test("a Codex shell sees its workspace, never the operator's HOME or git directo
     "bin",
     "codex.js",
   );
-  const run = (workspaceAccess, script) => {
-    const home = createCodexHome({
-      source: { PATH: process.env.PATH, HOME: operator },
+  const scratch = (workspaceAccess, PATH = path) =>
+    createCodexHome({
+      source: { PATH, HOME: operator },
       config: "",
-      sandbox: { workspace: workspaceAccess, network: false },
+      sandbox: {
+        directory: workspace,
+        workspace: workspaceAccess,
+        network: false,
+      },
     });
+  const run = (workspaceAccess, script) => {
+    const home = scratch(workspaceAccess);
     try {
       return spawnSync(
         process.execPath,
@@ -240,4 +280,14 @@ test("a Codex shell sees its workspace, never the operator's HOME or git directo
   assert.equal(readFileSync(join(workspace, "made.txt"), "utf8"), "new\n");
   assert.notEqual(run("read", "echo new > other.txt").status, 0);
   assert.equal(existsSync(join(workspace, "other.txt")), false);
+  // A worker runs the PATH's tools and cannot change them; a reviewer reads
+  // the tree alone.
+  assert.equal(run("write", "packaged && kit").stdout, "packaged-tool\nkit\n");
+  const planted = join(prefix, "bin", "planted");
+  assert.notEqual(run("write", `echo x > ${planted}`).status, 0);
+  assert.equal(existsSync(planted), false);
+  assert.notEqual(run("read", "kit").status, 0);
+  // A PATH directory that would show HOME or a login is refused, not mounted.
+  for (const entry of [operator, join(operator, ".config", "gh")])
+    assert.throws(() => scratch("write", `${entry}:/usr/bin`));
 });

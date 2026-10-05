@@ -234,7 +234,10 @@ test("autonomy defaults are bounded and on; the config section overrides them fi
     () => resolveAutonomy({ allowances: { implementationRepairs: -1 } }),
     /nonnegative integer/,
   );
-  assert.throws(() => resolveAutonomy({ actor: "x" }), /Unsupported autonomy/);
+  assert.throws(
+    () => resolveAutonomy({ actor: "x" }),
+    /autonomy\.actor is not a Factory configuration field/,
+  );
   assert.throws(
     () => resolveAutonomy({ repairClasses: ["anything"] }),
     /unsupported repair classes/,

@@ -120,8 +120,7 @@ const config = {
     },
   },
   delivery: { kind: "regular" },
-  contentStore: { kind: "local" },
-  policy: { network: "off", allowedSecretNames: [], deployments: "denied" },
+  policy: { network: "off", allowedSecretNames: [] },
 };
 
 function authored() {

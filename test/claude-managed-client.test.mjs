@@ -73,6 +73,18 @@ const json = (body, status = 200) =>
     status,
     headers: { "content-type": "application/json" },
   });
+test("managed Claude refuses an unknown field, naming it", () => {
+  assert.throws(
+    () => validateClaudeManagedConfig({ ...config(), apiKey: "x" }),
+    /execution\.config\.apiKey is not a Factory configuration field; remove it/,
+  );
+  const bad = config();
+  bad.environment.extra = true;
+  assert.throws(
+    () => validateClaudeManagedConfig(bad),
+    /execution\.config\.environment\.extra is not a Factory configuration field/,
+  );
+});
 test("managed Claude rejects publication paths and unpinned effective configuration", () => {
   const cfg = validateClaudeManagedConfig(config());
   for (const change of [

@@ -1,3 +1,4 @@
+import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
 import {
   createFactoryWorktreeMcp,
@@ -280,7 +281,7 @@ async function main(): Promise<void> {
       evidence: {
         harness: "claude-agent-sdk",
         ...(prepared && { environment: prepared.evidence() }),
-        adapter: input.config.adapter,
+        adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
         sessionId: result.session_id,
         configuredModel: input.config.model,
         observedModel: initialization.model,

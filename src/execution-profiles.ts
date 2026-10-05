@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import type { ExecutionProfile, FactoryConfig } from "./config.js";
+import {
+  harnessAdapterIdentity,
+  type ExecutionProfile,
+  type FactoryConfig,
+} from "./config.js";
 import type {
   ExecutionBinding,
   ExecutionProfileChoices,
@@ -26,7 +30,7 @@ export function profileBinding(
   const harness = profile.harness;
   return {
     id,
-    adapter: harness.kind === "codex-sdk" ? harness.kind : harness.adapter,
+    adapter: harnessAdapterIdentity(harness),
     ...(harness.kind !== "registered"
       ? { model: harness.model, reasoningEffort: harness.reasoningEffort }
       : {}),

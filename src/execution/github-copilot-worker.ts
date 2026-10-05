@@ -1,3 +1,4 @@
+import { GITHUB_COPILOT_SDK_ADAPTER_IDENTITY } from "../config.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -239,7 +240,7 @@ async function main(): Promise<void> {
       assets,
       evidence: {
         harness: "github-copilot-sdk",
-        adapter: input.config.adapter,
+        adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
         sessionId: session.sessionId,
         configuredModel: input.config.model,
         observedModel: sessionStart.selectedModel,

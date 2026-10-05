@@ -89,22 +89,20 @@ Profiles let the compiler assign different harness configs to different Work Ite
       "description": "Complex changes needing more reasoning.",
       "harness": {
         "kind": "claude-agent-sdk",
-        "adapter": "@anthropic-ai/claude-agent-sdk@0.3.281",
         "model": "CLAUDE_MODEL",
         "reasoningEffort": "high",
         "permissionMode": "acceptEdits",
-        "session": "new-per-attempt",
         "settingSources": [],
         "tools": ["Read", "Edit", "Write", "Glob", "Grep"],
         "allowedTools": ["Read", "Edit", "Write", "Glob", "Grep"],
-        "maxTurns": 12,
-        "authentication": "local"
+        "maxTurns": 12
       }
     }
   }
 }
 ```
 
+- Factory refuses a config field it does not know, naming the field. Fields from older versions (`contentStore`, `policy.deployments`, `session`, `authentication`, and `adapter` on a Claude or Copilot harness) do nothing now; remove them. The edit changes the config digest, so an Objective started before it stops at its next step; `factory status` names the way out.
 - Claude and Copilot profiles need `policy.network: "host"`. Copy a built-in harness object from the config `factory setup --config-only` writes.
 - Listing a profile approves its provider to read the whole worktree and its inputs. Owned paths limit writes, not reads.
 - Descriptions and hints go to the compiler and reviewer, so keep credentials and private paths out of them. Hints grant no tools or permissions.

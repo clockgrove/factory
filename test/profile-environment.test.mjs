@@ -47,16 +47,13 @@ const environment = (id) => ({
 });
 const harnessConfig = (model = "claude-fixture") => ({
   kind: "claude-agent-sdk",
-  adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   model,
   reasoningEffort: "medium",
   permissionMode: "acceptEdits",
-  session: "new-per-attempt",
   tools: ["Read", "Write"],
   allowedTools: ["Read", "Write"],
   settingSources: [],
   maxTurns: 4,
-  authentication: "local",
 });
 function item(id) {
   return {
@@ -180,14 +177,11 @@ test("profile environment summaries disclose only built-in capability and exact 
       codex: { kind: "codex-sdk", model: "fixture", reasoningEffort: "low" },
       copilot: {
         kind: "github-copilot-sdk",
-        adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
         model: "fixture",
         reasoningEffort: "low",
-        session: "new-per-attempt",
         availableTools: ["view"],
         permissionKinds: ["read"],
         timeoutSeconds: 30,
-        authentication: "local",
       },
     };
     for (const [id, harness] of Object.entries(builtins)) {

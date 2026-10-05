@@ -135,11 +135,9 @@ export function factoryConfig(
       },
     },
     delivery: { kind: delivery },
-    contentStore: { kind: "local" },
     policy: {
       network: "off",
       allowedSecretNames: [],
-      deployments: "denied",
     },
   };
 }

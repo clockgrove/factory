@@ -352,7 +352,7 @@ test("registered harness configuration is explicit and bound to its adapter", ()
     leaked.execution.harness.permissionMode = "ambient";
     assert.throws(
       () => validateConfig(leaked),
-      /execution\.harness\.permissionMode is unsupported/,
+      /execution\.harness\.permissionMode is not a Factory configuration field/,
     );
     assert.throws(
       () => compose(config),
@@ -448,20 +448,17 @@ test("Claude adapter configuration is exact, isolated, and bound to the pinned S
     config.policy.network = "host";
     config.execution.harness = {
       kind: "claude-agent-sdk",
-      adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
       model: "claude-explicit-model",
       reasoningEffort: "high",
       permissionMode: "acceptEdits",
-      session: "new-per-attempt",
       settingSources: [],
       tools: ["Read", "Edit", "Write", "Glob", "Grep"],
       allowedTools: ["Read", "Edit", "Write", "Glob", "Grep"],
       maxTurns: 8,
-      authentication: "local",
     };
     const validated = validateConfig(config);
     assert.equal(
-      validated.execution.harness.adapter,
+      configModule.harnessAdapterIdentity(validated.execution.harness),
       CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
     );
     assert.ok(compose(config));
@@ -635,18 +632,11 @@ test("Claude adapter configuration is exact, isolated, and bound to the pinned S
       "deny",
     );
 
-    const wrongAdapter = structuredClone(config);
-    wrongAdapter.execution.harness.adapter =
-      "@anthropic-ai/claude-agent-sdk@latest";
-    assert.throws(
-      () => validateConfig(wrongAdapter),
-      /adapter is not the pinned Claude SDK/,
-    );
     const leakedProviderField = structuredClone(config);
     leakedProviderField.execution.harness.effort = "medium";
     assert.throws(
       () => validateConfig(leakedProviderField),
-      /effort is unsupported/,
+      /effort is not a Factory configuration field/,
     );
     const unexpectedTool = structuredClone(config);
     unexpectedTool.execution.harness.allowedTools.push("WebSearch");
@@ -661,12 +651,15 @@ test("Claude adapter configuration is exact, isolated, and bound to the pinned S
       () => validateConfig(shellTool),
       /supports only Read, Edit, Write, Glob, and Grep/,
     );
-    const remoteAuthentication = structuredClone(config);
-    remoteAuthentication.execution.harness.authentication = "configured-key";
-    assert.throws(
-      () => validateConfig(remoteAuthentication),
-      /authentication must be local/,
-    );
+    for (const field of ["adapter", "session", "authentication"]) {
+      const removed = structuredClone(config);
+      removed.execution.harness[field] = "local";
+      assert.throws(
+        () => validateConfig(removed),
+        new RegExp(`execution\\.harness\\.${field} is not a Factory`),
+        field,
+      );
+    }
     const offline = structuredClone(config);
     offline.policy.network = "off";
     assert.throws(
@@ -761,18 +754,15 @@ test("GitHub Copilot adapter uses local auth with a bounded empty-mode capabilit
     config.policy.network = "host";
     config.execution.harness = {
       kind: "github-copilot-sdk",
-      adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
       model: "copilot-explicit-model",
       reasoningEffort: "medium",
-      session: "new-per-attempt",
       availableTools: ["view", "create", "edit", "grep", "glob"],
       permissionKinds: ["read", "write"],
       timeoutSeconds: 300,
-      authentication: "local",
     };
     const validated = validateConfig(config);
     assert.equal(
-      validated.execution.harness.adapter,
+      configModule.harnessAdapterIdentity(validated.execution.harness),
       GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
     );
     const [major, minor] = process.versions.node.split(".").map(Number);
@@ -921,12 +911,15 @@ test("GitHub Copilot adapter uses local auth with a bounded empty-mode capabilit
       "reject",
     );
 
-    const wrongAdapter = structuredClone(config);
-    wrongAdapter.execution.harness.adapter = "@github/copilot-sdk@latest";
-    assert.throws(
-      () => validateConfig(wrongAdapter),
-      /adapter is not the pinned GitHub Copilot SDK/,
-    );
+    for (const field of ["adapter", "session", "authentication"]) {
+      const removed = structuredClone(config);
+      removed.execution.harness[field] = "local";
+      assert.throws(
+        () => validateConfig(removed),
+        new RegExp(`execution\\.harness\\.${field} is not a Factory`),
+        field,
+      );
+    }
     for (const tool of [
       "bash",
       "*",
@@ -1083,16 +1076,13 @@ test("install selects the pinned optional Claude adapter without changing planni
     });
     assert.deepEqual(config.execution.harness, {
       kind: "claude-agent-sdk",
-      adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
       model: "claude-explicit-model",
       reasoningEffort: "xhigh",
       permissionMode: "dontAsk",
-      session: "new-per-attempt",
       settingSources: [],
       tools: ["Read", "Edit"],
       allowedTools: ["Read"],
       maxTurns: 12,
-      authentication: "local",
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1142,14 +1132,11 @@ test("install selects the pinned optional GitHub Copilot adapter with local auth
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     assert.deepEqual(config.execution.harness, {
       kind: "github-copilot-sdk",
-      adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
       model: "copilot-explicit-model",
       reasoningEffort: "high",
-      session: "new-per-attempt",
       availableTools: ["view", "edit", "apply_patch"],
       permissionKinds: ["read", "write"],
       timeoutSeconds: 600,
-      authentication: "local",
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -3040,5 +3027,52 @@ test("capacity-like transport text without a terminal provider event does not re
     assert.deepEqual(waits, []);
   } finally {
     Codex.prototype.startThread = original;
+  }
+});
+
+test("configuration refuses fields that do nothing, naming the field", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-unknown-config-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const target = createTarget(root);
+  const config = factoryConfig(target.checkout, "example/unknown-config");
+  assert.ok(validateConfig(config));
+  assert.ok(validateConfig({ ...config, queue: { pollSeconds: 5 } }));
+  const cases = [
+    ["contentStore", (c) => (c.contentStore = { kind: "local" })],
+    ["policy.deployments", (c) => (c.policy.deployments = "denied")],
+    ["delivery.strategy", (c) => (c.delivery.strategy = "x")],
+    ["execution.harness.session", (c) => (c.execution.harness.session = "x")],
+    ["execution.session", (c) => (c.execution.session = "x")],
+    ["execution.concurency", (c) => (c.execution.concurency = 2)],
+    [
+      "execution.contentStore",
+      (c) => {
+        delete c.execution.harness;
+        c.execution.profiles = {
+          main: {
+            description: "main",
+            harness: factoryConfig(target.checkout, "example/unknown-config")
+              .execution.harness,
+          },
+        };
+        c.execution.defaultProfile = "main";
+        c.execution.contentStore = {};
+      },
+    ],
+    ["notAField", (c) => (c.notAField = true)],
+    ["planning.planner.foo", (c) => (c.planning.planner.foo = 1)],
+    ["planning.reviewer.foo", (c) => (c.planning.reviewer.foo = 1)],
+    ["execution.harness.foo", (c) => (c.execution.harness.foo = 1)],
+  ];
+  for (const [field, mutate] of cases) {
+    const changed = structuredClone(config);
+    mutate(changed);
+    assert.throws(
+      () => validateConfig(changed),
+      (error) =>
+        error.message.includes(field) &&
+        error.message.includes("not a Factory configuration field"),
+      field,
+    );
   }
 });

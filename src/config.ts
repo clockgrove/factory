@@ -1,3 +1,4 @@
+import { refuseUnknownFields } from "./unknown-fields.js";
 import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
 import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
@@ -56,28 +57,36 @@ export type ClaudeSettingSource = "user" | "project" | "local";
 
 export interface ClaudeAgentSdkConfig {
   kind: "claude-agent-sdk";
-  adapter: typeof CLAUDE_AGENT_SDK_ADAPTER_IDENTITY;
   model: string;
   reasoningEffort: HarnessReasoningEffort;
   permissionMode: "acceptEdits" | "dontAsk";
-  session: "new-per-attempt";
   settingSources: ClaudeSettingSource[];
   tools: string[];
   allowedTools: string[];
   maxTurns: number;
-  authentication: "local";
 }
 
 export interface GitHubCopilotSdkConfig {
   kind: "github-copilot-sdk";
-  adapter: typeof GITHUB_COPILOT_SDK_ADAPTER_IDENTITY;
   model: string;
   reasoningEffort: HarnessReasoningEffort;
-  session: "new-per-attempt";
   availableTools: string[];
   permissionKinds: ("read" | "write")[];
   timeoutSeconds: number;
-  authentication: "local";
+}
+
+/** The adapter identity a harness is recorded under; SDK harnesses are identified by the SDK Factory ships. */
+export function harnessAdapterIdentity(harness: LocalHarnessConfig): string {
+  switch (harness.kind) {
+    case "codex-sdk":
+      return harness.kind;
+    case "claude-agent-sdk":
+      return CLAUDE_AGENT_SDK_ADAPTER_IDENTITY;
+    case "github-copilot-sdk":
+      return GITHUB_COPILOT_SDK_ADAPTER_IDENTITY;
+    case "registered":
+      return harness.adapter;
+  }
 }
 
 export type JsonValue =
@@ -217,11 +226,9 @@ export interface FactoryConfig {
   planning: PlanningConfig;
   execution: ExecutionConfig;
   delivery: { kind: "regular" | "native-stack" };
-  contentStore: { kind: "local" };
   policy: {
     network: "host" | "off";
     allowedSecretNames: string[];
-    deployments: "denied";
   };
 }
 
@@ -257,11 +264,7 @@ const copilotFileTools = new Set([
   "glob",
 ]);
 
-const factoryRepositories = new Set([
-  "clockgrove/factory",
-  "clockgrove/factory-rebuild",
-  "clockgrove/factory-archive",
-]);
+const factoryRepositories = new Set(["clockgrove/factory"]);
 
 function isFactorySource(checkout: string): boolean {
   try {
@@ -283,14 +286,15 @@ function assertObject(
   }
 }
 
-function assertOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: string[],
-  name: string,
-): void {
-  const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
-  if (unexpected) throw new Error(`${name}.${unexpected} is unsupported`);
-}
+const localExecutionKeys = [
+  "kind",
+  "concurrency",
+  "harness",
+  "profiles",
+  "defaultProfile",
+];
+
+const assertOnlyKeys = refuseUnknownFields;
 
 function assertJsonValue(
   value: unknown,
@@ -322,8 +326,10 @@ function assertJsonValue(
 function assertCodexModelSelection(
   value: unknown,
   name: string,
+  allowed = ["model", "reasoningEffort"],
 ): asserts value is CodexModelSelection {
   assertObject(value, name);
+  assertOnlyKeys(value, allowed, name);
   if (typeof value.model !== "string" || value.model.trim().length === 0)
     throw new Error(`${name}.model must be a non-empty string`);
   if (
@@ -355,6 +361,7 @@ export function validatePlanning(
 ): asserts value is FactoryConfig["planning"] {
   assertObject(value, "planning");
   if (value.kind === "codex-sdk") {
+    assertOnlyKeys(value, ["kind", "planner", "reviewer"], "planning");
     assertCodexModelSelection(value.planner, "planning.planner");
     assertCodexModelSelection(value.reviewer, "planning.reviewer");
     return;
@@ -542,6 +549,23 @@ export function validateConfig(value: unknown): FactoryConfig {
   ) {
     throw new Error("repository and checkout are required");
   }
+  assertOnlyKeys(
+    value,
+    [
+      "schemaVersion",
+      "repository",
+      "checkout",
+      "planning",
+      "scheduling",
+      "autonomy",
+      "capture",
+      "execution",
+      "delivery",
+      "policy",
+      "queue",
+    ],
+    "configuration",
+  );
   validateTarget(value.repository, value.checkout);
   validatePlanning(value.planning);
   if (value.scheduling !== undefined) validateScheduling(value.scheduling);
@@ -577,6 +601,7 @@ export function validateConfig(value: unknown): FactoryConfig {
       validateClaudeManagedConfig(value.execution.config);
     else throw new Error("Unsupported managed execution provider");
   } else if (value.execution.profiles !== undefined) {
+    assertOnlyKeys(value.execution, localExecutionKeys, "execution");
     if (value.execution.harness !== undefined)
       throw new Error(
         "execution.harness and execution.profiles are mutually exclusive",
@@ -652,22 +677,22 @@ export function validateConfig(value: unknown): FactoryConfig {
     )
       throw new Error("execution.defaultProfile must name an eligible profile");
   } else {
+    assertOnlyKeys(value.execution, localExecutionKeys, "execution");
     if (value.execution.defaultProfile !== undefined)
       throw new Error("execution.defaultProfile requires profiles");
     validateLocalHarness(value.execution.harness);
   }
 
   assertObject(value.delivery, "delivery");
+  assertOnlyKeys(value.delivery, ["kind"], "delivery");
   if (
     value.delivery.kind !== "regular" &&
     value.delivery.kind !== "native-stack"
   ) {
     throw new Error("Unsupported delivery strategy");
   }
-  assertObject(value.contentStore, "contentStore");
-  if (value.contentStore.kind !== "local")
-    throw new Error("Unsupported content store");
   assertObject(value.policy, "policy");
+  assertOnlyKeys(value.policy, ["network", "allowedSecretNames"], "policy");
   if (value.policy.network !== "host" && value.policy.network !== "off")
     throw new Error("Unsupported network policy");
   const harnesses =
@@ -705,8 +730,6 @@ export function validateConfig(value: unknown): FactoryConfig {
   ) {
     throw new Error("policy.allowedSecretNames must be a string array");
   }
-  if (value.policy.deployments !== "denied")
-    throw new Error("Deployments are unsupported");
   if (value.capture !== undefined) {
     assertObject(value.capture, "capture");
     assertOnlyKeys(
@@ -905,32 +928,26 @@ export function validateLocalHarness(
 ): asserts harness is LocalHarnessConfig {
   assertObject(harness, "execution.harness");
   if (harness.kind === "codex-sdk") {
-    assertOnlyKeys(
-      harness,
-      ["kind", "model", "reasoningEffort"],
-      "execution.harness",
-    );
-    assertCodexModelSelection(harness, "execution.harness");
+    assertCodexModelSelection(harness, "execution.harness", [
+      "kind",
+      "model",
+      "reasoningEffort",
+    ]);
   } else if (harness.kind === "claude-agent-sdk") {
     assertOnlyKeys(
       harness,
       [
         "kind",
-        "adapter",
         "model",
         "reasoningEffort",
         "permissionMode",
-        "session",
         "settingSources",
         "tools",
         "allowedTools",
         "maxTurns",
-        "authentication",
       ],
       "execution.harness",
     );
-    if (harness.adapter !== CLAUDE_AGENT_SDK_ADAPTER_IDENTITY)
-      throw new Error("execution.harness.adapter is not the pinned Claude SDK");
     if (typeof harness.model !== "string" || harness.model.trim().length === 0)
       throw new Error("execution.harness.model must be a non-empty string");
     if (
@@ -945,8 +962,6 @@ export function validateLocalHarness(
       harness.permissionMode !== "dontAsk"
     )
       throw new Error("execution.harness.permissionMode is unsupported");
-    if (harness.session !== "new-per-attempt")
-      throw new Error("execution.harness.session is unsupported");
     const settings = assertUniqueStrings(
       harness.settingSources,
       "execution.harness.settingSources",
@@ -979,28 +994,19 @@ export function validateLocalHarness(
       throw new Error(
         "execution.harness.maxTurns must be a positive operator-selected integer",
       );
-    if (harness.authentication !== "local")
-      throw new Error("execution.harness.authentication must be local");
   } else if (harness.kind === "github-copilot-sdk") {
     assertOnlyKeys(
       harness,
       [
         "kind",
-        "adapter",
         "model",
         "reasoningEffort",
-        "session",
         "availableTools",
         "permissionKinds",
         "timeoutSeconds",
-        "authentication",
       ],
       "execution.harness",
     );
-    if (harness.adapter !== GITHUB_COPILOT_SDK_ADAPTER_IDENTITY)
-      throw new Error(
-        "execution.harness.adapter is not the pinned GitHub Copilot SDK",
-      );
     if (typeof harness.model !== "string" || harness.model.trim().length === 0)
       throw new Error("execution.harness.model must be a non-empty string");
     if (
@@ -1010,8 +1016,6 @@ export function validateLocalHarness(
       )
     )
       throw new Error("execution.harness.reasoningEffort is unsupported");
-    if (harness.session !== "new-per-attempt")
-      throw new Error("execution.harness.session is unsupported");
     const availableTools = assertUniqueStrings(
       harness.availableTools,
       "execution.harness.availableTools",
@@ -1045,8 +1049,6 @@ export function validateLocalHarness(
       throw new Error(
         "execution.harness.timeoutSeconds must be a positive operator-selected integer",
       );
-    if (harness.authentication !== "local")
-      throw new Error("execution.harness.authentication must be local");
   } else if (harness.kind === "registered") {
     assertOnlyKeys(harness, ["kind", "adapter", "config"], "execution.harness");
     if (

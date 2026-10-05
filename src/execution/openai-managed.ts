@@ -1,3 +1,4 @@
+import { refuseUnknownFields } from "../unknown-fields.js";
 import { cancelledFault, classifyFaults } from "../fault.js";
 import { executionFault, missingCredential } from "./fault.js";
 import { randomUUID } from "node:crypto";
@@ -35,17 +36,18 @@ export function validateOpenAIManagedConfig(
   value: unknown,
 ): OpenAIManagedConfig {
   const v = object(value);
+  refuseUnknownFields(
+    v,
+    [
+      "model",
+      "reasoningEffort",
+      "containerSize",
+      "apiKeyEnv",
+      "timeoutSeconds",
+    ],
+    "execution.config",
+  );
   if (
-    Object.keys(v).some(
-      (key) =>
-        ![
-          "model",
-          "reasoningEffort",
-          "containerSize",
-          "apiKeyEnv",
-          "timeoutSeconds",
-        ].includes(key),
-    ) ||
     typeof v.model !== "string" ||
     !v.model.trim() ||
     !["low", "medium", "high"].includes(String(v.reasoningEffort)) ||

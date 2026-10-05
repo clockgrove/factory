@@ -14,7 +14,7 @@
 # Plan the public cases 5 times each and grade them with both frozen judges.
 node scripts/eval-planning.mjs --config factory.json --output out/a --repeat 5 \
   --judge evals/judges/strict-rubric-v1-claude.json \
-  --judge evals/judges/strict-rubric-v1-codex.json
+  --judge evals/judges/strict-rubric-v1-codex-gpt-6.1-sol.json
 
 # Seeded-defect review suite.
 node scripts/eval-planning.mjs --review-only --config factory.json \
@@ -127,7 +127,7 @@ Judge-free metrics count structured fields only: proofs, commands, workflow jobs
 
 ## Frozen judges
 
-A judge in `evals/judges/` is a JSON spec: provider, model, effort, prompt file and prompt SHA-256. Two ship with the same rubric: `strict-rubric-v1-claude` (Claude Agent SDK) and `strict-rubric-v1-codex` (Codex SDK). Neither sees production review findings or the production review status.
+A judge in `evals/judges/` is a JSON spec: provider, model, effort, prompt file and prompt SHA-256. Three ship with the same rubric: `strict-rubric-v1-claude` (Claude Agent SDK), `strict-rubric-v1-codex-gpt-6.1-sol` (Codex SDK) and `strict-rubric-v1-codex`, which stays frozen on `gpt-5.6-sol` to keep its recorded results comparable. No judge sees production review findings or the production review status.
 
 Judges run in a separate process inside a bubblewrap mount namespace (Linux, with unprivileged user namespaces). The namespace holds only:
 

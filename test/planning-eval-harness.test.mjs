@@ -90,6 +90,8 @@ const FROZEN_JUDGES = {
     "a77ab59477059969990bcb988b8a8be89275c79f61e8541c1ece87171316a1c2",
   "strict-rubric-v1-codex":
     "86b546ee233c50e2b0d120f5e107164656eba2fa784b1567d7fb8481a74fc819",
+  "strict-rubric-v1-codex-gpt-6.1-sol":
+    "dc2aeb2b2257a5909ad0df97856459d0e62d1e26f224dcabdfd05d57970bbf16",
 };
 
 /** Fixture commits are the same on every machine. */
@@ -567,7 +569,7 @@ test("judge-free metrics count structured fields only", () => {
 
 test("the frozen judges load only with their pinned prompt and grade all dimensions", async () => {
   const judges = loadJudges(
-    ["claude", "codex"].map((provider) =>
+    ["claude", "codex", "codex-gpt-6.1-sol"].map((provider) =>
       join(root, `evals/judges/strict-rubric-v1-${provider}.json`),
     ),
   );
@@ -578,9 +580,10 @@ test("the frozen judges load only with their pinned prompt and grade all dimensi
   );
   assert.deepEqual(
     judges.map((judge) => judge.model.kind),
-    ["claude-agent-sdk", "codex-sdk"],
+    ["claude-agent-sdk", "codex-sdk", "codex-sdk"],
   );
   assert.equal(judges[0].prompt, judges[1].prompt);
+  assert.equal(judges[0].prompt, judges[2].prompt);
   const [judge] = judges;
   assert.doesNotMatch(
     judge.prompt,

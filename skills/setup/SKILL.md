@@ -20,7 +20,7 @@ Running `setup --background` is the service consent. It grants no provider spend
 - Optional: `--concurrency N` (omit it and Factory sizes workers from the host), `--delivery regular|native-stack`, `--network host|off`, and role models with `--planning-model`, `--review-model`, `--worker-model` plus matching `--*-reasoning`.
 - For `--planning claude-agent-sdk`, ask for the planning and review models. It uses the operator's `claude auth login`.
 
-A fresh configuration persists these defaults when no model choices are given: planner `gpt-5.6-sol` with `medium` reasoning, reviewer `gpt-5.6-sol` with `medium` reasoning, and worker `gpt-5.6-luna` with `medium` reasoning.
+A fresh configuration persists these defaults when no model choices are given: planner `gpt-6.1-sol` with `high` reasoning, reviewer `gpt-6.1-sol` with `high` reasoning, and worker `gpt-6.1-sol` with `medium` reasoning.
 
 Keep configuration, credentials and state outside the target repository. Reuse a matching existing configuration. If the binding conflicts, report it and stop, because deleting state or choosing another root hides the conflict.
 

@@ -30,7 +30,7 @@ factory setup --config-only --repository OWNER/REPO --checkout /absolute/target 
 - **Optional packages:** a normal `npm install` includes the Claude and Copilot SDKs. With `--omit=optional`, only Codex and registered adapters work.
 - **Node:** Factory needs Node 22+. The Copilot SDK needs Node 22.12+ and fails before starting on older versions.
 - **Default tools:** Claude gets `Read`, `Edit`, `Write`, `Glob`, `Grep`. Copilot gets `view`, `create`, `edit`, `apply_patch`, `grep`, `glob`. The tool flags replace these lists.
-- **Copilot editing:** some models, such as `gpt-5.6-luna`, edit only through `apply_patch`, so keep it in the tool list.
+- **Copilot editing:** some models edit only through `apply_patch`, so keep it in the tool list.
 - **Claude settings:** no settings files are loaded by default. A source added with `--claude-setting-source` runs its settings and hooks as trusted local code.
 
 Factory never falls back to another harness. A missing adapter, identity mismatch or config change during a run stops the work.
@@ -81,7 +81,7 @@ Profiles let the compiler assign different harness configs to different Work Ite
       "selectionHints": ["Default when no stronger match exists."],
       "harness": {
         "kind": "codex-sdk",
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6.1-sol",
         "reasoningEffort": "medium"
       }
     },

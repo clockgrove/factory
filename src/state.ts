@@ -159,6 +159,13 @@ export interface PreparationState {
   baseSha: string;
   objectiveBodyDigest: string;
   coordinator: CoordinatorDisposition;
+  /**
+   * A run found the base, the Objective body, the sources or the configuration
+   * changed since planning and refused. Only a run can see it (status reads no
+   * GitHub or checkout); status then names how to end or discard the plan. The
+   * next run that finds them as planned clears it.
+   */
+  changedSincePlanning?: true;
   /** Present once planning completed; preparation then projects it. */
   plan?: import("./compiler.js").PlanCandidate;
   /** Issues already projected; projection reconciles the rest by marker. */
@@ -173,6 +180,40 @@ export interface PreparationState {
   wait?: Wait;
 }
 export type ContinuationState = FactoryState | PreparationState;
+
+/**
+ * Projection may create an issue before recording it, so it has started once
+ * an issue is recorded or the phase is entered. A plan cannot be refused then.
+ */
+export function projectionStarted(
+  preparation: Pick<PreparationState, "issueByItemId" | "coordinator">,
+): boolean {
+  return (
+    Object.keys(preparation.issueByItemId).length > 0 ||
+    preparation.coordinator.phase === "projection"
+  );
+}
+
+/**
+ * A rejected amendment holds the coordinator paused: a replacement or
+ * `factory cancel` is the only way on, and both need the pause. Every change
+ * of mode goes through `setCoordinatorMode`, so a drain, a handoff or a resume
+ * cannot release it; submitting the replacement does (the rejection is gone).
+ */
+export function rejectionHoldsPause(state: ContinuationState): boolean {
+  return (
+    state.schemaVersion === 7 && state.pendingAmendment?.phase === "rejected"
+  );
+}
+
+/** Set the coordinator's mode, unless a rejected amendment holds it paused. */
+export function setCoordinatorMode(
+  state: ContinuationState,
+  mode: CoordinatorDisposition["mode"],
+): void {
+  if (state.coordinator)
+    state.coordinator.mode = rejectionHoldsPause(state) ? "paused" : mode;
+}
 
 export interface FactoryState {
   finalAcceptance?: import("./completion.js").FinalAcceptance;

@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
-import { configPath, readConfig, stateRoot } from "./config.js";
+import {
+  configPath,
+  factoryConfigDigest,
+  readConfig,
+  stateRoot,
+} from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import { requestControl } from "./coordinator-control.js";
 import { runDiagnosticsCommand } from "./diagnostics-cli.js";
@@ -342,6 +347,7 @@ async function main(): Promise<void> {
       continuation?.capacity.concurrency,
       controllerActive(config.repository, objective),
       continuation ? undefined : readPreState(config.repository, objective),
+      factoryConfigDigest(config),
     );
     if (args.includes("--json")) console.log(JSON.stringify(document));
     else

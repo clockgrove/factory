@@ -1,6 +1,6 @@
 import { consumption } from "../dist/repair-policy.js";
 import { attachFault, faultOf, transient } from "../dist/fault.js";
-import { now } from "../dist/clock.js";
+import { now, realDelay } from "../dist/clock.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1120,6 +1120,9 @@ test("closed selection stays ineligible until explicit dequeue without model cal
     assert.equal(f.plans.length, 0);
   }));
 
+/** The logical milliseconds that pass in `real` real milliseconds (the clock may be scaled). */
+const logical = (real) => real / realDelay(1);
+
 /** A rate-limit hold the GitHub client raises without sending (#641). */
 const rateHeld = (milliseconds) => {
   const until = new Date(now() + milliseconds).toISOString();
@@ -1138,7 +1141,10 @@ test("a rate-limited read before compilation waits for GitHub instead of pausing
     f.github.objective = async (id) => {
       reads.push(now());
       // The second read is the check before compilation.
-      if (reads.length === 2) throw (held = rateHeld(500));
+      // Held for a real second: the hold must outlast the test's polling of
+      // the observation, whatever the clock scale (500 logical ms is 5 real ms
+      // at scale 100, which the poll can miss).
+      if (reads.length === 2) throw (held = rateHeld(logical(1000)));
       return read(id);
     };
     const running = f.application.runIntake();

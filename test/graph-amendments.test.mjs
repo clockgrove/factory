@@ -9,6 +9,7 @@ import {
   applyPendingAmendment,
   assertGraphRevisions,
   graphDigest,
+  replacementRefusal,
   submitAmendment,
   validateAmendment,
 } from "../dist/graph-amendments.js";
@@ -25,7 +26,7 @@ import {
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState, statePath } from "../dist/state-store.js";
 import { failureDigest, resolveAutonomy } from "../dist/repair-policy.js";
-import { parseFactoryState } from "../dist/state.js";
+import { parseFactoryState, setCoordinatorMode } from "../dist/state.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
 import { checkServiceState } from "../dist/supervision.js";
@@ -2059,6 +2060,8 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       assert.doesNotMatch(JSON.stringify(rejectedDocument), /coverage/);
       const rejectedStatus = rejectedDocument.pendingAmendment;
       assert.equal(rejectedStatus.phase, "rejected");
+      // A planning revision is left: a replacement fits.
+      assert.equal(rejectedStatus.replacementRefusal, null);
       assert.match(rejectedStatus.error, /\[REDACTED\]/);
       assert.doesNotMatch(rejectedStatus.error, /coverage/);
       assert.equal(
@@ -2071,6 +2074,15 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       );
       assert.equal(stopped.work.result.status, "done");
       assert.equal(stopped.pendingAmendment.phase, "rejected");
+      // A drain or a resume cannot release the pause a rejection holds, so a
+      // replacement or cancel stays what status names.
+      for (const action of ["drain", "resume", "pause", "resume"]) {
+        await controlObjective(config, { objective: 1, action });
+        assert.equal(
+          readState(config.repository, 1).coordinator.mode,
+          "paused",
+        );
+      }
       assert.equal(
         stopped.pendingAmendment.rejectionStage,
         rejection === "compilation" ? "compilation" : "review-findings",
@@ -2194,6 +2206,59 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
         assert.throws(() => submitAmendment(altered, input));
         assert.equal(JSON.stringify(altered), unchanged);
       }
+      // Status reads the same checks: every state `submitAmendment` refuses
+      // for its own sake has a refusal status can name (`factory cancel`), and
+      // a state it accepts has none (#567).
+      assert.equal(replacementRefusal(stopped), undefined);
+      for (const mutate of [
+        (s) => {
+          s.pendingAmendment.proposal.graph = structuredClone(s.graph);
+        },
+        (s) => {
+          s.work.result.status = "running";
+        },
+        (s) => {
+          s.work.result.status = "published";
+        },
+        (s) => {
+          s.pendingAmendment.rejectionStage = "review";
+        },
+        (s) => {
+          s.pendingAmendment.reviewDigest = "0".repeat(64);
+        },
+        (s) => {
+          s.pendingAmendment.issueByItemId.qa = 99;
+        },
+        (s) => {
+          s.coordinator.mode = "running";
+        },
+        (s) => {
+          s.coordinator.processes = [{ pid: 1, startTime: "1" }];
+        },
+        (s) => {
+          s.error = "unrelated error";
+        },
+        (s) => {
+          s.cancelRequested = true;
+        },
+        (s) => {
+          s.objectiveClosure = "complete";
+        },
+        (s) => {
+          s.autonomy.repairClasses = [];
+        },
+        (s) => {
+          for (const round of [90, 91])
+            s.charges[`objective/plan/${round}`] = {
+              allowances: ["planningRevisions"],
+              scopes: ["$planning"],
+            };
+        },
+      ]) {
+        const altered = structuredClone(stopped);
+        mutate(altered);
+        assert.ok(replacementRefusal(altered), String(mutate));
+      }
       let running;
       if (transport === "stopped CLI") {
         const proposalPath = join(root, "proposal.json");
@@ -2236,6 +2301,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       assert.equal(readyStatus.phase, "ready");
       assert.equal(readyStatus.error, null);
       assert.equal(readyStatus.failureDigest, null);
+      assert.equal(readyStatus.replacementRefusal, null);
       assert.doesNotThrow(() => checkServiceState(config, 1));
       for (const mutate of [
         (s) => {
@@ -2294,6 +2360,23 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
         assert.equal(consumption(refused, "$planning").planningRevisions, 2);
         assert.equal(compilations, 3);
         assert.equal(graphReviews, 3);
+        // Status exposes that no replacement fits (it names cancel).
+        assert.match(
+          status().pendingAmendment.replacementRefusal.message,
+          /planningRevisions allowance exhausted/,
+        );
+        assert.equal(
+          status().pendingAmendment.replacementRefusal.kind,
+          "planning-limit",
+        );
+        // A configuration without planning classes refuses the same way.
+        const unplanned = structuredClone(refused);
+        unplanned.autonomy.repairClasses = ["implementation"];
+        assert.match(
+          replacementRefusal(unplanned).message,
+          /No planning repair class is enabled/,
+        );
+        assert.equal(replacementRefusal(unplanned).kind, "planning-class");
         const next = {
           ...proposal,
           replacement: {
@@ -2601,4 +2684,31 @@ test("mutation-unknown projection repeats without duplicate issues", async () =>
       transient("GitHub POST response was lost", true),
     ),
   );
+});
+
+test("a rejected amendment holds the coordinator paused; nothing else does", () => {
+  const modes = (state) =>
+    ["draining", "running", "paused"].map((mode) => {
+      setCoordinatorMode(state, mode);
+      return state.coordinator.mode;
+    });
+  const coordinator = () => ({ mode: "running" });
+  assert.deepEqual(
+    modes({
+      schemaVersion: 7,
+      pendingAmendment: { phase: "rejected" },
+      coordinator: coordinator(),
+    }),
+    ["paused", "paused", "paused"],
+  );
+  for (const state of [
+    { schemaVersion: 7, pendingAmendment: { phase: "ready" } },
+    { schemaVersion: 7 },
+    { schemaVersion: 8 },
+  ])
+    assert.deepEqual(modes({ ...state, coordinator: coordinator() }), [
+      "draining",
+      "running",
+      "paused",
+    ]);
 });

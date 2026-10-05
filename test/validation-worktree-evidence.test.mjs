@@ -7,6 +7,7 @@ import test from "node:test";
 import { CodexPlanningModel, objectiveCriteria } from "../dist/compiler.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { coverageObligations } from "../dist/qa.js";
+import { defaultAutonomy } from "../dist/repair-policy.js";
 import {
   lingeringDescendants,
   pinnedGit,
@@ -223,6 +224,7 @@ test("settled dirty refusals retain structured relative tracked, generated, spec
         1,
       );
       const state = {
+        autonomy: defaultAutonomy,
         graph: { items: [{ id: "result", dependencies: [] }] },
         work: {
           result: {

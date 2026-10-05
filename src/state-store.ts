@@ -236,6 +236,11 @@ function parsePreparation(
   )
     throw new Error("Invalid preparation source packet binding");
   if (
+    value.changedSincePlanning !== undefined &&
+    value.changedSincePlanning !== true
+  )
+    throw new Error("Invalid preparation change flag");
+  if (
     value.issueAuthor !== undefined &&
     (typeof value.issueAuthor !== "string" || !value.issueAuthor)
   )

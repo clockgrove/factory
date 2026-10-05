@@ -27,7 +27,7 @@ syncBuiltinESMExports();
 
 const { join } = await import("node:path");
 const { Octokit } = await import("@octokit/core");
-const { stateRoot } = await import("../../dist/config.js");
+const { factoryConfigDigest, stateRoot } = await import("../../dist/config.js");
 const { NativeStackDelivery } = await import(
   "../../dist/delivery/native-stack.js"
 );
@@ -101,12 +101,15 @@ function status() {
       [],
       continuation?.capacity.concurrency,
       controllerActive(),
+      undefined,
+      factoryConfigDigest(config),
     );
     return {
       phase: document.phase,
       summary: document.summary,
       nextAction: document.nextAction,
       active: document.runActive ?? null,
+      configurationChanged: document.configurationChanged === true,
       // Every sentence of the status that can name a command: the summary,
       // the next action's reason, each repair's nextDecision, item errors
       // and waits, and the coordinator's wait reason.
@@ -219,6 +222,9 @@ const application = composeWithLocalHarness(
  * go to the running owner first and fall back to the application, as the CLI
  * does (src/cli.ts).
  */
+// Whether the owner's control socket answered the command, or the application did.
+let handledByOwner = false;
+
 async function command({ verb, options, input }) {
   const item = options.item;
   const viaOwner = async (action, body, apply) => {
@@ -227,6 +233,7 @@ async function command({ verb, options, input }) {
       action,
       input: body,
     });
+    handledByOwner = reply.handled === true;
     return reply.handled ? reply.result : apply();
   };
   switch (verb) {
@@ -284,21 +291,29 @@ async function command({ verb, options, input }) {
     case "resume":
     case "pause":
     case "drain":
-      return controlObjective(config, { objective, action: verb });
+      return viaOwner(verb, undefined, () =>
+        controlObjective(config, { objective, action: verb }),
+      );
     case "propose-amendment":
-      return controlObjective(config, {
-        objective,
-        action: "propose-amendment",
-        input,
-      });
+      return viaOwner("propose-amendment", input, () =>
+        controlObjective(config, {
+          objective,
+          action: "propose-amendment",
+          input,
+        }),
+      );
   }
   throw new Error(`Unsupported operator command: factory ${verb}`);
 }
 
+// The operator's view of the stored state alone: no run, so no owner.
+if (descriptor.mode === "status")
+  finish({ outcome: "stopped", status: status() });
+
 if (descriptor.mode === "command") {
   try {
     await command(descriptor.command);
-    finish({ ok: true, status: status() });
+    finish({ ok: true, status: status(), viaOwner: handledByOwner });
   } catch (error) {
     finish({ ok: false, message: String(error?.message ?? error) });
   }

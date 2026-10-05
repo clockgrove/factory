@@ -25,7 +25,12 @@
 import assert from "node:assert/strict";
 import { availableParallelism } from "node:os";
 import { describe, test } from "node:test";
-import { identityName, OVERLAY_VALUES, prepare } from "./support/dead-ends.mjs";
+import {
+  identityName,
+  OVERLAY_VALUES,
+  ownerProbes,
+  prepare,
+} from "./support/dead-ends.mjs";
 
 const has = (identity, ...values) =>
   values.some((value) => identity.slice(2).includes(value));
@@ -36,85 +41,7 @@ const has = (identity, ...values) =>
  * strands, `issue` says where it is tracked. A new diagnosis needs an open P0
  * issue (P1 when the Objective has another exit).
  */
-const D = {
-  repairAllowance: {
-    diagnosis:
-      "Status names `factory repair` after the repair allowance is used up (this item's path or the Objective's); repair is refused",
-    issue: "#676, fixed by #567",
-    pattern:
-      /factory repair is refused \((?:Repair path \S+ implementationRepairs allowance exhausted|Objective implementationRepairs allowance exhausted)/,
-    when: (identity) =>
-      has(
-        identity,
-        "this item's repair path is used up",
-        "the Objective's implementation repairs are used up",
-      ),
-  },
-  repairClass: {
-    diagnosis:
-      "Status names `factory repair` when repairClasses omits implementation; repair is refused",
-    issue: "#676, fixed by #567",
-    pattern:
-      /factory repair is refused \(Repair class implementation is not enabled/,
-    when: (identity) =>
-      has(
-        identity,
-        "no repair class is enabled",
-        "only planning repairs are enabled",
-      ),
-  },
-  amendmentPlanningRevision: {
-    diagnosis:
-      "A rejected amendment used the Objective's only planning revision, so its replacement (`factory propose-amendment`) is refused: allowance exhausted",
-    issue: "#715",
-    pattern:
-      /factory propose-amendment is refused \(Objective planningRevisions allowance exhausted\)/,
-    when: (identity) => has(identity, "an amendment was rejected"),
-  },
-  amendmentClass: {
-    diagnosis:
-      "Status names `factory propose-amendment` for a rejected amendment when repairClasses omits the planning classes; the replacement is refused",
-    issue: "#716",
-    pattern:
-      /factory propose-amendment is refused \(Repair class planning-output is not enabled/,
-    when: (identity) =>
-      has(identity, "an amendment was rejected") &&
-      has(
-        identity,
-        "no repair class is enabled",
-        "only planning repairs are enabled",
-      ),
-  },
-  amendmentUnsettled: {
-    diagnosis:
-      "Status names `factory propose-amendment` for a rejected amendment while an item is published or running; the replacement needs settled ownership, and the pending amendment blocks the delivery that would settle it",
-    issue: "#717",
-    pattern:
-      /factory propose-amendment is refused \(Amendment replacement requires paused, settled ownership\)/,
-    when: (identity) =>
-      has(identity, "an amendment was rejected") &&
-      /published|running/.test(identity[1]),
-  },
-  cancelledItem: {
-    diagnosis:
-      "A cancelled item of a live Objective is never retried: status names `factory run` (waiting for a decision nothing offers) or an Objective-wide `factory retry` (no dependency-ready delivery unit); `factory retry --item` would restart it",
-    issue: "#718",
-    pattern:
-      /factory run does not continue after .*Awaiting exact candidate decision|factory retry does not continue after stopped: No dependency-ready delivery unit/,
-    when: (identity) =>
-      has(identity, "an item was cancelled and the Objective retried"),
-  },
-  configurationChanged: {
-    diagnosis:
-      "The installation configuration changed after the Objective started: status names `factory retry`, which is accepted, and the next run stops identically (the state does not match this installation)",
-    issue: "#739",
-    pattern:
-      /factory retry does not continue after stopped: Existing Objective state does not match this Factory installation/,
-    when: (identity) =>
-      has(identity, "the installation configuration changed") &&
-      !identity[1].startsWith("preparing"),
-  },
-};
+const D = {};
 
 /**
  * Stranded states named outright: diagnosis → [delivery, anchor shape,
@@ -269,6 +196,182 @@ const FIXED = [
     "draining",
     "a recorded subprocess has exited",
   ],
+  // Rejected amendments (#715, #716, #717): status names cancel unless a
+  // replacement fits, and a supplied graph is never replaced.
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "an amendment was rejected with a planning revision to spare",
+  ],
+  [
+    "native-stack",
+    "alpha published (PR); beta pending",
+    "an amendment was rejected with a planning revision to spare",
+  ],
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "a supplied graph amendment was rejected with a planning revision to spare",
+  ],
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "no repair class is enabled",
+    "an amendment was rejected with a planning revision to spare",
+  ],
+  // The run that rejected an amendment stopped on it, so the Objective has an
+  // error: status names the rejection's exit, not the retry of that error.
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected and the run stopped",
+  ],
+  [
+    "native-stack",
+    "alpha published (PR); beta pending",
+    "an amendment was rejected and the run stopped with a planning revision to spare",
+  ],
+  // An unrelated stop beside the rejection: the replacement is refused until
+  // that stop is cleared, so status names the retry (ownership settles).
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected beside an unrelated stop",
+  ],
+  // The installation configuration changed after the Objective started
+  // (#739): status names cancel, which ends it.
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "alpha running/execute; beta pending",
+    "the installation configuration changed",
+  ],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "a step fails with an unclassified error",
+    "the installation configuration changed",
+  ],
+  // Final acceptance sealed under a changed configuration: cancel is refused,
+  // so status names the run that restoring the configuration allows.
+  [
+    "regular",
+    "alpha done; beta done (handle, PR, closure complete); final validation; Objective closure pending",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "alpha done; beta done (PR, closure complete); final validation; Objective closure pending; stack merge pending",
+    "the installation configuration changed",
+  ],
+  // A preparation under a changed configuration: a refusal discards the plan
+  // before projection; once issues exist only cancel ends it.
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "preparing, plan clean, planning complete, 0 issues, projection",
+    "the installation configuration changed",
+  ],
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 1 issues, projection",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "preparing, no plan, 0 issues, planning",
+    "the installation configuration changed",
+  ],
+  // A rejection is held paused (a handoff or a resume does not release it), so
+  // status keeps naming the replacement or cancel, also with no planning
+  // revision left (a permanent refusal goes straight to cancel).
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected, then the coordinator drained",
+  ],
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected, then the coordinator resumed",
+  ],
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected with no planning revision left, then the coordinator drained",
+  ],
+  [
+    "native-stack",
+    "alpha published (PR); beta pending",
+    "an amendment was rejected and the run stopped, then the coordinator resumed",
+  ],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "an amendment was rejected and the run stopped, then the coordinator drained",
+  ],
+  // A pause or drain of a preparation outranks a changed configuration: a
+  // refusal would discard it.
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "paused",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "preparing, plan clean, planning complete, 0 issues, projection",
+    "draining",
+    "the installation configuration changed",
+  ],
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 1 issues, projection",
+    "paused",
+    "the installation configuration changed",
+  ],
+  // The base, the Objective body or the sources changed during preparation:
+  // the run refuses and status names what ends or discards the plan.
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "the base changed since planning",
+  ],
+  [
+    "native-stack",
+    "preparing, plan clean, planning complete, 0 issues, projection",
+    "the Objective body changed since planning",
+  ],
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 1 issues, projection",
+    "the sources changed since planning",
+  ],
+  [
+    "native-stack",
+    "preparing, no plan, 0 issues, planning",
+    "the base changed since planning",
+  ],
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "paused",
+    "the base changed since planning",
+  ],
+  // A cancelled item of a live Objective (#718).
+  [
+    "native-stack",
+    "alpha pending; beta pending",
+    "an item was cancelled and the Objective retried",
+  ],
   ["native-stack", "alpha published (PR); beta pending", "draining"],
   [
     "regular",
@@ -344,6 +447,60 @@ describe("dead ends", { concurrency: true }, () => {
       );
     });
   }
+
+  // The owner's control socket falls back to the application when it does not
+  // answer, so a harness that never reaches an owner would still pass. Only a
+  // parked owner (paused or draining) is a live owner at a stop. The commands
+  // this PR's stops name must each have been answered by one: wait for the
+  // cases at those stops, in order, until every one has been.
+  test("named commands were applied through a live owner", {
+    timeout: 3_600_000,
+  }, async () => {
+    const wanted = [
+      ["rejected amendment", "cancel"],
+      ["rejected amendment", "propose-amendment"],
+      // A controller does not stay up at a cancelled item (its run ends with
+      // the decision), so the live owner there is the paused or draining one,
+      // and the retry that status names next is applied without it.
+      ["cancelled item", "resume"],
+    ];
+    const answered = ([stop, verb]) =>
+      ownerProbes.applied.some(
+        (command) =>
+          command.stop === stop && command.verb === verb && command.viaOwner,
+      );
+    const parked = cases.filter(
+      (testCase) =>
+        !testCase.unreachable &&
+        Object.values(testCase.values ?? {}).some(
+          (value) =>
+            /^an? (supplied graph )?amendment was rejected/.test(value) ||
+            value === "an item was cancelled and the Objective retried" ||
+            value === "paused" ||
+            value === "draining",
+        ),
+    );
+    for (const testCase of parked) {
+      await outcomeOf(testCase);
+      if (wanted.every(answered)) break;
+    }
+    assert.ok(
+      ownerProbes.run > 0,
+      "No stop with a live owner had a named command probed",
+    );
+    assert.ok(
+      ownerProbes.applied.some(
+        (command) =>
+          command.stop === "cancelled item" && command.verb === "retry",
+      ),
+      "No case applied the retry status names for a cancelled item",
+    );
+    assert.deepEqual(
+      wanted.filter((pair) => !answered(pair)).map((pair) => pair.join(": ")),
+      [],
+      `The owner's socket did not answer these commands at these stops; ${ownerProbes.answered} of ${ownerProbes.run} probes made with an owner running were answered; commands applied with an owner: ${JSON.stringify(ownerProbes.applied)}`,
+    );
+  });
 
   for (const testCase of cases) {
     test(testCase.name, { timeout: 3_600_000 }, async () => {

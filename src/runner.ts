@@ -117,6 +117,11 @@ import type {
   WorkState,
 } from "./state.js";
 import {
+  projectionStarted,
+  rejectionHoldsPause,
+  setCoordinatorMode,
+} from "./state.js";
+import {
   acquireControllerLock,
   type ControllerLock,
   readContinuation,
@@ -284,11 +289,7 @@ export async function decidePlan(
     if (input.outcome === "refuse") {
       if (!input.actor.trim() || !input.reason.trim())
         throw new Error("A plan refusal needs actor and reason");
-      // Projection may have created an issue before recording it.
-      if (
-        Object.keys(preparation.issueByItemId).length ||
-        preparation.coordinator.phase === "projection"
-      )
+      if (projectionStarted(preparation))
         throw new Error(
           "Work Item projection has started; cancel the Objective instead",
         );
@@ -515,12 +516,14 @@ export async function controlObjective(
       phase: "idle",
       phaseStartedAt: new Date().toISOString(),
     };
-    state.coordinator.mode =
+    setCoordinatorMode(
+      state,
       request.action === "pause"
         ? "paused"
         : request.action === "drain"
           ? "draining"
-          : "running";
+          : "running",
+    );
     saveState(statePath(config.repository, request.objective), state);
     return state.coordinator;
   } finally {
@@ -828,15 +831,21 @@ export async function runObjective(
       if (["pause", "drain", "resume", "handoff"].includes(request.action)) {
         if (request.action === "handoff") releaseOwnership();
         else if (request.action === "resume") {
-          if (owner.pause.signal.aborted && !owner.handoff)
+          if (
+            owner.pause.signal.aborted &&
+            !owner.handoff &&
+            !rejectionHoldsPause(state)
+          )
             owner.pause = new AbortController();
         } else owner.pause.abort(new Error(`Coordinator ${request.action}`));
-        state.coordinator.mode =
+        setCoordinatorMode(
+          state,
           request.action === "pause"
             ? "paused"
             : ["drain", "handoff"].includes(request.action)
               ? "draining"
-              : "running";
+              : "running",
+        );
         persist();
         wake();
         return state.coordinator;
@@ -903,7 +912,7 @@ export async function runObjective(
   const handoff = () => {
     releaseOwnership();
     if (owner.snapshot?.coordinator) {
-      owner.snapshot.coordinator.mode = "draining";
+      setCoordinatorMode(owner.snapshot, "draining");
       persist();
     }
     wake();
@@ -1189,7 +1198,7 @@ async function runObjectivePass(
     owner.snapshot = continuation;
     checkRequiredEnvironment(config, continuation?.autonomy);
     if (owner.handoff && continuation?.coordinator) {
-      continuation.coordinator.mode = "draining";
+      setCoordinatorMode(continuation, "draining");
       saveState(path, continuation);
     }
     let preparation =
@@ -1213,7 +1222,8 @@ async function runObjectivePass(
         state.configDigest !== installationConfigDigest
       ) {
         throw new Error(
-          "Existing Objective state does not match this Factory installation",
+          // Cancel is refused once acceptance is sealed; the restored run reconciles.
+          `Existing Objective state does not match this Factory installation; restore the configuration it started with${state.finalAcceptance ? ", then run it again" : `, or run \`factory cancel --objective ${objective}\``}`,
         );
       }
       if (state.error)
@@ -1335,16 +1345,26 @@ async function runObjectivePass(
         owner.snapshot = preparation;
         saveState(path, preparation);
       }
-      if (
+      const changedSincePlanning =
         preparation.sourcePacketDigest !== sourcePacketDigest ||
         preparation.configDigest !== installationConfigDigest ||
         preparation.baseSha !== baseSha ||
         preparation.objectiveBodyDigest !==
-          createHash("sha256").update(issue.body).digest("hex")
-      )
+          createHash("sha256").update(issue.body).digest("hex");
+      // Only a run sees this; recording it lets status name the way out
+      // (a refusal before projection, a cancel after) instead of this run.
+      if (
+        changedSincePlanning !==
+        (preparation.changedSincePlanning === true)
+      ) {
+        if (changedSincePlanning) preparation.changedSincePlanning = true;
+        else delete preparation.changedSincePlanning;
+        saveState(path, preparation);
+      }
+      if (changedSincePlanning)
         throw new Error(
-          Object.keys(preparation.issueByItemId).length
-            ? "Base, Objective, sources or configuration changed during projection; operator direction required"
+          projectionStarted(preparation)
+            ? `Base, Objective, sources or configuration changed during projection; restore what changed, or run \`factory cancel --objective ${objective}\``
             : "Base, Objective, sources or configuration changed since planning; refuse the plan with factory decide to plan again",
         );
       if (owner.handoff && canHandoff(preparation))
@@ -2098,7 +2118,7 @@ async function runObjectivePass(
         : paused && !cancellationRequested())
     ) {
       if (owner.snapshot?.coordinator) {
-        owner.snapshot.coordinator.mode = "draining";
+        setCoordinatorMode(owner.snapshot, "draining");
         saveState(path, owner.snapshot);
       }
       throw new CoordinatorHandoff();

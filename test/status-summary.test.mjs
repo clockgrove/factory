@@ -291,6 +291,67 @@ test("decisions name the exact command with real values", () => {
     command: "factory repair --objective 7 --proposal FILE",
     reason: "Narrow the fix",
   });
+  // An allowance is left: a supplied correction is accepted.
+  const left = summarizeStatus(
+    execution([item("A", { status: "failed", lastError: "tests failed" })], {
+      repairs: {
+        A: {
+          phase: "stopped",
+          failureClass: "implementation",
+          failureEvent: "item/A/execute/0",
+          repairable: true,
+          nextDecision: "Narrow the fix",
+        },
+      },
+    }),
+  );
+  assert.equal(
+    left.nextAction.command,
+    "factory repair --objective 7 --proposal FILE",
+  );
+  // The allowance is used up: `factory repair` is refused, a new attempt
+  // continues (#676).
+  const exhausted = summarizeStatus(
+    execution([item("A", { status: "failed", lastError: "tests failed" })], {
+      repairs: {
+        A: {
+          phase: "stopped",
+          failureClass: "implementation",
+          failureEvent: "item/A/execute/1",
+          repairable: false,
+          nextDecision: "allowance exhausted; start a new attempt",
+        },
+      },
+    }),
+  );
+  assert.equal(exhausted.summary, "repair decision for A");
+  assert.equal(
+    exhausted.nextAction.command,
+    "factory retry --objective 7 --item A",
+  );
+  // The retry line waits while a sibling runs: retry throws "Finish or cancel
+  // active work before retry" until it settles.
+  const sibling = summarizeStatus(
+    execution(
+      [
+        item("A", { status: "failed", lastError: "tests failed" }),
+        item("B", { status: "running", step: "execute" }),
+      ],
+      {
+        repairs: {
+          A: {
+            phase: "stopped",
+            failureClass: "implementation",
+            failureEvent: "item/A/execute/1",
+            repairable: false,
+            nextDecision: "allowance exhausted; start a new attempt",
+          },
+        },
+      },
+    ),
+  );
+  assert.equal(sibling.phase, "running");
+  assert.doesNotMatch(sibling.nextAction?.command ?? "", /factory retry/);
   const amendment = summarizeStatus(
     execution([item("A", { status: "running", step: "execute" })], {
       pendingAmendment: { phase: "rejected", error: "coverage gap" },
@@ -298,6 +359,51 @@ test("decisions name the exact command with real values", () => {
   );
   assert.equal(amendment.phase, "needs-decision");
   assert.equal(amendment.nextAction.reason, "coverage gap");
+  assert.equal(
+    amendment.nextAction.command,
+    "factory propose-amendment --objective 7 --proposal FILE",
+  );
+  // No replacement fits (the rejection is not one a replacement can follow,
+  // ownership is not settled, no planning class is enabled or the planning
+  // revisions are used up): `factory propose-amendment` is refused, so name
+  // cancel with the reason (#567, #715, #716, #717).
+  for (const refusal of [
+    {
+      kind: "planning-limit",
+      message: "Objective planningRevisions allowance exhausted",
+    },
+    {
+      kind: "planning-class",
+      message:
+        "No planning repair class is enabled; operator decision required",
+    },
+    {
+      kind: "not-replaceable",
+      message: "Replacement requires a known generated amendment rejection",
+    },
+    {
+      kind: "intake",
+      message: "Amendment requires a nonterminal Objective",
+    },
+  ]) {
+    const refused = summarizeStatus(
+      execution([item("A", { status: "running", step: "execute" })], {
+        pendingAmendment: {
+          phase: "rejected",
+          error: "coverage gap",
+          replacementRefusal: refusal,
+        },
+      }),
+    );
+    assert.equal(refused.phase, "needs-decision");
+    assert.equal(refused.summary, "graph amendment was rejected");
+    assert.equal(refused.nextAction.command, "factory cancel --objective 7");
+    assert.ok(
+      refused.nextAction.reason.startsWith(
+        `No replacement can be submitted (${refusal.message}); cancel, then start a new Objective`,
+      ),
+    );
+  }
 });
 
 test("failures point at retry, logs, authentication or diagnostics", () => {
@@ -359,14 +465,15 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
       },
     }),
   );
-  // The reason carries the amendment that fixes it, not only the retry.
-  assert.match(
-    blamed.nextAction.reason,
-    /^Only after lib's lib\.sh is fixed: factory propose-amendment --objective 7 --proposal FILE adds a Work Item after lib that owns it; then this retry starts a new attempt on the integrated head$/,
-  );
+  // The command is the step that works first, the amendment; the retry that
+  // follows the fix is in the reason (a retry before it is blamed again).
   assert.equal(
     blamed.nextAction.command,
-    "factory retry --objective 7 --item A",
+    "factory propose-amendment --objective 7 --proposal FILE",
+  );
+  assert.match(
+    blamed.nextAction.reason,
+    /^Adds a Work Item after lib that owns lib's lib\.sh; then factory retry --objective 7 --item A starts a new attempt on the integrated head/,
   );
   // With no planning revision left, an amendment cannot be taken: cancel.
   const used = summarizeStatus(
@@ -439,6 +546,28 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     }),
   );
   assert.match(rejected.nextAction.command, /^factory propose-amendment /);
+  // The rejected remedy cannot be replaced (the one revision is spent): cancel.
+  const unreplaceable = summarizeStatus(
+    execution([item("A", { status: "failed" })], {
+      state: "failed",
+      graphDigest: "g1",
+      allowanceRemaining: none,
+      pendingAmendment: {
+        phase: "rejected",
+        error: "bad graph",
+        replacementRefusal: {
+          kind: "planning-limit",
+          message: "Objective planningRevisions allowance exhausted",
+        },
+      },
+      repairs: blame("g1"),
+    }),
+  );
+  assert.equal(
+    unreplaceable.nextAction.command,
+    "factory cancel --objective 7",
+  );
+  assert.match(unreplaceable.nextAction.reason, /new Objective/);
   const landed = summarizeStatus(
     execution(
       [item("A", { status: "failed" }), item("fix", { status: "done" })],
@@ -474,6 +603,37 @@ test("failures point at retry, logs, authentication or diagnostics", () => {
     ),
   );
   assert.equal(unmerged.nextAction.command, "factory run --objective 7");
+  // An owner that runs is already merging the fix: run would be refused.
+  const unmergedOwned = summarizeStatus(
+    execution(
+      [item("A", { status: "failed" }), item("fix", { status: "published" })],
+      {
+        state: "failed",
+        runActive: true,
+        graphDigest: "g2",
+        allowanceRemaining: none,
+        repairs: blame("g1"),
+      },
+    ),
+  );
+  assert.equal(unmergedOwned.nextAction, null);
+  // A paused or draining owner merges nothing until it is resumed.
+  for (const mode of ["paused", "draining"]) {
+    const parked = summarizeStatus(
+      execution(
+        [item("A", { status: "failed" }), item("fix", { status: "pending" })],
+        {
+          state: "failed",
+          runActive: true,
+          coordinator: { mode, phase: "active" },
+          graphDigest: "g2",
+          allowanceRemaining: none,
+          repairs: blame("g1"),
+        },
+      ),
+    );
+    assert.equal(parked.nextAction.command, "factory resume --objective 7");
+  }
   const waitingOnly = summarizeStatus(
     execution(
       [
@@ -647,4 +807,261 @@ test("status documents carry the same phase, summary and next action", () => {
     "Objective #7: needs plan decision — plan review needs a human decision",
   );
   assert.ok(text.includes("Question: Keep [REDACTED]?"));
+});
+
+test("a cancelled item that blocks a live Objective is offered its own retry", () => {
+  const blocked = [
+    item("alpha", { status: "cancelled" }),
+    item("beta", { status: "pending", blockedReason: "dependency:alpha" }),
+  ];
+  for (const state of ["active", "failed"]) {
+    const cancelled = summarizeStatus(
+      execution(blocked, { state, runActive: false }),
+    );
+    assert.equal(
+      cancelled.nextAction.command,
+      "factory retry --objective 7 --item alpha",
+      state,
+    );
+  }
+  // Other work that can progress comes first; running work defers the retry.
+  assert.notEqual(
+    summarizeStatus(
+      execution([...blocked, item("gamma", { status: "pending" })], {
+        runActive: false,
+      }),
+    ).nextAction?.command,
+    "factory retry --objective 7 --item alpha",
+  );
+  assert.notEqual(
+    summarizeStatus(
+      execution([...blocked, item("gamma", { status: "running" })], {
+        runActive: false,
+      }),
+    ).nextAction?.command,
+    "factory retry --objective 7 --item alpha",
+  );
+});
+
+test("a rejected amendment that stopped the run names its exit before the retry of the error", () => {
+  // The runner records the work fault as the Objective's error, so the state
+  // is failed with no failed item (runObjective's catch).
+  const stopped = (replacementRefusal) =>
+    summarizeStatus(
+      execution([item("A", { status: "pending" })], {
+        state: "failed",
+        runActive: false,
+        lastError: "coverage gap",
+        coordinator: { mode: "paused", phase: "active" },
+        pendingAmendment: {
+          phase: "rejected",
+          error: "coverage gap",
+          replacementRefusal,
+        },
+      }),
+    );
+  assert.equal(
+    stopped(null).nextAction.command,
+    "factory propose-amendment --objective 7 --proposal FILE",
+  );
+  const cancel = stopped({
+    kind: "planning-limit",
+    message: "Objective planningRevisions allowance exhausted",
+  });
+  assert.equal(cancel.summary, "graph amendment was rejected");
+  assert.equal(cancel.nextAction.command, "factory cancel --objective 7");
+  assert.match(cancel.nextAction.reason, /limit raised/);
+  // Only a planning limit is a configuration change; the others are not.
+});
+
+test("a rejected amendment refused until something settles names that command, else cancel", () => {
+  const refusal = (kind) => ({ kind, message: "refused" });
+  const rejected = (kind, overrides) =>
+    summarizeStatus(
+      execution([item("A", { status: "pending" })], {
+        runActive: false,
+        coordinator: { mode: "paused", phase: "active" },
+        pendingAmendment: {
+          phase: "rejected",
+          error: "coverage gap",
+          replacementRefusal: refusal(kind),
+        },
+        ...overrides,
+      }),
+    );
+  // A stop other than the rejection is recorded: retry clears it.
+  assert.equal(
+    rejected("stop", { state: "failed", lastError: "another stop" }).nextAction
+      .command,
+    "factory retry --objective 7",
+  );
+  // The stop's kind, not the Objective's state, decides the retry.
+  assert.equal(
+    rejected("stop", {}).nextAction.command,
+    "factory retry --objective 7",
+  );
+  // An owner that is not paused: pause it (a rejection holds the pause, so
+  // only a state written elsewhere is in this kind).
+  assert.equal(
+    rejected("not-paused", {
+      runActive: true,
+      coordinator: { mode: "draining", phase: "active" },
+    }).nextAction.command,
+    "factory pause --objective 7",
+  );
+  // Work Items still live under a paused owner: the rejection blocks them
+  // from settling, so only cancel is left.
+  assert.equal(
+    rejected("live-work", { runActive: true }).nextAction.command,
+    "factory cancel --objective 7",
+  );
+  // No owner: the run settles recorded work, once any stop is cleared (a
+  // run is refused while one is recorded, the rejection's own included).
+  assert.equal(
+    rejected("live-work", {}).nextAction.command,
+    "factory run --objective 7",
+  );
+  assert.equal(
+    rejected("live-work", { state: "failed", lastError: "coverage gap" })
+      .nextAction.command,
+    "factory retry --objective 7",
+  );
+  // A recorded subprocess or unresolved cancellation is settled by neither a
+  // run (a paused owner runs no pass) nor a resume: cancel.
+  for (const runActive of [false, true])
+    assert.equal(
+      rejected("unsettled", { runActive }).nextAction.command,
+      "factory cancel --objective 7",
+    );
+});
+
+test("a sealed Objective under a changed configuration names the restore and run, not cancel", () => {
+  const sealed = summarizeStatus(
+    execution([item("A", { status: "done" })], {
+      configurationChanged: true,
+      sealed: true,
+      runActive: false,
+    }),
+  );
+  assert.equal(sealed.nextAction.command, "factory run --objective 7");
+  assert.match(sealed.nextAction.reason, /restore the configuration/);
+  assert.match(sealed.nextAction.reason, /cancel is refused/);
+});
+
+test("a preparation under a changed configuration names a refusal before projection and cancel after", () => {
+  const before = summarizeStatus(
+    preparing({ configurationChanged: true, runActive: false }),
+  );
+  assert.match(
+    before.nextAction.command,
+    /^factory decide --objective 7 --outcome refuse /,
+  );
+  const after = summarizeStatus(
+    preparing({
+      configurationChanged: true,
+      runActive: false,
+      projectionStarted: true,
+    }),
+  );
+  assert.equal(after.nextAction.command, "factory cancel --objective 7");
+});
+
+test("a pause or drain of a preparation outranks a changed plan or configuration", () => {
+  for (const mode of ["paused", "draining"])
+    for (const changed of [
+      { configurationChanged: true },
+      { changedSincePlanning: true },
+    ])
+      assert.equal(
+        summarizeStatus(
+          preparing({
+            ...changed,
+            runActive: false,
+            coordinator: { mode, phase: "planning" },
+          }),
+        ).nextAction.command,
+        "factory resume --objective 7",
+      );
+});
+
+test("a preparation whose base, Objective or sources changed names a refusal before projection and cancel after", () => {
+  const before = summarizeStatus(
+    preparing({ changedSincePlanning: true, runActive: false }),
+  );
+  assert.match(
+    before.nextAction.command,
+    /^factory decide --objective 7 --outcome refuse /,
+  );
+  const after = summarizeStatus(
+    preparing({
+      changedSincePlanning: true,
+      runActive: false,
+      projectionStarted: true,
+    }),
+  );
+  assert.equal(after.nextAction.command, "factory cancel --objective 7");
+  // A live owner keeps what it planned from: nothing to refuse yet.
+  assert.notEqual(
+    summarizeStatus(preparing({ changedSincePlanning: true, runActive: true }))
+      .nextAction?.command,
+    before.nextAction.command,
+  );
+});
+
+test("a live owner keeps its configuration: a changed one does not hide resume, decide or select", () => {
+  const paused = summarizeStatus(
+    execution([item("A", { status: "pending" })], {
+      configurationChanged: true,
+      runActive: true,
+      coordinator: { mode: "paused", phase: "active" },
+    }),
+  );
+  assert.equal(paused.nextAction.command, "factory resume --objective 7");
+  const waiting = summarizeStatus(
+    execution(
+      [
+        item("A", {
+          status: "waiting",
+          step: "approve-result",
+          acceptancePending: {
+            criterion: "c",
+            treeSha: "a".repeat(40),
+            question: "q",
+            detail: "d",
+          },
+        }),
+      ],
+      { configurationChanged: true, runActive: true },
+    ),
+  );
+  assert.match(waiting.nextAction.command, /^factory decide /);
+  const prepared = summarizeStatus(
+    preparing({
+      configurationChanged: true,
+      runActive: true,
+      planReview: {
+        status: "needs-human",
+        acceptable: true,
+        question: "q",
+        digest: "d",
+      },
+    }),
+  );
+  assert.match(prepared.nextAction.command, /^factory decide /);
+});
+
+test("a changed installation configuration names cancel, not a retry that cannot continue", () => {
+  for (const state of ["active", "failed"]) {
+    const changed = summarizeStatus(
+      execution([item("A", { status: "pending" })], {
+        state,
+        runActive: false,
+        configurationChanged: true,
+        lastError: state === "failed" ? "stopped" : null,
+      }),
+    );
+    assert.equal(changed.phase, "needs-decision");
+    assert.equal(changed.nextAction.command, "factory cancel --objective 7");
+    assert.match(changed.nextAction.reason, /different configuration/);
+  }
 });

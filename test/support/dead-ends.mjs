@@ -26,7 +26,11 @@
 //   interruption budget, a recorded subprocess that exited or whose pid was
 //   reused, a closure error, repeat and wait records (including a run of
 //   faults over a day old and a step asking the operator), a stopped planning,
-//   a rejected amendment, a cancelled item of a live Objective, spent
+//   a rejected amendment (with and without a planning revision to spare, one
+//   that carries an operator's graph, and one the coordinator was then drained
+//   or resumed after), a plan whose base, Objective body or sources changed, a
+//   cancelled item of a live
+//   Objective, spent
 //   autonomy allowances and disabled repair classes.
 //   Overlays apply only where Factory could write them (a reservation matches
 //   its step, a settled worker had a handle); the state validators prune the
@@ -65,10 +69,12 @@ const repositoryRoot = join(import.meta.dirname, "..", "..");
 const dist = (path) => join(repositoryRoot, "dist", path);
 const errors = await import(dist("work-repair.js"));
 const { attachFault } = await import(dist("fault.js"));
-const { parseFactoryState } = await import(dist("state.js"));
+const { parseFactoryState, setCoordinatorMode } = await import(
+  dist("state.js")
+);
 const { readContinuation } = await import(dist("state-store.js"));
 
-const { repairClasses } = await import(dist("repair-policy.js"));
+const { consumption, repairClasses } = await import(dist("repair-policy.js"));
 const repairClassCount = repairClasses.length;
 
 const REPOSITORY = "example/dead-ends";
@@ -605,6 +611,52 @@ const reviewNeedsHuman = (acceptable) => (state) => {
 };
 
 /** Overlay dimensions; each value mutates a state and says if it applies. */
+/** A graph amendment was rejected (see the "rejected amendment" overlays). */
+const rejectAmendment =
+  ({ spare, supplied = false, stopped = false, unrelated = false, then }) =>
+  (state) => {
+    if (state.schemaVersion !== 7 || state.pendingAmendment || state.error)
+      return false;
+    const error = "Injected amendment rejection";
+    state.pendingAmendment = {
+      id: "amendment-1",
+      proposal: {
+        scope: "in-scope",
+        reason: "Discovered a missing step",
+        evidence: ["observed while working"],
+        ownership: ["extra.txt"],
+        acceptance: ["extra.txt exists"],
+        dependencies: [],
+        expectedGraphDigest: state.planGraphDigest,
+        actor: "operator",
+        ...(supplied ? { graph: structuredClone(state.graph) } : {}),
+      },
+      phase: "rejected",
+      issueByItemId: structuredClone(state.issueByItemId),
+      error,
+      rejectionStage: supplied ? "validation" : "compilation",
+    };
+    // Each started amendment is charged one planning revision.
+    spend(state, ["objective/amend/amendment-1"], "planningRevisions", [
+      "$planning",
+    ]);
+    if (spare)
+      state.autonomy.allowances.planningRevisions =
+        consumption(state).planningRevisions + spare;
+    coordinator(state).mode = "paused";
+    coordinator(state).waitReason = error;
+    // The run that rejected it stopped on the rejection: the runner records
+    // the work fault as the Objective's error (runObjective's catch).
+    if (stopped) state.error = error;
+    // A later, unrelated stop replaced it: a replacement needs that cleared first.
+    if (unrelated) state.error = "Injected unrelated stop";
+    // Then an operator or a handoff changed the mode, as a drain, a SIGTERM
+    // handoff of the rejecting pass or `factory resume` does: through the
+    // setter every one of them uses, which holds a rejection paused.
+    if (then) setCoordinatorMode(state, then);
+    return true;
+  };
+
 const OVERLAYS = {
   "item event": {
     "a step fails with an unclassified error": failStep(
@@ -659,9 +711,35 @@ const OVERLAYS = {
     // cancel; the items it had cancelled stay cancelled until retried.
     "an item was cancelled and the Objective retried": (state) => {
       if (state.schemaVersion !== 7) return false;
-      const work = state.work[focus(state)];
+      const id = focus(state);
+      const work = state.work[id];
       if (!active(work) && work.status !== "pending") return false;
-      state.work[focus(state)] = { status: "cancelled" };
+      // Nothing that builds on the cancelled item has started again: cancel
+      // stopped every item, and only a retry restarts one, after the items
+      // it depends on.
+      const after = new Set([id]);
+      for (let grew = true; grew; ) {
+        grew = false;
+        for (const item of state.graph.items)
+          if (
+            !after.has(item.id) &&
+            item.dependencies.some((dependency) => after.has(dependency))
+          ) {
+            after.add(item.id);
+            grew = true;
+          }
+      }
+      if (
+        [...after].some(
+          (other) =>
+            other !== id &&
+            ["running", "published", "waiting"].includes(
+              state.work[other].status,
+            ),
+        )
+      )
+        return false;
+      state.work[id] = { status: "cancelled" };
       return true;
     },
     // The driver collected a settled worker with no result: a `work` fault.
@@ -694,10 +772,6 @@ const OVERLAYS = {
       state.errorItem = state.graph.items[0].id;
       return true;
     },
-    "the installation configuration changed": (state) => {
-      state.configDigest = "0".repeat(64);
-      return true;
-    },
     "cancel was requested": (state) => {
       if (state.cancelRequested || state.cancelledAt) return false;
       state.cancelRequested = true;
@@ -721,6 +795,37 @@ const OVERLAYS = {
     },
     draining: (state) => {
       coordinator(state).mode = "draining";
+      return true;
+    },
+  },
+  // The operator's configuration changed after the Objective started: its own
+  // dimension, so that it combines with a pause or a drain.
+  configuration: {
+    "the installation configuration changed": (state) => {
+      state.configDigest = "0".repeat(64);
+      // The seal records the digest it was made under.
+      if (state.finalAcceptance)
+        state.finalAcceptance.configDigest = state.configDigest;
+      return true;
+    },
+  },
+  // What a plan was made from changed before it was projected: the base, the
+  // Objective body or the sources. Only the run, which reads GitHub and the
+  // checkout, can see it; it refuses and records that it did.
+  "planning inputs": {
+    "the base changed since planning": (state) => {
+      if (state.schemaVersion !== 8) return false;
+      state.baseSha = "1".repeat(40);
+      return true;
+    },
+    "the Objective body changed since planning": (state) => {
+      if (state.schemaVersion !== 8) return false;
+      state.objectiveBodyDigest = "1".repeat(64);
+      return true;
+    },
+    "the sources changed since planning": (state) => {
+      if (state.schemaVersion !== 8) return false;
+      state.sourcePacketDigest = "1".repeat(64);
       return true;
     },
   },
@@ -869,36 +974,6 @@ const OVERLAYS = {
       detail: "Injected item prerequisite",
       fix: "Install the missing tool",
     }),
-    "an amendment was rejected": (state) => {
-      if (state.schemaVersion !== 7 || state.pendingAmendment || state.error)
-        return false;
-      const error = "Injected amendment rejection";
-      state.pendingAmendment = {
-        id: "amendment-1",
-        proposal: {
-          scope: "in-scope",
-          reason: "Discovered a missing step",
-          evidence: ["observed while working"],
-          ownership: ["extra.txt"],
-          acceptance: ["extra.txt exists"],
-          dependencies: [],
-          expectedGraphDigest: state.planGraphDigest,
-          actor: "operator",
-        },
-        phase: "rejected",
-        issueByItemId: structuredClone(state.issueByItemId),
-        error,
-        rejectionStage: "compilation",
-      };
-      // Each started amendment is charged one planning revision.
-      spend(state, ["objective/amend/amendment-1"], "planningRevisions", [
-        "$planning",
-      ]);
-      // As runAmendment leaves it: paused with the rejection as the reason.
-      coordinator(state).mode = "paused";
-      coordinator(state).waitReason = error;
-      return true;
-    },
     "planning stopped": (state) => {
       if (state.schemaVersion !== 8 || state.plan) return false;
       state.planningRecovery = {
@@ -910,6 +985,46 @@ const OVERLAYS = {
       return true;
     },
   },
+  // A graph amendment was rejected, as runAmendment leaves it: charged one
+  // planning revision, the coordinator paused with the rejection as the reason.
+  // `spare` planning revisions are left afterwards; a supplied graph is an
+  // operator's candidate, which no replacement can follow; `stopped` leaves the
+  // run's error recorded.
+  "rejected amendment": {
+    "an amendment was rejected": rejectAmendment({ spare: 0 }),
+    "an amendment was rejected with a planning revision to spare":
+      rejectAmendment({ spare: 1 }),
+    "a supplied graph amendment was rejected with a planning revision to spare":
+      rejectAmendment({ spare: 1, supplied: true }),
+    // The shape a real rejection leaves: the run stopped, so the Objective
+    // has an error and is failed (status must not name the retry of it first).
+    "an amendment was rejected and the run stopped": rejectAmendment({
+      spare: 0,
+      stopped: true,
+    }),
+    "an amendment was rejected and the run stopped with a planning revision to spare":
+      rejectAmendment({ spare: 1, stopped: true }),
+    "an amendment was rejected beside an unrelated stop": rejectAmendment({
+      spare: 1,
+      unrelated: true,
+    }),
+    // The mode changed after the rejection: a handoff of the pass that
+    // rejected it drains, and a resume runs.
+    "an amendment was rejected, then the coordinator drained": rejectAmendment({
+      spare: 1,
+      then: "draining",
+    }),
+    "an amendment was rejected, then the coordinator resumed": rejectAmendment({
+      spare: 1,
+      then: "running",
+    }),
+    "an amendment was rejected with no planning revision left, then the coordinator drained":
+      rejectAmendment({ spare: 0, then: "draining" }),
+    "an amendment was rejected and the run stopped, then the coordinator resumed":
+      rejectAmendment({ spare: 1, stopped: true, then: "running" }),
+    "an amendment was rejected and the run stopped, then the coordinator drained":
+      rejectAmendment({ spare: 0, stopped: true, then: "draining" }),
+  },
 };
 
 /** Every overlay value, for the guard that each is exercised. */
@@ -920,7 +1035,14 @@ export const OVERLAY_VALUES = Object.values(OVERLAYS).flatMap((values) =>
 /** Apply overlay values ({dimension: value}) to a copy of a state. */
 function applyOverlays(state, values) {
   const copy = structuredClone(state);
-  for (const [dimension, value] of Object.entries(values))
+  // The Objective's limits are fixed when it starts, so they come before the
+  // failures recorded under them (a failure names `factory repair` only while
+  // an allowance and the class admit it).
+  const limits = ["repair classes", "allowance"];
+  const ordered = Object.entries(values).sort(
+    ([a], [b]) => Number(limits.includes(b)) - Number(limits.includes(a)),
+  );
+  for (const [dimension, value] of ordered)
     if (!OVERLAYS[dimension][value](copy)) return undefined;
   return copy;
 }
@@ -1310,6 +1432,26 @@ const sightOf = (delivery, report, state) =>
     report.message,
   ]);
 
+/**
+ * Probes of named commands against a live owner, and how many of them the
+ * owner's control socket answered (the rest fell back to the application, as
+ * the CLI does when no owner answers). `applied` lists every command applied
+ * (whether or not an owner ran), with the kind of stop it answered.
+ */
+export const ownerProbes = { run: 0, answered: 0, applied: [] };
+
+/** The stop a probe was made at, by the state it left (not by its text). */
+function stopKind(state) {
+  if (!state || state.schemaVersion !== 7) return undefined;
+  if (state.pendingAmendment?.phase === "rejected") return "rejected amendment";
+  if (
+    !state.cancelledAt &&
+    Object.values(state.work).some((work) => work.status === "cancelled")
+  )
+    return "cancelled item";
+  return undefined;
+}
+
 /** Operator commands followed from one state before it counts as stranded. */
 const MAX_COMMANDS = 4;
 /** Named commands besides the next action that one case exercises. */
@@ -1426,13 +1568,24 @@ async function classify(slot, anchor, state) {
     trace,
     ...extra,
   });
+  /** Whether the owner's socket answered the first command applied since it was reset to null. */
+  let answeredByOwner = null;
   /** Apply one command; with a live owner it goes through the owner. */
   const apply = async (command) => {
     const input =
       command.verb === "propose-amendment"
         ? replacementProposal(snapshot())
         : undefined;
+    const stop = stopKind(snapshot());
     const applied = await runCommand(world, { ...command, input });
+    answeredByOwner ??= applied.viaOwner === true;
+    // Every command applied, by the stop it answered, so a test can require
+    // the ones it cares about to have reached an owner.
+    ownerProbes.applied.push({
+      stop,
+      verb: command.verb,
+      viaOwner: applied.viaOwner === true,
+    });
     trace.push(
       `factory ${command.verb}: ${applied.ok ? "applied" : `refused: ${applied.message}`}${owner ? " [via owner]" : ""}`,
     );
@@ -1532,6 +1685,20 @@ async function classify(slot, anchor, state) {
         );
       if (stops.size > MAX_COMMANDS)
         return result("stranded", `commands do not converge after ${context}`);
+      // The configuration is the operator's to restore, outside Factory: when
+      // the status says it changed (a flag, not text) and names only the run
+      // that restoring it allows, the operator restores it first.
+      if (next.verb === "run" && report.status.configurationChanged) {
+        const restored = snapshot();
+        restored.configDigest = anchor.state.configDigest;
+        if (restored.finalAcceptance)
+          restored.finalAcceptance.configDigest =
+            anchor.state.finalAcceptance.configDigest;
+        writeFileSync(
+          statePath(slot.root),
+          `${JSON.stringify(restored, null, 2)}\n`,
+        );
+      }
       command = next;
     }
   };
@@ -1546,7 +1713,7 @@ async function classify(slot, anchor, state) {
       `A stop names ${all.length} commands besides its next action; raise MAX_PROBES: ${all.map((c) => c.text).join(" | ")}`,
     );
     const named = all;
-    if (named.length) {
+    if (named.length || report.outcome === "idle") {
       const context = stopText(report);
       // A stop whose controller is still up (a paused or draining owner, a
       // held phase) takes its commands through the owner's control socket.
@@ -1575,10 +1742,15 @@ async function classify(slot, anchor, state) {
           if (back.outcome !== "idle")
             return `${command.text} (${command.source}): the owner did not come back to the stop (${stopText(back)})`;
         }
+        answeredByOwner = null;
         const outcome = await follow({
           command,
           context: `${context} (named by the ${command.source}: ${command.text}, ${where})`,
         });
+        if (withOwner && command.verb !== "run") {
+          ownerProbes.run++;
+          if (answeredByOwner) ownerProbes.answered++;
+        }
         stopOwner();
         return outcome.kind === "stranded"
           ? `${command.text} (${command.source}, ${where}): ${outcome.reason}`
@@ -1592,6 +1764,20 @@ async function classify(slot, anchor, state) {
             const problem = await probed.get(key);
             if (problem) problems.push(problem);
           }
+        // The owner may be gone when the operator looks (a crash, a handoff, a
+        // SIGTERM): the stored state read alone must have an exit too.
+        if (live) {
+          restore();
+          const alone = await controllerProcess(world, { mode: "status" });
+          if (stopped(alone) && stopOf(alone) !== stopOf(report)) {
+            const outcome = await follow({
+              report: alone,
+              context: `${context} (read again with no owner)`,
+            });
+            if (outcome.kind === "stranded")
+              problems.push(`with no owner: ${outcome.reason}`);
+          }
+        }
       } finally {
         stopOwner();
         restore();

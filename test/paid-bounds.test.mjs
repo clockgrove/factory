@@ -14,8 +14,8 @@ import {
 // alone cannot show that the decision is reachable and answerable.
 //
 // Not covered here: diagnose and amend, which an uninterrupted run never
-// reaches (test/bounded-repairs.test.mjs and test/graph-amendments.test.mjs
-// drive them).
+// reaches. The diagnose bound is tested in test/charges.test.mjs, the amend
+// bound in test/graph-amendments.test.mjs.
 
 const BOTH = ["regular", "native-stack"];
 const LOST = 4;

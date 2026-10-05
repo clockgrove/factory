@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { blameDecision } from "../dist/blame-decision.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
   assertRepairLedger,
@@ -751,7 +752,15 @@ test("at the default planningRevisions of 1, status names each step through blam
     // Blamed: the amendment comes first, and a planning revision is left.
     const blamed = await status();
     assert.equal(blamed.allowanceRemaining.objective.planningRevisions, 1);
-    assert.match(blamed.nextAction.reason, /factory propose-amendment/);
+    // The command that works first is the amendment; the retry is in the reason.
+    assert.match(
+      blamed.nextAction.command,
+      /^factory propose-amendment --objective 1 --proposal FILE$/,
+    );
+    assert.match(
+      blamed.nextAction.reason,
+      /factory retry --objective 1 --item next/,
+    );
     const [amend] = namedCommands(
       f.stateOf().work.next.recovery.failure.decision,
     );
@@ -928,3 +937,52 @@ test("an amendment is refused up front once the planning revision is used, and t
       assert.equal(f.amendments(), 0);
     },
   ));
+
+test("a rejected remedy amendment names cancel at the default planningRevisions of 1, and a replacement only while one fits", async () =>
+  blameFixture("default", { limits: defaultAutonomy }, async (f) => {
+    await f.application.runObjective(1).catch(() => undefined);
+    const state = f.stateOf();
+    const digest = graphDigest(state.graph);
+    // As runAmendment leaves a rejected amendment: charged, paused.
+    state.pendingAmendment = {
+      id: "remedy",
+      proposal: {
+        scope: "in-scope",
+        reason: "Fix the predecessor's file",
+        evidence: ["blamed"],
+        ownership: ["result.txt"],
+        acceptance: ["result.txt is right"],
+        dependencies: [],
+        expectedGraphDigest: digest,
+        actor: "operator",
+      },
+      phase: "rejected",
+      rejectionStage: "compilation",
+      issueByItemId: { ...state.issueByItemId },
+      error: "Injected rejection",
+    };
+    state.charges = {
+      ...state.charges,
+      "objective/amend/remedy": {
+        allowances: ["planningRevisions"],
+        scopes: ["$planning"],
+      },
+    };
+    state.coordinator.mode = "paused";
+    const spent = blameDecision(state, "next", digest);
+    assert.match(spent, /`factory cancel --objective 1`/);
+    assert.match(spent, /planningRevisions allowance exhausted/);
+    assert.doesNotMatch(spent, /propose-amendment/);
+    // With a revision to spare the replacement fits.
+    state.autonomy.allowances.planningRevisions = 2;
+    assert.match(
+      blameDecision(state, "next", digest),
+      /`factory propose-amendment --objective 1 --proposal FILE` with a replacement/,
+    );
+    // While work runs, the replacement is refused until it settles.
+    state.work.next.status = "running";
+    // A command settles it (status names which), so cancel is not named.
+    const waiting = blameDecision(state, "next", digest);
+    assert.match(waiting, /`factory status --objective 1`/);
+    assert.doesNotMatch(waiting, /factory cancel|propose-amendment/);
+  }));

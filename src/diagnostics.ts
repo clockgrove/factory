@@ -32,9 +32,11 @@ import type {
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { faultDetail, type Wait } from "./fault.js";
+import { replacementRefusal } from "./amendment-admission.js";
 import { graphDigest } from "./graph-amendments.js";
 import { objectiveCandidate } from "./qa.js";
 import {
+  implementationRepairable,
   consumption,
   failureDigest,
   remaining,
@@ -48,6 +50,7 @@ import type {
   PreparationState,
   WorkState,
 } from "./state.js";
+import { projectionStarted } from "./state.js";
 import type { PreState } from "./state-store.js";
 import { shortPlanDigest, summarizeStatus } from "./status-summary.js";
 import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
@@ -1103,6 +1106,7 @@ export function statusDocument(
   concurrency?: number,
   runActive: boolean | null = null,
   preState?: PreState,
+  installationConfigDigest?: string,
 ) {
   if (!state) {
     const view = {
@@ -1271,6 +1275,14 @@ export function statusDocument(
     repository,
     objective,
     runActive,
+    // The Objective was started under another configuration: the run refuses
+    // it (see runObjective), so no retry continues it.
+    ...(installationConfigDigest !== undefined &&
+    state.configDigest !== installationConfigDigest
+      ? { configurationChanged: true as const }
+      : {}),
+    // Cancel is refused once final acceptance is sealed; the run reconciles.
+    sealed: Boolean(state.finalAcceptance),
     state: state.cancelledAt
       ? ("cancelled" as const)
       : state.error
@@ -1297,6 +1309,13 @@ export function statusDocument(
           error: state.pendingAmendment.error
             ? redactDiagnosticDetail(state.pendingAmendment.error, secrets)
             : null,
+          // Why `factory propose-amendment` would refuse a replacement of a
+          // rejected amendment (the checks submitAmendment applies); null when
+          // it fits. Status names it only then; otherwise `factory cancel`.
+          replacementRefusal:
+            state.pendingAmendment.phase === "rejected"
+              ? (replacementRefusal(state) ?? null)
+              : null,
         }
       : null,
     allowanceConsumption: consumption(state),
@@ -1324,6 +1343,17 @@ export function statusDocument(
             blamedPath: work.recovery!.failure?.predecessor?.path ?? null,
             blamedGraphDigest:
               work.recovery!.failure?.predecessor?.graphDigest ?? null,
+            // Whether `factory repair` would be accepted for the failure
+            // event: implementation repair is enabled and an allowance fits
+            // (an event already charged does). Status names `factory repair`
+            // only then; otherwise `factory retry`.
+            repairable: work.recovery!.failure?.event
+              ? implementationRepairable(
+                  state,
+                  work.recovery!.failure.event,
+                  repairScopes(state, id),
+                )
+              : null,
             continuation: work.recovery!.failure?.continuation ?? null,
             unfinishedEdits: work.recovery!.failure?.unfinishedEdits ?? null,
             priorAttempts: work.recovery!.history?.length ?? 0,
@@ -1356,6 +1386,7 @@ export function preparationStatusDocument(
   preparation: PreparationState,
   secrets: string[] = [],
   runActive: boolean | null = null,
+  installationConfigDigest?: string,
 ) {
   const redact = (value: string | undefined) =>
     value ? redactDiagnosticDetail(value, secrets) : null;
@@ -1366,6 +1397,15 @@ export function preparationStatusDocument(
     objective: preparation.objective,
     runId: preparation.runId,
     runActive,
+    // Planned under another configuration: the run refuses it (see runObjective).
+    ...(installationConfigDigest !== undefined &&
+    preparation.configDigest !== installationConfigDigest
+      ? { configurationChanged: true as const }
+      : {}),
+    // A run found the plan's other inputs changed and refused (see runObjective).
+    ...(preparation.changedSincePlanning
+      ? { changedSincePlanning: true as const }
+      : {}),
     state: "preparing" as const,
     coordinator:
       redactCoordinatorDisposition(preparation.coordinator, secrets) ?? null,
@@ -1381,6 +1421,7 @@ export function preparationStatusDocument(
     planningStopped:
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
     issueByItemId: preparation.issueByItemId,
+    projectionStarted: projectionStarted(preparation),
     cancelledAt: preparation.cancelledAt ?? null,
     error: redact(preparation.error),
     waitReason: redact(preparation.coordinator.waitReason),
@@ -1399,9 +1440,15 @@ export function continuationStatusDocument(
   concurrency?: number,
   runActive: boolean | null = null,
   preState?: PreState,
+  installationConfigDigest?: string,
 ) {
   return continuation?.schemaVersion === 8
-    ? preparationStatusDocument(continuation, secrets, runActive)
+    ? preparationStatusDocument(
+        continuation,
+        secrets,
+        runActive,
+        installationConfigDigest,
+      )
     : statusDocument(
         continuation,
         repository,
@@ -1411,6 +1458,7 @@ export function continuationStatusDocument(
         concurrency,
         runActive,
         preState,
+        installationConfigDigest,
       );
 }
 

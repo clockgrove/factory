@@ -13,7 +13,13 @@ import {
   failureDigest,
   PAID_ATTEMPTS,
 } from "../dist/repair-policy.js";
-import { readState, saveState, statePath } from "../dist/state-store.js";
+import { continuationStatusDocument } from "../dist/diagnostics.js";
+import {
+  readContinuation,
+  readState,
+  saveState,
+  statePath,
+} from "../dist/state-store.js";
 import { PAID_FAULT_LIMIT, step } from "../dist/step.js";
 import {
   applyWorkCorrection,
@@ -142,6 +148,35 @@ const diagnose = (state, model) =>
 const restart = (state) => JSON.parse(JSON.stringify(state));
 const fail = (state, detail) =>
   recordWorkFailure(state, "result", new CandidateValidationFailure(detail));
+
+test("the recorded decision names factory repair only while repair would be accepted", () => {
+  const available = itemState(2);
+  fail(available, "Validation command failed (1)");
+  assert.match(
+    available.work.result.recovery.failure.decision,
+    /`factory repair --objective 1 --proposal FILE`/,
+  );
+  // The class is off: the same failure names the retry alone.
+  const off = itemState(2);
+  off.autonomy.repairClasses = [];
+  fail(off, "Validation command failed (1)");
+  const decision = off.work.result.recovery.failure.decision;
+  assert.doesNotMatch(decision, /factory repair/);
+  assert.match(decision, /`factory retry --objective 1 --item result`/);
+  // The allowance is used up: likewise.
+  const spent = itemState(1);
+  spent.charges = {
+    "item/result/validate/prior": {
+      allowances: ["implementationRepairs"],
+      scopes: ["$objective", "result"],
+    },
+  };
+  fail(spent, "Validation command failed (1)");
+  assert.doesNotMatch(
+    spent.work.result.recovery.failure.decision,
+    /factory repair/,
+  );
+});
 
 test("a wrong result is charged once, at its failure event, whatever repeats", async () => {
   let state = itemState(2);
@@ -862,6 +897,53 @@ for (const delivery of ["regular", "native-stack"]) {
 }
 
 for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: with repairClasses empty, status names retry and running it continues (#676)`, async () => {
+    await withApplication(
+      "no-repair-class",
+      delivery,
+      (graph) => ({
+        actions: {
+          result: {
+            failAttempts: 1,
+            files: [{ path: "result.txt", text: "accepted\n" }],
+          },
+        },
+        planningModel: {
+          generateStructured: async (request) => withCoverage(request, graph),
+          reviewGraph: async (request) => ({
+            packetId: request.reviewPacket.id,
+            findings: [],
+          }),
+          reviewResult: async (request) => reviewer(request),
+        },
+      }),
+      async ({ application, config }) => {
+        config.autonomy.repairClasses = [];
+        const fixture = application();
+        const stopped = await fixture.application.runObjective(1);
+        assert.equal(stopped.work.result.status, "failed");
+        // The allowance is untouched, but `factory repair` is refused because
+        // implementation repair is off; status must not name it.
+        assert.equal(consumption(stopped).implementationRepairs, 0);
+        const named = continuationStatusDocument(
+          readContinuation(config.repository, 1),
+          config.repository,
+          1,
+          delivery,
+        ).nextAction.command;
+        assert.equal(named, "factory retry --objective 1 --item result");
+        const [, , , objective, , itemId] = named.split(" ");
+        assert.equal(
+          fixture.application.retryWorkItem(Number(objective), itemId),
+          "attempt",
+        );
+        const done = await application().application.runObjective(1);
+        assert.equal(done.finalValidation.passed, true);
+      },
+    );
+  });
+
+for (const delivery of ["regular", "native-stack"])
   test(`${delivery}: a repeated identical failure after a correction stops for retry, and retry writes loadable state`, async () => {
     let diagnoses = 0;
     await withApplication(
@@ -909,7 +991,20 @@ for (const delivery of ["regular", "native-stack"])
           /exhausted; start a new attempt with `factory retry --objective 1 --item result`/,
         );
         assert.equal(consumption(stopped).implementationRepairs, 1);
-        fixture.application.retryWorkItem(1, "result");
+        // Status names the command that continues from here: retry, not the
+        // repair the exhausted allowance refuses (#676). Run exactly that.
+        const named = continuationStatusDocument(
+          readContinuation(config.repository, 1),
+          config.repository,
+          1,
+          delivery,
+        ).nextAction.command;
+        assert.equal(named, "factory retry --objective 1 --item result");
+        const [, , , objective, , itemId] = named.split(" ");
+        assert.equal(
+          fixture.application.retryWorkItem(Number(objective), itemId),
+          "attempt",
+        );
         const retried = readState(config.repository, 1);
         assert.equal(retried.work.result.status, "pending");
         const done = await application().application.runObjective(1);

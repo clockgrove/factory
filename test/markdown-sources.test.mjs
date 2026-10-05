@@ -185,7 +185,8 @@ test("Objective issue form keeps its sources, even when the field repeats its he
   const root = mkdtempSync(join(tmpdir(), "factory-objective-form-"));
   try {
     const target = createTarget(root, {
-      "docs/spec.md": "# Spec\n\n## Scope\nThe exact scope.\n",
+      "docs/spec.md":
+        "# Spec\n\n## Scope\nThe exact scope.\n\n## 7.1 Two words\nMore.\n",
     });
     const answers = {
       outcome: "Add a result file.",
@@ -200,6 +201,8 @@ test("Objective issue form keeps its sources, even when the field repeats its he
     for (const sources of [
       "- README.md\n- `docs/spec.md#Scope`",
       "## Sources\n- README.md\n- `docs/spec.md#Scope`",
+      // A heading with spaces works without backticks, as the guide shows it.
+      "- README.md\n- docs/spec.md#Scope\n- docs/spec.md#7.1 Two words",
     ]) {
       const body = renderedObjectiveForm({
         ...answers,
@@ -213,11 +216,13 @@ test("Objective issue form keeps its sources, even when the field repeats its he
       const selected = planningSources(body, target.baseSha, target.checkout)
         .slice(1)
         .map(({ path, heading }) => (heading ? `${path}#${heading}` : path));
-      assert.deepEqual(selected, [
+      assert.deepEqual(selected.slice(0, 3), [
         "AGENTS.md",
         "README.md",
         "docs/spec.md#Scope",
       ]);
+      if (!sources.includes("`"))
+        assert.equal(selected[3], "docs/spec.md#7.1 Two words");
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

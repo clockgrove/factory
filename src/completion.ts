@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { graphDigest, amendmentBlocksDispatch } from "./graph-amendments.js";
 import { assertCompletedCoverage, objectiveCandidate } from "./qa.js";
 import type { GitHubGateway } from "./contracts.js";
-import type { FactoryState } from "./state.js";
+import type { ContinuationState, FactoryState } from "./state.js";
 import { attachFault, decision } from "./fault.js";
 import { step } from "./step.js";
 import {
@@ -256,6 +256,30 @@ export async function closeWorkItem(
   work.githubClosure = "complete";
   delete work.error;
   save();
+}
+
+/**
+ * A cancelled Objective leaves no Work Item to do: close every Work Item issue
+ * that did not complete as not planned. Repeats like closeWorkItem: the
+ * gateway keys the closure to the issue's identity and posts its comment once.
+ */
+export async function closeCancelledWorkItems(
+  state: ContinuationState,
+  github: GitHubGateway,
+): Promise<void> {
+  for (const [itemId, number] of Object.entries(state.issueByItemId)) {
+    if (state.schemaVersion === 7 && state.work[itemId]?.status === "done")
+      continue;
+    await github.closeIssue(
+      number,
+      `Objective #${state.objective} was cancelled; this Work Item will not be done.`,
+      {
+        workItem: { objective: state.objective, id: itemId },
+        reason: "not_planned",
+        ...(state.issueAuthor ? { author: state.issueAuthor } : {}),
+      },
+    );
+  }
 }
 
 /** Close the Objective issue once final acceptance is sealed; repeats like closeWorkItem. */

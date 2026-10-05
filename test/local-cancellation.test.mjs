@@ -382,7 +382,10 @@ test("supported Objective cancellation retains the ceased worker failure and con
       "fixture-codex",
     );
     await owned.exit();
-    assert.equal(await cancelObjective(config, 1, driver), "cancelled");
+    assert.equal(
+      await cancelObjective(config, 1, driver, { closeIssue: async () => {} }),
+      "cancelled",
+    );
     const after = readState(config.repository, 1);
     assert.ok(after.cancelledAt);
     assert.equal(after.work.worker.status, "cancelled");

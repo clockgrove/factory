@@ -181,7 +181,7 @@ export function createApplication(
     runObjective: (objective, options) =>
       runObjective(config, objective, services, options),
     cancelObjective: (objective) =>
-      cancelObjective(config, objective, services.driver),
+      cancelObjective(config, objective, services.driver, services.github),
     repairWorkItem: (objective, input) =>
       repairWorkItem(config, objective, input),
     retryWorkItem: (objective, itemId) =>

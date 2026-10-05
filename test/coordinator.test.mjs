@@ -925,6 +925,69 @@ test("concurrent deliveries share one repeated observation through a GitHub outa
   );
 });
 
+test("cancelling an Objective closes its unfinished Work Item issues as not planned, once", async () => {
+  await fixture(
+    "cancel-closes-issues",
+    async ({ application, config, github }) => {
+      await assert.rejects(application.runObjective(1), /review response lost/);
+      const closes = () =>
+        github.state().events.filter((event) => event.type === "close-issue");
+      assert.equal(closes().length, 0);
+      assert.equal(await application.cancelObjective(1), "cancelled");
+      assert.ok(readState(config.repository, 1).cancelledAt);
+      assert.deepEqual(
+        closes().map((event) => [event.number, event.reason]),
+        [[github.state().issues.result, "not_planned"]],
+      );
+      // A repeat finds the Objective cancelled and closes nothing again.
+      assert.equal(await application.cancelObjective(1), "cancelled");
+      assert.equal(closes().length, 1);
+    },
+    undefined,
+    (descriptor) => {
+      descriptor.resultReviewer = async () => {
+        throw new Error("review response lost");
+      };
+    },
+  );
+});
+
+test("a failed closure leaves cancellation unresolved and a repeated cancel completes it", async () => {
+  await fixture(
+    "cancel-close-fails",
+    async ({ application, config, github }) => {
+      await assert.rejects(application.runObjective(1), /review response lost/);
+      const close = github.closeIssue.bind(github);
+      let refuse = true;
+      github.closeIssue = async (...parameters) => {
+        if (refuse) throw new Error("GitHub refused the closure");
+        return close(...parameters);
+      };
+      await assert.rejects(
+        application.cancelObjective(1),
+        /GitHub refused the closure/,
+      );
+      const unresolved = readState(config.repository, 1);
+      assert.equal(unresolved.cancelledAt, undefined);
+      assert.ok(unresolved.coordinator.cancelError);
+      refuse = false;
+      assert.equal(await application.cancelObjective(1), "cancelled");
+      const cancelled = readState(config.repository, 1);
+      assert.ok(cancelled.cancelledAt);
+      assert.equal(
+        github.state().closedIssues[github.state().issues.result],
+        true,
+      );
+    },
+    undefined,
+    (descriptor) => {
+      descriptor.resultReviewer = async () => {
+        throw new Error("review response lost");
+      };
+    },
+  );
+});
+
 test("a response-less result review leaves no unknown effect and allows retry", async () => {
   for (const delivery of ["regular", "native-stack"])
     await fixture(

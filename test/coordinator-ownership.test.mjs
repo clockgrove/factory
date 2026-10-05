@@ -511,7 +511,10 @@ test("offline cancellation verifies recorded subprocess cessation and leaves a r
         // The recorded pid now belongs to a foreign process group (pid
         // reuse after a crash or reboot): the recorded subprocess is gone,
         // and the foreign group is never signalled.
-        assert.equal(await cancelObjective(config, 1, {}), "cancelled");
+        assert.equal(
+          await cancelObjective(config, 1, {}, { closeIssue: async () => {} }),
+          "cancelled",
+        );
         assert.equal(processGroupExists(child.pid), true);
         assert.equal(
           linuxProcessIdentity(child.pid)?.startTime,

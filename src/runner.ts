@@ -42,6 +42,7 @@ import {
 import {
   objectiveComplete,
   sealFinalAcceptance,
+  closeCancelledWorkItems,
   closeObjectiveIssue,
   closeWorkItem,
 } from "./completion.js";
@@ -605,6 +606,33 @@ async function cancelRecordedSubprocesses(
   if (state.coordinator) state.coordinator.processes = [];
 }
 
+/**
+ * Close the Objective's open Work Item issues as not planned once cancellation
+ * has settled. A failure is an unresolved cancellation: `factory cancel`
+ * repeats it, and the closure is identity-keyed so a repeat posts nothing twice.
+ */
+async function closeCancelledIssues(
+  state: ContinuationState,
+  github: GitHubGateway,
+  save: () => void,
+): Promise<void> {
+  if (state.coordinator?.cancelError) return;
+  try {
+    await closeCancelledWorkItems(state, github);
+  } catch (error) {
+    state.coordinator ??= {
+      mode: "running",
+      phase: "waiting",
+      phaseStartedAt: new Date().toISOString(),
+    };
+    state.coordinator.cancelError =
+      error instanceof Error ? error.message : String(error);
+    state.coordinator.waitReason =
+      "Cancellation unresolved; operator direction required";
+    save();
+  }
+}
+
 async function cancelKnownWork(
   state: ContinuationState,
   driver: ExecutionDriver,
@@ -963,6 +991,7 @@ export async function runObjective(
       if (state?.cancelRequested) {
         cancel();
         await owner.cancellation;
+        await closeCancelledIssues(state, services.github, persist);
         if (!state.coordinator?.cancelError) {
           state.cancelledAt = new Date().toISOString();
           clearAllRepeats(state);
@@ -2247,6 +2276,10 @@ async function runObjectivePass(
       if (cancellationRequested()) {
         await owner.cancellation;
         await Promise.allSettled(active.values());
+        if (active.size === 0)
+          await closeCancelledIssues(current, github, () =>
+            saveState(path, current),
+          );
         if (!current.coordinator?.cancelError && active.size === 0) {
           current.cancelledAt = new Date().toISOString();
           clearAllRepeats(current);
@@ -2280,6 +2313,7 @@ export async function cancelObjective(
   config: FactoryConfig,
   objective: number,
   driver: ExecutionDriver,
+  github: GitHubGateway,
 ): Promise<"requested" | "cancelled"> {
   const root = stateRoot(config.repository);
   const lock = join(root, "controller.lock");
@@ -2329,6 +2363,13 @@ export async function cancelObjective(
       saveState(statePath(config.repository, objective), continuation);
       throw error;
     }
+    // Cessation is verified: an earlier unresolved attempt is answered.
+    delete continuation.coordinator?.cancelError;
+    await closeCancelledIssues(continuation, github, () =>
+      saveState(statePath(config.repository, objective), continuation),
+    );
+    if (continuation.coordinator?.cancelError)
+      throw new Error(continuation.coordinator.cancelError);
     if (continuation.schemaVersion === 7)
       for (const work of Object.values(continuation.work)) {
         if (work.execution && work.step === "execute")

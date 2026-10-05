@@ -174,7 +174,7 @@ for (const delivery of ["regular", "native-stack"])
         const { application } = makeApplication({
           config: cfg,
           graph,
-          objectiveBody: `## Acceptance\n- \`${command}\`\n\n## Final validation\n- \`${command}\`\n`,
+          objectiveBody: `## Acceptance\n- \`${command}\`\n`,
           fakeRoot: join(root, "github"),
           actions: {},
           driver,
@@ -287,7 +287,7 @@ for (const delivery of ["regular", "native-stack"])
       const { application } = makeApplication({
         config: cfg,
         graph: { objective: 1, baseSha: target.baseSha, items: [item] },
-        objectiveBody: `## Acceptance\n- \`${command}\`\n\n## Final validation\n- \`${command}\`\n`,
+        objectiveBody: `## Acceptance\n- \`${command}\`\n`,
         fakeRoot: join(root, "github"),
         actions: {},
         driver,

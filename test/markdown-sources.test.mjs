@@ -5,7 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   finalObjectiveCommands,
-  objectiveRequiredChecks,
   compilerCitationChoices,
   objectiveCriteria,
   planningSources,
@@ -38,17 +37,20 @@ test("Objective sections ignore fenced examples and accept real closing hashes",
     "## Acceptance",
     "- Example only",
     "```",
-    "## Final validation",
+    "",
     "- `false`",
     "````",
     "  ## Acceptance ##",
     "- Actual outcome",
-    "## Final validation ###",
+    "",
     "- `test -f result.txt`",
     "# Outside",
     "- `exit 1`",
   ].join("\n");
-  assert.deepEqual(objectiveCriteria(body), ["Actual outcome"]);
+  assert.deepEqual(objectiveCriteria(body), [
+    "Actual outcome",
+    "`test -f result.txt`",
+  ]);
   assert.deepEqual(finalObjectiveCommands(body), ["test -f result.txt"]);
   assert.deepEqual(
     objectiveCriteria(
@@ -65,14 +67,10 @@ test("pinned sections and citation choices preserve literal hashes and ignore fe
       "# Source\n```md\n## C#\nexample\n```\n## C# ###\nReal content\n~~~\n## Next\nexample\n~~~\n## Next\nOther content\n";
     const target = createTarget(root, { "docs/languages.md": text });
     const body =
-      "## Acceptance\n- Actual outcome\n```md\n## Planning sources\n- `missing.md`\n```\n## Planning sources ##\n- `docs/languages.md#C#`\n# End\nNo source entry here";
+      "## Acceptance\n- Actual outcome\n```md\n## Sources\n- `missing.md`\n```\n## Sources\n- `docs/languages.md#C#`\n# End\nNo source entry here";
     assert.throws(
       () =>
-        planningSources(
-          "## Planning sources\n- docs",
-          target.baseSha,
-          target.checkout,
-        ),
+        planningSources("## Sources\n- docs", target.baseSha, target.checkout),
       /missing at base/,
     );
     const selected = planningSources(
@@ -113,38 +111,77 @@ test("pinned sections and citation choices preserve literal hashes and ignore fe
   }
 });
 
-test("declared final validation and source selectors fail closed before model work", () => {
-  for (const entry of [
-    "",
-    "```sh\ntrue\n```",
-    "* true",
-    "- ` `",
-    "explanation",
+test("removed Objective fields are refused with where their content goes now", () => {
+  for (const [field, moved] of [
+    ["Final validation", /Acceptance bullet/],
+    ["Required checks", /workflow job/],
+    ["Planning sources", /Sources/],
+    ["What must be true", /Acceptance/],
+    ["Goal", /Outcome/],
+    ["Non-goals", /Constraints/],
   ]) {
-    assert.throws(
-      () =>
-        planningSources(`## Final validation\n${entry}`, "unused", "/unused"),
-      /Final validation/,
-    );
+    for (const body of [
+      `## Acceptance\n- one\n\n## ${field}\n- \`true\`\n`,
+      `### ${field}\n\n- \`true\`\n`,
+    ]) {
+      for (const read of [
+        objectiveCriteria,
+        finalObjectiveCommands,
+        (text) => planningSources(text, "unused", "/unused"),
+      ])
+        assert.throws(
+          () => read(body),
+          (error) =>
+            error.message.includes(`"${field}" was removed`) &&
+            moved.test(error.message) &&
+            /Outcome, Acceptance, Sources, Constraints/.test(error.message),
+        );
+    }
   }
+  // A removed field's name inside a fenced example is only text.
   assert.deepEqual(
-    finalObjectiveCommands("## Final validation\n- `second`\n- first"),
-    ["second", "first"],
+    objectiveCriteria("## Acceptance\n- one\n```md\n## Goal\n```\n"),
+    ["one ```md ## Goal ```"],
   );
+});
+
+test("command obligations are Acceptance bullets that are exactly one backticked command", () => {
+  assert.deepEqual(
+    finalObjectiveCommands(
+      [
+        "## Acceptance",
+        "- `second`",
+        "- first",
+        "- `npm test` passes",
+        "- Runs `a` and then `b`",
+        "- ``",
+        "- `a` `b`",
+        "-   `third`  ",
+        "1. `fourth`",
+        "",
+        "## Constraints",
+        "- `ignored`",
+      ].join("\n"),
+    ),
+    ["second", "third", "fourth"],
+  );
+  assert.deepEqual(finalObjectiveCommands("## Outcome\nDone\n"), []);
+});
+
+test("source selectors fail closed before model work", () => {
   for (const entry of [
     "```md\n- docs/a.md\n```",
     "- docs/a.md#",
     "- #Heading",
   ]) {
     assert.throws(
-      () =>
-        planningSources(`## Planning sources\n${entry}`, "unused", "/unused"),
-      /Planning sources/,
+      () => planningSources(`## Sources\n${entry}`, "unused", "/unused"),
+      /Invalid Sources entry/,
     );
   }
 });
 
-test("Objective issue form keeps its planning sources, even when the field repeats its heading", () => {
+test("Objective issue form keeps its sources, even when the field repeats its heading", () => {
   const root = mkdtempSync(join(tmpdir(), "factory-objective-form-"));
   try {
     const target = createTarget(root, {
@@ -152,28 +189,27 @@ test("Objective issue form keeps its planning sources, even when the field repea
     });
     const answers = {
       outcome: "Add a result file.",
-      acceptance: "- result.txt exists.",
-      "final-validation": "- `test -f README.md`",
+      acceptance: "- result.txt exists.\n- `test -f README.md`",
     };
     assert.match(
       renderedObjectiveForm(answers),
-      /### Planning sources\n\n- README\.md$/,
+      /### Sources\n\n- README\.md\n\n### Constraints/,
     );
     // The form's own value, and one that repeats the heading as older
     // copies of the form did.
     for (const sources of [
       "- README.md\n- `docs/spec.md#Scope`",
-      "## Planning sources\n- README.md\n- `docs/spec.md#Scope`",
+      "## Sources\n- README.md\n- `docs/spec.md#Scope`",
     ]) {
       const body = renderedObjectiveForm({
         ...answers,
-        "planning-sources": sources,
+        sources,
       });
-      assert.deepEqual(objectiveCriteria(body), ["result.txt exists."]);
+      assert.deepEqual(objectiveCriteria(body), [
+        "result.txt exists.",
+        "`test -f README.md`",
+      ]);
       assert.deepEqual(finalObjectiveCommands(body), ["test -f README.md"]);
-      // The optional Required checks field renders empty as _No response_.
-      assert.match(body, /### Required checks\n\n_No response_/);
-      assert.deepEqual(objectiveRequiredChecks(body), []);
       const selected = planningSources(body, target.baseSha, target.checkout)
         .slice(1)
         .map(({ path, heading }) => (heading ? `${path}#${heading}` : path));

@@ -18,7 +18,7 @@ import {
 } from "./support/integration-fixture.mjs";
 
 const body =
-  "## Acceptance\n- `test -s result.txt`\n\n## Planning sources\n- `docs/source.md#Scope`\n\n## Final validation\n- `test -s result.txt`\n";
+  "## Acceptance\n- `test -s result.txt`\n\n## Sources\n- `docs/source.md#Scope`\n\n";
 
 /** A plan whose independent review fails needs a specific human decision. */
 function undecidedModel(graph, calls) {
@@ -58,6 +58,12 @@ async function fixture(name, callback, options = {}) {
   try {
     const target = createTarget(root, {
       "docs/source.md": "## Scope\nDeliver result.txt\n",
+      ...(options.namedCi
+        ? {
+            ".github/workflows/ci.yml":
+              "name: CI\non: pull_request\njobs:\n  quality:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n",
+          }
+        : {}),
     });
     const config = factoryConfig(target.checkout, `example/plan-${name}`);
     const graph = {
@@ -91,7 +97,7 @@ async function fixture(name, callback, options = {}) {
     };
     const objectiveBody = options.namedCi
       ? body +
-        "\n## Required checks\n- quality\n\n## Delivery\nThe named check `quality` must pass on every exact published PR head before integration.\n"
+        "\n## Delivery\nThe named check `quality` must pass on every exact published PR head before integration.\n"
       : body;
     if (options.namedCi)
       graph.requiredPreIntegrationChecks = [
@@ -178,8 +184,8 @@ test("malformed final commands fail before planning provider calls", async () =>
     for (const command of ["npm install", "npm run", "pnpm exec unknown"]) {
       github.update((state) => {
         state.objectiveBody = body.replace(
-          "## Final validation\n- `test -s result.txt`",
-          `## Final validation\n- \`${command}\``,
+          "- `test -s result.txt`\n",
+          `- \`${command}\`\n`,
         );
       });
       await assert.rejects(
@@ -334,14 +340,13 @@ test("plan decisions validate required CI shape and pinned authority even with c
           },
           /exact pinned source authority/,
         ],
-        // A check name must be a workflow job at the base or an exact entry
-        // under the Objective's Required checks.
+        // A check name must be a workflow job at the base.
         [
           (plan) => {
             plan.graph.requiredPreIntegrationChecks[0].checkName =
               "invented-check";
           },
-          /"invented-check" is not a job in the base's GitHub workflows or an entry under the Objective's Required checks/,
+          /"invented-check" is not a job in the base's GitHub workflows/,
         ],
         [
           (plan) => {

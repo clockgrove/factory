@@ -41,6 +41,7 @@ node scripts/eval-planning.mjs --compare out/a/report.json out/b/report.json
 | `--max-wait MINUTES`         | Most one run waits in total. Default 360.                                                                                                                                  |
 | `--retry-wait SECONDS`       | First wait, doubling up to 8x. Default 15 minutes for a usage limit, 30 seconds for a network outage and 1 minute for a model at capacity, capped at 60, 5 and 10 minutes. |
 | `--allow-unsandboxed-judges` | Run judges without the sandbox when the host cannot create one. See Frozen judges. The report records it.                                                                  |
+| `--changed-inputs`           | With `--compare`: pair cases by name even when their Objective changed. See Numbers. |
 | `--judge-transport MODULE`   | Testing only: module exporting `createJudgeTransport({ judge })`. The report records it.                                                                                   |
 
 Runs use your provider login: the Codex login for `codex-sdk`, the Claude Code login for `claude-agent-sdk`.
@@ -87,7 +88,7 @@ To compare planner or reviewer versions, change one thing per report and compare
 
 Rates show a 95% interval clustered by case (by fixture in review-only mode), because repeats of one case are not independent. The interval is the wider of a case-level bootstrap and a Wilson interval on the number of cases, so more cases narrow it more than more repeats.
 
-`--compare` pairs units that both reports ran on identical inputs: same Objective and commit, and in review mode the same plan variants. Review units are pooled per fixture. For each metric it reports:
+`--compare` pairs units that both reports ran on identical inputs: same Objective and commit, and in review mode the same plan variants. `--changed-inputs` pairs units by id even when their Objective differs, for a change to how every Objective is written, such as a new template; the report lists the units it paired that way. Review units are pooled per fixture. For each metric it reports:
 
 - mean(B − A), with a paired-bootstrap 95% interval;
 - an exact sign-flip p-value, and its floor (the smallest p-value that number of units can reach).
@@ -103,7 +104,7 @@ Review mode has 3 fixtures and pools units per fixture, so every review-only `--
 | Judges agree                     | How often two judges gave the same verdict, Cohen's kappa, and both-pass, both-fail and one-fails counts.                                                                                                                               |
 | Case expectation met             | The case's `expect` held: outcome (`plan` or `question`), required checks, size, critical path, read-only.                                                                                                                              |
 | First try                        | How the first compile ended: `accepted`, `review-findings`, `review-invalid`, `parse`, `semantic`, `provider`. A semantic refusal is one row whatever it was about; the run's `firstTryField` names the Work Item, heading or response. |
-| Final review for command         | Command obligations proved by final review, by production's rule (`commandObligation` with `commandAuthority`), outside Final validation. Compile validation refuses these, so this should stay 0.                                      |
+| Final review for command | Command obligations proved by final review, by production's rule (`commandObligation` with `commandAuthority`). An Acceptance bullet that is exactly one backticked command is an Objective command that Factory runs on the integrated result, and compile validation refuses these in any other place, so this should stay 0. |
 | Proof kinds, final-review proofs | Coverage proofs per kind (result command, semantic, QA, CI, final review).                                                                                                                                                              |
 | Ungrounded CI                    | Named CI checks that no workflow job produces (job `name`, or job id). Should be 0.                                                                                                                                                     |
 | Critical path, items, revisions  | Longest dependency chain, Work Items, planning revisions.                                                                                                                                                                               |
@@ -118,7 +119,7 @@ Each seeded defect breaks exactly one rule:
 - an invented CI check name;
 - acceptance that needs the item's own merge or upload;
 - a native-stack dependency assumed merged;
-- final review replacing a command that an Acceptance bullet requires, by production's command-obligation rule (Final validation commands are exempt);
+- final review replacing a command that an Acceptance bullet requires, by production's command-obligation rule. An Acceptance command bullet is run on the integrated result, so no public fixture applies this defect;
 - missing file ownership;
 - a missing dependency;
 - the item's own new test as the only proof of a source-required behavior that the good plan leaves to independent review. Every command stays in place.
@@ -159,7 +160,7 @@ The sandbox tests (plan and review runs with judges, and the isolation probe) ru
 
 ## Cases
 
-Public cases live in `evals/cases/`. Keep private cases outside this repository and pass them with `--cases`. A case directory has `objective.md` (the Objective body) and `case.json`:
+Public cases live in `evals/cases/`. Keep private cases outside this repository and pass them with `--cases`. A case directory has `objective.md` (the Objective body, written in the [Objective template](templates/objective.md): Outcome, Acceptance, Sources, Constraints) and `case.json`:
 
 ```json
 {
@@ -171,13 +172,13 @@ Public cases live in `evals/cases/`. Keep private cases outside this repository 
 
 - `fixture`: an in-repo target tree under `evals/targets/`. It is committed with fixed metadata, so its SHA is the same everywhere. Names starting with `dot-` become dotfiles.
 - For a private case use `commit` and optionally `target` (a checkout; default `--target`) instead of `fixture`. Use a full SHA so the case stays repeatable; a branch resolves at start and the report records the SHA.
-- Sources come from the Objective's own `## Planning sources`, as in `factory run`.
+- Sources come from the Objective's own `## Sources`, as in `factory run`.
 - `repository` defaults to the configuration's; `objective` defaults to 1.
 - `expect` is optional: `outcome`, `requiredChecks`, `maxWorkItems`, `maxCriticalPath`, `readOnly`. A `question` outcome is met when planning stopped for an operator: a plan waiting for a decision, or the controller's undelegated-decision refusal. Whether it asked the right question is the judges' `scope` dimension.
 
 Predecessor cases are text only: the eval serves no predecessor Objectives, so `planningPrerequisites` evidence never reaches the planner. They test how the planner reads an Objective that names a predecessor, not native prerequisite admission.
 
-Review fixtures live in `evals/review/<name>/fixture.json`. Each holds the case it plans, a known-good authored graph (coverage names criteria by index), `native` for native-stack delivery, and an optional `workerTest` command. The harness derives each defect from the good graph. A defect only applies where its rule can hold. For example, final review can replace a command only when an Acceptance bullet is exactly that command line.
+Review fixtures live in `evals/review/<name>/fixture.json`. Each holds the case it plans, a known-good authored graph (coverage names criteria by index), `native` for native-stack delivery, and an optional `workerTest` command. The harness derives each defect from the good graph. A defect only applies where its rule can hold. For example, a native-stack defect applies only to a native fixture.
 
 ## Report
 

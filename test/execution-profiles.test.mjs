@@ -128,7 +128,7 @@ async function fixture(fn) {
   }
 }
 const body =
-  "# Objective\n\n## Acceptance\n- `test -s one.txt`\n- `test -s two.txt`\n- `test -s joined.txt`\n\n## Final validation\n- `test -s one.txt`\n- `test -s two.txt`\n- `test -s joined.txt`\n";
+  "# Objective\n\n## Acceptance\n- `test -s one.txt`\n- `test -s two.txt`\n- `test -s joined.txt`\n\n";
 function modelFor(graph, seen = []) {
   return {
     async generateStructured(request) {

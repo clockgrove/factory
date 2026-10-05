@@ -1,6 +1,6 @@
 # Truncate, command line and CLI docs as a native stack
 
-## Goal
+## Outcome
 
 Deliver three stacked changes with native-stack delivery: `truncate`, then
 the `textkit` command line that uses it, then `docs/CLI.md`. Each pull
@@ -21,21 +21,18 @@ but not merged when its dependent starts; it merges with the stack.
 - `truncate` throws a `RangeError` when `max` is not an integer, such as
   `2.5`.
 - `npm test`
+- `node scripts/check.mjs truncate`
+- `node scripts/check.mjs cli`
+- `node scripts/check.mjs docs`
 
-## Planning sources
+## Sources
 
 - `docs/SPEC.md#Truncate`
 - `docs/SPEC.md#Command line`
 - `docs/SPEC.md#Documentation`
 - `CONTRIBUTING.md#Required checks`
 
-## Final validation
-
-- `node scripts/check.mjs truncate`
-- `node scripts/check.mjs cli`
-- `node scripts/check.mjs docs`
-
-## Non-goals
+## Constraints
 
 - Implementing `wrap` or the `wrap` subcommand; `docs/CLI.md` documents it
   as planned.

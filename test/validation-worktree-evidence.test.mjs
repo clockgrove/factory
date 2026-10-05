@@ -579,7 +579,7 @@ for (const route of ["regular", "native-stack"])
       process.env.XDG_STATE_HOME = join(root, "state");
       try {
         const body =
-          "## Acceptance\n- Source result exists with unchanged validation worktree.\n- Integrated result validation preserves its worktree.\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
+          "## Acceptance\n- Source result exists with unchanged validation worktree.\n- Integrated result validation preserves its worktree.\n- `test -s result.txt`\n\n## Commands\n- test -s result.txt\n\n";
         const item = {
           id: "result",
           title: "Result",

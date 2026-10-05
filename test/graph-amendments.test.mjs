@@ -84,7 +84,7 @@ const replacementAutonomy = {
   },
 };
 const body =
-  "## Acceptance\n- result.txt exists\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
+  "## Acceptance\n- `test -s result.txt`\n\n## Commands\n- test -s result.txt\n\n";
 function item(id = "result", dependencies = []) {
   return {
     kind: "work",
@@ -549,7 +549,7 @@ for (const delivery of ["regular", "native-stack"])
         `pending-prose-${delivery}-${weakened}`,
         async ({ root, config, initial }) => {
           const source =
-            "## Acceptance\n- result.txt and peer.txt provide the input results\n- summary.txt joins both results without changing either input\n\n## Commands\n- test -s result.txt\n- test -s summary.txt\n\n## Final validation\n- test -s summary.txt\n";
+            "## Acceptance\n- result.txt and peer.txt provide the input results\n- summary.txt joins both results without changing either input\n- `test -s summary.txt`\n\n## Commands\n- test -s result.txt\n- test -s summary.txt\n\n";
           const original =
             "summary.txt joins both results without changing either input";
           const replacement = weakened

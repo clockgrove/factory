@@ -112,7 +112,7 @@
         "itemId": "thumbnail",
         "proof": {
           "kind": "result-command",
-          "validationIndex": 0
+          "validationIndex": 1
         }
       },
       {
@@ -120,7 +120,15 @@
         "itemId": "thumbnail",
         "proof": {
           "kind": "result-command",
-          "validationIndex": 1
+          "validationIndex": 0
+        }
+      },
+      {
+        "criterion": 5,
+        "itemId": "lfs-policy",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
         }
       }
     ]

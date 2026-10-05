@@ -65,7 +65,7 @@ for (const delivery of ["regular", "native-stack"]) {
         config,
         graph: { objective: 1, baseSha: target.baseSha, items },
         objectiveBody:
-          "# Objective\n\n## Acceptance\n- Deliver both files after independent review and named CI.\n\n## Final validation\n- `test -s first.txt`\n- `test -s second.txt`\n",
+          "# Objective\n\n## Acceptance\n- Deliver both files after independent review and named CI.\n- `test -s first.txt`\n- `test -s second.txt`\n\n",
         fakeRoot: join(root, "fake"),
         actions: Object.fromEntries(
           items.map((item) => [

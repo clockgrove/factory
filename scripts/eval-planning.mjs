@@ -5,6 +5,7 @@
 //   --review-only   feed known-good and seeded-defect plans to the production
 //                   reviewer and report recall per defect and false positives;
 //   --compare A B   paired comparison of two report.json files.
+//                   --changed-inputs pairs cases whose Objective changed.
 // No GitHub issues are created and no workers run. Requires `npm run build`.
 // Usage and case format: docs/PLANNING-EVALS.md.
 import { spawn } from "node:child_process";
@@ -76,7 +77,7 @@ const usage = `Usage:
     [--judge JUDGE_JSON ...] [--judge-transport MODULE]
     [--allow-unsandboxed-judges]
     [--max-retries N] [--max-wait MINUTES] [--retry-wait SECONDS]
-  node scripts/eval-planning.mjs --compare A/report.json B/report.json [--output DIR]`;
+  node scripts/eval-planning.mjs --compare A/report.json B/report.json [--changed-inputs] [--output DIR]`;
 
 function fail(message) {
   console.error(`${message}\n${usage}`);
@@ -596,6 +597,7 @@ function compareMode(values, positionals) {
     comparison = compareReports(
       JSON.parse(readFileSync(a, "utf8")),
       JSON.parse(readFileSync(b, "utf8")),
+      { pairChangedInputs: Boolean(values["changed-inputs"]) },
     );
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
@@ -638,6 +640,7 @@ async function main() {
       "allow-unsandboxed-judges": { type: "boolean" },
       "review-only": { type: "boolean" },
       compare: { type: "boolean" },
+      "changed-inputs": { type: "boolean" },
       help: { type: "boolean" },
     },
   });

@@ -93,7 +93,7 @@ On a supported Linux/WSL user-service host, the guided setup configures Factory,
 
 The target must be a trusted GitHub repository with committed requirements and available validation tools. Factory cannot run against its own source repository.
 
-Create an Objective issue **in the target repository** describing the outcome, acceptance checks, allowed changes, and canonical sources. You can copy the [Objective issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml) into that repository. Then ask:
+Create an Objective issue **in the target repository** with four sections: Outcome, Acceptance, Sources and Constraints. You can copy the [Objective issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml) into that repository. Then ask:
 
 > Use Factory to plan Objective #123. Show me the plan and any unresolved questions before running it.
 

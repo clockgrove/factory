@@ -14,12 +14,7 @@ import {
 } from "../dist/delivery/check-sources.js";
 import { faultOf } from "../dist/fault.js";
 import { unreportedGates } from "../dist/delivery/readiness.js";
-import {
-  validateGraphSources,
-  knownCheckNames,
-  objectiveRequiredChecks,
-  planningSources,
-} from "../dist/compiler.js";
+import { validateGraphSources, planningSources } from "../dist/compiler.js";
 import { createTarget, git } from "./support/integration-fixture.mjs";
 
 const step = '    runs-on: ubuntu-latest\n    steps: [{ run: "true" }]\n';
@@ -105,32 +100,9 @@ test("workflow check names are the names GitHub reports on a pull request", () =
       () => workflowCheckNames(target.checkout, "0".repeat(40)),
       /Cannot read the GitHub workflows at commit 0{40}/,
     );
-    // The Objective's Required checks add exact names the workflows cannot.
-    const body =
-      "## Acceptance\n- Done.\n\n## Required checks\n- `codecov/patch`\n- lint\n";
-    assert.deepEqual(objectiveRequiredChecks(body), ["codecov/patch", "lint"]);
-    assert.deepEqual(knownCheckNames(body, target.baseSha, target.checkout), [
-      "codecov/patch",
-      "lint",
-      ...reported.filter((name) => name !== "lint"),
-    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
-
-test("Required checks entries are exact bullets, checked before planning", () => {
-  assert.deepEqual(objectiveRequiredChecks("## Acceptance\n- Done.\n"), []);
-  for (const entry of ["quality", "- `` ", "```\n- quality\n```"])
-    assert.throws(
-      () =>
-        planningSources(
-          `## Acceptance\n- Done.\n\n## Required checks\n${entry}\n\n## Final validation\n- \`true\`\n`,
-          "unused",
-          "/unused",
-        ),
-      /Required checks entry/,
-    );
 });
 
 test("a plan may name only known CI checks, by exact string", () => {
@@ -156,13 +128,12 @@ test("a plan may name only known CI checks, by exact string", () => {
     assert.throws(
       () => assertKnownCheckNames(plan(gate, proof), known),
       new RegExp(
-        `CI check "${name.replace("/", "\\/")}" is not a job in the base's GitHub workflows or an entry under the Objective's Required checks`,
+        `CI check "${name.replace("/", "\\/")}" is not a job in the base's GitHub workflows; use`,
       ),
     );
 });
 
-const objectiveBody = (checks) =>
-  `## Acceptance\n- Done.\n\n## Required checks\n${checks}\n\n## Final validation\n- \`true\`\n`;
+const objectiveBody = () => "## Acceptance\n- Done.\n- `true`\n";
 const planOf = (body, baseSha, gate, proof) => ({
   objective: 1,
   baseSha,
@@ -188,7 +159,7 @@ test("a planned gate or CI proof naming an invented or misspelled check is refus
   const root = mkdtempSync(join(tmpdir(), "factory-check-names-"));
   try {
     const target = createTarget(root, workflows);
-    const body = objectiveBody("- `codecov/patch`");
+    const body = objectiveBody();
     const sources = planningSources(body, target.baseSha, target.checkout);
     const validate = (gate, proof) =>
       validateGraphSources(
@@ -207,8 +178,12 @@ test("a planned gate or CI proof naming an invented or misspelled check is refus
         () => validate(gate, proof),
         new RegExp(`CI check "${name}" is not a job in the base's GitHub`),
       );
-    // A workflow job and a Required checks line are the two bindings.
-    validate("lint", "codecov/patch");
+    // A workflow job binds a gate and a proof.
+    validate("lint", "lint");
+    assert.throws(
+      () => validate("lint", "codecov/patch"),
+      /CI check "codecov\/patch" is not a job in the base's GitHub/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -240,7 +215,7 @@ test("delivery refuses a gate that main no longer defines, offering only answers
   const root = mkdtempSync(join(tmpdir(), "factory-check-names-"));
   try {
     const target = createTarget(root, workflows);
-    const body = objectiveBody("- `codecov/patch`");
+    const body = objectiveBody();
     const at = (gate, proof) =>
       assertCheckSourcesAtIntegration({
         graph: planOf(body, target.baseSha, gate, proof),
@@ -250,9 +225,8 @@ test("delivery refuses a gate that main no longer defines, offering only answers
         gates: gate ? [gate] : [],
         defaultBranch: () => "main",
       });
-    // A job and a Required checks line both bind a gate.
+    // A workflow job binds a gate.
     await at("lint");
-    await at("codecov/patch");
     // No gate: nothing to bind, and a CI proof is bound by QA, not delivery.
     await at(undefined, undefined);
     await at(undefined, "gone");
@@ -273,15 +247,15 @@ test("delivery refuses a gate that main no longer defines, offering only answers
     });
     // A proof naming the renamed job is not a delivery wait.
     await at(undefined, "lint");
-    await at("lint2", "codecov/patch");
+    await at("lint2", undefined);
     // A verified gate stays verified only for its tip: "lint" passed above
     // before the rename and is refused after it.
-    // The Objective's Required checks can no longer justify the name.
+    // A name no workflow job defines is never a delivery wait.
     await assert.rejects(
       assertCheckSourcesAtIntegration({
         graph: planOf(body, target.baseSha, "codecov/patch"),
         baseSha: target.baseSha,
-        objectiveBody: objectiveBody("- `other`"),
+        objectiveBody: body,
         checkout: target.checkout,
         gates: ["codecov/patch"],
         defaultBranch: () => "main",
@@ -297,7 +271,7 @@ test("a QA CI proof is bound to its own commit, only while it must wait", () => 
   const root = mkdtempSync(join(tmpdir(), "factory-check-names-"));
   try {
     const target = createTarget(root, workflows);
-    const body = objectiveBody("- `codecov/patch`");
+    const body = objectiveBody();
     const at = (checkName, commit = target.baseSha, text = body) =>
       assertProofCheckDefined({
         checkName,
@@ -306,8 +280,7 @@ test("a QA CI proof is bound to its own commit, only while it must wait", () => 
         checkout: target.checkout,
       });
     at("lint");
-    at("codecov/patch");
-    for (const name of ["lnit", "Lint"])
+    for (const name of ["lnit", "Lint", "codecov/patch"])
       assert.throws(
         () => at(name),
         (error) => {
@@ -324,9 +297,6 @@ test("a QA CI proof is bound to its own commit, only while it must wait", () => 
           return true;
         },
       );
-    assert.throws(() =>
-      at("codecov/patch", target.baseSha, objectiveBody("- `x`")),
-    );
     // The commit decides: a later rename on main does not change it.
     renameLint(root, target);
     at("lint");

@@ -1,6 +1,6 @@
 # Add the format package
 
-## Goal
+## Outcome
 
 Add the `packages/format` workspace package as
 `docs/PACKAGES.md#Format package` specifies, and register it in
@@ -12,22 +12,18 @@ Add the `packages/format` workspace package as
 - `packages/format/package.json` is named `@widgets/format` and exports
   `./src/index.mjs`.
 - `label({ name: "gear", size: 4 })` returns `"gear (4)"`.
-- `node scripts/check-workspace.mjs format` passes.
+- `node scripts/check-workspace.mjs members`
+- `node scripts/check-workspace.mjs format`
 
-## Workspace package additions
-
-- `packages/format`
-
-## Planning sources
+## Sources
 
 - `docs/PACKAGES.md#Members`
 - `docs/PACKAGES.md#Format package`
 
-## Final validation
-
-- `node scripts/check-workspace.mjs members`
-- `node scripts/check-workspace.mjs format`
-
-## Non-goals
+## Constraints
 
 - Changing `packages/core` or adding dependencies.
+
+## Workspace package additions
+
+- `packages/format`

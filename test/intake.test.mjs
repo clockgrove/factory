@@ -52,7 +52,7 @@ const limits = {
   repairClasses: [],
 };
 const body = (id) =>
-  `## Acceptance\n- result-${id}.txt exists\n\n## Commands\n- test -s result-${id}.txt\n\n## Final validation\n- test -s result-${id}.txt\n`;
+  `## Acceptance\n- \`test -s result-${id}.txt\`\n\n## Commands\n- test -s result-${id}.txt\n`;
 const item = (id) => ({
   id: `result-${id}`,
   title: `Result ${id}`,
@@ -246,8 +246,8 @@ const plannedRevision = {
 test("sequential planning supplies grounded native acceptance in every rendered phase and preserves compound final timing", async (t) =>
   fixture(async (f) => {
     f.issues.get(2).body = body(2).replace(
-      "- result-2.txt exists",
-      "- result-2.txt exists\n- Prior QA remains successful and the new guide receives independent acceptance",
+      "- `test -s result-2.txt`\n",
+      "- `test -s result-2.txt`\n- Prior QA remains successful and the new guide receives independent acceptance\n",
     );
     const generated = f.model.generateStructured.bind(f.model);
     const reviewed = f.model.reviewGraph.bind(f.model);

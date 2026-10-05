@@ -23,7 +23,7 @@ test("accepted reprioritization changes pending order without resetting running 
     const target = createTarget(root);
     const config = factoryConfig(target.checkout, "example/priority-amendment");
     const body =
-      "## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n";
+      "## Acceptance\n- `test -s result.txt`\n## Commands\n- test -s result.txt\n";
     const item = (id) => ({
       id,
       kind: "work",
@@ -49,7 +49,7 @@ test("accepted reprioritization changes pending order without resetting running 
       minimumAssetSets: 0,
       requiredLfsRoles: [],
     });
-    const obligations = coverageObligations(body, ["result.txt exists"]);
+    const obligations = coverageObligations(body, ["`test -s result.txt`"]);
     const graph = withCoverage(
       { coverageObligations: obligations },
       {

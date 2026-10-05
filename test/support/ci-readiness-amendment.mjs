@@ -21,7 +21,7 @@ const root = process.argv[2];
 mkdirSync(root, { recursive: true });
 process.env.XDG_STATE_HOME = join(root, "state");
 const body =
-  "## Acceptance\n- result.txt exists\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
+  "## Acceptance\n- `test -s result.txt`\n\n## Commands\n- test -s result.txt\n\n";
 const item = {
   id: "result",
   kind: "work",

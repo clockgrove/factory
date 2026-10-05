@@ -66,7 +66,7 @@ for (const delivery of ["regular", "native-stack"]) {
         config,
         fakeRoot: join(root, "fake"),
         graph: { objective: 1, baseSha: target.baseSha, items },
-        objectiveBody: `# Objective\n\n## Acceptance\n${commands.map((c) => "- `" + c + "`").join("\n")}\n\n## Final validation\n${commands.map((c) => "- `" + c + "`").join("\n")}\n`,
+        objectiveBody: `# Objective\n\n## Acceptance\n${commands.map((c) => "- `" + c + "`").join("\n")}`,
         actions: {
           first: { files: [{ path: "first.txt", text: "first\n" }] },
           second: { files: [{ path: "second.txt", text: "second\n" }] },

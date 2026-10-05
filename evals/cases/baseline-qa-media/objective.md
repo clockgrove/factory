@@ -1,21 +1,18 @@
 # Qualify the gallery manifest
 
-## Goal
+## Outcome
 
 Confirm read-only that the gallery manifest is valid at the current base.
 
 ## Acceptance
 
 - `node scripts/check-gallery.mjs manifest` passes on the base.
+- `node scripts/check-gallery.mjs manifest`
 
-## Planning sources
+## Sources
 
 - `docs/MEDIA.md#Gallery manifest`
 
-## Final validation
-
-- `node scripts/check-gallery.mjs manifest`
-
-## Non-goals
+## Constraints
 
 - Any file change, including images and LFS rules.

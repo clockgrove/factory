@@ -268,11 +268,6 @@ Add a tiny POSIX shell greeting ${signature(tag)}. Plan exactly three Work Items
 - \`sh -n ${dir}/lib.sh\`
 - \`${dir}/NOTES.md\` is one sentence that names \`lib.sh\` and \`hello.sh\` (\`notes\` is independent, so its own patch proves this).
 
-## Final validation
-
-- \`test "$(sh ${dir}/hello.sh)" = "hello, world"\`
-- \`sh -n ${dir}/lib.sh\`
-
 ## Constraints
 
 - Only files under \`${dir}/\` change. No dependencies, no other files.

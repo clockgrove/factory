@@ -122,7 +122,7 @@ function descriptor(root, target, commands, finalCommands = ["pnpm test"]) {
   return {
     config: factoryConfig(target.checkout, "example/preflight", "regular", 1),
     fakeRoot: join(root, "fake"),
-    objectiveBody: `# Preflight fixture\n\n## Acceptance\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${finalCommands.map((c) => `- \`${c}\``).join("\n")}\n`,
+    objectiveBody: `# Preflight fixture\n\n## Acceptance\n${finalCommands.map((c) => `- \`${c}\``).join("\n")}\n\n## Commands\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`,
     graph: {
       objective: 1,
       baseSha: target.baseSha,

@@ -40,8 +40,13 @@ import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
 const Ajv = createRequire(import.meta.url)("ajv");
 const body =
-  '# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n\n## Worker implementation\nUse node:assert/strict and assert process.versions.node.split(".")[0] equals "24".\n\n## Required checks\n- required-check\n- quality\n';
+  '# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n\n## Worker implementation\nUse node:assert/strict and assert process.versions.node.split(".")[0] equals "24".\n';
 const sources = [{ path: "OBJECTIVE", content: body }];
+// Workflow jobs are the only CI check names a plan may use.
+const ciWorkflow = {
+  ".github/workflows/ci.yml":
+    "name: CI\non: pull_request\njobs:\n  required-check:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n  quality:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n",
+};
 function request(extra = {}) {
   return {
     objective: body,
@@ -1402,7 +1407,7 @@ test("compileObjective supplies trusted retained identity and keeps pending item
 test("actual SDK binds source-required quality independently of compound final proof and rejects reconstructed source authority", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-source-ci-wire-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const target = createTarget(root);
+  const target = createTarget(root, ciWorkflow);
   const compound = body.replace(
     "Source-defined result exists.",
     "Source-defined result exists and Quality workflow job `quality` succeeds on every exact PR head before integration; workflow files remain intact.",
@@ -1577,7 +1582,7 @@ test("strict CI choices hydrate complete pinned sources and bind actual executio
 test("planner and reviewer state the restored phase, command and test rules", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-restored-rules-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const target = createTarget(root);
+  const target = createTarget(root, ciWorkflow);
   const prompts = { compile: [], review: [] };
   t.mock.method(Codex.prototype, "startThread", () => ({
     async runStreamed(prompt, options) {
@@ -1625,7 +1630,7 @@ test("planner and reviewer state the restored phase, command and test rules", as
     assert(prompt.includes(phases));
     assert(
       prompt.includes(
-        "requires a command to pass is proved by that exact command, unless it is a Final validation command.",
+        "is exactly one backticked command is run by Factory on the integrated result, so any proof covers it; a criterion that requires another command to pass is proved by that exact command.",
       ),
     );
   }
@@ -1637,17 +1642,17 @@ test("planner and reviewer state the restored phase, command and test rules", as
   // A required check missing from the known names is kept for the operator.
   assert(
     planner.includes(
-      "If a source requires a check that is not in checkNames, never drop the requirement: leave it for review to ask the operator to add it under ## Required checks.",
+      "If a source requires a check that is not in checkNames, never drop the requirement: leave it for review to ask the operator.",
     ),
   );
   assert(
     reviewer.includes(
-      "A source-required check missing from the known CI check names is an unresolved source decision: ask the operator to add it under ## Required checks.",
+      "A source-required check missing from the known CI check names is an unresolved source decision: ask the operator.",
     ),
   );
   assert(
     reviewer.includes(
-      'Known CI check names (jobs in the base\'s workflows and the Objective\'s Required checks):\n["required-check","quality"]',
+      'Known CI check names (check runs the base\'s pull-request workflows report):\n["lint","quality","required-check"]',
     ),
   );
 });
@@ -1655,11 +1660,8 @@ test("planner and reviewer state the restored phase, command and test rules", as
 test("CI checks are chosen by index from known names, so an invented name cannot be expressed", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-check-index-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  // The base's workflow defines job "lint"; the Objective lists the rest.
-  const target = createTarget(root, {
-    ".github/workflows/ci.yml":
-      "name: CI\non: pull_request\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n",
-  });
+  // The base's workflow defines the jobs.
+  const target = createTarget(root, ciWorkflow);
   let indices = [];
   const prompts = [];
   const diagnoses = [];
@@ -1678,9 +1680,9 @@ test("CI checks are chosen by index from known names, so an invented name cannot
           prompt.split("\nCompiler choices (JSON data):\n")[1],
         );
         assert.deepEqual(choices.checkNames, [
-          { checkIndex: 0, name: "required-check" },
+          { checkIndex: 0, name: "lint" },
           { checkIndex: 1, name: "quality" },
-          { checkIndex: 2, name: "lint" },
+          { checkIndex: 2, name: "required-check" },
         ]);
         const gate =
           options.outputSchema.properties.requiredPreIntegrationChecks.items;
@@ -1719,7 +1721,7 @@ test("CI checks are chosen by index from known names, so an invented name cannot
   const model = new CodexPlanningModel(target.checkout, selection, selection);
   // A provider that ignores the schema's bound is refused, and that spends
   // the revision instead of producing a clean plan.
-  indices = [7, 2];
+  indices = [7, 0];
   const candidate = await compilePlan(
     17,
     body,
@@ -1840,7 +1842,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const pinned =
     "# Rules\nUse two independent configured slots.\nBefore every ordinary delivery PR integration, check `quality` must succeed on that exact published head.\nKeep the workflow unchanged.\n";
-  const target = createTarget(root, { "AGENTS.md": pinned });
+  const target = createTarget(root, { "AGENTS.md": pinned, ...ciWorkflow });
   const config = factoryConfig(target.checkout, "example/planning-bounds");
   config.execution.concurrency = 2;
   const autonomy = {

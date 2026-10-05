@@ -30,7 +30,7 @@ const commands = [
   "test ! -e new-product.txt",
   "git diff --quiet",
 ];
-const body = `## Outcome\nQualify the unchanged pinned baseline. No implementation worker, source change or PR is authorized.\n## Acceptance\n- Existing baseline content is alpha.\n- Final independent acceptance establishes current readiness.\n## Planning sources\n- \`existing.txt\`\n## Final validation\n${commands.map((command) => `- \`${command}\``).join("\n")}\n`;
+const body = `## Outcome\nQualify the unchanged pinned baseline. No implementation worker, source change or PR is authorized.\n## Acceptance\n- Existing baseline content is alpha.\n- Final independent acceptance establishes current readiness.\n${commands.map((command) => `- \`${command}\`\n`).join("")}## Sources\n- \`existing.txt\`\n`;
 // Baseline qualification runs with no planning revision or repair.
 const autonomy = {
   allowances: {
@@ -114,6 +114,18 @@ async function fixture(delivery, action, options = {}) {
                   preparedBy: "",
                 },
               },
+              // Each Acceptance command is its own obligation, proved by
+              // running exactly that command.
+              ...commands.map((_, index) => ({
+                obligationIndex: 2 + index,
+                proof: { kind: "integrated-command", validationIndex: index },
+                environment: {
+                  kind: "local",
+                  readiness: "available",
+                  probeValidationIndex: null,
+                  preparedBy: "",
+                },
+              })),
             ],
           };
           if (options.finalController) {
@@ -228,7 +240,7 @@ async function fixture(delivery, action, options = {}) {
             packet,
             response,
           });
-          if (options.moveDuringFinal && packet.criteria.length === 2)
+          if (options.moveDuringFinal && packet.criteria.length === 8)
             moveDefault(target);
         }
         const validate = new Ajv({ strict: false }).compile(outputSchema);
@@ -420,7 +432,7 @@ test("QA-owned final controller proof stays at independent final acceptance", as
       const state = readState(config.repository, 1);
       assert.ok(objectiveComplete(state));
       assert.equal(state.work["baseline-qa"].validation.criteria.length, 1);
-      assert.equal(state.finalValidation.criteria.length, 2);
+      assert.equal(state.finalValidation.criteria.length, 8);
       assert.equal(
         captures.find((entry) => entry.phase === "QA").packet.criteria.length,
         1,

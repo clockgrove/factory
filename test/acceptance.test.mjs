@@ -14,6 +14,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   PlanningNeedsDecision,
+  assertObjectiveCriteria,
   objectiveCriteria,
   verifyPlanCandidate,
 } from "../dist/compiler.js";
@@ -105,7 +106,7 @@ test("preview blocks invented and mismatched commands, and admits exact pinned b
     },
     async (_root, target) => {
       const body =
-        "# Objective\n\n## Acceptance\n- result.txt exists\n\n## Validation\n- `test -s result.txt`\n\n## Final validation\n- `npm test`\n";
+        "# Objective\n\n## Acceptance\n- result.txt exists\n- `npm test`\n\n## Validation\n- `test -s result.txt`\n\n";
       let graph = item(target.baseSha, [
         {
           command: "test -s result.txt",
@@ -202,28 +203,35 @@ test("preview blocks invented and mismatched commands, and admits exact pinned b
   );
 });
 
-test("Objective criteria use explicit acceptance or the source Goal", () => {
+test("Objective criteria are the Acceptance bullets and nothing else", () => {
   assert.deepEqual(objectiveCriteria("## Acceptance\n- one\n- two\n"), [
     "one",
     "two",
   ]);
   assert.deepEqual(
     objectiveCriteria(
-      "## Goal\n\nDeliver a complete result.\n\n## Final validation\n- `true`\n",
+      "## Outcome\n\nDeliver a complete result.\n\n## Acceptance\n- `true`\n",
     ),
-    ["Deliver a complete result."],
+    ["`true`"],
   );
   assert.deepEqual(
     objectiveCriteria(
-      "### Outcome\n\nDeliver a result.\n\n### Acceptance\n\n- First observable check\n- Second observable check\n\n### Boundaries\nNo deployment\n",
+      "### Outcome\n\nDeliver a result.\n\n### Acceptance\n\n- First observable check\n- Second observable check\n\n### Constraints\nNo deployment\n",
     ),
     ["First observable check", "Second observable check"],
   );
   assert.deepEqual(
     objectiveCriteria(
-      "### Outcome\n\nDeliver a result.\n\n### What must be true\n\nA user sees the result.\n\n### Boundaries\nNo deployment\n",
+      "### Outcome\n\nDeliver a result.\n\n### Acceptance\n\nA user sees the result.\n\n### Constraints\nNo deployment\n",
     ),
     ["A user sees the result."],
+  );
+  // An Objective without Acceptance has no criteria; it is not planned from
+  // its Outcome.
+  assert.deepEqual(objectiveCriteria("## Outcome\n\nDeliver a result.\n"), []);
+  assert.throws(
+    () => assertObjectiveCriteria("## Outcome\n\nDeliver a result.\n"),
+    /requires nonempty criteria under Acceptance/,
   );
 });
 
@@ -382,7 +390,7 @@ test("exact script-disabled pnpm bootstrap is source-authorized and plain instal
       "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
     },
     async (_root, target) => {
-      const body = `# Objective\n\n## Acceptance\n- Check passes\n\n## Final validation\n- \`${PINNED_PNPM_BOOTSTRAP}\`\n- \`pnpm check\`\n`;
+      const body = `# Objective\n\n## Acceptance\n- Check passes\n- \`${PINNED_PNPM_BOOTSTRAP}\`\n- \`pnpm check\`\n`;
       const graph = item(target.baseSha, [
         {
           command: "pnpm check",
@@ -421,7 +429,7 @@ test("exact script-disabled pnpm bootstrap is source-authorized and plain instal
       const unsafeBody = body.replace(PINNED_PNPM_BOOTSTRAP, "pnpm install");
       await assert.rejects(
         compilePlan(1, unsafeBody, target.baseSha, target.checkout, model),
-        /Final validation command has no executable authority/,
+        /Acceptance command has no executable authority/,
       );
       writeFileSync(
         join(target.checkout, ".pnpmfile.cjs"),
@@ -454,7 +462,7 @@ test("exact script-disabled pnpm bootstrap is source-authorized and plain instal
 test("a source-declared pnpm workspace can be created, validated, and pinned for later work", async () => {
   await withTarget("new-pnpm-workspace", {}, async (root, target) => {
     const finalCommands = [PINNED_PNPM_BOOTSTRAP, "pnpm check", "pnpm test"];
-    const body = `# Objective\n\n## Acceptance\n- Create the pnpm workspace\n- \`pnpm check\`\n\n## Final validation\n${finalCommands.map((command) => `- \`${command}\``).join("\n")}\n`;
+    const body = `# Objective\n\n## Acceptance\n- Create the pnpm workspace\n${[...new Set(["pnpm check", ...finalCommands])].map((command) => `- \`${command}\``).join("\n")}\n`;
     const graph = item(target.baseSha, [
       {
         command: "pnpm check",

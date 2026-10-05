@@ -363,9 +363,13 @@ export function compareReports(a, b, options = {}) {
   const left = new Map(collapse(a.units).map((unit) => [unit.id, unit]));
   const right = new Map(collapse(b.units).map((unit) => [unit.id, unit]));
   const common = [...left.keys()].filter((id) => right.has(id));
-  const mismatched = common.filter(
+  const changed = common.filter(
     (id) => left.get(id).digest !== right.get(id).digest,
   );
+  // By default a unit whose inputs changed is not a pair. When the change is
+  // the thing under test, such as rewriting every Objective in a new
+  // template, `pairChangedInputs` pairs units by id and says so.
+  const mismatched = options.pairChangedInputs ? [] : changed;
   const shared = common.filter((id) => !mismatched.includes(id));
   const digests = (report) =>
     new Map((report.judges ?? []).map((judge) => [judge.name, judge.digest]));
@@ -385,6 +389,10 @@ export function compareReports(a, b, options = {}) {
   if (skipped.length)
     notes.push(
       `Judge metrics for ${skipped.join(", ")} are not compared: the judge is missing from one report or its digest differs.`,
+    );
+  if (options.pairChangedInputs && changed.length)
+    notes.push(
+      `Paired by id although the Objective, commit or plan inputs differ, because that change is under test: ${changed.join(", ")}.`,
     );
   if (mismatched.length)
     notes.push(

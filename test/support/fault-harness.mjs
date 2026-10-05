@@ -194,7 +194,7 @@ export async function runScenario({
       `https://github.com/${repository}.git`,
     );
     const commands = items.map((item) => item.validation[0].command);
-    const objectiveBody = `# Deterministic Objective\n\n## Acceptance\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`;
+    const objectiveBody = `# Deterministic Objective\n\n## Acceptance\n${commands.map((c) => `- \`${c}\``).join("\n")}`;
     let child;
     const crashes = [];
     fake = new GitHubHttpFake({

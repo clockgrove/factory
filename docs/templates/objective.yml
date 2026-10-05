@@ -13,18 +13,18 @@ body:
     id: acceptance
     attributes:
       label: Acceptance
-      description: One observable fact per bullet. Include any constraint that must be verified.
+      description: One observable fact per bullet. A bullet that is exactly one backticked command means that command must pass on the integrated result.
       value: |
-        -
+        - `npm test`
     validations:
       required: true
   - type: textarea
-    id: final-validation
+    id: sources
     attributes:
-      label: Final validation
-      description: Exact commands, one per bullet, that must pass on the integrated result.
+      label: Sources
+      description: Repository files, one per bullet, or path#Exact Heading for one section. Workers get them verbatim.
       value: |
-        - `npm test`
+        - README.md
     validations:
       required: true
   - type: textarea
@@ -32,17 +32,3 @@ body:
     attributes:
       label: Constraints
       description: Non-goals and limits, such as no deployment or no new dependencies.
-  - type: textarea
-    id: required-checks
-    attributes:
-      label: Required checks
-      description: Optional. Exact CI check names, one per bullet, that are not jobs in the repository's workflows.
-  - type: textarea
-    id: planning-sources
-    attributes:
-      label: Planning sources
-      description: Repository files, one per bullet, or path#Exact Heading for one section.
-      value: |
-        - README.md
-    validations:
-      required: true

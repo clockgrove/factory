@@ -47,13 +47,16 @@ Remote execution (`execution.kind: "managed-agent"`) runs Work Items in a provid
 
 ## Write an Objective
 
-Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). The sections that matter:
+Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). An Objective has four sections. Keep it to one page.
 
-- **Acceptance:** one observable fact per bullet. A bullet that is one command line means that command must pass.
-- **Final validation:** exact commands that must pass on the integrated result. "Run the tests" is not a command.
-- **Required checks** (optional): CI check names that are not pull-request workflow jobs, such as checks from external apps. A plan can name only checks that exist at the base or are listed here.
-- **Planning sources** (optional): files or `path#Exact heading` sections workers need. Each costs tokens, so keep the list short.
-- **Workspace package additions** (optional): exact backticked directories, to add packages to an existing `pnpm-workspace.yaml`. Undeclared workspace changes are blocked.
+- **Outcome:** one paragraph: what changes, for whom, and what is out of scope.
+- **Acceptance:** one observable fact per bullet. A bullet that is exactly one backticked command means that command must pass on the integrated result. "Run the tests" is not a command. Put a path or other code span inside a sentence, not as a bullet of its own.
+- **Sources:** files or `path#Exact Heading` sections workers need, one per bullet. Each costs tokens, so keep the list short.
+- **Constraints:** non-goals and limits workers must respect.
+
+A plan can name a CI check only if it is a pull-request workflow job at the base. Checks from external apps cannot be named. Delivery re-checks the job against the default branch: if it is renamed after planning, the run asks you to restore it and `factory retry`, or to cancel and plan again.
+
+Factory refuses the earlier sections with a message that says where the content goes: Final validation (an Acceptance command bullet), Required checks (a workflow job), Planning sources (Sources), What must be true (Acceptance), Goal (Outcome), Non-goals (Constraints). Only a repository that adds packages to an existing `pnpm-workspace.yaml` needs one more section, **Workspace package additions**: exact backticked directories. Undeclared workspace changes are blocked.
 
 Keep the first Objective small. Editing the issue after planning invalidates the saved plan; refuse it (below) and run again.
 

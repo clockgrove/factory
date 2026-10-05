@@ -68,7 +68,7 @@ const body = `# Objective
 ## Acceptance
 - \`test -s one.txt\`
 
-## Planning sources
+## Sources
 - \`docs/plan.md#Wave 0\`
 `;
 
@@ -531,7 +531,7 @@ test("graph review identifies the exact supplied section among duplicate paths",
 ## Acceptance
 - \`test -s one.txt\`
 
-## Planning sources
+## Sources
 - \`docs/plan.md#Earlier\`
 - \`docs/plan.md#Later\`
 `;

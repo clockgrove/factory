@@ -40,7 +40,7 @@ export function proofKinds(graph) {
 
 /**
  * The command a criterion requires, by production's own rule
- * (`commandObligation` with `commandAuthority`), when Final validation does
+ * (`commandObligation` with `commandAuthority`), when the Acceptance commands do
  * not already run it. Otherwise null.
  */
 export function requiredCommandLine(text, finalCommands, isCommand) {
@@ -52,7 +52,7 @@ export function requiredCommandLine(text, finalCommands, isCommand) {
 
 /**
  * Command obligations left to final review, by production's rule, outside
- * Final validation. Production now refuses these, so this stays 0 unless a
+ * the Acceptance commands. Production now refuses these, so this stays 0 unless a
  * rule regresses. `isCommand` is production's `commandAuthority`.
  */
 export function finalReviewInsteadOfCommand(plan, isCommand) {

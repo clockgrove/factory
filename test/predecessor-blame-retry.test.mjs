@@ -13,7 +13,7 @@ import {
 } from "./support/integration-fixture.mjs";
 
 const bodyWith = (command) =>
-  `## Acceptance\n- result.txt exists\n\n## Commands\n- \`test -s result.txt\`\n- \`${command}\`\n\n## Final validation\n- \`test -s result.txt\`\n`;
+  `## Acceptance\n- \`test -s result.txt\`\n\n## Commands\n- \`test -s result.txt\`\n- \`${command}\`\n`;
 const workItem = (id, file, dependencies, command) => ({
   id,
   title: id,

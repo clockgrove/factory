@@ -90,7 +90,7 @@ function jobsOf(workflow: unknown): [string, Job][] {
  * a matrix job "name (a, b)" per combination, and a job that calls a local
  * reusable workflow "caller / callee" per called job. Calls to another
  * repository's workflow, expression names and matrices that need include,
- * exclude or expressions are left to the Objective's Required checks.
+ * exclude or expressions cannot be named in a plan.
  */
 export function workflowCheckNames(
   checkout: string,
@@ -196,6 +196,6 @@ export function assertKnownCheckNames(graph: WorkGraph, names: string[]): void {
   );
   if (name !== undefined)
     throw new Error(
-      `CI check ${JSON.stringify(name)} is not a job in the base's GitHub workflows or an entry under the Objective's Required checks; use one of those exact names: ${JSON.stringify(names.slice(0, 20))}${names.length > 20 ? ` and ${names.length - 20} more` : ""}`,
+      `CI check ${JSON.stringify(name)} is not a job in the base's GitHub workflows; use one of those exact names: ${JSON.stringify(names.slice(0, 20))}${names.length > 20 ? ` and ${names.length - 20} more` : ""}`,
     );
 }

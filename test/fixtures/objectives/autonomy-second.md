@@ -1,6 +1,6 @@
 # Explain the accepted summary utility
 
-## Goal
+## Outcome
 
 After the first Objective is independently accepted, use its exact integrated
 baseline to create only `GUIDE.md`. Describe importing `summarize`, the normal
@@ -17,17 +17,10 @@ to the actual accepted predecessor head. Queueing alone does not satisfy that ga
 - GUIDE.md accurately explains the accepted implementation and examples.
 - The first Objective's accepted implementation and immutable checks are unchanged.
 - The predecessor's full QA still passes and independent review accepts the guide.
-
-## Final validation
-
 - `node scripts/check.mjs guide`
 - `node scripts/check.mjs qa`
 
-## Non-goals
-
-Implementation, dependency changes, deployment, media or extra features.
-
-## Planning sources
+## Sources
 
 - README.md
 - AGENTS.md
@@ -35,3 +28,7 @@ Implementation, dependency changes, deployment, media or extra features.
 - src/alpha.mjs
 - src/beta.mjs
 - src/summary.mjs
+
+## Constraints
+
+Implementation, dependency changes, deployment, media or extra features.

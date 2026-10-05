@@ -229,7 +229,7 @@ assert.equal(execFileSync('git', ['check-ignore', 'node_modules/pilot-dependency
         baseSha: target.baseSha,
         items: [foundation, policy, media, final],
       },
-      objectiveBody: `# Ordinary pilot\n\n## Planning sources\n- \`docs/toolchain.md#Approved toolchain\`\n\n## Policy validation\n${policyCommands.map((c) => `- \`${c}\``).join("\n")}\n\n## Acceptance\n- Exact selected pointer digest/size and inherited tracked LFS rule are proved on the reviewed tree.\n- Fresh-clone hydration preserves the selected bytes at assets/source.png.\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`,
+      objectiveBody: `# Ordinary pilot\n\n## Sources\n- \`docs/toolchain.md#Approved toolchain\`\n\n## Policy validation\n${policyCommands.map((c) => `- \`${c}\``).join("\n")}\n\n## Acceptance\n- Exact selected pointer digest/size and inherited tracked LFS rule are proved on the reviewed tree.\n- Fresh-clone hydration preserves the selected bytes at assets/source.png.\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`,
       fakeRoot: join(root, "fake"),
       actions: {
         foundation: {

@@ -258,7 +258,10 @@ test("the service pins its mode, needs the background setup and refuses unknown 
     delete value.futureAuthority;
     value.serviceConsent = { actor: "x", reason: "y", consent: true };
     writeFileSync(path, JSON.stringify(value));
-    assert.throws(() => checkIntakeServiceState(config, "/c.json"), /unsupported field/);
+    assert.throws(
+      () => checkIntakeServiceState(config, "/c.json"),
+      /unsupported field/,
+    );
     // The fix it names: delete the file, and the service check says to set up the background service.
     rmSync(path);
     assert.throws(
@@ -485,7 +488,27 @@ test("a service bound to one Objective by an earlier version is refused for reus
       evidenceRetained: true,
     });
     assert.equal(existsSync(path), false);
-@@NEWTESTS@@
+    test("install over a different registered service names uninstall and the setup command", () =>
+      fixture(async ({ config, configPath }) => {
+        await install(configPath);
+        const unitFile = join(
+          process.env.XDG_CONFIG_HOME,
+          "systemd/user",
+          serviceName(config.repository),
+        );
+        const prefix = "# Factory local supervision v1 ";
+        const value = JSON.parse(
+          readFileSync(unitFile, "utf8").split("\n")[0].slice(prefix.length),
+        );
+        value.cli = "/different/cli.js";
+        writeFileSync(unitFile, renderService(value), { mode: 0o600 });
+        await assert.rejects(
+          install(configPath),
+          (error) =>
+            error.message.includes("`factory supervisor uninstall --config ") &&
+            error.message.includes("`factory setup --background --config "),
+        );
+      }));
   }));
 
 test("uninstalling a service an earlier version bound to one Objective hands off its running owner", () =>

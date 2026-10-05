@@ -9,6 +9,7 @@ import {
   objectiveCriteria,
   planningSources,
 } from "../dist/compiler.js";
+import { workspacePackageAdditions } from "../dist/workspace-membership.js";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { createTarget } from "./support/integration-fixture.mjs";
@@ -227,4 +228,16 @@ test("Objective issue form keeps its sources, even when the field repeats its he
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the issue form's Workspace package additions field declares additions or is left empty", () => {
+  assert.deepEqual(workspacePackageAdditions(renderedObjectiveForm({})), []);
+  assert.deepEqual(
+    workspacePackageAdditions(
+      renderedObjectiveForm({
+        "workspace-package-additions": "- `packages/example`",
+      }),
+    ),
+    ["packages/example"],
+  );
 });

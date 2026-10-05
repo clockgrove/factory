@@ -32,3 +32,9 @@ body:
     attributes:
       label: Constraints
       description: Non-goals and limits, such as no deployment or no new dependencies.
+  - type: textarea
+    id: workspace-package-additions
+    attributes:
+      label: Workspace package additions
+      description: Optional. Only when adding packages to an existing pnpm-workspace.yaml. One exact backticked package directory per bullet.
+      placeholder: "- `packages/example`"

@@ -56,7 +56,7 @@ Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/t
 
 A plan can name a CI check only if it is a pull-request workflow job at the base. Checks from external apps cannot be named. Delivery re-checks the job against the default branch: if it is renamed after planning, the run asks you to restore it and `factory retry`, or to cancel and plan again.
 
-Factory refuses the earlier sections with a message that says where the content goes: Final validation (an Acceptance command bullet), Required checks (a workflow job), Planning sources (Sources), What must be true (Acceptance), Goal (Outcome), Non-goals (Constraints). Only a repository that adds packages to an existing `pnpm-workspace.yaml` needs one more section, **Workspace package additions**: exact backticked directories. Undeclared workspace changes are blocked.
+Factory refuses the earlier sections with a message that says where the content goes: Final validation (an Acceptance command bullet), Required checks (a workflow job), Planning sources (Sources), What must be true (Acceptance), Goal (Outcome), Non-goals (Constraints). Only a repository that adds packages to an existing `pnpm-workspace.yaml` needs one more section, **Workspace package additions**: exact backticked directories, as a level-two or level-three heading like the other sections. Undeclared workspace changes are blocked, and planning refuses a plan that creates an undeclared package.
 
 Keep the first Objective small. Editing the issue after planning invalidates the saved plan; refuse it (below) and run again.
 

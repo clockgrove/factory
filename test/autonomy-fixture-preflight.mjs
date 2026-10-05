@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse } from "yaml";
 
 import { workflowCheckNames } from "../dist/check-names.js";
 import {
@@ -99,6 +100,14 @@ try {
     events,
     ["pull_request"],
     "Each exact published head needs one unambiguous source-check receipt",
+  );
+  const checkoutStep = parse(workflow).jobs["source-check"].steps.find((step) =>
+    step.uses?.startsWith("actions/checkout@"),
+  );
+  assert.equal(
+    checkoutStep?.with?.ref,
+    "${{ github.event.pull_request.head.sha }}",
+    "The CI command checks the published head rather than a synthetic merge",
   );
   git("init", "-b", "main");
   const baseline = commit("Public unfinished baseline");

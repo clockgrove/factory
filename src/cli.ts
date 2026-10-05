@@ -20,7 +20,6 @@ import {
 import { compose, composeIntake, composePlanning } from "./index.js";
 import { type IntakeAuthorization, intakeControl } from "./intake.js";
 import { operatorName } from "./operator.js";
-import { linuxProcessIdentity } from "./process.js";
 import { loadServiceLoginCredentials } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
 import { controlObjective, selectAssetSetFromCli } from "./runner.js";
@@ -33,29 +32,27 @@ import {
 import { setupTarget } from "./setup.js";
 import type { ContinuationState } from "./state.js";
 import {
+  installationLockPath,
+  liveControllerOwner,
+  objectiveLockPath,
   readContinuation,
-  readControllerOwner,
   readPreState,
 } from "./state-store.js";
 import { renderServiceStatus, renderStatusText } from "./status-summary.js";
 import { checkIntakeServiceState, supervise } from "./supervision.js";
 
-/** Whether a live controller owns this Objective; null when the lock is unreadable. */
+/** Whether a live controller owns this Objective; null when a lock is unreadable. */
 function controllerActive(
   repository: string,
   objective: number,
 ): boolean | null {
   try {
-    const owner = readControllerOwner(
-      join(stateRoot(repository), "controller.lock"),
-    );
-    if (!owner) return false;
-    const current = linuxProcessIdentity(owner.pid);
-    return (
-      current?.startTime === owner.startTime &&
-      current.state !== "Z" &&
-      (owner.intake === true || owner.objective === objective)
-    );
+    const installation = liveControllerOwner(installationLockPath(repository));
+    if (installation)
+      return (
+        installation.intake === true || installation.objective === objective
+      );
+    return !!liveControllerOwner(objectiveLockPath(repository, objective));
   } catch {
     return null;
   }

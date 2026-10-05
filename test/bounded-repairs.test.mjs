@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { stateRoot } from "../dist/config.js";
+import { objectiveRoot } from "../dist/state-store.js";
 import {
   chargeRepair,
   consumption,
@@ -430,11 +430,11 @@ for (const delivery of ["regular", "native-stack"])
       const fixture = makeApplication(descriptor);
       // The controller cannot prepare validation: the item's directory is a file.
       const validationRoot = join(
-        stateRoot(config.repository),
+        objectiveRoot(config.repository, 1),
         "validation",
         "result",
       );
-      mkdirSync(join(stateRoot(config.repository), "validation"), {
+      mkdirSync(join(objectiveRoot(config.repository, 1), "validation"), {
         recursive: true,
       });
       writeFileSync(validationRoot, "not a directory\n");

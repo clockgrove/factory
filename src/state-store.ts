@@ -32,13 +32,13 @@ import {
   parseFactoryState,
 } from "./state.js";
 
+/** An Objective's private directory: its snapshot, owner and validation trees. */
+export function objectiveRoot(repository: string, objective: number): string {
+  return join(stateRoot(repository), "objectives", String(objective));
+}
+
 export function statePath(repository: string, objective: number): string {
-  return join(
-    stateRoot(repository),
-    "objectives",
-    String(objective),
-    "state.json",
-  );
+  return join(objectiveRoot(repository, objective), "state.json");
 }
 
 /**
@@ -345,22 +345,124 @@ export function readControllerOwner(path: string): ControllerOwner | undefined {
   return owner as unknown as ControllerOwner;
 }
 
+/** The installation's owner: the background service, or a queue command for a moment. */
+export function installationLockPath(repository: string): string {
+  return join(stateRoot(repository), "controller.lock");
+}
+
+/** One Objective's owner: a foreground run, or a command changing that Objective. */
+export function objectiveLockPath(
+  repository: string,
+  objective: number,
+): string {
+  return join(objectiveRoot(repository, objective), "controller.lock");
+}
+
+/** The recorded owner, while that exact process is alive. */
+export function liveControllerOwner(path: string): ControllerOwner | undefined {
+  const owner = readControllerOwner(path);
+  if (!owner) return undefined;
+  const current = linuxProcessIdentity(owner.pid);
+  return current?.startTime === owner.startTime && current.state !== "Z"
+    ? owner
+    : undefined;
+}
+
+/** A live owner of any one Objective. */
+export function liveObjectiveOwner(
+  repository: string,
+): ControllerOwner | undefined {
+  const root = join(stateRoot(repository), "objectives");
+  if (!existsSync(root)) return undefined;
+  for (const name of readdirSync(root)) {
+    if (!/^\d+$/.test(name)) continue;
+    const owner = liveControllerOwner(
+      objectiveLockPath(repository, Number(name)),
+    );
+    if (owner) return owner;
+  }
+  return undefined;
+}
+
+/**
+ * Own the installation: refused while any Objective has a live owner. Both
+ * kinds of owner are taken under the installation's guard, so neither can
+ * start beside the other.
+ */
+export function acquireInstallationLock(
+  repository: string,
+  objective = 0,
+): ControllerLock {
+  return acquireControllerLock(installationLockPath(repository), objective, {
+    conflict: () => {
+      const owner = liveObjectiveOwner(repository);
+      return owner && `Objective #${owner.objective}`;
+    },
+  });
+}
+
+/**
+ * Own one Objective: refused while the installation has a live owner (the
+ * service answers for every Objective). Owners of different Objectives run
+ * side by side.
+ */
+export function acquireObjectiveLock(
+  repository: string,
+  objective: number,
+): ControllerLock {
+  mkdirSync(objectiveRoot(repository, objective), {
+    recursive: true,
+    mode: 0o700,
+  });
+  const installation = installationLockPath(repository);
+  return acquireControllerLock(
+    objectiveLockPath(repository, objective),
+    objective,
+    {
+      guard: `${installation}.acquire`,
+      owned: `Objective #${objective}`,
+      conflict: () =>
+        liveControllerOwner(installation) ? "this installation" : undefined,
+    },
+  );
+}
+
+const guardWait = new Int32Array(new SharedArrayBuffer(4));
+
+/** Contenders hold the guard for milliseconds; one still there after a second crashed and is refused. */
+function takeGuard(guard: string): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      mkdirSync(guard, { mode: 0o700 });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 100)
+        throw error;
+      Atomics.wait(guardWait, 0, 0, 10);
+    }
+  }
+}
+
 export function acquireControllerLock(
   path: string,
   objective: number,
+  /** What `path` owns, and what another live owner that excludes it owns. */
+  scope: {
+    guard?: string;
+    owned?: string;
+    conflict?: () => string | undefined;
+  } = {},
 ): ControllerLock {
   // Serialize stale-owner replacement as well as creation. A crashed guard is
   // refused explicitly; never remove a contender's newly acquired lock.
-  const guard = `${path}.acquire`;
-  mkdirSync(guard, { mode: 0o700 });
+  const guard = scope.guard ?? `${path}.acquire`;
+  takeGuard(guard);
   try {
-    const previous = readControllerOwner(path);
-    if (previous) {
-      const current = linuxProcessIdentity(previous.pid);
-      if (current?.startTime === previous.startTime && current.state !== "Z")
-        throw new Error("A Factory controller already owns this installation");
-      rmSync(path);
-    }
+    const owned = liveControllerOwner(path)
+      ? (scope.owned ?? "this installation")
+      : scope.conflict?.();
+    if (owned) throw new Error(`A Factory controller already owns ${owned}`);
+    rmSync(path, { force: true });
     const identity = linuxProcessIdentity(process.pid);
     if (!identity)
       throw new Error("Cannot establish controller process identity");

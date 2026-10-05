@@ -1567,7 +1567,9 @@ async function classify(slot, anchor, state) {
   rmSync(slot.root, { recursive: true, force: true });
   copyWorld(anchor.dir, slot.root);
   // The stopped controller's lock names a process that is gone.
-  rmSync(join(slot.root, STATE, "controller.lock"), { force: true });
+  rmSync(join(slot.root, STATE, "objectives", "1", "controller.lock"), {
+    force: true,
+  });
   writeFileSync(statePath(slot.root), `${JSON.stringify(state, null, 2)}\n`);
   const fake = await startFake(join(slot.root, "origin.git"), anchor.fakeState);
   const world = { root: slot.root, fake, descriptor: slot.descriptor };
@@ -1789,7 +1791,9 @@ async function classify(slot, anchor, state) {
       const restore = () => {
         rmSync(slot.root, { recursive: true, force: true });
         copyWorld(stop.dir, slot.root);
-        rmSync(join(slot.root, STATE, "controller.lock"), { force: true });
+        rmSync(join(slot.root, STATE, "objectives", "1", "controller.lock"), {
+          force: true,
+        });
         fake.state = structuredClone(stop.fakeState);
         baseline = fingerprint(snapshot() ?? state);
       };

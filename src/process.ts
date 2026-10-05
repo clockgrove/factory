@@ -100,6 +100,10 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
   // Another git process holds the repository lock; it releases it shortly.
   if (/Unable to create '[^']*\.lock': File exists/.test(detail))
     return transient(`git ${subcommand} found the repository locked`, false);
+  // Another controller's `worktree remove` deleted an entry this command was
+  // reading (see LockMode); the entry is gone shortly.
+  if (/Invalid path '[^']*worktrees\//.test(detail))
+    return transient(`git ${subcommand} read a worktree being removed`, false);
   if (!GIT_REMOTE.has(subcommand)) return undefined;
   const push = subcommand === "push" || subcommand === "lfs push";
   if (
@@ -161,7 +165,9 @@ function classifiedGit<T>(args: string[], run: () => T): T {
  * entry) dies with "Invalid path '.git/worktrees/<id>'". Commands that change
  * the registry therefore hold a per-repository lock exclusively and commands
  * that walk it hold it shared. Fetches share it with each other because
- * Factory's fetches write no shared ref (see fetchHead).
+ * Factory's fetches write no shared ref (see fetchHead). The lock is per
+ * process: a controller of another Objective can still race, and gitFault
+ * makes that error transient, so the step repeats.
  */
 type LockMode = "shared" | "exclusive";
 

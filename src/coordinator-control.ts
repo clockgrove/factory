@@ -2,8 +2,14 @@ import { chmodSync, closeSync, existsSync, openSync, rmSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { stateRoot } from "./config.js";
-import { linuxProcessIdentity } from "./process.js";
-import { type ControllerLock, readControllerOwner } from "./state-store.js";
+import {
+  type ControllerLock,
+  installationLockPath,
+  liveControllerOwner,
+  liveObjectiveOwner,
+  objectiveLockPath,
+  objectiveRoot,
+} from "./state-store.js";
 
 export interface ControlRequest {
   objective: number;
@@ -25,16 +31,21 @@ export interface ControlRequest {
     | "watch";
   input?: Record<string, unknown>;
 }
-const socketPath = (repository: string) =>
-  join(stateRoot(repository), "control.sock");
-
-/** One private local transport. Snapshot preconditions, not command replay, settle lost replies. */
+/**
+ * One private local transport in the owner's directory: the installation's
+ * for the service, the Objective's for a foreground run. Snapshot
+ * preconditions, not command replay, settle lost replies.
+ */
 export async function serveControl(
   repository: string,
   lock: ControllerLock,
   handle: (request: ControlRequest) => Promise<unknown>,
+  objective?: number,
 ): Promise<Server> {
-  const path = socketPath(repository);
+  const directoryPath = objective
+    ? objectiveRoot(repository, objective)
+    : stateRoot(repository);
+  const path = join(directoryPath, "control.sock");
   if (existsSync(path)) rmSync(path);
   const server = createServer((socket) => {
     socket.setEncoding("utf8");
@@ -59,7 +70,7 @@ export async function serveControl(
     });
     socket.on("error", () => undefined);
   });
-  const directory = openSync(stateRoot(repository), "r");
+  const directory = openSync(directoryPath, "r");
   let directoryOpen = true;
   const closeDirectory = () => {
     if (directoryOpen) {
@@ -91,7 +102,7 @@ export async function serveControl(
 }
 
 /**
- * A foreground `factory run` holds the installation; only that Objective answers. The message
+ * A foreground `factory run` owns only its Objective, and the queue waits for it. The message
  * names the command that does work meanwhile.
  */
 export class ForegroundControllerError extends Error {
@@ -109,17 +120,25 @@ export async function requestControl(
   repository: string,
   request: ControlRequest,
 ): Promise<{ handled: boolean; result?: unknown }> {
-  const owner = readControllerOwner(
-    join(stateRoot(repository), "controller.lock"),
-  );
+  // The service answers for every Objective; otherwise an Objective's own owner does.
+  let owner = liveControllerOwner(installationLockPath(repository));
+  let directoryPath = stateRoot(repository);
+  if (owner) {
+    if (owner.objective !== request.objective && !owner.intake)
+      throw new ForegroundControllerError(owner.objective);
+  } else if (request.objective) {
+    owner = liveControllerOwner(
+      objectiveLockPath(repository, request.objective),
+    );
+    directoryPath = objectiveRoot(repository, request.objective);
+  } else {
+    const foreground = liveObjectiveOwner(repository);
+    if (foreground) throw new ForegroundControllerError(foreground.objective);
+  }
   if (!owner) return { handled: false };
-  const current = linuxProcessIdentity(owner.pid);
-  if (current?.startTime !== owner.startTime || current.state === "Z")
-    return { handled: false };
-  if (owner.objective !== request.objective && !owner.intake)
-    throw new ForegroundControllerError(owner.objective);
+  const token = owner.token;
   return new Promise((resolve, reject) => {
-    const directory = openSync(stateRoot(repository), "r");
+    const directory = openSync(directoryPath, "r");
     const socket = createConnection(`/proc/self/fd/${directory}/control.sock`);
     let directoryOpen = true;
     const closeDirectory = () => {
@@ -133,7 +152,7 @@ export async function requestControl(
     let body = "";
     socket.setEncoding("utf8");
     socket.on("connect", () =>
-      socket.write(`${JSON.stringify({ ...request, token: owner.token })}\n`),
+      socket.write(`${JSON.stringify({ ...request, token })}\n`),
     );
     socket.on("data", (part) => {
       body += part;

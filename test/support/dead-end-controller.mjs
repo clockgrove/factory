@@ -37,10 +37,12 @@ const { composeWithLocalHarness } = await import("../../dist/index.js");
 const { EXIT_COMPLETE, EXIT_NEEDS_DECISION, runOutcome } = await import(
   "../../dist/run-outcome.js"
 );
-const { readContinuation, readControllerOwner } = await import(
-  "../../dist/state-store.js"
-);
-const { linuxProcessIdentity } = await import("../../dist/process.js");
+const {
+  installationLockPath,
+  liveControllerOwner,
+  objectiveLockPath,
+  readContinuation,
+} = await import("../../dist/state-store.js");
 const { requestControl } = await import("../../dist/coordinator-control.js");
 const { continuationStatusDocument } = await import(
   "../../dist/diagnostics.js"
@@ -75,15 +77,15 @@ function readJson(path) {
 /** Whether a live controller owns this Objective, as `factory status` reads it. */
 function controllerActive() {
   try {
-    const owner = readControllerOwner(
-      join(stateRoot(config.repository), "controller.lock"),
+    const installation = liveControllerOwner(
+      installationLockPath(config.repository),
     );
-    if (!owner) return false;
-    const current = linuxProcessIdentity(owner.pid);
-    return (
-      current?.startTime === owner.startTime &&
-      current.state !== "Z" &&
-      (owner.intake === true || owner.objective === objective)
+    if (installation)
+      return (
+        installation.intake === true || installation.objective === objective
+      );
+    return !!liveControllerOwner(
+      objectiveLockPath(config.repository, objective),
     );
   } catch {
     return null;

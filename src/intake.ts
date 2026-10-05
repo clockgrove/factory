@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { checkRequiredEnvironment } from "./repair-policy.js";
+import { requiredProviderCredentials } from "./provider-credentials.js";
 import {
   factoryConfigDigest,
   stateRoot,
@@ -110,11 +111,17 @@ export function readIntake(
   const path = intakePath(config);
   if (!existsSync(path)) return;
   const invalid = (reason: string, queued = false): never => {
+    const remove = `rm ${/^[\w@%+=:,./-]+$/.test(path) ? path : `'${path.replaceAll("'", "'\\''")}'`}`;
+    const setup = `factory setup --background${requiredProviderCredentials(
+      config,
+    )
+      .map((name) => ` --credential-file ${name}=ABSOLUTE_PRIVATE_FILE`)
+      .join("")}`;
     throw new Error(
       `The queue record ${path} cannot be used (${reason}). ${
         queued
-          ? "Run `factory queue list` to see what it holds before deleting it, because deleting drops the queue order; then run `factory setup --background` and `factory queue add N` to start a new queue"
-          : "It is from an earlier build; delete it, then run `factory setup --background` and `factory queue add N` to start a new queue"
+          ? `Run \`factory queue list\` to see what it holds before deleting it, because deleting drops the queue order; then delete it with \`${remove}\`, run \`${setup}\` and \`factory queue add N\` to start a new queue`
+          : `It is from an earlier build; delete it with \`${remove}\`, then run \`${setup}\` and \`factory queue add N\` to start a new queue`
       }`,
     );
   };
@@ -421,12 +428,14 @@ export function resumeWatcherAfterUpgrade(
       !current?.watch ||
       !expected.watch ||
       expected.mode !== "running" ||
-      current.mode !== "draining" ||
+      !["draining", "running"].includes(current.mode) ||
       binding(current) !== binding(expected) ||
       !intakeSettled(config)
     )
       return false;
-    applyControl(config, current, "resume");
+    // A queue that is already running was never drained: the unit had failed
+    // and no owner was there to drain it.
+    if (current.mode === "draining") applyControl(config, current, "resume");
     return true;
   } finally {
     releaseControllerLock(path, lock);

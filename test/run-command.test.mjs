@@ -368,7 +368,7 @@ test("state from an earlier Factory version stops every command with one message
       writeFileSync(leftover, JSON.stringify({ schemaVersion }));
     }
     const objectives = join(stateRoot(config.repository), "objectives");
-    const message = `State from an earlier Factory version: ${join(objectives, "9")}, ${join(objectives, "12")}. v0.2.0 starts fresh: stop and uninstall any old Factory service with the old version (factory supervisor uninstall), then delete those directories, or finish them with the old version first`;
+    const message = `State from an earlier Factory version: ${join(objectives, "9")}, ${join(objectives, "12")}. v0.2.0 starts fresh: run \`factory supervisor uninstall\` (add \`--config PATH\` unless it is the default configuration), then \`rm -r ${join(objectives, "9")} ${join(objectives, "12")}\` (this leaves worktrees and open PRs from that state in place), or finish them with the old version first`;
     await assert.rejects(application.runObjective(1), { message });
     assert.doesNotMatch(
       message,

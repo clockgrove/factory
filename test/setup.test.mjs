@@ -91,7 +91,7 @@ fs.appendFileSync(root+'/calls',process.argv.slice(2).join(' ')+'\\n');
 const file=name=>root+'/'+name;
 const alive=()=>{try{const text=fs.readFileSync('/proc/'+fs.readFileSync(file('pid'),'utf8')+'/stat','utf8');return !['Z','X'].includes(text.slice(text.lastIndexOf(')')+2).split(' ')[0]);}catch{return false;}};
 if(action==='is-system-running'){console.log(fs.existsSync(file('unsupported'))?'offline':'running');}
-else if(action==='is-active'){console.log(fs.existsSync(file('start-failure'))?'failed':alive()?'active':'inactive');}
+else if(action==='is-active'){console.log(fs.existsSync(file('start-failure'))||(!alive()&&fs.existsSync(file('unit-failed')))?'failed':alive()?'active':'inactive');}
 else if(action==='is-enabled'){console.log(fs.existsSync(file('enabled'))?'enabled':'not-found');}
 else if(action==='show'){console.log(alive()?fs.readFileSync(file('pid'),'utf8'):'0');}
 else if(action==='enable'){if(fs.existsSync(file('enable-failure')))process.exit(1);fs.writeFileSync(file('registered'),process.argv[4]);fs.writeFileSync(file('enabled'),'');}
@@ -107,6 +107,7 @@ else if(action==='stop'&&fs.existsSync(file('foreign-at-stop'))){
  fs.rmSync(file('foreign-at-stop'));
 }
 else if(action==='start'&&!alive()&&!fs.existsSync(file('start-failure'))){
+ fs.rmSync(file('unit-failed'),{force:true});
  const unit=fs.readFileSync(fs.readFileSync(file('registered'),'utf8'),'utf8');
  const binding=JSON.parse(unit.split('\\n')[0].slice('# Factory local supervision v1 '.length));
  const args=[binding.cli,'supervisor','serve','--config',binding.config];
@@ -292,33 +293,6 @@ test("actual guided CLI sets up an idle service, verifies its owner and reuses i
     const json = JSON.parse(run(["status", "--json"]).stdout);
     assert.equal(json.service.active, "active");
     assert.equal(json.queue.watch, true);
-  }));
-
-test("guided setup refuses to reuse a retired single-credential service binding", () =>
-  fixture(async ({ root, run, configure }) => {
-    configure();
-    const first = run(["setup", ...background]);
-    assert.equal(first.status, 0, first.stderr + first.stdout);
-    const unit = readFileSync(join(root, "registered"), "utf8");
-    const prefix = "# Factory local supervision v1 ";
-    const text = readFileSync(unit, "utf8");
-    const value = JSON.parse(text.split("\n")[0].slice(prefix.length));
-    value.credential = { name: "KEY", file: join(root, "key") };
-    writeFileSync(
-      unit,
-      `${prefix}${JSON.stringify(value)}\n${text.split("\n").slice(1).join("\n")}`,
-      { mode: 0o600 },
-    );
-    const starts = readFileSync(join(root, "starts"), "utf8");
-    const again = run(["setup", ...background]);
-    assert.equal(again.status, 1, again.stderr + again.stdout);
-    assert.equal(again.document.blocked.stage, "service-binding");
-    assert.match(
-      again.document.blocked.detail,
-      /retired single `credential` field.*--credential-file NAME=/,
-    );
-    assert.equal(readFileSync(join(root, "starts"), "utf8"), starts);
-    assert.equal(readFileSync(unit, "utf8").includes('"credential":'), true);
   }));
 
 test("actual guided configuration-only setup succeeds with unavailable manager and background setup stops at the host", () =>
@@ -845,6 +819,32 @@ function named(run, message, pattern, fill = {}) {
   );
 }
 
+/**
+ * The commands a refusal names, each runnable as the operator would paste it.
+ * `factory X` runs the CLI; anything else runs in a shell. Placeholders are replaced first.
+ */
+function namedCommands(run, env, message, substitutions = {}) {
+  const found = [...message.matchAll(/`([^`]+)`/g)]
+    .map((match) => match[1])
+    .filter((command) => /^(factory|rm|journalctl) /.test(command));
+  assert.ok(found.length, `no command named in: ${message}`);
+  return found.map((command) => {
+    let text = command;
+    for (const [from, to] of Object.entries(substitutions))
+      text = text.replaceAll(from, to);
+    return {
+      command,
+      exec() {
+        const result = text.startsWith("factory ")
+          ? run(text.replace(/^factory /, "").split(" "))
+          : spawnSync("sh", ["-c", text], { encoding: "utf8", env });
+        assert.equal(result.status, 0, `${command}\n${result.stderr}`);
+        return result;
+      },
+    };
+  });
+}
+
 test("while a foreground run holds the lock, status and queue list still read, and a refusal names a command that works", () =>
   fixture(async ({ run, configPath, checkout, env }) => {
     writeFileSync(
@@ -947,11 +947,15 @@ test("an intake.json from an earlier build is refused naming the file and the fi
       assert.ok(refused.stderr.includes(path), refused.stderr);
       assert.match(
         refused.stderr,
-        /delete it, then run `factory setup --background`/,
+        /delete it with `rm \S+`, then run `factory setup --background`/,
       );
     }
-    // Deleting the file, as named, leaves a working empty queue.
-    rmSync(path);
+    // Deleting the file with the named command leaves a working empty queue.
+    const [remove, again] = namedCommands(run, env, run(["status"]).stderr);
+    assert.equal(remove.command, `rm ${path}`);
+    remove.exec();
+    assert.equal(existsSync(path), false);
+    assert.match(again.command, /^factory setup --background$/);
     const empty = run(["queue", "list"]);
     assert.equal(empty.status, 0, empty.stderr);
     assert.deepEqual(empty.document, { objectives: [], dequeued: [] });
@@ -1110,4 +1114,223 @@ test("the pointer for --objective on queue names the number given, inline or nex
     });
     assert.equal(added.status, 0, added.stderr);
     assert.deepEqual(added.document.objectives, [1]);
+  }));
+
+function credentialed(checkout, concurrency) {
+  const config = factoryConfig(checkout, "example/setup");
+  config.execution = {
+    kind: "managed-agent",
+    provider: "openai-agents",
+    concurrency,
+    config: {
+      model: "fixture",
+      reasoningEffort: "low",
+      containerSize: "small",
+      apiKeyEnv: "FACTORY_SERVICE_TEST_KEY",
+      timeoutSeconds: 10,
+    },
+  };
+  config.queue = { pollSeconds: 0.05 };
+  return config;
+}
+
+/** Write a retained Objective 1 preparation under this configuration. */
+async function retainObjective(env, config) {
+  const oldStateHome = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = env.XDG_STATE_HOME;
+  try {
+    const { factoryConfigDigest } = await import("../dist/config.js");
+    const path = statePath(config.repository, 1);
+    saveState(path, {
+      schemaVersion: 8,
+      kind: "preparing",
+      repository: config.repository,
+      objective: 1,
+      runId: "retained-preparation",
+      configDigest: factoryConfigDigest(config),
+      baseSha: "a".repeat(40),
+      objectiveBodyDigest: "b".repeat(64),
+      autonomy: defaultAutonomy,
+      capacity: { concurrency: 1 },
+      issueByItemId: {},
+      coordinator: {
+        mode: "running",
+        phase: "planning",
+        phaseStartedAt: new Date().toISOString(),
+      },
+    });
+    return path;
+  } finally {
+    if (oldStateHome === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = oldStateHome;
+  }
+}
+
+test("a continuation written under another configuration names commands that run, with the credential file", () =>
+  fixture(async ({ root, run, configPath, env, checkout }) => {
+    const credential = join(root, "credential");
+    writeFileSync(credential, "fixture-no-provider-call", { mode: 0o600 });
+    delete env.FACTORY_SERVICE_TEST_KEY;
+    const path = await retainObjective(env, credentialed(checkout, 1));
+    // The queue is written under the changed configuration.
+    writeFileSync(configPath, JSON.stringify(credentialed(checkout, 2)), {
+      mode: 0o600,
+    });
+    const queued = run(["queue", "add", "1"]);
+    assert.equal(queued.status, 0, queued.stdout + queued.stderr);
+    const setup = [
+      "setup",
+      ...background,
+      "--credential-file",
+      `FACTORY_SERVICE_TEST_KEY=${credential}`,
+    ];
+    const refused = run(setup);
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    const detail = refused.document.blocked.detail;
+    assert.match(
+      detail,
+      /continuation was written with a different configuration/,
+    );
+    assert.doesNotMatch(detail, /compatib/);
+    assert.equal(existsSync(join(root, "registered")), false);
+    // Every setup command it names carries the credential the configuration needs.
+    const commands = namedCommands(run, env, detail, {
+      ABSOLUTE_PRIVATE_FILE: credential,
+    });
+    assert.equal(commands.length, 4);
+    assert.match(commands[0].command, /^factory setup --background /);
+    assert.match(commands[1].command, /^factory supervisor uninstall /);
+    assert.match(commands[2].command, /^rm -r \S+\/objectives\/1$/);
+    assert.match(commands[3].command, /^factory setup --background /);
+    for (const { command } of [commands[0], commands[3]])
+      assert.match(
+        command,
+        /--credential-file FACTORY_SERVICE_TEST_KEY=ABSOLUTE_PRIVATE_FILE$/,
+      );
+    // Start fresh: uninstall, remove the Objective's state, set up again.
+    for (const fresh of commands.slice(1)) fresh.exec();
+    assert.equal(existsSync(path), false);
+    assert.equal(run(["status", "--json"]).document.service.active, "active");
+  }));
+
+test("a service bound without the credential a configuration now needs is replaced by the commands start names", () =>
+  fixture(async ({ root, run, configPath, env, checkout }) => {
+    const credential = join(root, "credential");
+    writeFileSync(credential, "fixture-no-provider-call", { mode: 0o600 });
+    delete env.FACTORY_SERVICE_TEST_KEY;
+    // A service registered for a configuration that needs no credential...
+    const plain = factoryConfig(checkout, "example/setup");
+    plain.queue = { pollSeconds: 0.05 };
+    writeFileSync(configPath, JSON.stringify(plain), { mode: 0o600 });
+    const first = run(["setup", ...background]);
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    assert.equal(run(["supervisor", "stop"]).status, 0);
+    // ...then the configuration changes to one that does.
+    writeFileSync(configPath, JSON.stringify(credentialed(checkout, 1)), {
+      mode: 0o600,
+    });
+    const refused = run(["supervisor", "start"]);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /credential bindings \(none\) differ/);
+    const commands = namedCommands(run, env, refused.stderr, {
+      ABSOLUTE_PRIVATE_FILE: credential,
+    });
+    assert.match(
+      commands[1].command,
+      /^factory setup --background --config \S+ --credential-file FACTORY_SERVICE_TEST_KEY=ABSOLUTE_PRIVATE_FILE$/,
+    );
+    commands[0].exec();
+    // The queue record belongs to the earlier configuration: setup refuses and names the way on.
+    const stale = run(
+      commands[1].command
+        .replace(/^factory /, "")
+        .replace("ABSOLUTE_PRIVATE_FILE", credential)
+        .split(" "),
+    );
+    assert.equal(stale.status, 1, stale.stdout + stale.stderr);
+    const next = namedCommands(run, env, stale.document.blocked.detail, {
+      ABSOLUTE_PRIVATE_FILE: credential,
+    });
+    // The queue record holds an order, so the refusal first names the command that reads it.
+    assert.equal(next[0].command, "factory queue list");
+    assert.match(next[1].command, /^rm \S+intake\.json$/);
+    next[1].exec();
+    next[2].exec();
+    assert.equal(run(["status", "--json"]).document.service.active, "active");
+  }));
+
+test("a package that does not start says where its refusal is, and the way back leaves the service running", () =>
+  fixture(async ({ root, run, configure, env }) => {
+    configure();
+    writeFileSync(
+      join(root, "bin/journalctl"),
+      `#!/bin/sh\ncat ${JSON.stringify(join(root, "service-error"))}\n`,
+      { mode: 0o700 },
+    );
+    const ready = run(["setup", ...background]);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    const previous = ready.document.artifact;
+    const candidate = join(root, "candidate-cli.mjs");
+    writeFileSync(
+      candidate,
+      `import{writeFileSync}from"node:fs";writeFileSync(${JSON.stringify(join(root, "unit-failed"))},"");console.error("State from an earlier Factory version: start fresh");process.exit(1);\n`,
+    );
+    const failed = run(["supervisor", "upgrade", "--cli", candidate]);
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.match(
+      failed.stderr,
+      /has not established its exact coordinator owner/,
+    );
+    const all = namedCommands(run, env, failed.stderr);
+    const named = (prefix) =>
+      all.find(({ command }) => command.startsWith(prefix));
+    const log = named("journalctl");
+    const back = named("factory supervisor upgrade");
+    assert.match(log.command, /^journalctl --user -u factory-/);
+    assert.match(log.exec().stdout, /start fresh/);
+    assert.match(back.command, new RegExp(`--cli ${previous}`));
+    // The way back restarts the service on its own: no start command follows.
+    assert.equal(named("factory supervisor start"), undefined);
+    back.exec();
+    const status = run(["status", "--json"]).document.service;
+    assert.equal(status.active, "active");
+    assert.equal(status.binding.cli, previous);
+  }));
+
+test("start refuses a queue record without the service switch or with an unsupported field, naming commands that run", () =>
+  fixture(async ({ run, configure, env }) => {
+    configure();
+    const ready = run(["setup", ...background]);
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+    assert.equal(run(["queue", "add", "1"]).status, 0);
+    assert.equal(run(["supervisor", "stop"]).status, 0);
+    assert.equal(run(["queue", "resume"]).status, 0);
+    const path = join(
+      env.XDG_STATE_HOME,
+      "clockgrove-factory/repositories/example/setup/intake.json",
+    );
+    const record = JSON.parse(readFileSync(path, "utf8"));
+    // No service switch: the named setup command establishes it.
+    const { watch: _watch, ...unserved } = record;
+    writeFileSync(path, JSON.stringify(unserved));
+    const unset = run(["supervisor", "start"]);
+    assert.equal(unset.status, 1);
+    const [setup] = namedCommands(run, env, unset.stderr);
+    assert.match(setup.command, /^factory setup --background$/);
+    setup.exec();
+    assert.equal(run(["status", "--json"]).document.service.active, "active");
+    // An unsupported field: delete the record with the named command, then set up again.
+    assert.equal(run(["supervisor", "stop"]).status, 0);
+    writeFileSync(
+      path,
+      JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), extra: 1 }),
+    );
+    const unsupported = run(["supervisor", "start"]);
+    assert.equal(unsupported.status, 1);
+    assert.doesNotMatch(unsupported.stderr, /compatib/);
+    const [remove, again] = namedCommands(run, env, unsupported.stderr);
+    assert.equal(remove.command, `rm ${path}`);
+    remove.exec();
+    again.exec();
+    assert.equal(run(["status", "--json"]).document.service.active, "active");
   }));

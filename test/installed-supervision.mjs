@@ -134,7 +134,6 @@ writeFileSync(
         "session independence",
         "duplicate setup",
         "restart identity",
-        "safe upgrade refusal",
         "stop/disable/uninstall retention",
       ],
       disposition:
@@ -238,16 +237,9 @@ try {
   report.checks.push(
     "ordinary manager restart preserves paused continuation and run identity",
   );
-  const incompatible = join(evidence, "old-cli.mjs");
-  writeFileSync(incompatible, 'console.log("unsupported command")');
-  assert.throws(() => run("supervisor", "upgrade", "--cli", incompatible));
-  assert.equal(JSON.parse(run("status", "--json")).service.active, "active");
-  report.checks.push(
-    "incompatible artifact refuses before stopping live owner",
-  );
   run("supervisor", "upgrade", "--cli", cli);
   assert.equal(snapshot().runId, state.runId);
-  report.checks.push("compatible exact-artifact handoff and restart");
+  report.checks.push("exact-artifact handoff and restart");
   run("supervisor", "stop", "--disable");
   const disabled = JSON.parse(run("status", "--json")).service;
   assert.equal(disabled.registered, true);

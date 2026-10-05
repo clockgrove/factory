@@ -4,7 +4,6 @@ import {
   requiredProviderCredentials,
   validateCredentialFile,
 } from "./provider-credentials.js";
-import type { ContinuationState } from "./state.js";
 import {
   readIntake,
   intakeSettled,
@@ -35,7 +34,11 @@ import {
 } from "./config.js";
 import { requestControl } from "./coordinator-control.js";
 import { command, linuxProcessIdentity } from "./process.js";
-import { readContinuation, readControllerOwner } from "./state-store.js";
+import {
+  readContinuation,
+  readControllerOwner,
+  statePath,
+} from "./state-store.js";
 
 interface ServiceBinding {
   /** Set by a unit that an earlier build bound to one Objective; only teardown reads it. */
@@ -188,22 +191,16 @@ function privateFile(path: string): void {
   )
     throw new Error(`Expected an owner-private file: ${path}`);
 }
-export const LEGACY_CREDENTIAL_BINDING =
-  "This service binding uses the retired single `credential` field; run `factory supervisor uninstall`, then `factory setup --background --credential-file NAME=ABSOLUTE_PRIVATE_FILE`";
-
 export const LEGACY_SERVICE_BINDING =
   "This service was bound to one Objective by an earlier Factory version; run `factory supervisor uninstall`, then `factory setup --background`";
 
 /**
- * Only stop and uninstall may act on a retired binding (a single credential, or
- * one bound to an Objective), so an operator can remove it; nothing reuses or rewrites it.
+ * Only stop and uninstall may act on a retired binding (one bound to an Objective), so an operator can remove it; nothing reuses or rewrites it.
  */
 function decodeBinding(text: string, teardown = false): ServiceBinding {
   if (!text.startsWith(marker))
     throw new Error("Refusing a service not registered by Factory");
   const value = JSON.parse(text.split("\n")[0]!.slice(marker.length));
-  if (!teardown && value && typeof value === "object" && "credential" in value)
-    throw new Error(LEGACY_CREDENTIAL_BINDING);
   if (
     !teardown &&
     value &&
@@ -273,7 +270,7 @@ function inspectBinding(
   const health: BindingHealth = {
     status: registered ? "unusable" : "unregistered",
     limitation:
-      "Local binding checks only; provider readiness, state compatibility and running ownership are not verified.",
+      "Local binding checks only; provider readiness, the state version and running ownership are not verified.",
     diagnostics: [],
   };
   const report = (code: string, message: string, action: string) =>
@@ -301,13 +298,7 @@ function inspectBinding(
   try {
     value = decodeBinding(text);
   } catch (error) {
-    if (error instanceof Error && error.message === LEGACY_CREDENTIAL_BINDING)
-      report(
-        "legacy-credential-binding",
-        "The unit uses the retired single-credential binding.",
-        LEGACY_CREDENTIAL_BINDING,
-      );
-    else if (error instanceof Error && error.message === LEGACY_SERVICE_BINDING)
+    if (error instanceof Error && error.message === LEGACY_SERVICE_BINDING)
       report(
         "legacy-service-binding",
         "The unit is bound to one Objective, as earlier Factory versions did.",
@@ -344,7 +335,7 @@ function inspectBinding(
     report(
       "missing-cli",
       "The bound installed CLI is missing or unreadable.",
-      "Run `factory supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI` with a compatible durable installation; the supported upgrade drains the owner and validates state.",
+      "Use `factory supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI` to point the service at an installed package. The upgrade drains the owner first and does not check the package; the new package refuses state it cannot read when the service starts.",
     );
   if (!health.checks.config)
     report(
@@ -426,29 +417,46 @@ export function renderService(value: ServiceBinding): string {
       "\n",
     )}\n${(value.credentials ?? []).map(({ name, file }) => `LoadCredential=${quoted(`${name}:${file}`, false)}\n`).join("")}KillMode=process\nKillSignal=SIGTERM\nSendSIGKILL=no\nTimeoutStopSec=infinity\nRestart=on-failure\nSuccessExitStatus=2\nRestartPreventExitStatus=1 2\nRestartSec=5s\n[Install]\nWantedBy=default.target\n`;
 }
-function checkServiceContinuationFields(state: ContinuationState): void {
-  // Older installed artifacts must refuse newer continuation fields rather than silently drop them.
-  const fields =
-    state.schemaVersion === 8
-      ? "schemaVersion kind repository objective runId configDigest baseSha objectiveBodyDigest sourcePacketDigest autonomy capacity charges planningRecovery coordinator plan issueByItemId issueAuthor error cancelRequested cancelledAt permanentAbandonment repeats wait"
-      : "schemaVersion repository objective runId configDigest baseSha autonomy capacity planGraphDigest prerequisitesDigest coordinator graph graphRevisions pendingAmendment rejectedAmendments charges planningRecovery backlogDiscoveries objectiveCommands issueByItemId issueAuthor work stackNumbers stackMerges integratedSha finalHead finalValidation finalAcceptance finalAcceptancePending finalAcceptanceDecisions objectiveBodyDigest objectiveClosure cancelRequested cancelledAt error repeats wait";
-  for (const field of Object.keys(state))
-    if (!fields.split(" ").includes(field))
-      throw new Error(
-        `This artifact cannot validate continuation field ${field}; use the Factory version that wrote the state`,
-      );
+/** A shell word for a command shown to the operator: plain when safe, single-quoted otherwise. */
+function word(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value)
+    ? value
+    : `'${value.replaceAll("'", "'\\''")}'`;
 }
-/** Continuation state an Objective already has must match this installation and be readable by this artifact. */
+/** The exact `factory supervisor ACTION` command an operator can paste. */
+function supervisorCommand(
+  action: string,
+  configPath: string,
+  target: { cli?: string } = {},
+): string {
+  const parts = ["factory", "supervisor", action];
+  if (target.cli) parts.push("--cli", word(target.cli));
+  parts.push("--config", word(resolve(configPath)));
+  return parts.join(" ");
+}
+/** The exact `factory setup --background` command that registers the service again, with a credential file for each required provider. */
+function setupCommand(configPath: string, credentials: string[]): string {
+  return [
+    "factory setup --background --config",
+    word(resolve(configPath)),
+    ...credentials.map(
+      (name) => `--credential-file ${name}=ABSOLUTE_PRIVATE_FILE`,
+    ),
+  ].join(" ");
+}
+/** Continuation state an Objective already has must match this installation. */
 export function checkServiceState(
   config: FactoryConfig,
   objective: number,
+  configPath: string,
 ): void {
   const state = readContinuation(config.repository, objective);
-  if (state) checkServiceContinuationFields(state);
-  if (state && state.configDigest !== factoryConfigDigest(config))
+  if (state && state.configDigest !== factoryConfigDigest(config)) {
+    const setup = setupCommand(configPath, requiredProviderCredentials(config));
     throw new Error(
-      "Continuation configuration differs; refusing compatibility claim",
+      `Objective ${objective} continuation was written with a different configuration. To continue it, restore that configuration at ${resolve(configPath)}, then run \`${setup}\`. To start fresh instead, run \`${supervisorCommand("uninstall", configPath)}\`, then \`rm -r ${word(dirname(statePath(config.repository, objective)))}\`, then \`${setup}\``,
     );
+  }
 }
 function hasOwner(config: FactoryConfig): boolean {
   const owner = readControllerOwner(
@@ -459,13 +467,16 @@ function hasOwner(config: FactoryConfig): boolean {
     current && current.startTime === owner?.startTime && current.state !== "Z",
   );
 }
-export function checkIntakeServiceState(config: FactoryConfig): void {
+export function checkIntakeServiceState(
+  config: FactoryConfig,
+  configPath: string,
+): void {
   const intake = readIntake(config);
   if (!intake?.watch)
     throw new Error(
       "The background service is not set up; run `factory setup --background`",
     );
-  for (const id of intake.objectives) checkServiceState(config, id);
+  for (const id of intake.objectives) checkServiceState(config, id, configPath);
 }
 
 /**
@@ -521,20 +532,8 @@ async function verifyServiceOwner(
     await pause(100);
   }
   throw new Error(
-    `Service has not established its exact coordinator owner; inspect \`factory status\` and retained evidence${readIntake(config)?.mode === "draining" ? "; the queue is draining, so `factory queue resume` is needed before the service stays up" : ""}`,
+    `Service has not established its exact coordinator owner. The service log has the reason (a package that refuses the retained state says so there): \`journalctl --user -u ${name} -n 50 --no-pager\`. Inspect \`factory status\` and retained evidence, which are untouched${readIntake(config)?.mode === "draining" ? "; the queue is draining, so `factory queue resume` is needed before the service stays up" : ""}`,
   );
-}
-function validateArtifact(value: ServiceBinding): void {
-  const result = command(
-    value.node,
-    [value.cli, "supervisor", "check", "--config", value.config],
-    undefined,
-    { ...process.env, ...value.environment, XDG_STATE_HOME: value.stateHome },
-  );
-  if (result !== "factory-supervision-compatible-v1")
-    throw new Error(
-      "Candidate does not affirm state compatibility; no service switch performed",
-    );
 }
 function saveUnit(path: string, value: ServiceBinding): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -554,10 +553,6 @@ export async function supervise(
   } = {},
 ): Promise<unknown> {
   const config = readConfig(configPath);
-  if (action === "check") {
-    checkIntakeServiceState(config);
-    return "factory-supervision-compatible-v1";
-  }
   const path = unitPath(config),
     name = serviceName(config.repository);
   if (action === "status") {
@@ -596,11 +591,11 @@ export async function supervise(
       ),
       environment,
     };
-    checkIntakeServiceState(config);
+    checkIntakeServiceState(config, configPath);
     if (existsSync(path)) {
       if (JSON.stringify(binding(config)) !== JSON.stringify(value))
         throw new Error(
-          "Different service already registered; use an explicit upgrade after drain",
+          `Different service already registered. To replace it, run \`${supervisorCommand("uninstall", configPath)}\`, then \`${setupCommand(configPath, requiredProviderCredentials(config))}\`. \`supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI\` changes only the package`,
         );
     } else saveUnit(path, value);
     systemctl("daemon-reload");
@@ -621,11 +616,13 @@ export async function supervise(
       bound.some((name) => !required.includes(name) && !optional.includes(name))
     )
       throw new Error(
-        `Service credential bindings differ from the configured providers (${required.join(", ") || "none"}); run \`factory setup --background --credential-file NAME=ABSOLUTE_PRIVATE_FILE\``,
+        `Service credential bindings (${bound.join(", ") || "none"}) differ from the configured providers (${required.join(", ") || "none"}). Run \`${supervisorCommand("uninstall", configPath)}\`, then \`${setupCommand(configPath, required)}\``,
       );
     for (const { name, file } of value.credentials ?? [])
       validateCredentialFile(config, name, file);
-    validateArtifact(value);
+    // Refuse retained state this installation cannot continue here, with its
+    // remedy, instead of starting a service that exits with it in the log.
+    checkIntakeServiceState(config, configPath);
     if (hasOwner(config) && inspect("is-active", name) !== "active")
       throw new Error(
         "An existing foreground owner must hand off before service start",
@@ -648,9 +645,10 @@ export async function supervise(
       if (!input.cli || !isAbsolute(input.cli))
         throw new Error("upgrade requires --cli ABSOLUTE_INSTALLED_CLI");
       candidate = { ...value, cli: realpathSync(input.cli) };
-      validateArtifact(candidate);
     }
-    const wasActive = inspect("is-active", name) === "active";
+    // A failed unit is one that should be running: upgrading it, as when returning from a
+    // package that refused the retained state, starts it again.
+    const wasActive = ["active", "failed"].includes(inspect("is-active", name));
     const beforeIntake = candidate ? readIntake(config) : undefined;
     const resumeIdleWatcher =
       wasActive &&
@@ -660,7 +658,6 @@ export async function supervise(
     await handoffService(config, undefined, value.objective);
     systemctl("stop", name);
     if (candidate) {
-      validateArtifact(candidate);
       saveUnit(path, candidate);
       systemctl("daemon-reload");
       const restart = beforeIntake?.watch
@@ -668,7 +665,13 @@ export async function supervise(
         : wasActive;
       if (restart) {
         systemctl("start", name);
-        await verifyServiceOwner(config, name);
+        try {
+          await verifyServiceOwner(config, name);
+        } catch (error) {
+          throw new Error(
+            `${(error as Error).message}. The unit now runs ${candidate.cli}; to return to the previous package, which restarts the service, run \`${supervisorCommand("upgrade", configPath, { cli: value.cli })}\``,
+          );
+        }
       }
       return {
         artifact: candidate.cli,

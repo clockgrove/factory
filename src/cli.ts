@@ -202,7 +202,7 @@ async function supervisorCommand(args: string[], path: string): Promise<void> {
         : [],
     );
     loadServiceLoginCredentials(config, loaded);
-    checkIntakeServiceState(config);
+    checkIntakeServiceState(config, path);
     reportIntake(await compose(config, loaded).runIntake());
     return;
   }

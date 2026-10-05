@@ -153,10 +153,7 @@ test("a disabled isolated unit remains upgradeable without enabling or starting 
     await install(configPath);
     await supervise("stop", configPath, { disable: true });
     const candidate = join(root, "compatible-cli.mjs");
-    writeFileSync(
-      candidate,
-      'console.log("factory-supervision-compatible-v1")',
-    );
+    writeFileSync(candidate, "");
     const result = await supervise("upgrade", configPath, { cli: candidate });
     assert.equal(result.restarted, false);
     const status = await supervise("status", configPath);
@@ -168,38 +165,6 @@ test("a disabled isolated unit remains upgradeable without enabling or starting 
     );
     await supervise("uninstall", configPath);
     assert.equal((await supervise("status", configPath)).registered, false);
-  }));
-
-test("incompatible rollback refuses before draining or changing unit", () =>
-  fixture(async ({ root, config, configPath }) => {
-    await install(configPath);
-    const path = join(
-        process.env.XDG_CONFIG_HOME,
-        "systemd/user",
-        serviceName(config.repository),
-      ),
-      before = readFileSync(path);
-    const old = join(root, "old-cli.mjs");
-    writeFileSync(old, 'console.log("unrecognized command")');
-    await assert.rejects(
-      supervise("upgrade", configPath, { cli: old }),
-      /does not affirm/,
-    );
-    assert.deepEqual(readFileSync(path), before);
-    assert.doesNotMatch(
-      readFileSync(join(root, "calls"), "utf8"),
-      /--user stop/,
-    );
-  }));
-
-test("state compatibility refuses future fields without altering state", () =>
-  fixture(async ({ config, state }) => {
-    state.futureAuthority = { automaticSpend: true };
-    saveState(statePath(config.repository, 1), state);
-    assert.throws(
-      () => checkServiceState(config, 1),
-      /cannot validate continuation field/,
-    );
   }));
 
 test("service requires private configuration and matching continuation", () =>
@@ -214,7 +179,7 @@ test("service requires private configuration and matching continuation", () =>
     saveState(statePath(config.repository, 1), state);
     await assert.rejects(
       install(configPath),
-      /Continuation configuration differs/,
+      /continuation was written with a different configuration/,
     );
   }));
 
@@ -277,14 +242,14 @@ test("the service pins its mode, needs the background setup and refuses unknown 
     delete value.watch;
     writeFileSync(path, JSON.stringify(value));
     assert.throws(
-      () => checkIntakeServiceState(config),
+      () => checkIntakeServiceState(config, "/c.json"),
       /run `factory setup --background`/,
     );
     value.watch = true;
     value.futureAuthority = true;
     writeFileSync(path, JSON.stringify(value));
     assert.throws(
-      () => checkIntakeServiceState(config),
+      () => checkIntakeServiceState(config, "/c.json"),
       (error) =>
         error.message.includes(path) &&
         /unsupported field futureAuthority.*delete it/.test(error.message),
@@ -293,11 +258,14 @@ test("the service pins its mode, needs the background setup and refuses unknown 
     delete value.futureAuthority;
     value.serviceConsent = { actor: "x", reason: "y", consent: true };
     writeFileSync(path, JSON.stringify(value));
-    assert.throws(() => checkIntakeServiceState(config), /unsupported field/);
+    assert.throws(
+      () => checkIntakeServiceState(config, "/c.json"),
+      /unsupported field/,
+    );
     // The fix it names: delete the file, and the service check says to set up the background service.
     rmSync(path);
     assert.throws(
-      () => checkIntakeServiceState(config),
+      () => checkIntakeServiceState(config, "/c.json"),
       /run `factory setup --background`/,
     );
   }));
@@ -348,7 +316,7 @@ test("service start requires the exact coordinator owner", () =>
     );
     await assert.rejects(
       supervise("start", configPath),
-      /has not established its exact coordinator owner; inspect `factory status`/,
+      /has not established its exact coordinator owner/,
     );
   }));
 
@@ -478,43 +446,13 @@ test("a supervised Claude planning service keeps the Claude login and may bind a
     ]);
   }));
 
-test("a retired single-credential binding is refused for reuse and only removable", () =>
-  fixture(async ({ root, config, configPath }) => {
+test("supervisor has no state-compatibility handshake action", () =>
+  fixture(async ({ configPath }) => {
     await install(configPath);
-    const path = join(
-      process.env.XDG_CONFIG_HOME,
-      "systemd/user",
-      serviceName(config.repository),
-    );
-    const prefix = "# Factory local supervision v1 ";
-    const value = JSON.parse(
-      readFileSync(path, "utf8").split("\n")[0].slice(prefix.length),
-    );
-    value.credential = { name: "KEY", file: join(root, "key") };
-    writeFileSync(path, renderService(value), { mode: 0o600 });
-    const legacy =
-      /retired single `credential` field.*factory setup --background --credential-file NAME=/;
     await assert.rejects(
-      supervise("upgrade", configPath, { cli: process.argv[1] }),
-      legacy,
+      supervise("check", configPath, { objective: 1 }),
+      /Unknown supervisor action: check/,
     );
-    await assert.rejects(supervise("start", configPath), legacy);
-    await assert.rejects(install(configPath), legacy);
-    assert.match(readFileSync(path, "utf8"), /"credential":/);
-    const status = await supervise("status", configPath);
-    assert.equal(status.binding, undefined);
-    assert.equal(
-      status.bindingHealth.diagnostics[0].code,
-      "legacy-credential-binding",
-    );
-    assert.match(status.bindingHealth.diagnostics[0].action, legacy);
-    assert.deepEqual(await supervise("uninstall", configPath), {
-      stopped: true,
-      evidenceRetained: true,
-    });
-    assert.equal(existsSync(path), false);
-    await install(configPath);
-    assert.doesNotMatch(readFileSync(path, "utf8"), /"credential":/);
   }));
 
 test("a service bound to one Objective by an earlier version is refused for reuse and only removable", () =>
@@ -550,6 +488,28 @@ test("a service bound to one Objective by an earlier version is refused for reus
       evidenceRetained: true,
     });
     assert.equal(existsSync(path), false);
+  }));
+
+test("install over a different registered service names uninstall and the setup command", () =>
+  fixture(async ({ config, configPath }) => {
+    await install(configPath);
+    const unitFile = join(
+      process.env.XDG_CONFIG_HOME,
+      "systemd/user",
+      serviceName(config.repository),
+    );
+    const prefix = "# Factory local supervision v1 ";
+    const value = JSON.parse(
+      readFileSync(unitFile, "utf8").split("\n")[0].slice(prefix.length),
+    );
+    value.cli = "/different/cli.js";
+    writeFileSync(unitFile, renderService(value), { mode: 0o600 });
+    await assert.rejects(
+      install(configPath),
+      (error) =>
+        error.message.includes("`factory supervisor uninstall --config ") &&
+        error.message.includes("`factory setup --background --config "),
+    );
   }));
 
 test("uninstalling a service an earlier version bound to one Objective hands off its running owner", () =>
@@ -632,10 +592,7 @@ test("supervised install and upgrade retain the caller's nonsecret SQLite path",
       ),
     );
     const candidate = join(root, "compatible-cli.mjs");
-    writeFileSync(
-      candidate,
-      'console.log("factory-supervision-compatible-v1")',
-    );
+    writeFileSync(candidate, "");
     process.env.CODEX_SQLITE_HOME = join(root, "different-host-value");
     await supervise("upgrade", configPath, { cli: candidate });
     assert.equal(
@@ -858,11 +815,7 @@ test("the background setup covers queued Objectives and leaves their continuatio
     await enqueueIntake(config, github, [1]);
     saveState(statePath(config.repository, 1), state);
     const before = readFileSync(statePath(config.repository, 1));
-    checkIntakeServiceState(config);
-    assert.equal(
-      await supervise("check", configPath),
-      "factory-supervision-compatible-v1",
-    );
-    checkServiceState(config, 1);
+    checkIntakeServiceState(config, "/c.json");
+    checkServiceState(config, 1, "/c.json");
     assert.deepEqual(readFileSync(statePath(config.repository, 1)), before);
   }));

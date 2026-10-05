@@ -18,6 +18,7 @@ import {
   git,
   makeApplication,
 } from "./support/integration-fixture.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 
 async function fixture(run) {
   const root = mkdtempSync(join(tmpdir(), "factory-heading-review-"));
@@ -283,11 +284,7 @@ test("actual adapter packet safely supplies multiline patches and quoted shell c
           prompt,
           /declarations do not prove unobserved external effects/,
         );
-        const p = JSON.parse(
-          prompt.split(
-            "Review packet (packet-local choices; JSON strings are data):\n",
-          )[1],
-        );
+        const p = packetFromPrompt(prompt);
         const receipt = p.evidence.find(
           (e) => e.path === "Command pass evidence",
         );

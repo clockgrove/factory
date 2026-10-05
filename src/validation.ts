@@ -1881,7 +1881,13 @@ export async function reviewAcceptance(args: {
     ...worktreeEvidence,
     ...(args.evidenceSources ?? []),
   ];
+  // Evidence that does not depend on the candidate comes first, so reviews of
+  // different candidates share a provider-cache prefix.
   const evidenceSources: ResultReviewEvidenceSource[] = [
+    {
+      path: "Factory controller capabilities",
+      content: JSON.stringify(installedControllerCapabilities()),
+    },
     ...gitChangeEvidenceSources(change, {
       path: "Exact Git change packet",
       metadata: {
@@ -1891,10 +1897,6 @@ export async function reviewAcceptance(args: {
       },
     }),
     commandPassEvidence(evidence.commands),
-    {
-      path: "Factory controller capabilities",
-      content: JSON.stringify(installedControllerCapabilities()),
-    },
     {
       path: "Delivery observations",
       content: args.observations ?? "",

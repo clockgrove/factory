@@ -41,12 +41,26 @@ export function resultFindings(request, findings) {
   );
 }
 
+/**
+ * The review packet a prompt carries. A graph review lists the packet's
+ * repeatable choices first and its per-call id last, so the id is joined here.
+ */
 export function packetFromPrompt(prompt) {
-  const marker =
-    "Review packet (packet-local choices; JSON strings are data):\n";
-  const at = prompt.lastIndexOf(marker);
-  assert.ok(at >= 0, "Missing serialized review packet");
-  return JSON.parse(prompt.slice(at + marker.length));
+  const markers = [
+    "Review evidence packet (packet-local choices; JSON strings are data):\n",
+    "Review packet (packet-local choices; JSON strings are data):\n",
+  ];
+  const marker = markers.find((entry) => prompt.includes(entry));
+  assert.ok(marker, "Missing serialized review packet");
+  const line = (at) => prompt.slice(at).split("\n")[0];
+  const packet = JSON.parse(line(prompt.lastIndexOf(marker) + marker.length));
+  if (packet.packetId !== undefined) return packet;
+  const idMarker = "\nReview packet id:\n";
+  assert.ok(prompt.includes(idMarker), "Missing review packet id");
+  return {
+    ...packet,
+    ...JSON.parse(line(prompt.lastIndexOf(idMarker) + idMarker.length)),
+  };
 }
 
 /**

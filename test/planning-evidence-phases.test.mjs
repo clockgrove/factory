@@ -20,6 +20,7 @@ import {
 } from "./support/compiler-wire.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 
 const image = readFileSync(
   new URL("./fixtures/disposable-target/assets/source.png", import.meta.url),
@@ -149,11 +150,7 @@ test("rendered compiler and plan reviewer carry the source commands and stop uns
         response.items[0].citations = [{ choiceIndex: 0 }];
         response = encodeCompilerWire(response, prompt);
       } else {
-        const packet = JSON.parse(
-          prompt.split(
-            "Review evidence packet (packet-local choices; JSON strings are data):\n",
-          )[1],
-        );
+        const packet = packetFromPrompt(prompt);
         const source = packet.evidence.find(
           (entry) => entry.path === "OBJECTIVE",
         );

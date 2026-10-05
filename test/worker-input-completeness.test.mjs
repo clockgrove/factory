@@ -19,6 +19,7 @@ import {
 import { isGraphReviewSchema } from "./support/review-protocol.mjs";
 import { createTarget } from "./support/integration-fixture.mjs";
 import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 
 // Scripted SDK responses exercise the real planning/revision/prompt boundary,
 // not live model judgment. No worker or source-declared command is executed.
@@ -142,11 +143,7 @@ test("review repairs required implementation content without moving later valida
         });
         // The supervisor sees the command even when this item's prompt does not.
         assert.ok(prompt.includes(laterCommand));
-        const packet = JSON.parse(
-          prompt.split(
-            "Review evidence packet (packet-local choices; JSON strings are data):\n",
-          )[1],
-        );
+        const packet = packetFromPrompt(prompt);
         const evidence = packet.evidence.find(
           (entry) =>
             entry.path === "OBJECTIVE" && entry.content.includes(requirement),

@@ -21,6 +21,7 @@ import {
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 const Ajv = createRequire(import.meta.url)("ajv");
 const commands = [
   "test -s README.md",
@@ -147,11 +148,7 @@ async function fixture(delivery, action, options = {}) {
             "Review evidence packet (packet-local choices; JSON strings are data):\n",
           )
         ) {
-          const packet = JSON.parse(
-            prompt.split(
-              "Review evidence packet (packet-local choices; JSON strings are data):\n",
-            )[1],
-          );
+          const packet = packetFromPrompt(prompt);
           response = {
             packetId: packet.packetId,
             findings: options.requireImplementation
@@ -173,11 +170,7 @@ async function fixture(delivery, action, options = {}) {
           };
           captures.push({ phase: "graph-review", packet, response });
         } else {
-          const packet = JSON.parse(
-            prompt.split(
-              "Review packet (packet-local choices; JSON strings are data):\n",
-            )[1],
-          );
+          const packet = packetFromPrompt(prompt);
           const observation = JSON.parse(
             packet.evidence.find(
               (entry) => entry.path === "Delivery observations",

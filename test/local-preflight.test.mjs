@@ -37,6 +37,7 @@ import {
   makeApplication,
   readEvents,
 } from "./support/integration-fixture.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 
 async function fixture(run) {
   const root = mkdtempSync(join(tmpdir(), "factory-preflight-"));
@@ -519,11 +520,7 @@ test("actual planning packets carry presence without executing acceptance, and b
           args.prompt,
         );
       if (args.defaultPhase === "graph-review") {
-        const packet = JSON.parse(
-          args.prompt.split(
-            "\nReview evidence packet (packet-local choices; JSON strings are data):\n",
-          )[1],
-        );
+        const packet = packetFromPrompt(args.prompt);
         const evidenceIndex = packet.evidence.findIndex(
           (entry) => entry.path === "FACTORY_LOCAL_EXECUTABLE_OBSERVATIONS",
         );

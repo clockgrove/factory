@@ -11,6 +11,7 @@ import {
   installedControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
 } from "../dist/controller-capabilities.js";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 
 // Captures production prompts at the SDK seam. Scripted answers prove prompt
 // contracts, not a live model's ability to apply them to arbitrary criteria.
@@ -56,11 +57,7 @@ test("compile and independent graph review expose the pre-delivery boundary for 
       const response = isCompileSchema(options?.outputSchema)
         ? compilerResponse(prompt, scripted.items)
         : {
-            packetId: JSON.parse(
-              prompt.split(
-                "Review evidence packet (packet-local choices; JSON strings are data):\n",
-              )[1],
-            ).packetId,
+            packetId: packetFromPrompt(prompt).packetId,
             ...scripted,
           };
       return {

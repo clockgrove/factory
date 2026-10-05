@@ -311,20 +311,10 @@ export function compilerWire(
       },
     },
   });
+  // Stable content first, so repeated and revised compilations share a
+  // provider-cache prefix; the revision-specific parts and the context
+  // identity, which hashes them, come last.
   const data = {
-    contextId,
-    instructions: context.instructions,
-    ...(retainedItems.size
-      ? {
-          retainedItems: [...retainedItems.values()].map((item) => ({
-            id: item.id,
-            kind: item.kind ?? "work",
-            acceptance: item.acceptance,
-            validation: item.validation,
-            dependencies: item.dependencies,
-          })),
-        }
-      : {}),
     obligations: obligations.map((entry, obligationIndex) => ({
       obligationIndex,
       text: entry.source.text,
@@ -349,6 +339,19 @@ export function compilerWire(
     executionProfiles: request.executionProfiles ?? null,
     executionBounds: request.executionBounds ?? null,
     checkNames: checkNames.map((name, checkIndex) => ({ checkIndex, name })),
+    instructions: context.instructions,
+    ...(retainedItems.size
+      ? {
+          retainedItems: [...retainedItems.values()].map((item) => ({
+            id: item.id,
+            kind: item.kind ?? "work",
+            acceptance: item.acceptance,
+            validation: item.validation,
+            dependencies: item.dependencies,
+          })),
+        }
+      : {}),
+    contextId,
   };
   return {
     schema,

@@ -28,7 +28,7 @@ const discovery = {
   dependencies: ["result"],
 };
 const body =
-  "## Acceptance\n- result.txt exists\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
+  "## Acceptance\n- `test -s result.txt`\n\n## Commands\n- test -s result.txt\n\n";
 function item(id = "result", dependencies = []) {
   return {
     kind: "work",

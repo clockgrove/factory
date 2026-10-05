@@ -69,9 +69,8 @@ const body = `# Packed harness Objective
 
 ## Acceptance
 - one.txt contains the scripted adapter result
-
-## Final validation
 - \`grep -qx 'packed harness' one.txt\`
+
 `;
 const baseSha = git("rev-parse", "HEAD");
 const graph = {

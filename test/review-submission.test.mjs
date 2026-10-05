@@ -29,7 +29,7 @@ import { withCoverage } from "./support/coverage.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
 
 const body =
-  "## Acceptance\n- result.txt exists\n\n## Commands\n- test -s result.txt\n\n## Final validation\n- test -s result.txt\n";
+  "## Acceptance\n- `test -s result.txt`\n\n## Commands\n- test -s result.txt\n\n";
 function item(id, kind = "work", dependencies = []) {
   return {
     id,

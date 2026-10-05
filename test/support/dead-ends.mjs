@@ -208,7 +208,7 @@ function temporary(prefix) {
 
 const objectiveBody = () => {
   const commands = ITEMS.map((item) => item.validation[0].command);
-  return `# Deterministic Objective\n\n## Acceptance\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`;
+  return `# Deterministic Objective\n\n## Acceptance\n${commands.map((c) => `- \`${c}\``).join("\n")}`;
 };
 
 function descriptorFor(root, delivery, baseSha) {

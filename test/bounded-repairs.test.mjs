@@ -96,7 +96,7 @@ const item = (id = "result", dependencies = []) => ({
   requiredLfsRoles: [],
 });
 const body =
-  "# Recovery fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n";
+  "# Recovery fixture\n## Acceptance\n- `test -s result.txt`\n## Commands\n- test -s result.txt\n";
 function reviewer(request) {
   return {
     packetId: request.reviewPacket.id,
@@ -646,7 +646,7 @@ for (const delivery of ["regular", "native-stack"])
         2,
       );
       const body =
-        "# Recovery fixture\n## Acceptance\n- failed.txt exists\n- peer.txt exists\n- child.txt exists\n## Commands\n- test -s failed.txt\n- test -s peer.txt\n- test -s child.txt\n## Final validation\n- test -s child.txt\n";
+        "# Recovery fixture\n## Acceptance\n- failed.txt exists\n- peer.txt exists\n- `test -s child.txt`\n## Commands\n- test -s failed.txt\n- test -s peer.txt\n- test -s child.txt\n";
       const graph = {
         objective: 1,
         baseSha: target.baseSha,

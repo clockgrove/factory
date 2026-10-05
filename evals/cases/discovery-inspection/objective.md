@@ -1,6 +1,6 @@
 # Inspect slug for accented letters
 
-## Goal
+## Outcome
 
 `slug("Café")` returns `caf` today, which drops the accented letter. One
 read-only inspection Work Item examines `src/slug.mjs` against
@@ -13,15 +13,12 @@ graph through its normal amendment review. Do not plan the fix up front.
 - The inspection runs `node scripts/check.mjs slug` on the base and passes.
 - The inspection submits one discovery that names the accented-letter
   behavior and proposes acceptance for a follow-up change.
+- `node scripts/check.mjs slug`
 
-## Planning sources
+## Sources
 
 - `docs/SPEC.md#Slug`
 
-## Final validation
-
-- `node scripts/check.mjs slug`
-
-## Non-goals
+## Constraints
 
 - Changing `src/slug.mjs` or `docs/SPEC.md` in this Objective.

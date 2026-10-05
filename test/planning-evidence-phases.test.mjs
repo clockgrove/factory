@@ -215,23 +215,18 @@ test("rendered compiler and plan reviewer carry the source commands and stop uns
   );
 });
 
-test("command authority comes from the Objective and sources, never from the plan under check", (t) => {
+test("command authority comes from the Objective's Acceptance, never from the plan under check", (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-command-authority-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const policy = "git check-attr filter -- approved/selected.png | grep -q lfs";
   const stored = "git lfs ls-files | grep -q 'approved/selected.png'";
-  // The media fixture shape: backticked criteria, one of them also a line in
-  // the base repository, and the other a Final validation command.
+  // The media fixture shape: one criterion is exactly a command, and the
+  // other only mentions one, which is also a line in the base repository.
   const target = createTarget(root, { "docs/checks.txt": `${stored}\n` });
-  const text = `# Media gate\n\n## Acceptance\n- \`${policy}\`\n- \`${stored}\`\n\n## Final validation\n- \`${policy}\`\n`;
+  const text = `# Media gate\n\n## Acceptance\n- \`${policy}\`\n- Ready after \`${stored}\`\n`;
   const sources = [{ path: "OBJECTIVE", content: text }];
   const obligations = coverageObligations(text, objectiveCriteria(text));
-  const authority = commandAuthority(
-    text,
-    sources,
-    target.baseSha,
-    target.checkout,
-  );
+  const authority = commandAuthority(text);
   assert.equal(authority(policy, true), true);
   // A plan that carries the command with base-observed provenance cannot
   // make it a command obligation; a plan that drops it cannot unmake one.
@@ -269,7 +264,7 @@ test("command authority comes from the Objective and sources, never from the pla
         sources,
         obligations,
         [policy],
-        commandAuthority(text, sources, target.baseSha, target.checkout),
+        commandAuthority(text),
       ),
     );
 });

@@ -71,7 +71,7 @@ const item = {
   requiredLfsRoles: [],
 };
 const body =
-  "# Run fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n";
+  "# Run fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n";
 
 /**
  * A scripted model that records each call. `planFinding` makes plan review return one sourced

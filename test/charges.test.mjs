@@ -86,7 +86,7 @@ const item = {
   requiredLfsRoles: [],
 };
 const body =
-  "# Charges fixture\n## Acceptance\n- result.txt exists\n## Commands\n- test -s result.txt\n## Final validation\n- test -s result.txt\n";
+  "# Charges fixture\n## Acceptance\n- `test -s result.txt`\n## Commands\n- test -s result.txt\n";
 const failedAttempt = (attempt, step = "validate") => ({
   status: "failed",
   step,

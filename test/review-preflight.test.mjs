@@ -131,8 +131,8 @@ test("missing or empty final criteria refuse preview and activation before model
     };
     for (const [index, objectiveBody] of [
       "# Objective\n## Scope\nDo work",
-      "## Acceptance\n\n## Final validation\n- true",
-      "## Acceptance\n- \n1. \n## Final validation\n- true",
+      "## Acceptance\n\n",
+      "## Acceptance\n- \n1. \n",
     ].entries()) {
       assert.deepEqual(objectiveCriteria(objectiveBody), []);
       const { application, github, eventsPath } = makeApplication({
@@ -154,11 +154,11 @@ test("missing or empty final criteria refuse preview and activation before model
       };
       await assert.rejects(
         application.planObjective(1),
-        /nonempty final criteria/,
+        /nonempty criteria under Acceptance/,
       );
       await assert.rejects(
         application.runObjective(1),
-        /nonempty final criteria/,
+        /nonempty criteria under Acceptance/,
       );
       assert.throws(
         () =>
@@ -169,21 +169,17 @@ test("missing or empty final criteria refuse preview and activation before model
             target.baseSha,
             target.checkout,
           ),
-        /nonempty final criteria/,
+        /nonempty criteria under Acceptance/,
       );
       assert.equal(projections, 0);
       assert.deepEqual(readEvents(eventsPath), []);
     }
     assert.equal(calls, 0);
-    for (const heading of [
-      "Acceptance",
-      "What must be true",
-      "Goal",
-      "Outcome",
-    ])
-      assert.deepEqual(objectiveCriteria(`## ${heading}\n- Finished result`), [
-        "Finished result",
-      ]);
+    assert.deepEqual(objectiveCriteria("## Acceptance\n- Finished result"), [
+      "Finished result",
+    ]);
+    // Only Acceptance holds criteria; the Outcome is not one.
+    assert.deepEqual(objectiveCriteria("## Outcome\n- Finished result"), []);
   } finally {
     if (oldState === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = oldState;

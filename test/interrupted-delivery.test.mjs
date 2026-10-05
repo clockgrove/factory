@@ -73,7 +73,7 @@ async function interrupt(boundary, peer) {
     const descriptor = {
       config: factoryConfig(target.checkout, repository),
       graph: { objective, baseSha: target.baseSha, items },
-      objectiveBody: `# Deterministic Objective\n\n## Acceptance\n${commands.map((c) => `- \`${c}\``).join("\n")}\n\n## Final validation\n${finalCommands.map((c) => `- \`${c}\``).join("\n")}\n`,
+      objectiveBody: `# Deterministic Objective\n\n## Acceptance\n${finalCommands.map((c) => `- \`${c}\``).join("\n")}\n\n## Commands\n${commands.map((c) => `- \`${c}\``).join("\n")}\n`,
       fakeRoot,
       actions: {
         work: { files: [{ path: "work.txt", text: "work\n" }] },

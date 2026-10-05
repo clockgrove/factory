@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { unknownCheckNames } from "../check-names.js";
-import { knownCheckNames, planningSources } from "../compiler.js";
+import { unknownCheckNames, workflowCheckNames } from "../check-names.js";
+import { planningSources } from "../compiler.js";
 import type { WorkGraph } from "../contracts.js";
 import { attachedFault, decision, StepFault } from "../fault.js";
 import { fetchHead } from "../process.js";
@@ -29,13 +29,9 @@ const digest = (text: string): string =>
  * fail: a git error keeps the class git gave it (transient, config); anything
  * else is a decision the operator can answer, not a plain Error.
  */
-function readKnownNames(
-  objectiveBody: string,
-  commit: string,
-  checkout: string,
-): string[] {
+function readKnownNames(commit: string, checkout: string): string[] {
   try {
-    return knownCheckNames(objectiveBody, commit, checkout);
+    return workflowCheckNames(checkout, commit);
   } catch (error) {
     if (attachedFault(error)) throw error;
     throw new StepFault(
@@ -51,7 +47,7 @@ function readKnownNames(
 /**
  * While a source-required CI check has not reported on the PR head, the check
  * must still be defined where it was planned from: a job in the default
- * branch's workflows or a line under the Objective's Required checks, and the
+ * branch's workflows, and the
  * pinned source that requires it must be unchanged. A job renamed after
  * planning would never report, and delivery would wait forever; ask the
  * operator.
@@ -109,12 +105,12 @@ export async function assertCheckSourcesAtIntegration(args: {
       ),
     );
   }
-  const known = readKnownNames(args.objectiveBody, tip, checkout);
+  const known = readKnownNames(tip, checkout);
   const unknown = unknownCheckNames(gates, known);
   if (unknown.length)
     throw new StepFault(
       decision(
-        `CI check ${unknown.map((name) => JSON.stringify(name)).join(", ")} has not reported on the PR head and is no longer a job in ${defaultBranch}'s GitHub workflows (at ${tip.slice(0, 12)}) or an entry under the Objective's Required checks, so it will never report. Restore the job under that name and run factory retry, or cancel and plan again?`,
+        `CI check ${unknown.map((name) => JSON.stringify(name)).join(", ")} has not reported on the PR head and is no longer a job in ${defaultBranch}'s GitHub workflows (at ${tip.slice(0, 12)}) so it will never report. Restore the job under that name and run factory retry, or cancel and plan again?`,
         `Defined now: ${JSON.stringify(known.slice(0, 20))}`,
       ),
     );
@@ -123,8 +119,7 @@ export async function assertCheckSourcesAtIntegration(args: {
 
 /**
  * A QA CI proof that is about to wait must name a check its own commit
- * defines: a job in that commit's workflows or a line under the Objective's
- * Required checks. The commit is the one the check must report on, so a later
+ * defines: a job in that commit's workflows. The commit is the one the check must report on, so a later
  * rename on the default branch does not matter, and a proof that has
  * completed or is not waiting is never asked. A commit that lacks the job can
  * never report it, and restoring the job elsewhere does not change that
@@ -146,11 +141,11 @@ export function assertProofCheckDefined(args: {
     checkName,
   ]);
   if (verified.has(key)) return;
-  const known = readKnownNames(args.objectiveBody, commit, checkout);
+  const known = readKnownNames(commit, checkout);
   if (!known.includes(checkName))
     throw new StepFault(
       decision(
-        `CI check ${JSON.stringify(checkName)} is not a job in the GitHub workflows at ${commit.slice(0, 12)}, the commit it must report on, or an entry under the Objective's Required checks, so it will never report. Cancel and plan again with a check that exists?`,
+        `CI check ${JSON.stringify(checkName)} is not a job in the GitHub workflows at ${commit.slice(0, 12)}, the commit it must report on, so it will never report. Cancel and plan again with a check that exists?`,
         `Defined there: ${JSON.stringify(known.slice(0, 20))}`,
       ),
     );

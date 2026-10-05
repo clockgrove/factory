@@ -1,6 +1,6 @@
 # Add truncate and the textkit command line
 
-## Goal
+## Outcome
 
 Implement `wrap` and `truncate`, then add the `textkit` command line that
 uses them, as `docs/SPEC.md` specifies.
@@ -14,19 +14,16 @@ uses them, as `docs/SPEC.md` specifies.
 - `bin/textkit.mjs` implements the `slug`, `wrap` and `truncate`
   subcommands and `node scripts/check.mjs cli` passes.
 - `src/index.mjs` also exports `truncate`.
+- `node scripts/check.mjs wrap`
+- `node scripts/check.mjs truncate`
+- `node scripts/check.mjs cli`
 
-## Planning sources
+## Sources
 
 - `docs/SPEC.md#Wrap`
 - `docs/SPEC.md#Truncate`
 - `docs/SPEC.md#Command line`
 
-## Final validation
-
-- `node scripts/check.mjs wrap`
-- `node scripts/check.mjs truncate`
-- `node scripts/check.mjs cli`
-
-## Non-goals
+## Constraints
 
 - Publishing the package or changing `scripts/check.mjs`.

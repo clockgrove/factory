@@ -10,6 +10,7 @@ Operate the installed Factory CLI on a target repository. `factory help` lists t
 ## Rules
 
 - **Target.** Take the repository and Objective issue number from the request. Refuse any Factory source, rebuild or archive repository, because Factory must never run on itself.
+- **Objective.** It has four sections: Outcome, Acceptance, Sources, Constraints ([template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md)). An Acceptance bullet that is exactly one backticked command is run on the integrated result. Factory refuses an Objective that still has Final validation, Required checks or Planning sources and says where each goes; have the author edit the issue, and never rewrite it yourself.
 - **Binding.** Before any Objective command, check that the installed configuration binds that repository and checkout, because an issue number alone is not identity. On a mismatch, stop and use the `setup` skill. Never delete state.
 - **Consent.** `factory run --objective N` is the consent to run that Objective. Run only Objectives the operator named. Never edit state files.
 - **Host.** Run the controller from an ordinary host terminal, because workers inherit an enclosing agent sandbox. On a socket-directory error, diagnose the host; never chmod, unmask or bypass the sandbox.
@@ -44,7 +45,7 @@ The first line of `status` is the phase and a one-line summary. `Next:` is the e
 
 ## Missing contract
 
-Search the pinned repository for the canonical text before treating a gap as a human decision. If it exists, add `path#Exact heading` under `## Planning sources` in the Objective, refuse the saved plan and run again. If it is genuinely unspecified, ask the owner. Never invent a requirement or weaken acceptance to pass a plan.
+Search the pinned repository for the canonical text before treating a gap as a human decision. If it exists, add `path#Exact heading` under `## Sources` in the Objective, refuse the saved plan and run again. If it is genuinely unspecified, ask the owner. Never invent a requirement or weaken acceptance to pass a plan.
 
 ## Observe
 

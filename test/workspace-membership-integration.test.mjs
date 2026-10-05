@@ -25,9 +25,6 @@ const objectiveBody = `# Add the runtime package
 
 ## Workspace package additions
 - \`apps/runtime\`
-
-## Final validation
-- \`${command}\`
 `;
 
 function item(id, dependencies, ownedPaths) {

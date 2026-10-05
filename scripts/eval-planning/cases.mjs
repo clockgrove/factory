@@ -125,7 +125,7 @@ export function loadCase(root, { defaultTarget, repository, targets }) {
     fail("case.json must be an object");
   if ("sources" in spec)
     fail(
-      "case.json `sources` is no longer supported; declare sources in the Objective's `## Planning sources` section",
+      "case.json `sources` is no longer supported; declare sources in the Objective's `## Sources` section",
     );
   const unknown = Object.keys(spec).filter((key) => !caseKeys.has(key));
   if (unknown.length) fail(`unknown case.json keys ${unknown}`);

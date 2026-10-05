@@ -347,7 +347,7 @@ export function assertCoverageSources(
     isCommand ?? ((command: string) => planned.has(normalizedCommand(command)));
   for (const { itemId, proof, source } of graph.coverage) {
     // A command obligation is proved by running exactly that command, on
-    // its owning item or in Final validation.
+    // its owning item or among the Acceptance commands.
     const command = commandObligation(source.text, authority);
     if (
       command === undefined ||
@@ -363,7 +363,7 @@ export function assertCoverageSources(
         command;
     if (!proved)
       throw new Error(
-        `Objective obligation \`${command}\` is a command, so its proof must be a result-command or integrated-command whose validationIndex selects exactly \`${command}\` on its owning item, or the command must be in Final validation; it is proved by ${proof.kind} on ${itemId}`,
+        `Objective obligation \`${command}\` is a command, so its proof must be a result-command or integrated-command whose validationIndex selects exactly \`${command}\` on its owning item; it is proved by ${proof.kind} on ${itemId}`,
       );
   }
   for (const required of obligations) {

@@ -33,7 +33,7 @@ for (const delivery of ["regular", "native-stack"]) {
         const repository = `example/phase-${delivery}`;
         const barrier = join(root, "barriers", "slow.go");
         const body =
-          "# Phase admission\n## Acceptance\n- fast.txt exists\n- slow.txt exists\n- joined.txt exists\n- tail.txt exists\n## Commands\n- test -s fast.txt\n- test -s slow.txt\n- test -s joined.txt\n- test -s tail.txt\n## Final validation\n- test -s joined.txt\n";
+          "# Phase admission\n## Acceptance\n- fast.txt exists\n- slow.txt exists\n- `test -s joined.txt`\n- tail.txt exists\n## Commands\n- test -s fast.txt\n- test -s slow.txt\n- test -s joined.txt\n- test -s tail.txt\n";
         const item = (id, dependencies = []) => ({
           id,
           title: id,

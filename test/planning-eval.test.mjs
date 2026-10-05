@@ -193,7 +193,7 @@ test("plan mode plans public cases through planObjective and reports review, jud
       });
       assert.equal(entry.metrics.finalReviewInsteadOfCommand.count, 0);
       assert.deepEqual(entry.metrics.proofKinds, {
-        "result-command": 4,
+        "result-command": 7,
         "final-controller": 1,
         "result-semantic": 1,
       });
@@ -378,9 +378,9 @@ test("review-only mode reports recall per seeded defect and the false-positive r
         [row.recall.successes, row.recall.total],
       ]),
     );
-    // Compile validation refuses invented CI names and final review of the
-    // `npm test` criterion, so those variants never reach the reviewer. The media
-    // fixture has no command with authority, so that defect does not apply there.
+    // Compile validation refuses invented CI names, so those variants never
+    // reach the reviewer. Every command bullet is run on the integrated
+    // result, so no fixture has a command for review to replace.
     assert.deepEqual(recall, {
       "acceptance-needs-own-merge": [6, 6],
       "native-dependency-assumed-merged": [2, 2],
@@ -403,9 +403,7 @@ test("review-only mode reports recall per seeded defect and the false-positive r
     assert.deepEqual(
       summary.refusedByCode.map((row) => `${row.fixture}/${row.defect}`).sort(),
       [
-        "native-stack-chain/final-review-replaces-command",
         "native-stack-chain/invented-ci-name",
-        "required-ci-check-qa/final-review-replaces-command",
         "required-ci-check-qa/invented-ci-name",
       ],
     );
@@ -579,7 +577,7 @@ test("a private case with a leftover sources key is refused with a clear message
         ]),
       (error) =>
         error.status === 2 &&
-        /old: case.json `sources` is no longer supported; declare sources in the Objective's `## Planning sources` section/.test(
+        /old: case.json `sources` is no longer supported; declare sources in the Objective's `## Sources` section/.test(
           error.stderr,
         ),
     );
@@ -886,12 +884,13 @@ test("retry, wait and reviewer options are checked before any model call", () =>
   }
 });
 
-// No bwrap on PATH makes the sandbox unavailable on any host; node, git and sh stay.
+// No bwrap on PATH makes the sandbox unavailable on any host; node, npm, git and sh stay.
 function pathWithoutBubblewrap(work) {
   const bin = join(work, "bin-without-bwrap");
   mkdirSync(bin);
   const tools = {
     node: process.execPath,
+    npm: execFileSync("which", ["npm"], { encoding: "utf8" }).trim(),
     git: execFileSync("which", ["git"], { encoding: "utf8" }).trim(),
     sh: "/bin/sh",
   };

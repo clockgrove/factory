@@ -36,9 +36,10 @@ test("review repairs required implementation content without moving later valida
 - ${requirement}
 - A separate item creates the summary and checker after documentation; documentation must not execute the final command or create its inputs.
 
-test -s GUIDE.md
+## Commands
+- test -s GUIDE.md
 
-## Final validation
+## Later check
 - \`${laterCommand}\`
 `;
   const item = {
@@ -92,7 +93,7 @@ test -s GUIDE.md
     ],
   };
   const corrected = structuredClone(incomplete);
-  corrected.items[0].citations = [{ choiceIndex: 2 }, { choiceIndex: 3 }];
+  corrected.items[0].citations = [{ choiceIndex: 2 }, { choiceIndex: 4 }];
   corrected.items[0].brief =
     "Document the final validation command from the selected source. This is not a command to run during this item. Do not create its inputs or change owned paths.";
   const finding = {
@@ -202,14 +203,14 @@ test -s GUIDE.md
   ]) {
     assert.deepEqual(accepted[field], item[field]);
   }
-  assert.deepEqual(candidate.finalCommands, [laterCommand]);
+  assert.deepEqual(candidate.finalCommands, []);
   assert.equal(
     candidate.commands.filter((c) => c.itemId === "guide").length,
     1,
   );
   const prompt = workItemPrompt({ item: accepted, worktree: target.checkout });
   assert.ok(prompt.includes(laterCommand));
-  assert.match(prompt, /Final validation/);
+  assert.match(prompt, /Later check/);
   assert.match(prompt, /not a command to run during this item/);
   assert.match(prompt, /Change only the owned paths/);
   assert.match(

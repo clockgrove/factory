@@ -1,6 +1,6 @@
 # Thumbnail for the reference image
 
-## Goal
+## Outcome
 
 Add a thumbnail for `assets/source.png` as `docs/MEDIA.md#Thumbnails`
 specifies, and list it in `gallery.json`.
@@ -16,20 +16,16 @@ specifies, and list it in `gallery.json`.
   and a `metadata` role bound to `thumbs/source.json`. The `image` role
   requires LFS. A human selects one set.
 - `gallery.json` gives the reference image `"thumb": "thumbs/source.png"`.
-- `node scripts/check-gallery.mjs thumbs` passes.
 - `node scripts/check-gallery.mjs manifest`
+- `node scripts/check-gallery.mjs thumbs`
+- `git check-attr filter -- thumbs/source.png | grep -qx 'thumbs/source.png: filter: lfs'`
 
-## Planning sources
+## Sources
 
 - `docs/MEDIA.md#Thumbnails`
 - `docs/MEDIA.md#Gallery manifest`
 
-## Final validation
-
-- `node scripts/check-gallery.mjs thumbs`
-- `git check-attr filter -- thumbs/source.png | grep -qx 'thumbs/source.png: filter: lfs'`
-
-## Non-goals
+## Constraints
 
 - Changing `assets/source.png` or committing candidate bytes directly.
 

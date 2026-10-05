@@ -84,15 +84,17 @@ const body = `# Public multi-item QA fixture
 - integrated behavior is proven
 - actual real-environment readiness is proven
 - dependency versions pass the named CI job
+- \`test -s integration.txt\`
 ## Commands
 - test -s unit.txt
 - test -s integration.txt
 - test -s real-environment.txt
-## Final validation
-- test -s integration.txt
-## Required checks
-- dependency-version-test
 `;
+// The named CI job in `body` must be a workflow job at the base.
+const ciWorkflow = {
+  ".github/workflows/ci.yml":
+    "name: CI\non: pull_request\njobs:\n  dependency-version-test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n",
+};
 function graph(baseSha, text = body) {
   const unit = work("unit");
   const integration = work("integration", ["unit"]);
@@ -147,6 +149,8 @@ function graph(baseSha, text = body) {
         preparedBy: "",
       }),
       entry(3, "qa", "integrated", "ci", "dependency-version-test"),
+      // The command bullet is run on the integrated result as well.
+      entry(4, "integration", "result", "command", "test -s integration.txt"),
     ],
   };
 }
@@ -252,6 +256,7 @@ test("published named CI retains the real dependency head instead of claiming in
 test("coverage rejects missing, unknown, premature and unready proof without weakening commands", async () =>
   fixture(async (root) => {
     const target = createTarget(root, {
+      ...ciWorkflow,
       "real-environment.txt": "actual local fixture resource",
     });
     const good = graph(target.baseSha);
@@ -343,7 +348,7 @@ test("a command obligation is proved by exactly that command; other obligations 
     runs = ["test -s unit.txt"],
     isCommand = undefined,
   ) => {
-    const objective = `## Acceptance\n- ${criterion}\n## Final validation\n- \`test -s final.txt\`\n`;
+    const objective = `## Acceptance\n- ${criterion}\n`;
     const obligations = coverageObligations(
       objective,
       objectiveCriteria(objective),
@@ -388,7 +393,7 @@ test("a command obligation is proved by exactly that command; other obligations 
       `obligation \`${name.replace(/[-.*+?^${}()|[\]\\]/g, "\\$&")}\` is a command, so its proof must be a result-command or integrated-command whose validationIndex selects exactly`,
     );
   // A bullet that is exactly one command: proved by that command, or by
-  // anything when Final validation runs it.
+  // anything when it is also an Acceptance command that Factory runs on the integrated result.
   check("`test -s unit.txt`", command());
   check("`test  -s unit.txt`", command());
   check("test -s unit.txt", command());
@@ -420,7 +425,7 @@ test("a command obligation is proved by exactly that command; other obligations 
     "npm test",
     "npm test -- --coverage",
   ]);
-  // A command with authority that no item runs, and Final validation does
+  // A command with authority that no item runs, and no Acceptance command
   // not, cannot be proved; without authority the bullet is semantic.
   const lint = (command, backticked) =>
     backticked && command === "npm run lint";
@@ -440,63 +445,43 @@ test("a command obligation is proved by exactly that command; other obligations 
     check(criterion, { kind: "final-review" });
 });
 
-test("a backticked bullet is a command only with authority beyond itself", async () =>
-  fixture(async (root) => {
-    const target = createTarget(root, {
-      "package.json": JSON.stringify({ scripts: { lint: "true" } }),
-      "docs/run.md": "# Run\n\n- `test -s docs.txt`\n",
-    });
-    const objective = [
-      "## Acceptance",
-      "- `npm run lint`",
-      "- `README.md`",
-      "- `test -s docs.txt`",
-      "- `echo only-here`",
-      "- `test -s twice.txt`",
-      "- `test -s final.txt`",
-      "",
-      "## Validation",
-      "- `test -s twice.txt`",
-      "",
-      "## Final validation",
-      "- `test -s final.txt`",
-      "",
-      "## Planning sources",
-      "- docs/run.md",
-      "- `README.md`",
-      "",
-      "## Required checks",
-      "- `npm run lint`",
-      "",
-    ].join("\n");
-    const sources = planningSources(objective, target.baseSha, target.checkout);
-    const isCommand = commandAuthority(
-      objective,
-      sources,
-      target.baseSha,
-      target.checkout,
-    );
-    // A package script at the base, a line declared in another source or
-    // section, and a Final validation command have authority.
-    for (const command of [
-      "npm run lint",
-      "test -s docs.txt",
-      "test -s twice.txt",
-      "test -s final.txt",
-    ])
-      assert(isCommand(command, true), command);
-    // A bullet that only declares itself, or a line repeated as prose or as a
-    // planning source, is a semantic obligation. A plan that runs it gives it
-    // no authority: commandAuthority never sees the plan.
-    for (const command of ["README.md", "echo only-here", "npm run missing"])
-      assert(!isCommand(command, true), command);
-    assert(!isCommand("test -s docs.txt", false));
-  }));
+test("an Acceptance bullet is a command only when it is exactly one backticked command", () => {
+  const objective = [
+    "## Acceptance",
+    "- `npm run lint`",
+    "- `README.md`",
+    "- `test -s  docs.txt`",
+    "- `npm test` passes",
+    "- npm run build",
+    "",
+    "## Constraints",
+    "- `test -s constraint.txt`",
+    "",
+    "## Sources",
+    "- `docs/run.md`",
+    "",
+  ].join("\n");
+  const isCommand = commandAuthority(objective);
+  for (const command of ["npm run lint", "README.md", "test -s docs.txt"])
+    assert(isCommand(command, true), command);
+  // Prose, a plain line, and bullets outside Acceptance have no authority,
+  // and a plan that runs a command gives it none: the plan is never an input.
+  for (const command of [
+    "npm test",
+    "npm run build",
+    "test -s constraint.txt",
+    "docs/run.md",
+    "npm run missing",
+  ])
+    assert(!isCommand(command, true), command);
+  assert(!isCommand("npm run lint", false));
+});
 
 for (const delivery of ["regular", "native"])
   test(`${delivery} executes multi-item QA after integration with no worker or empty PR`, async () =>
     fixture(async (root) => {
       const target = createTarget(root, {
+        ...ciWorkflow,
         "real-environment.txt": "actual local fixture resource",
       });
       let qaPacket;
@@ -643,19 +628,15 @@ test("a job renamed on main after merge does not stop QA whose CI proof is bound
   fixture(async (root) => {
     const workflow = ".github/workflows/ci.yml";
     const target = createTarget(root, {
+      ...ciWorkflow,
       "real-environment.txt": "actual local fixture resource",
       [workflow]:
         "name: CI\non: pull_request\njobs:\n  dependency-version-test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n",
     });
-    // The check is bound by the workflow job alone.
-    const objectiveBody = body.replace(
-      "## Required checks\n- dependency-version-test\n",
-      "",
-    );
     const { application, github } = makeApplication({
       config: factoryConfig(target.checkout, "example/qa-renamed-on-main"),
-      graph: graph(target.baseSha, objectiveBody),
-      objectiveBody,
+      graph: graph(target.baseSha, body),
+      objectiveBody: body,
       fakeRoot: join(root, "fake"),
       actions: {
         unit: { files: [{ path: "unit.txt", text: "unit" }] },
@@ -725,6 +706,7 @@ for (const failure of ["missing", "pending", "failure", "stale", "unrelated"])
   test(`local success cannot finish with ${failure} named CI evidence`, async () =>
     fixture(async (root) => {
       const target = createTarget(root, {
+        ...ciWorkflow,
         "real-environment.txt": "actual local fixture resource",
       });
       const { application, github } = makeApplication({
@@ -798,6 +780,7 @@ for (const delivery of ["regular", "native-stack"])
     test(`${delivery}: ${action} acknowledged during resumed named-CI read submits no new QA review`, async () =>
       fixture(async (root) => {
         const target = createTarget(root, {
+          ...ciWorkflow,
           "real-environment.txt": "actual local resource",
         });
         const config = factoryConfig(
@@ -891,6 +874,7 @@ for (const delivery of ["regular", "native-stack"])
 test("independent review blocks inadequate negative controls and unauthorized golden changes", async () =>
   fixture(async (root) => {
     const target = createTarget(root, {
+      ...ciWorkflow,
       "real-environment.txt": "actual fixture resource",
     });
     let reviewed = 0;
@@ -907,7 +891,7 @@ test("independent review blocks inadequate negative controls and unauthorized go
         },
         async reviewGraph(request) {
           reviewed++;
-          assert.equal(request.graph.coverage.length, 4);
+          assert.equal(request.graph.coverage.length, 5);
           return {
             packetId: request.reviewPacket.id,
             findings: [
@@ -935,7 +919,7 @@ test("independent review blocks inadequate negative controls and unauthorized go
 
 test("compiler resolves selected criterion IDs to canonical sources without model quotations", async () =>
   fixture(async (root) => {
-    const target = createTarget(root);
+    const target = createTarget(root, ciWorkflow);
     const modelGraph = () => {
       const value = graph(target.baseSha);
       for (const entry of value.coverage) delete entry.source;
@@ -979,7 +963,7 @@ test("compiler resolves selected criterion IDs to canonical sources without mode
 
 test("unavailable real environment stops before a worker starts", async () =>
   fixture(async (root) => {
-    const target = createTarget(root);
+    const target = createTarget(root, ciWorkflow);
     const value = graph(target.baseSha);
     value.items[0].validation.push(value.items[2].validation[0]);
     value.coverage[0].environment = {
@@ -1007,7 +991,7 @@ test("unavailable real environment stops before a worker starts", async () =>
 
 test("authorized prerequisite creates the real environment before late QA probes it", async () =>
   fixture(async (root) => {
-    const target = createTarget(root);
+    const target = createTarget(root, ciWorkflow);
     const value = graph(target.baseSha);
     value.items[1].ownedPaths.push("real-environment.txt");
     value.coverage[2].environment.readiness = "prepare";
@@ -1045,6 +1029,7 @@ test("authorized prerequisite creates the real environment before late QA probes
 test("a dependency-version mismatch passes real local validation but failed CI blocks completion", async () =>
   fixture(async (root) => {
     const target = createTarget(root, {
+      ...ciWorkflow,
       "real-environment.txt": "actual local resource",
       "package.json": JSON.stringify({
         scripts: { test: "node dependency-check.cjs 1" },
@@ -1114,7 +1099,7 @@ test("a dependency-version mismatch passes real local validation but failed CI b
 
 test("native preparation integrates before its worker consumer readiness probe", async () =>
   fixture(async (root) => {
-    const target = createTarget(root);
+    const target = createTarget(root, ciWorkflow);
     const value = graph(target.baseSha);
     value.items[0].ownedPaths.push("real-environment.txt");
     value.items[1].validation.push(value.items[2].validation[0]);
@@ -1225,6 +1210,7 @@ for (const delivery of ["regular", "native"])
     test(`${delivery} ${outcome} QA review: lost response repeats, refusal needs retry`, async () =>
       fixture(async (root) => {
         const target = createTarget(root, {
+          ...ciWorkflow,
           "real-environment.txt": "actual local resource",
         });
         const repository = `example/qa-review-${outcome}-${delivery}`;
@@ -1310,6 +1296,7 @@ for (const delivery of ["regular", "native"])
 test("cancellation acknowledged during named CI observation prevents QA model submission", async () =>
   fixture(async (root) => {
     const target = createTarget(root, {
+      ...ciWorkflow,
       "real-environment.txt": "actual local resource",
     });
     const repository = "example/qa-cancel-before-review";

@@ -152,6 +152,30 @@
           "kind": "result-command",
           "validationIndex": 1
         }
+      },
+      {
+        "criterion": 6,
+        "itemId": "truncate",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
+      },
+      {
+        "criterion": 7,
+        "itemId": "cli",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
+      },
+      {
+        "criterion": 8,
+        "itemId": "cli-docs",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
       }
     ]
   }

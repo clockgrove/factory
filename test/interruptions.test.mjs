@@ -17,7 +17,7 @@ import {
 
 const objective = 1;
 const command = 'test "$(cat result.txt)" = result';
-const body = `# Deterministic Objective\n\n## Acceptance\n- \`${command}\`\n\n## Final validation\n- \`${command}\`\n`;
+const body = `# Deterministic Objective\n\n## Acceptance\n- \`${command}\`\n`;
 
 async function withApp(name, delivery, options, callback) {
   const root = mkdtempSync(join(tmpdir(), `factory-interrupt-${name}-`));

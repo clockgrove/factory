@@ -127,22 +127,6 @@
     "coverage": [
       {
         "criterion": 0,
-        "itemId": "truncate",
-        "proof": {
-          "kind": "result-command",
-          "validationIndex": 0
-        }
-      },
-      {
-        "criterion": 1,
-        "itemId": "cli",
-        "proof": {
-          "kind": "result-command",
-          "validationIndex": 0
-        }
-      },
-      {
-        "criterion": 2,
         "itemId": "cli-docs",
         "proof": {
           "kind": "result-command",
@@ -150,7 +134,7 @@
         }
       },
       {
-        "criterion": 3,
+        "criterion": 1,
         "itemId": "docs-build-check",
         "proof": {
           "kind": "integrated-ci",
@@ -158,7 +142,7 @@
         }
       },
       {
-        "criterion": 4,
+        "criterion": 2,
         "itemId": "truncate",
         "proof": {
           "kind": "result-semantic",
@@ -166,11 +150,35 @@
         }
       },
       {
-        "criterion": 5,
+        "criterion": 3,
         "itemId": "truncate",
         "proof": {
           "kind": "result-command",
           "validationIndex": 1
+        }
+      },
+      {
+        "criterion": 4,
+        "itemId": "truncate",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
+      },
+      {
+        "criterion": 5,
+        "itemId": "cli",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
+        }
+      },
+      {
+        "criterion": 6,
+        "itemId": "cli-docs",
+        "proof": {
+          "kind": "result-command",
+          "validationIndex": 0
         }
       }
     ]

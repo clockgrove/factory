@@ -1,10 +1,42 @@
 # Implement the public summary utility
 
-## Goal
+## Outcome
 
 Implement the utility in this repository using two independent executable leaves,
 a join, and independently reviewed required QA discovered from worker inspection.
 Use the baseline README and complete scripts/check.mjs as pinned planning sources.
+
+## Acceptance
+
+- The two independent functions and their joined public result satisfy normal,
+  empty and negative-number cases without mutating inputs.
+- The required discovered QA and aggregate parent pass against the integrated
+  current graph; discovery alone is not acceptance.
+- The named disposable test condition passes `factory-fixture-prerequisite` during
+  beta result validation before acceptance. A failed probe preserves the original
+  candidate objects and failure history and requires a diagnosed, authorized
+  environment correction; it must never be skipped or replaced with a mock success.
+  Preserve beta's exact owned path inventory, file mode and blob bytes, attempt and
+  execution base. Native replay may change the result commit/tree only onto the
+  independently accepted alpha integration commit, with exact parent and result-base
+  proof. Both beta commands and full independent review must validate the actual
+  replayed tree before exact-head CI and protected integration; no new beta worker
+  or implementation attempt is permitted.
+- Independent review and the required `source-check` GitHub check pass on exact
+  published heads before protected integration.
+- `node scripts/check.mjs qa`
+- `factory-fixture-prerequisite`
+
+## Sources
+
+- README.md
+- AGENTS.md
+- scripts/check.mjs
+
+## Constraints
+
+Changing baseline checks, workflow or instructions; credentials,
+network services, media, LFS, deployment, Factory source or unrelated repositories.
 
 ## Initial work
 
@@ -48,38 +80,3 @@ receives independent acceptance review. Neither parent nor QA has a coding worke
 or PR; neither may run `factory-fixture-prerequisite`.
 Every initial obligation stays covered. The controller, not the worker, assigns
 new node identities and projects native issue hierarchy.
-
-## Acceptance
-
-- The two independent functions and their joined public result satisfy normal,
-  empty and negative-number cases without mutating inputs.
-- The required discovered QA and aggregate parent pass against the integrated
-  current graph; discovery alone is not acceptance.
-- The named disposable test condition passes `factory-fixture-prerequisite` during
-  beta result validation before acceptance. A failed probe preserves the original
-  candidate objects and failure history and requires a diagnosed, authorized
-  environment correction; it must never be skipped or replaced with a mock success.
-  Preserve beta's exact owned path inventory, file mode and blob bytes, attempt and
-  execution base. Native replay may change the result commit/tree only onto the
-  independently accepted alpha integration commit, with exact parent and result-base
-  proof. Both beta commands and full independent review must validate the actual
-  replayed tree before exact-head CI and protected integration; no new beta worker
-  or implementation attempt is permitted.
-- Independent review and the required `source-check` GitHub check pass on exact
-  published heads before protected integration.
-
-## Final validation
-
-- `node scripts/check.mjs qa`
-- `factory-fixture-prerequisite`
-
-## Non-goals
-
-Changing baseline checks, workflow or instructions; credentials,
-network services, media, LFS, deployment, Factory source or unrelated repositories.
-
-## Planning sources
-
-- README.md
-- AGENTS.md
-- scripts/check.mjs

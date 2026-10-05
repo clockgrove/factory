@@ -85,8 +85,7 @@ async function fixture(name, fn, model, customize) {
     const descriptor = {
       config,
       graph,
-      objectiveBody:
-        "## Acceptance\n- `test -s result.txt`\n\n## Final validation\n- `test -s result.txt`\n",
+      objectiveBody: "## Acceptance\n- `test -s result.txt`\n\n",
       fakeRoot: join(root, "fake"),
       actions: { result: { files: [{ path: "result.txt", text: "done\n" }] } },
       ...(model ? { planningModel: model(graph) } : {}),
@@ -1308,7 +1307,7 @@ test("an item's defect stops only that item; a healthy sibling worker runs on un
         ],
       });
       descriptor.objectiveBody =
-        "## Acceptance\n- `test -s result.txt`\n- `test -s other.txt`\n\n## Final validation\n- `test -s result.txt`\n";
+        "## Acceptance\n- `test -s result.txt`\n- `test -s other.txt`\n\n";
       descriptor.actions.other = {
         barrier: join(descriptor.fakeRoot, "..", "barrier", "go"),
         files: [{ path: "other.txt", text: "done\n" }],

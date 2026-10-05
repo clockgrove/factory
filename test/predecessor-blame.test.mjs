@@ -492,7 +492,7 @@ test("releasing a charge gives back only the implementation repair", () => {
 
 // The stop's named commands, run as written, fix the predecessor (#672).
 const bodyWith = (command) =>
-  `## Acceptance\n- result.txt exists\n\n## Commands\n- \`test -s result.txt\`\n- \`${command}\`\n\n## Final validation\n- \`test -s result.txt\`\n`;
+  `## Acceptance\n- \`test -s result.txt\`\n\n## Commands\n- \`test -s result.txt\`\n- \`${command}\`\n`;
 const fileItem = (id, file, dependencies, command) => ({
   id,
   title: id,

@@ -287,7 +287,7 @@ test("each seeded defect changes exactly its rule in the authored plan", () => {
       ),
     [],
   );
-  // A command line that Final validation runs anyway is exempt.
+  // A command line the Objective runs on the integrated result anyway is exempt.
   assert.equal(
     planVariants(graph, {
       ...context,
@@ -409,7 +409,7 @@ test("judge-free metrics count structured fields only", () => {
           proof: { kind: "final-review" },
           source: { text: "`node check.mjs a`" },
         },
-        // A Final validation command runs anyway: exempt.
+        // A command the Objective runs on the integrated result anyway: exempt.
         { proof: { kind: "final-review" }, source: { text: "`npm test`" } },
         // Prose around a command is not a command-line criterion.
         {
@@ -811,10 +811,11 @@ test("review fixtures compile; each defect reaches the reviewer or production re
         );
       }
     }
-    // Every defect applies somewhere. Production now refuses invented CI
-    // names and command criteria proved by final review, so those never
-    // reach the reviewer. The media criterion has no command authority from
-    // the Objective or its sources (#693), so that defect does not apply there.
+    // Every defect applies somewhere except final review replacing a command:
+    // an Acceptance bullet that is exactly one command is run on the
+    // integrated result, so no fixture has a command that review could be
+    // asked to replace (#658). Production refuses invented CI names, so those
+    // never reach the reviewer.
     assert.deepEqual(outcomes, {
       "invented-ci-name": [
         "native-stack-chain:refused",
@@ -826,10 +827,6 @@ test("review fixtures compile; each defect reaches the reviewer or production re
         "required-ci-check-qa:review",
       ],
       "native-dependency-assumed-merged": ["native-stack-chain:review"],
-      "final-review-replaces-command": [
-        "native-stack-chain:refused",
-        "required-ci-check-qa:refused",
-      ],
       "missing-ownership": [
         "media-lfs-thumbnail:review",
         "native-stack-chain:review",
@@ -902,6 +899,15 @@ test("compare pairs units on identical inputs, tests them exactly and adjusts se
   assert.deepEqual(result.onlyInA, ["only-a"]);
   // A unit whose Objective or commit changed is not a pair.
   assert.deepEqual(result.mismatched, ["moved"]);
+  // Unless that change is under test: then it pairs by id, and says so.
+  const paired = compareReports(
+    { ...a, summary: { overall: { errors: 0, judgeErrors: 0 } } },
+    { ...b, summary: { overall: { errors: 0, judgeErrors: 0 } } },
+    { iterations: 100, pairChangedInputs: true },
+  );
+  assert.deepEqual(paired.mismatched, []);
+  assert.equal(paired.units, 7);
+  assert.match(paired.notes.join("\n"), /Paired by id.*differ.*moved/);
   const rows = Object.fromEntries(result.rows.map((row) => [row.metric, row]));
   assert.equal(rows["judgePass:codex"], undefined);
   assert.match(result.notes[0], /codex are not compared/);

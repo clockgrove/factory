@@ -492,7 +492,7 @@ export function validateAmendment(
     sources,
     coverageObligations(body, objectiveCriteria(body)),
     finalObjectiveCommands(body),
-    commandAuthority(body, sources, state.baseSha, config.checkout),
+    commandAuthority(body),
   );
   if (!graph.coverage)
     throw new Error("Amendment requires retained acceptance coverage");

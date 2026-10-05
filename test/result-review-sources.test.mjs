@@ -425,7 +425,7 @@ test("actual application Work Item and final review accept later selected headin
       ),
       fakeRoot: join(root, "fake"),
       objectiveBody:
-        "# Public Objective\n\n## Planning sources\n- `docs/public-plan.md#Foundation`\n- `docs/public-plan.md#Toolchain`\n- `docs/public-plan.md#Delivery`\n\n## Acceptance\n- Delivery obligation.\n\n## Validation\n- `test -f result.txt`\n\n## Final validation\n- `test -f result.txt`\n",
+        "# Public Objective\n\n## Sources\n- `docs/public-plan.md#Foundation`\n- `docs/public-plan.md#Toolchain`\n- `docs/public-plan.md#Delivery`\n\n## Acceptance\n- Delivery obligation.\n\n## Validation\n- `test -f result.txt`\n\n",
       graph,
       planningModel,
       actions: {

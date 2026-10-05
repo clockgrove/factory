@@ -423,8 +423,7 @@ test("a lost planning reply is reissued on restart under the same run", async ()
   try {
     const target = createTarget(root);
     const config = factoryConfig(target.checkout, "example/restart-planning");
-    const objectiveBody =
-      "## Acceptance\n- `test -s result.txt`\n\n## Final validation\n- `test -s result.txt`\n";
+    const objectiveBody = "## Acceptance\n- `test -s result.txt`\n\n";
     const runIds = [];
     const descriptor = {
       config,
@@ -586,8 +585,7 @@ test("persisted drain reattaches an existing worker and leaves its dependent pen
           baseSha: target.baseSha,
           items: [item("first", []), item("second", ["first"])],
         },
-        objectiveBody:
-          "## Acceptance\n- `test -s result.txt`\n\n## Final validation\n- `test -s result.txt`\n",
+        objectiveBody: "## Acceptance\n- `test -s result.txt`\n\n",
         fakeRoot: join(root, "fake"),
         actions: {
           first: { barrier, files: [{ path: "result.txt", text: "first\n" }] },

@@ -76,10 +76,10 @@ function body(commands, finalCommands = commands) {
   return `# Deterministic Objective
 
 ## Acceptance
-${commands.map((command) => `- \`${command}\``).join("\n")}
-
-## Final validation
 ${finalCommands.map((command) => `- \`${command}\``).join("\n")}
+
+## Commands
+${commands.map((command) => `- \`${command}\``).join("\n")}
 `;
 }
 
@@ -443,9 +443,6 @@ test("pnpm Work Item and final review auto-pass from exact-tree command receipts
 ## Acceptance
 
 - ${criterion}
-
-## Final validation
-
 ${commands.map((command) => `- \`${command}\``).join("\n")}
 `;
     const reviewedScopes = new Set();
@@ -988,9 +985,6 @@ for (const firstId of ["rc-left", "rc-right"])
 ## Acceptance
 
 - The final tree contains both scripted results.
-
-## Final validation
-
 - \`${commands[0]}\`
 - \`${commands[1]}\`
 `;
@@ -1234,9 +1228,6 @@ test("native successor review receives its exact predecessor result head", async
 ## Acceptance
 
 - The final tree contains all three scripted results.
-
-## Final validation
-
 - \`${commands[0]}\`
 - \`${commands[1]}\`
 - \`${commands[2]}\`
@@ -2206,10 +2197,6 @@ test("regular and native asset selection preserve a complete set and hydrate tar
 - Fresh-clone hydration preserves the selected bytes at approved/model.bin.
 - \`${command}\`
 - \`${consumerCommand}\`
-
-## Final validation
-- \`${command}\`
-- \`${consumerCommand}\`
 `,
         fakeRoot,
         actions: {
@@ -2644,11 +2631,7 @@ Work Item acceptance uses the selected materialized bytes and exact validation b
 - Fresh-clone hydration preserves the selected bytes at assets/source.png.
 - \`${hashCommand}\`
 - \`${lfsCommand}\`
-
-## Final validation
 - \`${policyCommand}\`
-- \`${hashCommand}\`
-- \`${lfsCommand}\`
 `;
       const descriptor = {
         config: factoryConfig(
@@ -2932,9 +2915,6 @@ test("hydration failure is URL-free and blocks final review, evidence, and closu
 ## Acceptance
 - Fresh-clone hydration preserves the selected bytes at approved/model.bin.
 - \`${command}\`
-
-## Final validation
-- \`${command}\`
 - \`node sabotage.mjs\`
 `,
       fakeRoot: join(root, "fake"),
@@ -3097,9 +3077,6 @@ exec ${JSON.stringify(realGit)} "$@"
 
 ## Acceptance
 - Fresh-clone hydration preserves the selected bytes at approved/model.bin.
-- \`${command}\`
-
-## Final validation
 - \`${command}\`
 `,
       fakeRoot: join(root, "fake"),

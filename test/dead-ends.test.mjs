@@ -374,6 +374,15 @@ const FIXED = [
     "the installation configuration changed",
     "the base changed since planning",
   ],
+  // The owner that is draining at a cancelled item is answered through its
+  // socket ("named commands were applied through a live owner" needs one; the
+  // sample does not always pick it).
+  [
+    "regular",
+    "alpha done; beta pending",
+    "an item was cancelled and the Objective retried",
+    "draining",
+  ],
   // A cancelled item of a live Objective (#718).
   [
     "native-stack",
@@ -487,6 +496,18 @@ describe("dead ends", { concurrency: true }, () => {
             value === "paused" ||
             value === "draining",
         ),
+    );
+    // A cancelled item with a parked owner first: the sample does not always
+    // pick one, and the named case is added after the sampled ones.
+    const cancelledParked = (testCase) => {
+      const values = Object.values(testCase.values ?? {});
+      return (
+        values.includes("an item was cancelled and the Objective retried") &&
+        (values.includes("paused") || values.includes("draining"))
+      );
+    };
+    parked.sort(
+      (a, b) => Number(cancelledParked(b)) - Number(cancelledParked(a)),
     );
     for (const testCase of parked) {
       await outcomeOf(testCase);

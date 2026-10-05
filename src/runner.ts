@@ -379,7 +379,7 @@ export async function decideObjective(
   if (state.schemaVersion === 8) {
     if (input.item || input.criterion)
       throw new Error(
-        "--item and --criterion name a result's criterion; a plan decision takes neither",
+        "--item names a Work Item's result; a plan decision takes none",
       );
     if (input.outcome === "accept" && !input.answer)
       throw new Error("Accepting a plan requires --answer to its question");

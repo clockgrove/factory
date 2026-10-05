@@ -1344,7 +1344,11 @@ function enumerateCases(anchors) {
 
 /** Parse a status next action into an operator command. */
 function operatorCommand(text) {
-  const words = text.match(/"[^"]*"|\S+/g) ?? [];
+  // Words as a shell reads them: a criterion is single-quoted, with '\'' for its own quote.
+  const words = (text.match(/(?:'(?:[^']|'\\'')*'|"[^"]*"|\S)+/g) ?? []).map(
+    (word) =>
+      word.startsWith("'") ? word.slice(1, -1).replaceAll("'\\''", "'") : word,
+  );
   if (words[0] !== "factory") return { external: text };
   const options = {};
   for (let index = 2; index < words.length; index++)

@@ -52,7 +52,11 @@ import type {
 } from "./state.js";
 import { projectionStarted } from "./state.js";
 import type { PreState } from "./state-store.js";
-import { shortPlanDigest, summarizeStatus } from "./status-summary.js";
+import {
+  type PendingDecisionView,
+  shortPlanDigest,
+  summarizeStatus,
+} from "./status-summary.js";
 import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
 
@@ -1135,9 +1139,21 @@ export function statusDocument(
       unit.items.map((item) => [item.id, unit.id] as const),
     ),
   );
-  const pendingDecision = (pending: FactoryState["finalAcceptancePending"]) =>
+  const pendingDecision = (
+    pending: FactoryState["finalAcceptancePending"],
+  ): (PendingDecisionView & Record<string, unknown>) | null =>
     pending
       ? {
+          ...(pending.more?.length
+            ? {
+                more: pending.more.map(
+                  (other) =>
+                    pendingDecision(other) as NonNullable<
+                      ReturnType<typeof pendingDecision>
+                    >,
+                ),
+              }
+            : {}),
           criterion: redactDiagnosticDetail(pending.criterion, secrets),
           treeSha: pending.treeSha,
           source: pending.source,

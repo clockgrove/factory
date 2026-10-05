@@ -50,6 +50,8 @@ export interface PendingDecisionView {
   treeSha: string;
   question: string;
   detail: string;
+  /** The other criteria of the same review that wait for their own decision. */
+  more?: PendingDecisionView[];
 }
 
 export interface CoordinatorView {
@@ -203,6 +205,21 @@ export function shortPlanDigest(plan: { reviewDigest: string }): string {
 
 const REASON = '"WHY"';
 const ANSWER = '"ANSWER"';
+
+/** A criterion as one shell word, so the printed command runs as shown. */
+function shellWord(text: string): string {
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The decision that answers one pending criterion; several pending ones name theirs. */
+function decideCriterion(
+  objective: number,
+  itemId: string | undefined,
+  pending: PendingDecisionView,
+  named: boolean,
+): string {
+  return `factory decide --objective ${objective}${itemId ? ` --item ${itemId}` : ""}${named ? ` --criterion ${shellWord(pending.criterion)}` : ""} --outcome accept|refuse --reason ${REASON}`;
+}
 
 function short(text: string, limit = 100): string {
   const line = text.replace(/\s+/g, " ").trim();
@@ -492,10 +509,17 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
     if (item.step === "approve-result" && item.acceptancePending)
       return {
         phase: "needs-decision",
-        summary: `criterion decision for ${item.id} at tree ${item.acceptancePending.treeSha.slice(0, 12)}`,
+        summary: `${item.acceptancePending.more?.length ? `${item.acceptancePending.more.length + 1} criterion decisions` : "criterion decision"} for ${item.id} at tree ${item.acceptancePending.treeSha.slice(0, 12)}`,
         nextAction: {
-          command: `factory decide --objective ${objective} --item ${item.id} --outcome accept|refuse --reason ${REASON}`,
-          reason: `Answer the question below${thenRun(view)}`,
+          command: decideCriterion(
+            objective,
+            item.id,
+            item.acceptancePending,
+            Boolean(item.acceptancePending.more?.length),
+          ),
+          reason: item.acceptancePending.more?.length
+            ? `Answer every question below, one decision each${thenRun(view)}`
+            : `Answer the question below${thenRun(view)}`,
         },
       };
     if (item.step === "approve-asset") {
@@ -513,10 +537,17 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   if (view.finalAcceptancePending)
     return {
       phase: "needs-decision",
-      summary: `final acceptance decision at tree ${view.finalAcceptancePending.treeSha.slice(0, 12)}`,
+      summary: `${view.finalAcceptancePending.more?.length ? `${view.finalAcceptancePending.more.length + 1} final acceptance decisions` : "final acceptance decision"} at tree ${view.finalAcceptancePending.treeSha.slice(0, 12)}`,
       nextAction: {
-        command: `factory decide --objective ${objective} --outcome accept|refuse --reason ${REASON}`,
-        reason: `Answer the question below${thenRun(view)}`,
+        command: decideCriterion(
+          objective,
+          undefined,
+          view.finalAcceptancePending,
+          Boolean(view.finalAcceptancePending.more?.length),
+        ),
+        reason: view.finalAcceptancePending.more?.length
+          ? `Answer every question below, one decision each${thenRun(view)}`
+          : `Answer the question below${thenRun(view)}`,
       },
     };
   const status = (id: string) =>
@@ -1179,15 +1210,28 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
       );
   }
   if (view.capacity) lines.push("", capacityLine(view.capacity));
-  const question = (label: string, pending: PendingDecisionView) =>
-    lines.push(
-      "",
-      `${label} criterion "${pending.criterion}" at tree ${pending.treeSha}`,
-      `  Question: ${pending.question}`,
-      `  Evidence: ${pending.detail}`,
-    );
+  const question = (
+    label: string,
+    itemId: string | undefined,
+    first: PendingDecisionView,
+  ) => {
+    const all = [first, ...(first.more ?? [])];
+    for (const pending of all)
+      lines.push(
+        "",
+        `${label} criterion "${pending.criterion}" at tree ${pending.treeSha}`,
+        `  Question: ${pending.question}`,
+        `  Evidence: ${pending.detail}`,
+        ...(all.length > 1
+          ? [
+              `  Decide: ${decideCriterion(view.objective, itemId, pending, true)}`,
+            ]
+          : []),
+      );
+  };
   for (const item of view.work) {
-    if (item.acceptancePending) question(`${item.id}:`, item.acceptancePending);
+    if (item.acceptancePending)
+      question(`${item.id}:`, item.id, item.acceptancePending);
     if (item.status === "waiting" && item.step === "approve-asset") {
       lines.push("", `${item.id}: candidate AssetSets`);
       for (const set of item.assetSets ?? [])
@@ -1203,7 +1247,7 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
       );
   }
   if (view.finalAcceptancePending)
-    question("Objective:", view.finalAcceptancePending);
+    question("Objective:", undefined, view.finalAcceptancePending);
   if (view.state === "failed" && view.lastError)
     lines.push("", `Error: ${view.lastError}`);
   return lines;

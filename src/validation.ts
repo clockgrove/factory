@@ -1970,7 +1970,9 @@ export async function reviewAcceptance(args: {
   /** The first criterion whose answer was invalid. */
   let firstInvalid: string | undefined;
   const proven: CriterionEvidence[] = [];
-  let pending: AcceptancePending | undefined;
+  /** Every criterion that needs a human, by its place in `criteria`. */
+  const questions = new Map<number, Omit<AcceptancePending, "more">>();
+  const invalidIndices: number[] = [];
   let refused: string | undefined;
   for (const [index, criterion] of criteria.entries()) {
     const decision = args.decisions?.find(
@@ -2001,6 +2003,7 @@ export async function reviewAcceptance(args: {
       observeInvalidReview(args.invocation, "finding", "invalid-response");
       invalidAnswers.push(`criterion ${index}: ${invalid}`);
       firstInvalid ??= criterion;
+      invalidIndices.push(index);
       continue;
     }
     if (finding.verdict === "pass") {
@@ -2016,12 +2019,12 @@ export async function reviewAcceptance(args: {
       refused ??= `Acceptance criterion disproved: ${criterion}: ${finding.detail}`;
       continue;
     }
-    pending ??= {
+    questions.set(index, {
       criterion,
       treeSha: evidence.treeSha,
       detail: finding.detail,
       question: finding.question,
-    };
+    });
   }
   const automaticCriterion = criteria.find(
     (criterion) =>
@@ -2068,7 +2071,7 @@ export async function reviewAcceptance(args: {
     if (!protocolInvalid)
       observeOutcome(
         "semantic",
-        refused ? "refuse" : pending ? "needs-human" : "pass",
+        refused ? "refuse" : questions.size ? "needs-human" : "pass",
       );
   }
 
@@ -2085,14 +2088,23 @@ export async function reviewAcceptance(args: {
       args.onInvalid?.(detail);
       throw new StepFault(transient(detail, true));
     }
-    pending ??= {
-      criterion: firstInvalid,
-      treeSha: evidence.treeSha,
-      detail,
-      question: `The independent reviewer could not give a valid answer for this criterion twice. Inspect the evidence and accept or refuse it.`,
-    };
+    // A packet-level fault has no criterion of its own: it is asked of the first.
+    for (const index of invalidIndices.length
+      ? invalidIndices
+      : [criteria.indexOf(firstInvalid)])
+      questions.set(index, {
+        criterion: criteria[index]!,
+        treeSha: evidence.treeSha,
+        detail,
+        question: `The independent reviewer could not give a valid answer for this criterion twice. Inspect the evidence and accept or refuse it.`,
+      });
   }
-  if (pending) return { pending };
+  if (questions.size) {
+    const [pending, ...more] = [...questions.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, question]) => question);
+    return { pending: more.length ? { ...pending!, more } : pending! };
+  }
   return { evidence: { ...evidence, criteria: proven } };
 }
 

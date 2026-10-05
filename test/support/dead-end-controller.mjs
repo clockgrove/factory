@@ -282,6 +282,7 @@ async function command({ verb, options, input }) {
       // The state says whether this is a plan or a result; only a plan takes an answer.
       return application.decide(objective, {
         item,
+        criterion: options.criterion,
         actor: "operator",
         outcome: options.outcome === "refuse" ? "refuse" : "accept",
         answer: options.answer ? "Proceed" : undefined,

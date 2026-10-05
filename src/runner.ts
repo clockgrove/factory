@@ -122,6 +122,7 @@ import type {
   WorkState,
 } from "./state.js";
 import {
+  pendingQuestions,
   projectionStarted,
   rejectionHoldsPause,
   setCoordinatorMode,
@@ -350,6 +351,8 @@ export async function decidePlan(
 export interface DecisionInput {
   /** The Work Item whose result is decided; none for a plan or the final acceptance. */
   item?: string;
+  /** The pending criterion this decision answers; required only when several are pending. */
+  criterion?: string;
   actor: string;
   outcome: "accept" | "refuse";
   /** The answer to a plan's question; required to accept a plan. */
@@ -367,14 +370,14 @@ export async function decideObjective(
   objective: number,
   services: Pick<ApplicationServices, "github">,
   input: DecisionInput,
-): Promise<"plan-accepted" | "plan-refused" | "result"> {
+): Promise<"plan-accepted" | "plan-refused" | "result" | "result-open"> {
   const state = readContinuation(config.repository, objective);
   if (!state)
     throw new Error(
       `Objective #${objective} has no Factory state; run \`factory run --objective ${objective}\` first`,
     );
   if (state.schemaVersion === 8) {
-    if (input.item)
+    if (input.item || input.criterion)
       throw new Error(
         "--item names a Work Item's result; a plan decision takes none",
       );
@@ -394,6 +397,7 @@ export async function decideObjective(
     );
   const result = {
     item: input.item,
+    criterion: input.criterion,
     actor: input.actor,
     outcome: input.outcome,
     reason: input.reason,
@@ -404,7 +408,14 @@ export async function decideObjective(
     input: result,
   });
   if (!reply.handled) decideResult(config, objective, result);
-  return "result";
+  // Criteria of the same review that still wait keep the Objective stopped.
+  const after = readContinuation(config.repository, objective);
+  const open =
+    after?.schemaVersion === 7 &&
+    (input.item
+      ? after.work[input.item]?.acceptancePending
+      : after.finalAcceptancePending);
+  return open ? "result-open" : "result";
 }
 
 export class CoordinatorHandoff extends Error {
@@ -2715,6 +2726,7 @@ export function decideResult(
   objective: number,
   input: {
     item?: string;
+    criterion?: string;
     actor: string;
     outcome: "accept" | "refuse";
     reason: string;
@@ -2755,6 +2767,19 @@ export function decideResult(
       throw new Error(
         "Result decision tree differs from the pending exact result",
       );
+    // One review may leave several criteria for a human; each is decided on its own.
+    const questions = pendingQuestions(pending);
+    const asked = input.criterion
+      ? questions.find((question) => question.criterion === input.criterion)
+      : questions.length === 1
+        ? questions[0]
+        : undefined;
+    if (!asked)
+      throw new Error(
+        input.criterion
+          ? "No pending criterion matches --criterion"
+          : `${questions.length} criteria are pending; name one with --criterion (\`factory status --objective ${objective}\` lists them)`,
+      );
     if (
       !input.actor.trim() ||
       !input.reason.trim() ||
@@ -2762,27 +2787,37 @@ export function decideResult(
     )
       throw new Error("Result decision requires actor and reason");
     const decision = {
-      criterion: pending.criterion,
+      criterion: asked.criterion,
       treeSha: pending.treeSha,
       actor: input.actor,
       at: new Date().toISOString(),
       outcome: input.outcome,
       reason: input.reason,
     };
+    // An accepted answer leaves the other questions waiting; the last one resumes validation.
+    const [next, ...more] = questions.filter((question) => question !== asked);
+    const remaining =
+      input.outcome === "accept" && next
+        ? { ...next, ...(more.length ? { more } : {}) }
+        : undefined;
     if (work) {
       work.acceptanceDecisions ??= [];
       work.acceptanceDecisions.push(decision);
-      delete work.acceptancePending;
-      work.status = input.outcome === "accept" ? "running" : "failed";
-      work.step = "validate";
+      if (remaining) work.acceptancePending = remaining;
+      else {
+        delete work.acceptancePending;
+        work.status = input.outcome === "accept" ? "running" : "failed";
+        work.step = "validate";
+      }
       if (input.outcome === "refuse")
-        work.error = `Acceptance refused: ${pending.criterion}`;
+        work.error = `Acceptance refused: ${asked.criterion}`;
     } else {
       state.finalAcceptanceDecisions ??= [];
       state.finalAcceptanceDecisions.push(decision);
-      delete state.finalAcceptancePending;
+      if (remaining) state.finalAcceptancePending = remaining;
+      else delete state.finalAcceptancePending;
       if (input.outcome === "refuse")
-        state.error = `Final acceptance refused: ${pending.criterion}`;
+        state.error = `Final acceptance refused: ${asked.criterion}`;
     }
     saveState(path, state);
     new DiagnosticEmitter(config.repository, objective).emit({

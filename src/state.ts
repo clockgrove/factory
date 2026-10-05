@@ -57,6 +57,16 @@ export interface AcceptancePending {
   question: string;
   detail: string;
   reviewFinding?: ResultReviewCandidate;
+  /** The other criteria of the same review that also need a human, in criterion order. */
+  more?: Omit<AcceptancePending, "more">[];
+}
+
+/** Every open question of a review: the pending criterion, then the others it stopped with. */
+export function pendingQuestions(
+  pending: AcceptancePending,
+): Omit<AcceptancePending, "more">[] {
+  const { more, ...first } = pending;
+  return [first, ...(more ?? [])];
 }
 
 export interface WorkState {
@@ -380,8 +390,18 @@ function acceptanceDecisions(value: unknown, label: string): void {
   }
 }
 
-function acceptancePending(value: unknown, label: string): void {
+function acceptancePending(
+  value: unknown,
+  label: string,
+  nested = false,
+): void {
   const pending = record(value, label);
+  if (pending.more !== undefined) {
+    if (nested || !Array.isArray(pending.more))
+      throw new Error(`${label}.more is invalid`);
+    for (const [index, other] of pending.more.entries())
+      acceptancePending(other, `${label}.more[${index}]`, true);
+  }
   for (const key of ["criterion", "question", "detail"])
     string(pending[key], `${label}.${key}`);
   for (const key of ["source", "quote"])

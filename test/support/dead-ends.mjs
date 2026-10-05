@@ -1484,7 +1484,9 @@ function holdProblem(command, before, after, applied) {
     before.pendingAmendment?.phase !== "rejected"
   )
     return undefined;
-  if (after?.pendingAmendment?.phase !== "rejected") return undefined;
+  // A cancelled Objective is terminal: no mode change reaches it.
+  if (after?.pendingAmendment?.phase !== "rejected" || after.cancelledAt)
+    return undefined;
   if (after.coordinator?.mode !== "paused")
     return `factory ${verb} released a rejected amendment's pause (mode ${after.coordinator?.mode})`;
   if (verb === "queue") return undefined;

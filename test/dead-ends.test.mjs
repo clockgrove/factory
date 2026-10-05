@@ -510,6 +510,34 @@ describe("dead ends", { concurrency: true }, () => {
     );
   });
 
+  // A rejection whose mode is not paused (the raw state a bypass of the
+  // setter or an old state file leaves) gets `factory pause` from status; the
+  // finder must apply it, then reach the replacement.
+  test("the pause status names for an unpaused rejection is applied", {
+    timeout: 3_600_000,
+  }, async () => {
+    const applied = () =>
+      ownerProbes.applied.some(
+        (command) =>
+          command.stop === "rejected amendment" && command.verb === "pause",
+      );
+    for (const testCase of cases) {
+      if (
+        testCase.unreachable ||
+        !Object.values(testCase.values ?? {}).some((value) =>
+          /, then the mode was left /.test(value),
+        )
+      )
+        continue;
+      await outcomeOf(testCase);
+      if (applied()) break;
+    }
+    assert.ok(
+      applied(),
+      "No case applied factory pause at a rejected amendment",
+    );
+  });
+
   for (const testCase of cases) {
     test(testCase.name, { timeout: 3_600_000 }, async () => {
       const outcome = await outcomeOf(testCase);

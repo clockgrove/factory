@@ -5,6 +5,7 @@ import {
   type PlanningRequest,
   type WorkGraph,
 } from "./contracts.js";
+import { ownsPath } from "./ownership.js";
 import { assertWorkItemFields } from "./scheduler.js";
 import { aggregateAcceptance } from "./qa.js";
 
@@ -48,6 +49,11 @@ function index(value: unknown, length: number, label: string): number {
     throw new PlannerChoiceError(`Planner ${label} is invalid`);
   return value as number;
 }
+function strings(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string"))
+    throw new Error(`Planner ${label} must be an array of strings`);
+  return value as string[];
+}
 const integer = (length?: number): Schema => ({
   type: "integer",
   minimum: 0,
@@ -90,6 +96,9 @@ export function compilerWire(
       );
     retainedItems.set(id, structuredClone(item));
   }
+  // The failed attempt that proposed this amendment runs again: its retained
+  // choice may add owned paths, and nothing else of it changes.
+  const reattempt = retainedItems.get(context.reattemptItemId ?? "")?.id;
   const obligations = request.coverageObligations ?? [];
   if (!obligations.length)
     throw new Error("Codex compilation requires controller obligations");
@@ -105,6 +114,7 @@ export function compilerWire(
         request.sources,
         request.executionProfiles,
         request.controllerCapabilitiesDigest,
+        ...(request.fixedScripts?.length ? [request.fixedScripts] : []),
         ...(request.checkNames?.length ? [request.checkNames] : []),
       ]),
     )
@@ -129,6 +139,14 @@ export function compilerWire(
         ...text,
         description:
           "Literal repository-relative files or trailing-slash directory prefixes; no wildcard, absolute path, empty, dot or parent components.",
+      },
+    },
+    newPackages: {
+      type: "array",
+      items: {
+        ...text,
+        description:
+          "Directory of each package this item creates (it adds that directory's package.json); empty when it creates none.",
       },
     },
     priority: { type: "integer" },
@@ -256,6 +274,7 @@ export function compilerWire(
   };
   const readonlyFields = [
     ...Object.keys(readonlyConstants),
+    "newPackages",
     "executionProfile",
   ];
   const schema = strict({
@@ -297,15 +316,24 @@ export function compilerWire(
             const ids = [...retainedItems.values()]
               .filter((item) => (item.kind ?? "work") === kind)
               .map((item) => item.id);
-            return ids.length
-              ? [
-                  strict({
-                    kind: { type: "string", enum: ["retained"] },
-                    id: { type: "string", enum: ids },
-                    coverage: coverageSchema(kind),
-                  }),
-                ]
-              : [];
+            const choice = (ids: string[], more: Record<string, Schema> = {}) =>
+              strict({
+                kind: { type: "string", enum: ["retained"] },
+                id: { type: "string", enum: ids },
+                coverage: coverageSchema(kind),
+                ...more,
+              });
+            const kept = ids.filter((id) => id !== reattempt);
+            return [
+              ...(kept.length ? [choice(kept)] : []),
+              ...(reattempt && ids.includes(reattempt)
+                ? [
+                    choice([reattempt], {
+                      addedOwnedPaths: { type: "array", items: text },
+                    }),
+                  ]
+                : []),
+            ];
           }),
         ],
       },
@@ -338,6 +366,9 @@ export function compilerWire(
     })),
     executionProfiles: request.executionProfiles ?? null,
     executionBounds: request.executionBounds ?? null,
+    ...(request.fixedScripts?.length
+      ? { fixedScripts: request.fixedScripts }
+      : {}),
     checkNames: checkNames.map((name, checkIndex) => ({ checkIndex, name })),
     instructions: context.instructions,
     ...(retainedItems.size
@@ -400,18 +431,34 @@ export function compilerWire(
       const referenced = new Set<string>();
       for (const raw of wire.items) {
         let item = structuredClone(object(raw, "item"));
+        let newPackages: string[] = [];
         if (item.kind === "retained") {
-          keys(item, ["kind", "id", "coverage"], "retained item");
           const retained =
             typeof item.id === "string"
               ? retainedItems.get(item.id)
               : undefined;
+          const widens = retained !== undefined && retained.id === reattempt;
+          keys(
+            item,
+            ["kind", "id", "coverage", ...(widens ? ["addedOwnedPaths"] : [])],
+            "retained item",
+          );
           if (!retained || referenced.has(retained.id))
             throw new PlannerChoiceError(
               "Planner retained item is unavailable or duplicated",
             );
           referenced.add(retained.id);
+          const added = widens
+            ? strings(item.addedOwnedPaths, "addedOwnedPaths")
+            : [];
           item = { ...structuredClone(retained), coverage: item.coverage };
+          if (widens)
+            item.ownedPaths = [
+              ...retained.ownedPaths,
+              ...new Set(
+                added.filter((path) => !ownsPath(path, retained.ownedPaths)),
+              ),
+            ];
         } else {
           if (typeof item.id === "string" && retainedItems.has(item.id))
             throw new Error(
@@ -432,6 +479,8 @@ export function compilerWire(
             );
           if (item.kind !== "work")
             Object.assign(item, structuredClone(readonlyConstants));
+          else newPackages = strings(item.newPackages, "newPackages");
+          delete item.newPackages;
           if (!Array.isArray(item.sourceAssets))
             throw new Error("Planner sourceAssets must be an array");
           for (const rawAsset of item.sourceAssets) {
@@ -518,6 +567,17 @@ export function compilerWire(
           });
         }
         assertWorkItemFields(item);
+        // A new package the item declares becomes literal manifest ownership,
+        // the fact workspace validation checks (#803).
+        for (const directory of newPackages) {
+          const manifest = `${directory.replace(/\/$/, "")}/package.json`;
+          if (!ownsPath(manifest, item.ownedPaths))
+            throw new PlannerChoiceError(
+              `Planner item ${item.id} creates the package ${directory} without owning ${manifest}`,
+            );
+          if (!item.ownedPaths.includes(manifest))
+            item.ownedPaths.push(manifest);
+        }
         if (!Array.isArray(item.coverage))
           throw new Error("Planner item coverage must be an array");
         if (item.kind === "qa" && item.coverage.length === 0)

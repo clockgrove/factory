@@ -17,6 +17,13 @@ import {
   validateWorkspacePackagePlan,
   workspacePackageAdditions,
 } from "../dist/workspace-membership.js";
+import {
+  compileObjective,
+  compilerCitationChoices,
+  PlanValidationError,
+} from "../dist/compiler.js";
+import { compilerWire, PlannerChoiceError } from "../dist/compiler-wire.js";
+import { encodeCompilerWire } from "./support/compiler-wire.mjs";
 import { withCoverage } from "./support/coverage.mjs";
 import { createTarget, git } from "./support/integration-fixture.mjs";
 import { compilePlan } from "./support/plan.mjs";
@@ -423,6 +430,50 @@ test("planning refuses a new workspace package the Objective did not declare", a
         target.checkout,
       ),
     );
+  });
+});
+
+test("a package the plan declares under an owned directory needs the Objective's declaration, and the planner gets the fixed script bodies (#803, #819)", async () => {
+  await fixture(async (_root, target) => {
+    const body =
+      "# Objective\n\n## Acceptance\n- apps/web/package.json exists\n- `pnpm check`\n";
+    const planned = graph(target.baseSha);
+    Object.assign(planned.items[0], {
+      ownedPaths: ["apps/web/"],
+      citations: [{ path: "OBJECTIVE", heading: "Acceptance" }],
+    });
+    let newPackages = ["apps/web"];
+    const model = {
+      async generateStructured(request) {
+        // The acceptance command's script as the base defines it.
+        assert.deepEqual(request.fixedScripts, [
+          { name: "check", body: "true" },
+        ]);
+        const wire = compilerWire(
+          request,
+          compilerCitationChoices(request.sources),
+        );
+        assert.deepEqual(wire.data.fixedScripts, request.fixedScripts);
+        const value = encodeCompilerWire(
+          withCoverage(request, planned),
+          wire.data,
+        );
+        value.items[0].newPackages = newPackages;
+        return wire.decode(value);
+      },
+    };
+    const compile = () =>
+      compileObjective(1, body, target.baseSha, target.checkout, model);
+    // The directory prefix alone says nothing; the declared package does.
+    await assert.rejects(compile(), (error) => {
+      assert(error instanceof PlanValidationError);
+      assert.match(error.message, /apps\/web/);
+      return true;
+    });
+    newPackages = ["apps/elsewhere"];
+    await assert.rejects(compile(), PlannerChoiceError);
+    newPackages = [];
+    assert.deepEqual((await compile()).items[0].ownedPaths, ["apps/web/"]);
   });
 });
 

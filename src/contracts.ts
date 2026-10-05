@@ -270,7 +270,11 @@ export interface PlanningRequest<T> {
     instructions: string;
     previousGraph?: WorkGraph;
     immutableItemIds?: string[];
+    /** The retained item whose failed attempt proposed the amendment; its ownership may widen. */
+    reattemptItemId?: string;
   };
+  /** Package scripts the acceptance commands run, as the base defines them; validation keeps them fixed. */
+  fixedScripts?: { name: string; body: string }[];
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;

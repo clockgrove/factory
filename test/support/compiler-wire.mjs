@@ -128,6 +128,7 @@ export function encodeCompilerWire(input, promptOrChoices) {
         if (item.kind !== "work")
           for (const field of [
             "ownedPaths",
+            "newPackages",
             "sourceAssets",
             "expectedOutputRoles",
             "requiredLfsRoles",
@@ -156,6 +157,7 @@ export function compilerItem(overrides = {}) {
     children: [],
     dependencies: [],
     ownedPaths: ["result.txt"],
+    newPackages: [],
     resources: [],
     validation: [],
     sourceAssets: [],

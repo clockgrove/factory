@@ -475,6 +475,119 @@ for (const delivery of ["regular", "native-stack"])
     );
   });
 
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: a failed attempt that reports an unowned path runs again under widened ownership, with no repair and no operator decision (#819, #827)`, async () => {
+    await fixture(
+      `widen-${delivery}`,
+      async ({ root, config, initial }) => {
+        // A repair is available, so the test shows the amendment does not spend it.
+        config.autonomy = {
+          allowances: {
+            ...autonomyConfig.allowances,
+            implementationRepairs: 1,
+          },
+          repairClasses: ["implementation"],
+        };
+        const needed = {
+          scope: "in-scope",
+          reason: "Acceptance needs extra.txt, which this item does not own",
+          evidence: ["The fixed check reads extra.txt"],
+          ownership: ["extra.txt"],
+          acceptance: ["extra.txt changes with result.txt"],
+          dependencies: [],
+        };
+        // The first worker stops on the unowned path and only stages the discovery.
+        const actions = {
+          result: {
+            files: [
+              { path: ".factory-discovery.json", text: JSON.stringify(needed) },
+            ],
+          },
+        };
+        let first;
+        const planningModel = {
+          async generateStructured(request) {
+            assert.notEqual(request.purpose, "diagnosis");
+            if (!first) return (first = withCoverage(request, initial));
+            assert.equal(request.compileContext.reattemptItemId, "result");
+            // The failure took a repair for its diagnosis, which waits here.
+            assert.equal(
+              consumption(readState(config.repository, 1))
+                .implementationRepairs,
+              1,
+            );
+            const wire = compilerWire(
+              request,
+              compilerCitationChoices(request.sources),
+            );
+            const value = encodeCompilerWire(first, wire.data);
+            assert.deepEqual(value.items[0], {
+              kind: "retained",
+              id: "result",
+              coverage: value.items[0].coverage,
+            });
+            value.items[0].addedOwnedPaths = ["extra.txt", "result.txt"];
+            // The next worker changes the path the first one reported.
+            actions.result.files = [
+              { path: "result.txt", text: "done\n" },
+              { path: "extra.txt", text: "done\n" },
+            ];
+            return wire.decode(value);
+          },
+          async reviewGraph(request) {
+            return { packetId: request.reviewPacket.id, findings: [] };
+          },
+          async reviewResult(request) {
+            return {
+              packetId: request.reviewPacket.id,
+              findings: request.reviewPacket.criteria.map(
+                (_, criterionIndex) => ({
+                  criterionIndex,
+                  evidenceIndices: [
+                    request.reviewPacket.evidence.findIndex(
+                      (entry) => entry.path === "OBJECTIVE",
+                    ),
+                  ],
+                  verdict: "pass",
+                  detail: "Fixture source-backed acceptance",
+                  question: "",
+                }),
+              ),
+            };
+          },
+        };
+        const setup = makeApplication({
+          config,
+          graph: initial,
+          objectiveBody: body,
+          fakeRoot: join(root, "fake"),
+          planningModel,
+          actions,
+        });
+        const state = await setup.application.runObjective(1);
+        assert.equal(state.finalValidation.passed, true);
+        assert.deepEqual(state.graph.items[0], {
+          ...first.items[0],
+          ownedPaths: ["result.txt", "extra.txt"],
+        });
+        assert.deepEqual(consumption(state), {
+          planningRevisions: 1,
+          implementationRepairs: 0,
+          resultRereviews: 0,
+        });
+        assert.equal(state.work.result.recovery.history.length, 1);
+        assert.equal(
+          readEvents(setup.eventsPath).filter((event) => event.type === "start")
+            .length,
+          2,
+        );
+        assertGraphRevisions(readState(config.repository, 1));
+        assert.doesNotThrow(() => checkServiceState(config, 1));
+      },
+      delivery,
+    );
+  });
+
 test("amendment validation preserves cycles, stable/completed identity, command authority and coverage", async () => {
   await fixture("validation", async ({ config, initial }) => {
     const obligations = coverageObligations(body, objectiveCriteria(body));
@@ -539,6 +652,35 @@ test("amendment validation preserves cycles, stable/completed identity, command 
       /immutable/,
     );
     validateAmendment(state, proposal.graph, config, body);
+    // Only the failed attempt that proposed the amendment may change, and
+    // only by owning more paths.
+    state.work.result = {
+      status: "failed",
+      attempt: "failed",
+      recovery: { failure: { event: "item/result/execute/0" } },
+    };
+    const widened = structuredClone(proposal.graph);
+    widened.items[0].ownedPaths.push("extra.txt");
+    assert.throws(
+      () => validateAmendment(state, widened, config, body),
+      /immutable/,
+    );
+    state.pendingAmendment.proposal.worker = {
+      itemId: "result",
+      attempt: "failed",
+    };
+    validateAmendment(state, widened, config, body);
+    for (const mutate of [
+      (item) => item.ownedPaths.shift(),
+      (item) => (item.brief += " changed"),
+    ]) {
+      const invalid = structuredClone(widened);
+      mutate(invalid.items[0]);
+      assert.throws(
+        () => validateAmendment(state, invalid, config, body),
+        /immutable/,
+      );
+    }
   });
 });
 

@@ -1744,6 +1744,23 @@ test("model faults: only connect-phase failures before a turn started are unpaid
     syscall: "getsockopt",
   });
   assert.equal(modelFault(odd, call(true)).kind, "transient");
+  // A request the provider rejected is configuration, with its message.
+  const unsupported = new Error(
+    JSON.stringify({
+      type: "error",
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        message:
+          "The 'm' model is not supported when using Codex with a ChatGPT account.",
+      },
+    }),
+  );
+  const fault = modelFault(unsupported, call(true));
+  assert.equal(fault.kind, "config");
+  assert.match(fault.detail, /^The 'm' model is not supported/);
+  const overloaded = new Error(JSON.stringify({ type: "error", status: 503 }));
+  assert.equal(modelFault(overloaded, call(true)).kind, "transient");
 });
 
 test("model faults: a Factory programming error is a defect, a missing CLI is configuration", () => {

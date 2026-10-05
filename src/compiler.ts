@@ -396,9 +396,40 @@ export function modelFault(
     )
   )
     return { kind: "defect", detail };
+  // The provider rejected the request itself, such as a model the login
+  // cannot use: nothing ran, and repeating it cannot succeed.
+  const rejected = rejectedRequest(detail);
+  if (rejected)
+    return {
+      kind: "config",
+      detail: rejected,
+      fix: "Choose a model and options the provider login supports in the Factory configuration, then `factory run`",
+    };
   // A lost session, a dropped stream, a turn that never completed or a
   // provider failure after it ran: the paid call may have happened.
   return transient(`Model call did not complete: ${detail}`, true);
+}
+
+/** The provider's message when its structured error is a rejected request. */
+function rejectedRequest(detail: string): string | undefined {
+  let body: unknown;
+  try {
+    body = JSON.parse(detail);
+  } catch {
+    return undefined;
+  }
+  const { status, error } = (body ?? {}) as {
+    status?: unknown;
+    error?: { message?: unknown };
+  };
+  if (
+    typeof status !== "number" ||
+    status < 400 ||
+    status >= 500 ||
+    [408, 409, 429].includes(status)
+  )
+    return undefined;
+  return typeof error?.message === "string" ? error.message : detail;
 }
 
 function providerFailureClass(error: unknown): string {

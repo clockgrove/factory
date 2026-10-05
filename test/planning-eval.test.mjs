@@ -1060,10 +1060,17 @@ export function createJudgeTransport({ judge }) {
   return path;
 }
 
+const scratchDirectories = () =>
+  readdirSync(tmpdir()).filter((name) =>
+    name.startsWith("factory-plan-judge-"),
+  );
+
 test("judges run sandboxed: no file outside their scratch, no operator Codex config", {
   skip: sandboxSkip,
 }, () => {
   const work = mkdtempSync(join(tmpdir(), "factory-planning-eval-isolation-"));
+  // Scratch left by an earlier killed run is not this run's leak.
+  const scratchBefore = scratchDirectories();
   try {
     const canary = join(work, "canary.txt");
     writeFileSync(canary, "secret");
@@ -1141,9 +1148,7 @@ test("judges run sandboxed: no file outside their scratch, no operator Codex con
     // The real login file is bound, not copied, and is untouched.
     assert.equal(readFileSync(join(codexHome, "auth.json"), "utf8"), "{}");
     assert.deepEqual(
-      readdirSync(tmpdir()).filter((name) =>
-        name.startsWith("factory-plan-judge-"),
-      ),
+      scratchDirectories().filter((name) => !scratchBefore.includes(name)),
       [],
     );
   } finally {

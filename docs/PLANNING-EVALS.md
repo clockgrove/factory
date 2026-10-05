@@ -151,10 +151,9 @@ A judge's digest covers:
 - its spec and prompt;
 - the input, prompt and repository-fact builders;
 - the decoder and the isolation code;
-- the resolved provider options: Claude's thinking, turns, tools, system prompt and transformed output schema, or Codex's thread options and output schema;
-- the provider SDK versions in `package-lock.json`.
+- the resolved provider options: Claude's thinking, turns, tools, system prompt and transformed output schema, or Codex's thread options and output schema.
 
-The test suite pins each digest, so a change to any of these fails CI.
+It does not cover the provider SDK packages or their versions, so a dependency bump does not change a frozen judge. The test suite pins each digest, so a change to any of the above fails CI.
 
 The sandbox tests (plan and review runs with judges, and the isolation probe) run in CI: the `judge-sandbox` action installs bubblewrap and loads an AppArmor profile that grants unprivileged user namespaces to `/usr/bin/bwrap` only, and sets `FACTORY_REQUIRE_SANDBOX=1`, so a missing sandbox fails CI instead of skipping (#705). On hosts that cannot run bubblewrap with user namespaces (macOS, Windows, containers) they skip, with the reason in the test output; run `node --test test/planning-eval.test.mjs` on a Linux host with user namespaces before changing the judge sandbox.
 

@@ -19,6 +19,33 @@ Keep optional dependencies enabled for source development: TypeScript and notice
 
 Read [AGENTS.md](AGENTS.md) for contributor rules and the [architecture](docs/ARCHITECTURE.md) for how Factory works and its safety invariants. Factory must never execute an Objective against its own source repository.
 
+## Run the CLI from a checkout
+
+Use this to run Factory from `main` before a release, on your own repository or while developing. The setup skill and the README run `factory` from the PATH, so put your build there.
+
+```sh
+git clone https://github.com/clockgrove/factory.git ~/factory-main
+cd ~/factory-main
+npm ci
+npm run build
+npm link          # or the wrapper below
+factory help
+```
+
+Without `npm link`, write a wrapper on your PATH that runs the build:
+
+```sh
+printf '#!/bin/sh\nexec node "$HOME/factory-main/dist/cli.js" "$@"\n' > ~/.local/bin/factory
+chmod +x ~/.local/bin/factory
+```
+
+Then run the setup skill, or `factory setup`, as the README describes. Rules:
+
+- `npm run build` again after every `git pull`; the CLI runs `dist/`, not the source.
+- Keep the checkout in place. The link and the wrapper point at it, and a background service keeps running it.
+- Never use this checkout as the target repository. Factory refuses to run an Objective against its own source.
+- Remove the link with `npm unlink -g @clockgrove/factory`.
+
 ## Checks
 
 Before submitting a code change, run:

@@ -4,6 +4,7 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -82,17 +83,17 @@ const root = resolve(import.meta.dirname, "..");
 
 /**
  * Frozen judges: a new judge is a new file; these digests never change. A
- * digest covers the spec, prompt, schema, input builder and provider system
- * prompt, so editing any of them fails here. The provider system prompt comes
- * from the bundled Codex package, so a Codex upgrade re-pins the Codex judge.
+ * digest covers the spec, prompt, schema and input builder, so editing any of
+ * them fails here. It does not cover the bundled provider packages: a Codex or
+ * Claude SDK upgrade must not fail it.
  */
 const FROZEN_JUDGES = {
   "strict-rubric-v1-claude":
-    "a77ab59477059969990bcb988b8a8be89275c79f61e8541c1ece87171316a1c2",
+    "e61976130e2bb5e23687526b4f4e985815c035f6c98cbb8ce62c9cd49c9c52d3",
   "strict-rubric-v1-codex":
-    "98bdea7ecda8518d04e3f21bab7815876ffe1176fc9b4dddaeda4ba089ac0145",
+    "216a0bdcc61685acea61cc78f4a37ecefbe1f92db9c8cdfbf2f33bff7d01916a",
   "strict-rubric-v1-codex-gpt-6.1-sol":
-    "0453dbd59ed8286431e89429e197c1378aad9b567917d532c04b42ecf2b641d1",
+    "3e63b10625e42d4783d72bd7d54cb67a10df91f6a8e18d68a4d268815596e0f6",
 };
 
 /** Fixture commits are the same on every machine. */
@@ -565,6 +566,28 @@ test("judge-free metrics count structured fields only", () => {
     null,
   );
   assert.equal(expectation(undefined, { outcome: "plan" }, plan.graph), null);
+});
+
+test("a judge digest does not depend on the installed provider package versions", () => {
+  for (const [kind, packages] of [
+    ["codex-sdk", ["@openai/codex-sdk", "@openai/codex"]],
+    ["claude-agent-sdk", ["@anthropic-ai/claude-agent-sdk"]],
+  ]) {
+    const context = JSON.stringify(
+      providerContext({
+        kind,
+        model: "m",
+        reasoningEffort: "high",
+        maxOutputTokens: 1000,
+      }),
+    );
+    for (const name of packages) {
+      const { version } = JSON.parse(
+        readFileSync(join(root, "node_modules", name, "package.json"), "utf8"),
+      );
+      assert.ok(!context.includes(version), `${name}@${version} is hashed`);
+    }
+  }
 });
 
 test("the frozen judges load only with their pinned prompt and grade all dimensions", async () => {

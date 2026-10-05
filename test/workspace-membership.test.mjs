@@ -107,6 +107,13 @@ function guard(target, head, extra = {}, commands = []) {
 
 test("workspace addition authority is literal, unique and confined to its Objective section", () => {
   assert.deepEqual(workspacePackageAdditions(objective), ["apps/runtime"]);
+  // The issue form renders every field, including this one, as `###`.
+  assert.deepEqual(
+    workspacePackageAdditions(
+      "### Outcome\nx\n### Workspace package additions\n- `apps/runtime`\n### Constraints\n- `apps/other`\n",
+    ),
+    ["apps/runtime"],
+  );
   assert.deepEqual(
     workspacePackageAdditions("# Objective\nMention apps/runtime in prose."),
     [],
@@ -377,6 +384,44 @@ test("plan ownership and worker inputs must carry the exact human-declared addit
       () =>
         validateWorkspacePackagePlan(missingBrief, objective, target.checkout),
       /responsible item/,
+    );
+  });
+});
+
+test("planning refuses a new workspace package the Objective did not declare", async () => {
+  await fixture(async (_root, target) => {
+    const plan = (ownedPaths) => {
+      const planned = graph(target.baseSha);
+      planned.items[0].ownedPaths = ownedPaths;
+      return planned;
+    };
+    const undeclared = plan(["apps/runtime/package.json"]);
+    assert.throws(
+      () =>
+        validateWorkspacePackagePlan(
+          undeclared,
+          "# Objective\n",
+          target.checkout,
+        ),
+      /Workspace package additions/,
+    );
+    // An existing member's manifest, or one a base glob already covers, is not an addition.
+    assert.doesNotThrow(() =>
+      validateWorkspacePackagePlan(
+        plan(["packages/core/package.json"]),
+        "# Objective\n",
+        target.checkout,
+      ),
+    );
+    target.baseSha = commit(target, {
+      "pnpm-workspace.yaml": "packages:\n  - packages/core\n  - apps/*\n",
+    });
+    assert.doesNotThrow(() =>
+      validateWorkspacePackagePlan(
+        plan(["apps/runtime/package.json"]),
+        "# Objective\n",
+        target.checkout,
+      ),
     );
   });
 });

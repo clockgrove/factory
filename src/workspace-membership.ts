@@ -15,13 +15,23 @@ export function workspacePackageAdditions(body: string): string[] {
     line.heading?.text.toLowerCase() === heading ? [index] : [],
   );
   if (!matches.length) return [];
-  if (matches.length !== 1 || lines[matches[0]!]!.heading!.level !== 2)
-    throw new Error("Use one level-two Workspace package additions section");
   const start = matches[0]!;
+  const level = lines[start]!.heading!.level;
+  // Same levels as the four template sections: the issue form renders `###`.
+  if (matches.length !== 1 || ![2, 3].includes(level))
+    throw new Error(
+      "Use one level-two or level-three Workspace package additions section",
+    );
   const result: string[] = [];
+  let noResponse = false;
   for (const line of lines.slice(start + 1)) {
-    if (line.heading && line.heading.level <= 2) break;
+    if (line.heading && line.heading.level <= level) break;
     if (!line.text.trim()) continue;
+    // GitHub renders an unanswered optional form field this way.
+    if (!line.fenced && line.text.trim() === "_No response_") {
+      noResponse = true;
+      continue;
+    }
     const match = !line.fenced && line.text.match(/^\s*-\s+`([^`]+)`\s*$/);
     if (!match || !exactPackageDirectory(match[1]!))
       throw new Error(
@@ -31,7 +41,7 @@ export function workspacePackageAdditions(body: string): string[] {
       throw new Error("Duplicate Workspace package additions entry");
     result.push(match[1]!);
   }
-  if (!result.length)
+  if (!result.length && !noResponse)
     throw new Error("Workspace package additions must not be empty");
   return result;
 }
@@ -205,6 +215,7 @@ export function validateWorkspacePackagePlan(
     throw new Error(
       "Existing workspace ownership requires explicit Workspace package additions authority; omit ownership when preserving this file",
     );
+  assertDeclaredPackageManifests(graph, baseline, additions, checkout);
   if (!additions.length) return;
   assertWorkspacePackageChange(
     checkout,
@@ -228,4 +239,49 @@ export function validateWorkspacePackagePlan(
         `Workspace package addition needs one responsible item owning the workspace and package, with a worker-visible directory: ${entry}`,
       );
   }
+}
+
+/** A workspace is closed to new members unless the Objective declares them. */
+function assertDeclaredPackageManifests(
+  graph: WorkGraph,
+  baseline: string,
+  additions: readonly string[],
+  checkout: string,
+): void {
+  let packages: string[];
+  try {
+    packages = parseWorkspace(baseline).packages;
+  } catch {
+    return; // Unreadable membership is the worker-time guard's concern.
+  }
+  const covered = (dir: string) =>
+    packages.some((entry) =>
+      new RegExp(
+        `^${entry
+          .replace(/^\.\//, "")
+          .replace(/\/$/, "")
+          .split("**")
+          .map((part) =>
+            part
+              .split("*")
+              .map((piece) => piece.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+              .join("[^/]+"),
+          )
+          .join(".+")}$`,
+      ).test(dir),
+    );
+  for (const item of graph.items)
+    for (const owned of item.ownedPaths) {
+      const dir = owned.match(/^(.+)\/package\.json$/)?.[1];
+      if (
+        !dir ||
+        additions.includes(dir) ||
+        covered(dir) ||
+        file(checkout, graph.baseSha, owned) !== undefined
+      )
+        continue;
+      throw new Error(
+        `Work Item ${item.id} adds the workspace package ${dir}, but the Objective has no Workspace package additions entry for it. Add \`${dir}\` under Workspace package additions, or do not create the package`,
+      );
+    }
 }

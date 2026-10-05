@@ -101,14 +101,21 @@ try {
     ["pull_request"],
     "Each exact published head needs one unambiguous source-check receipt",
   );
-  const checkoutStep = parse(workflow).jobs["source-check"].steps.find((step) =>
+  const steps = parse(workflow).jobs["source-check"].steps;
+  const checkoutStep = steps.find((step) =>
     step.uses?.startsWith("actions/checkout@"),
   );
+  assert.equal(checkoutStep?.uses, "actions/checkout@v7");
   assert.equal(
     checkoutStep?.with?.ref,
     "${{ github.event.pull_request.head.sha }}",
     "The CI command checks the published head rather than a synthetic merge",
   );
+  const nodeStep = steps.find((step) =>
+    step.uses?.startsWith("actions/setup-node@"),
+  );
+  assert.equal(nodeStep?.uses, "actions/setup-node@v7");
+  assert.equal(String(nodeStep?.with?.["node-version"]), "24");
   git("init", "-b", "main");
   const baseline = commit("Public unfinished baseline");
   assert.deepEqual(

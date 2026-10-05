@@ -235,3 +235,43 @@ test("review repairs required implementation content without moving later valida
     "no indiscriminate Objective context injection",
   );
 });
+
+test("the worker brief names the package scripts validation keeps identical to the base (#811)", () => {
+  const prompt = (commands) =>
+    workItemPrompt({
+      item: {
+        title: "t",
+        goal: "g",
+        acceptance: [],
+        nonGoals: [],
+        ownedPaths: ["src"],
+        brief: "b",
+        validation: commands.map((command) => ({
+          command,
+          provenance: "source-declared",
+        })),
+      },
+    });
+  const scripts = (text) =>
+    new Set(
+      (text.match(/package scripts \(fixed\): ([^.]*)\./)?.[1] ?? "")
+        .split(", ")
+        .filter(Boolean),
+    );
+  assert.deepEqual(
+    scripts(prompt(["pnpm check", "npm run lint:types", "test -s a.txt"])),
+    new Set([
+      "check",
+      "precheck",
+      "postcheck",
+      "lint:types",
+      "prelint:types",
+      "postlint:types",
+    ]),
+  );
+  assert.deepEqual(
+    scripts(prompt(["pnpm install --frozen-lockfile --ignore-scripts"])),
+    new Set(),
+  );
+  assert.deepEqual(scripts(prompt(["test -s a.txt"])), new Set());
+});

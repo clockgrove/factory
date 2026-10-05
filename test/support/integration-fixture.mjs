@@ -534,6 +534,7 @@ export class ScriptedHarness {
       attempt: identity,
       worktree: request.worktree,
       baseSha: git(request.worktree, "rev-parse", "HEAD"),
+      brief: request.item.brief,
     });
     return {
       identity,

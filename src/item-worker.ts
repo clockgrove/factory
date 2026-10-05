@@ -15,6 +15,7 @@ import { recordWorkerDiscovery } from "./graph-amendments.js";
 import { cancelledFault } from "./fault.js";
 import { executeItem } from "./item-steps.js";
 import { selectedInputsForItem } from "./media.js";
+import type { WorkRecovery } from "./repair-policy.js";
 import type { PhaseAdmission } from "./phase-admission.js";
 import { preflightItemEnvironment } from "./qa-execution.js";
 import type { FactoryState } from "./state.js";
@@ -26,6 +27,24 @@ interface ItemWorker {
   save: () => void;
   cancelled: () => boolean;
   diagnostics?: DiagnosticEmitter;
+}
+
+/**
+ * The item as the new attempt sees it. A failed earlier attempt's recorded
+ * failure (it carries the worker's final response, when there was one) and an
+ * accepted correction go into the brief, so the worker does not repeat it.
+ */
+function attemptItem(item: WorkItem, recovery?: WorkRecovery): WorkItem {
+  const failure = recovery?.failure;
+  const correction = recovery?.correction;
+  if (!failure && !correction) return item;
+  const previous = failure
+    ? `\nThe previous attempt failed. Do not repeat it: ${failure.detail}`
+    : "";
+  const repair = correction
+    ? `\nDiagnosed repair: ${correction.diagnosis}\nRequired correction: ${correction.correction}`
+    : "";
+  return { ...item, brief: `${item.brief}${previous}${repair}` };
 }
 
 /**
@@ -74,12 +93,7 @@ export async function runWorker(
     diagnostics: args.diagnostics,
     request: (attemptId) => ({
       captureContext: { objective: args.objective, runId: state.runId },
-      item: work.recovery?.correction
-        ? {
-            ...item,
-            brief: `${item.brief}\nDiagnosed repair: ${work.recovery.correction.diagnosis}\nRequired correction: ${work.recovery.correction.correction}`,
-          }
-        : item,
+      item: attemptItem(item, work.recovery),
       baseSha,
       attemptId,
       objectiveBody: args.objectiveBody,

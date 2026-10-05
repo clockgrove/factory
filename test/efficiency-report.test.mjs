@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { stateRoot } from "../dist/config.js";
 import { diagnosticPath } from "../dist/diagnostics.js";
+import { renderEfficiency, summarizeEfficiency } from "../dist/efficiency.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 
 const origin = Date.parse("2026-01-01T00:00:00.000Z");
@@ -196,6 +197,8 @@ test("diagnostics --summary --json reports stage time as a union, operator waits
     closure: 5_000,
   });
   assert.equal(report.operatorWaitMs, 75_000); // 30 s retry + 145..190 once
+  assert.equal(report.humanStops, 3); // the planning retry and the two result decisions
+  assert.equal(report.cancelled, false);
   assert.equal(report.unattributedMs, 15_000);
   assert.deepEqual(report.attempts, {
     worker: 3,
@@ -240,4 +243,70 @@ test("diagnostics --summary --json reports stage time as a union, operator waits
   );
   assert.equal(text.status, 0, text.stderr);
   assert.throws(() => JSON.parse(text.stdout));
+});
+
+const emptySummary = {
+  workerUsage: { tokenTotals: {}, cacheReadRatio: null, byInvocation: {} },
+  modelUsage: { tokenTotals: {}, cacheReadRatio: null },
+  objective: { invocationCount: 0, failedCount: 0 },
+};
+const synthetic = (events, now) =>
+  summarizeEfficiency(
+    events.map(([seconds, operation, outcome, itemId]) => ({
+      at: at(seconds),
+      operation,
+      outcome,
+      ...(itemId ? { itemId } : {}),
+    })),
+    [],
+    emptySummary,
+    origin + now * 1000,
+  );
+
+test("a run that stops for a human counts the gap until the next run or command as operator wait", () => {
+  const hour = 3600;
+  const report = synthetic(
+    [
+      [0, "objective-run", "started"],
+      // A decision wait: the run exits, the operator re-runs 4 h later.
+      [10, "objective-run", "waiting"],
+      [10 + 4 * hour, "objective-run", "started"],
+      [20 + 4 * hour, "harness", "started", "a"],
+      // A Work Item fails and stays failed: the run exits, the operator repairs and re-runs.
+      [60 + 4 * hour, "execute", "failed", "a"],
+      [60 + 9 * hour, "objective-run", "started"],
+      [70 + 9 * hour, "harness", "started", "a"],
+      // A failure the next attempt follows in the same run is not a human stop.
+      [100 + 9 * hour, "execute", "failed", "a"],
+      [110 + 9 * hour, "harness", "started", "a"],
+      [200 + 9 * hour, "objective-finalization", "completed"],
+    ],
+    0,
+  );
+  assert.equal(report.humanStops, 2);
+  assert.equal(report.operatorWaitMs, (4 + 5) * hour * 1000);
+  // Only the seconds between events are left over, not the hours.
+  assert.ok(report.unattributedMs < 60_000);
+  assert.match(renderEfficiency(report), /Human stops: 2/);
+});
+
+test("a cancelled Objective ends at its cancellation instead of growing with the clock", () => {
+  const events = [
+    [0, "objective-run", "started"],
+    [5, "harness", "started", "a"],
+    [600, "objective-cancel", "completed"],
+  ];
+  const soon = synthetic(events, 700);
+  const later = synthetic(events, 700 + 10 * 86_400);
+  for (const report of [soon, later]) {
+    assert.equal(report.cancelled, true);
+    assert.equal(report.finished, false);
+    assert.equal(report.wallMs, 600_000);
+    assert.equal(report.endedAt, at(600));
+  }
+  assert.match(renderEfficiency(later), /\(cancelled\)/);
+  // The same events without the cancellation are still running.
+  const running = synthetic(events.slice(0, 2), 700);
+  assert.equal(running.cancelled, false);
+  assert.equal(running.wallMs, 700_000);
 });

@@ -60,10 +60,13 @@ function transition(event: ControllerEvent): Phase | "idle" | undefined {
   )
     return "wait";
   if (
-    ["approve-result", "objective-validation", "objective-run"].includes(op) &&
+    ["approve-result", "objective-validation"].includes(op) &&
     outcome === "waiting"
   )
     return "wait";
+  // A run that stops waiting for a human ends its phase. The wait itself is counted as a
+  // human stop, up to the next run start or operator command.
+  if (op === "objective-run" && outcome === "waiting") return "idle";
   if (
     [
       "acceptance-decision",
@@ -89,6 +92,49 @@ function transition(event: ControllerEvent): Phase | "idle" | undefined {
   )
     return "idle";
   return undefined;
+}
+
+/** Operations that only an operator command emits: each answers or ends a human wait. */
+const operatorCommands = [
+  "step-retry",
+  "work-retry",
+  "acceptance-decision",
+  "objective-acceptance-decision",
+  "planning-decision",
+  "result-rereview-request",
+  "media-selection",
+  "objective-cancel",
+];
+
+/**
+ * An event that leaves the Objective or a Work Item waiting for a human: a decision, a
+ * criterion to accept, an asset to select, or a Work Item that failed and still needs a repair.
+ */
+function humanWait(event: ControllerEvent): boolean {
+  const { operation: op, outcome } = event;
+  if (
+    outcome === "waiting" &&
+    [
+      "objective-run",
+      "objective-validation",
+      "acceptance-pending",
+      "objective-acceptance-pending",
+      "approve-result",
+      "approve-asset",
+    ].includes(op)
+  )
+    return true;
+  if (
+    outcome === "observed" &&
+    ["acceptance-pending", "objective-acceptance-pending"].includes(op)
+  )
+    return true;
+  // A failure only stays a wait if nothing in its scope runs again before an operator acts.
+  return (
+    event.itemId !== undefined &&
+    outcome === "failed" &&
+    transition(event) === "idle"
+  );
 }
 
 /** Merge overlapping or touching intervals. */
@@ -177,7 +223,26 @@ export function summarizeEfficiency(
       entry.event.operation === "objective-finalization" &&
       entry.event.outcome === "completed",
   );
-  const endedAt = finished?.time ?? now;
+  // A cancelled Objective ends at its cancellation, unless a later run started it again.
+  const cancelled = events
+    .filter(
+      (entry) =>
+        entry.event.operation === "objective-cancel" &&
+        entry.event.outcome === "completed",
+    )
+    .at(-1);
+  const cancelledAt =
+    cancelled &&
+    !events.some(
+      (entry) =>
+        entry.index !== cancelled.index &&
+        entry.time >= cancelled.time &&
+        entry.event.operation === "objective-run" &&
+        entry.event.outcome === "started",
+    )
+      ? cancelled.time
+      : undefined;
+  const endedAt = finished?.time ?? cancelledAt ?? now;
 
   const spans: { phase: Phase; interval: Interval }[] = [];
   // One open phase per scope: a Work Item, or the Objective itself.
@@ -196,6 +261,39 @@ export function summarizeEfficiency(
   }
   for (const current of open.values())
     spans.push({ phase: current.phase, interval: [current.since, endedAt] });
+
+  // Human stops: from the event that leaves a scope waiting for a human until the next run
+  // start or operator command. A run records no end, so the wait is read from where the next
+  // one begins; the operator's time is whatever passes before they act.
+  let humanStops = 0;
+  const waiting = new Map<string, number>();
+  for (const { event, time } of events) {
+    const scope = event.itemId ?? "";
+    const runStart =
+      event.operation === "objective-run" && event.outcome === "started";
+    if (runStart || operatorCommands.includes(event.operation)) {
+      let released = false;
+      for (const [waitingScope, since] of waiting) {
+        if (!runStart && event.itemId && waitingScope && waitingScope !== scope)
+          continue;
+        spans.push({ phase: "wait", interval: [since, time] });
+        waiting.delete(waitingScope);
+        released = true;
+      }
+      if (released) humanStops++;
+    } else if (humanWait(event)) {
+      if (!waiting.has(scope)) waiting.set(scope, time);
+    } else {
+      const next = transition(event);
+      if (next !== undefined && next !== "idle" && next !== "wait")
+        waiting.delete(scope);
+    }
+  }
+  if (!finished && waiting.size > 0) {
+    for (const since of waiting.values())
+      spans.push({ phase: "wait", interval: [since, endedAt] });
+    humanStops++;
+  }
   const clip = (interval: Interval): Interval[] => {
     const start = Math.max(interval[0], startedAt ?? interval[0]);
     const end = Math.min(interval[1], endedAt);
@@ -251,9 +349,12 @@ export function summarizeEfficiency(
       startedAt === undefined ? null : new Date(startedAt).toISOString(),
     endedAt: startedAt === undefined ? null : new Date(endedAt).toISOString(),
     finished: finished !== undefined,
+    cancelled: cancelledAt !== undefined,
     wallMs,
     stageMs,
     operatorWaitMs,
+    /** Times a run stopped for a human (decision, repair or criterion) and later resumed. */
+    humanStops,
     /** Wall time in no stage and no wait: restarts, scheduling and publication gaps. */
     unattributedMs: Math.max(0, wallMs - accountedMs),
     attempts: {
@@ -303,7 +404,7 @@ const stageLabels: Record<EfficiencyStage, string> = {
 /** One screen of plain text; unknown stays unknown, never zero. */
 export function renderEfficiency(report: EfficiencyReport): string {
   const lines = [
-    `Total wall time: ${formatDuration(report.wallMs)}${report.finished ? "" : " (still running)"}`,
+    `Total wall time: ${formatDuration(report.wallMs)}${report.finished ? "" : report.cancelled ? " (cancelled)" : " (still running)"}`,
     ...(report.startedAt
       ? [`  from ${report.startedAt} to ${report.endedAt}`]
       : []),
@@ -321,6 +422,7 @@ export function renderEfficiency(report: EfficiencyReport): string {
   const a = report.attempts;
   lines.push(
     "",
+    `Human stops: ${report.humanStops}`,
     `Worker attempts: ${a.worker} (${a.failedWorker} failed); repairs and retries: ${a.retries} (+${a.operatorRetries} operator step retries)`,
     `Planning runs: ${a.planningRuns} (${a.failedPlanningRuns} failed); planner and reviewer model calls: ${a.modelCalls} (${a.failedModelCalls} failed)`,
     "",

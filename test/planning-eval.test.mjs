@@ -64,11 +64,9 @@ function writeConfig(work) {
         },
       },
       delivery: { kind: "regular" },
-      contentStore: { kind: "local" },
       policy: {
         network: "off",
         allowedSecretNames: [],
-        deployments: "denied",
       },
     }),
   );

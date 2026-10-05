@@ -111,7 +111,7 @@ test("binding checks every effective push destination and Git URL rewrites", (t)
 test("binding retains Factory self-target refusal through fetch and push aliases", (t) => {
   const { checkout } = target(t);
   assert.throws(
-    () => validateTarget("clockgrove/factory-rebuild", checkout),
+    () => validateTarget("clockgrove/factory", checkout),
     /Factory repository/,
   );
   for (const key of ["remote.origin.url", "remote.origin.pushurl"]) {

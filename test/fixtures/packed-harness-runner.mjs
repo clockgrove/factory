@@ -128,37 +128,29 @@ const config = validateConfig({
     },
   },
   delivery: { kind: "regular" },
-  contentStore: { kind: "local" },
   policy: {
     network: "off",
     allowedSecretNames: [],
-    deployments: "denied",
   },
 });
 for (const harness of [
   {
     kind: "claude-agent-sdk",
-    adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
     model: "missing-optional-sdk",
     reasoningEffort: "medium",
     permissionMode: "acceptEdits",
-    session: "new-per-attempt",
     settingSources: [],
     tools: ["Read", "Edit"],
     allowedTools: ["Read", "Edit"],
     maxTurns: 1,
-    authentication: "local",
   },
   {
     kind: "github-copilot-sdk",
-    adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
     model: "missing-optional-sdk",
     reasoningEffort: "medium",
-    session: "new-per-attempt",
     availableTools: ["view", "edit"],
     permissionKinds: ["read", "write"],
     timeoutSeconds: 1,
-    authentication: "local",
   },
 ]) {
   const omitted = validateConfig({

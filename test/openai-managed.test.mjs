@@ -391,7 +391,7 @@ test("configured API origin and beta header are exact; ambiguous mutation is nev
   assert.throws(
     () =>
       validateOpenAIManagedConfig({ ...config, endpoint: "https://elsewhere" }),
-    /configuration/,
+    /execution\.config\.endpoint is not a Factory configuration field; remove it/,
   );
 });
 

@@ -1,11 +1,9 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import {
-  CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   DEFAULT_PLANNER_MODEL_SELECTION,
   DEFAULT_REVIEWER_MODEL_SELECTION,
   DEFAULT_WORKER_MODEL_SELECTION,
-  GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
   stateRoot,
   validateConfig,
 } from "./config.js";
@@ -115,12 +113,10 @@ export function writeConfiguration(args: string[], path: string): string {
         harness === "claude-agent-sdk"
           ? {
               kind: "claude-agent-sdk",
-              adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
               model: option(args, "worker-model"),
               reasoningEffort: option(args, "worker-reasoning") ?? "medium",
               permissionMode:
                 option(args, "claude-permission") ?? "acceptEdits",
-              session: "new-per-attempt",
               settingSources: options(args, "claude-setting-source"),
               tools: claudeTools.length ? claudeTools : defaultClaudeTools,
               allowedTools: claudeAllowedTools.length
@@ -129,21 +125,17 @@ export function writeConfiguration(args: string[], path: string): string {
                   ? claudeTools
                   : defaultClaudeTools,
               maxTurns: Number(option(args, "claude-max-turns")),
-              authentication: "local",
             }
           : harness === "github-copilot-sdk"
             ? {
                 kind: "github-copilot-sdk",
-                adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
                 model: option(args, "worker-model"),
                 reasoningEffort: option(args, "worker-reasoning") ?? "medium",
-                session: "new-per-attempt",
                 availableTools: copilotTools.length
                   ? copilotTools
                   : defaultCopilotTools,
                 permissionKinds: ["read", "write"],
                 timeoutSeconds: Number(option(args, "copilot-timeout-seconds")),
-                authentication: "local",
               }
             : {
                 kind: "codex-sdk",
@@ -156,7 +148,6 @@ export function writeConfiguration(args: string[], path: string): string {
               },
     },
     delivery: { kind: option(args, "delivery") ?? "regular" },
-    contentStore: { kind: "local" },
     ...(args.includes("--capture-content")
       ? {
           capture: {
@@ -170,7 +161,6 @@ export function writeConfiguration(args: string[], path: string): string {
     policy: {
       network: option(args, "network") ?? "host",
       allowedSecretNames: [],
-      deployments: "denied",
     },
   };
   validateConfig(config);

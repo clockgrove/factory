@@ -248,11 +248,9 @@ export async function runScenario({
           },
         },
         delivery: { kind: delivery },
-        contentStore: { kind: "local" },
         policy: {
           network: "off",
           allowedSecretNames: [],
-          deployments: "denied",
         },
       },
       graph: { objective: OBJECTIVE, baseSha: target.baseSha, items },

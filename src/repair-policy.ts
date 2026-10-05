@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { refuseUnknownFields } from "./unknown-fields.js";
 import type { FactoryConfig } from "./config.js";
 import type { AllowanceConsumption } from "./graph-amendments.js";
 import type { FactoryState, WorkState } from "./state.js";
@@ -50,9 +51,7 @@ const allowanceKeys = [
   "resultRereviews",
 ] as const;
 function onlyKeys(value: object, names: readonly string[], label: string) {
-  for (const key of Object.keys(value))
-    if (!names.includes(key))
-      throw new Error(`Unsupported ${label} field: ${key}`);
+  refuseUnknownFields(value as Record<string, unknown>, names, label);
 }
 function assertAllowances(value: unknown, label: string): void {
   if (!value || typeof value !== "object" || Array.isArray(value))

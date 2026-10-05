@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { BetaCloudConfig } from "@anthropic-ai/sdk/resources/beta/environments/environments";
 import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import { refuseUnknownFields } from "../unknown-fields.js";
 import { missingCredential } from "./fault.js";
 import type {
   BetaManagedAgentsSession,
@@ -36,19 +37,21 @@ export function validateClaudeManagedConfig(
 ): ClaudeManagedConfig {
   if (!record(value))
     throw new Error("Claude managed configuration must be an object");
-  const allowed = new Set([
-    "agentId",
-    "agentVersion",
-    "environmentId",
-    "workspaceId",
-    "credentialEnv",
-    "agent",
-    "environment",
-    "budgetCents",
-    "timeoutSeconds",
-  ]);
-  if (Object.keys(value).some((key) => !allowed.has(key)))
-    throw new Error("Unknown Claude managed configuration field");
+  refuseUnknownFields(
+    value,
+    [
+      "agentId",
+      "agentVersion",
+      "environmentId",
+      "workspaceId",
+      "credentialEnv",
+      "agent",
+      "environment",
+      "budgetCents",
+      "timeoutSeconds",
+    ],
+    "execution.config",
+  );
   for (const key of [
     "agentId",
     "environmentId",
@@ -91,28 +94,23 @@ export function validateClaudeManagedConfig(
     throw new Error(
       "Claude managed environment must be an explicit cloud configuration",
     );
-  if (
-    Object.keys(environment).some(
-      (key) => !["type", "networking", "packages"].includes(key),
-    )
-  )
-    throw new Error("Unknown Claude managed environment configuration");
+  refuseUnknownFields(
+    environment,
+    ["type", "networking", "packages"],
+    "execution.config.environment",
+  );
   const network = environment.networking;
+  refuseUnknownFields(
+    network,
+    ["type", "allowed_hosts", "allow_mcp_servers", "allow_package_managers"],
+    "execution.config.environment.networking",
+  );
   if (
     network.type !== "limited" ||
     !Array.isArray(network.allowed_hosts) ||
     network.allowed_hosts.length ||
     network.allow_mcp_servers !== false ||
-    network.allow_package_managers !== false ||
-    Object.keys(network).some(
-      (key) =>
-        ![
-          "type",
-          "allowed_hosts",
-          "allow_mcp_servers",
-          "allow_package_managers",
-        ].includes(key),
-    )
+    network.allow_package_managers !== false
   )
     throw new Error(
       "Claude managed workers require denied outbound networking",

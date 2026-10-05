@@ -24,6 +24,7 @@ import type { FactoryConfig, JsonValue, LocalHarnessConfig } from "./config.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   factoryConfigDigest,
+  harnessAdapterIdentity,
   resolveCapacity,
   GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
   stateRoot,
@@ -535,7 +536,7 @@ export function compose(
   return composeLocal(
     config,
     builtInHarness(config, harness),
-    harness.kind === "codex-sdk" ? harness.kind : harness.adapter,
+    harnessAdapterIdentity(harness),
     { planningModel },
   );
 }

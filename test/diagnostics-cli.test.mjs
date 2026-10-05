@@ -141,9 +141,11 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
   for (const snapshot of [preparation, execution]) {
     saveState(snapshotPath, snapshot);
     const before = readFileSync(snapshotPath, "utf8");
-    const summary = cli("--summary");
+    const summary = cli("--summary", "--json");
     assert.equal(summary.status, 0, summary.stderr);
-    const value = JSON.parse(summary.stdout);
+    // The report's end is "now" while the Objective runs, so it differs between reads.
+    const { efficiency, ...value } = JSON.parse(summary.stdout);
+    assert.equal(efficiency.finished, false);
     if (expected) assert.deepEqual(value, expected);
     else expected = value;
     assert.equal(value.objective.invocationCount, 2);
@@ -167,7 +169,12 @@ test("diagnostics and status CLI preserve snapshots, unknown usage and coordinat
       { schemaVersion: 99 },
     ]) {
       writeStateFile(snapshotPath, { ...snapshot, ...mutation });
-      for (const flags of [[], ["--summary"], ["--follow"]]) {
+      for (const flags of [
+        [],
+        ["--summary"],
+        ["--summary", "--json"],
+        ["--follow"],
+      ]) {
         const invalid = cli(...flags);
         assert.notEqual(invalid.status, 0);
         assert.equal(invalid.stdout, "");
@@ -283,6 +290,10 @@ test("diagnostics is the one observation command: timeline, summary, analyze, lo
   refused(
     ["--group-by", "phase"],
     /--group-by belongs to diagnostics --analyze/,
+  );
+  refused(
+    ["--follow", "--json"],
+    /--json belongs to diagnostics --summary or --analyze/,
   );
   refused(["--summary", "--gantt"], /--gantt belongs to diagnostics --analyze/);
   refused(["--content", "abc"], /--content belongs to diagnostics --captures/);

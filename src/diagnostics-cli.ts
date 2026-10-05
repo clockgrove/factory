@@ -4,15 +4,19 @@ import { option } from "./cli-flags.js";
 import type { FactoryConfig } from "./config.js";
 import {
   readAgentTimeline,
+  readDiagnosticMetadata,
   readUsageSummaryEvents,
   readWorkerOutput,
   redactDiagnosticDetail,
   summarizeDiagnosticUsage,
 } from "./diagnostics.js";
+import { renderEfficiency, summarizeEfficiency } from "./efficiency.js";
 import { readContinuation, readState } from "./state-store.js";
 
 const modes = ["summary", "analyze", "logs", "captures"] as const;
 const analysisFlags = ["group-by", "filter", "json", "gantt", "output"];
+/** Flags that belong to --analyze alone; --json is shared with --summary. */
+const analyzeOnlyFlags = analysisFlags.filter((flag) => flag !== "json");
 
 /** Keep printing until interrupted. */
 function untilInterrupted(tick: () => void): Promise<void> {
@@ -29,7 +33,8 @@ function untilInterrupted(tick: () => void): Promise<void> {
 
 /**
  * `factory diagnostics`: the one observation command. Without a mode it prints the agent
- * timeline (`--follow` keeps printing); `--summary` totals usage, `--analyze` reports on
+ * timeline (`--follow` keeps printing); `--summary` prints the efficiency report (`--json` for
+ * tools), `--analyze` reports on
  * retained interactions, `--logs ITEM` prints a Work Item's worker output and `--captures`
  * lists retained captures (`--content ID` prints one).
  */
@@ -49,9 +54,11 @@ export async function runDiagnosticsCommand(
     );
   const mode = chosen[0];
   if (mode !== "analyze")
-    for (const flag of analysisFlags)
+    for (const flag of analyzeOnlyFlags)
       if (flags.has(flag))
         throw new Error(`--${flag} belongs to diagnostics --analyze`);
+  if (flags.has("json") && mode !== "analyze" && mode !== "summary")
+    throw new Error("--json belongs to diagnostics --summary or --analyze");
   if (mode !== "captures" && flags.has("content"))
     throw new Error("--content belongs to diagnostics --captures");
   const secrets = config.policy.allowedSecretNames
@@ -105,13 +112,23 @@ export async function runDiagnosticsCommand(
   const executing =
     continuation?.schemaVersion === 7 ? continuation : undefined;
   if (mode === "summary") {
-    console.log(
-      JSON.stringify(
-        summarizeDiagnosticUsage(
-          readUsageSummaryEvents(config.repository, objective, executing),
-        ),
-      ),
+    const usage = readUsageSummaryEvents(
+      config.repository,
+      objective,
+      executing,
     );
+    const tokens = summarizeDiagnosticUsage(usage);
+    const efficiency = summarizeEfficiency(
+      readDiagnosticMetadata(config.repository, objective).filter(
+        (event) => !event.capture,
+      ),
+      usage,
+      tokens,
+      Date.now(),
+    );
+    if (flags.has("json"))
+      console.log(JSON.stringify({ ...tokens, efficiency }));
+    else process.stdout.write(renderEfficiency(efficiency));
     return;
   }
   const seen = new Set<string>();

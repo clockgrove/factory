@@ -426,7 +426,15 @@ test("fresh packed artifact composes a registered harness through the package ro
     const summary = JSON.parse(
       execFileSync(
         cli,
-        ["diagnostics", "--objective", "1", "--summary", "--config", config],
+        [
+          "diagnostics",
+          "--objective",
+          "1",
+          "--summary",
+          "--json",
+          "--config",
+          config,
+        ],
         { encoding: "utf8", env: environment },
       ),
     );

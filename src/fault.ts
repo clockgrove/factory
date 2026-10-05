@@ -12,6 +12,8 @@ import * as time from "./clock.js";
 /** What a failed result showed, for repair and the operator. */
 export interface FailureEvidence {
   detail: string;
+  /** A discovery the worker staged with its wrong result; reviewed as an amendment. */
+  discovery?: import("./contracts.js").WorkDiscovery;
 }
 
 export type Fault =

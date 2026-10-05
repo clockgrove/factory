@@ -1205,6 +1205,63 @@ test("a worker that changes nothing carries its own final response into the work
   assert.ok(!faultOf(silent).evidence.detail.includes("final response"));
 });
 
+test("a discovery staged beside an empty result rides on the work fault and is held for amendment review (#820)", async () => {
+  const proposal = { ...discoveryProposal, scope: "in-scope" };
+  const error = await runCandidate(
+    (worktree) =>
+      writeFileSync(
+        join(worktree, ".factory-discovery.json"),
+        JSON.stringify(proposal),
+      ),
+    { evidence: { harness: "scripted", finalResponse: "Stopped: unowned" } },
+  ).then(
+    () => assert.fail("collection succeeded"),
+    (rejection) => rejection,
+  );
+  const fault = faultOf(error);
+  assert.equal(fault.kind, "work");
+  assert.match(fault.evidence.detail, /no repository change/);
+  assert.deepEqual(fault.evidence.discovery, proposal);
+  const { recordWorkFailure } = await import("../dist/work-repair.js");
+  const { amendmentBlocksDispatch, selectWorkerAmendment } = await import(
+    "../dist/graph-amendments.js"
+  );
+  const state = {
+    objective: 1,
+    autonomy: {
+      allowances: {
+        planningRevisions: 1,
+        implementationRepairs: 0,
+        resultRereviews: 0,
+      },
+      repairClasses: [],
+      repairPolicy: {
+        perPath: {
+          planningRevisions: 1,
+          implementationRepairs: 0,
+          resultRereviews: 0,
+        },
+      },
+      requiredEnvironment: [],
+    },
+    graph: { objective: 1, items: [] },
+    work: { safety: { status: "failed", step: "execute", attempt: "first" } },
+  };
+  recordWorkFailure(state, "safety", error);
+  assert.deepEqual(state.work.safety.discovery, {
+    ...proposal,
+    attempt: "first",
+  });
+  assert.equal(amendmentBlocksDispatch(state), true);
+  selectWorkerAmendment(state);
+  assert.deepEqual(state.pendingAmendment.proposal.worker, {
+    itemId: "safety",
+    attempt: "first",
+  });
+  assert.equal(state.pendingAmendment.proposal.scope, "in-scope");
+  assert.equal(state.work.safety.discoveryDisposition, "proposed");
+});
+
 test("a result file that is missing or malformed is the worker's wrong result; an unreadable one is not (#649)", async (t) => {
   const { readWorkerJson } = await import("../dist/fault.js");
   const root = mkdtempSync(join(tmpdir(), "factory-worker-json-"));

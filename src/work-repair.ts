@@ -4,7 +4,7 @@ import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
 import type { PlanningModel, WorkItem } from "./contracts.js";
 import { blameDecision, cappedDiagnosis } from "./blame-decision.js";
-import { graphDigest } from "./graph-amendments.js";
+import { graphDigest, recordWorkerDiscovery } from "./graph-amendments.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { pinnedGitRaw } from "./process.js";
 import {
@@ -71,6 +71,10 @@ export function recordWorkFailure(
   if (typeof error === "object" && error !== null) failedItems.set(error, id);
   const detail = error instanceof Error ? error.message : String(error);
   const fault = faultOf(error);
+  // A discovery staged beside a wrong result is reviewed like one beside a
+  // collected result (#820).
+  if (fault.kind === "work" && fault.evidence.discovery && work.attempt)
+    recordWorkerDiscovery(state, id, fault.evidence.discovery);
   // A published result that fails (a failed check, a conflict) is repaired
   // by a new attempt that republishes the branch with a lease.
   const isolated =

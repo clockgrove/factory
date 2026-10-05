@@ -2704,6 +2704,26 @@ export function assertPinnedNpmScripts(
     authority.workspacePackageAdditions,
     authority.predecessorSha,
   );
+  const file = (revision: string, path: string): string | undefined => {
+    try {
+      const entry = pinnedGit(checkout, "ls-tree", revision, "--", path);
+      if (!entry) return undefined;
+      if (!/^100(?:644|755) blob /.test(entry))
+        throw new Error(
+          `Package script validation blocked: ${path} is not a regular file`,
+        );
+      return pinnedGitRaw(checkout, "show", `${revision}:${path}`).toString(
+        "utf8",
+      );
+    } catch (error) {
+      if (
+        authority.packageManagerUpdate !== undefined ||
+        (error instanceof Error && error.message.includes("not a regular file"))
+      )
+        throw error;
+      return undefined;
+    }
+  };
   const original = packageMetadata(checkout, acceptedBaseSha);
   const predecessor =
     authority.predecessorSha && authority.predecessorSha !== acceptedBaseSha
@@ -2727,6 +2747,35 @@ export function assertPinnedNpmScripts(
     throw new Error("Package manager update cannot revert a predecessor pin");
   const managerToken = /\b(?:npm|pnpm)\b/;
   const selected = commands.filter((check) => managerToken.test(check));
+  if (selected.length || authority.packageManagerUpdate !== undefined)
+    for (const key of ["config", "pnpm"])
+      if (
+        (original ?? predecessor) &&
+        !isDeepStrictEqual((original ?? predecessor)?.[key], after?.[key])
+      )
+        throw new Error(
+          `Package script validation blocked: ${key} differs from the accepted base`,
+        );
+  if (
+    authority.packageManagerUpdate !== undefined &&
+    file(acceptedBaseSha, "pnpm-workspace.yaml") === undefined &&
+    file(commit, "pnpm-workspace.yaml") !== undefined
+  )
+    throw new Error(
+      "Package manager update cannot create workspace security configuration",
+    );
+  if (authority.packageManagerUpdate !== undefined)
+    for (const path of [
+      ".npmrc",
+      ".pnpmfile.cjs",
+      ".pnpmfile.js",
+      ".pnpmfile.mjs",
+      "package.yaml",
+    ])
+      if (file(acceptedBaseSha, path) !== file(commit, path))
+        throw new Error(
+          `Package script validation blocked: ${path} differs from the accepted base; Package manager update grants no configuration or hook changes`,
+        );
   if (!selected.length) return;
   const declared = new Set(authority.sourceDeclared ?? []);
   const bootstrap = selected.some(
@@ -2747,26 +2796,6 @@ export function assertPinnedNpmScripts(
       "Package script validation blocked: only root npm/pnpm test, pnpm check, or npm/pnpm run NAME can be pinned",
     );
 
-  const file = (revision: string, path: string): string | undefined => {
-    try {
-      const entry = pinnedGit(checkout, "ls-tree", revision, "--", path);
-      if (!entry) return undefined;
-      if (!/^100(?:644|755) blob /.test(entry))
-        throw new Error(
-          `Package script validation blocked: ${path} is not a regular file`,
-        );
-      return pinnedGitRaw(checkout, "show", `${revision}:${path}`).toString(
-        "utf8",
-      );
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.includes("not a regular file")
-      )
-        throw error;
-      return undefined;
-    }
-  };
   if (!original && selected.some((command) => !declared.has(command)))
     throw new Error(
       "Package script validation blocked: a new package.json needs exact source-declared command authority",
@@ -2775,14 +2804,6 @@ export function assertPinnedNpmScripts(
     throw new Error(
       "Package script validation blocked: package.json is absent from the result tree",
     );
-  for (const key of ["config", "pnpm"])
-    if (
-      (original ?? predecessor) &&
-      !isDeepStrictEqual((original ?? predecessor)?.[key], after?.[key])
-    )
-      throw new Error(
-        `Package script validation blocked: ${key} differs from the accepted base`,
-      );
   const scripts = (pkg: Record<string, unknown>): Record<string, unknown> => {
     const value = pkg.scripts;
     if (!value || typeof value !== "object" || Array.isArray(value))

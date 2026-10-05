@@ -115,7 +115,7 @@ export function plannedPackageManager(
 }
 
 export function packageManagerInstructions(update?: string): string {
-  return `Root package-manager metadata (fixed): preserve package.json config and pnpm settings, .npmrc, workspace security settings and package-manager hooks. ${
+  return `Root package-manager metadata (fixed): preserve package.json config and pnpm settings, .npmrc, workspace security settings, package.yaml and package-manager hook files. ${
     update
       ? `The pinned Objective's Package manager update section permits only package.json packageManager ${update}; no manager switch or other configuration change is authorized. Keep the base pin until this update is implemented, then preserve the declared pin in successors.`
       : "Preserve package.json packageManager; no exact Package manager update is authorized."

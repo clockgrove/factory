@@ -625,3 +625,175 @@ test("Work Item validation refuses undeclared and mismatched pins, including ran
     }
   });
 });
+
+test("explicit version authority preserves security configuration with only Node validation commands", async () => {
+  await fixture(async (root, target) => {
+    const marker = join(root, "node-command-ran");
+    const command = `node -e "require('node:fs').writeFileSync('${marker}', 'ran')"`;
+    const work = item("update", [], undefined, command);
+    const validate = (head) =>
+      validateWorkItem(
+        target.checkout,
+        join(root, "node-validation"),
+        work,
+        head,
+        git(target.checkout, "rev-parse", `${head}^{tree}`),
+        target.baseSha,
+        undefined,
+        undefined,
+        target.baseSha,
+        [],
+        undefined,
+        [],
+        after,
+      );
+    const safe = commit(target, {
+      "package.json": JSON.stringify({ ...pkg, packageManager: after }),
+    });
+    await assert.doesNotReject(validate(safe));
+    assert.equal(readFileSync(marker, "utf8"), "ran");
+    rmSync(marker);
+    for (const files of [
+      {
+        "package.json": JSON.stringify({
+          ...pkg,
+          packageManager: after,
+          config: { trusted: false },
+        }),
+      },
+      {
+        "package.json": JSON.stringify({
+          ...pkg,
+          packageManager: after,
+          pnpm: { onlyBuiltDependencies: [] },
+        }),
+      },
+      { ".npmrc": "ignore-scripts=false\n" },
+      { "pnpm-workspace.yaml": workspace.replace("1440", "0") },
+      { "package.yaml": "scripts:\n  check: false\n" },
+      ...[".pnpmfile.cjs", ".pnpmfile.js", ".pnpmfile.mjs"].map((path) => ({
+        [path]: "export default {}\n",
+      })),
+    ]) {
+      git(target.checkout, "checkout", "--detach", target.baseSha);
+      const head = commit(target, {
+        "package.json": JSON.stringify({ ...pkg, packageManager: after }),
+        ...files,
+      });
+      assert.throws(
+        () => guard(target, head, { packageManagerUpdate: after }, [command]),
+        /differs|non-membership/,
+      );
+      assert.throws(
+        () => guard(target, head, { packageManagerUpdate: after }, []),
+        /differs|non-membership/,
+      );
+      await assert.rejects(validate(head), /differs|non-membership/);
+      assert.equal(
+        existsSync(marker),
+        false,
+        "rejected configuration must not execute Node checks",
+      );
+    }
+  });
+});
+
+test("explicit version authority preserves existing manager hook bytes with only Node commands", async () => {
+  await fixture(async (root, target) => {
+    target.baseSha = commit(target, {
+      ".pnpmfile.cjs": "module.exports = {}\n",
+    });
+    const safe = commit(target, {
+      "package.json": JSON.stringify({ ...pkg, packageManager: after }),
+    });
+    assert.doesNotThrow(() =>
+      guard(target, safe, { packageManagerUpdate: after }, ["node --version"]),
+    );
+    const changed = commit(target, {
+      ".pnpmfile.cjs": "module.exports = {hooks: {}}\n",
+    });
+    assert.throws(
+      () =>
+        guard(target, changed, { packageManagerUpdate: after }, [
+          "node --version",
+        ]),
+      /hook changes/,
+    );
+  });
+});
+
+test("explicit version authority refuses a newly introduced workspace and preserves declared additions to an existing workspace", async () => {
+  await fixture(async (root, target) => {
+    const expanded = workspace.replace(
+      "minimumReleaseAge",
+      "  - apps/runtime\nminimumReleaseAge",
+    );
+    const head = commit(target, {
+      "package.json": JSON.stringify({ ...pkg, packageManager: after }),
+      "pnpm-workspace.yaml": expanded,
+      "apps/runtime/package.json": JSON.stringify({
+        name: "runtime",
+        private: true,
+      }),
+    });
+    assert.doesNotThrow(() =>
+      guard(
+        target,
+        head,
+        {
+          packageManagerUpdate: after,
+          workspacePackageAdditions: ["apps/runtime"],
+        },
+        ["node --version"],
+      ),
+    );
+    assert.throws(
+      () =>
+        guard(target, head, { packageManagerUpdate: after }, [
+          "node --version",
+        ]),
+      /workspace.yaml differs/,
+    );
+  });
+  await fixture(async (root, target) => {
+    rmSync(join(target.checkout, "pnpm-workspace.yaml"));
+    target.baseSha = commit(target, {});
+    const head = commit(target, {
+      "package.json": JSON.stringify({ ...pkg, packageManager: after }),
+      "pnpm-workspace.yaml": "packages: []\nallowBuilds:\n  unapproved: true\n",
+    });
+    for (const commands of [[], ["node --version"], ["pnpm run check"]])
+      for (const additions of [[], ["apps/runtime"]])
+        assert.throws(
+          () =>
+            guard(
+              target,
+              head,
+              {
+                packageManagerUpdate: after,
+                workspacePackageAdditions: additions,
+              },
+              commands,
+            ),
+          /cannot create workspace security configuration/,
+        );
+    await assert.rejects(
+      validateWorkItem(
+        target.checkout,
+        join(root, "new-workspace-refused"),
+        item("update", [], undefined, "node --version"),
+        head,
+        git(target.checkout, "rev-parse", `${head}^{tree}`),
+        target.baseSha,
+        undefined,
+        undefined,
+        target.baseSha,
+        [],
+        undefined,
+        [],
+        after,
+      ),
+      /cannot create workspace security configuration/,
+    );
+  });
+});

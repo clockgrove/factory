@@ -41,7 +41,7 @@ Built-in harnesses reuse your local login. Factory stores no tokens in its confi
 
 - The worker environment drops controller publication variables such as `GH_TOKEN` and `GITHUB_TOKEN`, and gets an empty `GH_CONFIG_DIR`, so a worker cannot use the controller's `gh` login.
 - Copilot runs with `useLoggedInUser: true` in `empty` mode, which disables keytar; a system-keychain login is not used.
-- Codex keeps your `CODEX_HOME` and `CODEX_SQLITE_HOME`; a supervisor service captures them at install.
+- Codex workers, the Codex result reviewer and the readiness probe run with a private `HOME`, `CODEX_HOME` and `TMPDIR`. The private `CODEX_HOME` holds Factory's config and a link to your login (`auth.json` from your `CODEX_HOME`, which a supervisor service captures at install); your `config.toml`, `AGENTS.md`, skills, MCP servers and `CODEX_SQLITE_HOME` do not apply.
 - On WSL2, log in inside the distribution and user that runs the controller; a Windows desktop login does not count.
 - Claude planning uses the same SDK and login, or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. It loads no settings files, so Bedrock, Vertex and `apiKeyHelper` are unsupported.
 
@@ -56,7 +56,8 @@ factory run --objective ISSUE_NUMBER
 
 Harnesses are local processes running as your OS user. Path checks, permission callbacks, filtered environments and disabled extensions reduce accidental authority; they are not an OS sandbox for hostile code.
 
-- **Codex:** `workspace-write` sandbox, `approvalPolicy: "never"`, and network access only when `policy.network` is `host`.
+- **Codex:** a Codex permission profile and `approvalPolicy: "never"`. Shell commands see only Codex's `:minimal` platform paths, the Codex runtime, the worktree (its `.git` link read-only) and the private `HOME` and `TMPDIR`; your `HOME`, logins, SSH keys, `gh` config, Factory's state and the checkout's git directory are not mounted, so `git` does not work inside a worker. Network is on only when `policy.network` is `host`. The result reviewer's shell reads the exact tree only, offline. Toolchains installed under your `HOME` (for example nvm) are not visible to worker commands.
+- **Claude and Copilot:** the SDK process keeps your `HOME`, where its login lives. The model has no shell, and Factory allows its file tools only inside the worktree (the Claude result reviewer: read-only tools inside the tree).
 - **Claude:** skills, subagents, session persistence, auto-memory, synced plugins and personal or project instruction files are off. Bundled and administrator-managed components are trusted runtime.
 - **Copilot:** shell, task, web, GitHub, MCP, memory, skills, plugins, host Git, remote sessions and config discovery are off.
 

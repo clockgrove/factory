@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { redactDiagnosticDetail } from "./diagnostics.js";
+import { createCodexHome } from "./codex-planning-isolation.js";
 import { sanitizedWorkerEnvironment } from "./process.js";
 
 export interface HarnessReadiness {
@@ -97,6 +98,13 @@ export async function probeCodexReadiness(
   };
   const argv = command ?? bundled();
   if (!argv.length) throw new Error("Readiness has no harness executable");
+  // The worker's own private home and permission profile.
+  const home = createCodexHome({
+    source: env,
+    config: "",
+    sandbox: { workspace: "write", network: input.network === "host" },
+    keep: input.allowedSecretNames,
+  });
   const child = spawn(
     argv[0]!,
     [
@@ -104,13 +112,9 @@ export async function probeCodexReadiness(
       "app-server",
       "--stdio",
       "-c",
-      'sandbox_mode="workspace-write"',
-      "-c",
       'approval_policy="never"',
-      "-c",
-      `sandbox_workspace_write.network_access=${input.network === "host"}`,
     ],
-    { cwd: workspace, env, stdio: ["pipe", "pipe", "pipe"] },
+    { cwd: workspace, env: home.env, stdio: ["pipe", "pipe", "pipe"] },
   );
   let stderr = "";
   let sequence = 0;
@@ -182,7 +186,9 @@ export async function probeCodexReadiness(
       `${JSON.stringify({ method: "initialized", params: {} })}\n`,
     );
     // No thread/start or turn/start: this executes only a fixed sentinel probe.
-    const script = `const fs=require('node:fs');const [inside,outside,token]=process.argv.slice(1);let writable=false,refused=false;fs.writeFileSync(inside,token,{flag:'wx',mode:0o600});writable=true;try{fs.writeFileSync(outside,token,{flag:'wx',mode:0o600})}catch(e){if(!['EACCES','EPERM','EROFS'].includes(e.code))throw e;refused=true}console.log(JSON.stringify({writable,refused}));`;
+    // ENOENT is a refusal too: the sandbox does not mount the outside
+    // directory, which the host write above proved exists.
+    const script = `const fs=require('node:fs');const [inside,outside,token]=process.argv.slice(1);let writable=false,refused=false;fs.writeFileSync(inside,token,{flag:'wx',mode:0o600});writable=true;try{fs.writeFileSync(outside,token,{flag:'wx',mode:0o600})}catch(e){if(!['EACCES','EPERM','EROFS','ENOENT'].includes(e.code))throw e;refused=true}console.log(JSON.stringify({writable,refused}));`;
     const execution = (await request("command/exec", {
       command: [process.execPath, "-e", script, insidePath, outsidePath, token],
       cwd: workspace,
@@ -201,8 +207,10 @@ export async function probeCodexReadiness(
       proof.writable === true &&
       existsSync(insidePath) &&
       readFileSync(insidePath, "utf8") === token;
-    result.outsideWriteRefused =
-      proof.refused === true && !existsSync(outsidePath);
+    // Refused means the bytes never reached the host: the sandbox denied the
+    // write, or (outside a parent of the workspace, such as HOME) it landed
+    // in the sandbox's own private copy of that directory.
+    result.outsideWriteRefused = !existsSync(outsidePath);
     result.status =
       result.workspaceWritable && result.outsideWriteRefused
         ? "ready"
@@ -223,6 +231,7 @@ export async function probeCodexReadiness(
     await closed;
     clearTimeout(killTimer);
     lines.close();
+    home.dispose();
     for (const path of [insidePath, outsidePath]) {
       if (existsSync(path) && readFileSync(path, "utf8") === token)
         unlinkSync(path);

@@ -25,7 +25,7 @@ import { Codex } from "@openai/codex-sdk";
 import {
   CODEX_PLANNING_CONFIG,
   CODEX_TREE_REVIEW_CONFIG,
-  createCodexPlanningHome,
+  createCodexHome,
 } from "./codex-planning-isolation.js";
 import type { CodexModelSelection } from "./config.js";
 import type {
@@ -667,16 +667,23 @@ class CodexPlanningTransport implements PlanningTransport {
     const turn = new ProviderTurnGuard(this.providerTurnIdleTimeoutMs);
     let thread: ReturnType<Codex["startThread"]> | undefined;
     let turnCompleted = false;
-    const home = createCodexPlanningHome(
-      process.env,
-      args.tree ? CODEX_TREE_REVIEW_CONFIG : CODEX_PLANNING_CONFIG,
+    // A tree review's shell reads the tree alone, offline.
+    const home = createCodexHome(
+      args.tree
+        ? {
+            config: CODEX_TREE_REVIEW_CONFIG,
+            sandbox: { workspace: "read", network: false },
+          }
+        : { config: CODEX_PLANNING_CONFIG },
     );
     try {
       thread = new Codex({ env: home.env }).startThread({
         workingDirectory: args.tree ?? this.checkout,
         // The tree is a plain directory, not a repository.
-        ...(args.tree && { skipGitRepoCheck: true }),
-        sandboxMode: "read-only",
+        // Its sandbox is the permission profile in Factory's config.
+        ...(args.tree
+          ? { skipGitRepoCheck: true }
+          : { sandboxMode: "read-only" as const }),
         approvalPolicy: "never",
         model: selection.model,
         modelReasoningEffort: selection.reasoningEffort,

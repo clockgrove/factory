@@ -450,10 +450,8 @@ test("setup and the first run share the readiness checks, the home default and t
       requests.map(({ message }) => message.method),
       Array(4).fill(["initialize", "initialized", "command/exec"]).flat(),
     );
-    for (const { args } of requests) {
-      assert.ok(args.includes('sandbox_mode="workspace-write"'));
+    for (const { args } of requests)
       assert.ok(args.includes('approval_policy="never"'));
-    }
   }));
 
 test("guided ready requires the service owner's own GitHub observation and retains a blocked live watcher for correction", () =>

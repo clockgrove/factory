@@ -11,11 +11,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { Codex } from "@openai/codex-sdk";
 import { CodexPlanningModel } from "../dist/compiler.js";
-import { CODEX_PLANNING_CONFIG } from "../dist/codex-planning-isolation.js";
+import {
+  CODEX_PLANNING_CONFIG,
+  createCodexHome,
+} from "../dist/codex-planning-isolation.js";
+import { sandboxBinary } from "../scripts/eval-planning/sandbox.mjs";
 
 const selection = { model: "gpt-5.6-sol", reasoningEffort: "medium" };
 
@@ -161,4 +167,77 @@ test("the scratch Codex home is removed when the attempt fails", async (t) => {
   );
   assert.ok(home);
   assert.equal(existsSync(home), false);
+});
+
+// The real Codex sandbox (no model call) under the permission profile a
+// worker and a tree reviewer get. Hosts without bubblewrap skip; CI sets
+// FACTORY_REQUIRE_SANDBOX=1 (#705) and never does.
+test("a Codex shell sees its workspace, never the operator's HOME or git directory", {
+  skip:
+    sandboxBinary() || process.env.FACTORY_REQUIRE_SANDBOX === "1"
+      ? false
+      : "bubblewrap with unprivileged user namespaces is not usable here",
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-codex-sandbox-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const operator = join(root, "operator");
+  const secrets = [
+    join(operator, ".config", "gh", "hosts.yml"),
+    join(operator, ".codex", "auth.json"),
+    join(operator, "checkout", ".git", "config"),
+  ];
+  for (const path of secrets) {
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, "operator-secret\n");
+  }
+  // A worktree under Factory's state in the operator's HOME, as in service.
+  const workspace = join(operator, ".local", "state", "worktree");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "source.txt"), "workspace-bytes\n");
+  writeFileSync(
+    join(workspace, ".git"),
+    `gitdir: ${join(operator, "checkout", ".git")}\n`,
+  );
+  const codex = join(
+    dirname(
+      createRequire(import.meta.url).resolve("@openai/codex/package.json"),
+    ),
+    "bin",
+    "codex.js",
+  );
+  const run = (workspaceAccess, script) => {
+    const home = createCodexHome({
+      source: { PATH: process.env.PATH, HOME: operator },
+      config: "",
+      sandbox: { workspace: workspaceAccess, network: false },
+    });
+    try {
+      return spawnSync(
+        process.execPath,
+        [codex, "sandbox", "--", "sh", "-c", script],
+        { cwd: workspace, env: home.env, encoding: "utf8" },
+      );
+    } finally {
+      home.dispose();
+    }
+  };
+  for (const access of ["write", "read"]) {
+    const read = run(access, "cat source.txt");
+    assert.equal(read.status, 0, read.stderr);
+    assert.equal(read.stdout, "workspace-bytes\n");
+    for (const path of [...secrets, '"$CODEX_HOME/auth.json"']) {
+      const denied = run(access, `cat ${path}`);
+      assert.notEqual(denied.status, 0);
+      assert.doesNotMatch(denied.stdout + denied.stderr, /operator-secret/);
+    }
+    // The worktree's link to the controller's git directory stays as is.
+    assert.notEqual(run(access, "echo x >> .git").status, 0);
+  }
+  assert.equal(
+    run("write", 'echo new > made.txt && echo $HOME > "$HOME/h"').status,
+    0,
+  );
+  assert.equal(readFileSync(join(workspace, "made.txt"), "utf8"), "new\n");
+  assert.notEqual(run("read", "echo new > other.txt").status, 0);
+  assert.equal(existsSync(join(workspace, "other.txt")), false);
 });

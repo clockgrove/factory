@@ -89,10 +89,14 @@ const scenarios = [
     // The test clock runs 100x fast (src/clock.ts), so real overhead between
     // the create and the list read counts 100x too: the span is 30 s logical
     // (0.3 s real), still inside Factory's lag window, so the read stays stale.
+    // A loaded machine can spend that span before the first list read, so
+    // the read after the create is stale whatever the clock says (#815).
     name: "lost issue creation, then the issue list lags after each creation",
     deliveries: BOTH,
     http: [{ match: CREATE_ISSUE, kind: "drop" }],
-    fake: { lag: [{ read: ISSUES, after: CREATE_ISSUE, ms: 30_000 }] },
+    fake: {
+      lag: [{ read: ISSUES, after: CREATE_ISSUE, ms: 30_000, reads: 1 }],
+    },
   },
   {
     name: "sub-issue list lags one read after a sub-issue is added",

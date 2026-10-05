@@ -349,6 +349,33 @@ test("an unavailable burst and rate limits are answered without an effect", asyn
   assert.equal(fake.effects(`POST ${repo}/issues`).length, 1);
 });
 
+test("a lag with a span and a read count serves the stale read even once the span passed (#815)", async (t) => {
+  let now = Date.parse("2026-01-01T00:00:00Z");
+  const { fake, client } = await setup(t, {
+    now: () => now,
+    lag: [
+      {
+        read: `GET ${repo}/issues`,
+        after: `POST ${repo}/issues`,
+        ms: 3000,
+        reads: 1,
+      },
+    ],
+  });
+  const listed = async () =>
+    (await client.paginate("repos/example/target/issues?state=all")).map(
+      (issue) => issue.number,
+    );
+  const created = await client.request("POST", "repos/example/target/issues", {
+    title: "New",
+  });
+  // The span passed before the first list read: that read is still stale.
+  now += 10_000;
+  assert.equal((await listed()).includes(created.number), false);
+  assert.equal((await listed()).includes(created.number), true);
+  assert.equal(fake.lag[0].served, 1);
+});
+
 test("a lagging read sees the state before the write", async (t) => {
   const { fake, client, pushBranch } = await setup(t, {
     lag: [{ read: `GET ${repo}/pulls`, after: `POST ${repo}/pulls`, reads: 1 }],

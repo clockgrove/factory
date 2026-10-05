@@ -21,6 +21,7 @@ import type {
 } from "../contracts.js";
 import { networkFailure } from "../fault.js";
 import { parseProducedAssetSets } from "../media.js";
+import { fixedPackageScripts } from "../validation.js";
 import {
   ProviderTurnIncompleteError,
   ProviderTurnTimeoutError,
@@ -211,6 +212,12 @@ export function workItemPrompt(request: HarnessRequest): string {
         .map((check) => JSON.stringify(check))
         .join("\n")}`
     : "";
+  const fixedScripts = fixedPackageScripts(
+    request.item.validation.map((check) => check.command),
+  );
+  const scriptInstructions = fixedScripts.length
+    ? `\n\nAcceptance-command package scripts (fixed): ${fixedScripts.join(", ")}. Their package.json bodies must stay identical to the accepted base, including any pre/post lifecycle hooks; validation rejects a changed one. Put new checks in files these scripts already run, not in the scripts.`
+    : "";
   const mediaInstructions = request.item.expectedOutputRoles?.length
     ? `\n\nProduce at least ${request.item.minimumAssetSets ?? 1} complete candidate AssetSets. Candidate content and any required variation must follow the accepted brief and source requirements; preserve source bytes exactly when byte identity is required. Put candidate bytes under .factory-media/ and write .factory-assets.json at the checkout root. Use this format-neutral manifest shape, replacing every angle-bracket placeholder with the actual declared role, file, media type, and owned destination: {"sets":[{"id":"candidate-a","members":[{"role":"<expected role>","path":".factory-media/candidate-a/<file>","mediaType":"<declared media type>","destination":"<owned target path>"}],"provenance":{"source":"<source path or generated>","rights":"<basis for repository use>","visibility":"repository","lineage":["<source path or input identity>"]}}]}. Include every expected role in each set. When an authoritative tool supplies actual format fields, you may add member formatMetadata using this exact optional shape: {"source":"<authoritative tool or source>","values":{}}. Put all supplied format fields inside values; do not place them beside source. Omit formatMetadata when no authoritative format fields are supplied. Source byte identity alone does not require formatMetadata: controller source/content receipts already bind byte count and digest. You may add set-level relationships with from, toRole, and kind when outputs are related, and production evidence with model, tool, request, or parameters when those values are actually supplied. Do not invent metadata or tool identities. .factory-media/ and .factory-assets.json are the only staging exceptions to owned paths. Do not write, remove, or otherwise change final destinations directly. Candidate files and the manifest are staging outputs; do not commit them. The controller owns capture, whole-set selection, final destination materialization (including an authorized byte-identical same-path LFS replacement), publication, and Objective lifecycle. Do not run Factory CLI operations or inspect controller installation, configuration, status, or logs. These staging instructions do not remove explicitly owned ordinary code work. Stop after completing the authorized owned code changes, candidate files, and manifest, and report the staged candidates; do not wait for or perform selection or delivery. If the accepted brief requires a controller operation, report the conflict rather than performing it.\nSource bindings: ${JSON.stringify(request.sourceAssets ?? [])}\nExpected output roles: ${request.item.expectedOutputRoles.join(", ")}`
     : "";
@@ -226,7 +233,7 @@ export function workItemPrompt(request: HarnessRequest): string {
         )}`
       : "";
   const discoveryInstructions = `\n\nIf execution reveals necessary additional work, you may write .factory-discovery.json as a private uncommitted proposal: {"scope":"in-scope" or "backlog","reason":"concrete gap","evidence":["observed source or result"],"ownership":["required paths or resources"],"acceptance":["observable outcomes"],"dependencies":["known prerequisite Work Item IDs"]}. This is a staging exception only. Complete only your accepted owned work. The controller independently reviews discoveries under existing Objective authority before projecting or executing them; do not create issues or change the graph yourself. Out-of-scope discoveries are backlog proposals, never authority.`;
-  return `Implement this Work Item in the current repository checkout. Change only the owned paths. Do not commit, push, create issues, create pull requests, or access GitHub credentials. Stop and report if acceptance is impossible.\n\nTitle: ${request.item.title}\nGoal: ${request.item.goal}\nAcceptance:\n${request.item.acceptance.join("\n")}\nNon-goals:\n${request.item.nonGoals.join("\n")}\nOwned paths:\n${request.item.ownedPaths.join("\n")}\nBrief:\n${request.item.brief}${sourceInstructions}${validationInstructions}${mediaInstructions}${inputInstructions}${environmentInstructions}${discoveryInstructions}`;
+  return `Implement this Work Item in the current repository checkout. Change only the owned paths. Do not commit, push, create issues, create pull requests, or access GitHub credentials. Stop and report if acceptance is impossible.\n\nTitle: ${request.item.title}\nGoal: ${request.item.goal}\nAcceptance:\n${request.item.acceptance.join("\n")}\nNon-goals:\n${request.item.nonGoals.join("\n")}\nOwned paths:\n${request.item.ownedPaths.join("\n")}\nBrief:\n${request.item.brief}${sourceInstructions}${validationInstructions}${scriptInstructions}${mediaInstructions}${inputInstructions}${environmentInstructions}${discoveryInstructions}`;
 }
 
 export function readProducedAssets(

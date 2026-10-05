@@ -2596,6 +2596,30 @@ export interface PackageScriptAuthority {
   predecessorSha?: string;
 }
 
+/** The commands that run package scripts: the ones validation pins to the accepted base. */
+export function packageScriptCommands(commands: readonly string[]): string[] {
+  return commands.filter(
+    (check) =>
+      /\b(?:npm|pnpm)\b/.test(check) && check.trim() !== PINNED_PNPM_BOOTSTRAP,
+  );
+}
+
+/** Names of the package scripts (and their pre/post hooks) validation keeps identical to the base. */
+export function fixedPackageScripts(commands: readonly string[]): string[] {
+  const names = new Set<string>();
+  for (const command of packageScriptCommands(commands)) {
+    const invocation = packageScriptInvocation(command);
+    if (invocation)
+      for (const name of [
+        invocation.name,
+        `pre${invocation.name}`,
+        `post${invocation.name}`,
+      ])
+        names.add(name);
+  }
+  return [...names];
+}
+
 export function assertPinnedNpmScripts(
   checkout: string,
   acceptedBaseSha: string,
@@ -2625,9 +2649,7 @@ export function assertPinnedNpmScripts(
     throw new Error(
       "Package script validation blocked: script-disabled bootstrap must run first",
     );
-  const scriptCommands = selected.filter(
-    (check) => check.trim() !== PINNED_PNPM_BOOTSTRAP,
-  );
+  const scriptCommands = packageScriptCommands(commands);
   const requests = scriptCommands.map(packageScriptInvocation);
   if (requests.some((request) => !request))
     throw new Error(

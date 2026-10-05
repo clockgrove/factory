@@ -2029,12 +2029,15 @@ test("native execution failure is terminal until an explicit safe retry", async 
     application.retryWorkItem(objective, "retry");
     const done = await application.runObjective(objective);
     assert.equal(done.finalValidation.passed, true);
-    assert.equal(
-      readEvents(eventsPath).filter(
-        (event) => event.type === "start" && event.item === "retry",
-      ).length,
-      2,
+    const starts = readEvents(eventsPath).filter(
+      (event) => event.type === "start" && event.item === "retry",
     );
+    assert.equal(starts.length, 2);
+    // The new attempt's brief carries the recorded failure of the first (#812).
+    const recorded = failed.work.retry.recovery.failure.detail;
+    assert.ok(recorded);
+    assert.ok(!starts[0].brief.includes(recorded));
+    assert.ok(starts[1].brief.includes(recorded));
     const retryTimeline = readDiagnostics(
       descriptor.config.repository,
       objective,

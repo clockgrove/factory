@@ -1549,6 +1549,116 @@ test("preview planning stays read-only and a refused plan is planned again", asy
   });
 });
 
+test("a run plans from the default branch head on origin and keeps that base when it resumes", async () => {
+  await fixture("fresh-base", async (root) => {
+    const target = createTarget(root);
+    // Another clone merges to the default branch after the checkout's last
+    // fetch: the checkout's HEAD and origin/main still name the old commit.
+    const other = join(root, "other");
+    execFileSync("git", ["clone", "--quiet", target.origin, other]);
+    const merge = (path) => {
+      writeFileSync(join(other, path), `${path}\n`);
+      git(other, "add", "-A");
+      git(
+        other,
+        "-c",
+        "user.name=Factory Test",
+        "-c",
+        "user.email=factory-test@example.com",
+        "commit",
+        "-m",
+        `Add ${path}`,
+      );
+      git(other, "push", "origin", "main");
+      return git(other, "rev-parse", "HEAD");
+    };
+    const remoteHead = merge("upstream.txt");
+    const command = "test -s upstream.txt && test -s fresh.txt";
+    const graph = {
+      objective,
+      baseSha: remoteHead,
+      items: [item("fresh", { path: "fresh.txt", command })],
+    };
+    const config = factoryConfig(
+      target.checkout,
+      "example/fresh-base",
+      "regular",
+      1,
+    );
+    let findings = [
+      {
+        itemIds: [],
+        evidenceIndices: [0],
+        detail: "Source needs an owner interpretation",
+        question: "Approve?",
+      },
+    ];
+    const planningModel = {
+      async generateStructured(request) {
+        return withCoverage(request, structuredClone(graph));
+      },
+      async reviewGraph(request) {
+        return { packetId: request.reviewPacket.id, findings };
+      },
+      async reviewResult(request) {
+        return {
+          packetId: request.reviewPacket.id,
+          findings: resultFindings(
+            request,
+            request.criteria.map((criterion) => ({
+              criterion,
+              verdict: "pass",
+              source: "OBJECTIVE",
+              quote: "## Acceptance",
+              detail: "The scripted result proves the exact criterion",
+              question: "",
+            })),
+          ),
+        };
+      },
+    };
+    const { application } = makeApplication({
+      config,
+      graph,
+      objectiveBody: body([command]),
+      fakeRoot: join(root, "fake"),
+      planningModel,
+      actions: { fresh: { files: [{ path: "fresh.txt", text: "fresh\n" }] } },
+    });
+    const preparing = await application.runObjective(objective);
+    assert.equal(preparing.schemaVersion, 8);
+    assert.equal(preparing.baseSha, remoteHead);
+    // The fetch wrote no ref of the checkout and left none of its own.
+    assert.equal(git(target.checkout, "rev-parse", "HEAD"), target.baseSha);
+    assert.equal(
+      git(target.checkout, "rev-parse", "refs/remotes/origin/main"),
+      target.baseSha,
+    );
+    assert.equal(
+      git(target.checkout, "for-each-ref", "refs/factory/fetch"),
+      "",
+    );
+
+    // The default branch moves again while the plan waits for its decision:
+    // the Objective keeps the base its plan was made from.
+    assert.notEqual(merge("later.txt"), remoteHead);
+    const waiting = await application.runObjective(objective);
+    assert.equal(waiting.schemaVersion, 8);
+    assert.equal(waiting.baseSha, remoteHead);
+    assert.equal(waiting.changedSincePlanning, undefined);
+    await application.decidePlan(objective, {
+      actor: "test operator",
+      outcome: "accept",
+      answer: "I inspected the exact graph and accept its sole item",
+      reason: "Pinned Objective and graph match",
+    });
+    findings = [];
+    const completed = await application.runObjective(objective);
+    assert.equal(completed.baseSha, remoteHead);
+    assert.equal(completed.finalValidation.passed, true);
+  });
+});
+
 test("application lifecycle reattaches once, cancels owned work, and retries only explicitly", async () => {
   await fixture("lifecycle-restart", async (root) => {
     const target = createTarget(root);

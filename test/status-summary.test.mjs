@@ -984,7 +984,7 @@ test("a pause or drain of a preparation outranks a changed plan or configuration
       );
 });
 
-test("a preparation whose base, Objective or sources changed names a refusal before projection and cancel after", () => {
+test("a preparation whose Objective or sources changed names a refusal before projection and cancel after", () => {
   const before = summarizeStatus(
     preparing({ changedSincePlanning: true, runActive: false }),
   );

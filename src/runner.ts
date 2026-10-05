@@ -1373,7 +1373,14 @@ async function runObjectivePass(
         );
       reportRunStatus?.("Factory: resuming the existing run from atomic state");
     } else {
-      const baseSha = git(config.checkout, "rev-parse", "HEAD");
+      // A new plan starts from the default branch as origin has it now; the
+      // checkout's own refs are only as new as its last fetch. A preparation
+      // keeps the base it recorded, like every later run of the Objective.
+      const baseSha =
+        preparation?.baseSha ??
+        (await objectiveStep(owner.snapshot, "base", async () =>
+          fetchHead(config.checkout, await github.defaultBranch()),
+        ));
       const prerequisites = await objectiveStep(
         owner.snapshot,
         "prerequisites",
@@ -1416,7 +1423,6 @@ async function runObjectivePass(
       // restoring it clears the stop without a run.
       const inputsChanged =
         preparation.sourcePacketDigest !== sourcePacketDigest ||
-        preparation.baseSha !== baseSha ||
         preparation.objectiveBodyDigest !==
           createHash("sha256").update(issue.body).digest("hex");
       // Only a run sees this; recording it lets status name the way out
@@ -1432,8 +1438,8 @@ async function runObjectivePass(
       )
         throw new Error(
           projectionStarted(preparation)
-            ? `Base, Objective, sources or configuration changed during projection; restore what changed, or run \`factory cancel --objective ${objective}\``
-            : "Base, Objective, sources or configuration changed since planning; refuse the plan with factory decide to plan again",
+            ? `Objective, sources or configuration changed during projection; restore what changed, or run \`factory cancel --objective ${objective}\``
+            : "Objective, sources or configuration changed since planning; refuse the plan with factory decide to plan again",
         );
       if (owner.handoff && canHandoff(preparation))
         throw new CoordinatorHandoff();

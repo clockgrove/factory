@@ -69,6 +69,11 @@ export function createTarget(root, files = {}) {
 let transportRoot;
 const transportRoutes = {};
 
+/** The directory holding the git stub that routes GitHub URLs to local origins. */
+export function transportBin() {
+  return transportRoot;
+}
+
 /** Give offline targets a real GitHub binding and stub only transport to that host. */
 export function bindTarget(checkout, repository) {
   if (!transportRoot) {

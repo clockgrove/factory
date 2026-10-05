@@ -36,6 +36,7 @@ import {
   git,
   makeApplication,
   readEvents,
+  transportBin,
 } from "./support/integration-fixture.mjs";
 import { packetFromPrompt } from "./support/review-protocol.mjs";
 
@@ -163,7 +164,7 @@ test("known missing final tools fail before planning spend", async () => {
         },
       },
     });
-    process.env.PATH = "/usr/bin:/bin";
+    process.env.PATH = `${transportBin()}:/usr/bin:/bin`;
     await assert.rejects(
       setup.application.planObjective(1),
       /final.*command index 0.*executable pnpm/,
@@ -187,12 +188,12 @@ test("missing work-item tools stop activation before projection, attempt or targ
     ];
     process.env.PATH = "/usr/bin:/bin";
     const setup = makeApplication(descriptor(root, target, commands, ["true"]));
-    process.env.PATH = "/usr/bin:/bin";
+    process.env.PATH = `${transportBin()}:/usr/bin:/bin`;
     const plan = await setup.application.planObjective(1);
     assert.equal(plan.review.status, "clean");
     await assert.rejects(
       setup.application.runObjective(1),
-      /work-item bootstrap.*command index 0.*executable pnpm.*PATH=\/usr\/bin:\/bin/,
+      /work-item bootstrap.*command index 0.*executable pnpm.*PATH=[^\n]*\/usr\/bin:\/bin/,
     );
     const events = readDiagnostics("example/preflight", 1).filter(
       (e) => e.operation === "local-executable-preflight",
@@ -210,7 +211,7 @@ test("missing work-item tools stop activation before projection, attempt or targ
       commandIndex: 0,
       executable: "pnpm",
       preflightStatus: "missing",
-      pathContext: "/usr/bin:/bin",
+      pathContext: `${transportBin()}:/usr/bin:/bin`,
     });
     const preparation = readContinuation("example/preflight", 1);
     assert.equal(preparation.schemaVersion, 8);
@@ -289,7 +290,7 @@ test("activation rechecks changed PATH, final requirements, pinned mismatches an
         ["pnpm test"],
       ),
     );
-    process.env.PATH = "/usr/bin:/bin";
+    process.env.PATH = `${transportBin()}:/usr/bin:/bin`;
     await assert.rejects(
       setup.application.runObjective(1),
       /final.*command index 0.*executable pnpm/,
@@ -297,7 +298,7 @@ test("activation rechecks changed PATH, final requirements, pinned mismatches an
     writeFileSync(join(tools.bin, "pnpm"), `#!/bin/sh\necho 8.0.0\n`, {
       mode: 0o755,
     });
-    process.env.PATH = `${tools.bin}:/usr/bin:/bin`;
+    process.env.PATH = `${transportBin()}:${tools.bin}:/usr/bin:/bin`;
     await assert.rejects(
       setup.application.runObjective(1),
       /version-mismatch.*pnpm@9.0.0.*8.0.0/,
@@ -312,7 +313,7 @@ test("fixed lookups use supplied environment, do not execute target commands, an
   await fixture(async (root) => {
     const target = createTarget(root);
     const tools = hostTools(root);
-    process.env.PATH = `${tools.bin}:/usr/bin:/bin`;
+    process.env.PATH = `${transportBin()}:${tools.bin}:/usr/bin:/bin`;
     assert.notEqual(
       resolveLocalExecutable("pnpm", root, { PATH: "/usr/bin:/bin" }, "/bin/sh")
         .status,
@@ -558,7 +559,7 @@ test("actual planning packets carry presence without executing acceptance, and b
       },
     };
     const setup = makeApplication({ ...descriptorInput, planningModel: model });
-    process.env.PATH = `${bin}:/usr/bin:/bin`;
+    process.env.PATH = `${transportBin()}:${bin}:/usr/bin:/bin`;
     const waiting = await setup.application.runObjective(1);
     assert.equal(waiting.schemaVersion, 8);
     const candidate = waiting.plan;

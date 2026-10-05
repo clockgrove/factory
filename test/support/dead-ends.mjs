@@ -29,7 +29,7 @@
 //   a rejected amendment (with and without a planning revision to spare, one
 //   that carries an operator's graph, and one whose mode was left draining or
 //   running, as a bypass of the setter or an old state file leaves it), a plan
-//   whose base, Objective body or sources changed (alone or with a changed
+//   whose Objective body or sources changed (alone or with a changed
 //   configuration, a pause or a drain), a
 //   cancelled item of a live
 //   Objective, spent

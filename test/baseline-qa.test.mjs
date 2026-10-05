@@ -385,14 +385,13 @@ test("baseline graph does not grant authority to omit source-required implementa
     },
     { requireImplementation: true },
   ));
-test("moving default branch before baseline QA fails before review or commands", async () =>
+test("a checkout behind the default branch plans from the default branch head, before review or commands", async () =>
   fixture("regular", async ({ application, target, captures, eventsPath }) => {
     moveDefault(target);
     git(target.checkout, "checkout", "--detach", target.baseSha);
-    await assert.rejects(
-      application.runObjective(1),
-      /Default branch|base|HEAD/i,
-    );
+    const state = await application.runObjective(1);
+    assert.equal(state.baseSha, git(target.origin, "rev-parse", "main"));
+    assert.notEqual(state.baseSha, target.baseSha);
     assert.ok(!captures.some((entry) => entry.phase === "QA"));
     assert.deepEqual(readEvents(eventsPath), []);
   }));

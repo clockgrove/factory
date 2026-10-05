@@ -56,7 +56,7 @@ Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/t
 
 A plan can name a CI check only if it is a pull-request workflow job at the base. Checks from external apps cannot be named. Delivery re-checks the job against the default branch: if it is renamed after planning, the run asks you to restore it and `factory retry`, or to cancel and plan again.
 
-Factory refuses the earlier sections with a message that says where the content goes: Final validation (an Acceptance command bullet), Required checks (a workflow job), Planning sources (Sources), What must be true (Acceptance), Goal (Outcome), Non-goals (Constraints). Only a repository that adds packages to an existing `pnpm-workspace.yaml` needs one more section, **Workspace package additions**: exact backticked directories, as a level-two or level-three heading like the other sections. Undeclared workspace changes are blocked, and planning refuses a plan that creates an undeclared package. Any other change to `pnpm-workspace.yaml` (such as `allowBuilds` dependency build approvals) is yours to make, because which dependency scripts may run is the operator's decision: no Objective section authorizes it. Merge it to the default branch before `factory run`. If planning already stopped on it, merge the change, refuse the stopped planning and run again.
+Factory refuses the earlier sections with a message that says where the content goes: Final validation (an Acceptance command bullet), Required checks (a workflow job), Planning sources (Sources), What must be true (Acceptance), Goal (Outcome), Non-goals (Constraints). For adding packages to an existing `pnpm-workspace.yaml`, use the optional **Workspace package additions** section: exact backticked directories, as a level-two or level-three heading like the other sections. Undeclared workspace changes are blocked, and planning refuses a plan that creates an undeclared package. Any other change to `pnpm-workspace.yaml` (such as `allowBuilds` dependency build approvals) is yours to make, because which dependency scripts may run is the operator's decision: no Objective section authorizes it. Merge it to the default branch before `factory run`. If planning already stopped on it, merge the change, refuse the stopped planning and run again.
 
 Keep the first Objective small. Editing the issue after planning invalidates the saved plan; refuse it (below) and run again.
 
@@ -70,6 +70,18 @@ Short rules from real runs. Each has its reason.
 - **Leave dependency build approvals and other workspace configuration to the operator.** Set them on the base branch before the run. _Because_ a worker's change to them is out of its ownership and is blocked.
 - **Inject what does not exist yet; do not require it.** Pass a missing file, service or value in through the code under test. _Because_ an Acceptance bullet that needs something absent can never pass.
 - **Put stable repository facts in the target's own contributor docs** (for example its `AGENTS.md` or `CONTRIBUTING.md`), not in every Objective. _Because_ workers read them each run, and an Objective stays short and about one outcome.
+
+A version refresh of an existing exact stable npm or pnpm `packageManager` pin needs an optional **Package manager update** section. Use exactly one backticked pin in one bullet, under a level-two or level-three heading:
+
+```markdown
+## Package manager update
+
+- `pnpm@10.34.5`
+```
+
+Factory parses this section from the pinned Objective, checks that the accepted base uses the same manager, and supplies the exact update to the planner and workers. Prose elsewhere does not grant authority. A range, URL, prerelease, manager switch, duplicate section or multiple pins is refused before planning. Intermediate work may keep the base pin until the update lands; successors preserve the declared pin, and final validation requires it. Acceptance-script bodies, lifecycle hooks, `config`, `pnpm`, `.npmrc`, workspace security settings and package-manager hooks remain protected. Prepare the declared version on the validation PATH before running: host readiness checks that exact version.
+
+The section cannot be added retroactively to an accepted plan: its Objective body is digest-bound. If a prior attempt failed on the fixed-pin guard, preserve the rejected candidate, evidence, usage and consumed allowances. Diagnose the conflict and use the supported lifecycle to stop the predecessor before a corrected new Objective; an unchanged retry cannot authorize the update.
 
 ## Run
 

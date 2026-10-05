@@ -38,3 +38,9 @@ body:
       label: Workspace package additions
       description: Optional. Only when adding packages to an existing pnpm-workspace.yaml. One exact backticked package directory per bullet.
       placeholder: "- `packages/example`"
+  - type: textarea
+    id: package-manager-update
+    attributes:
+      label: Package manager update
+      description: Optional. Refresh an existing exact stable npm or pnpm packageManager pin. Exactly one backticked pin in one bullet, using the same manager. Scripts, hooks and security configuration stay fixed.
+      placeholder: "- `pnpm@10.34.5`"

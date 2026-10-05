@@ -1,3 +1,4 @@
+import { packageManagerUpdate } from "../dist/package-manager-update.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -239,5 +240,17 @@ test("the issue form's Workspace package additions field declares additions or i
       }),
     ),
     ["packages/example"],
+  );
+});
+
+test("the issue form's Package manager update field declares one exact pin or is left empty", () => {
+  assert.equal(packageManagerUpdate(renderedObjectiveForm({})), undefined);
+  assert.equal(
+    packageManagerUpdate(
+      renderedObjectiveForm({
+        "package-manager-update": "- `pnpm@10.34.5`",
+      }),
+    ),
+    "pnpm@10.34.5",
   );
 });

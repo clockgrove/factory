@@ -491,6 +491,8 @@ export interface ExecutionDriver {
 }
 
 export interface HarnessRequest {
+  /** Pinned Objective section, parsed by the controller; never model-granted authority. */
+  packageManagerUpdate?: string;
   capture?: {
     context: import("./capture.js").CaptureContext;
     policy?: import("./capture.js").CapturePolicy;

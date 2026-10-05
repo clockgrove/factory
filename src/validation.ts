@@ -1,3 +1,7 @@
+import {
+  assertPackageManagerUpdate,
+  packageMetadata,
+} from "./package-manager-update.js";
 import { objectiveCandidate } from "./qa.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { assertGraphRevisions } from "./graph-amendments.js";
@@ -2648,6 +2652,10 @@ export const PINNED_PNPM_BOOTSTRAP =
   "pnpm install --frozen-lockfile --ignore-scripts";
 
 export interface PackageScriptAuthority {
+  /** Exact stable same-manager pin declared by the pinned Objective. */
+  packageManagerUpdate?: string;
+  /** Final acceptance must include the declared update. */
+  requirePackageManagerUpdate?: boolean;
   /** Commands literally declared by a pinned source, not inferred by the model. */
   sourceDeclared?: readonly string[];
   /** Exact package directories admitted by the pinned Objective. */
@@ -2696,6 +2704,27 @@ export function assertPinnedNpmScripts(
     authority.workspacePackageAdditions,
     authority.predecessorSha,
   );
+  const original = packageMetadata(checkout, acceptedBaseSha);
+  const predecessor =
+    authority.predecessorSha && authority.predecessorSha !== acceptedBaseSha
+      ? packageMetadata(checkout, authority.predecessorSha)
+      : original;
+  const after = packageMetadata(checkout, commit);
+  if (original || predecessor || authority.packageManagerUpdate !== undefined)
+    assertPackageManagerUpdate(
+      authority.packageManagerUpdate !== undefined
+        ? original?.packageManager
+        : (original ?? predecessor)?.packageManager,
+      after?.packageManager,
+      authority.packageManagerUpdate,
+      authority.requirePackageManagerUpdate,
+    );
+  if (
+    authority.packageManagerUpdate !== undefined &&
+    predecessor?.packageManager === authority.packageManagerUpdate &&
+    after?.packageManager !== authority.packageManagerUpdate
+  )
+    throw new Error("Package manager update cannot revert a predecessor pin");
   const managerToken = /\b(?:npm|pnpm)\b/;
   const selected = commands.filter((check) => managerToken.test(check));
   if (!selected.length) return;
@@ -2738,25 +2767,6 @@ export function assertPinnedNpmScripts(
       return undefined;
     }
   };
-  const packageFile = (
-    revision: string,
-  ): Record<string, unknown> | undefined => {
-    const raw = file(revision, "package.json");
-    if (raw === undefined) return undefined;
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-        throw new Error("invalid package");
-      return parsed as Record<string, unknown>;
-    } catch {
-      throw new Error(
-        "Package script validation blocked: package.json is invalid",
-      );
-    }
-  };
-  const original = packageFile(acceptedBaseSha);
-  const predecessor = packageFile(authority.predecessorSha ?? acceptedBaseSha);
-  const after = packageFile(commit);
   if (!original && selected.some((command) => !declared.has(command)))
     throw new Error(
       "Package script validation blocked: a new package.json needs exact source-declared command authority",
@@ -2765,7 +2775,7 @@ export function assertPinnedNpmScripts(
     throw new Error(
       "Package script validation blocked: package.json is absent from the result tree",
     );
-  for (const key of ["packageManager", "config", "pnpm"])
+  for (const key of ["config", "pnpm"])
     if (
       (original ?? predecessor) &&
       !isDeepStrictEqual((original ?? predecessor)?.[key], after?.[key])
@@ -2918,6 +2928,7 @@ export async function validateWorkItem(
   lfsMembers: ValidationLfsMember[] = [],
   contentStore?: ContentStore,
   workspacePackageAdditions: readonly string[] = [],
+  packageManagerUpdate?: string,
 ): Promise<ValidationEvidence> {
   assertPinnedNpmScripts(
     checkout,
@@ -2930,6 +2941,7 @@ export async function validateWorkItem(
         .map((v) => v.command),
       predecessorSha,
       workspacePackageAdditions,
+      packageManagerUpdate,
     },
   );
   return validateTree(

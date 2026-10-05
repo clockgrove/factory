@@ -24,3 +24,9 @@ One paragraph: what changes, for whom, and what is out of scope for this Objecti
 Optional. Only when adding packages to an existing `pnpm-workspace.yaml`. One exact backticked package directory per bullet; planning refuses a Work Item that creates a package manifest not listed here.
 
 - `packages/example`
+
+## Package manager update
+
+Optional. Only when refreshing an existing exact stable npm or pnpm `packageManager` pin. Exactly one backticked pin in one bullet; preserve the manager, acceptance scripts, lifecycle hooks and security configuration. Omit this section when no update is authorized.
+
+- `pnpm@10.34.5`

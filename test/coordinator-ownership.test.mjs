@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
@@ -140,11 +140,31 @@ test("controller owner retirement during observation is absent while malformed i
       assert.deepEqual(fs.readdirSync(root), ["controller.lock"]);
     }
     fs.rmSync(path);
+    // A guard with content that names no holder is not Factory's: it stays.
     fs.mkdirSync(`${path}.acquire`);
-    assert.throws(() => acquireControllerLock(path, 1), /EEXIST/);
-    assert.equal(existsSync(`${path}.acquire`), true);
+    fs.writeFileSync(`${path}.acquire/other`, "");
+    assert.throws(() => acquireControllerLock(path, 1), /names no holder/);
+    assert.deepEqual(fs.readdirSync(`${path}.acquire`), ["other"]);
     assert.equal(existsSync(path), false);
-    fs.rmdirSync(`${path}.acquire`);
+    fs.rmSync(`${path}.acquire`, { recursive: true });
+    // An empty guard (an earlier build's crashed holder) is taken over.
+    fs.mkdirSync(`${path}.acquire`);
+    releaseControllerLock(path, acquireControllerLock(path, 1));
+    assert.equal(existsSync(`${path}.acquire`), false);
+    // A guard whose holder process is gone is reclaimed under a tombstone.
+    fs.mkdirSync(`${path}.acquire`);
+    const gone = spawnSync(process.execPath, ["-e", "0"]);
+    assert.equal(gone.status, 0);
+    fs.writeFileSync(
+      `${path}.acquire/holder`,
+      JSON.stringify({ pid: gone.pid, startTime: "0" }),
+    );
+    const reclaimed = acquireControllerLock(path, 1);
+    assert.equal(readControllerOwner(path).pid, process.pid);
+    assert.equal(existsSync(`${path}.acquire`), false);
+    assert.equal(existsSync(`${path}.acquire.dead-${gone.pid}-0`), true);
+    releaseControllerLock(path, reclaimed);
+    assert.equal(existsSync(path), false);
     fs.writeFileSync(path, "permission-denied owner");
     fs.readFileSync = (target, ...args) => {
       if (target === path) {
@@ -190,7 +210,9 @@ for (const failure of ["write", "sync", "publication"]) {
     });
     fs.openSync = (...args) => {
       const fd = original.openSync(...args);
-      if (String(args[0]).startsWith(`${path}.`)) opened.push(fd);
+      const target = String(args[0]);
+      if (target.startsWith(`${path}.`) && target.endsWith(".tmp"))
+        opened.push(fd);
       return fd;
     };
     fs.writeFileSync = (fd, ...args) => {
@@ -320,7 +342,7 @@ for (const stale of [false, true]) {
       for (let index = 0; index < peers.length; index++) {
         if (index === winner) continue;
         assert.equal(results[index].outcome, "refused");
-        assert.match(results[index].error, /already owns|EEXIST/);
+        assert.match(results[index].error, /already owns|held by process/);
         await finish(peers[index]);
         assert.deepEqual(
           readControllerOwner(path),

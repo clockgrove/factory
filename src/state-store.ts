@@ -10,13 +10,17 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
-  rmdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { stateRoot, validateCapacity } from "./config.js";
-import { linuxProcessIdentity, processAlive, takeGuard } from "./process.js";
+import {
+  linuxProcessIdentity,
+  processAlive,
+  releaseGuard,
+  takeGuard,
+} from "./process.js";
 import {
   assertRepeats,
   assertWait,
@@ -442,8 +446,9 @@ export function acquireControllerLock(
     conflict?: () => string | undefined;
   } = {},
 ): ControllerLock {
-  // Serialize stale-owner replacement as well as creation. A crashed guard is
-  // refused explicitly; never remove a contender's newly acquired lock.
+  // Serialize stale-owner replacement as well as creation (a crashed holder's
+  // guard is reclaimed by takeGuard); never remove a contender's newly
+  // acquired lock.
   const guard = scope.guard ?? `${path}.acquire`;
   takeGuard(guard);
   try {
@@ -480,7 +485,7 @@ export function acquireControllerLock(
       rmSync(temporary, { force: true });
     }
   } finally {
-    rmdirSync(guard);
+    releaseGuard(guard);
   }
 }
 

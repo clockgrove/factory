@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
-import { withRegistryFiles } from "../dist/process.js";
+import { registryLockDirectory, withRegistryFiles } from "../dist/process.js";
 
 const processUrl = new URL("../dist/process.js", import.meta.url).href;
 
@@ -80,4 +82,73 @@ test("the worktree registry lock holds across processes: exclusive excludes the 
   other = await holder(key, "exclusive");
   await other.kill();
   await withRegistryFiles(key, "exclusive", undefined, async () => undefined);
+});
+
+/** Another process holding the lock directory's guard until it exits. */
+async function guardHolder(guard) {
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { mkdirSync } from "node:fs";
+       import { dirname } from "node:path";
+       import { takeGuard } from ${JSON.stringify(processUrl)};
+       mkdirSync(dirname(${JSON.stringify(guard)}), { recursive: true });
+       takeGuard(${JSON.stringify(guard)});
+       process.stdout.write("held\\n");
+       setInterval(() => undefined, 1000);`,
+    ],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  child.stdout.setEncoding("utf8");
+  await new Promise((resolve) => {
+    let output = "";
+    child.stdout.on("data", (part) => {
+      output += part;
+      if (output.includes("held")) resolve();
+    });
+  });
+  return child;
+}
+
+test("a guard left by a process killed inside its window is reclaimed; a live holder keeps it", async () => {
+  const key = `/registry-guard-${process.pid}-${Date.now()}`;
+  const directory = registryLockDirectory(key);
+  const guard = join(directory, ".guard");
+
+  const dead = await guardHolder(guard);
+  dead.kill("SIGKILL");
+  await once(dead, "exit");
+  assert.equal(existsSync(guard), true);
+  let ran = false;
+  await withRegistryFiles(key, "exclusive", undefined, async () => {
+    ran = true;
+  });
+  assert.equal(ran, true);
+  assert.equal(existsSync(guard), false);
+  // The dead holder's guard became its tombstone, which stays.
+  const tombstones = readdirSync(directory).filter((name) =>
+    name.startsWith(".guard.dead-"),
+  );
+  assert.equal(tombstones.length, 1);
+  assert.equal(
+    JSON.parse(readFileSync(join(directory, tombstones[0], "holder"))).pid,
+    dead.pid,
+  );
+
+  const live = await guardHolder(guard);
+  try {
+    await assert.rejects(
+      withRegistryFiles(key, "shared", undefined, async () => undefined),
+      /held by process/,
+    );
+    assert.equal(
+      JSON.parse(readFileSync(join(guard, "holder"), "utf8")).pid,
+      live.pid,
+    );
+  } finally {
+    live.kill("SIGKILL");
+    await once(live, "exit");
+  }
 });

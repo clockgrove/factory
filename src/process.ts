@@ -7,7 +7,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
-  rmdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -310,22 +310,103 @@ export function processAlive(owner: {
 
 const guardWait = new Int32Array(new SharedArrayBuffer(4));
 
+/** The identity lock files and guards record: one process life. */
+export function ownIdentity(): { pid: number; startTime: string } {
+  const identity = linuxProcessIdentity(process.pid);
+  if (!identity) throw new Error("Cannot establish process identity");
+  return { pid: process.pid, startTime: identity.startTime };
+}
+
+function errorCode(error: unknown): string {
+  return (error as NodeJS.ErrnoException).code ?? "";
+}
+
 /**
- * Take a lock directory's guard: a directory only one process creates.
- * Contenders hold it for milliseconds, without awaiting; one still there
- * after a second crashed and is refused.
+ * Take a lock directory's guard: a directory only one process holds, naming
+ * its holder inside (`holder`, the identity the lock files carry). A take
+ * renames a prepared directory onto the guard's path, which fails while a
+ * guard is there, so a guard never exists without its holder. Holders keep
+ * it for milliseconds, without awaiting; a live holder still there after a
+ * second is refused. A guard whose holder process is gone is reclaimed by
+ * renaming it to a tombstone named for that process. The tombstone stays:
+ * a contender that saw the same dead holder may still rename the path, and
+ * only a non-empty directory in its way stops it from taking a live guard.
  */
 export function takeGuard(guard: string): void {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      mkdirSync(guard, { mode: 0o700 });
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 100)
-        throw error;
+  const prepared = `${guard}.take-${randomUUID()}`;
+  mkdirSync(prepared, { mode: 0o700 });
+  try {
+    writeFileSync(join(prepared, "holder"), JSON.stringify(ownIdentity()), {
+      mode: 0o600,
+    });
+    for (let waits = 0; ; ) {
+      try {
+        renameSync(prepared, guard);
+        return;
+      } catch (error) {
+        if (!["EEXIST", "ENOTEMPTY"].includes(errorCode(error))) throw error;
+      }
+      const holder = guardHolder(guard);
+      if (!holder) continue;
+      if (!processAlive(holder)) {
+        try {
+          renameSync(guard, `${guard}.dead-${holder.pid}-${holder.startTime}`);
+        } catch (error) {
+          if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes(errorCode(error)))
+            throw error;
+        }
+        continue;
+      }
+      if (++waits >= 100)
+        throw new Error(
+          `Factory's lock guard ${guard} is held by process ${holder.pid}`,
+        );
       Atomics.wait(guardWait, 0, 0, 10);
     }
+  } catch (error) {
+    rmSync(prepared, { recursive: true, force: true });
+    throw error;
   }
+}
+
+/** The guard's holder, or undefined once the guard is gone. */
+function guardHolder(
+  guard: string,
+): { pid: number; startTime: string } | undefined {
+  try {
+    if (readdirSync(guard).includes("holder")) {
+      const value = JSON.parse(readFileSync(join(guard, "holder"), "utf8"));
+      if (
+        Number.isSafeInteger(value?.pid) &&
+        typeof value.startTime === "string"
+      )
+        return value;
+    }
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    if (!(error instanceof SyntaxError)) throw error;
+  }
+  throw new Error(
+    `Factory's lock guard ${guard} names no holder process; remove it if no Factory process is running`,
+  );
+}
+
+/** Let the guard go without a moment where it exists empty. */
+export function releaseGuard(guard: string): void {
+  const released = `${guard}.released-${randomUUID()}`;
+  renameSync(guard, released);
+  rmSync(released, { recursive: true, force: true });
+}
+
+/** Where a checkout's cross-process registry lock lives, keyed by git common directory. */
+export function registryLockDirectory(key: string): string {
+  return join(
+    process.env.XDG_STATE_HOME ??
+      join(process.env.HOME ?? "", ".local", "state"),
+    "clockgrove-factory",
+    "git-locks",
+    createHash("sha256").update(key).digest("hex").slice(0, 32),
+  );
 }
 
 /**
@@ -342,38 +423,31 @@ export async function withRegistryFiles<T>(
   signal: AbortSignal | undefined,
   run: () => Promise<T>,
 ): Promise<T> {
-  const directory = join(
-    process.env.XDG_STATE_HOME ??
-      join(process.env.HOME ?? "", ".local", "state"),
-    "clockgrove-factory",
-    "git-locks",
-    createHash("sha256").update(key).digest("hex").slice(0, 32),
-  );
+  const directory = registryLockDirectory(key);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const identity = linuxProcessIdentity(process.pid);
-  if (!identity) throw new Error("Cannot establish process identity");
   const id = randomUUID();
   const own = mode === "exclusive" ? "writer" : `reader-${id}`;
-  const record = JSON.stringify({
-    pid: process.pid,
-    startTime: identity.startTime,
-    id,
-  });
+  const record = JSON.stringify({ ...ownIdentity(), id });
   const guarded = <R>(body: () => R): R => {
     takeGuard(join(directory, ".guard"));
     try {
       return body();
     } finally {
-      rmdirSync(join(directory, ".guard"));
+      releaseGuard(join(directory, ".guard"));
     }
   };
+  /** A holder file's live holder; a stale or partial file is removed. */
   const holder = (name: string) => {
+    let value: { id: string; pid: number; startTime: string } | undefined;
     try {
-      const value = JSON.parse(readFileSync(join(directory, name), "utf8"));
-      if (processAlive(value)) return value as { id: string };
-    } catch {
-      // Absent or unreadable: a holder that crashed while publishing.
+      value = JSON.parse(readFileSync(join(directory, name), "utf8"));
+    } catch (error) {
+      // Absent, or partial from a holder that crashed while publishing. Any
+      // other failure must not remove a live holder's record.
+      if (errorCode(error) !== "ENOENT" && !(error instanceof SyntaxError))
+        throw error;
     }
+    if (value && typeof value === "object" && processAlive(value)) return value;
     rmSync(join(directory, name), { force: true });
     return undefined;
   };

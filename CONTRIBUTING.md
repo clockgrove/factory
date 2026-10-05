@@ -68,6 +68,8 @@ node scripts/live-check.mjs reset --objective N   # close what that run left
 
 The maintainer's machine runs the check nightly with a systemd user timer and the local `gh` login (no extra token): both deliveries with the scripted worker, then `reset`. A failure opens, or comments on, the one open issue labelled `live-check` with the log tail. Run it by hand the same way: `npm run build`, then `node scripts/live-check.mjs run --worker scripted --delivery regular` (and `native-stack`). `node scripts/live-check.mjs setup` installs the fixture's CI workflow and required check once (repository admin).
 
+A `--tag` is single-use: a finished run leaves `live/TAG/` on the scratch repository's main (`reset` does not rewrite it), and a rerun under the same tag would add nothing, so `run` refuses it. Without `--tag` the run picks a fresh one; the nightly job's tag carries the date, so a second run the same day needs its own tag.
+
 ## Pull requests
 
 Link the issue, explain the user-visible change, and report the checks you ran. Keep each pull request focused on one complete outcome, with adjacent cleanup left out. Describe any remaining limitations and distinguish local test results from live acceptance evidence. Never include credentials, private repository content, raw agent transcripts, or private run details.

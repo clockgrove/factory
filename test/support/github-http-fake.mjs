@@ -260,7 +260,8 @@ export class GitHubHttpFake {
    * @param {{read: string, after?: string, reads?: number, ms?: number}[]} [options.lag]
    *   after each write (to `after`, or any endpoint), the next `reads` reads
    *   of the `read` endpoint, or every read of it for `ms` on the fake's
-   *   clock, still see the state before that write
+   *   clock (both: whichever lasts longer), still see the state before that
+   *   write
    * @param {() => number} [options.now] the fake's clock in ms (logical now)
    * @param {(sha: string) => object[]} [options.checkRuns]
    * @param {(sha: string) => object} [options.statuses]
@@ -694,16 +695,19 @@ export class GitHubHttpFake {
     const pending = {};
     for (const [index, rule] of this.lag.entries())
       if (rule.after && rule.after !== endpoint) continue;
-      else if (rule.ms > 0) pending[index] = { until: this.now() + rule.ms };
-      else if (rule.reads > 0) pending[index] = rule.reads;
+      else if (rule.ms > 0 || rule.reads > 0)
+        pending[index] = {
+          until: this.now() + (rule.ms ?? 0),
+          reads: rule.reads ?? 0,
+        };
     if (Object.keys(pending).length) this.writes.push({ before, pending });
   }
 
   /** Whether a write still lags for one rule: reads left, or time left. */
   lagging(pending) {
-    return typeof pending === "number"
-      ? pending > 0
-      : pending !== undefined && this.now() < pending.until;
+    return (
+      pending !== undefined && (pending.reads > 0 || this.now() < pending.until)
+    );
   }
 
   /** The state a read of `endpoint` observes: before the oldest lagging write. */
@@ -722,11 +726,7 @@ export class GitHubHttpFake {
           this.lag[index].served = (this.lag[index].served ?? 0) + 1;
     for (const write of this.writes)
       for (const index of rules)
-        if (
-          typeof write.pending[index] === "number" &&
-          write.pending[index] > 0
-        )
-          write.pending[index]--;
+        if (write.pending[index]?.reads > 0) write.pending[index].reads--;
     this.writes = this.writes.filter((write) =>
       Object.values(write.pending).some((pending) => this.lagging(pending)),
     );

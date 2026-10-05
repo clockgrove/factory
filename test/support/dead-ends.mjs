@@ -1708,7 +1708,7 @@ async function classify(slot, anchor, state) {
       `A stop names ${all.length} commands besides its next action; raise MAX_PROBES: ${all.map((c) => c.text).join(" | ")}`,
     );
     const named = all;
-    if (named.length) {
+    if (named.length || report.outcome === "idle") {
       const context = stopText(report);
       // A stop whose controller is still up (a paused or draining owner, a
       // held phase) takes its commands through the owner's control socket.
@@ -1759,6 +1759,20 @@ async function classify(slot, anchor, state) {
             const problem = await probed.get(key);
             if (problem) problems.push(problem);
           }
+        // The owner may be gone when the operator looks (a crash, a handoff, a
+        // SIGTERM): the stored state read alone must have an exit too.
+        if (live) {
+          restore();
+          const alone = await controllerProcess(world, { mode: "status" });
+          if (stopped(alone) && stopOf(alone) !== stopOf(report)) {
+            const outcome = await follow({
+              report: alone,
+              context: `${context} (read again with no owner)`,
+            });
+            if (outcome.kind === "stranded")
+              problems.push(`with no owner: ${outcome.reason}`);
+          }
+        }
       } finally {
         stopOwner();
         restore();

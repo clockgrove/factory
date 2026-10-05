@@ -306,6 +306,10 @@ async function command({ verb, options, input }) {
   throw new Error(`Unsupported operator command: factory ${verb}`);
 }
 
+// The operator's view of the stored state alone: no run, so no owner.
+if (descriptor.mode === "status")
+  finish({ outcome: "stopped", status: status() });
+
 if (descriptor.mode === "command") {
   try {
     await command(descriptor.command);

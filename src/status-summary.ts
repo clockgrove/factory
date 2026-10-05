@@ -355,7 +355,9 @@ function refusedReplacement(view: ExecutionStatusView, refusal: Refusal) {
         240,
       ),
     };
-  if (view.runActive === true) return null;
+  // A paused owner with work still live cannot settle it while the rejection
+  // is pending (it blocks delivery), so no command settles it but cancel.
+  if (view.runActive === true) return cancelRefused(objective, refusal);
   return {
     command: run(objective),
     reason: short(

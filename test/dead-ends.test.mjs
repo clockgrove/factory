@@ -231,6 +231,13 @@ const FIXED = [
     "alpha published (PR); beta pending",
     "an amendment was rejected and the run stopped with a planning revision to spare",
   ],
+  // An unrelated stop beside the rejection: the replacement is refused until
+  // that stop is cleared, so status names the retry (ownership settles).
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected beside an unrelated stop",
+  ],
   // The installation configuration changed after the Objective started
   // (#739): status names cancel, which ends it.
   [

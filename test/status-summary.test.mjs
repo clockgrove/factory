@@ -874,7 +874,7 @@ test("a rejected amendment that stopped the run names its exit before the retry 
   // Only a planning limit is a configuration change; the others are not.
 });
 
-test("a rejected amendment refused for ownership names what settles it, never cancel", () => {
+test("a rejected amendment refused for ownership names what settles it, else cancel", () => {
   const refusal = {
     kind: "ownership",
     message: "Amendment replacement requires paused, settled ownership",
@@ -905,8 +905,12 @@ test("a rejected amendment refused for ownership names what settles it, never ca
     }).nextAction.command,
     "factory resume --objective 7",
   );
-  // Paused and settling under a live owner: nothing to run.
-  assert.equal(rejected({ runActive: true }).nextAction, null);
+  // Paused under a live owner with work still live: the rejection blocks
+  // that work from settling, so only cancel is left.
+  assert.equal(
+    rejected({ runActive: true }).nextAction.command,
+    "factory cancel --objective 7",
+  );
   // No owner: the run settles recorded work.
   assert.equal(rejected({}).nextAction.command, "factory run --objective 7");
 });

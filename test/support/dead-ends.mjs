@@ -609,7 +609,7 @@ const reviewNeedsHuman = (acceptable) => (state) => {
 /** Overlay dimensions; each value mutates a state and says if it applies. */
 /** A graph amendment was rejected (see the "rejected amendment" overlays). */
 const rejectAmendment =
-  ({ spare, supplied = false, stopped = false }) =>
+  ({ spare, supplied = false, stopped = false, unrelated = false }) =>
   (state) => {
     if (state.schemaVersion !== 7 || state.pendingAmendment || state.error)
       return false;
@@ -644,6 +644,8 @@ const rejectAmendment =
     // The run that rejected it stopped on the rejection: the runner records
     // the work fault as the Objective's error (runObjective's catch).
     if (stopped) state.error = error;
+    // A later, unrelated stop replaced it: a replacement needs that cleared first.
+    if (unrelated) state.error = "Injected unrelated stop";
     return true;
   };
 
@@ -970,6 +972,10 @@ const OVERLAYS = {
     }),
     "an amendment was rejected and the run stopped with a planning revision to spare":
       rejectAmendment({ spare: 1, stopped: true }),
+    "an amendment was rejected beside an unrelated stop": rejectAmendment({
+      spare: 1,
+      unrelated: true,
+    }),
   },
 };
 

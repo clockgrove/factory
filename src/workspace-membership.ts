@@ -154,7 +154,7 @@ export function assertWorkspacePackageChange(
   const result = parseWorkspace(after);
   if (!isDeepStrictEqual(before.config, result.config))
     throw new Error(
-      "Workspace non-membership configuration differs from the accepted base",
+      "Workspace non-membership configuration differs from the accepted base; settings other than package membership are the operator's to change on the default branch",
     );
   if (
     !isDeepStrictEqual(
@@ -213,7 +213,7 @@ export function validateWorkspacePackagePlan(
   );
   if (owners.length && !additions.length)
     throw new Error(
-      "Existing workspace ownership requires explicit Workspace package additions authority; omit ownership when preserving this file",
+      "Existing workspace ownership requires explicit Workspace package additions authority; omit ownership when preserving this file. Its other settings are the operator's to change on the default branch before the run",
     );
   assertDeclaredPackageManifests(graph, baseline, additions, checkout);
   if (!additions.length) return;

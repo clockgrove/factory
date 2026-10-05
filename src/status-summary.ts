@@ -111,7 +111,7 @@ export interface PreparingStatusView extends WaitView {
   projectionStarted?: boolean;
   /** Set when the installation configuration differs from the one planning started under. */
   configurationChanged?: boolean;
-  /** A run found the base, Objective or sources changed since planning and refused; the configuration is checked live (`configurationChanged`). */
+  /** A run found the Objective or sources changed since planning and refused; the configuration is checked live (`configurationChanged`). */
   changedSincePlanning?: boolean;
   cancelledAt: string | null;
   error?: string | null;
@@ -937,7 +937,7 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         : "planning stopped for a decision",
       nextAction: {
         command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
-        reason: `Discards the stopped planning; resolve the decision in the Objective, then ${run(objective)} plans again`,
+        reason: `Discards the stopped planning; resolve the decision in the Objective or on the default branch, then ${run(objective)} plans again`,
       },
     };
   const waiting = objectiveWait(view);
@@ -983,10 +983,9 @@ function configurationStop(
     // The run's refusal names the same two ways out, by the same predicate
     // (`projectionStarted`): a refusal discards the plan before projection.
     const changed = {
-      summary:
-        "the base, Objective, sources or configuration changed since planning",
+      summary: "the Objective, sources or configuration changed since planning",
       restore:
-        "Factory will not continue a plan after what it was made from changed: restore the base, Objective, sources and configuration it started with",
+        "Factory will not continue a plan after what it was made from changed: restore the Objective, sources and configuration it started with",
     };
     if (view.projectionStarted)
       return {

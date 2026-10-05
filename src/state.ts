@@ -160,10 +160,11 @@ export interface PreparationState {
   objectiveBodyDigest: string;
   coordinator: CoordinatorDisposition;
   /**
-   * A run found the base, the Objective body or the sources changed since
-   * planning and refused. Only a run can see it (status reads no GitHub or
-   * checkout); status then names how to end or discard the plan. The next run
-   * that finds them as planned clears it. The configuration is not recorded:
+   * A run found the Objective body or the sources changed since planning and
+   * refused (the base cannot: a preparation keeps the one it recorded). Only
+   * a run can see it (status reads no GitHub or checkout); status then names
+   * how to end or discard the plan. The next run that finds them as planned
+   * clears it. The configuration is not recorded:
    * status compares it live, so restoring it is enough.
    */
   changedSincePlanning?: true;

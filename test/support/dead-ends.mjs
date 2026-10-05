@@ -26,8 +26,10 @@
 //   interruption budget, a recorded subprocess that exited or whose pid was
 //   reused, a closure error, repeat and wait records (including a run of
 //   faults over a day old and a step asking the operator), a stopped planning,
-//   a rejected amendment (with and without a planning revision to spare, and
-//   one that carries an operator's graph), a cancelled item of a live
+//   a rejected amendment (with and without a planning revision to spare, one
+//   that carries an operator's graph, and one the coordinator was then drained
+//   or resumed after), a plan whose base, Objective body or sources changed, a
+//   cancelled item of a live
 //   Objective, spent
 //   autonomy allowances and disabled repair classes.
 //   Overlays apply only where Factory could write them (a reservation matches
@@ -67,7 +69,9 @@ const repositoryRoot = join(import.meta.dirname, "..", "..");
 const dist = (path) => join(repositoryRoot, "dist", path);
 const errors = await import(dist("work-repair.js"));
 const { attachFault } = await import(dist("fault.js"));
-const { parseFactoryState } = await import(dist("state.js"));
+const { parseFactoryState, setCoordinatorMode } = await import(
+  dist("state.js")
+);
 const { readContinuation } = await import(dist("state-store.js"));
 
 const { consumption, repairClasses } = await import(dist("repair-policy.js"));
@@ -647,8 +651,9 @@ const rejectAmendment =
     // A later, unrelated stop replaced it: a replacement needs that cleared first.
     if (unrelated) state.error = "Injected unrelated stop";
     // Then an operator or a handoff changed the mode, as a drain, a SIGTERM
-    // handoff of the rejecting pass or `factory resume` does.
-    if (then) coordinator(state).mode = then;
+    // handoff of the rejecting pass or `factory resume` does: through the
+    // setter every one of them uses, which holds a rejection paused.
+    if (then) setCoordinatorMode(state, then);
     return true;
   };
 

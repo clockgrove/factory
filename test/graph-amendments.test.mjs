@@ -26,7 +26,7 @@ import {
 import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
 import { readState, statePath } from "../dist/state-store.js";
 import { failureDigest, resolveAutonomy } from "../dist/repair-policy.js";
-import { parseFactoryState } from "../dist/state.js";
+import { parseFactoryState, setCoordinatorMode } from "../dist/state.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
 import { checkServiceState } from "../dist/supervision.js";
@@ -2074,6 +2074,15 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
       );
       assert.equal(stopped.work.result.status, "done");
       assert.equal(stopped.pendingAmendment.phase, "rejected");
+      // A drain or a resume cannot release the pause a rejection holds, so a
+      // replacement or cancel stays what status names.
+      for (const action of ["drain", "resume", "pause", "resume"]) {
+        await controlObjective(config, { objective: 1, action });
+        assert.equal(
+          readState(config.repository, 1).coordinator.mode,
+          "paused",
+        );
+      }
       assert.equal(
         stopped.pendingAmendment.rejectionStage,
         rejection === "compilation" ? "compilation" : "review-findings",
@@ -2675,4 +2684,31 @@ test("mutation-unknown projection repeats without duplicate issues", async () =>
       transient("GitHub POST response was lost", true),
     ),
   );
+});
+
+test("a rejected amendment holds the coordinator paused; nothing else does", () => {
+  const modes = (state) =>
+    ["draining", "running", "paused"].map((mode) => {
+      setCoordinatorMode(state, mode);
+      return state.coordinator.mode;
+    });
+  const coordinator = () => ({ mode: "running" });
+  assert.deepEqual(
+    modes({
+      schemaVersion: 7,
+      pendingAmendment: { phase: "rejected" },
+      coordinator: coordinator(),
+    }),
+    ["paused", "paused", "paused"],
+  );
+  for (const state of [
+    { schemaVersion: 7, pendingAmendment: { phase: "ready" } },
+    { schemaVersion: 7 },
+    { schemaVersion: 8 },
+  ])
+    assert.deepEqual(modes({ ...state, coordinator: coordinator() }), [
+      "draining",
+      "running",
+      "paused",
+    ]);
 });

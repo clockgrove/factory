@@ -4,7 +4,7 @@
  * disagree. It reads only the redacted status document.
  */
 import type { Wait } from "./fault.js";
-import type { Refusal } from "./amendment-admission.js";
+import { type Refusal, settlesFirst } from "./amendment-admission.js";
 
 /** A step in a run of transient faults (src/step.ts `outageOf`). */
 export interface OutageView {
@@ -111,6 +111,8 @@ export interface PreparingStatusView extends WaitView {
   projectionStarted?: boolean;
   /** Set when the installation configuration differs from the one planning started under. */
   configurationChanged?: boolean;
+  /** A run found the base, Objective, sources or configuration changed since planning and refused. */
+  changedSincePlanning?: boolean;
   cancelledAt: string | null;
   error?: string | null;
 }
@@ -329,42 +331,56 @@ function cancelRefused(objective: number, refusal: Refusal) {
 }
 
 /**
- * The command for a rejected amendment whose replacement is refused now:
- * `ownership` settles (an unrelated stop, an owner that is not paused, work
- * still running), so name what settles it; every other kind is permanent for
- * this Objective and ends in cancel.
+ * The command for a rejected amendment whose replacement is refused now. A
+ * refusal a command settles (`settlesFirst`) names it, from the kind the
+ * refusal itself records, then status names the replacement; every other kind
+ * is permanent for this Objective and ends in cancel. A rejection holds the
+ * coordinator paused, so the replacement never waits on a resume.
  */
 function refusedReplacement(view: ExecutionStatusView, refusal: Refusal) {
   const objective = view.objective;
-  if (refusal.kind !== "ownership") return cancelRefused(objective, refusal);
-  const mode = view.coordinator?.mode;
+  if (!settlesFirst(refusal)) return cancelRefused(objective, refusal);
   const then = "; status then names the replacement";
-  if (view.state === "failed")
-    return {
-      command: retryCommand(objective),
-      reason: short(
-        `An unrelated stop is recorded, and a replacement needs it cleared (${refusal.message}): this clears it${then}`,
-        240,
-      ),
-    };
-  if (view.runActive === true && mode && mode !== "paused")
-    return {
-      command: `factory resume --objective ${objective}`,
-      reason: short(
-        `The owner is ${mode}, and a replacement needs it paused and settled (${refusal.message}): this resumes it${then}`,
-        240,
-      ),
-    };
-  // A paused owner with work still live cannot settle it while the rejection
-  // is pending (it blocks delivery), so no command settles it but cancel.
-  if (view.runActive === true) return cancelRefused(objective, refusal);
-  return {
-    command: run(objective),
-    reason: short(
-      `A replacement needs settled ownership (${refusal.message}): this settles recorded work${then}`,
-      240,
-    ),
-  };
+  switch (refusal.kind) {
+    case "stop":
+      return {
+        command: retryCommand(objective),
+        reason: short(
+          `A stop other than the rejection is recorded, and a replacement needs it cleared (${refusal.message}): this clears it${then}`,
+          240,
+        ),
+      };
+    case "not-paused":
+      return {
+        command: `factory pause --objective ${objective}`,
+        reason: short(
+          `A replacement needs the owner paused (${refusal.message}): this pauses it${then}`,
+          240,
+        ),
+      };
+    default:
+      // Work Items still live. A run refuses while any stop is recorded (the
+      // rejection's own included), so that is cleared first. A paused owner
+      // cannot settle live work while the rejection is pending (it blocks
+      // delivery), so only cancel is left; with no owner a run settles it.
+      if (view.state === "failed")
+        return {
+          command: retryCommand(objective),
+          reason: short(
+            `Work Items are still live (${refusal.message}), and a run is refused while a stop is recorded: this clears it${then}`,
+            240,
+          ),
+        };
+      return view.runActive === true
+        ? cancelRefused(objective, refusal)
+        : {
+            command: run(objective),
+            reason: short(
+              `A replacement needs settled Work Items (${refusal.message}): this settles recorded work${then}`,
+              240,
+            ),
+          };
+  }
 }
 
 /**
@@ -860,9 +876,19 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: "Repeats cancellation of the recorded work",
       },
     };
-  // The run refuses a plan made under another configuration, so a resume or
-  // diagnostics only leads to that refusal. A live owner keeps its configuration.
-  if (view.configurationChanged && view.runActive !== true)
+  // A pause or drain is the operator's, and refusing a plan would discard it
+  // with the preparation: it is lifted first, and the run that follows names
+  // a change if it still holds.
+  const mode = view.coordinator?.mode;
+  const held = mode === "paused" || mode === "draining";
+  // The run refuses a plan made under another configuration or from other
+  // inputs, so a resume or diagnostics only leads to that refusal. A live
+  // owner keeps the configuration it loaded.
+  if (
+    (view.configurationChanged || view.changedSincePlanning) &&
+    view.runActive !== true &&
+    !held
+  )
     return configurationStop(view);
   if (view.error)
     return {
@@ -873,15 +899,10 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: "Inspect the failure before running again",
       },
     };
-  // Resume first: refusing a plan discards the preparation, and with it a
-  // pause or drain the operator asked for.
-  if (
-    view.coordinator?.mode === "paused" ||
-    view.coordinator?.mode === "draining"
-  )
+  if (held)
     return {
       phase: "waiting",
-      summary: `${view.coordinator.mode === "paused" ? "paused" : "drained"}${view.coordinator.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+      summary: `${mode === "paused" ? "paused" : "drained"}${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
       nextAction: {
         command: `factory resume --objective ${objective}`,
         reason: `Resumes planning${view.runActive === true ? "" : `; then ${run(objective)}`}`,
@@ -959,21 +980,29 @@ function configurationStop(
   const summary =
     "the installation configuration changed since this Objective started";
   if (view.state === "preparing") {
+    // The run's refusal names the same two ways out, by the same predicate
+    // (`projectionStarted`): a refusal discards the plan before projection.
+    const changed = {
+      summary:
+        "the base, Objective, sources or configuration changed since planning",
+      restore:
+        "Factory will not continue a plan after what it was made from changed: restore the base, Objective, sources and configuration it started with",
+    };
     if (view.projectionStarted)
       return {
         phase: "needs-decision",
-        summary,
+        summary: changed.summary,
         nextAction: {
           command: `factory cancel --objective ${objective}`,
-          reason: `${restore} (then ${run(objective)}), or cancel it: Work Item issues exist, so the plan cannot be refused`,
+          reason: `${changed.restore} (then ${run(objective)}), or cancel it: Work Item issues exist, so the plan cannot be refused`,
         },
       };
     return {
       phase: "needs-decision",
-      summary,
+      summary: changed.summary,
       nextAction: {
         command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
-        reason: `${restore} (then ${run(objective)}), or discard the plan: ${run(objective)} then plans again under the new configuration`,
+        reason: `${changed.restore} (then ${run(objective)}), or discard the plan: ${run(objective)} then plans again from what is there now`,
       },
     };
   }

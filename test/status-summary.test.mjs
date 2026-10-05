@@ -874,12 +874,9 @@ test("a rejected amendment that stopped the run names its exit before the retry 
   // Only a planning limit is a configuration change; the others are not.
 });
 
-test("a rejected amendment refused for ownership names what settles it, else cancel", () => {
-  const refusal = {
-    kind: "ownership",
-    message: "Amendment replacement requires paused, settled ownership",
-  };
-  const rejected = (overrides) =>
+test("a rejected amendment refused until something settles names that command, else cancel", () => {
+  const refusal = (kind) => ({ kind, message: "refused" });
+  const rejected = (kind, overrides) =>
     summarizeStatus(
       execution([item("A", { status: "pending" })], {
         runActive: false,
@@ -887,32 +884,55 @@ test("a rejected amendment refused for ownership names what settles it, else can
         pendingAmendment: {
           phase: "rejected",
           error: "coverage gap",
-          replacementRefusal: refusal,
+          replacementRefusal: refusal(kind),
         },
         ...overrides,
       }),
     );
-  // An unrelated stop is recorded: retry clears it.
+  // A stop other than the rejection is recorded: retry clears it.
   assert.equal(
-    rejected({ state: "failed", lastError: "another stop" }).nextAction.command,
+    rejected("stop", { state: "failed", lastError: "another stop" }).nextAction
+      .command,
     "factory retry --objective 7",
   );
-  // An owner that is draining: resume it.
+  // The stop's kind, not the Objective's state, decides the retry.
   assert.equal(
-    rejected({
+    rejected("stop", {}).nextAction.command,
+    "factory retry --objective 7",
+  );
+  // An owner that is not paused: pause it (a rejection holds the pause, so
+  // only a state written elsewhere is in this kind).
+  assert.equal(
+    rejected("not-paused", {
       runActive: true,
       coordinator: { mode: "draining", phase: "active" },
     }).nextAction.command,
-    "factory resume --objective 7",
+    "factory pause --objective 7",
   );
-  // Paused under a live owner with work still live: the rejection blocks
-  // that work from settling, so only cancel is left.
+  // Work Items still live under a paused owner: the rejection blocks them
+  // from settling, so only cancel is left.
   assert.equal(
-    rejected({ runActive: true }).nextAction.command,
+    rejected("live-work", { runActive: true }).nextAction.command,
     "factory cancel --objective 7",
   );
-  // No owner: the run settles recorded work.
-  assert.equal(rejected({}).nextAction.command, "factory run --objective 7");
+  // No owner: the run settles recorded work, once any stop is cleared (a
+  // run is refused while one is recorded, the rejection's own included).
+  assert.equal(
+    rejected("live-work", {}).nextAction.command,
+    "factory run --objective 7",
+  );
+  assert.equal(
+    rejected("live-work", { state: "failed", lastError: "coverage gap" })
+      .nextAction.command,
+    "factory retry --objective 7",
+  );
+  // A recorded subprocess or unresolved cancellation is settled by neither a
+  // run (a paused owner runs no pass) nor a resume: cancel.
+  for (const runActive of [false, true])
+    assert.equal(
+      rejected("unsettled", { runActive }).nextAction.command,
+      "factory cancel --objective 7",
+    );
 });
 
 test("a sealed Objective under a changed configuration names the restore and run, not cancel", () => {
@@ -944,6 +964,48 @@ test("a preparation under a changed configuration names a refusal before project
     }),
   );
   assert.equal(after.nextAction.command, "factory cancel --objective 7");
+});
+
+test("a pause or drain of a preparation outranks a changed plan or configuration", () => {
+  for (const mode of ["paused", "draining"])
+    for (const changed of [
+      { configurationChanged: true },
+      { changedSincePlanning: true },
+    ])
+      assert.equal(
+        summarizeStatus(
+          preparing({
+            ...changed,
+            runActive: false,
+            coordinator: { mode, phase: "planning" },
+          }),
+        ).nextAction.command,
+        "factory resume --objective 7",
+      );
+});
+
+test("a preparation whose base, Objective or sources changed names a refusal before projection and cancel after", () => {
+  const before = summarizeStatus(
+    preparing({ changedSincePlanning: true, runActive: false }),
+  );
+  assert.match(
+    before.nextAction.command,
+    /^factory decide --objective 7 --outcome refuse /,
+  );
+  const after = summarizeStatus(
+    preparing({
+      changedSincePlanning: true,
+      runActive: false,
+      projectionStarted: true,
+    }),
+  );
+  assert.equal(after.nextAction.command, "factory cancel --objective 7");
+  // A live owner keeps what it planned from: nothing to refuse yet.
+  assert.notEqual(
+    summarizeStatus(preparing({ changedSincePlanning: true, runActive: true }))
+      .nextAction?.command,
+    before.nextAction.command,
+  );
 });
 
 test("a live owner keeps its configuration: a changed one does not hide resume, decide or select", () => {

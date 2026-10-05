@@ -981,5 +981,8 @@ test("a rejected remedy amendment names cancel at the default planningRevisions 
     );
     // While work runs, the replacement is refused until it settles.
     state.work.next.status = "running";
-    assert.match(blameDecision(state, "next", digest), /settled ownership/);
+    // A command settles it (status names which), so cancel is not named.
+    const waiting = blameDecision(state, "next", digest);
+    assert.match(waiting, /`factory status --objective 1`/);
+    assert.doesNotMatch(waiting, /factory cancel|propose-amendment/);
   }));

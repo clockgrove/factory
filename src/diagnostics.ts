@@ -1402,6 +1402,10 @@ export function preparationStatusDocument(
     preparation.configDigest !== installationConfigDigest
       ? { configurationChanged: true as const }
       : {}),
+    // A run found the plan's other inputs changed and refused (see runObjective).
+    ...(preparation.changedSincePlanning
+      ? { changedSincePlanning: true as const }
+      : {}),
     state: "preparing" as const,
     coordinator:
       redactCoordinatorDisposition(preparation.coordinator, secrets) ?? null,

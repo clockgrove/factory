@@ -15,12 +15,17 @@ import { isDeepStrictEqual } from "node:util";
 /**
  * What kind of check refused. Callers branch on the kind, never on the
  * message: `planning-class` and `planning-limit` are the two a raised limit
- * in the configuration changes (for a new Objective).
+ * in the configuration changes (for a new Objective). `not-paused`, `stop`
+ * and `live-work` are the kinds a command settles (`settlesFirst`); the rest
+ * end in `factory cancel`.
  */
 export type RefusalKind =
   | "intake"
   | "not-replaceable"
-  | "ownership"
+  | "not-paused"
+  | "stop"
+  | "live-work"
+  | "unsettled"
   | "planning-class"
   | "planning-limit";
 
@@ -61,12 +66,11 @@ export const NOT_REPLACEABLE = refuse(
 );
 
 /**
- * Why a rejected amendment cannot be replaced at all, whatever the proposal
- * says: it is not the generated rejection (id, stage and evidence) the
- * validator knows, or ownership is not paused and settled. `amendmentId`, when
- * given, must name the rejected amendment.
+ * Why a rejected amendment cannot be replaced at all, whatever the proposal: it
+ * is not the generated rejection (id, stage and evidence) the validator knows.
+ * `amendmentId`, when given, must name the rejected amendment.
  */
-export function rejectionRefusal(
+function notReplaceable(
   state: FactoryState,
   amendmentId?: string,
 ): Refusal | undefined {
@@ -97,11 +101,28 @@ export function rejectionRefusal(
         !isDeepStrictEqual(rejected.issueByItemId, state.issueByItemId)))
   )
     return NOT_REPLACEABLE;
+  return undefined;
+}
+
+/**
+ * Why the rejected amendment cannot be replaced yet: the coordinator is not
+ * paused and settled. A rejection holds the pause (`setCoordinatorMode`), so
+ * `not-paused` is a state no mode change leaves; the others are an unrelated
+ * stop, work still live, or a recorded subprocess or unresolved cancellation.
+ */
+function unsettled(state: FactoryState): Refusal | undefined {
+  const rejected = state.pendingAmendment;
+  if (state.coordinator?.mode !== "paused")
+    return refuse(
+      "not-paused",
+      "Amendment replacement requires a paused owner",
+    );
+  if (state.error !== undefined && state.error !== rejected?.error)
+    return refuse(
+      "stop",
+      "Amendment replacement requires an unrelated stop to be cleared",
+    );
   if (
-    state.coordinator?.mode !== "paused" ||
-    state.coordinator.cancelError ||
-    state.coordinator.processes?.length ||
-    (state.error !== undefined && state.error !== rejected.error) ||
     Object.values(state.work).some(
       (work) =>
         work.status === "running" ||
@@ -110,10 +131,37 @@ export function rejectionRefusal(
     )
   )
     return refuse(
-      "ownership",
-      "Amendment replacement requires paused, settled ownership",
+      "live-work",
+      "Amendment replacement requires settled Work Items",
+    );
+  if (state.coordinator.cancelError || state.coordinator.processes?.length)
+    return refuse(
+      "unsettled",
+      "Amendment replacement requires no recorded subprocess or unresolved cancellation",
     );
   return undefined;
+}
+
+/**
+ * Whether a command settles the refusal, after which the replacement fits
+ * (status names it): an unrelated stop, an owner that is not paused, Work
+ * Items still live. Every other refusal ends in `factory cancel`.
+ */
+export const settlesFirst = (refusal: Refusal): boolean =>
+  refusal.kind === "not-paused" ||
+  refusal.kind === "stop" ||
+  refusal.kind === "live-work";
+
+/**
+ * Why `submitAmendment` cannot replace the rejected amendment `amendmentId`
+ * names: it is not a rejection the validator knows, or ownership is not
+ * paused and settled.
+ */
+export function rejectionRefusal(
+  state: FactoryState,
+  amendmentId?: string,
+): Refusal | undefined {
+  return notReplaceable(state, amendmentId) ?? unsettled(state);
 }
 
 const PLANNING_CLASSES = repairClasses.filter((kind) =>
@@ -163,7 +211,13 @@ export function planningRefusal(
  * when a replacement fits.
  */
 export function replacementRefusal(state: FactoryState): Refusal | undefined {
+  // What no command changes comes first (a spent revision, a disabled class),
+  // so a permanent refusal goes straight to cancel; settling ownership is
+  // pointless when the replacement is refused anyway.
   return (
-    intakeRefusal(state) ?? rejectionRefusal(state) ?? planningRefusal(state)
+    intakeRefusal(state) ??
+    notReplaceable(state) ??
+    planningRefusal(state) ??
+    unsettled(state)
   );
 }

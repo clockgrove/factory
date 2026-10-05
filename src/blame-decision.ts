@@ -1,4 +1,4 @@
-import { replacementRefusal } from "./amendment-admission.js";
+import { replacementRefusal, settlesFirst } from "./amendment-admission.js";
 import { amendmentAllowed, amendmentsUsedUp } from "./repair-policy.js";
 import type { FactoryState } from "./state.js";
 
@@ -37,6 +37,10 @@ export function blameDecision(
   if (pending?.phase === "rejected") {
     // The replacement is refused for the same reasons status reads.
     const refusal = replacementRefusal(state);
+    // A refusal a command settles (a stop, live work) is not permanent:
+    // `factory status` names that command from the state now.
+    if (refusal && settlesFirst(refusal))
+      return `${head} The amendment that was to fix it was rejected and a replacement waits on a command that settles it (${refusal.message}): \`factory status --objective ${objective}\` names it and then the replacement`;
     return refusal
       ? `${head} The amendment that was to fix it was rejected and no replacement can be submitted (${refusal.message}): \`factory cancel --objective ${objective}\`, then start a new Objective (limits are recorded per Objective, so a raised limit applies to a new one)`
       : `${head} The amendment that was to fix it was rejected: \`factory propose-amendment --objective ${objective} --proposal FILE\` with a replacement`;

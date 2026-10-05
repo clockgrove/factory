@@ -36,6 +36,16 @@ memories = false
 hooks = false
 `;
 
+/**
+ * The same configuration for a result review, which reads the exact candidate
+ * tree itself: only the shell is on, inside the read-only, network-less
+ * sandbox the thread starts with.
+ */
+export const CODEX_TREE_REVIEW_CONFIG = CODEX_PLANNING_CONFIG.replace(
+  "shell_tool = false",
+  "shell_tool = true",
+);
+
 /** Ambient variables a planning Codex process keeps; everything else is dropped. */
 const ENVIRONMENT = [
   /^PATH$/,
@@ -64,6 +74,7 @@ export interface CodexPlanningHome {
  */
 export function createCodexPlanningHome(
   source: NodeJS.ProcessEnv = process.env,
+  config: string = CODEX_PLANNING_CONFIG,
 ): CodexPlanningHome {
   const root = mkdtempSync(join(tmpdir(), "factory-codex-planning-"));
   try {
@@ -71,7 +82,7 @@ export function createCodexPlanningHome(
     const codexHome = join(root, "codex-home");
     mkdirSync(home);
     mkdirSync(codexHome);
-    writeFileSync(join(codexHome, "config.toml"), CODEX_PLANNING_CONFIG);
+    writeFileSync(join(codexHome, "config.toml"), config);
     const login = join(
       source.CODEX_HOME || join(homedir(), ".codex"),
       "auth.json",

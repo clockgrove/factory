@@ -55,11 +55,23 @@ export const CLAUDE_PLANNING_ADAPTER = CLAUDE_AGENT_SDK_ADAPTER_IDENTITY;
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 /** One answer plus the SDK's bounded schema-repair turns. */
 const CLAUDE_PLANNING_MAX_TURNS = 4;
+/** A result review also spends turns reading the tree. */
+const CLAUDE_TREE_REVIEW_MAX_TURNS = 40;
+/** Read-only tools a result review gets over the exact candidate tree. */
+const TREE_REVIEW_TOOLS = ["Read", "Grep", "Glob"];
 
 /** Shared by every Claude planning call; plan-eval judges hash it into their digest. */
 export const CLAUDE_PLANNING_SYSTEM_PROMPT = [
   "You are the planning and review model for Clockgrove Factory.",
   "The user message is the complete request; you have no tools, files or network.",
+  "Return exactly the requested result through the structured output.",
+].join(" ");
+
+/** The system prompt when the session may read the exact result tree. */
+export const CLAUDE_TREE_REVIEW_SYSTEM_PROMPT = [
+  "You are the planning and review model for Clockgrove Factory.",
+  "The user message is the complete request; you have no network.",
+  "Your working directory holds the exact tree under review, and your tools can only read it.",
   "Return exactly the requested result through the structured output.",
 ].join(" ");
 
@@ -148,6 +160,8 @@ export function claudePlanningOptions(input: {
   cwd: string;
   credentialDirectory: string;
   abortController: AbortController;
+  /** `cwd` is the exact tree under review: allow read-only tools over it. */
+  tree?: boolean;
 }): Options {
   return {
     abortController: input.abortController,
@@ -160,8 +174,12 @@ export function claudePlanningOptions(input: {
       schema: claudeOutputSchema(input.schema) as Record<string, unknown>,
     },
     // No built-in tools, MCP servers, agents, plugins, skills or settings.
-    tools: [],
-    allowedTools: [],
+    // A tree review keeps only read-only file tools, allowed inside cwd alone
+    // (a symlink out of the tree is denied too).
+    tools: input.tree ? TREE_REVIEW_TOOLS : [],
+    allowedTools: input.tree
+      ? TREE_REVIEW_TOOLS.map((tool) => `${tool}(./**)`)
+      : [],
     permissionMode: "dontAsk",
     mcpServers: {},
     strictMcpConfig: true,
@@ -176,10 +194,14 @@ export function claudePlanningOptions(input: {
       disableBundledSkills: true,
       claudeMdExcludes: ["**"],
     },
-    systemPrompt: CLAUDE_PLANNING_SYSTEM_PROMPT,
+    systemPrompt: input.tree
+      ? CLAUDE_TREE_REVIEW_SYSTEM_PROMPT
+      : CLAUDE_PLANNING_SYSTEM_PROMPT,
     // Prompts carry untrusted source text; never expand @paths or commands.
     verbatimPrompts: true,
-    maxTurns: CLAUDE_PLANNING_MAX_TURNS,
+    maxTurns: input.tree
+      ? CLAUDE_TREE_REVIEW_MAX_TURNS
+      : CLAUDE_PLANNING_MAX_TURNS,
     persistSession: false,
     env: {
       ...claudeWorkerEnvironment(input.credentialDirectory),
@@ -285,12 +307,17 @@ export async function probeClaudeLogin(
 function assertPlanningInitialization(
   message: SDKSystemMessage,
   model: string,
+  tree: boolean,
 ): void {
   if (message.model !== model)
     throw new Error(
       `Claude SDK selected model ${message.model}, expected ${model}`,
     );
-  const tool = message.tools.find((name) => name !== STRUCTURED_OUTPUT_TOOL);
+  const allowed = new Set([
+    STRUCTURED_OUTPUT_TOOL,
+    ...(tree ? TREE_REVIEW_TOOLS : []),
+  ]);
+  const tool = message.tools.find((name) => !allowed.has(name));
   if (tool) throw new Error(`Claude SDK exposed unconfigured tool ${tool}`);
   if (message.mcp_servers.length)
     throw new Error("Claude SDK initialized an unconfigured MCP server");
@@ -401,13 +428,13 @@ class ClaudePlanningTransport implements PlanningTransport {
     return role === "planner" ? this.config.planner : this.config.reviewer;
   }
 
-  settings(role: PlanningRole): Record<string, unknown> {
+  settings(role: PlanningRole, tree?: string): Record<string, unknown> {
     return {
       ...this.selection(role),
       maxOutputTokens: this.config.maxOutputTokens,
-      maxTurns: CLAUDE_PLANNING_MAX_TURNS,
+      maxTurns: tree ? CLAUDE_TREE_REVIEW_MAX_TURNS : CLAUDE_PLANNING_MAX_TURNS,
       thinking: "adaptive",
-      tools: "none",
+      tools: tree ? TREE_REVIEW_TOOLS : "none",
       settingSources: [],
       outputFormat: "json_schema",
     };
@@ -419,6 +446,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     schema: unknown;
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
+    tree?: string;
   }): Promise<void> {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
@@ -438,12 +466,13 @@ class ClaudePlanningTransport implements PlanningTransport {
     let closeStarted = false;
     let result: SDKResultMessage | undefined;
     try {
-      // An empty private directory: the session has nothing to read or load.
       root = mkdtempSync(join(tmpdir(), "factory-claude-planning-"));
       const query = this.query ?? (await guard.race(loadClaudeQuery()));
-      const cwd = join(root, "cwd");
+      // A tree review reads the exact tree; any other session gets an empty
+      // private directory, with nothing to read or load.
+      const cwd = args.tree ?? join(root, "cwd");
       const credentialDirectory = join(root, "empty-gh-config");
-      mkdirSync(cwd, { mode: 0o700 });
+      if (!args.tree) mkdirSync(cwd, { mode: 0o700 });
       mkdirSync(credentialDirectory, { mode: 0o700 });
       events = query({
         prompt: args.prompt,
@@ -454,6 +483,7 @@ class ClaudePlanningTransport implements PlanningTransport {
           cwd,
           credentialDirectory,
           abortController,
+          tree: Boolean(args.tree),
         }),
       })[Symbol.asyncIterator]();
       for (;;) {
@@ -495,7 +525,7 @@ class ClaudePlanningTransport implements PlanningTransport {
             }),
           });
         if (message.type === "system" && message.subtype === "init") {
-          assertPlanningInitialization(message, model);
+          assertPlanningInitialization(message, model, Boolean(args.tree));
           facts.initialized = true;
         }
         if (message.type === "result") {

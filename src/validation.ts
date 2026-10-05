@@ -23,11 +23,13 @@ import {
   fstatSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readSync,
   realpathSync,
   rmSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
@@ -818,6 +820,45 @@ function configuredResultReviewTextBudget(): number {
   return Number.isSafeInteger(configured) && configured > 0
     ? configured
     : 48_000;
+}
+
+/**
+ * Write the exact tree's files into a private directory the reviewer reads.
+ * Git alone decides the bytes: a throwaway index, no filters or hooks, and
+ * LFS pointers stay pointers. The directory holds no repository.
+ */
+function materializeResultTree(
+  checkout: string,
+  treeSha: string,
+): { directory: string; remove(): void } {
+  const root = mkdtempSync(join(tmpdir(), "factory-result-tree-"));
+  const directory = join(root, "tree");
+  const remove = () => rmSync(root, { recursive: true, force: true });
+  try {
+    mkdirSync(directory);
+    const env = {
+      ...pinnedGitEnvironment(),
+      GIT_INDEX_FILE: join(root, "index"),
+    };
+    for (const args of [
+      ["read-tree", treeSha],
+      ["--work-tree", directory, "checkout-index", "--all", "--force"],
+    ]) {
+      const result = spawnSync("git", ["-C", checkout, ...args], {
+        env,
+        maxBuffer: 1 << 20,
+      });
+      if (result.error) throw result.error;
+      if (result.status !== 0)
+        throw new Error(
+          `Cannot materialize exact result tree for independent review: ${result.stderr.toString("utf8")}`,
+        );
+    }
+    return { directory, remove };
+  } catch (error) {
+    remove();
+    throw error;
+  }
 }
 
 /** Inventory Git paths, not checkout files, blob contents or submodule contents. */
@@ -1867,7 +1908,7 @@ export async function reviewAcceptance(args: {
       origin: "controller" as const,
     })),
   ]);
-  const request = {
+  const request: Parameters<NonNullable<PlanningModel["reviewResult"]>>[0] = {
     reviewPhase: args.reviewPhase ?? ("result-review" as const),
     criteria,
     reviewPacket: packet,
@@ -1901,9 +1942,18 @@ export async function reviewAcceptance(args: {
     );
   // A failed call keeps the fault its adapter classified: the review step
   // repeats a lost answer and waits out a limit.
-  const response = undecided
-    ? await model.reviewResult!(request)
-    : { packetId: packet.id, findings: [] };
+  // The reviewer reads the exact tree itself instead of asking for contents.
+  const tree = undecided
+    ? materializeResultTree(checkout, evidence.treeSha)
+    : undefined;
+  let response: Awaited<ReturnType<NonNullable<PlanningModel["reviewResult"]>>>;
+  try {
+    response = undecided
+      ? await model.reviewResult!({ ...request, tree: tree!.directory })
+      : { packetId: packet.id, findings: [] };
+  } finally {
+    tree?.remove();
+  }
   let decoded: ReturnType<typeof decodeReview>;
   try {
     decoded = decodeReview(response, packet);

@@ -61,7 +61,7 @@ test("Copilot default tools expose the model's native editor and preserve worktr
         "--harness",
         "github-copilot-sdk",
         "--worker-model",
-        "gpt-5.6-luna",
+        "gpt-6.1-sol",
         "--copilot-timeout-seconds",
         "30",
         "--config",

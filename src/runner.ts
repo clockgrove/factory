@@ -1213,7 +1213,7 @@ async function runObjectivePass(
         state.configDigest !== installationConfigDigest
       ) {
         throw new Error(
-          "Existing Objective state does not match this Factory installation",
+          `Existing Objective state does not match this Factory installation; restore the configuration it started with, or run \`factory cancel --objective ${objective}\``,
         );
       }
       if (state.error)

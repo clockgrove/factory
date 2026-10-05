@@ -2353,16 +2353,21 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
         assert.equal(graphReviews, 3);
         // Status exposes that no replacement fits (it names cancel).
         assert.match(
-          status().pendingAmendment.replacementRefusal,
+          status().pendingAmendment.replacementRefusal.message,
           /planningRevisions allowance exhausted/,
+        );
+        assert.equal(
+          status().pendingAmendment.replacementRefusal.kind,
+          "planning-limit",
         );
         // A configuration without planning classes refuses the same way.
         const unplanned = structuredClone(refused);
         unplanned.autonomy.repairClasses = ["implementation"];
         assert.match(
-          replacementRefusal(unplanned),
+          replacementRefusal(unplanned).message,
           /No planning repair class is enabled/,
         );
+        assert.equal(replacementRefusal(unplanned).kind, "planning-class");
         const next = {
           ...proposal,
           replacement: {

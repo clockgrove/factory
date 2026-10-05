@@ -313,7 +313,7 @@ export function submitAmendment(
   proposal: AmendmentProposal,
 ): PendingAmendment {
   const intake = intakeRefusal(state);
-  if (intake) throw new Error(intake);
+  if (intake) throw new Error(intake.message);
   assertDiscovery(proposal);
   if (
     !proposal.actor?.trim() ||
@@ -380,7 +380,7 @@ function validateAmendmentReplacement(
   const unreplaceable = proposal.graph
     ? NOT_REPLACEABLE
     : rejectionRefusal(state, replacement.amendmentId);
-  if (unreplaceable) throw new Error(unreplaceable);
+  if (unreplaceable) throw new Error(unreplaceable.message);
   const rejected = state.pendingAmendment!;
   const error = rejected.error!;
   const discovery = (value: AmendmentProposal) => ({
@@ -420,7 +420,7 @@ function validateAmendmentReplacement(
     );
   // The replacement is charged when it starts; it must fit now.
   const refusal = planningRefusal(state, correction.kind);
-  if (refusal) throw new Error(refusal);
+  if (refusal) throw new Error(refusal.message);
   return rejected;
 }
 

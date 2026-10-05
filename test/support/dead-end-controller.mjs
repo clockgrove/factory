@@ -27,7 +27,7 @@ syncBuiltinESMExports();
 
 const { join } = await import("node:path");
 const { Octokit } = await import("@octokit/core");
-const { stateRoot } = await import("../../dist/config.js");
+const { factoryConfigDigest, stateRoot } = await import("../../dist/config.js");
 const { NativeStackDelivery } = await import(
   "../../dist/delivery/native-stack.js"
 );
@@ -101,6 +101,8 @@ function status() {
       [],
       continuation?.capacity.concurrency,
       controllerActive(),
+      undefined,
+      factoryConfigDigest(config),
     );
     return {
       phase: document.phase,

@@ -609,7 +609,7 @@ const reviewNeedsHuman = (acceptable) => (state) => {
 /** Overlay dimensions; each value mutates a state and says if it applies. */
 /** A graph amendment was rejected (see the "rejected amendment" overlays). */
 const rejectAmendment =
-  ({ spare, supplied = false }) =>
+  ({ spare, supplied = false, stopped = false }) =>
   (state) => {
     if (state.schemaVersion !== 7 || state.pendingAmendment || state.error)
       return false;
@@ -641,6 +641,9 @@ const rejectAmendment =
         consumption(state).planningRevisions + spare;
     coordinator(state).mode = "paused";
     coordinator(state).waitReason = error;
+    // The run that rejected it stopped on the rejection: the runner records
+    // the work fault as the Objective's error (runObjective's catch).
+    if (stopped) state.error = error;
     return true;
   };
 
@@ -948,13 +951,22 @@ const OVERLAYS = {
   // A graph amendment was rejected, as runAmendment leaves it: charged one
   // planning revision, the coordinator paused with the rejection as the reason.
   // `spare` planning revisions are left afterwards; a supplied graph is an
-  // operator's candidate, which no replacement can follow.
+  // operator's candidate, which no replacement can follow; `stopped` leaves the
+  // run's error recorded.
   "rejected amendment": {
     "an amendment was rejected": rejectAmendment({ spare: 0 }),
     "an amendment was rejected with a planning revision to spare":
       rejectAmendment({ spare: 1 }),
     "a supplied graph amendment was rejected with a planning revision to spare":
       rejectAmendment({ spare: 1, supplied: true }),
+    // The shape a real rejection leaves: the run stopped, so the Objective
+    // has an error and is failed (status must not name the retry of it first).
+    "an amendment was rejected and the run stopped": rejectAmendment({
+      spare: 0,
+      stopped: true,
+    }),
+    "an amendment was rejected and the run stopped with a planning revision to spare":
+      rejectAmendment({ spare: 1, stopped: true }),
   },
 };
 
@@ -1366,9 +1378,22 @@ const sightOf = (delivery, report, state) =>
 /**
  * Probes of named commands against a live owner, and how many of them the
  * owner's control socket answered (the rest fell back to the application, as
- * the CLI does when no owner answers).
+ * the CLI does when no owner answers). `applied` lists every command applied
+ * (whether or not an owner ran), with the kind of stop it answered.
  */
-export const ownerProbes = { run: 0, answered: 0 };
+export const ownerProbes = { run: 0, answered: 0, applied: [] };
+
+/** The stop a probe was made at, by the state it left (not by its text). */
+function stopKind(state) {
+  if (!state || state.schemaVersion !== 7) return undefined;
+  if (state.pendingAmendment?.phase === "rejected") return "rejected amendment";
+  if (
+    !state.cancelledAt &&
+    Object.values(state.work).some((work) => work.status === "cancelled")
+  )
+    return "cancelled item";
+  return undefined;
+}
 
 /** Operator commands followed from one state before it counts as stranded. */
 const MAX_COMMANDS = 4;
@@ -1494,8 +1519,16 @@ async function classify(slot, anchor, state) {
       command.verb === "propose-amendment"
         ? replacementProposal(snapshot())
         : undefined;
+    const stop = stopKind(snapshot());
     const applied = await runCommand(world, { ...command, input });
     answeredByOwner ??= applied.viaOwner === true;
+    // Every command applied, by the stop it answered, so a test can require
+    // the ones it cares about to have reached an owner.
+    ownerProbes.applied.push({
+      stop,
+      verb: command.verb,
+      viaOwner: applied.viaOwner === true,
+    });
     trace.push(
       `factory ${command.verb}: ${applied.ok ? "applied" : `refused: ${applied.message}`}${owner ? " [via owner]" : ""}`,
     );

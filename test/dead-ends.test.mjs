@@ -41,18 +41,7 @@ const has = (identity, ...values) =>
  * strands, `issue` says where it is tracked. A new diagnosis needs an open P0
  * issue (P1 when the Objective has another exit).
  */
-const D = {
-  configurationChanged: {
-    diagnosis:
-      "The installation configuration changed after the Objective started: status names `factory retry`, which is accepted, and the next run stops identically (the state does not match this installation)",
-    issue: "#739",
-    pattern:
-      /factory retry does not continue after stopped: Existing Objective state does not match this Factory installation/,
-    when: (identity) =>
-      has(identity, "the installation configuration changed") &&
-      !identity[1].startsWith("preparing"),
-  },
-};
+const D = {};
 
 /**
  * Stranded states named outright: diagnosis → [delivery, anchor shape,
@@ -230,6 +219,36 @@ const FIXED = [
     "no repair class is enabled",
     "an amendment was rejected with a planning revision to spare",
   ],
+  // The run that rejected an amendment stopped on it, so the Objective has an
+  // error: status names the rejection's exit, not the retry of that error.
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected and the run stopped",
+  ],
+  [
+    "native-stack",
+    "alpha published (PR); beta pending",
+    "an amendment was rejected and the run stopped with a planning revision to spare",
+  ],
+  // The installation configuration changed after the Objective started
+  // (#739): status names cancel, which ends it.
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "alpha running/execute; beta pending",
+    "the installation configuration changed",
+  ],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "a step fails with an unclassified error",
+    "the installation configuration changed",
+  ],
   // A cancelled item of a live Objective (#718).
   [
     "native-stack",
@@ -314,25 +333,55 @@ describe("dead ends", { concurrency: true }, () => {
 
   // The owner's control socket falls back to the application when it does not
   // answer, so a harness that never reaches an owner would still pass. Only a
-  // parked owner (paused or draining) is a live owner at a stop, so wait for
-  // those cases, in order, until one has had a command answered by its owner.
+  // parked owner (paused or draining) is a live owner at a stop. The commands
+  // this PR's stops name must each have been answered by one: wait for the
+  // cases at those stops, in order, until every one has been.
   test("named commands were applied through a live owner", {
     timeout: 3_600_000,
   }, async () => {
-    const parked = cases.filter((testCase) =>
-      has(testCase.identity, "paused", "draining"),
+    const wanted = [
+      ["rejected amendment", "cancel"],
+      ["rejected amendment", "propose-amendment"],
+      // A controller does not stay up at a cancelled item (its run ends with
+      // the decision), so the live owner there is the paused or draining one,
+      // and the retry that status names next is applied without it.
+      ["cancelled item", "resume"],
+    ];
+    const answered = ([stop, verb]) =>
+      ownerProbes.applied.some(
+        (command) =>
+          command.stop === stop && command.verb === verb && command.viaOwner,
+      );
+    const parked = cases.filter(
+      (testCase) =>
+        !testCase.unreachable &&
+        Object.values(testCase.values ?? {}).some(
+          (value) =>
+            /^an? (supplied graph )?amendment was rejected/.test(value) ||
+            value === "an item was cancelled and the Objective retried" ||
+            value === "paused" ||
+            value === "draining",
+        ),
     );
     for (const testCase of parked) {
       await outcomeOf(testCase);
-      if (ownerProbes.answered > 0) break;
+      if (wanted.every(answered)) break;
     }
     assert.ok(
       ownerProbes.run > 0,
       "No stop with a live owner had a named command probed",
     );
     assert.ok(
-      ownerProbes.answered > 0,
-      `The owner's socket answered none of ${ownerProbes.run} probes made with an owner running`,
+      ownerProbes.applied.some(
+        (command) =>
+          command.stop === "cancelled item" && command.verb === "retry",
+      ),
+      "No case applied the retry status names for a cancelled item",
+    );
+    assert.deepEqual(
+      wanted.filter((pair) => !answered(pair)).map((pair) => pair.join(": ")),
+      [],
+      `The owner's socket did not answer these commands at these stops; ${ownerProbes.answered} of ${ownerProbes.run} probes made with an owner running were answered; commands applied with an owner: ${JSON.stringify(ownerProbes.applied)}`,
     );
   });
 

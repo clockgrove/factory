@@ -1105,6 +1105,7 @@ export function statusDocument(
   concurrency?: number,
   runActive: boolean | null = null,
   preState?: PreState,
+  installationConfigDigest?: string,
 ) {
   if (!state) {
     const view = {
@@ -1273,6 +1274,12 @@ export function statusDocument(
     repository,
     objective,
     runActive,
+    // The Objective was started under another configuration: the run refuses
+    // it (see runObjective), so no retry continues it.
+    ...(installationConfigDigest !== undefined &&
+    state.configDigest !== installationConfigDigest
+      ? { configurationChanged: true as const }
+      : {}),
     state: state.cancelledAt
       ? ("cancelled" as const)
       : state.error
@@ -1419,6 +1426,7 @@ export function continuationStatusDocument(
   concurrency?: number,
   runActive: boolean | null = null,
   preState?: PreState,
+  installationConfigDigest?: string,
 ) {
   return continuation?.schemaVersion === 8
     ? preparationStatusDocument(continuation, secrets, runActive)
@@ -1431,6 +1439,7 @@ export function continuationStatusDocument(
         concurrency,
         runActive,
         preState,
+        installationConfigDigest,
       );
 }
 

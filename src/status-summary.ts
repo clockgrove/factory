@@ -4,6 +4,7 @@
  * disagree. It reads only the redacted status document.
  */
 import type { Wait } from "./fault.js";
+import type { Refusal } from "./amendment-admission.js";
 
 /** A step in a run of transient faults (src/step.ts `outageOf`). */
 export interface OutageView {
@@ -142,6 +143,8 @@ export function capacityLine(capacity: CapacityView): string {
 
 export interface ExecutionStatusView extends WaitView {
   objective: number;
+  /** Set when the installation configuration differs from the one the Objective started under. */
+  configurationChanged?: boolean;
   state: "active" | "waiting" | "complete" | "failed" | "cancelled";
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
@@ -149,7 +152,7 @@ export interface ExecutionStatusView extends WaitView {
     phase: string;
     error: string | null;
     /** Why `factory propose-amendment` would refuse a replacement of a rejected amendment; null when it fits. */
-    replacementRefusal?: string | null;
+    replacementRefusal?: Refusal | null;
   } | null;
   /** The digest of the accepted graph now; an amendment that lands changes it. */
   graphDigest?: string;
@@ -305,14 +308,58 @@ export function itemWait(item: StatusItemView): ShownWait | undefined {
  * cancel. Limits are recorded when an Objective starts, so a spent planning
  * allowance or a disabled class is changed for a new Objective.
  */
-function cancelRefused(objective: number, refusal: string) {
+function cancelRefused(objective: number, refusal: Refusal) {
+  // Only the planning limits are raised in the configuration; the other
+  // refusals are about the rejection or the work, not a limit.
+  const limit =
+    refusal.kind === "planning-class" || refusal.kind === "planning-limit";
   return {
     command: `factory cancel --objective ${objective}`,
     reason: short(
-      `No replacement can be submitted (${refusal}); cancel, then start a new Objective${/planningRevisions|class/.test(refusal) ? " with the limit raised (autonomy in the configuration)" : ""}`,
+      `No replacement can be submitted (${refusal.message}); cancel, then start a new Objective${limit ? " with the limit raised (autonomy in the configuration)" : ""}`,
       240,
     ),
   };
+}
+
+/**
+ * The rejected graph amendment as the status line: cancel when no replacement
+ * can follow, else the replacement. A run that stopped on the rejection has
+ * `state.error` set (the runner records the work fault), so this comes before
+ * the generic failed-Objective retry, which would be named first.
+ */
+function rejectedAmendment(
+  view: ExecutionStatusView,
+): StatusSummary | undefined {
+  const pending = view.pendingAmendment;
+  if (pending?.phase !== "rejected") return undefined;
+  const objective = view.objective;
+  const refusal = pending.replacementRefusal;
+  return {
+    phase: "needs-decision",
+    summary: "graph amendment was rejected",
+    nextAction: refusal
+      ? cancelRefused(objective, refusal)
+      : {
+          command: `factory propose-amendment --objective ${objective} --proposal FILE`,
+          reason: short(pending.error ?? "Submit a diagnosed replacement", 160),
+        },
+  };
+}
+
+/**
+ * What an owner that is already running does about work that is waiting on
+ * it: nothing to name while it runs, but a paused or draining owner merges
+ * nothing until it is resumed.
+ */
+function ownerResume(view: ExecutionStatusView, why: string) {
+  const mode = view.coordinator?.mode;
+  return view.runActive === true && mode && mode !== "running"
+    ? {
+        command: `factory resume --objective ${view.objective}`,
+        reason: `The owner is ${mode}: this resumes it, which ${why}`,
+      }
+    : null;
 }
 
 /** The command that answers a step's decision or config fix in a scope. */
@@ -463,22 +510,8 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
         },
       };
   }
-  if (view.pendingAmendment?.phase === "rejected") {
-    const refusal = view.pendingAmendment.replacementRefusal;
-    return {
-      phase: "needs-decision",
-      summary: "graph amendment was rejected",
-      nextAction: refusal
-        ? cancelRefused(objective, refusal)
-        : {
-            command: `factory propose-amendment --objective ${objective} --proposal FILE`,
-            reason: short(
-              view.pendingAmendment.error ?? "Submit a diagnosed replacement",
-              160,
-            ),
-          },
-    };
-  }
+  const rejected = rejectedAmendment(view);
+  if (rejected) return rejected;
   return undefined;
 }
 
@@ -568,7 +601,7 @@ function blamedItem(
       summary: `${summary}; an amendment to fix ${file} is pending`,
       nextAction:
         view.runActive === true
-          ? null
+          ? ownerResume(view, "reviews and projects the amendment")
           : {
               command: run(objective),
               reason: `An amendment to fix ${file} is pending: this reviews and projects it and merges its Work Items; then ${retry} starts a new attempt on the integrated head`,
@@ -605,7 +638,7 @@ function blamedItem(
         : summary,
       nextAction: unmerged
         ? view.runActive === true
-          ? null
+          ? ownerResume(view, "merges the amendment's Work Items")
           : {
               command: run(objective),
               reason: `An amendment to fix ${file} landed: this merges its Work Items; then ${retry} starts a new attempt on the integrated head`,
@@ -919,10 +952,27 @@ export function summarizeStatus(view: StatusView): StatusSummary {
         reason: "Repeats cancellation of the recorded work",
       },
     };
+  // The run refuses an Objective started under another configuration, so no
+  // retry or run continues it: restore that configuration, or cancel.
+  if (view.configurationChanged)
+    return {
+      phase: "needs-decision",
+      summary:
+        "the installation configuration changed since this Objective started",
+      nextAction: {
+        command: `factory cancel --objective ${objective}`,
+        reason:
+          "Factory will not run an Objective under a different configuration: restore the configuration it started with (then factory run), or cancel it and start a new Objective",
+      },
+    };
   // An Objective stopped outside any Work Item: inspect, then run it again.
   // A pending decision waits until then, since decide refuses a
   // stopped Objective; a failed item's retry or repair answers the stop.
   if (view.state === "failed" && !failedItem(view)) {
+    // The rejection stops the run with its error recorded: name what answers
+    // the rejection, not the retry of that error.
+    const rejected = rejectedAmendment(view);
+    if (rejected) return rejected;
     const cancelled = cancelledItem(view);
     if (cancelled) return cancelled;
     return {

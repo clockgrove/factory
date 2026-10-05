@@ -12,23 +12,53 @@ import { isDeepStrictEqual } from "node:util";
 // reads the same functions, so status never names `factory propose-amendment`
 // for a state where it throws.
 
+/**
+ * What kind of check refused. Callers branch on the kind, never on the
+ * message: `planning-class` and `planning-limit` are the two a raised limit
+ * in the configuration changes (for a new Objective).
+ */
+export type RefusalKind =
+  | "intake"
+  | "not-replaceable"
+  | "ownership"
+  | "planning-class"
+  | "planning-limit";
+
+export interface Refusal {
+  kind: RefusalKind;
+  message: string;
+}
+
+const refuse = (kind: RefusalKind, message: string): Refusal => ({
+  kind,
+  message,
+});
+
 /** Why no amendment is taken now: the Objective is closing or terminal. */
-export function intakeRefusal(state: FactoryState): string | undefined {
+export function intakeRefusal(state: FactoryState): Refusal | undefined {
   if (state.objectiveClosure === "complete")
-    return "Completed Objective discoveries require successor work";
+    return refuse(
+      "intake",
+      "Completed Objective discoveries require successor work",
+    );
   if (state.finalAcceptance || state.objectiveClosure === "pending")
-    return "Objective closure is busy or awaiting reconciliation; amendment intake is fenced";
+    return refuse(
+      "intake",
+      "Objective closure is busy or awaiting reconciliation; amendment intake is fenced",
+    );
   if (
     state.cancelRequested ||
     state.cancelledAt ||
     state.finalValidation?.passed
   )
-    return "Amendment requires a nonterminal Objective";
+    return refuse("intake", "Amendment requires a nonterminal Objective");
   return undefined;
 }
 
-export const NOT_REPLACEABLE =
-  "Replacement requires a known generated amendment rejection";
+export const NOT_REPLACEABLE = refuse(
+  "not-replaceable",
+  "Replacement requires a known generated amendment rejection",
+);
 
 /**
  * Why a rejected amendment cannot be replaced at all, whatever the proposal
@@ -39,7 +69,7 @@ export const NOT_REPLACEABLE =
 export function rejectionRefusal(
   state: FactoryState,
   amendmentId?: string,
-): string | undefined {
+): Refusal | undefined {
   const rejected = state.pendingAmendment;
   if (
     !rejected ||
@@ -79,7 +109,10 @@ export function rejectionRefusal(
         (work.execution && work.status !== "done" && work.step === "execute"),
     )
   )
-    return "Amendment replacement requires paused, settled ownership";
+    return refuse(
+      "ownership",
+      "Amendment replacement requires paused, settled ownership",
+    );
   return undefined;
 }
 
@@ -95,14 +128,17 @@ const PLANNING_CLASSES = repairClasses.filter((kind) =>
 export function planningRefusal(
   state: FactoryState,
   kind?: RepairClass,
-): string | undefined {
+): Refusal | undefined {
   const kinds = kind ? [kind] : PLANNING_CLASSES;
   if (
     !kinds.some((candidate) => state.autonomy.repairClasses.includes(candidate))
   )
-    return kind
-      ? `Repair class ${kind} is not enabled; operator decision required`
-      : "No planning repair class is enabled; operator decision required";
+    return refuse(
+      "planning-class",
+      kind
+        ? `Repair class ${kind} is not enabled; operator decision required`
+        : "No planning repair class is enabled; operator decision required",
+    );
   if (
     !allowanceAvailable(
       state,
@@ -111,7 +147,10 @@ export function planningRefusal(
       ["$planning"],
     )
   )
-    return "Objective planningRevisions allowance exhausted";
+    return refuse(
+      "planning-limit",
+      "Objective planningRevisions allowance exhausted",
+    );
   return undefined;
 }
 
@@ -123,7 +162,7 @@ export function planningRefusal(
  * names `factory cancel` exactly when the replacement is refused. Undefined
  * when a replacement fits.
  */
-export function replacementRefusal(state: FactoryState): string | undefined {
+export function replacementRefusal(state: FactoryState): Refusal | undefined {
   return (
     intakeRefusal(state) ?? rejectionRefusal(state) ?? planningRefusal(state)
   );

@@ -2512,16 +2512,19 @@ export async function validateTree(
 }
 
 /**
- * Remove validation worktrees an interrupted run left under `root`. Only the
- * controller holding the repository lock calls this, before any validation.
+ * Remove the validation worktrees an interrupted run of one Objective left in
+ * `objectiveDirectory`. Only that Objective's owner calls this, before any
+ * validation. Then unregister Factory's stale worktrees anywhere under the
+ * state `root`: their directories are gone, so no live run uses them.
  */
 export async function sweepValidationWorktrees(
   checkout: string,
+  objectiveDirectory: string,
   root: string,
 ): Promise<void> {
-  const owned = [join(root, "final-validation", "worktree")];
+  const owned = [join(objectiveDirectory, "final-validation", "worktree")];
   for (const parent of ["validation", "environment-preflight"]) {
-    const directory = join(root, parent);
+    const directory = join(objectiveDirectory, parent);
     if (!existsSync(directory)) continue;
     for (const entry of readdirSync(directory))
       owned.push(join(directory, entry, "worktree"));

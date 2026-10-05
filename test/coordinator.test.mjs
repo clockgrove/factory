@@ -22,8 +22,13 @@ import { defaultAutonomy } from "../dist/index.js";
 import { requestControl } from "../dist/coordinator-control.js";
 import { controlObjective } from "../dist/runner.js";
 import {
+  acquireInstallationLock,
+  installationLockPath,
+  objectiveLockPath,
+  objectiveRoot,
   readContinuation,
   readState,
+  releaseControllerLock,
   saveState,
   statePath,
 } from "../dist/state-store.js";
@@ -119,8 +124,8 @@ test("owner remains responsive during planning; cancellation succeeds and cannot
       assert.equal(snapshot.plan, undefined);
       assert.throws(() => readState(config.repository, 1), /schema version/);
       assert.equal(
-        statSync(join(stateRoot(config.repository), "control.sock")).mode &
-          0o777,
+        statSync(join(objectiveRoot(config.repository, 1), "control.sock"))
+          .mode & 0o777,
         0o600,
       );
       const status = await requestControl(config.repository, {
@@ -160,6 +165,62 @@ test("owner remains responsive during planning; cancellation succeeds and cannot
           packetId: request.reviewPacket.id,
           findings: [],
         };
+      },
+    }),
+  );
+});
+
+test("runs of different Objectives own them side by side; each answers for its own", async () => {
+  const pending = deferred();
+  let calls = 0;
+  await fixture(
+    "parallel",
+    async ({ application, config }) => {
+      const first = application.runObjective(1);
+      const firstStopped = assert.rejects(first);
+      await until(() => calls === 1);
+      const second = application.runObjective(2);
+      const secondStopped = assert.rejects(second);
+      await until(() => calls === 2);
+      for (const objective of [1, 2]) {
+        const status = await requestControl(config.repository, {
+          objective,
+          action: "status",
+        });
+        assert.equal(status.handled, true);
+        assert.equal(status.result.phase, "planning");
+      }
+      // Still one owner per Objective, and the queue cannot take the installation meanwhile.
+      await assert.rejects(application.runObjective(2));
+      assert.throws(() => acquireInstallationLock(config.repository));
+      for (const objective of [1, 2])
+        await requestControl(config.repository, {
+          objective,
+          action: "cancel",
+        });
+      pending.resolve();
+      await firstStopped;
+      await secondStopped;
+      for (const objective of [1, 2]) {
+        assert.ok(readContinuation(config.repository, objective).cancelledAt);
+        assert.equal(
+          existsSync(objectiveLockPath(config.repository, objective)),
+          false,
+        );
+      }
+      releaseControllerLock(
+        installationLockPath(config.repository),
+        acquireInstallationLock(config.repository),
+      );
+    },
+    (graph) => ({
+      async generateStructured(request) {
+        calls++;
+        await pending.promise;
+        return withCoverage(request, graph);
+      },
+      async reviewGraph(request) {
+        return { packetId: request.reviewPacket.id, findings: [] };
       },
     }),
   );
@@ -1098,10 +1159,7 @@ test("owner handoff releases a paused preparation without cancellation or projec
       assert.equal(state.cancelRequested, undefined);
       assert.equal(state.cancelledAt, undefined);
       assert.deepEqual(state.issueByItemId, {});
-      assert.equal(
-        existsSync(join(stateRoot(config.repository), "controller.lock")),
-        false,
-      );
+      assert.equal(existsSync(objectiveLockPath(config.repository, 1)), false);
     },
     (graph) => ({
       generateStructured: async (request) => {
@@ -1132,10 +1190,7 @@ test("handoff settles an already running worker and preserves its attempt instea
         objective: 1,
         action: "handoff",
       });
-      assert.equal(
-        existsSync(join(stateRoot(config.repository), "controller.lock")),
-        true,
-      );
+      assert.equal(existsSync(objectiveLockPath(config.repository, 1)), true);
       mkdirSync(join(root, "barrier"), { recursive: true });
       writeFileSync(barrier, "go");
       await assert.rejects(
@@ -1157,10 +1212,7 @@ test("handoff settles an already running worker and preserves its attempt instea
           .length;
       assert.equal(starts(), 1);
       assert.equal(cancels(), 0);
-      assert.equal(
-        existsSync(join(stateRoot(config.repository), "controller.lock")),
-        false,
-      );
+      assert.equal(existsSync(objectiveLockPath(config.repository, 1)), false);
       await controlObjective(config, { objective: 1, action: "resume" });
       const completed = await application.runObjective(1);
       assert.equal(completed.finalValidation.passed, true);
@@ -1203,10 +1255,7 @@ test("SIGTERM before the first snapshot persists drain and starts no planning or
         0,
       );
       assert.equal(readEvents(planningPath).length, 0);
-      assert.equal(
-        existsSync(join(stateRoot(config.repository), "controller.lock")),
-        false,
-      );
+      assert.equal(existsSync(objectiveLockPath(config.repository, 1)), false);
     },
   );
 });
@@ -1237,10 +1286,7 @@ test("native handoff retains a known published layer and resumes its pending suc
       assert.equal(paused.work.next.status, "pending");
       assert.ok(paused.work.result.pullRequest);
       assert.equal(paused.work.result.pendingEffect, undefined);
-      assert.equal(
-        existsSync(join(stateRoot(config.repository), "controller.lock")),
-        false,
-      );
+      assert.equal(existsSync(objectiveLockPath(config.repository, 1)), false);
       assert.equal(
         readEvents(eventsPath).filter((event) => event.type === "start").length,
         1,

@@ -36,7 +36,7 @@ import {
   CoordinatorHandoff,
 } from "./runner.js";
 import {
-  acquireControllerLock,
+  acquireInstallationLock,
   readContinuation,
   releaseControllerLock,
   retargetControllerLock,
@@ -252,7 +252,7 @@ export async function enqueueIntake(
   if (reply.handled) return reply.result as IntakeAuthorization;
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const lockPath = join(stateRoot(config.repository), "controller.lock");
-  const lock = acquireControllerLock(lockPath, 0);
+  const lock = acquireInstallationLock(config.repository);
   try {
     const bodyDigests = await authorizedBodies(config, github, objectives);
     const value = queued(config, objectives, bodyDigests, readIntake(config));
@@ -273,7 +273,7 @@ export async function watchIntake(
   if (reply.handled) return reply.result as IntakeAuthorization;
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const path = join(stateRoot(config.repository), "controller.lock");
-  const lock = acquireControllerLock(path, 0);
+  const lock = acquireInstallationLock(config.repository);
   try {
     const value = watchRecord(config, readIntake(config));
     saveIntake(config, value);
@@ -362,7 +362,7 @@ export async function intakeControl(
   if (reply.handled) return reply.result;
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const path = join(stateRoot(config.repository), "controller.lock"),
-    lock = acquireControllerLock(path, 0);
+    lock = acquireInstallationLock(config.repository);
   try {
     const record = readIntake(config, {
       anyConfiguration: action === "status",
@@ -417,7 +417,7 @@ export function resumeWatcherAfterUpgrade(
   expected: IntakeAuthorization,
 ): boolean {
   const path = join(stateRoot(config.repository), "controller.lock");
-  const lock = acquireControllerLock(path, 0);
+  const lock = acquireInstallationLock(config.repository);
   try {
     const current = readIntake(config);
     const binding = (record: IntakeAuthorization) => {
@@ -474,7 +474,7 @@ export async function runIntake(
     );
   const record: IntakeAuthorization = initial;
   const lockPath = join(stateRoot(config.repository), "controller.lock");
-  const lock = acquireControllerLock(lockPath, 0);
+  const lock = acquireInstallationLock(config.repository);
   const observations = new IntakeObservation(services.github);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
   let activeObjective: number | undefined;

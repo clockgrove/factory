@@ -74,11 +74,11 @@ Running is the consent to execute that Objective. `run` plans if needed, saves t
 | 2    | It needs you. The message names the decision and command. |
 | 1    | It failed or was cancelled. The message says why.         |
 
-Run the same command again to resume. A saved plan is never planned again, and every step is safe to repeat. The first run also checks host and worker readiness, without a model call, and names any failing check and its fix. Control a live run from another terminal with `factory pause|drain|resume|cancel --objective N`. Pause and drain survive restarts, and `resume` continues either. `--deadline` is absolute and a restart cannot extend it.
+Run the same command again to resume. A saved plan is never planned again, and every step is safe to repeat. The first run also checks host and worker readiness, without a model call, and names any failing check and its fix. Control a live run from another terminal with `factory pause|drain|resume|cancel --objective N`. Pause and drain survive restarts, and `resume` continues either. `--deadline` is absolute and a restart cannot extend it. Different Objectives can run at the same time, each from its own terminal with its own configured concurrency; a second live run of the same Objective is refused.
 
 ## Queue and background
 
-The background service runs queued Objectives one at a time. It needs a systemd user manager and keeps running after the terminal closes. Sleep pauses it, shutdown stops it, and logout behavior follows your host's linger setting. Factory changes neither.
+The background service runs queued Objectives one at a time, and it cannot start while a foreground `factory run` is live. It needs a systemd user manager and keeps running after the terminal closes. Sleep pauses it, shutdown stops it, and logout behavior follows your host's linger setting. Factory changes neither.
 
 ```sh
 factory queue add N [N ...]   # consent to run these, in order, within the autonomy limits

@@ -1,7 +1,16 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { type Fault, transient, withFault } from "./fault.js";
@@ -161,7 +170,9 @@ function classifiedGit<T>(args: string[], run: () => T): T {
  * entry) dies with "Invalid path '.git/worktrees/<id>'". Commands that change
  * the registry therefore hold a per-repository lock exclusively and commands
  * that walk it hold it shared. Fetches share it with each other because
- * Factory's fetches write no shared ref (see fetchHead).
+ * Factory's fetches write no shared ref (see fetchHead). Controllers of
+ * different Objectives share a checkout from separate processes, so the lock
+ * holds across processes too (see withRegistryFiles).
  */
 type LockMode = "shared" | "exclusive";
 
@@ -275,15 +286,200 @@ async function withRepositoryLock<T>(
 ): Promise<T> {
   const lock = repositoryLocks.get(key) ?? new RepositoryLock();
   repositoryLocks.set(key, lock);
-  const turn = lock.acquire(mode, currentProcessSignal());
+  const signal = currentProcessSignal();
+  const turn = lock.acquire(mode, signal);
   let held = false;
   try {
     await turn;
     held = true;
-    return await run();
+    return await withRegistryFiles(key, mode, signal, run);
   } finally {
     if (held) lock.release(mode);
     if (lock.idle) repositoryLocks.delete(key);
+  }
+}
+
+/** Whether the process a lock file names is still that exact, live process. */
+export function processAlive(owner: {
+  pid: number;
+  startTime: string;
+}): boolean {
+  const current = linuxProcessIdentity(owner.pid);
+  return current?.startTime === owner.startTime && current.state !== "Z";
+}
+
+const guardWait = new Int32Array(new SharedArrayBuffer(4));
+
+/** The identity lock files and guards record: one process life. */
+export function ownIdentity(): { pid: number; startTime: string } {
+  const identity = linuxProcessIdentity(process.pid);
+  if (!identity) throw new Error("Cannot establish process identity");
+  return { pid: process.pid, startTime: identity.startTime };
+}
+
+function errorCode(error: unknown): string {
+  return (error as NodeJS.ErrnoException).code ?? "";
+}
+
+/**
+ * Take a lock directory's guard: a directory only one process holds, naming
+ * its holder inside (`holder`, the identity the lock files carry). A take
+ * renames a prepared directory onto the guard's path, which fails while a
+ * guard is there, so a guard never exists without its holder. Holders keep
+ * it for milliseconds, without awaiting; a live holder still there after a
+ * second is refused. A guard whose holder process is gone is reclaimed by
+ * renaming it to a tombstone named for that process. The tombstone stays:
+ * a contender that saw the same dead holder may still rename the path, and
+ * only a non-empty directory in its way stops it from taking a live guard.
+ */
+export function takeGuard(guard: string): void {
+  const prepared = `${guard}.take-${randomUUID()}`;
+  mkdirSync(prepared, { mode: 0o700 });
+  try {
+    writeFileSync(join(prepared, "holder"), JSON.stringify(ownIdentity()), {
+      mode: 0o600,
+    });
+    for (let waits = 0; ; ) {
+      try {
+        renameSync(prepared, guard);
+        return;
+      } catch (error) {
+        if (!["EEXIST", "ENOTEMPTY"].includes(errorCode(error))) throw error;
+      }
+      const holder = guardHolder(guard);
+      if (!holder) continue;
+      if (!processAlive(holder)) {
+        try {
+          renameSync(guard, `${guard}.dead-${holder.pid}-${holder.startTime}`);
+        } catch (error) {
+          if (!["ENOENT", "EEXIST", "ENOTEMPTY"].includes(errorCode(error)))
+            throw error;
+        }
+        continue;
+      }
+      if (++waits >= 100)
+        throw new Error(
+          `Factory's lock guard ${guard} is held by process ${holder.pid}`,
+        );
+      Atomics.wait(guardWait, 0, 0, 10);
+    }
+  } catch (error) {
+    rmSync(prepared, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+/** The guard's holder, or undefined once the guard is gone. */
+function guardHolder(
+  guard: string,
+): { pid: number; startTime: string } | undefined {
+  try {
+    if (readdirSync(guard).includes("holder")) {
+      const value = JSON.parse(readFileSync(join(guard, "holder"), "utf8"));
+      if (
+        Number.isSafeInteger(value?.pid) &&
+        typeof value.startTime === "string"
+      )
+        return value;
+    }
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return undefined;
+    if (!(error instanceof SyntaxError)) throw error;
+  }
+  throw new Error(
+    `Factory's lock guard ${guard} names no holder process; remove it if no Factory process is running`,
+  );
+}
+
+/** Let the guard go without a moment where it exists empty. */
+export function releaseGuard(guard: string): void {
+  const released = `${guard}.released-${randomUUID()}`;
+  renameSync(guard, released);
+  rmSync(released, { recursive: true, force: true });
+}
+
+/** Where a checkout's cross-process registry lock lives, keyed by git common directory. */
+export function registryLockDirectory(key: string): string {
+  return join(
+    process.env.XDG_STATE_HOME ??
+      join(process.env.HOME ?? "", ".local", "state"),
+    "clockgrove-factory",
+    "git-locks",
+    createHash("sha256").update(key).digest("hex").slice(0, 32),
+  );
+}
+
+/**
+ * The repository lock across processes, with the controller lock's
+ * mechanism: files naming their holder's process identity, changed only
+ * under a guard, and a file whose process is gone is stale and removed. Each
+ * git command publishes `reader-ID`, or `writer` for an exclusive one, in a
+ * directory under Factory's state keyed by the git common directory. A
+ * published writer holds off new readers and runs once no reader is left.
+ */
+export async function withRegistryFiles<T>(
+  key: string,
+  mode: LockMode,
+  signal: AbortSignal | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  const directory = registryLockDirectory(key);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const id = randomUUID();
+  const own = mode === "exclusive" ? "writer" : `reader-${id}`;
+  const record = JSON.stringify({ ...ownIdentity(), id });
+  const guarded = <R>(body: () => R): R => {
+    takeGuard(join(directory, ".guard"));
+    try {
+      return body();
+    } finally {
+      releaseGuard(join(directory, ".guard"));
+    }
+  };
+  /** A holder file's live holder; a stale or partial file is removed. */
+  const holder = (name: string) => {
+    let value: { id: string; pid: number; startTime: string } | undefined;
+    try {
+      value = JSON.parse(readFileSync(join(directory, name), "utf8"));
+    } catch (error) {
+      // Absent, or partial from a holder that crashed while publishing. Any
+      // other failure must not remove a live holder's record.
+      if (errorCode(error) !== "ENOENT" && !(error instanceof SyntaxError))
+        throw error;
+    }
+    if (value && typeof value === "object" && processAlive(value)) return value;
+    rmSync(join(directory, name), { force: true });
+    return undefined;
+  };
+  const release = () =>
+    guarded(() => {
+      if (holder(own)?.id === id) rmSync(join(directory, own));
+    });
+  try {
+    for (;;) {
+      const granted = guarded(() => {
+        const writer = existsSync(join(directory, "writer"))
+          ? holder("writer")
+          : undefined;
+        if (writer && writer.id !== id) return false;
+        if (!writer) writeFileSync(join(directory, own), record);
+        if (mode === "shared") return true;
+        return !readdirSync(directory).some(
+          (name) => name.startsWith("reader-") && holder(name),
+        );
+      });
+      if (granted) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      signal?.throwIfAborted();
+    }
+  } catch (error) {
+    release();
+    throw error;
+  }
+  try {
+    return await run();
+  } finally {
+    release();
   }
 }
 

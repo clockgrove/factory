@@ -25,7 +25,7 @@ import {
   type AmendmentProposal,
 } from "./graph-amendments.js";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   assertObjectiveCriteria,
@@ -127,8 +127,13 @@ import {
   setCoordinatorMode,
 } from "./state.js";
 import {
-  acquireControllerLock,
+  acquireObjectiveLock,
+  assertNoEarlierVersion,
   type ControllerLock,
+  installationLockPath,
+  liveControllerOwner,
+  objectiveLockPath,
+  objectiveRoot,
   readContinuation,
   readControllerOwner,
   readState,
@@ -282,7 +287,6 @@ export async function decidePlan(
   );
   const started = Date.now();
   diagnostics.emit({ operation: "planning-decision", outcome: "started" });
-  const lockPath = join(stateRoot(config.repository), "controller.lock");
   const lock = mutationLock(config, objective);
   try {
     const path = statePath(config.repository, objective);
@@ -338,7 +342,7 @@ export async function decidePlan(
     });
     throw error;
   } finally {
-    releaseMutationLock(lockPath, lock);
+    releaseMutationLock(config, objective, lock);
   }
 }
 
@@ -469,13 +473,18 @@ function mutationLock(
 ): ControllerLock {
   return owners.has(ownerKey(config, objective))
     ? { fd: -1, token: "owner" }
-    : acquireControllerLock(
-        join(stateRoot(config.repository), "controller.lock"),
-        objective,
-      );
+    : acquireObjectiveLock(config.repository, objective);
 }
-function releaseMutationLock(path: string, lock: ControllerLock): void {
-  if (lock.fd !== -1) releaseControllerLock(path, lock);
+function releaseMutationLock(
+  config: FactoryConfig,
+  objective: number,
+  lock: ControllerLock,
+): void {
+  if (lock.fd !== -1)
+    releaseControllerLock(
+      objectiveLockPath(config.repository, objective),
+      lock,
+    );
 }
 
 /**
@@ -524,8 +533,8 @@ export async function controlObjective(
     )
   )
     throw new Error("No active coordinator owns this Objective");
-  const lockPath = join(stateRoot(config.repository), "controller.lock");
-  const lock = acquireControllerLock(lockPath, request.objective);
+  const lockPath = objectiveLockPath(config.repository, request.objective);
+  const lock = acquireObjectiveLock(config.repository, request.objective);
   try {
     const state = readContinuation(config.repository, request.objective);
     if (!state) throw new Error("Objective has no Factory state");
@@ -697,8 +706,12 @@ export async function runObjective(
     throw new Error("Deadline must be an absolute timestamp");
   const root = stateRoot(config.repository);
   mkdirSync(root, { recursive: true, mode: 0o700 });
-  const lockPath = join(root, "controller.lock");
-  const lock = options.ownerLock ?? acquireControllerLock(lockPath, objective);
+  // The service lends its installation lease; a foreground run owns only its Objective.
+  const lockPath = options.ownerLock
+    ? installationLockPath(config.repository)
+    : objectiveLockPath(config.repository, objective);
+  const lock =
+    options.ownerLock ?? acquireObjectiveLock(config.repository, objective);
   if (options.ownerLock) {
     const recorded = readControllerOwner(lockPath);
     const identity = linuxProcessIdentity(process.pid);
@@ -967,7 +980,8 @@ export async function runObjective(
       return result;
     };
     if (options.observeControl) options.observeControl(handle);
-    else server = await serveControl(config.repository, lock, handle);
+    else
+      server = await serveControl(config.repository, lock, handle, objective);
   } catch (error) {
     options.observeControl?.(undefined);
     if (deadlineTimer) clearTimeout(deadlineTimer);
@@ -1365,21 +1379,7 @@ async function runObjectivePass(
         "prerequisites",
         () => planningPrerequisites(config, github, objective, baseSha),
       );
-      const objectivesRoot = join(root, "objectives");
-      if (existsSync(objectivesRoot)) {
-        for (const name of readdirSync(objectivesRoot)) {
-          if (!/^\d+$/.test(name) || Number(name) === objective) continue;
-          const other = readContinuation(config.repository, Number(name));
-          if (
-            other &&
-            !(other.schemaVersion === 7 && objectiveComplete(other)) &&
-            !other.cancelledAt
-          )
-            throw new Error(
-              `Objective #${name} is already active in this installation`,
-            );
-        }
-      }
+      assertNoEarlierVersion(config.repository);
       const localExecutables = preflightObjective(config, issue.body, baseSha);
       const sourcePacketDigest = preparationSourceDigest(
         planningSources(issue.body, baseSha, config.checkout),
@@ -1732,8 +1732,11 @@ async function runObjectivePass(
     const graph = state.graph;
     verifyExecutionProfiles(graph, executionProfileChoices(config));
     await driver.preflight?.(graph);
-    // This controller holds the repository lock: no validation runs yet.
-    await sweepValidationWorktrees(config.checkout, root);
+    // This controller owns the Objective: none of its validations runs yet.
+    // Validation trees live in the Objective's directory, so another
+    // Objective's controller keeps its own.
+    const objectiveDirectory = objectiveRoot(config.repository, objective);
+    await sweepValidationWorktrees(config.checkout, objectiveDirectory, root);
     validateCommandProvenance(
       graph,
       planningSources(issue.body, state.baseSha, config.checkout),
@@ -1773,7 +1776,7 @@ async function runObjectivePass(
         config,
         objective,
         objectiveBody: issue.body,
-        root,
+        root: objectiveDirectory,
         state,
         driver,
         delivery,
@@ -1800,7 +1803,7 @@ async function runObjectivePass(
         config,
         objective,
         objectiveBody: issue.body,
-        root,
+        root: objectiveDirectory,
         state,
         driver,
         delivery,
@@ -1957,7 +1960,7 @@ async function runObjectivePass(
         async () => {
           const commandEvidence = await validateTree(
             config.checkout,
-            join(root, "final-validation"),
+            join(objectiveDirectory, "final-validation"),
             candidateCommitSha,
             finalTree,
             state.objectiveCommands ?? finalObjectiveCommands(issue.body),
@@ -2315,22 +2318,19 @@ export async function cancelObjective(
   driver: ExecutionDriver,
   github: GitHubGateway,
 ): Promise<"requested" | "cancelled"> {
-  const root = stateRoot(config.repository);
-  const lock = join(root, "controller.lock");
   const control = await requestControl(config.repository, {
     objective,
     action: "cancel",
   });
   if (control.handled) return "requested";
-  const owner = readControllerOwner(lock);
+  const owner =
+    liveControllerOwner(installationLockPath(config.repository)) ??
+    liveControllerOwner(objectiveLockPath(config.repository, objective));
   if (owner) {
-    const current = linuxProcessIdentity(owner.pid);
-    if (current?.startTime === owner.startTime && current.state !== "Z") {
-      if (owner.objective !== objective)
-        throw new ForegroundControllerError(owner.objective);
-      process.kill(owner.pid, "SIGUSR1");
-      return "requested";
-    }
+    if (owner.objective !== objective)
+      throw new ForegroundControllerError(owner.objective);
+    process.kill(owner.pid, "SIGUSR1");
+    return "requested";
   }
   const lockHandle = mutationLock(config, objective);
   try {
@@ -2403,7 +2403,7 @@ export async function cancelObjective(
     });
     return "cancelled";
   } finally {
-    releaseMutationLock(lock, lockHandle);
+    releaseMutationLock(config, objective, lockHandle);
   }
 }
 
@@ -2417,7 +2417,6 @@ function retryStep(
   objective: number,
   itemId: string | undefined,
 ): boolean {
-  const lock = join(stateRoot(config.repository), "controller.lock");
   const lockHandle = mutationLock(config, objective);
   try {
     const state =
@@ -2457,7 +2456,7 @@ function retryStep(
     });
     return true;
   } finally {
-    releaseMutationLock(lock, lockHandle);
+    releaseMutationLock(config, objective, lockHandle);
   }
 }
 
@@ -2490,8 +2489,6 @@ export function retryWorkItem(
     throw new Error(
       "No Objective step awaits a decision or configuration fix; name a Work Item with --item",
     );
-  const root = stateRoot(config.repository);
-  const lock = join(root, "controller.lock");
   const lockHandle = mutationLock(config, objective);
   try {
     const state = mutationState(config, objective);
@@ -2600,7 +2597,7 @@ export function retryWorkItem(
     });
     return "attempt";
   } finally {
-    releaseMutationLock(lock, lockHandle);
+    releaseMutationLock(config, objective, lockHandle);
   }
 }
 
@@ -2610,7 +2607,6 @@ export function repairWorkItem(
   objective: number,
   input: { item: string; correction: RepairCorrection },
 ): void {
-  const lock = join(stateRoot(config.repository), "controller.lock");
   const handle = mutationLock(config, objective);
   try {
     const state = mutationState(config, objective);
@@ -2626,7 +2622,7 @@ export function repairWorkItem(
     delete state.errorItem;
     saveState(statePath(config.repository, objective), state);
   } finally {
-    releaseMutationLock(lock, handle);
+    releaseMutationLock(config, objective, handle);
   }
 }
 
@@ -2639,7 +2635,6 @@ export function rereviewWorkItem(
   objective: number,
   input: { item: string; actor: string },
 ): void {
-  const lock = join(stateRoot(config.repository), "controller.lock");
   const handle = mutationLock(config, objective);
   try {
     const state = mutationState(config, objective);
@@ -2701,7 +2696,7 @@ export function rereviewWorkItem(
       metadata: { treeSha, actor: input.actor },
     });
   } finally {
-    releaseMutationLock(lock, handle);
+    releaseMutationLock(config, objective, handle);
   }
 }
 
@@ -2719,7 +2714,6 @@ export function decideResult(
     reason: string;
   },
 ): void {
-  const root = stateRoot(config.repository);
   const lockHandle = mutationLock(config, objective);
   try {
     const path = statePath(config.repository, objective);
@@ -2797,7 +2791,7 @@ export function decideResult(
       detail: input.reason,
     });
   } finally {
-    releaseMutationLock(join(root, "controller.lock"), lockHandle);
+    releaseMutationLock(config, objective, lockHandle);
   }
 }
 
@@ -2815,8 +2809,6 @@ async function selectAssetSetWithSurface(
   decision: AssetSelectionInput | undefined,
   surface: "factory-cli" | "application",
 ): Promise<void> {
-  const root = stateRoot(config.repository);
-  const lock = join(root, "controller.lock");
   const lockHandle = mutationLock(config, objective);
   try {
     const state = mutationState(config, objective);
@@ -2872,7 +2864,7 @@ async function selectAssetSetWithSurface(
       metadata: { setId, downstreamCount: downstreamItems.length },
     });
   } finally {
-    releaseMutationLock(lock, lockHandle);
+    releaseMutationLock(config, objective, lockHandle);
   }
 }
 

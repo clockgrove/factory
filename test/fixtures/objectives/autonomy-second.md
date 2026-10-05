@@ -15,6 +15,8 @@ to the actual accepted predecessor head. Queueing alone does not satisfy that ga
 ## Acceptance
 
 - GUIDE.md accurately explains the accepted implementation and examples.
+- Independent review and the required `source-check` GitHub check pass on the
+  exact published head before integration.
 - The first Objective's accepted implementation and immutable checks are unchanged.
 - The predecessor's full QA still passes and independent review accepts the guide.
 - `node scripts/check.mjs guide`
@@ -28,6 +30,7 @@ to the actual accepted predecessor head. Queueing alone does not satisfy that ga
 - src/alpha.mjs
 - src/beta.mjs
 - src/summary.mjs
+- .github/workflows/quality.yml
 
 ## Constraints
 

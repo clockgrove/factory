@@ -26,7 +26,9 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
 
 2. **Merge.** Open a pull request. It merges after review and a green Quality check, like any other change.
 
-3. **Tag.** On the merged commit:
+3. **Qualify minor versions.** Before tagging `X.Y.0`, complete the [live qualification](#live-qualification) on the frozen packed artifact from the merged commit. Retain its checksum and installation for the final distribution comparison.
+
+4. **Tag.** On the merged commit:
 
    ```sh
    git switch main && git pull --ff-only
@@ -47,14 +49,19 @@ sha256sum --check SHA256SUMS
 
 The attestation verification is the independent check: it proves that the bytes were built by this repository's Release workflow, without trusting the release page that served them.
 
+For a live-qualified minor version, also compare the downloaded archive byte for byte with the retained qualified archive. A mismatch leaves that release unaccepted; preserve both identities and diagnose it without replacing the tag or assets.
+
 ## Live qualification
 
-Deterministic tests run on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [autonomous target](../test/fixtures/autonomous-target/) with its [first](../test/fixtures/objectives/autonomy-first.md) and [second](../test/fixtures/objectives/autonomy-second.md) Objectives ([#448](https://github.com/clockgrove/factory/issues/448) simplifies this), and link the result from the release notes. A failed qualification is fixed in a patch release and rerun.
+Deterministic tests run on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [autonomous target](../test/fixtures/autonomous-target/) with its [first](../test/fixtures/objectives/autonomy-first.md) and [second](../test/fixtures/objectives/autonomy-second.md) Objectives ([#519](https://github.com/clockgrove/factory/issues/519)), and link the result from the release notes. Historical failed qualifications remain unaccepted; a corrected successor needs a concrete diagnosis and its own recorded finite bounds.
 
-1. Before creating the target, run `npm run build && node test/autonomy-fixture-preflight.mjs`. It checks the fixture's commands and sources without model calls.
-2. Install the packed artifact in a new public target copied from the fixture, then run `factory setup --background` and queue both Objectives with `factory queue add N`.
-3. Keep the `factory-fixture-prerequisite` condition unavailable so that beta's validation fails. Then restore the condition and submit a repair proposal. This proves a diagnosed repair.
-4. After a worker starts, restart the supervisor once. The same run, attempt and issue/PR identities must continue with no duplicate submission.
+1. Before creating the target or calling a provider, run `npm run build && node test/autonomy-fixture-preflight.mjs`. It checks the fixture's commands, planner-visible CI check and complete pinned worker sources without model calls. Freeze the source/tree/archive, installed path, fixture bytes, owner, acceptance, providers, concurrency and finite per-run repair limits. Inspect the actual installed compiler, review and worker inputs, exact-tree validator observations, command authority, evidence grounding and hydration. Model-free checks do not accept a live Objective.
+2. Pack the merged candidate with the Release workflow's locked dependency/build toolchain and install it offline outside a fresh public target copied from the fixture. Keep this artifact for both Objectives and later distribution verification. Supply the external `factory-fixture-prerequisite` executable on the supervisor's PATH before planning, with its operator-owned condition unavailable. The tool must be present even while the condition fails; it is an acceptance probe, not a coding-readiness prerequisite.
+3. Run `factory setup --background --repository OWNER/REPO --checkout ABSOLUTE_TARGET --concurrency 2`. Verify explicit service consent, readiness, the exact manager/controller owner and a successful authenticated service observation. With an empty queue, it must make no model calls. Admit only the first Objective with `factory queue add FIRST`.
+4. After a worker starts, perform one supported controlled restart: `factory supervisor stop`, then `factory queue resume` and `factory supervisor start`. Retain and compare the same run, attempt, worker and existing issue/PR identities; the restart must not duplicate submission.
+5. Retain beta's actual failed candidate and prerequisite receipt. Restore the operator-owned condition, then submit `factory repair --objective FIRST --proposal FILE` with a diagnosis bound to its failure digest. This permits one new beta implementation attempt through the current supported repair contract, preserving the original failure, candidate, identities, usage and consumed allowance. It is distinct from restart identity preservation. If the service exited for the decision, continue with `factory queue resume` and `factory supervisor start`. Do not repeat an unchanged failure or manually accept it.
+6. Require all three implementation items' independent acceptance, successful `source-check` receipts on their exact published heads before integration, and the first Objective's final QA and independent acceptance. Then observe the same active service waiting with an exhausted queue and no model calls.
+7. Create the second Objective with a native blocked-by dependency on the accepted first Objective. Leave it unqueued through idle observations, then admit it explicitly with `factory queue add SECOND`. Its plan must pin the actual accepted predecessor head and complete implementation sources. Require guide review, exact-head CI and final guide/QA acceptance on the same installed artifact. Retain the full evidence and accounting for independent scenario review before release acceptance.
 
 ## Version numbers
 

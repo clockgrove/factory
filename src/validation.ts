@@ -53,11 +53,11 @@ import {
   localValidationEnvironment,
   localValidationShellArguments,
   pinnedGit,
-  pinnedGitAsync,
   pinnedGitEnvironment,
   pinnedGitRaw,
   removeWorktree,
   subprocessAsync,
+  withWorktreeRegistry,
 } from "./process.js";
 import {
   decodeReview,
@@ -2514,20 +2514,25 @@ export async function validateTree(
 /**
  * Remove the validation worktrees an interrupted run of one Objective left in
  * `objectiveDirectory`. Only that Objective's owner calls this, before any
- * validation. Then unregister Factory's stale worktrees anywhere under the
- * state `root`: their directories are gone, so no live run uses them.
+ * validation. The same trees directly under the state `root` are from a build
+ * that kept them there: no controller validates there now, so any run
+ * removes them (#823). Then unregister Factory's stale worktrees anywhere
+ * under `root`: their directories are gone, so no live run uses them.
  */
 export async function sweepValidationWorktrees(
   checkout: string,
   objectiveDirectory: string,
   root: string,
 ): Promise<void> {
-  const owned = [join(objectiveDirectory, "final-validation", "worktree")];
-  for (const parent of ["validation", "environment-preflight"]) {
-    const directory = join(objectiveDirectory, parent);
-    if (!existsSync(directory)) continue;
-    for (const entry of readdirSync(directory))
-      owned.push(join(directory, entry, "worktree"));
+  const owned: string[] = [];
+  for (const base of [objectiveDirectory, root]) {
+    owned.push(join(base, "final-validation", "worktree"));
+    for (const parent of ["validation", "environment-preflight"]) {
+      const directory = join(base, parent);
+      if (!existsSync(directory)) continue;
+      for (const entry of readdirSync(directory))
+        owned.push(join(directory, entry, "worktree"));
+    }
   }
   for (const worktree of owned)
     if (existsSync(worktree)) await removeWorktree(checkout, worktree);
@@ -2563,26 +2568,26 @@ async function unregisterStaleWorktrees(
       const rest = relative(root, path);
       return rest === "" || (!rest.startsWith("..") && !isAbsolute(rest));
     });
-  const listing = await pinnedGitAsync(
-    checkout,
-    "worktree",
-    "list",
-    "--porcelain",
-  );
-  for (const entry of listing.split(/\n\n+/)) {
-    const lines = entry.split("\n");
-    const path = lines
-      .find((line) => line.startsWith("worktree "))
-      ?.slice("worktree ".length);
-    if (
-      path &&
-      lines.some(
-        (line) => line === "prunable" || line.startsWith("prunable "),
-      ) &&
-      within(resolve(path))
-    )
-      await pinnedGitAsync(checkout, "worktree", "remove", "--force", path);
-  }
+  // One hold of the registry lock covers the listing and the removals:
+  // another Objective's controller sweeping at the same moment lists only
+  // after these entries are gone, so no entry is unregistered twice (#822).
+  await withWorktreeRegistry(checkout, async (git) => {
+    const listing = await git("worktree", "list", "--porcelain");
+    for (const entry of listing.split(/\n\n+/)) {
+      const lines = entry.split("\n");
+      const path = lines
+        .find((line) => line.startsWith("worktree "))
+        ?.slice("worktree ".length);
+      if (
+        path &&
+        lines.some(
+          (line) => line === "prunable" || line.startsWith("prunable "),
+        ) &&
+        within(resolve(path))
+      )
+        await git("worktree", "remove", "--force", path);
+    }
+  });
 }
 
 /** Package managers resolve scripts and lifecycle hooks from the result tree.

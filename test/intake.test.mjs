@@ -1029,6 +1029,57 @@ test("the queue runs Objectives in the order they were added and ignores unqueue
     assert.equal(readContinuation(f.config.repository, 99), undefined);
   }));
 
+test("the service finishes unfinished queued Objectives one at a time, in queue order (#824)", async () =>
+  fixture(async (f) => {
+    f.dependencies.clear();
+    const generate = f.model.generateStructured.bind(f.model);
+    // Two foreground runs each stop unfinished, with planning under way.
+    for (const id of [1, 2]) {
+      let entered, release;
+      const started = new Promise((resolve) => {
+        entered = resolve;
+      });
+      const blocked = new Promise((resolve) => {
+        release = resolve;
+      });
+      f.model.generateStructured = async (request) => {
+        entered();
+        await blocked;
+        return generate(request);
+      };
+      const running = f.application.runObjective(id);
+      await started;
+      await controlObjective(f.config, { objective: id, action: "pause" });
+      release();
+      await eventually(
+        () =>
+          readContinuation(f.config.repository, id).planningRecovery?.response,
+      );
+      await requestControl(f.config.repository, {
+        objective: id,
+        action: "handoff",
+      });
+      await assert.rejects(running);
+      assert.equal(
+        objectiveComplete(readContinuation(f.config.repository, id)),
+        false,
+      );
+    }
+    f.model.generateStructured = generate;
+    await f.application.enqueueIntake([2, 1]);
+    await intakeControl(f.config, "resume");
+    await f.application.runIntake();
+    assert.deepEqual(
+      readEvents(f.eventsPath)
+        .filter((event) => event.type === "start")
+        .map((event) => event.item),
+      ["result-2", "result-1"],
+    );
+    for (const id of [1, 2])
+      assert.equal(objectiveComplete(readState(f.config.repository, id)), true);
+    assert.equal(readIntake(f.config).mode, "running");
+  }));
+
 test("adding is additive: new Objectives go last, a queued one keeps its place and takes the current body, a removed one is queued again", async () =>
   fixture(async (f) => {
     const first = await f.application.enqueueIntake([1]);

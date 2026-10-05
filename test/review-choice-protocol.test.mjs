@@ -64,12 +64,13 @@ test("bounded reviewer choices restore exact canonical identities and source pro
   assert.deepEqual(decoded.errors, []);
   const graph = response(p, [
     {
+      itemIds: [],
       evidenceIndices: [1],
       detail: "Material finding",
       question: "Which source decision?",
     },
   ]);
-  assert.deepEqual(decodeGraphReview(graph, p)[0].evidence, [
+  assert.deepEqual(decodeGraphReview(graph, p, [])[0].evidence, [
     {
       id: p.evidence[1].id,
       origin: "controller",
@@ -136,7 +137,14 @@ test("wire schema remains bounded for 1001 criteria and evidence entries", () =>
     const value = response(
       large,
       graph
-        ? [{ evidenceIndices: [1000], detail: "Proof", question: "Question?" }]
+        ? [
+            {
+              itemIds: [],
+              evidenceIndices: [1000],
+              detail: "Proof",
+              question: "Question?",
+            },
+          ]
         : [choice(1000, [1000])],
     );
     assert.equal(conforms(value), true);
@@ -258,9 +266,15 @@ test("graph review is atomic and empty packets cannot invent evidence", () => {
       () =>
         decodeGraphReview(
           response(p, [
-            { evidenceIndices, detail: "Defect", question: "Question?" },
+            {
+              itemIds: [],
+              evidenceIndices,
+              detail: "Defect",
+              question: "Question?",
+            },
           ]),
           p,
+          [],
         ),
       /evidence/,
     );
@@ -271,10 +285,11 @@ test("graph review is atomic and empty packets cannot invent evidence", () => {
           { ...choice(0), detail: "Defect", question: "Question?" },
         ]),
         p,
+        [],
       ),
     /unknown fields/,
   );
-  assert.deepEqual(decodeGraphReview(response(p, []), p), []);
+  assert.deepEqual(decodeGraphReview(response(p, []), p, []), []);
   const empty = reviewPacket(["No supplied evidence"], []);
   assert.match(
     decode(response(empty, [choice(0)]), empty).errors[0],
@@ -286,8 +301,9 @@ test("graph finding without a question derives it from the detail or is invalid"
   const p = packet();
   const decoded = (detail, question) =>
     decodeGraphReview(
-      response(p, [{ evidenceIndices: [0], detail, question }]),
+      response(p, [{ itemIds: [], evidenceIndices: [0], detail, question }]),
       p,
+      [],
     );
   assert.equal(
     decoded("Name the missing owner.", "")[0].question,
@@ -302,4 +318,59 @@ test("graph finding without a question derives it from the detail or is invalid"
   for (const detail of ["?", " . ", "..."])
     assert.throws(() => decoded(detail, ""), /question or a detail/);
   assert.equal(decoded("?", "Which owner?")[0].question, "Which owner?");
+});
+
+test("graph findings carry item ids that must be items of the reviewed graph", () => {
+  const p = packet();
+  const finding = (itemIds) => ({
+    itemIds,
+    evidenceIndices: [0],
+    detail: "Defect",
+    question: "Question?",
+  });
+  const ids = ["item-a", "item-b"];
+  assert.deepEqual(
+    decodeGraphReview(
+      response(p, [finding(["item-b", "item-a"]), finding([])]),
+      p,
+      ids,
+    ).map((entry) => entry.itemIds),
+    [["item-b", "item-a"], []],
+  );
+  for (const itemIds of [["item-z"], ["item-a", "item-a"], "item-a", [1], null])
+    assert.throws(
+      () => decodeGraphReview(response(p, [finding(itemIds)]), p, ids),
+      /item ids/,
+    );
+  // The field is required: a finding without it is invalid review output.
+  const { itemIds: _omitted, ...missing } = finding([]);
+  assert.throws(
+    () => decodeGraphReview(response(p, [missing]), p, ids),
+    /item ids/,
+  );
+});
+
+test("graph review wire schema requires itemIds and result review does not", () => {
+  const p = packet();
+  const graph = reviewSchema(p, true).properties.findings.items;
+  assert.deepEqual(graph.properties.itemIds, {
+    type: "array",
+    items: { type: "string" },
+  });
+  assert.ok(graph.required.includes("itemIds"));
+  const result = reviewSchema(p).properties.findings.items;
+  assert.equal(result.properties.itemIds, undefined);
+  assert.equal(result.required.includes("itemIds"), false);
+  const conforms = new Ajv({ allErrors: true }).compile(reviewSchema(p, true));
+  const value = response(p, [
+    {
+      itemIds: ["item-a"],
+      evidenceIndices: [0],
+      detail: "Defect",
+      question: "",
+    },
+  ]);
+  assert.equal(conforms(value), true);
+  delete value.findings[0].itemIds;
+  assert.equal(conforms(value), false);
 });

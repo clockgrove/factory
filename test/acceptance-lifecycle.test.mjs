@@ -27,6 +27,7 @@ test("compile and independent graph review expose the pre-delivery boundary for 
     items: [{ id: "media", acceptance: [correctedCriterion] }],
   };
   const finding = {
+    itemIds: [],
     evidenceIndices: [0],
     detail:
       "The compound media criterion requires post-delivery evidence before publication.",

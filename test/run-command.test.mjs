@@ -114,6 +114,7 @@ function model(
           (typeof planFinding === "number" && reviews <= planFinding)
             ? [
                 {
+                  itemIds: [],
                   evidenceIndices: [
                     request.reviewPacket.evidence.findIndex(
                       (entry) => entry.path === "OBJECTIVE",

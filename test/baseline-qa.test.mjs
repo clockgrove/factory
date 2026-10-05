@@ -145,6 +145,7 @@ async function fixture(delivery, action, options = {}) {
             findings: options.requireImplementation
               ? [
                   {
+                    itemIds: [],
                     evidenceIndices: [
                       packet.evidence.find(
                         (entry) => entry.path === "OBJECTIVE",

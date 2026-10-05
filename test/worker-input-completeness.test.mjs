@@ -96,6 +96,7 @@ test -s GUIDE.md
   corrected.items[0].brief =
     "Document the final validation command from the selected source. This is not a command to run during this item. Do not create its inputs or change owned paths.";
   const finding = {
+    itemIds: [],
     detail:
       "The guide worker cannot resolve the final command from its item inputs.",
     question:

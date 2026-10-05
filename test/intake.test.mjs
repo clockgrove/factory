@@ -316,6 +316,7 @@ test("sequential planning supplies grounded native acceptance in every rendered 
             reviewCount++ === 0
               ? [
                   {
+                    itemIds: [],
                     evidenceIndices: [controllerIndex],
                     detail:
                       "A scripted bounded evidence correction exercises the diagnosis packet.",

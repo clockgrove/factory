@@ -258,6 +258,7 @@ test("planning wire retains one whole compound proof and substantive review refu
     [{ origin: "source", path: "OBJECTIVE", content: objective }],
   );
   const finding = {
+    itemIds: [],
     evidenceIndices: [0],
     detail:
       "The integration guarantee does not cover the independent automatic review clause; retain the whole criterion once with final-review.",
@@ -275,7 +276,7 @@ test("planning wire retains one whole compound proof and substantive review refu
     controllerCapabilitiesDigest: input.controllerCapabilitiesDigest,
     reviewPacket: packet,
   });
-  assert.equal(decodeGraphReview(refusal, packet).length, 1);
+  assert.equal(decodeGraphReview(refusal, packet, []).length, 1);
   assert.deepEqual(refusal.findings, [finding]);
   response = { diagnosis: finding.detail };
   await model.generateStructured({
@@ -1937,6 +1938,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
           findings: invalidGate
             ? [
                 {
+                  itemIds: [],
                   evidenceIndices: [
                     packet.evidence.findIndex(
                       (entry) => entry.path === "AGENTS.md",
@@ -1951,6 +1953,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
             : reviewCalls === 1
               ? [
                   {
+                    itemIds: [],
                     evidenceIndices: [boundsIndex],
                     detail:
                       "Authored prose claims 999 although the actual configured ceiling is two.",
@@ -2059,7 +2062,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
     request.reviewPacket = reviewPacket([], planningReviewEvidence(request));
     const refusal = await model.reviewGraph(request);
     assert.equal(
-      decodeGraphReview(refusal, request.reviewPacket).length,
+      decodeGraphReview(refusal, request.reviewPacket, []).length,
       1,
       "Substantive grounded refusals stay refusals through the actual SDK contract",
     );

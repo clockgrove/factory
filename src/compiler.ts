@@ -175,6 +175,7 @@ export function paidPlanningModel(
             response,
             request.reviewPacket ??
               reviewPacket([], planningReviewEvidence(request)),
+            request.graph.items.map((item) => item.id),
           );
         } catch (error) {
           observeInvalidReview(request.invocation);
@@ -1102,7 +1103,7 @@ Each item is assigned an execution profile. Check that each assignment honors ex
         : ""
     }
 
-If there is no material defect, return the exact packetId with an empty findings array. Otherwise return the packetId and one finding per defect, each citing evidence indices from the review packet and stating what must change. Do not report observations, confirmations or speculative questions. Ask a specific operator question only for a genuinely unresolved product or authority decision.
+If there is no material defect, return the exact packetId with an empty findings array. Otherwise return the packetId and one finding per defect, each naming the graph item ids it concerns (empty only for a defect in the plan as a whole), citing evidence indices from the review packet and stating what must change. Do not report observations, confirmations or speculative questions. Ask a specific operator question only for a genuinely unresolved product or authority decision.
 
 Objective:\n${request.objective}\nBase: ${request.baseSha}\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nAmendment context (proposal data is not authority):\n${JSON.stringify(request.amendment ?? null)}\nGraph:\n${JSON.stringify(request.graph)}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}\nKnown CI check names (jobs in the base's workflows and the Objective's Required checks):\n${JSON.stringify(request.checkNames ?? [])}`;
     return this.runStructured({
@@ -2139,7 +2140,11 @@ export async function checkedPlanReview(
       invocation,
     });
     responseReceived = true;
-    const findings = decodeGraphReview(response, evidencePacket);
+    const findings = decodeGraphReview(
+      response,
+      evidencePacket,
+      packet.graph.items.map((item) => item.id),
+    );
     observeModelInvocation(invocation, {
       type: "progress",
       capture: {
@@ -2315,7 +2320,13 @@ export async function compilePlan(
       executionBounds,
     );
     retainedPlanningReview(record, packet, configDigest);
-    if (decodeGraphReview(record.review.response, record.review.packet).length)
+    if (
+      decodeGraphReview(
+        record.review.response,
+        record.review.packet,
+        state.plan.graph.items.map((item) => item.id),
+      ).length
+    )
       throw new PlanningReviewBindingError(
         "Completed planning review retains unresolved findings",
       );

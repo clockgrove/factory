@@ -35,11 +35,14 @@ export interface ReviewChoiceFinding {
   question: string;
 }
 export interface GraphReviewFinding {
+  /** Graph items the finding concerns; empty when it concerns the plan as a whole. */
+  itemIds: string[];
   evidenceIndices: number[];
   detail: string;
   question: string;
 }
 export interface ResolvedGraphFinding {
+  itemIds: string[];
   evidence: ReviewEvidenceReference[];
   detail: string;
   question: string;
@@ -143,6 +146,9 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
                     enum: ["pass", "needs-human", "refuse"],
                   },
                 }),
+            ...(graph
+              ? { itemIds: { type: "array", items: { type: "string" } } }
+              : {}),
             evidenceIndices: {
               type: "array",
               minItems: 1,
@@ -152,7 +158,7 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
             question: { type: "string" },
           },
           required: [
-            ...(graph ? [] : ["criterionIndex", "verdict"]),
+            ...(graph ? ["itemIds"] : ["criterionIndex", "verdict"]),
             "evidenceIndices",
             "detail",
             "question",
@@ -311,15 +317,37 @@ export function decodeReview(
   });
   return { findings, errors, ...(packetError ? { packetError } : {}) };
 }
+function graphItemReferences(
+  value: unknown,
+  graphItemIds: readonly string[],
+): string[] {
+  if (
+    !Array.isArray(value) ||
+    new Set(value).size !== value.length ||
+    value.some((id) => typeof id !== "string" || !graphItemIds.includes(id))
+  )
+    throw new ReviewProtocolError(
+      "Graph finding item ids must be a unique array of items in the reviewed graph",
+    );
+  return value as string[];
+}
+
+/**
+ * Findings name the graph items they concern. Every id must be an item of
+ * the reviewed graph. The field is required: an empty array is a finding
+ * about the plan as a whole, and a missing field is invalid review output.
+ */
 export function decodeGraphReview(
   response: unknown,
   packet: ReviewPacket,
+  graphItemIds: readonly string[],
 ): ResolvedGraphFinding[] {
   return reviewResponse(response, packet).map((raw) => {
     const value = object(raw);
     if (
       Object.keys(value).some(
-        (key) => !["evidenceIndices", "detail", "question"].includes(key),
+        (key) =>
+          !["itemIds", "evidenceIndices", "detail", "question"].includes(key),
       )
     )
       throw new ReviewProtocolError("Graph finding contains unknown fields");
@@ -334,6 +362,7 @@ export function decodeGraphReview(
         "Review finding needs a question or a detail to derive one from",
       );
     return {
+      itemIds: graphItemReferences(value.itemIds, graphItemIds),
       evidence: resolveReviewReferences(
         reviewEvidenceIds(value.evidenceIndices, packet),
         packet,

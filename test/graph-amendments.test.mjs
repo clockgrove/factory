@@ -620,6 +620,7 @@ for (const delivery of ["regular", "native-stack"])
                     request.amendment && weakened
                       ? [
                           {
+                            itemIds: [],
                             evidenceIndices: [
                               packet.evidence.findIndex(
                                 (entry) => entry.path === "OBJECTIVE",
@@ -1962,6 +1963,7 @@ for (const { transport, rejection } of ["stopped CLI", "live owner"].flatMap(
                 packetId: request.reviewPacket.id,
                 findings: [
                   {
+                    itemIds: [],
                     evidenceIndices: [
                       request.reviewPacket.evidence.findIndex(
                         (entry) => entry.path === "OBJECTIVE",
@@ -2418,6 +2420,7 @@ test("actual review provider/protocol failures cannot authorize amendment replac
               packetId: request.reviewPacket.id,
               findings: [
                 {
+                  itemIds: [],
                   evidenceIndices: [0],
                   detail: "Partial finding with missing question",
                 },

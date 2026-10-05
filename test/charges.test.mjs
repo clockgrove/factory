@@ -505,6 +505,7 @@ function planner(target, { reviews, diagnoses = [] }) {
           answer === "finding"
             ? [
                 {
+                  itemIds: [],
                   evidenceIndices: [0],
                   detail: `Brief omitted a supplied fact (${model.reviews})`,
                   question: "Keep the fact",

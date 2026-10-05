@@ -36,6 +36,7 @@ export function createPlanningModel() {
         findings: subject
           ? [
               {
+                itemIds: item ? [item.id] : [],
                 evidenceIndices: [0],
                 detail: `${subject} assumes a merge or an unsupported check.`,
                 question: "Fix the plan?",

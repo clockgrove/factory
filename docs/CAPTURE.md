@@ -41,8 +41,11 @@ Usage records keep allowlisted token counters; missing counters stay unknown, ne
 ```sh
 factory diagnostics --objective 123 --captures                      # metadata only
 factory diagnostics --objective 123 --captures --content RECORD_ID  # one content record
-factory diagnostics --objective 123 --summary         # usage, no transcripts
+factory diagnostics --objective 123 --summary         # efficiency report: time per stage, operator waits, tokens per role
+factory diagnostics --objective 123 --summary --json  # the same numbers plus full usage counters, for tools
 ```
+
+`--summary` derives stage times from recorded events as the union of their intervals (overlapping work counts once; a reported event duration is never added up). Stages are plan, implement, item validation and result review, delivery, final validation and Objective review, and closure; time waiting for an operator decision and time in no stage are listed apart. Total wall time runs from the first run start to completion, or to now while the Objective runs. Unknown usage is shown as unknown, not zero.
 
 A truncated content record can be incomplete JSON. The package root exports the same reads as `readInteractionMetadata` and `readInteractionContent`.
 

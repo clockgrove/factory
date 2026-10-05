@@ -50,7 +50,7 @@ Search the pinned repository for the canonical text before treating a gap as a h
 ## Observe
 
 ```sh
-factory diagnostics --objective N [--follow | --summary | --logs ITEM [--follow]]
+factory diagnostics --objective N [--follow | --summary [--json] | --logs ITEM [--follow]]
 ```
 
-A quiet timeline means no new provider event, not completion. Diagnostics can hold private source, so review them before pasting. Change the `autonomy` limits only on request. See the [capture guide](https://github.com/clockgrove/factory/blob/main/docs/CAPTURE.md) for timing and captures, and [remote execution](https://github.com/clockgrove/factory/blob/main/docs/REMOTE-EXECUTION.md), which is not live-qualified.
+`--summary` is the efficiency report (time per stage, operator waits, tokens per role). A quiet timeline means no new provider event, not completion. Diagnostics can hold private source, so review them before pasting. Change the `autonomy` limits only on request. See the [capture guide](https://github.com/clockgrove/factory/blob/main/docs/CAPTURE.md) for timing and captures, and [remote execution](https://github.com/clockgrove/factory/blob/main/docs/REMOTE-EXECUTION.md), which is not live-qualified.

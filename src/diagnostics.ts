@@ -999,6 +999,8 @@ function usageEvent(
             "scopeId",
             "observationType",
             "usageAvailable",
+            "model",
+            "reasoningEffort",
             ...tokenCategories,
           ].map((key) => [key, metadata[key]]),
         ),

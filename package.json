@@ -31,6 +31,7 @@
     "skills",
     "assets",
     "docs/AGENT-HARNESSES.md",
+    "docs/USER-GUIDE.md",
     ".codex-plugin",
     ".claude-plugin/plugin.json",
     "README.md",

@@ -133,6 +133,7 @@ test("fresh packed artifact composes a registered harness through the package ro
       "skills/director/SKILL.md",
       "skills/setup/SKILL.md",
       "docs/AGENT-HARNESSES.md",
+      "docs/USER-GUIDE.md",
       "docs/REMOTE-EXECUTION.md",
       "docs/CAPTURE.md",
       "THIRD_PARTY_NOTICES.md",

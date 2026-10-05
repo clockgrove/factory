@@ -1,152 +1,142 @@
-# Using the Factory plugin
+# Factory user guide
 
-Factory coordinates one Objective in a target GitHub repository: plan, execute, validate, deliver, and check the integrated result. The target owns its requirements and branch rules. Factory configuration and run state stay outside that repository.
+Factory turns one Objective, a GitHub issue in your target repository, into reviewed pull requests: it plans, runs coding agents, validates, delivers and checks the integrated result. The target repository owns requirements and branch rules. Factory's configuration and state stay outside it.
 
-Start with the [published installation instructions](../README.md#install). Use the installed `setup` and `director` skills through your Codex agent. This guide explains that workflow and includes the underlying CLI commands for diagnosis or direct inspection. You do not need a Factory source checkout. To develop Factory itself, use [Contributing](../CONTRIBUTING.md). Run `factory help` for the commands supported by your installed version. [Releases](https://github.com/clockgrove/factory/releases) and the [changelog](../CHANGELOG.md) describe what each version contains.
+Agents operate Factory through the `setup` and `director` skills, and the skills run the commands below. `factory help` lists every command and option of the installed version and is the authority if this guide differs. Install with the [README](../README.md#install). To change Factory itself, see [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md).
 
-## Published plugin compatibility
+## Prerequisites
 
-Use matching plugin and CLI versions, and check `factory help` for the installed commands. Each release's notes link its qualification, if any. Using Factory as a plugin does not require a Factory source checkout; contributors building Factory follow [Contributing](../CONTRIBUTING.md).
+- Linux x64 (WSL2 works), Node.js 22 or later, Git 2.31 or later, an authenticated `gh`, and a Codex login. Other providers are in [agent harnesses](AGENT-HARNESSES.md).
+- A trusted checkout whose `origin` fetch and push URLs resolve to the same GitHub `OWNER/REPO`. Factory refuses local-path origins, mismatched push URLs and its own source repositories.
+- The target's toolchain on the validation `PATH`. Factory installs no package manager or build tool. Validation runs commands with non-login `sh -c`, so shell profiles do not provision it.
+- Requirements and validation instructions committed. Planning reads the pinned Git base, not uncommitted edits.
+- A controller started from an ordinary host terminal. A controller inside an agent command sandbox passes that sandbox to its workers.
 
-If you remain on immutable v0.1.30, its older skills still refer to the maintainer qualification workflow. Explicitly ask your agent to follow this guide for ordinary target-repository work rather than create release fixtures. Retain host/worker readiness, target authority, sandbox and spending boundaries. Maintainers follow the [release procedure](RELEASING.md).
+## Set up
 
-## Ask the plugin
-
-In your target repository, use requests such as:
-
-| Intent       | Example request                                                                  |
-| ------------ | -------------------------------------------------------------------------------- |
-| Set up       | “Use Factory to set up this repository with concurrency two. Do not start work.” |
-| Preview      | “Use Factory to plan Objective #123 and show any unresolved questions.”          |
-| Execute      | “Use Factory to run Objective #123.”                                             |
-| Inspect      | “Use Factory to show the status of Objective #123.”                              |
-| Review media | “Use Factory to export the candidate asset sets for my review.”                  |
-| Stop         | “Use Factory to cancel Objective #123 and report its final status.”              |
-
-Configuration-only setup does not start execution. Running an Objective is the consent to execute it; `factory queue add` queues explicitly selected Objectives for the background service, and service consent alone permits model-free observation. The agent uses Factory's controller for scheduling and delivery and asks about specific unresolved decisions. Keep the CLI runtime on that agent's PATH. The command examples below describe what the skills operate; they are not a separate development workflow.
-
-## Prepare your environment
-
-Use Linux x64 with Node.js 22 or later for the published bundled Codex runtime, Git, authenticated GitHub CLI access, and an authenticated Codex environment. Optional harnesses have their own [runtime and login requirements](AGENT-HARNESSES.md). Build-from-source prerequisites are in [Contributing](../CONTRIBUTING.md).
-
-Choose a trusted target checkout. Its `origin` fetch and push destinations must resolve to the same `OWNER/REPO`, including Git URL rewrites and explicit push URLs. Use the repository's GitHub HTTPS or SSH URL. Factory refuses local-path origins, mismatched destinations, custom LFS endpoints, and alternate LFS transfer routing. Keep requirements and validation instructions committed: planning reads the pinned Git base, not uncommitted edits. Factory refuses its own source repositories as targets.
-
-Provide the target's toolchain before execution. Factory does not install its package manager or build tools. It checks supported literal validation entrypoints and explicit package-manager pins, but a successful lookup does not prove that script internals or runtime dependencies work. Validation uses non-login `sh -c` with an explicit PATH; shell login profiles do not provision it. Missing tools or a supported exact-version mismatch stop fresh activation before Work Item projection or worker attempts.
-
-Run the controller from an authorized ordinary host terminal, retaining worker sandbox, credential, approval, and network safeguards. A controller launched inside an agent command sandbox passes that enclosing restriction to its workers; detaching it does not change this. Before initial execution, have the agent check host and worker readiness as described below. Installation, login, and planning are not proof that worker shell/file tools function.
-
-### Host and worker readiness
-
-The readiness checks cover the configured default local Codex implementation harness. `factory setup --background` runs them, and so does the first `factory run --objective N` of an Objective (it stops and names the failing check and its fix). They use your home directory as the default outside-write probe location. Override it in setup with `--outside-directory /absolute/existing/owned-directory` when home is inside the workspace or writable under the worker policy. Factory tries only the selected location. A checkout parent under `/tmp` can be legitimately writable by Codex and is unsuitable for proving refusal.
-
-Readiness resolves the real directories and first creates, verifies and removes an exclusive private sentinel in the outside directory on the controller host. Host permission denial cannot qualify the sandbox boundary. It then starts the exact bundled model-free app-server diagnostic, applies the worker's workspace-write/never/network settings and filtered environment, and checks a temporary workspace write plus refusal of the same outside write. The result names the canonical outside directory and records `outsideHostWritable`, `workspaceWritable` and `outsideWriteRefused`. It does not create a thread, submit a model turn, change policy or certify all other paths. Temporary owned probe files are removed.
-
-An unavailable result retains its diagnostic explanation; it never certifies readiness. Other harnesses and non-default execution profiles need their own supported diagnostics. This implementation-harness result does not establish controller validation readiness: acceptance commands still need their actual dependencies and must run in their declared execution environment. A differently configured home, permission profile or enclosing launch sandbox proves only that different environment.
-
-If the harness reports a socket directory or permission error, inspect the host and enclosing sandbox before another model call. An outer agent sandbox can deliberately hide a correctly configured host socket directory. Do not chmod, unmask, relocate credentials, bypass a security control, or retry a worker as a readiness probe. Correct the authorized controller launch context and repeat the model-free check. Then use the already requested bounded Objective to exercise real tools; ordinary plugin use does not require creating or qualifying a Factory release fixture.
-
-## Managed execution development candidate
-
-The [remote execution guide](REMOTE-EXECUTION.md) describes explicit provider configuration and current qualification limitations. It changes Work Item execution only; installing Factory retains local defaults and grants no additional provider, disclosure or spending authority.
-
-## Guided target setup
-
-Use one guided request to establish the intended outcome. On installed versions exposing `setup`, background setup reuses or creates the bound configuration, checks the host and authenticated GitHub access, records explicit service consent, registers the exact retained package, starts it and verifies its actual owner/control connection:
+Pick one:
 
 ```sh
-factory setup --background --repository OWNER/REPO --checkout /absolute/path/to/target \
-  --concurrency 2 --config /private/factory.json
+factory setup --config-only --repository OWNER/REPO --checkout /abs/path/to/target
+factory setup --background  --repository OWNER/REPO --checkout /abs/path/to/target
 ```
 
-Running `setup --background` is the service consent; it takes no consent, actor or reason flags. Keep the immutable installed package outside the target checkout until supported upgrade or uninstall. Repeating setup with the same binding reuses existing choices and does not duplicate controllers. Installation options can be omitted for an existing matching configuration. Conflicting choices stop rather than silently changing an active binding. Setup runs the readiness checks before it starts the service; an idle service with an empty queue makes no model calls. Add Objectives only when the operator has explicitly approved running them within the [configured limits](#limit-unattended-work), with `factory queue add N` (see [the background service](#the-background-service-and-its-queue)). No issue label or discovery admits work.
+`--config-only` writes the configuration and starts nothing. `--background` also checks readiness, then installs and starts the service that runs the queue. Running it is the service consent. It grants no provider spending and runs no Objective. The command prints JSON: `status` is `configured`, `ready` or `blocked`. A `blocked` result names the failed stage; fix it and repeat the same command.
 
-Use `factory setup --config-only` with the same installation options for a configuration-only request. That mode succeeds without a supported service host and does not register or start supervision. `factory queue` and `factory supervisor` control the service afterwards.
+Repeating setup with a matching binding reuses the configuration. A conflicting option stops, because Factory never changes an active binding.
 
-Background success returns `status: ready`, verified active/enabled service state, exact artifact and configuration, poll interval, queued IDs or idle reason, and host persistence limits. Configuration-only success returns `status: configured`. A failure returns `status: blocked`, the failed stage, completed stages and a supported continuation; it does not remove them or claim readiness. Inspect retained state, resolve the stated prerequisite and repeat. Paused/draining work requires a separate explicit safe resume. Sleep suspends execution, shutdown stops it, and logout persistence is reported without changing linger. A supported upgrade validates compatibility, drains the existing owner and switches the exact package without resetting history. Only an unchanged, settled idle service automatically restores its prior running mode. A paused queue or any retained nonterminal work requires an explicit `factory queue resume`; guided setup reports that retained boundary.
+Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` and state under `$XDG_STATE_HOME/clockgrove-factory` (defaults `~/.config` and `~/.local/state`). Keep both, and all plan output and logs, outside the checkout.
 
-## Bind a checkout
+### Models, network and delivery
 
-After installing the CLI, bind your target:
+Choose these at setup. Defaults: planner and reviewer `gpt-5.6-sol`, worker `gpt-5.6-luna`, all `medium` reasoning.
+
+| Option                                                      | Effect                                                                                                                                    |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `--concurrency N`                                           | Worker ceiling. Omit it to size workers from the host; setup reports `capacity`.                                                          |
+| `--planning-model` `--review-model` `--worker-model`        | Role models. Each has a matching `--*-reasoning`.                                                                                         |
+| `--planning claude-agent-sdk`                               | Plan and review with Claude. Pass both models. It uses `claude auth login`.                                                               |
+| `--harness codex-sdk\|claude-agent-sdk\|github-copilot-sdk` | The worker agent. Details in [agent harnesses](AGENT-HARNESSES.md).                                                                       |
+| `--delivery regular\|native-stack`                          | Pull requests, or native linear stacks.                                                                                                   |
+| `--network host\|off`                                       | Worker network policy. `off` works for Codex only.                                                                                        |
+| `--capture-content`                                         | Keep prompts and responses locally. See [capture](CAPTURE.md).                                                                            |
+| `--credential-file NAME=/abs/private/file`                  | With `--background`: bind a provider credential to the service. Repeat per credential.                                                    |
+| `--outside-directory /abs/dir`                              | With `--background`: the directory for the Codex write-refusal check. The default is your home; change it if home is inside the checkout. |
+
+Remote execution (`execution.kind: "managed-agent"`) runs Work Items in a provider-hosted session. It is implemented, not yet qualified against live providers; see [managed execution](REMOTE-EXECUTION.md).
+
+## Write an Objective
+
+Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). The sections that matter:
+
+- **Acceptance:** one observable fact per bullet. A bullet that is one command line means that command must pass.
+- **Final validation:** exact commands that must pass on the integrated result. "Run the tests" is not a command.
+- **Required checks** (optional): CI check names that are not pull-request workflow jobs, such as checks from external apps. A plan can name only checks that exist at the base or are listed here.
+- **Planning sources** (optional): files or `path#Exact heading` sections workers need. Each costs tokens, so keep the list short.
+- **Workspace package additions** (optional): exact backticked directories, to add packages to an existing `pnpm-workspace.yaml`. Undeclared workspace changes are blocked.
+
+Keep the first Objective small. Editing the issue after planning invalidates the saved plan; refuse it (below) and run again.
+
+## Run
 
 ```sh
-factory setup --config-only --repository OWNER/REPO --checkout /absolute/path/to/target
+factory run --objective N [--deadline ISO_TIMESTAMP]
 ```
 
-Without `--concurrency`, Factory writes no `execution.concurrency` and sizes workers and [scheduling](#resource-limits-in-the-upcoming-autonomous-release) from the host when an Objective starts; the Objective keeps that sizing until it finishes, even on another host. It keeps 2 CPUs and 4 GiB for the OS and controller. From the rest, each coding worker reserves 2 CPUs and 2 GiB, each validation job 4 CPUs and 4 GiB, and each review or delivery 0.5 CPU and 512 MiB. A phase's ceiling is how many of its reservations fit; review allows two per coding worker. On a 24-thread, 45 GiB host this gives 11 workers, 5 validation jobs and 22 reviews. Setup reports the result as `capacity`.
+Running is the consent to execute that Objective. `run` plans if needed, saves the plan and its independent review, executes a clean plan, and exits:
 
-Pass `--concurrency N` (or set `execution.concurrency`) to choose the worker ceiling yourself. Without `scheduling`, validation and review then share that ceiling. Set `scheduling` in the configuration to override the derived values.
+| Exit | Meaning                                                   |
+| ---- | --------------------------------------------------------- |
+| 0    | The Objective completed; final validation passed.         |
+| 2    | It needs you. The message names the decision and command. |
+| 1    | It failed or was cancelled. The message says why.         |
 
-Setup writes configuration without starting an Objective. The CLI prints its configuration path. Defaults live under `$XDG_CONFIG_HOME/clockgrove-factory` (or `~/.config/clockgrove-factory`); run state lives under `$XDG_STATE_HOME/clockgrove-factory` (or `~/.local/state/clockgrove-factory`). Plan output, logs, and review exports may contain private source and should also stay outside the checkout.
+Run the same command again to resume. A saved plan is never planned again, and every step is safe to repeat. The first run also checks host and worker readiness, without a model call, and names any failing check and its fix. Control a live run from another terminal with `factory pause|drain|resume|cancel --objective N`. Pause and drain survive restarts, and `resume` continues either. `--deadline` is absolute and a restart cannot extend it.
 
-Installation requires an unused configuration path and no existing state for the repository. If installation refuses, inspect the existing binding and state. Do not delete state or move an active run into new roots to bypass a lifecycle fence.
+## Queue and background
 
-For a separate initial trial, choose new private XDG directories and keep them set for every Factory command. Preserve GitHub CLI authentication before changing the XDG configuration root:
+The background service runs queued Objectives one at a time. It needs a systemd user manager and keeps running after the terminal closes. Sleep pauses it, shutdown stops it, and logout behavior follows your host's linger setting. Factory changes neither.
 
 ```sh
-export GH_CONFIG_DIR="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
-export XDG_CONFIG_HOME="/absolute/private/factory-trial/config"
-export XDG_STATE_HOME="/absolute/private/factory-trial/state"
+factory queue add N [N ...]   # consent to run these, in order, within the autonomy limits
+factory queue list | remove N | pause | resume | drain
+factory supervisor start | stop [--disable] | upgrade --cli /abs/installed/dist/cli.js | uninstall
 ```
 
-These are installation choices, not recovery commands. Keep provider authentication accessible through its existing local profile. Never copy credentials into the target repository.
+- `queue add` never replaces the queue. An Objective already queued keeps its place and takes the issue's current body. `remove` withdraws a pending Objective and refuses an active one.
+- With an empty queue the service only watches GitHub, makes no model calls and lists unqueued candidates. Labels and discovery never admit work. Polling uses `queue.pollSeconds` (default 30).
+- `supervisor stop` drains and keeps state. `--disable` also stops it starting at login. `upgrade` checks that the new package can continue the retained state before switching.
+- An Objective that needs a human exits the service with code 2. Decide it, run `factory queue resume`, then `factory supervisor start`.
 
-### Resource limits in the upcoming autonomous release
-
-Before running an Objective, an operator may add or change `scheduling` in the installation configuration. Omitting it with no explicit concurrency uses host-derived values. For example, the following declares four CPU units and 4096 MiB shared by active phases, with one concurrent reviewer and one validation job:
-
-```json
-{
-  "scheduling": {
-    "cpu": 4,
-    "memoryMiB": 4096,
-    "reviewConcurrency": 1,
-    "validationConcurrency": 1,
-    "phases": {
-      "coding": { "cpu": 2, "memoryMiB": 2048 },
-      "validation": { "cpu": 2, "memoryMiB": 2048 },
-      "review": { "cpu": 1, "memoryMiB": 512 },
-      "delivery": { "cpu": 1, "memoryMiB": 512 }
-    }
-  }
-}
-```
-
-Choose reservations for your actual workloads. They govern admission; they do not install OS resource controls or promise measured peak usage. When you set a CPU or memory total, declare that resource for every phase. Worker concurrency still applies. Review and QA receive the next suitable completion opportunity as workers settle, and a worker releases its coding reservation before review. Status shows held/requested phases and blocking reasons. An unknown provider capacity is reported as unknown and never expands the operator ceiling. Configuration is bound to the accepted plan; do not edit an active run's binding to raise a limit.
-
-### Models, network, and delivery
-
-Factory persists explicit model choices at installation; it does not inherit ambient Codex model preferences. The defaults are planner and reviewer `gpt-5.6-sol`, worker `gpt-5.6-luna`, all with `medium` reasoning. Override them when you set up:
+## Status
 
 ```sh
-factory setup --config-only --repository OWNER/REPO \
-  --checkout /absolute/path/to/target --concurrency 2 \
-  --planning-model MODEL --planning-reasoning medium \
-  --review-model MODEL --review-reasoning medium \
-  --worker-model MODEL --worker-reasoning medium
+factory status --objective N [--json]
+factory status
 ```
 
-Use one installation command with your chosen options, not both examples. Planning and review use the selected planning provider, independent of the local Work Item harness. See [local harnesses](AGENT-HARNESSES.md) for Claude, Copilot, and custom adapters.
+The first line is the headline, for example `Objective #7: needs plan decision — plan review needs a human decision`. The next lines give `Next:`, the exact command that answers it. Then come the question, if any, and a table of Work Items. The phases are `not started`, `planning`, `needs plan decision`, `running`, `waiting`, `needs decision`, `failed`, `cancelled` and `complete`. `--json` carries the same summary plus the plan, graph, consumed allowances and failure identities. Without `--objective`, status shows the service and the queue.
 
-Planning and review support the Codex SDK (`--planning codex-sdk`, the default) and the Claude Agent SDK (`--planning claude-agent-sdk`). For Claude, choose both models explicitly; reasoning defaults to `high`:
+Observe further with `factory diagnostics --objective N` (the agent timeline; add `--follow`, `--summary`, or `--logs ITEM`). A quiet timeline means no new provider event. It does not mean done, and missing usage is unknown, not zero. Diagnostics can hold private source, so keep them out of public issues. Timing and capture analysis are in [capture](CAPTURE.md).
+
+## Decisions
+
+Factory stops for a decision only when a human owns it. Show the operator the exact question and evidence, then record the answer. Each command is followed by `factory run --objective N`.
 
 ```sh
-factory setup --config-only --repository OWNER/REPO \
-  --checkout /absolute/path/to/target --concurrency 2 \
-  --planning claude-agent-sdk \
-  --planning-model claude-opus-5-5 --review-model claude-opus-5-5
+# Plan question: accept needs --answer; refuse discards the plan so the next run plans again
+factory decide --objective N --outcome accept --answer "Specific answer" --reason "Evidence and authority"
+factory decide --objective N --outcome refuse --reason "Why"
+
+# Result criterion: --item names a Work Item; omit it for final acceptance
+factory decide --objective N --item ITEM --outcome accept|refuse --reason "Reviewed evidence"
 ```
 
-Like Codex planning, Claude planning uses your existing login: the Claude Code login on the controller host (`claude auth login`), or `CLAUDE_CODE_OAUTH_TOKEN`. An `ANTHROPIC_API_KEY` in the controller environment is optional and is used when present. Each call runs without tools in an empty temporary directory and may produce up to `planning.maxOutputTokens` (64000 by default). It needs the optional `@anthropic-ai/claude-agent-sdk` package. The readiness checks (setup, and the first `factory run`) confirm, without a model call, that the SDK finds a login. Claude settings files are not loaded, so Bedrock, Vertex and `apiKeyHelper` configurations are not supported yet; proxy settings (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`) and `CLAUDE_CONFIG_DIR` pass through.
+Decisions read the exact plan or tree from state, apply only to that plan or tree, and never bypass branch protection. Review excerpts can be truncated, and a truncated excerpt cannot auto-pass, so inspect the full tree before accepting. Raising `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` may allow a complete automatic review.
 
-Remote execution providers still need an API key. In the foreground Factory reads it from the controller environment. A supervised service binds one owner-private file per required credential: `factory setup --background ... --credential-file NAME=/absolute/private/key`. When Claude plans or works, a headless service may also bind `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY` the same way; otherwise it uses the Claude login in its home or `CLAUDE_CONFIG_DIR`.
+```sh
+# Run validation and review again on a pending Work Item result. No model call, accepts nothing.
+factory retry --objective N --item ITEM --rereview
 
-The default delivery mode is regular pull requests. Add `--delivery native-stack` at installation to choose native linear stacks on a target that supports them. Independent work remains dependency-aware; target branch protection and required checks still govern integration.
+# Start a failed or cancelled Work Item's new attempt, or answer the stopped step that status names
+factory retry --objective N [--item ITEM]
 
-The default network policy is `host`; `--network off` selects the supported offline worker policy for the Codex path. GitHub operations and planning still need their own service access. Review the chosen harness's boundaries before selecting a policy. Local work consumes your provider account usage; unavailable usage is never zero. Managed agents are configured separately in [remote execution](REMOTE-EXECUTION.md); automatic provider fallback is not available.
+# Record a diagnosed correction for a failed Work Item
+factory repair --objective N --proposal /abs/repair.json
 
-## Limit unattended work
+# Submit a graph amendment, or a replacement for a rejected one
+factory propose-amendment --objective N --proposal /abs/proposal.json
+```
 
-Every run repairs and amends within bounded limits. The optional `autonomy` section of the configuration changes them; omitted fields keep these defaults:
+- **repair file:** `{"item": "ITEM", "correction": {"kind": "implementation", "failureDigest": "...", "diagnosis": "...", "correction": "...", "actor": "NAME"}}`. The `failureDigest` is `repairs.ITEM.failureDigest` in `status --json`. The correction starts a new attempt from the accepted base and uses the allowance already charged for the failure.
+- **blamed on a merged predecessor:** when the failing file belongs to a merged predecessor (by the accepted graph's `ownedPaths`), the item stops with a decision that names the predecessor, its PR and the file, and no repair is spent, because repairing the dependent cannot fix it. Submit an amendment that adds a Work Item after the predecessor and owns the file, then `factory run` to merge it, `factory retry --objective N --item ITEM` for a new attempt on the integrated head, and `factory run`. `factory status` names whichever step is due. An amendment costs a planning revision (default 1) and is refused when none is left; then only `factory cancel` and a new Objective with a higher `autonomy.allowances.planningRevisions` helps, because limits are fixed when an Objective starts.
+- **amendment file:** `scope` (`in-scope` or `backlog`), `reason`, nonempty `evidence`, `ownership` and `acceptance` arrays, `dependencies` (known Work Item IDs), `actor`, and `expectedGraphDigest` (the `graphDigest` in `status --json`). An optional `graph` is a complete proposed replacement. Workers can also stage `.factory-discovery.json`, and Factory reviews it the same way. While the Objective is stopped, `propose-amendment` takes an in-scope amendment and the next `factory run` reviews and projects it. A backlog discovery needs a running owner.
+- **replacing a rejected amendment:** add `replacement: {"amendmentId": "...", "correction": {...}}` with the same correction fields as a repair, taking `amendmentId` (its `id`) and `failureDigest` from `pendingAmendment` in `status --json`. It needs a paused, settled Objective and a remaining planning allowance. It consumes one revision, and the fresh amendment still goes through validation and independent review.
+- **media:** `factory select --objective N --item ITEM --output /abs/new/dir` writes every candidate AssetSet for review. Then `factory select --objective N --item ITEM --set SET_ID [--bind DEPENDENT ...]` records the whole-set pick. The target's `.gitattributes` owns Git LFS policy.
+
+## Autonomy limits
+
+Runs repair and amend within bounded limits. The optional `autonomy` configuration section changes them. Omitted fields keep these defaults:
 
 ```json
 {
@@ -174,296 +164,12 @@ Every run repairs and amends within bounded limits. The optional `autonomy` sect
 }
 ```
 
-`allowances` cap the whole Objective; `repairPolicy.perPath` caps each original Work Item. Planning revisions and amendments have one Objective-wide scope, so only `allowances.planningRevisions` limits them. Zero is valid. Set `repairClasses` to `[]` to stop for an operator decision on every failure. `requiredEnvironment` names worker secrets that must be present before planning; each must also be in `policy.allowedSecretNames`. Each Objective records these limits when it starts, so editing them affects the next Objective, not a running one. Consumption is never reset.
-
-### Resolve source and prerequisite gaps
-
-Planning and activation use the same pinned-source and final-command parsing rules. A declared final-validation section with no recognized commands is an authoring error, not an empty successful check. Fix the Objective declaration before retrying planning. Required facts and host prerequisites must be available in the environment where their phase runs; passing worker diagnostics do not establish controller validation readiness.
-
-When an apparent missing contract already exists elsewhere in the authorized pinned repository, locate that canonical file or section read-only and add it to the Objective's **Planning sources** section as `path#Exact heading`. Editing the Objective invalidates a saved plan: refuse it with `factory decide`, then run again so the corrected packet gets fresh compilation and review. Uncommitted edits are not pinned source evidence. If the behavior is genuinely unspecified, obtain the exact product or security decision from its owner instead of inventing it. Source lookup does not authorize broader implementation scope.
-
-## Write an Objective
-
-Create the issue in the repository that owns the work. Start from the [one-page template](templates/objective.md), or copy the [issue form](templates/objective.yml) into the target's `.github/ISSUE_TEMPLATE/`.
-
-- **Acceptance** is what the plan must deliver and what review checks. Write one observable fact per bullet. A bullet that is exactly one command line means that command must pass. If a constraint must be verified, such as "the Git tree stays clean", put it here.
-- **Final validation** lists exact commands that must pass on the integrated result. A vague "run the tests" is not a command.
-- **Required checks** (optional) lists exact CI check names that are not jobs in the target's workflows. A plan can name a CI check only if it is a pull-request workflow job at the base or listed here. Checks reported by external apps, such as codecov, must be listed here. Delivery re-checks a required check against the default branch: if its job is renamed after planning, the run asks you to restore the job and `factory retry`, or to cancel and plan again, instead of waiting for a check that never reports.
-- **Planning sources** lists files, or `path#Exact Heading` sections, that workers need. Workers receive those sections verbatim and also have the full checkout. Keep the list short: every source costs tokens in planning and review.
-
-Keep the first Objective small, for example a `healthcheck` script that calls the existing test command.
-
-### Add packages to an existing pnpm workspace
-
-An Objective that adds package directories to an existing `pnpm-workspace.yaml` must explicitly authorize each exact directory:
-
-```markdown
-## Workspace package additions
-
-- `apps/runtime`
-```
-
-Use literal relative directories, not globs. One responsible Work Item must own both `pnpm-workspace.yaml` and the new package manifest, and name the directory in its brief. Each added directory must contain a regular, valid `package.json` at validation. Existing membership entries and their relative order remain intact; additions may be inserted between them.
-
-This declaration permits membership additions only. Registry settings, release-age policy, hooks, scripts and other non-membership configuration retain their existing validation boundaries. Undeclared workspace changes remain blocked, including changes made by a worker that runs no package-manager command. Existing accepted runs gain no permission from upgrading Factory; the declaration must belong to the pinned Objective and plan. Omit workspace ownership from a plan that leaves the existing file unchanged. New workspaces continue to use the existing greenfield validation rules.
-
-## Run an Objective
-
-```sh
-factory run --objective ISSUE_NUMBER
-```
-
-Running is the consent to execute that Objective. `run` compiles and independently reviews a plan, saves the plan and its review in the Objective's state, and executes it when the review is clean. It keeps running until the Objective completes, fails, or needs a human decision, then exits with a message naming the decision and the command to make it. Run the same command again to resume; an existing plan is never planned again.
-
-`run` and the background service exit with:
-
-| Code | Meaning                                                     |
-| ---- | ----------------------------------------------------------- |
-| 0    | The Objective (or the queue) completed.                     |
-| 2    | An Objective needs a human decision; status names it.       |
-| 1    | A failure or cancellation stopped it; the message says why. |
-
-The background service treats exit 2 as a clean stop: `factory status` reports `waitingFor: human-decision`, and the service is not restarted until you decide and start it again. Every command refuses an option it does not read.
-
-If Factory finds state written by an earlier version, every command stops and names those Objective directories. Stop and uninstall any old Factory service with the old version first, then delete the named directories (or finish them with the old version).
-
-When plan review leaves a specific question, `run` stops before creating any Work Item issue. Inspect the question and the plan's short digest with `factory status --objective ISSUE_NUMBER`, then decide on exactly that plan:
-
-```sh
-factory decide --objective ISSUE_NUMBER --outcome accept \
-  --answer "Specific answer" --reason "Evidence and authority for the decision"
-factory run --objective ISSUE_NUMBER
-```
-
-The decision applies to the plan the Objective's state holds; its digest is read from state. Accepting requires `--answer`. Your user name is recorded as the decider. `--outcome refuse` discards the saved plan, so the next `run` plans again. When planning itself stopped for a decision before producing a plan, status says so; resolve it in the Objective and refuse to plan again. A decision cannot expand scope or override deterministic checks. If the base commit, Objective body, sources or configuration change before the plan is projected, `run` stops; refuse the plan to plan again.
-
-`run` saves the plan, so there is no separate preview: `factory status --objective ISSUE_NUMBER` shows the saved plan's review, and `--json` carries its owned paths, dependencies, acceptance, non-goals, validation commands, and final integrated-result checks.
-
-Execution projects Work Items to GitHub, starts ready workers, independently validates and reviews their results, delivers accepted changes, and checks the final integrated Objective. Work Item completion is not Objective completion. Human-owned decisions and failed checks stop progress with evidence.
-
-## Keep a run under local control
-
-A `run` keeps one local owner alive while it works, including while it waits for required checks, a pause or a drain. It remains a foreground process; see local background supervision for service operation and host limitations.
-
-Use another terminal to control that owner:
-
-```sh
-factory pause --objective ISSUE_NUMBER
-factory drain --objective ISSUE_NUMBER
-factory status --objective ISSUE_NUMBER --json
-factory resume --objective ISSUE_NUMBER
-```
-
-Pause and drain stop new dispatch and persist across controller restarts; `resume` continues either. Inspect status to distinguish a requested drain from completed owned work. Resume permits the existing continuation to proceed; it grants no new attempt or repair authority. Exact-tree decisions and media selections reach a live owner through its private local socket; when `run` has exited for a decision, the command records it directly and the next `run` continues.
-
-An optional `factory run --deadline ISO_TIMESTAMP` records an absolute deadline. Restart cannot extend it. Expiry requests cancellation; it does not prove that a remote effect failed or that owned work stopped. Cancellation remains unresolved until cessation is verified. Preserve retained workspaces and evidence when status reports unresolved ownership.
-
-An unavailable GitHub observation is repeated with backoff while local control remains available; status reports an outage once it lasts about a minute. Factory does not spend model calls on idle wakes or infer issue closure from a failed API request. A planning or review call whose response was lost is asked again at most three times, then Factory asks you to decide. A closed or edited Objective issue also waits for your decision.
-
-## Inspect progress
-
-```sh
-factory status --objective ISSUE_NUMBER
-factory status --objective ISSUE_NUMBER --json
-factory diagnostics --objective ISSUE_NUMBER --follow
-factory diagnostics --objective ISSUE_NUMBER --summary
-factory diagnostics --objective ISSUE_NUMBER --logs WORK_ITEM_ID --follow
-```
-
-Status describes current continuation state, including blocked work, selection pauses, errors, and final acceptance. Diagnostics provide a private timeline and available usage; logs expose worker output. A quiet timeline means no new provider event was observed. Neither silence nor missing counters proves completion or zero usage. Keep transcripts and private validation output out of public issues. For optional sensitive local request/response capture and metadata-only inspection, see [capture and analysis](CAPTURE.md).
-
-For metadata-only comparisons of recorded usage, timing and outcomes, use [`factory diagnostics --analyze`](CAPTURE.md#analyze). Captured content inspection is a separate, explicit operation.
-
-## Review a result decision
-
-A pending result decision identifies one criterion, its exact tree, and a specific question. Inspect the complete result before accepting it. Review text can be truncated; an incomplete cited chunk cannot establish automatic acceptance, while complete independent evidence can prove a criterion despite unrelated omitted text. Malformed review responses are reported separately from substantive acceptance questions; they are not approval. A larger `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` and reviewer context may allow a complete review, but do not treat missing evidence as a pass.
-
-```sh
-factory decide --objective ISSUE_NUMBER --item WORK_ITEM_ID \
-  --outcome accept --reason "Reviewed evidence"
-factory run --objective ISSUE_NUMBER
-```
-
-The exact tree is read from the Objective's state. Omit `--item` for final Objective acceptance. Use `--outcome refuse` to reject the criterion. The decision applies only to that criterion and tree; it does not bypass branch protection, authorize another attempt, or repair ambiguous delivery.
-
-## Request automatic review again
-
-If an independent Work Item review did not complete or could not read sufficient evidence, inspect the pending tree and failure before requesting another review:
-
-```sh
-factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID --rereview
-factory run --objective ISSUE_NUMBER
-```
-
-`retry --rereview` only schedules the preserved result for validation and automatic review. It makes no model call, records no acceptance decision, and does not restart implementation. The following `run` repeats exact-tree validation and review under the existing configuration and delivery guards. Previous decisions and usage records remain intact; missing usage remains unknown. A stale tree, terminal Objective, refused result or published Work Item cannot use this action. Diagnose another failure before any further explicit request; this is not an automatic retry loop.
-
-For a pending **final Objective** review, `factory run --objective ISSUE_NUMBER` already repeats final validation, hydration and automatic review of the exact integrated result, while checking that the default branch has not moved. No Work Item re-review request is needed. Neither path accepts a criterion on the operator's behalf. Use `decide` only when an actual acceptance or refusal is intended; use `retry` without `--rereview` for a separately authorized new implementation attempt.
-
-## Select media and deliver LFS assets
-
-A media worker produces complete candidate AssetSets. When Factory pauses, status lists their IDs and digests. Without `--set`, `select` writes every candidate set to its own directory under `--output`, outside the checkout, for human inspection; with `--set` it records the pick:
-
-```sh
-factory select --objective ISSUE_NUMBER --item WORK_ITEM_ID \
-  --output /absolute/new/review-directory
-factory select --objective ISSUE_NUMBER --item WORK_ITEM_ID \
-  --set CANDIDATE_ID --bind DEPENDENT_WORK_ITEM_ID
-factory run --objective ISSUE_NUMBER
-```
-
-Use `--bind` only for a pending direct dependent that should receive the selected set; repeat it for multiple dependents or omit it when none needs the input. Selection records your user name, whole-set digest, destinations, and bindings. Unselected files are not passed downstream.
-
-The target's `.gitattributes` owns LFS policy. Factory checks selected bytes and committed pointers, uploads required LFS objects before branch publication, and verifies exact bytes in a fresh clone after integration. Before applicable validation commands it restores selected required-LFS bytes from its verified local content store; missing or corrupt content stops validation. Workers must not reimplement those controller operations.
-
-Source assets may be pinned repository files, explicitly cited absolute private files, or supported GitHub Objective attachments. Supply access and rights authority explicitly. Factory imports immutable bytes and supplies temporary input files to the harness; the harness determines their model representation. Source, reviewed, and generated assets retain distinct roles. See the [public media example](../test/fixtures/objectives/media-lfs.md) for an illustrative Objective, not a prerequisite to ordinary use.
+`allowances` cap the Objective and `perPath` caps each original Work Item. Zero is valid, and `repairClasses: []` stops for a human on every failure. `requiredEnvironment` lists worker secrets that must exist before planning; each must also be in `policy.allowedSecretNames`. Only a wrong result is charged: a failed validation, a refused criterion or a plan finding. A transient or configuration failure never is. Each Objective snapshots its limits when it starts, and consumption never resets. Exhausted limits stop for a decision. The optional `scheduling` section sets CPU, memory, review and validation reservations, and by default these come from the host.
 
 ## Stopping and recovery
 
-```sh
-factory cancel --objective ISSUE_NUMBER
-```
+Every step is safe to repeat, so after any interruption run the Objective again: Factory re-reads its state and GitHub, finds its issues, pull requests and merges by stable identity, reattaches a running worker, and repeats only the step it was on. A real failure keeps its evidence and stops until you `retry`, `repair` or `cancel`. See [Architecture, State and recovery](https://github.com/clockgrove/factory/blob/main/docs/ARCHITECTURE.md#state-and-recovery) for the state layout, the step rules and the retry limits. Never delete state or start a new root to get past a stop.
 
-Cancellation stops owned local work. Inspect its resulting status before attempting anything else.
+## Safety
 
-Cancellation never needs to settle in-flight calls first: every Factory step is safe to repeat, so nothing is left in an unknown state.
-
-For a failed or cancelled unpublished item, including one whose repair allowance is exhausted, an explicit new-attempt decision can use:
-
-```sh
-factory retry --objective ISSUE_NUMBER --item WORK_ITEM_ID
-```
-
-The same command answers a step that stopped for the operator: a decision (such as repeated lost model turns) or a configuration fix. Status prints the exact command; leave out `--item` when the Objective's own step is waiting. It works while a run is active and with a published PR. It clears every step record of that item (or of the Objective), so the waiting step runs again with a fresh bound; a decision blocks only the step that asked it. The other answer is `factory cancel`.
-
-If the controller stops for any reason, run the Objective again. Factory re-reads its state and GitHub and repeats the step it was on: planning and reviews are asked again, issues and PRs are found by their markers and branches instead of being created twice, and a merge that already happened is confirmed rather than repeated. A running worker is reattached by its recorded handle.
-
-## Allow diagnosed repairs
-
-Automatic repairs are on within the [configured limits](#limit-unattended-work). The `repairClasses` are `implementation`, `planning-output`, `planning-evidence` and `planning-choice`. Children, restart and recompilation cannot reset consumption. Each failure is charged once, however often it repeats; a transient or configuration failure is never charged.
-
-Factory requires a concrete diagnosis and correction before another implementation attempt. The new attempt starts from the accepted base; removed unfinished edits are unavailable. Missing product or security decisions, unknown external outcomes and exhausted limits stop for an explicit decision. `status --json` reports the failure identity, consumed allowances, the charged failure events and the next decision.
-
-When the controller could not prepare validation (a configuration fault, such as an unwritable validation directory), the Work Item waits and the candidate is not judged. Restore only the already authorized environment, then run `factory retry --objective ISSUE_NUMBER --item ITEM`; the same result is validated again.
-
-A validation command that fails is a wrong result, whatever the cause. Factory diagnoses and charges it like any other wrong result. `factory repair` or `factory retry` starts a new attempt from the accepted base; the failed result is not validated again.
-
-When the failure comes from a file a merged predecessor owns (by the accepted graph's `ownedPaths`), Factory stops the item with a decision that names the predecessor, its PR and the file, and spends no repair: repairing the dependent cannot fix it. The way forward is an amendment that adds a Work Item after the predecessor and owns the file (`factory propose-amendment`, which works while the Objective is stopped), then `factory run` to merge it, `factory retry --item ITEM` to start a new attempt on the integrated head, and `factory run`. `factory status` names the step that is due, including while the amendment is pending and after it has merged. An amendment takes a planning revision (the default is 1) and is refused up front when none is left; then only `factory cancel` and a new Objective with a higher `autonomy.allowances.planningRevisions` helps, because limits are recorded when an Objective starts.
-
-To supply a diagnosed correction for a wrong result yourself, submit a proposal file containing `item` and `correction` with `kind: "implementation"`, `failureDigest`, `actor`, `diagnosis` and `correction`:
-
-```sh
-factory repair --objective ISSUE_NUMBER --proposal /private/repair.json
-```
-
-The configured limits must permit the class. The correction starts a new attempt from the accepted base; it uses the allowance already charged for the failure. Required commands and full independent result review validate the new attempt, and successful authenticated named checks must match its exact published head before integration. Operator diagnosis and host-action declarations remain distinct from verified Git facts and actual successful probe receipts. Unknown accounting stays unknown, and no recovery operation raises a provider or spending limit.
-
-## Publication and local safety
-
-Factory checks changed-path ownership, unsafe links and special files, and scans staged content and working bytes with its packaged Secretlint rules before publication. Target ignore files and scanner configuration cannot bypass the packaged scan. A finding reports its rule and path without the secret value. Review false positives outside the worker checkout; an operator may select a reviewed external configuration with `FACTORY_SECRETLINT_CONFIG` before an explicit retry. Do not weaken the scan merely to make an attempt pass.
-
-Workers receive a filtered environment; controller GitHub, Git, and SSH credential variables remain excluded even if named in an allowlist. These controls do not prevent same-user code from accessing readable host files. Run only trusted code, retain repository protections, and follow the [security policy](../SECURITY.md).
-
-## Discover required work during a run
-
-A running Objective
-can use its planning-revision allowance to review necessary discoveries.
-Workers stage a private `.factory-discovery.json` proposal with evidence, scope,
-ownership, acceptance and dependencies. Factory collects it with the ordinary result,
-then independently reviews and projects an in-scope graph revision. Workers keep
-implementing only their already accepted scope. Out-of-scope proposals remain backlog.
-
-Current, dependency and final review receive the retained proposal with its
-attempt/result binding. The matching accepted graph-revision receipt separately
-identifies the independently reviewed addition and its actual QA/parent definitions;
-completed QA evidence remains distinct. Missing or stale capture is missing proof,
-not proof that no proposal was submitted. Missing or mismatched evidence cannot
-pass a required discovery or amendment criterion.
-
-An operator can submit the same structured discovery to a running owner, or while the Objective is stopped (no owner running). A stopped Objective takes only an in-scope amendment: Factory records it under the state lock after the same graph-digest check, and the next `factory run` reviews, charges and projects it. A backlog discovery needs a running owner.
-
-```sh
-factory propose-amendment --objective 123 --proposal /absolute/path/proposal.json
-```
-
-The proposal includes `scope` (`in-scope` or `backlog`), `reason`, nonempty `evidence`,
-`ownership` and `acceptance` arrays, a `dependencies` array of known Work Item IDs,
-`actor`, and `expectedGraphDigest` from the current status graph. An optional `graph`
-is a complete proposed replacement graph; Factory regenerates its worker source inputs
-from the selected pinned citations before the same deterministic and independent checks.
-Callers do not copy source contents into `inputSources`. The owner rejects stale proposals. A started/completed node's
-identity cannot be repurposed; propose successor or revalidation work instead.
-Never-started ordinary work may revise generated acceptance wording while retaining
-every substantive requirement. Independent review compares the complete old and new
-graphs; a paraphrase alone is not deletion, and weakened obligations still block
-the amendment. Source criterion identities/text and existing aggregate acceptance
-remain exact.
-
-A decomposed parent waits for every explicit child dependency and proves its own
-acceptance without another implementation worker or synthetic PR. Unknown model or
-projection outcomes pause affected work without repeating possibly completed calls.
-Inspect the preserved pending proposal and original evidence before choosing a
-supported continuation; editing state or running a fresh root cannot bypass a fence.
-
-A known compiler-generated amendment rejection, including a completed independent
-review finding, can be replaced after diagnosing and correcting its cause. Keep the original discovery fields and current graph digest,
-set `actor` to the correcting operator, and add `replacement`:
-
-```json
-{
-  "amendmentId": "rejected-amendment-id-from-status",
-  "correction": {
-    "failureDigest": "sha256-of-the-exact-rejected-error",
-    "kind": "planning-output",
-    "diagnosis": "Concrete cause of the rejected compiler output",
-    "correction": "Meaningful correction already established",
-    "actor": "operator"
-  }
-}
-```
-
-Submit that proposal with the same `propose-amendment` command. Factory requires
-a paused, settled, nonterminal Objective, an enabled planning repair class and
-remaining total/per-path planning allowance. The operation also works while the
-owner is stopped, under the existing controller lock. It retains the rejected
-proposal and leaves the Objective paused; resume and start the existing owner to
-compile a fresh candidate through normal validation, independent review and
-projection. The new compilation consumes one remaining revision. The diagnosis grants no
-missing source authority and cannot resolve a human-owned product decision; the
-fresh review still stops on an unresolved finding. Unknown calls/projection,
-provider failures, invalid or incomplete review responses and unchanged failed
-corrections cannot use this operation. It does not accept or edit the rejected
-response, alter the accepted graph or restart completed Work Items.
-
-## The background service and its queue
-
-A supported Linux or WSL host needs a running systemd user manager. Factory never changes login persistence or gains administrator privileges. A user manager can survive the chat closing; sleeping pauses execution, shutdown stops it, and logout behavior depends on the host's existing linger policy. Unsupported hosts keep the foreground `factory run --objective N`.
-
-`factory setup --background` (above) is the one route: it checks readiness, registers the installed artifact as one deterministic user unit, starts it and verifies its owner. The service works from the queue, one Objective at a time:
-
-```sh
-factory queue add N M --config /private/factory.json
-factory queue list --config /private/factory.json
-factory queue remove N --config /private/factory.json
-factory queue pause --config /private/factory.json
-factory queue resume --config /private/factory.json
-factory queue drain --config /private/factory.json
-```
-
-`queue add` records the Objectives in order and each issue's current body; it is the consent to run them within the [configured limits](#limit-unattended-work). It adds to the queue, never replaces it, and works while an Objective runs: an Objective already queued keeps its place and takes the issue's current body, and one removed earlier is queued again. A queue added to before setup waits for the service. `remove` withdraws a pending Objective and refuses an active one; it does not cancel an Objective. Pause stops new dispatch; drain lets owned work settle and releases the controller. Both persist across restarts, and `resume` continues the existing allowances. Poll GitHub at `queue.pollSeconds` in the configuration (default 30 seconds); idle observation makes no model calls.
-
-`factory status` without `--objective` reports the service (registered, active, enabled, waiting for a decision) and the queue, with the command that answers each problem. The service records the last observation time, unqueued candidate IDs and eligibility reasons: a closed issue, a changed body or an unaccepted predecessor stays ineligible with its reason. An unavailable scan reports its error rather than a healthy empty result. Candidate bodies are not stored. A GitHub issue's native “blocked by” dependencies must have retained Factory acceptance evidence, and Factory verifies that the default branch contains that accepted result before compiling the successor. Keep the configured checkout clean and able to fast-forward.
-
-The configuration file must be private to your user. The unit pins absolute Node, CLI, configuration and state paths, plus the installation's launch path and existing credential-directory settings; it does not copy credential values. Provider credentials for the service are bound at setup with `--credential-file NAME=ABSOLUTE_PRIVATE_FILE`. Worker environment filtering remains in force.
-
-```sh
-factory supervisor start --config /private/factory.json
-factory supervisor stop [--disable] --config /private/factory.json
-factory supervisor upgrade --cli /absolute/new-package/dist/cli.js --config /private/factory.json
-factory supervisor uninstall --config /private/factory.json
-```
-
-`stop` requests a drain and waits for ownership to be released. It does not cancel an Objective. If owned work or an uncertain external effect remains, stop refuses and preserves the live owner and evidence; check `factory status` before trying again. `stop --disable` also disables future automatic starts; the owned unit stays registered for explicit start, upgrade or uninstall. `uninstall` also removes the owned unit. Both retain target binding, snapshots, results, logs and accounting, and neither removes the target repository or provider authentication. Raw systemd stop sends a graceful drain request only to the owner and does not kill detached workers; prefer the packaged stop command.
-
-`upgrade` asks the new artifact to validate the actual continuation before draining and again after owned work settles, then switches the unit. Rollback uses the same operation and refuses if the older artifact cannot validate retained state. No state fields, allowances or evidence are reset.
-
-An unresolved human plan question pauses the queue; it is not automatic acceptance. The service exits 2 and `factory status` names the Objective. Inspect the question with `factory status --objective N` and record it with `factory decide --objective N ...` as described under running an Objective. Then `factory queue resume` releases the retained drain and `factory supervisor start` starts the service again; it continues with the same saved plan and allowances. A failed or unknown submitted outcome requires its supported recovery; restart alone does not authorize replay. Result decisions and media selection continue to use the ordinary Objective controls.
+Factory checks changed-path ownership, unsafe links and special files, and scans staged content with its packaged Secretlint rules before publishing. A finding names the rule and path, never the value. Review false positives outside the checkout, then point `FACTORY_SECRETLINT_CONFIG` at a reviewed config and retry. Workers get a filtered environment without controller GitHub, Git or SSH credentials. Workers run as your OS user and are not a boundary against hostile code. Follow the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).

@@ -1251,9 +1251,11 @@ test("a service bound without the credential a configuration now needs is replac
     const next = namedCommands(run, env, stale.document.blocked.detail, {
       ABSOLUTE_PRIVATE_FILE: credential,
     });
-    assert.match(next[0].command, /^rm \S+intake\.json$/);
-    next[0].exec();
+    // The queue record holds an order, so the refusal first names the command that reads it.
+    assert.equal(next[0].command, "factory queue list");
+    assert.match(next[1].command, /^rm \S+intake\.json$/);
     next[1].exec();
+    next[2].exec();
     assert.equal(run(["status", "--json"]).document.service.active, "active");
   }));
 

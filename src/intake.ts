@@ -421,12 +421,14 @@ export function resumeWatcherAfterUpgrade(
       !current?.watch ||
       !expected.watch ||
       expected.mode !== "running" ||
-      current.mode !== "draining" ||
+      !["draining", "running"].includes(current.mode) ||
       binding(current) !== binding(expected) ||
       !intakeSettled(config)
     )
       return false;
-    applyControl(config, current, "resume");
+    // A queue that is already running was never drained: the unit had failed
+    // and no owner was there to drain it.
+    if (current.mode === "draining") applyControl(config, current, "resume");
     return true;
   } finally {
     releaseControllerLock(path, lock);

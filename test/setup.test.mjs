@@ -91,7 +91,7 @@ fs.appendFileSync(root+'/calls',process.argv.slice(2).join(' ')+'\\n');
 const file=name=>root+'/'+name;
 const alive=()=>{try{const text=fs.readFileSync('/proc/'+fs.readFileSync(file('pid'),'utf8')+'/stat','utf8');return !['Z','X'].includes(text.slice(text.lastIndexOf(')')+2).split(' ')[0]);}catch{return false;}};
 if(action==='is-system-running'){console.log(fs.existsSync(file('unsupported'))?'offline':'running');}
-else if(action==='is-active'){console.log(fs.existsSync(file('start-failure'))?'failed':alive()?'active':'inactive');}
+else if(action==='is-active'){console.log(fs.existsSync(file('start-failure'))||(!alive()&&fs.existsSync(file('unit-failed')))?'failed':alive()?'active':'inactive');}
 else if(action==='is-enabled'){console.log(fs.existsSync(file('enabled'))?'enabled':'not-found');}
 else if(action==='show'){console.log(alive()?fs.readFileSync(file('pid'),'utf8'):'0');}
 else if(action==='enable'){if(fs.existsSync(file('enable-failure')))process.exit(1);fs.writeFileSync(file('registered'),process.argv[4]);fs.writeFileSync(file('enabled'),'');}
@@ -107,6 +107,7 @@ else if(action==='stop'&&fs.existsSync(file('foreign-at-stop'))){
  fs.rmSync(file('foreign-at-stop'));
 }
 else if(action==='start'&&!alive()&&!fs.existsSync(file('start-failure'))){
+ fs.rmSync(file('unit-failed'),{force:true});
  const unit=fs.readFileSync(fs.readFileSync(file('registered'),'utf8'),'utf8');
  const binding=JSON.parse(unit.split('\\n')[0].slice('# Factory local supervision v1 '.length));
  const args=[binding.cli,'supervisor','serve','--config',binding.config];
@@ -1270,7 +1271,7 @@ test("a package that does not start says where its refusal is, and the way back 
     const candidate = join(root, "candidate-cli.mjs");
     writeFileSync(
       candidate,
-      'console.error("State from an earlier Factory version: start fresh");process.exit(1);\n',
+      `import{writeFileSync}from"node:fs";writeFileSync(${JSON.stringify(join(root, "unit-failed"))},"");console.error("State from an earlier Factory version: start fresh");process.exit(1);\n`,
     );
     const failed = run(["supervisor", "upgrade", "--cli", candidate]);
     assert.equal(failed.status, 1, failed.stdout + failed.stderr);
@@ -1283,12 +1284,12 @@ test("a package that does not start says where its refusal is, and the way back 
       all.find(({ command }) => command.startsWith(prefix));
     const log = named("journalctl");
     const back = named("factory supervisor upgrade");
-    const start = named("factory supervisor start");
     assert.match(log.command, /^journalctl --user -u factory-/);
     assert.match(log.exec().stdout, /start fresh/);
     assert.match(back.command, new RegExp(`--cli ${previous}`));
+    // The way back restarts the service on its own: no start command follows.
+    assert.equal(named("factory supervisor start"), undefined);
     back.exec();
-    start.exec();
     const status = run(["status", "--json"]).document.service;
     assert.equal(status.active, "active");
     assert.equal(status.binding.cli, previous);

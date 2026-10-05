@@ -669,7 +669,7 @@ export async function supervise(
           await verifyServiceOwner(config, name);
         } catch (error) {
           throw new Error(
-            `${(error as Error).message}. The unit now runs ${candidate.cli}; to return to the previous package run \`${supervisorCommand("upgrade", configPath, { cli: value.cli })}\`, then \`${supervisorCommand("start", configPath)}\` (upgrade leaves a stopped service stopped; if start says the queue is draining, run \`factory queue resume --config ${word(resolve(configPath))}\` first)`,
+            `${(error as Error).message}. The unit now runs ${candidate.cli}; to return to the previous package, which restarts the service, run \`${supervisorCommand("upgrade", configPath, { cli: value.cli })}\``,
           );
         }
       }

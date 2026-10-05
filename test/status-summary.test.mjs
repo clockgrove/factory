@@ -382,10 +382,6 @@ test("decisions name the exact command with real values", () => {
       message: "Replacement requires a known generated amendment rejection",
     },
     {
-      kind: "ownership",
-      message: "Amendment replacement requires paused, settled ownership",
-    },
-    {
       kind: "intake",
       message: "Amendment requires a nonterminal Objective",
     },
@@ -876,11 +872,116 @@ test("a rejected amendment that stopped the run names its exit before the retry 
   assert.equal(cancel.nextAction.command, "factory cancel --objective 7");
   assert.match(cancel.nextAction.reason, /limit raised/);
   // Only a planning limit is a configuration change; the others are not.
-  const ownership = stopped({
+});
+
+test("a rejected amendment refused for ownership names what settles it, never cancel", () => {
+  const refusal = {
     kind: "ownership",
     message: "Amendment replacement requires paused, settled ownership",
-  });
-  assert.doesNotMatch(ownership.nextAction.reason, /limit raised/);
+  };
+  const rejected = (overrides) =>
+    summarizeStatus(
+      execution([item("A", { status: "pending" })], {
+        runActive: false,
+        coordinator: { mode: "paused", phase: "active" },
+        pendingAmendment: {
+          phase: "rejected",
+          error: "coverage gap",
+          replacementRefusal: refusal,
+        },
+        ...overrides,
+      }),
+    );
+  // An unrelated stop is recorded: retry clears it.
+  assert.equal(
+    rejected({ state: "failed", lastError: "another stop" }).nextAction.command,
+    "factory retry --objective 7",
+  );
+  // An owner that is draining: resume it.
+  assert.equal(
+    rejected({
+      runActive: true,
+      coordinator: { mode: "draining", phase: "active" },
+    }).nextAction.command,
+    "factory resume --objective 7",
+  );
+  // Paused and settling under a live owner: nothing to run.
+  assert.equal(rejected({ runActive: true }).nextAction, null);
+  // No owner: the run settles recorded work.
+  assert.equal(rejected({}).nextAction.command, "factory run --objective 7");
+});
+
+test("a sealed Objective under a changed configuration names the restore and run, not cancel", () => {
+  const sealed = summarizeStatus(
+    execution([item("A", { status: "done" })], {
+      configurationChanged: true,
+      sealed: true,
+      runActive: false,
+    }),
+  );
+  assert.equal(sealed.nextAction.command, "factory run --objective 7");
+  assert.match(sealed.nextAction.reason, /restore the configuration/);
+  assert.match(sealed.nextAction.reason, /cancel is refused/);
+});
+
+test("a preparation under a changed configuration names a refusal before projection and cancel after", () => {
+  const before = summarizeStatus(
+    preparing({ configurationChanged: true, runActive: false }),
+  );
+  assert.match(
+    before.nextAction.command,
+    /^factory decide --objective 7 --outcome refuse /,
+  );
+  const after = summarizeStatus(
+    preparing({
+      configurationChanged: true,
+      runActive: false,
+      issueByItemId: { A: 11 },
+    }),
+  );
+  assert.equal(after.nextAction.command, "factory cancel --objective 7");
+});
+
+test("a live owner keeps its configuration: a changed one does not hide resume, decide or select", () => {
+  const paused = summarizeStatus(
+    execution([item("A", { status: "pending" })], {
+      configurationChanged: true,
+      runActive: true,
+      coordinator: { mode: "paused", phase: "active" },
+    }),
+  );
+  assert.equal(paused.nextAction.command, "factory resume --objective 7");
+  const waiting = summarizeStatus(
+    execution(
+      [
+        item("A", {
+          status: "waiting",
+          step: "approve-result",
+          acceptancePending: {
+            criterion: "c",
+            treeSha: "a".repeat(40),
+            question: "q",
+            detail: "d",
+          },
+        }),
+      ],
+      { configurationChanged: true, runActive: true },
+    ),
+  );
+  assert.match(waiting.nextAction.command, /^factory decide /);
+  const prepared = summarizeStatus(
+    preparing({
+      configurationChanged: true,
+      runActive: true,
+      planReview: {
+        status: "needs-human",
+        acceptable: true,
+        question: "q",
+        digest: "d",
+      },
+    }),
+  );
+  assert.match(prepared.nextAction.command, /^factory decide /);
 });
 
 test("a changed installation configuration names cancel, not a retry that cannot continue", () => {
@@ -888,6 +989,7 @@ test("a changed installation configuration names cancel, not a retry that cannot
     const changed = summarizeStatus(
       execution([item("A", { status: "pending" })], {
         state,
+        runActive: false,
         configurationChanged: true,
         lastError: state === "failed" ? "stopped" : null,
       }),

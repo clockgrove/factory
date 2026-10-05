@@ -107,6 +107,10 @@ export interface PreparingStatusView extends WaitView {
   } | null;
   /** Planning stopped for a decision before producing a reviewable plan. */
   planningStopped: boolean;
+  /** Work Item issues projected so far; projection has started when any exist. */
+  issueByItemId?: Record<string, unknown>;
+  /** Set when the installation configuration differs from the one planning started under. */
+  configurationChanged?: boolean;
   cancelledAt: string | null;
   error?: string | null;
 }
@@ -145,6 +149,8 @@ export interface ExecutionStatusView extends WaitView {
   objective: number;
   /** Set when the installation configuration differs from the one the Objective started under. */
   configurationChanged?: boolean;
+  /** Final acceptance is sealed: the Objective only reconciles its closure, and cancel is refused. */
+  sealed?: boolean;
   state: "active" | "waiting" | "complete" | "failed" | "cancelled";
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
@@ -323,6 +329,43 @@ function cancelRefused(objective: number, refusal: Refusal) {
 }
 
 /**
+ * The command for a rejected amendment whose replacement is refused now:
+ * `ownership` settles (an unrelated stop, an owner that is not paused, work
+ * still running), so name what settles it; every other kind is permanent for
+ * this Objective and ends in cancel.
+ */
+function refusedReplacement(view: ExecutionStatusView, refusal: Refusal) {
+  const objective = view.objective;
+  if (refusal.kind !== "ownership") return cancelRefused(objective, refusal);
+  const mode = view.coordinator?.mode;
+  const then = "; status then names the replacement";
+  if (view.state === "failed")
+    return {
+      command: retryCommand(objective),
+      reason: short(
+        `An unrelated stop is recorded, and a replacement needs it cleared (${refusal.message}): this clears it${then}`,
+        240,
+      ),
+    };
+  if (view.runActive === true && mode && mode !== "paused")
+    return {
+      command: `factory resume --objective ${objective}`,
+      reason: short(
+        `The owner is ${mode}, and a replacement needs it paused and settled (${refusal.message}): this resumes it${then}`,
+        240,
+      ),
+    };
+  if (view.runActive === true) return null;
+  return {
+    command: run(objective),
+    reason: short(
+      `A replacement needs settled ownership (${refusal.message}): this settles recorded work${then}`,
+      240,
+    ),
+  };
+}
+
+/**
  * The rejected graph amendment as the status line: cancel when no replacement
  * can follow, else the replacement. A run that stopped on the rejection has
  * `state.error` set (the runner records the work fault), so this comes before
@@ -339,7 +382,7 @@ function rejectedAmendment(
     phase: "needs-decision",
     summary: "graph amendment was rejected",
     nextAction: refusal
-      ? cancelRefused(objective, refusal)
+      ? refusedReplacement(view, refusal)
       : {
           command: `factory propose-amendment --objective ${objective} --proposal FILE`,
           reason: short(pending.error ?? "Submit a diagnosed replacement", 160),
@@ -588,7 +631,7 @@ function blamedItem(
       phase: "failed",
       summary,
       nextAction: refusal
-        ? cancelRefused(objective, refusal)
+        ? refusedReplacement(view, refusal)
         : {
             command: `factory propose-amendment --objective ${objective} --proposal FILE`,
             reason: `The amendment that was to fix ${file} was rejected: ${short(pending.error ?? "submit a replacement", 120)}`,
@@ -815,6 +858,10 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: "Repeats cancellation of the recorded work",
       },
     };
+  // The run refuses a plan made under another configuration, so a resume or
+  // diagnostics only leads to that refusal. A live owner keeps its configuration.
+  if (view.configurationChanged && view.runActive !== true)
+    return configurationStop(view);
   if (view.error)
     return {
       phase: "failed",
@@ -894,6 +941,59 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
   };
 }
 
+/**
+ * An Objective started under another configuration, with no owner: the run
+ * refuses it. Restoring the configuration is always a way out. Cancel ends it
+ * unless final acceptance is sealed (cancel is refused then; the restored
+ * run reconciles the closure) or Factory is still planning, where a refusal
+ * before projection plans again.
+ */
+function configurationStop(
+  view: ExecutionStatusView | PreparingStatusView,
+): StatusSummary {
+  const objective = view.objective;
+  const restore =
+    "Factory will not run an Objective under a different configuration: restore the configuration it started with";
+  const summary =
+    "the installation configuration changed since this Objective started";
+  if (view.state === "preparing") {
+    if (Object.keys(view.issueByItemId ?? {}).length)
+      return {
+        phase: "needs-decision",
+        summary,
+        nextAction: {
+          command: `factory cancel --objective ${objective}`,
+          reason: `${restore} (then ${run(objective)}), or cancel it: Work Item issues exist, so the plan cannot be refused`,
+        },
+      };
+    return {
+      phase: "needs-decision",
+      summary,
+      nextAction: {
+        command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
+        reason: `${restore} (then ${run(objective)}), or discard the plan: ${run(objective)} then plans again under the new configuration`,
+      },
+    };
+  }
+  if (view.sealed)
+    return {
+      phase: "needs-decision",
+      summary,
+      nextAction: {
+        command: run(objective),
+        reason: `${restore}; then this reconciles the Objective closure (acceptance is sealed, so cancel is refused)`,
+      },
+    };
+  return {
+    phase: "needs-decision",
+    summary,
+    nextAction: {
+      command: `factory cancel --objective ${objective}`,
+      reason: `${restore} (then ${run(objective)}), or cancel it and start a new Objective`,
+    },
+  };
+}
+
 /** The single derivation of phase, summary and next action. Pure. */
 export function summarizeStatus(view: StatusView): StatusSummary {
   const objective = view.objective;
@@ -953,18 +1053,10 @@ export function summarizeStatus(view: StatusView): StatusSummary {
       },
     };
   // The run refuses an Objective started under another configuration, so no
-  // retry or run continues it: restore that configuration, or cancel.
-  if (view.configurationChanged)
-    return {
-      phase: "needs-decision",
-      summary:
-        "the installation configuration changed since this Objective started",
-      nextAction: {
-        command: `factory cancel --objective ${objective}`,
-        reason:
-          "Factory will not run an Objective under a different configuration: restore the configuration it started with (then factory run), or cancel it and start a new Objective",
-      },
-    };
+  // retry or run continues it. A live owner keeps the configuration it loaded
+  // and still accepts resume, decide and select, so those are named below.
+  if (view.configurationChanged && view.runActive !== true)
+    return configurationStop(view);
   // An Objective stopped outside any Work Item: inspect, then run it again.
   // A pending decision waits until then, since decide refuses a
   // stopped Objective; a failed item's retry or repair answers the stop.

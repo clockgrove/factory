@@ -1280,6 +1280,8 @@ export function statusDocument(
     state.configDigest !== installationConfigDigest
       ? { configurationChanged: true as const }
       : {}),
+    // Cancel is refused once final acceptance is sealed; the run reconciles.
+    sealed: Boolean(state.finalAcceptance),
     state: state.cancelledAt
       ? ("cancelled" as const)
       : state.error
@@ -1383,6 +1385,7 @@ export function preparationStatusDocument(
   preparation: PreparationState,
   secrets: string[] = [],
   runActive: boolean | null = null,
+  installationConfigDigest?: string,
 ) {
   const redact = (value: string | undefined) =>
     value ? redactDiagnosticDetail(value, secrets) : null;
@@ -1393,6 +1396,11 @@ export function preparationStatusDocument(
     objective: preparation.objective,
     runId: preparation.runId,
     runActive,
+    // Planned under another configuration: the run refuses it (see runObjective).
+    ...(installationConfigDigest !== undefined &&
+    preparation.configDigest !== installationConfigDigest
+      ? { configurationChanged: true as const }
+      : {}),
     state: "preparing" as const,
     coordinator:
       redactCoordinatorDisposition(preparation.coordinator, secrets) ?? null,
@@ -1429,7 +1437,12 @@ export function continuationStatusDocument(
   installationConfigDigest?: string,
 ) {
   return continuation?.schemaVersion === 8
-    ? preparationStatusDocument(continuation, secrets, runActive)
+    ? preparationStatusDocument(
+        continuation,
+        secrets,
+        runActive,
+        installationConfigDigest,
+      )
     : statusDocument(
         continuation,
         repository,

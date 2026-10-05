@@ -1213,7 +1213,8 @@ async function runObjectivePass(
         state.configDigest !== installationConfigDigest
       ) {
         throw new Error(
-          `Existing Objective state does not match this Factory installation; restore the configuration it started with, or run \`factory cancel --objective ${objective}\``,
+          // Cancel is refused once acceptance is sealed; the restored run reconciles.
+          `Existing Objective state does not match this Factory installation; restore the configuration it started with${state.finalAcceptance ? ", then run it again" : `, or run \`factory cancel --objective ${objective}\``}`,
         );
       }
       if (state.error)
@@ -1344,7 +1345,7 @@ async function runObjectivePass(
       )
         throw new Error(
           Object.keys(preparation.issueByItemId).length
-            ? "Base, Objective, sources or configuration changed during projection; operator direction required"
+            ? `Base, Objective, sources or configuration changed during projection; restore what changed, or run \`factory cancel --objective ${objective}\``
             : "Base, Objective, sources or configuration changed since planning; refuse the plan with factory decide to plan again",
         );
       if (owner.handoff && canHandoff(preparation))

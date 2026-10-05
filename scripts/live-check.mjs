@@ -28,7 +28,8 @@
 // harness's scripted planner, reviewer and worker over real GitHub, and the
 // setup needs no model login. The nightly run uses it. The run exits 1
 // unless the last launch completed, every kill point was reached and GitHub
-// holds the expected counts.
+// holds the expected counts. A tag is single-use: a finished run leaves
+// live/TAG/ on main, so `run` refuses a tag the repository already holds.
 // Run `npm run build` first. `reset` closes only what this harness made: Objectives
 // titled `Live check TAG` with this fixture's body and the gh login as author, their Work
 // Item issues, their `factory/objective-N/*` PRs and branches. `reset --objective N` limits
@@ -250,6 +251,23 @@ export function setup(call = api) {
 const signature = (tag) =>
   `under \`live/${tag}/\` for Factory's live crash-restart check`;
 
+/**
+ * A tag names `live/TAG/` in the repository, and a finished run leaves its
+ * files on main (reset closes issues and PRs, it does not rewrite history).
+ * A second run under the same tag would write identical files, so every Work
+ * Item would end with "Worker produced no repository change": a harness
+ * collision, not a Factory fault. Refuse it before anything is created.
+ */
+export function assertTagUnused(tag, call = api) {
+  const { status } = call("GET", `repos/${REPO}/contents/live/${tag}`);
+  if (status === 404) return;
+  if (status === 200)
+    throw new Error(
+      `--tag ${tag} was already run: ${REPO} holds live/${tag}/ on its default branch; use a new tag`,
+    );
+  throw new Error(`tag lookup live/${tag}: ${status}`);
+}
+
 export function objectiveBody(tag) {
   const dir = `live/${tag}`;
   return `## Outcome
@@ -428,6 +446,7 @@ export async function run(options) {
       `#${options.objective} is not a live-check Objective in ${REPO}`,
     );
   if (!objective) {
+    assertTagUnused(tag);
     // Private: the HTTP log and Factory state hold private repository data.
     mkdirSync(work, { recursive: true, mode: 0o700 });
     const url = gh(

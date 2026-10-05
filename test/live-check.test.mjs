@@ -17,6 +17,7 @@ import {
   scriptedGraph,
 } from "../scripts/live-check-scripted.mjs";
 import {
+  assertTagUnused,
   checkOptions,
   count,
   objectiveBody,
@@ -112,6 +113,23 @@ test("reset reports a write GitHub refused", () => {
   assert.throws(
     () => reset("5", live(200, 403)),
     /delete refs\/heads\/factory\/objective-5\/a: 403/,
+  );
+});
+
+test("a tag the repository already holds is refused before anything is created", () => {
+  const answer = (status) => (method, path) => {
+    assert.equal(method, "GET");
+    assert.equal(path, `repos/${REPO}/contents/live/day-1`);
+    return { status };
+  };
+  assert.doesNotThrow(() => assertTagUnused("day-1", answer(404)));
+  assert.throws(
+    () => assertTagUnused("day-1", answer(200)),
+    /--tag day-1 was already run.*use a new tag/,
+  );
+  assert.throws(
+    () => assertTagUnused("day-1", answer(500)),
+    /tag lookup live\/day-1: 500/,
   );
 });
 

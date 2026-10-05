@@ -290,6 +290,82 @@ const FIXED = [
     "preparing, no plan, 0 issues, planning",
     "the installation configuration changed",
   ],
+  // A rejection is held paused (a handoff or a resume does not release it), so
+  // status keeps naming the replacement or cancel, also with no planning
+  // revision left (a permanent refusal goes straight to cancel).
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected, then the coordinator drained",
+  ],
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected, then the coordinator resumed",
+  ],
+  [
+    "regular",
+    "alpha pending; beta pending",
+    "an amendment was rejected with no planning revision left, then the coordinator drained",
+  ],
+  [
+    "native-stack",
+    "alpha published (PR); beta pending",
+    "an amendment was rejected and the run stopped, then the coordinator resumed",
+  ],
+  [
+    "regular",
+    "alpha running/execute; beta pending",
+    "an amendment was rejected and the run stopped, then the coordinator drained",
+  ],
+  // A pause or drain of a preparation outranks a changed configuration: a
+  // refusal would discard it.
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "paused",
+    "the installation configuration changed",
+  ],
+  [
+    "native-stack",
+    "preparing, plan clean, planning complete, 0 issues, projection",
+    "draining",
+    "the installation configuration changed",
+  ],
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 1 issues, projection",
+    "paused",
+    "the installation configuration changed",
+  ],
+  // The base, the Objective body or the sources changed during preparation:
+  // the run refuses and status names what ends or discards the plan.
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "the base changed since planning",
+  ],
+  [
+    "native-stack",
+    "preparing, plan clean, planning complete, 0 issues, projection",
+    "the Objective body changed since planning",
+  ],
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 1 issues, projection",
+    "the sources changed since planning",
+  ],
+  [
+    "native-stack",
+    "preparing, no plan, 0 issues, planning",
+    "the base changed since planning",
+  ],
+  [
+    "regular",
+    "preparing, plan clean, planning complete, 0 issues, planning",
+    "paused",
+    "the base changed since planning",
+  ],
   // A cancelled item of a live Objective (#718).
   [
     "native-stack",

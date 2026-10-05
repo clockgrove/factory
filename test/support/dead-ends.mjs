@@ -609,7 +609,7 @@ const reviewNeedsHuman = (acceptable) => (state) => {
 /** Overlay dimensions; each value mutates a state and says if it applies. */
 /** A graph amendment was rejected (see the "rejected amendment" overlays). */
 const rejectAmendment =
-  ({ spare, supplied = false, stopped = false, unrelated = false }) =>
+  ({ spare, supplied = false, stopped = false, unrelated = false, then }) =>
   (state) => {
     if (state.schemaVersion !== 7 || state.pendingAmendment || state.error)
       return false;
@@ -646,6 +646,9 @@ const rejectAmendment =
     if (stopped) state.error = error;
     // A later, unrelated stop replaced it: a replacement needs that cleared first.
     if (unrelated) state.error = "Injected unrelated stop";
+    // Then an operator or a handoff changed the mode, as a drain, a SIGTERM
+    // handoff of the rejecting pass or `factory resume` does.
+    if (then) coordinator(state).mode = then;
     return true;
   };
 
@@ -764,13 +767,6 @@ const OVERLAYS = {
       state.errorItem = state.graph.items[0].id;
       return true;
     },
-    "the installation configuration changed": (state) => {
-      state.configDigest = "0".repeat(64);
-      // The seal records the digest it was made under.
-      if (state.finalAcceptance)
-        state.finalAcceptance.configDigest = state.configDigest;
-      return true;
-    },
     "cancel was requested": (state) => {
       if (state.cancelRequested || state.cancelledAt) return false;
       state.cancelRequested = true;
@@ -794,6 +790,37 @@ const OVERLAYS = {
     },
     draining: (state) => {
       coordinator(state).mode = "draining";
+      return true;
+    },
+  },
+  // The operator's configuration changed after the Objective started: its own
+  // dimension, so that it combines with a pause or a drain.
+  configuration: {
+    "the installation configuration changed": (state) => {
+      state.configDigest = "0".repeat(64);
+      // The seal records the digest it was made under.
+      if (state.finalAcceptance)
+        state.finalAcceptance.configDigest = state.configDigest;
+      return true;
+    },
+  },
+  // What a plan was made from changed before it was projected: the base, the
+  // Objective body or the sources. Only the run, which reads GitHub and the
+  // checkout, can see it; it refuses and records that it did.
+  "planning inputs": {
+    "the base changed since planning": (state) => {
+      if (state.schemaVersion !== 8) return false;
+      state.baseSha = "1".repeat(40);
+      return true;
+    },
+    "the Objective body changed since planning": (state) => {
+      if (state.schemaVersion !== 8) return false;
+      state.objectiveBodyDigest = "1".repeat(64);
+      return true;
+    },
+    "the sources changed since planning": (state) => {
+      if (state.schemaVersion !== 8) return false;
+      state.sourcePacketDigest = "1".repeat(64);
       return true;
     },
   },
@@ -976,6 +1003,22 @@ const OVERLAYS = {
       spare: 1,
       unrelated: true,
     }),
+    // The mode changed after the rejection: a handoff of the pass that
+    // rejected it drains, and a resume runs.
+    "an amendment was rejected, then the coordinator drained": rejectAmendment({
+      spare: 1,
+      then: "draining",
+    }),
+    "an amendment was rejected, then the coordinator resumed": rejectAmendment({
+      spare: 1,
+      then: "running",
+    }),
+    "an amendment was rejected with no planning revision left, then the coordinator drained":
+      rejectAmendment({ spare: 0, then: "draining" }),
+    "an amendment was rejected and the run stopped, then the coordinator resumed":
+      rejectAmendment({ spare: 1, stopped: true, then: "running" }),
+    "an amendment was rejected and the run stopped, then the coordinator drained":
+      rejectAmendment({ spare: 0, stopped: true, then: "draining" }),
   },
 };
 

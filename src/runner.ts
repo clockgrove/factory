@@ -75,7 +75,11 @@ import {
 import { runNativeGraph } from "./delivery/native-runner.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { runRegularGraph } from "./delivery/regular-runner.js";
-import { DiagnosticEmitter, StateDiagnostics } from "./diagnostics.js";
+import {
+  continuationStatusDocument,
+  DiagnosticEmitter,
+  StateDiagnostics,
+} from "./diagnostics.js";
 import {
   awaitsOperator,
   clearAllRepeats,
@@ -473,6 +477,40 @@ function releaseMutationLock(path: string, lock: ControllerLock): void {
   if (lock.fd !== -1) releaseControllerLock(path, lock);
 }
 
+/**
+ * What a mode change returns: the coordinator, plus the hold when a rejected
+ * amendment kept it from taking effect (`rejectionHoldsPause`), with the
+ * command status names to lift it. Only a resume or a drain is held back.
+ */
+function modeChangeResult(
+  config: FactoryConfig,
+  state: ContinuationState,
+  action: string,
+  runActive: boolean,
+) {
+  if (
+    !["resume", "drain"].includes(action) ||
+    !rejectionHoldsPause(state) ||
+    state.coordinator?.mode !== "paused"
+  )
+    return state.coordinator;
+  const next = continuationStatusDocument(
+    state,
+    config.repository,
+    state.objective,
+    config.delivery.kind,
+    [],
+    state.capacity.concurrency,
+    runActive,
+    undefined,
+    factoryConfigDigest(config),
+  ).nextAction?.command;
+  return {
+    ...state.coordinator,
+    hold: { reason: "rejected-amendment" as const, next: next ?? null },
+  };
+}
+
 export async function controlObjective(
   config: FactoryConfig,
   request: ControlRequest,
@@ -525,7 +563,7 @@ export async function controlObjective(
           : "running",
     );
     saveState(statePath(config.repository, request.objective), state);
-    return state.coordinator;
+    return modeChangeResult(config, state, request.action, false);
   } finally {
     releaseControllerLock(lockPath, lock);
   }
@@ -848,7 +886,7 @@ export async function runObjective(
         );
         persist();
         wake();
-        return state.coordinator;
+        return modeChangeResult(config, state, request.action, true);
       }
       const apply = async () => {
         if (owner.abort.signal.aborted)
@@ -1345,23 +1383,24 @@ async function runObjectivePass(
         owner.snapshot = preparation;
         saveState(path, preparation);
       }
-      const changedSincePlanning =
+      // The plan's own inputs. Status checks the configuration live, so
+      // restoring it clears the stop without a run.
+      const inputsChanged =
         preparation.sourcePacketDigest !== sourcePacketDigest ||
-        preparation.configDigest !== installationConfigDigest ||
         preparation.baseSha !== baseSha ||
         preparation.objectiveBodyDigest !==
           createHash("sha256").update(issue.body).digest("hex");
       // Only a run sees this; recording it lets status name the way out
       // (a refusal before projection, a cancel after) instead of this run.
-      if (
-        changedSincePlanning !==
-        (preparation.changedSincePlanning === true)
-      ) {
-        if (changedSincePlanning) preparation.changedSincePlanning = true;
+      if (inputsChanged !== (preparation.changedSincePlanning === true)) {
+        if (inputsChanged) preparation.changedSincePlanning = true;
         else delete preparation.changedSincePlanning;
         saveState(path, preparation);
       }
-      if (changedSincePlanning)
+      if (
+        inputsChanged ||
+        preparation.configDigest !== installationConfigDigest
+      )
         throw new Error(
           projectionStarted(preparation)
             ? `Base, Objective, sources or configuration changed during projection; restore what changed, or run \`factory cancel --objective ${objective}\``

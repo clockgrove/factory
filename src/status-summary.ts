@@ -111,7 +111,7 @@ export interface PreparingStatusView extends WaitView {
   projectionStarted?: boolean;
   /** Set when the installation configuration differs from the one planning started under. */
   configurationChanged?: boolean;
-  /** A run found the base, Objective, sources or configuration changed since planning and refused. */
+  /** A run found the base, Objective or sources changed since planning and refused; the configuration is checked live (`configurationChanged`). */
   changedSincePlanning?: boolean;
   cancelledAt: string | null;
   error?: string | null;

@@ -79,7 +79,7 @@ function help(): void {
       "      Control the background service (stop drains and keeps state; --disable also stops it starting at login)",
       "  status [--objective N] [--json]",
       "      With --objective: the phase and the exact next command. Without: the service and the queue",
-      "  decide --objective N [--item ITEM] --outcome accept|refuse [--answer TEXT] --reason TEXT",
+      "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT] --reason TEXT",
       "      Decide a plan (--answer is required to accept one) or a result criterion (--item names the Work Item; without it, the final acceptance)",
       "  retry --objective N [--item ITEM] [--rereview]",
       "      Answer a step's decision or configuration fix, start a failed Work Item's new attempt, or (--item --rereview) run validation and review again on a pending result",
@@ -252,6 +252,7 @@ async function decideCommand(
     throw new Error("decide requires --outcome accept|refuse and --reason");
   const decided = await composePlanning(config).decide(objective, {
     item,
+    criterion: option(args, "criterion"),
     actor: operatorName(),
     outcome,
     answer: option(args, "answer"),
@@ -263,7 +264,11 @@ async function decideCommand(
       ? `Accepted the plan for Objective #${objective}; run ${run} to continue`
       : decided === "plan-refused"
         ? `Refused and discarded the plan for Objective #${objective}; the next run plans again`
-        : `Recorded ${outcome} for the ${item ? `pending criterion of Work Item ${item}` : "pending final acceptance"}; ${run} continues it`,
+        : `Recorded ${outcome} for the ${item ? `pending criterion of Work Item ${item}` : "pending final acceptance"}; ${
+            decided === "result-open"
+              ? `other criteria still wait: \`factory status --objective ${objective}\` lists each decision, then ${run} continues`
+              : `${run} continues it`
+          }`,
   );
 }
 

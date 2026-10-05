@@ -86,7 +86,7 @@ export interface FactoryApplication {
   decide(
     objective: number,
     input: import("./runner.js").DecisionInput,
-  ): Promise<"plan-accepted" | "plan-refused" | "result">;
+  ): Promise<"plan-accepted" | "plan-refused" | "result" | "result-open">;
   runObjective(
     objective: number,
     options?: { deadlineAt?: string },

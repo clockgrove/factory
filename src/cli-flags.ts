@@ -35,7 +35,7 @@ const commandFlags: Record<string, string[]> = {
   run: ["objective", "deadline"],
   queue: [],
   supervisor: ["cli", "disable", "service-credential"],
-  decide: ["objective", "item", "outcome", "answer", "reason"],
+  decide: ["objective", "item", "criterion", "outcome", "answer", "reason"],
   status: ["objective", "json"],
   diagnostics: [
     "objective",
@@ -93,7 +93,7 @@ export const removedCommands: Record<string, string> = {
     "factory setup --background or factory run --objective N, which run the same checks",
   intake: "factory queue add|list|remove|pause|resume|drain",
   "decide-result":
-    "factory decide --objective N [--item X] --outcome accept|refuse --reason TEXT",
+    "factory decide --objective N [--item X] [--criterion TEXT] --outcome accept|refuse --reason TEXT",
   rereview: "factory retry --objective N --item X --rereview",
   plan: "factory run --objective N, which plans and saves the plan for factory status",
   analyze: "factory diagnostics --objective N --analyze",

@@ -12,8 +12,11 @@ import { coverageObligations } from "../dist/qa.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
   renderServiceStatus,
+  renderStatusText,
   summarizeStatus,
 } from "../dist/status-summary.js";
+import { reviewAcceptance, validateTree } from "../dist/validation.js";
+import { resultFindings } from "./support/review-protocol.mjs";
 import {
   createTarget,
   factoryConfig,
@@ -230,6 +233,160 @@ test("the result decision a stop names runs end to end, for a Work Item and for 
     );
     assert.equal(stray.status, 1);
     assert.match(stray.stderr, /--answer belongs to a plan decision/);
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a review with three criteria for a human stops once with all three, each answered by its own decision", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-cli-three-"));
+  const previous = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const { target, config, state, commit, treeSha } = waitingObjective(root);
+    const configPath = join(root, "config.json");
+    writeFileSync(configPath, JSON.stringify(config));
+    const criteria = [
+      "result.txt exists",
+      "result.txt says it was created",
+      "the owner's 'quoted' wording is kept",
+    ];
+    const evidence = await validateTree(
+      target.checkout,
+      join(root, "validation"),
+      commit,
+      treeSha,
+      [],
+    );
+    let reviewerCalls = 0;
+    const model = {
+      async reviewResult(request) {
+        reviewerCalls += 1;
+        return {
+          packetId: request.reviewPacket.id,
+          findings: resultFindings(
+            request,
+            criteria.map((criterion) => ({
+              criterion,
+              verdict: "needs-human",
+              source: "OBJECTIVE",
+              quote: criterion,
+              detail: `Evidence for ${criterion} is not conclusive`,
+              question: `Does the result meet: ${criterion}?`,
+            })),
+          ),
+        };
+      },
+    };
+    const review = (decisions) =>
+      reviewAcceptance({
+        model,
+        checkout: target.checkout,
+        baseSha: target.baseSha,
+        commit,
+        evidence,
+        criteria,
+        sources: [{ path: "OBJECTIVE", content: criteria.join("\n") }],
+        decisions,
+      });
+
+    // One review: every criterion that needs a human, in one stop.
+    const stopped = await review([]);
+    assert.equal(reviewerCalls, 1);
+    assert.equal(stopped.pending.criterion, criteria[0]);
+    assert.deepEqual(
+      stopped.pending.more.map((other) => other.criterion),
+      criteria.slice(1),
+    );
+    state.work.one.acceptancePending = stopped.pending;
+    state.graph.items[0].acceptance = criteria;
+    const path = statePath(config.repository, 1);
+    saveState(path, state);
+
+    const shown = () => {
+      const view = statusDocument(
+        readState(config.repository, 1),
+        config.repository,
+        1,
+        "regular",
+      );
+      return renderStatusText({ ...summarizeStatus(view), ...view });
+    };
+    const commands = shown()
+      .filter((line) => line.startsWith("  Decide: "))
+      .map((line) => line.slice("  Decide: ".length));
+    assert.equal(commands.length, 3);
+    const decide = (command, outcome) => {
+      const ran = spawnSync(
+        "sh",
+        [
+          "-c",
+          `${command
+            .replace(/^factory/, `${process.execPath} ${cli}`)
+            .replace("accept|refuse", outcome)
+            .replace('"WHY"', "'Looked at it'")} --config ${configPath}`,
+        ],
+        { encoding: "utf8", env: { ...process.env } },
+      );
+      assert.equal(ran.status, 0, ran.stderr);
+      return ran.stdout;
+    };
+
+    // An answer needs the criterion it is for while several are pending.
+    const unnamed = spawnSync(
+      process.execPath,
+      [
+        cli,
+        "decide",
+        "--objective",
+        "1",
+        "--item",
+        "one",
+        "--outcome",
+        "accept",
+        "--reason",
+        "x",
+        "--config",
+        configPath,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(unnamed.status, 1);
+    assert.equal(
+      readState(config.repository, 1).work.one.acceptanceDecisions,
+      undefined,
+    );
+
+    // Answering all but the last keeps the Work Item waiting on the rest.
+    decide(commands[2], "accept");
+    decide(commands[0], "accept");
+    const waiting = readState(config.repository, 1).work.one;
+    assert.equal(waiting.status, "waiting");
+    assert.equal(waiting.step, "approve-result");
+    assert.equal(waiting.acceptancePending.criterion, criteria[1]);
+    assert.equal(waiting.acceptancePending.more, undefined);
+    assert.equal(
+      shown().filter((line) => line.startsWith("  Question: ")).length,
+      1,
+    );
+    decide(commands[1], "accept");
+    const resumed = readState(config.repository, 1).work.one;
+    assert.equal(resumed.status, "running");
+    assert.equal(resumed.step, "validate");
+    assert.deepEqual(
+      resumed.acceptanceDecisions.map((decision) => decision.criterion).sort(),
+      [...criteria].sort(),
+    );
+
+    // The rerun proceeds: no further question and no reviewer call.
+    const rerun = await review(resumed.acceptanceDecisions);
+    assert.equal(rerun.pending, undefined);
+    assert.equal(reviewerCalls, 1);
+    assert.ok(
+      rerun.evidence.criteria.every((c) => c.verdict === "human-accept"),
+    );
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previous;

@@ -788,8 +788,10 @@ function gitProcess(
   args: string[],
   pinned: boolean,
   overrides?: NodeJS.ProcessEnv,
+  /** The caller already holds the repository lock (withWorktreeRegistry). */
+  locked = false,
 ): Promise<string> {
-  const mode = gitLockMode(args);
+  const mode = locked ? undefined : gitLockMode(args);
   const network = ["fetch", "pull"].includes(gitSubcommand(args));
   const run = async () => {
     const deadline = network
@@ -828,6 +830,24 @@ function gitProcess(
     }
     return withRepositoryLock(key, mode, run);
   });
+}
+
+/**
+ * Run `body` holding `checkout`'s worktree-registry lock exclusively, so what
+ * it reads from the registry still holds when it acts on it: no other
+ * command, in this process or another controller's, reads or changes the
+ * registry in between. `git` runs a pinned command under that one hold (the
+ * locking wrappers would wait for it).
+ */
+export async function withWorktreeRegistry<T>(
+  checkout: string,
+  body: (git: (...args: string[]) => Promise<string>) => Promise<T>,
+): Promise<T> {
+  return withRepositoryLock(
+    repositoryKey(checkout, pinnedGitEnvironment()),
+    "exclusive",
+    () => body((...args) => gitProcess(checkout, args, true, undefined, true)),
+  );
 }
 
 /**

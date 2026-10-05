@@ -609,16 +609,13 @@ export async function runIntake(
     await serve();
     for (;;) {
       if (handingOff || record.mode === "draining") return record;
-      const existing = continuations(config).filter(
-        (state) => !terminal(state),
-      );
-      if (existing.length > 1)
-        throw new Error(
-          "Multiple nonterminal Objectives require ownership reconciliation",
-        );
-      const current = existing[0];
-      if (current && !record.objectives.includes(current.objective))
-        throw new Error("Active Objective is outside this intake selection");
+      // Unfinished queued Objectives come first, one at a time in queue
+      // order: foreground runs of different Objectives can each stop
+      // unfinished and be queued later (#824). One the queue does not hold
+      // stays with `factory run`.
+      const current = record.objectives
+        .map((id) => readContinuation(config.repository, id))
+        .find((state) => state && !terminal(state));
       const reasons: Record<string, string> = {};
       let selected = current?.objective;
       if (record.mode === "running" && !selected) {

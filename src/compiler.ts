@@ -1799,6 +1799,12 @@ export function planningSources(
   finalObjectiveCommands(body);
   workspacePackageAdditions(body);
   plannedPackageManager(body, checkout, baseSha);
+  const update = packageManagerUpdate(body);
+  if (update !== undefined)
+    assertPinnedNpmScripts(checkout, baseSha, baseSha, [], {
+      packageManagerUpdate: update,
+      preview: true,
+    });
   const sources: PlanningSource[] = [{ path: "OBJECTIVE", content: body }];
   const selected = selectedHeadings(body);
   const defaults = ["AGENTS.md", "README.md"].filter((path) => {

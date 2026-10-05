@@ -2776,11 +2776,20 @@ export function assertPinnedNpmScripts(
         throw new Error(
           `Package script validation blocked: ${path} differs from the accepted base; Package manager update grants no configuration or hook changes`,
         );
-  if (!selected.length) return;
-  const declared = new Set(authority.sourceDeclared ?? []);
   const bootstrap = selected.some(
     (check) => check.trim() === PINNED_PNPM_BOOTSTRAP,
   );
+  if (
+    (bootstrap || authority.packageManagerUpdate !== undefined) &&
+    [file(commit, ".npmrc"), file(commit, "pnpm-workspace.yaml")].some(
+      (content) => /pnpmfile/i.test(content ?? ""),
+    )
+  )
+    throw new Error(
+      "Package script validation blocked: configured pnpmfile hooks need separate authority",
+    );
+  if (!selected.length) return;
+  const declared = new Set(authority.sourceDeclared ?? []);
   if (
     bootstrap &&
     commands.findIndex((check) => check.trim() === PINNED_PNPM_BOOTSTRAP) >
@@ -2909,15 +2918,6 @@ export function assertPinnedNpmScripts(
         `Package script validation blocked: ${path} differs from the accepted base`,
       );
   }
-  if (
-    bootstrap &&
-    [file(commit, ".npmrc"), file(commit, "pnpm-workspace.yaml")].some(
-      (content) => /pnpmfile/i.test(content ?? ""),
-    )
-  )
-    throw new Error(
-      "Package script validation blocked: configured pnpmfile hooks need separate authority",
-    );
 }
 
 /** Supported root script forms; shell wrappers and package-manager flags are ambiguous. */

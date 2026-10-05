@@ -797,3 +797,65 @@ test("explicit version authority refuses a newly introduced workspace and preser
     );
   });
 });
+
+test("explicit version authority refuses configured pnpmfile hooks before Node validation or planning", async () => {
+  for (const configPath of [".npmrc", "pnpm-workspace.yaml"])
+    await fixture(async (root, target) => {
+      const hookPath = "tools/pnpm-hook.cjs";
+      target.baseSha = commit(target, {
+        [configPath]:
+          configPath === ".npmrc"
+            ? "pnpmfile=tools/pnpm-hook.cjs\nignore-scripts=true\n"
+            : `${workspace}pnpmfile: tools/pnpm-hook.cjs\n`,
+        [hookPath]: "module.exports = {};\n",
+      });
+      const head = commit(target, {
+        "package.json": JSON.stringify({ ...pkg, packageManager: after }),
+        [hookPath]: "module.exports = {hooks: {readPackage: p => p}};\n",
+      });
+      const marker = join(root, "configured-hook-node-check-ran");
+      const command = `node -e "require('node:fs').writeFileSync('${marker}', 'ran')"`;
+      for (const commands of [[], [command], ["pnpm run check"]])
+        assert.throws(
+          () =>
+            guard(
+              target,
+              head,
+              {
+                packageManagerUpdate: after,
+                requirePackageManagerUpdate: true,
+              },
+              commands,
+            ),
+          /configured pnpmfile hooks need separate authority/,
+        );
+      await assert.rejects(
+        validateWorkItem(
+          target.checkout,
+          join(root, "configured-hook-refused"),
+          item("update", [], undefined, command),
+          head,
+          git(target.checkout, "rev-parse", `${head}^{tree}`),
+          target.baseSha,
+          undefined,
+          undefined,
+          target.baseSha,
+          [],
+          undefined,
+          [],
+          after,
+        ),
+        /configured pnpmfile hooks need separate authority/,
+      );
+      assert.equal(existsSync(marker), false);
+      assert.throws(
+        () => planningSources(body, target.baseSha, target.checkout),
+        /configured pnpmfile hooks need separate authority/,
+      );
+      const legacy = commit(target, { "package.json": JSON.stringify(pkg) });
+      assert.doesNotThrow(
+        () => guard(target, legacy, {}, [command]),
+        "no-authority Node validation retains its existing hook scope",
+      );
+    });
+});

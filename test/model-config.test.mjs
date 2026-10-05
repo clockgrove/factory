@@ -1078,8 +1078,8 @@ test("install selects the pinned optional Claude adapter without changing planni
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     assert.deepEqual(config.planning, {
       kind: "codex-sdk",
-      planner: { model: "gpt-6.1-sol", reasoningEffort: "medium" },
-      reviewer: { model: "gpt-6.1-sol", reasoningEffort: "medium" },
+      planner: { model: "gpt-6.1-sol", reasoningEffort: "high" },
+      reviewer: { model: "gpt-6.1-sol", reasoningEffort: "high" },
     });
     assert.deepEqual(config.execution.harness, {
       kind: "claude-agent-sdk",
@@ -1169,15 +1169,15 @@ test("install resolves Factory-owned role defaults and isolates one-role overrid
     {
       name: "planner",
       flags: ["--planning-model", "planner-choice"],
-      planner: { model: "planner-choice", reasoningEffort: "medium" },
+      planner: { model: "planner-choice", reasoningEffort: "high" },
       reviewer: DEFAULT_REVIEWER_MODEL_SELECTION,
       worker: DEFAULT_WORKER_MODEL_SELECTION,
     },
     {
       name: "reviewer",
-      flags: ["--review-reasoning", "high"],
+      flags: ["--review-reasoning", "medium"],
       planner: DEFAULT_PLANNER_MODEL_SELECTION,
-      reviewer: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+      reviewer: { model: "gpt-6.1-sol", reasoningEffort: "medium" },
       worker: DEFAULT_WORKER_MODEL_SELECTION,
     },
     {

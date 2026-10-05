@@ -29,12 +29,12 @@ export interface CodexModelSelection {
 
 export const DEFAULT_PLANNER_MODEL_SELECTION: CodexModelSelection = {
   model: "gpt-6.1-sol",
-  reasoningEffort: "medium",
+  reasoningEffort: "high",
 };
 
 export const DEFAULT_REVIEWER_MODEL_SELECTION: CodexModelSelection = {
   model: "gpt-6.1-sol",
-  reasoningEffort: "medium",
+  reasoningEffort: "high",
 };
 
 export const DEFAULT_WORKER_MODEL_SELECTION: CodexModelSelection = {

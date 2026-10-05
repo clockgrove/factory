@@ -99,7 +99,7 @@ Runs the Work Item in an OpenAI-hosted environment over REST (`OpenAI-Beta: agen
   "concurrency": 1,
   "config": {
     "model": "APPROVED_MODEL",
-    "reasoningEffort": "low",
+    "reasoningEffort": "medium",
     "containerSize": "small",
     "apiKeyEnv": "FACTORY_OPENAI_API_KEY",
     "timeoutSeconds": 600

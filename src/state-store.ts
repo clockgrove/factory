@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { stateRoot, validateCapacity } from "./config.js";
-import { linuxProcessIdentity } from "./process.js";
+import { linuxProcessIdentity, processAlive, takeGuard } from "./process.js";
 import {
   assertRepeats,
   assertWait,
@@ -370,11 +370,7 @@ export function objectiveLockPath(
 /** The recorded owner, while that exact process is alive. */
 export function liveControllerOwner(path: string): ControllerOwner | undefined {
   const owner = readControllerOwner(path);
-  if (!owner) return undefined;
-  const current = linuxProcessIdentity(owner.pid);
-  return current?.startTime === owner.startTime && current.state !== "Z"
-    ? owner
-    : undefined;
+  return owner && processAlive(owner) ? owner : undefined;
 }
 
 /** A live owner of any one Objective. */
@@ -434,22 +430,6 @@ export function acquireObjectiveLock(
         liveControllerOwner(installation) ? "this installation" : undefined,
     },
   );
-}
-
-const guardWait = new Int32Array(new SharedArrayBuffer(4));
-
-/** Contenders hold the guard for milliseconds; one still there after a second crashed and is refused. */
-function takeGuard(guard: string): void {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      mkdirSync(guard, { mode: 0o700 });
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 100)
-        throw error;
-      Atomics.wait(guardWait, 0, 0, 10);
-    }
-  }
 }
 
 export function acquireControllerLock(

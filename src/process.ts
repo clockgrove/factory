@@ -1,7 +1,16 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { type Fault, transient, withFault } from "./fault.js";
@@ -100,10 +109,6 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
   // Another git process holds the repository lock; it releases it shortly.
   if (/Unable to create '[^']*\.lock': File exists/.test(detail))
     return transient(`git ${subcommand} found the repository locked`, false);
-  // Another controller's `worktree remove` deleted an entry this command was
-  // reading (see LockMode); the entry is gone shortly.
-  if (/Invalid path '[^']*worktrees\//.test(detail))
-    return transient(`git ${subcommand} read a worktree being removed`, false);
   if (!GIT_REMOTE.has(subcommand)) return undefined;
   const push = subcommand === "push" || subcommand === "lfs push";
   if (
@@ -165,9 +170,9 @@ function classifiedGit<T>(args: string[], run: () => T): T {
  * entry) dies with "Invalid path '.git/worktrees/<id>'". Commands that change
  * the registry therefore hold a per-repository lock exclusively and commands
  * that walk it hold it shared. Fetches share it with each other because
- * Factory's fetches write no shared ref (see fetchHead). The lock is per
- * process: a controller of another Objective can still race, and gitFault
- * makes that error transient, so the step repeats.
+ * Factory's fetches write no shared ref (see fetchHead). Controllers of
+ * different Objectives share a checkout from separate processes, so the lock
+ * holds across processes too (see withRegistryFiles).
  */
 type LockMode = "shared" | "exclusive";
 
@@ -281,15 +286,126 @@ async function withRepositoryLock<T>(
 ): Promise<T> {
   const lock = repositoryLocks.get(key) ?? new RepositoryLock();
   repositoryLocks.set(key, lock);
-  const turn = lock.acquire(mode, currentProcessSignal());
+  const signal = currentProcessSignal();
+  const turn = lock.acquire(mode, signal);
   let held = false;
   try {
     await turn;
     held = true;
-    return await run();
+    return await withRegistryFiles(key, mode, signal, run);
   } finally {
     if (held) lock.release(mode);
     if (lock.idle) repositoryLocks.delete(key);
+  }
+}
+
+/** Whether the process a lock file names is still that exact, live process. */
+export function processAlive(owner: {
+  pid: number;
+  startTime: string;
+}): boolean {
+  const current = linuxProcessIdentity(owner.pid);
+  return current?.startTime === owner.startTime && current.state !== "Z";
+}
+
+const guardWait = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Take a lock directory's guard: a directory only one process creates.
+ * Contenders hold it for milliseconds, without awaiting; one still there
+ * after a second crashed and is refused.
+ */
+export function takeGuard(guard: string): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      mkdirSync(guard, { mode: 0o700 });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= 100)
+        throw error;
+      Atomics.wait(guardWait, 0, 0, 10);
+    }
+  }
+}
+
+/**
+ * The repository lock across processes, with the controller lock's
+ * mechanism: files naming their holder's process identity, changed only
+ * under a guard, and a file whose process is gone is stale and removed. Each
+ * git command publishes `reader-ID`, or `writer` for an exclusive one, in a
+ * directory under Factory's state keyed by the git common directory. A
+ * published writer holds off new readers and runs once no reader is left.
+ */
+export async function withRegistryFiles<T>(
+  key: string,
+  mode: LockMode,
+  signal: AbortSignal | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  const directory = join(
+    process.env.XDG_STATE_HOME ??
+      join(process.env.HOME ?? "", ".local", "state"),
+    "clockgrove-factory",
+    "git-locks",
+    createHash("sha256").update(key).digest("hex").slice(0, 32),
+  );
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const identity = linuxProcessIdentity(process.pid);
+  if (!identity) throw new Error("Cannot establish process identity");
+  const id = randomUUID();
+  const own = mode === "exclusive" ? "writer" : `reader-${id}`;
+  const record = JSON.stringify({
+    pid: process.pid,
+    startTime: identity.startTime,
+    id,
+  });
+  const guarded = <R>(body: () => R): R => {
+    takeGuard(join(directory, ".guard"));
+    try {
+      return body();
+    } finally {
+      rmdirSync(join(directory, ".guard"));
+    }
+  };
+  const holder = (name: string) => {
+    try {
+      const value = JSON.parse(readFileSync(join(directory, name), "utf8"));
+      if (processAlive(value)) return value as { id: string };
+    } catch {
+      // Absent or unreadable: a holder that crashed while publishing.
+    }
+    rmSync(join(directory, name), { force: true });
+    return undefined;
+  };
+  const release = () =>
+    guarded(() => {
+      if (holder(own)?.id === id) rmSync(join(directory, own));
+    });
+  try {
+    for (;;) {
+      const granted = guarded(() => {
+        const writer = existsSync(join(directory, "writer"))
+          ? holder("writer")
+          : undefined;
+        if (writer && writer.id !== id) return false;
+        if (!writer) writeFileSync(join(directory, own), record);
+        if (mode === "shared") return true;
+        return !readdirSync(directory).some(
+          (name) => name.startsWith("reader-") && holder(name),
+        );
+      });
+      if (granted) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      signal?.throwIfAborted();
+    }
+  } catch (error) {
+    release();
+    throw error;
+  }
+  try {
+    return await run();
+  } finally {
+    release();
   }
 }
 

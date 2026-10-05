@@ -1235,6 +1235,18 @@ test("usage limits and outages are infrastructure; other failures are not", () =
     infrastructureKind("getaddrinfo ENOTFOUND api.openai.com"),
     "network",
   );
+  assert.equal(
+    infrastructureKind(
+      "Selected model is at capacity. Please try a different model.",
+    ),
+    "capacity",
+  );
+  assert.equal(
+    infrastructureKind(
+      "API Error: No response from API (waited 3m, then 10m on the retry).",
+    ),
+    "network",
+  );
   assert.equal(infrastructureKind("Work Item a cites a missing heading"), null);
   assert.equal(infrastructureKind(undefined), null);
   // Plan prose about rate limits is not the provider throttling the eval.
@@ -1303,6 +1315,10 @@ test("backoff doubles to a cap, per kind, or from a chosen base", () => {
   assert.deepEqual(
     network,
     [30, 60, 120, 240, 300, 300, 300].map((s) => s * 1000),
+  );
+  assert.deepEqual(
+    [1, 2, 3, 4, 5].map((n) => backoffMs("capacity", n, {})),
+    [60, 120, 240, 480, 600].map((s) => s * 1000),
   );
   assert.deepEqual(
     [1, 2, 3, 4, 5].map((n) => backoffMs("network", n, { baseSeconds: 2 })),

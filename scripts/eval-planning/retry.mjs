@@ -5,11 +5,13 @@
 
 /** The provider says the login's allowance is used up until a reset. */
 const USAGE_LIMIT = /session limit|usage limit|hit your (?:\w+ )?limit/i;
+/** The provider has no room for the model right now. */
+const CAPACITY = /at capacity|overloaded_error/i;
 /** HTTP-level throttling; only an error's own text is trusted to mean it. */
 const THROTTLED = /rate.?limit|too many requests|\b429\b/i;
 /** The host could not reach the provider: DNS, refused, unreachable, reset. */
 const NETWORK =
-  /Reconnecting\.\.\. \d+\/\d+|stream disconnected|failed to lookup address|workspace routing discovery failed|EAI_AGAIN|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENETDOWN|UND_ERR_CONNECT_TIMEOUT|getaddrinfo|Can't reach the API|Could not resolve host|fetch failed|socket hang up/i;
+  /Reconnecting\.\.\. \d+\/\d+|No response from API|stream disconnected|failed to lookup address|workspace routing discovery failed|EAI_AGAIN|ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ENETDOWN|UND_ERR_CONNECT_TIMEOUT|getaddrinfo|Can't reach the API|Could not resolve host|fetch failed|socket hang up/i;
 
 /**
  * Provider and process errors reach the eval as text, so this is the one place
@@ -19,6 +21,7 @@ export function infrastructureKind(text, { error = true } = {}) {
   if (typeof text !== "string") return null;
   if (USAGE_LIMIT.test(text) || (error && THROTTLED.test(text)))
     return "usage-limit";
+  if (CAPACITY.test(text)) return "capacity";
   if (NETWORK.test(text)) return "network";
   return null;
 }
@@ -30,13 +33,17 @@ export function backoffMs(kind, retry, policy) {
       ? policy.baseSeconds * 1000
       : kind === "usage-limit"
         ? 15 * 60_000
-        : 30_000;
+        : kind === "capacity"
+          ? 60_000
+          : 30_000;
   const cap =
     policy.baseSeconds !== undefined
       ? base * 8
       : kind === "usage-limit"
         ? 60 * 60_000
-        : 5 * 60_000;
+        : kind === "capacity"
+          ? 10 * 60_000
+          : 5 * 60_000;
   return Math.min(base * 2 ** (retry - 1), cap);
 }
 

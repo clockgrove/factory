@@ -3,7 +3,15 @@
 // own scratch directory and the provider logins bound into it. Every other
 // path, including /home, /tmp and the eval's output, does not exist inside.
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
 const SYSTEM = ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc"];
@@ -36,18 +44,20 @@ export function sandboxBinary() {
   if (available !== undefined) return available;
   const bwrap = findBubblewrap();
   available = null;
-  if (bwrap)
+  if (bwrap) {
+    // Probe with the arguments a judge runs with, so a host that can start
+    // bubblewrap but not this sandbox reads as unavailable.
+    const scratch = mkdtempSync(join(tmpdir(), "factory-sandbox-probe-"));
     try {
       execFileSync(
         bwrap,
         [
-          "--unshare-all",
-          "--share-net",
-          ...systemBinds(),
-          "--dev",
-          "/dev",
-          "--proc",
-          "/proc",
+          ...sandboxArguments({
+            scratch,
+            readOnly: [],
+            readWrite: [],
+            cwd: scratch,
+          }),
           "--",
           "true",
         ],
@@ -56,7 +66,10 @@ export function sandboxBinary() {
       available = bwrap;
     } catch {
       // No user namespaces, or bubblewrap is blocked.
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
     }
+  }
   return available;
 }
 

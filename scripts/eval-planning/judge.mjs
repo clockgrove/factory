@@ -18,14 +18,10 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
-  CLAUDE_PLANNING_ADAPTER,
   ClaudePlanningModel,
   claudePlanningOptions,
 } from "../../dist/claude-planning.js";
-import {
-  CODEX_PLANNING_ADAPTER,
-  CodexPlanningModel,
-} from "../../dist/compiler.js";
+import { CodexPlanningModel } from "../../dist/compiler.js";
 import { repositoryFacts } from "./cases.mjs";
 import {
   sandboxArguments,
@@ -97,8 +93,9 @@ export function loadJudge(path) {
     promptPath: resolve(dirname(file), spec.prompt),
     // Everything that shapes what the judge sees or how it is scored: the
     // spec and prompt, the input, prompt and repository-fact builders, the
-    // decoder, the isolation, the resolved provider options (with the output
-    // schema as the provider receives it) and the provider SDK versions.
+    // decoder, the isolation and the resolved provider options (with the output
+    // schema as the provider receives it). The provider package and its
+    // version are not hashed: a dependency bump must not change a frozen judge.
     digest: sha256(
       JSON.stringify({
         spec: bytes.toString("utf8"),
@@ -126,19 +123,6 @@ export function loadJudges(paths) {
   const repeated = names.find((name, index) => names.indexOf(name) !== index);
   if (repeated) throw new Error(`Judge ${repeated} is listed twice`);
   return judges;
-}
-
-/** Locked SDK versions, from package-lock.json. */
-function lockedVersions(names) {
-  const lock = JSON.parse(
-    readFileSync(join(root, "package-lock.json"), "utf8"),
-  );
-  return Object.fromEntries(
-    names.map((name) => [
-      name,
-      lock.packages?.[`node_modules/${name}`]?.version,
-    ]),
-  );
 }
 
 /**
@@ -169,14 +153,9 @@ export function providerContext(model) {
       credentialDirectory: "<empty credential directory>",
       abortController: undefined,
     });
-    return {
-      adapter: CLAUDE_PLANNING_ADAPTER,
-      options,
-      versions: lockedVersions(["@anthropic-ai/claude-agent-sdk"]),
-    };
+    return { options };
   }
   return {
-    adapter: CODEX_PLANNING_ADAPTER,
     thread: {
       ...new CodexPlanningModel(
         "<empty Git repository>",
@@ -187,7 +166,6 @@ export function providerContext(model) {
       codexHome: "<isolated: auth.json only>",
     },
     outputSchema: judgeSchema(),
-    versions: lockedVersions(["@openai/codex-sdk", "@openai/codex"]),
   };
 }
 

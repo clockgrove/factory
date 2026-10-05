@@ -4,6 +4,7 @@ import {
   classifyFaults,
   judgedAsWork,
   readWorkerJson,
+  StepFault,
   workFault,
 } from "../fault.js";
 import { executionFault } from "./fault.js";
@@ -506,8 +507,16 @@ export async function collectWorktreeResult(
     request.item.ownedPaths,
     acceptedIgnoredLinks,
   );
+  // An empty result is still wrong, but a staged discovery is the worker's
+  // account of why: it rides on the fault so Factory reviews it (#820).
   if (!paths.length && !assets.length)
-    throw workFault(noChangeDetail(result.evidence));
+    throw new StepFault({
+      kind: "work",
+      evidence: {
+        detail: noChangeDetail(result.evidence),
+        ...(discovery ? { discovery } : {}),
+      },
+    });
   if (paths.length)
     await pinnedGitAsync(
       worktree,
@@ -945,6 +954,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
     if (!collected) {
       if (collectionError instanceof AuthenticationRequiredError)
         throw collectionError;
+      // A wrong result keeps its own fault: its evidence may carry the
+      // worker's staged discovery.
+      if (!interrupted) throw collectionError;
       throw stoppedFault(
         collectionError instanceof Error
           ? collectionError.message

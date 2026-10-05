@@ -58,14 +58,14 @@ Generated from the production dependencies in `package-lock.json` and their inst
 | `@octokit/request-error` | 7.1.2 | MIT | `node_modules/@octokit/request-error/LICENSE` |
 | `content-type` | 3.1.1 | MIT | `node_modules/@octokit/request/node_modules/content-type/LICENSE` |
 | `@octokit/types` | 18.0.0 | MIT | `node_modules/@octokit/types/LICENSE` |
-| `@openai/codex` | 0.156.0 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
-| `@openai/codex-darwin-arm64` | 0.156.0-darwin-arm64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
-| `@openai/codex-darwin-x64` | 0.156.0-darwin-x64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
-| `@openai/codex-linux-arm64` | 0.156.0-linux-arm64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
-| `@openai/codex-linux-x64` | 0.156.0-linux-x64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
-| `@openai/codex-sdk` | 0.156.0 | Apache-2.0 | `node_modules/@openai/codex-sdk/LICENSE` |
-| `@openai/codex-win32-arm64` | 0.156.0-win32-arm64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
-| `@openai/codex-win32-x64` | 0.156.0-win32-x64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
+| `@openai/codex` | 0.160.0 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
+| `@openai/codex-darwin-arm64` | 0.160.0-darwin-arm64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
+| `@openai/codex-darwin-x64` | 0.160.0-darwin-x64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
+| `@openai/codex-linux-arm64` | 0.160.0-linux-arm64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
+| `@openai/codex-linux-x64` | 0.160.0-linux-x64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
+| `@openai/codex-sdk` | 0.160.0 | Apache-2.0 | `node_modules/@openai/codex-sdk/LICENSE` |
+| `@openai/codex-win32-arm64` | 0.160.0-win32-arm64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
+| `@openai/codex-win32-x64` | 0.160.0-win32-x64 | Apache-2.0 | `@openai/codex-sdk/LICENSE (same Apache-2.0 family)` |
 | `@secretlint/config-loader` | 13.0.5 | MIT | `node_modules/@secretlint/config-loader/LICENSE` |
 | `@secretlint/core` | 13.0.5 | MIT | `node_modules/@secretlint/core/LICENSE` |
 | `@secretlint/formatter` | 13.0.5 | MIT | `node_modules/@secretlint/formatter/LICENSE` |
@@ -1522,7 +1522,7 @@ The above copyright notice and this permission notice (including the next paragr
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ````
 
-### @openai/codex@0.156.0
+### @openai/codex@0.160.0
 
 Source: `@openai/codex-sdk/LICENSE (same Apache-2.0 family)`
 
@@ -1730,7 +1730,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ````
 
-### @openai/codex-darwin-arm64@0.156.0-darwin-arm64
+### @openai/codex-darwin-arm64@0.160.0-darwin-arm64
 
 Source: `@openai/codex-sdk/LICENSE (same Apache-2.0 family)`
 
@@ -1938,7 +1938,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ````
 
-### @openai/codex-darwin-x64@0.156.0-darwin-x64
+### @openai/codex-darwin-x64@0.160.0-darwin-x64
 
 Source: `@openai/codex-sdk/LICENSE (same Apache-2.0 family)`
 
@@ -2146,7 +2146,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ````
 
-### @openai/codex-linux-arm64@0.156.0-linux-arm64
+### @openai/codex-linux-arm64@0.160.0-linux-arm64
 
 Source: `@openai/codex-sdk/LICENSE (same Apache-2.0 family)`
 
@@ -2354,7 +2354,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ````
 
-### @openai/codex-linux-x64@0.156.0-linux-x64
+### @openai/codex-linux-x64@0.160.0-linux-x64
 
 Source: `@openai/codex-sdk/LICENSE (same Apache-2.0 family)`
 
@@ -2562,7 +2562,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ````
 
-### @openai/codex-sdk@0.156.0
+### @openai/codex-sdk@0.160.0
 
 Source: `node_modules/@openai/codex-sdk/LICENSE`
 
@@ -2770,7 +2770,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ````
 
-### @openai/codex-win32-arm64@0.156.0-win32-arm64
+### @openai/codex-win32-arm64@0.160.0-win32-arm64
 
 Source: `@openai/codex-sdk/LICENSE (same Apache-2.0 family)`
 
@@ -2978,7 +2978,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ````
 
-### @openai/codex-win32-x64@0.156.0-win32-x64
+### @openai/codex-win32-x64@0.160.0-win32-x64
 
 Source: `@openai/codex-sdk/LICENSE (same Apache-2.0 family)`
 

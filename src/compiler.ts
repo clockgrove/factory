@@ -1642,7 +1642,7 @@ function selectedHeadings(body: string): SourceSelector[] {
     .filter((line) => line.trim())
     .map((line) => {
       const value = line
-        .match(/^\s*-\s+(?:`([^`]+)`|(\S+))\s*$/)
+        .match(/^\s*-\s+(?:`([^`]+)`|([^`\s][^`]*?))\s*$/)
         ?.slice(1)
         .find(Boolean);
       if (!value) throw new Error(`Invalid Sources entry: ${line.trim()}`);

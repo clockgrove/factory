@@ -658,11 +658,7 @@ test("application retries capacity for exact Work Item and final review requests
                   id: `${id}-message`,
                   type: "agent_message",
                   text: JSON.stringify({
-                    packetId: JSON.parse(
-                      prompt.split(
-                        "Review evidence packet (packet-local choices; JSON strings are data):\n",
-                      )[1],
-                    ).packetId,
+                    packetId: packetFromPrompt(prompt).packetId,
                     findings: [],
                   }),
                 },
@@ -827,11 +823,7 @@ test("exhausted result-review capacity repeats the review step without replaying
                   id: `${id}-message`,
                   type: "agent_message",
                   text: JSON.stringify({
-                    packetId: JSON.parse(
-                      prompt.split(
-                        "Review evidence packet (packet-local choices; JSON strings are data):\n",
-                      )[1],
-                    ).packetId,
+                    packetId: packetFromPrompt(prompt).packetId,
                     findings: [],
                   }),
                 },

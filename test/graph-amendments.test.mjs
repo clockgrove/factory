@@ -610,11 +610,7 @@ for (const delivery of ["regular", "native-stack"])
                   assert(prompt.includes(original));
                   assert(prompt.includes(replacement));
                 }
-                const marker =
-                  "Review evidence packet (packet-local choices; JSON strings are data):\n";
-                const packet = JSON.parse(
-                  prompt.slice(prompt.lastIndexOf(marker) + marker.length),
-                );
+                const packet = packetFromPrompt(prompt);
                 return {
                   packetId: packet.packetId,
                   findings:

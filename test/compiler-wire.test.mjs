@@ -38,6 +38,7 @@ import { decodeGraphReview, reviewPacket } from "../dist/review-evidence.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { createTarget, factoryConfig } from "./support/integration-fixture.mjs";
 import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 const Ajv = createRequire(import.meta.url)("ajv");
 const body =
   '# Objective\n\n## Acceptance\n- Source-defined result exists.\n\n## Validation\n- `test -d .`\n\n## Worker implementation\nUse node:assert/strict and assert process.versions.node.split(".")[0] equals "24".\n';
@@ -1900,11 +1901,7 @@ test("actual compiler, canonical review and bounded diagnosis receive complete C
         };
       } else if (options.outputSchema.properties.packetId) {
         reviewCalls++;
-        const packet = JSON.parse(
-          prompt.split(
-            "\nReview evidence packet (packet-local choices; JSON strings are data):\n",
-          )[1],
-        );
+        const packet = packetFromPrompt(prompt);
         const boundsIndex = packet.evidence.findIndex(
           (entry) => entry.path === "FACTORY_EXECUTION_BOUNDS",
         );

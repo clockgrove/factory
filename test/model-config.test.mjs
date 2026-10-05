@@ -52,6 +52,7 @@ import {
   createTarget,
   factoryConfig,
 } from "./support/integration-fixture.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 
 const {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
@@ -1386,11 +1387,7 @@ test("Codex adapter passes phase selections to every planning and review thread"
         { model: "reviewer-choice", modelReasoningEffort: "medium" },
       ],
     );
-    const graphPacket = JSON.parse(
-      captured[1].prompt.split(
-        "Review evidence packet (packet-local choices; JSON strings are data):\n",
-      )[1],
-    );
+    const graphPacket = packetFromPrompt(captured[1].prompt);
     assert.deepEqual(
       captured[1].outputSchema.properties.findings.items.properties
         .evidenceIndices.items,

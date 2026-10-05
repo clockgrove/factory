@@ -40,6 +40,7 @@ import {
   readEvents,
 } from "./support/integration-fixture.mjs";
 import { writeStateFile } from "./support/state-file.mjs";
+import { packetFromPrompt } from "./support/review-protocol.mjs";
 
 const objectives = [1, 2];
 /** No unattended repair or amendment unless a test raises a limit. */
@@ -275,11 +276,7 @@ test("sequential planning supplies grounded native acceptance in every rendered 
         return encodeCompilerWire(graph, args.prompt);
       }
       if (args.defaultPhase === "graph-review") {
-        const packet = JSON.parse(
-          args.prompt.split(
-            "\nReview evidence packet (packet-local choices; JSON strings are data):\n",
-          )[1],
-        );
+        const packet = packetFromPrompt(args.prompt);
         const controllerIndex = packet.evidence.findIndex(
           (entry) =>
             entry.origin === "controller" &&
@@ -669,11 +666,7 @@ for (const [descendant, dependent, historical] of [
           }));
           return encodeCompilerWire(graph, args.prompt);
         }
-        const evidence = JSON.parse(
-          args.prompt.split(
-            "\nReview evidence packet (packet-local choices; JSON strings are data):\n",
-          )[1],
-        );
+        const evidence = packetFromPrompt(args.prompt);
         const native = evidence.evidence.find(
           (entry) => entry.path === "FACTORY_NATIVE_OBJECTIVE_PREREQUISITES",
         );

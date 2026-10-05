@@ -105,10 +105,12 @@ export function assertReviewPacketBinding(
     );
 }
 
-/** Provider choices omit opaque identities; the packet envelope binds their meaning. */
-export function renderReviewPacket(packet: ReviewPacket): string {
-  return JSON.stringify({
-    packetId: packet.id,
+/**
+ * The packet's criteria and evidence as provider choices, which omit opaque
+ * identities. This part repeats across calls over the same sources.
+ */
+function reviewPacketChoices(packet: ReviewPacket) {
+  return {
     criteria: packet.criteria.map(({ text }, criterionIndex) => ({
       criterionIndex,
       text,
@@ -117,7 +119,29 @@ export function renderReviewPacket(packet: ReviewPacket): string {
       evidenceIndex,
       ...entry,
     })),
+  };
+}
+
+/**
+ * The packet as one JSON value. The packet id is fresh per call, so it comes
+ * last and the choices before it stay a stable prompt prefix for the provider
+ * cache.
+ */
+export function renderReviewPacket(packet: ReviewPacket): string {
+  return JSON.stringify({
+    ...reviewPacketChoices(packet),
+    packetId: packet.id,
   });
+}
+
+/** The packet's repeatable choices without its per-call id; see `renderReviewPacketId`. */
+export function renderReviewPacketChoices(packet: ReviewPacket): string {
+  return JSON.stringify(reviewPacketChoices(packet));
+}
+
+/** The per-call packet id, rendered for the end of a prompt. */
+export function renderReviewPacketId(packet: ReviewPacket): string {
+  return JSON.stringify({ packetId: packet.id });
 }
 
 /** Bounds grow numerically, never by enumerating every criterion/evidence identity. */

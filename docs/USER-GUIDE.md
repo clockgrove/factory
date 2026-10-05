@@ -60,6 +60,17 @@ Factory refuses the earlier sections with a message that says where the content 
 
 Keep the first Objective small. Editing the issue after planning invalidates the saved plan; refuse it (below) and run again.
 
+### Writing Objectives that deliver
+
+Short rules from real runs. Each has its reason.
+
+- **One packet per Objective.** Do not bundle unrelated fixes. _Because_ one bad part stops the whole Objective, and a bundle cannot be reviewed as one outcome.
+- **Check that the work it depends on is delivered, and that every Source exists on the default branch.** _Because_ Factory plans from the base branch, so a file that is still in an open PR is missing for the planner and the workers.
+- **Say where a new check gets wired.** Name a file the fixed acceptance scripts already run. _Because_ acceptance script bodies are fixed: a new test or check that no existing script runs is never run.
+- **Leave dependency build approvals and other workspace configuration to the operator.** Set them on the base branch before the run. _Because_ a worker's change to them is out of its ownership and is blocked.
+- **Inject what does not exist yet; do not require it.** Pass a missing file, service or value in through the code under test. _Because_ an Acceptance bullet that needs something absent can never pass.
+- **Put stable repository facts in the target's own contributor docs** (for example its `AGENTS.md` or `CONTRIBUTING.md`), not in every Objective. _Because_ workers read them each run, and an Objective stays short and about one outcome.
+
 ## Run
 
 ```sh
@@ -78,7 +89,7 @@ Run the same command again to resume. A saved plan is never planned again, and e
 
 ## Queue and background
 
-The background service runs queued Objectives one at a time, and it cannot start while a foreground `factory run` is live. It needs a systemd user manager and keeps running after the terminal closes. Sleep pauses it, shutdown stops it, and logout behavior follows your host's linger setting. Factory changes neither.
+The background service runs queued Objectives one at a time. Foreground runs of different Objectives can run in parallel, but the service and a live foreground run exclude each other. It needs a systemd user manager and keeps running after the terminal closes. Sleep pauses it, shutdown stops it, and logout behavior follows your host's linger setting. Factory changes neither.
 
 ```sh
 factory queue add N [N ...]   # consent to run these, in order, within the autonomy limits

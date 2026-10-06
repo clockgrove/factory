@@ -11,8 +11,8 @@
  *    refuses is recorded with `ctx.invalid(detail)`; the next ask reads `ctx.previousInvalid()`.
  * 6. Never rotate the attempt inside a step. Records are keyed by item, so rotation alone never resets the
  *    paid bound; work and defect end the step and reset it (repair allowances bound those).
- * 7. `step` returns only on success. On a throw, first `StepPaused` (pause, drain or handoff ended a wait
- *    between tries): stop quietly, change nothing; the record stays and the next run resumes the step.
+ * 7. `step` returns only on success. On a throw, first `StepPaused` (pause, drain or handoff blocked a
+ *    new try or paid call): stop quietly; the record stays and the next run resumes the step.
  *    Otherwise branch on `faultOf(error).kind`: `cancelled` stop quietly; `work` fail the attempt, then
  *    repair or retry; `decision` / `config` leave the scope waiting (the wait is saved; `factory retry`
  *    answers it); `defect` stop and report. Transient faults never leave `step`.
@@ -133,7 +133,7 @@ export interface StepOptions {
   /** Cancel: ends a backoff or try with a `cancelled` fault. */
   signal?: AbortSignal;
   /**
-   * Pause, drain or handoff: ends a backoff or poll wait with `StepPaused`
+   * Pause, drain or handoff: blocks a new try or paid call with `StepPaused`
    * (not a fault). Nothing is charged or failed; the record stays, so the
    * next run resumes the step where it waited. A running try is not cut off.
    */
@@ -142,8 +142,8 @@ export interface StepOptions {
 }
 
 /**
- * The owner paused (or is draining or handing off) while the step waited
- * between tries. Not a fault: the caller stops quietly and leaves the scope
+ * The owner paused (or is draining or handing off) before a new try or paid
+ * call. Not a fault: the caller stops quietly and leaves the scope
  * as it is.
  */
 export class StepPaused extends Error {
@@ -430,7 +430,7 @@ async function repeat<T>(
   // Running time of the current run of faults; downtime is never counted.
   let activeFrom = clock.now();
   for (;;) {
-    if (signal?.aborted) throw cancelled();
+    stopWaiting();
     const next = record();
     if (next.nextAt && next.scheduledAt) {
       // Never longer than the delay chosen when it was scheduled, so a
@@ -445,7 +445,7 @@ async function repeat<T>(
           throw error;
         });
       }
-      if (signal?.aborted) throw cancelled();
+      stopWaiting();
     }
 
     let done = false;
@@ -468,6 +468,7 @@ async function repeat<T>(
       save();
     };
     const paid = async <R>(call: () => Promise<R>): Promise<R> => {
+      stopWaiting();
       if (!spec.paid)
         throw new Error(`Step ${name} is not paid but made a paid call`);
       // One paid call at a time, so one marker settles exactly one call.
@@ -530,6 +531,10 @@ async function repeat<T>(
       return result;
     } catch (error) {
       done = true;
+      if (error instanceof StepPaused) {
+        if (signal?.aborted) throw cancelled();
+        throw error;
+      }
       if (error instanceof StepPending) {
         const now = clock.now();
         const at = error.retryAt ? Date.parse(error.retryAt) : Number.NaN;

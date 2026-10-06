@@ -2,7 +2,11 @@ import { bindPlanningPlaybook } from "./compiler.js";
 import { hasReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
-import { applyWorkCorrection } from "./work-repair.js";
+import {
+  applyWorkCorrection,
+  recordSavedResultRefusal,
+  recordWorkFailure,
+} from "./work-repair.js";
 import { operatorName } from "./operator.js";
 import { approvedPlaybook, observeRetrospective } from "./learning.js";
 import {
@@ -20,7 +24,7 @@ import type {
   ExecutionDriver,
   GitHubGateway,
 } from "./contracts.js";
-import { cancelledFault } from "./fault.js";
+import { cancelledFault, workFault } from "./fault.js";
 import {
   type ControlRequest,
   ForegroundControllerError,
@@ -333,6 +337,8 @@ export async function runObjective(
     snapshot,
     deadlineAt: options.deadlineAt,
   };
+  if (snapshot?.coordinator?.mode !== "running" && snapshot?.coordinator)
+    owner.pause.abort(new Error(`Coordinator ${snapshot.coordinator.mode}`));
   owners.set(ownerKey(config, objective), owner);
   const waiters = new Set<() => void>();
   const wake = () => {
@@ -1022,6 +1028,11 @@ export function repairWorkItem(
       throw new Error(
         "Operator corrections must declare their own provenance, not controller-checked readiness",
       );
+    if (recordSavedResultRefusal(state, input.item, config.checkout)) {
+      // This is a new authenticated observation of a retained refusal, not
+      // a historical command failure. Persist it even if the correction is refused.
+      saveState(statePath(config.repository, objective), state);
+    }
     applyWorkCorrection(state, input.item, input.correction);
     // The repair answers the stop the item's failure caused, as retry does.
     delete state.error;
@@ -1198,8 +1209,10 @@ export function decideResult(
         work.status = input.outcome === "accept" ? "running" : "failed";
         work.step = "validate";
       }
-      if (input.outcome === "refuse")
+      if (input.outcome === "refuse") {
         work.error = `Acceptance refused: ${asked.criterion}`;
+        recordWorkFailure(state, input.item!, workFault(work.error));
+      }
     } else {
       state.finalAcceptanceDecisions ??= [];
       state.finalAcceptanceDecisions.push(decision);

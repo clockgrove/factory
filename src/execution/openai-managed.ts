@@ -1,5 +1,10 @@
 import { refuseUnknownFields } from "../unknown-fields.js";
-import { cancelledFault, classifyFaults } from "../fault.js";
+import {
+  cancelledFault,
+  classifyFaults,
+  decision,
+  StepFault,
+} from "../fault.js";
 import { executionFault, missingCredential } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -164,6 +169,7 @@ interface Active {
     | "running"
     | "cancel-submitted"
     | "delete-submitted"
+    | "delete-acknowledged"
     | "disposed";
   sessionId?: string;
   environmentId?: string;
@@ -256,7 +262,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       settle: (detail) => this.settle(handle, context, detail, false),
     });
   }
-  /** Records why the attempt ended, deletes its session and reports a settled failure. */
+  /** Records why the attempt ended before attempting owned cleanup. */
   private async settle(
     handle: ExecutionHandle,
     context: ExecutionContext,
@@ -496,14 +502,8 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<ExecutionObservation> {
     const data = this.active(handle);
-    if (data.phase === "disposed")
-      return {
-        state: data.terminal ?? "failed",
-        ...(data.stopped && {
-          detail: data.stopped.detail,
-          ...(data.stopped.interrupted && { interrupted: true }),
-        }),
-      };
+    if (data.phase === "disposed" || data.phase === "delete-acknowledged")
+      this.physicalCessationUnconfirmed(handle);
     // This API surface cannot list sessions by attempt tag, so a lost create
     // response cannot be resolved; any session it made never received input.
     if (!data.sessionId)
@@ -519,7 +519,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       "GET",
       `/agents/sessions/${data.sessionId}`,
     );
-    // A session that no longer exists has ended; its attempt is settled.
+    // API disappearance does not establish physical hosted cleanup.
     if (current === null)
       return { state: "failed", detail: "Managed session no longer exists" };
     const session = object(current);
@@ -606,27 +606,33 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       throw new Error("Unknown managed turn status");
     return { state: terminal ?? "running" };
   }
+  private physicalCessationUnconfirmed(handle: ExecutionHandle): never {
+    const data = this.active(handle);
+    throw new StepFault(
+      decision(
+        "How can physical cessation of the owned OpenAI hosted environment be authenticated? This adapter has no authenticated physical-cessation receipt; keep the attempt held.",
+        `Attempt ${handle.identity}; session ${data.sessionId ?? "unknown"}; environment ${data.environmentId ?? "unknown"}; cleanup phase ${data.phase}`,
+      ),
+    );
+  }
   private async dispose(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<void> {
     const data = this.active(handle);
+    // Legacy `disposed` checkpoints used API disappearance as their proof.
+    // Neither those checkpoints nor a DELETE acknowledgment prove cessation.
+    if (data.phase === "disposed" || data.phase === "delete-acknowledged")
+      this.physicalCessationUnconfirmed(handle);
     data.cleanupStartedAt ??= Date.now();
     if (data.sessionId) {
       data.phase = "delete-submitted";
       this.save(handle, context);
       await this.request(data, "DELETE", `/agents/sessions/${data.sessionId}`);
-      if (
-        await this.request(
-          data,
-          "GET",
-          `/agents/environments/${data.environmentId}`,
-        )
-      )
-        throw new Error("Managed environment cessation has not been confirmed");
+      data.phase = "delete-acknowledged";
     }
-    data.phase = "disposed";
     this.save(handle, context);
+    this.physicalCessationUnconfirmed(handle);
   }
   @classifyFaults(executionFault)
   async cancel(
@@ -663,7 +669,8 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<void> {
     const data = this.active(handle);
-    if (data.phase === "disposed") return;
+    if (data.phase === "disposed" || data.phase === "delete-acknowledged")
+      this.physicalCessationUnconfirmed(handle);
     // Each cleanup gets a fresh window, so cleanup resumed after an outage
     // longer than the window still runs.
     data.cleanupStartedAt = Date.now();
@@ -686,7 +693,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
           { events: [{ type: "agent.session.input.cancel" }] },
         );
       } catch (error) {
-        // A session that no longer exists has nothing left to cancel.
+        // The API cannot cancel a missing session; physical cleanup is unknown.
         if (!(error instanceof AgentsApiError && error.status === 404))
           throw error;
         data.phase = "delete-submitted";
@@ -701,8 +708,8 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     await this.dispose(handle, context);
   }
   /**
-   * Any failure either interrupts the step (it reattaches) or deletes the
-   * session first, so a repeated attempt never runs beside it.
+   * Reattach transient failures; retain the owned attempt and any collected
+   * result while physical cleanup cannot be authenticated.
    */
   @classifyFaults(executionFault)
   async collect(
@@ -729,7 +736,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
       }
       this.save(handle, context);
     }
-    if (data.phase !== "disposed") await this.dispose(handle, context);
+    await this.dispose(handle, context);
     return data.result!;
   }
   private async produce(

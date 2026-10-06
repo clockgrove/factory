@@ -106,6 +106,12 @@ export interface PreparingStatusView extends WaitView {
     /** False when Factory refuses the plan: only `refuse` can answer it. */
     acceptable?: boolean;
     question: string | null;
+    findings?: {
+      detail: string | null;
+      question: string | null;
+      evidence: { path: string | null }[];
+    }[];
+    failure?: { detail: string | null; question: string | null } | null;
     digest: string;
   } | null;
   /** Planning stopped for a decision before producing a reviewable plan. */
@@ -1184,8 +1190,30 @@ export function renderStatusText(
     );
   if (view.state === "not-started") return lines;
   if (view.state === "preparing") {
-    if (view.planReview?.question)
-      lines.push("", `Question: ${view.planReview.question}`);
+    const review = view.planReview;
+    if (review?.findings?.length || review?.failure) {
+      lines.push(
+        "",
+        `Plan handoff (${review.status}) — no Work Items are admitted while planning is blocked:`,
+      );
+      for (const finding of review.findings ?? []) {
+        lines.push(
+          `  Requirement: ${finding.detail ?? "unknown"}`,
+          `  Question: ${finding.question ?? "unknown"}`,
+        );
+        lines.push(
+          `  Sources: ${finding.evidence.map((entry) => entry.path ?? "unknown").join(", ")}`,
+        );
+      }
+      if (review.failure)
+        lines.push(
+          `  Review failure: ${review.failure.detail ?? "unknown"}`,
+          `  Question: ${review.failure.question ?? "unknown"}`,
+        );
+      lines.push(
+        "  Resolve these against the pinned requirements through the existing decision/readiness path. Do not send secret values in chat; guidance grants no additional authority.",
+      );
+    } else if (review?.question) lines.push("", `Question: ${review.question}`);
     if (view.error) lines.push("", `Error: ${view.error}`);
     return lines;
   }

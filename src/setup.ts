@@ -19,6 +19,8 @@ import {
   watchIntake,
 } from "./intake.js";
 import { checkReadiness } from "./readiness.js";
+import { configurationCommand } from "./status-summary.js";
+import { requiredProviderCredentials } from "./provider-credentials.js";
 import { supervise, supervisorHost } from "./supervision.js";
 
 const cli = () =>
@@ -74,6 +76,21 @@ export async function setupTarget(
     }
     const config = readConfig(configPath);
     result.repository = config.repository;
+    result.requirements = {
+      providerCredentials: requiredProviderCredentials(config),
+      workerSecrets: (config.autonomy?.requiredEnvironment ?? []).map(
+        (name) => ({
+          name,
+          presence: process.env[name] ? "present" : "missing",
+          allowed: config.policy.allowedSecretNames.includes(name),
+        }),
+      ),
+      accountAccess: "not verified",
+      workerSecretSource:
+        "setup process environment; service worker environment not verified",
+      guidance:
+        "Keep credential values in the configured private files or controller environment, never in chat. Presence does not verify account access, billing, environment readiness or deployment approval.",
+    };
     const host = {
       cpus: availableParallelism(),
       memoryBytes: totalmem(),
@@ -295,5 +312,72 @@ export async function setupTarget(
         "Preserve completed stages and retained state. Resolve the stated prerequisite (`factory status` shows the service and queue), then repeat `factory setup --background`.",
     };
     return result;
+  } finally {
+    const stages = [
+      [
+        "intent",
+        "Select configuration only or explicitly consent to a background service.",
+      ],
+      [
+        "configuration",
+        "Bind the trusted repository/checkout and keep configuration, state and installed CLI outside the target.",
+      ],
+      [
+        "host-readiness",
+        "Background operation requires a running Linux systemd user manager.",
+      ],
+      [
+        "service-binding",
+        "Preserve the existing service/configuration binding; inspect factory status before changing it.",
+      ],
+      [
+        "execution-readiness",
+        "Supply configured private credentials/login and a usable worker sandbox; readiness details name the observed check and fix.",
+      ],
+      [
+        "github-readiness",
+        "Authenticate gh for the target; setup verifies issue-read access, not deployment or administrative authority.",
+      ],
+      [
+        "queue-binding",
+        "Only explicitly queued Objectives are authorized; inspect factory queue list and resolve any pause before resuming.",
+      ],
+      [
+        "service-registration",
+        "Register or upgrade the installed artifact through supported supervisor operations.",
+      ],
+      [
+        "service-start",
+        "Start the service only with background consent and preserve existing Objective limits.",
+      ],
+      [
+        "service-verification",
+        "Verify the active enabled service and responsive exact owner.",
+      ],
+      [
+        "service-observation",
+        "Verify a fresh authenticated GitHub observation; no Objective or provider call is required.",
+      ],
+    ];
+    const reached = stages.findIndex(([name]) => name === stage);
+    const verification = configurationCommand(
+      `factory setup --${background ? "background" : "config-only"}`,
+      configPath,
+    );
+    result.prerequisites = stages.map(([name, guidance], index) => ({
+      stage: name,
+      status:
+        !background && index > 1
+          ? "not-requested"
+          : result.status !== "blocked" || index < reached
+            ? "complete"
+            : index === reached
+              ? "blocked"
+              : "not-checked",
+      guidance,
+      verification: `${verification} (retain the original setup options and private credential bindings)`,
+    }));
+    result.independentWork =
+      "This handoff admits no Objective. Configuration-only starts nothing; blocked setup does not establish a ready service. Already admitted work retains its own ownership, readiness and limits.";
   }
 }

@@ -1,4 +1,5 @@
 import { objectiveCandidate } from "./qa.js";
+import { assertNativePrerequisites } from "./native-prerequisite-evidence.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
 import { assertRepairLedger, type Autonomy } from "./repair-policy.js";
@@ -252,6 +253,8 @@ export interface FactoryState {
   planGraphDigest: string;
   /** Native predecessor facts the plan was made with; absent when it had none. */
   prerequisitesDigest?: string;
+  /** Immutable authenticated admission facts, bound to prerequisitesDigest. */
+  prerequisites?: import("./contracts.js").PlanningPrerequisites;
   schemaVersion: 7;
   repository: string;
   objective: number;
@@ -501,6 +504,7 @@ export function parseFactoryState(
   if (state.prerequisitesDigest !== undefined)
     sha(state.prerequisitesDigest, "prerequisitesDigest", 64);
   sha(state.baseSha, "baseSha");
+  assertNativePrerequisites(state as unknown as FactoryState);
   const graph = record(state.graph, "graph");
   if (
     graph.objective !== objective ||

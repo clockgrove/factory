@@ -3,6 +3,7 @@ import {
   packageMetadata,
 } from "./package-manager-update.js";
 import { objectiveCandidate } from "./qa.js";
+import { nativePrerequisiteReviewEvidence } from "./native-prerequisite-evidence.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { assertGraphRevisions } from "./graph-amendments.js";
 import {
@@ -1684,6 +1685,14 @@ export function workItemReviewEvidence(args: {
     checkout,
     textBudget,
   });
+  evidence.push(
+    ...nativePrerequisiteReviewEvidence({
+      state,
+      checkout,
+      candidateCommitSha: current.changeRef,
+      candidateTreeSha: current.treeSha,
+    }),
+  );
   if (item.kind === "qa" || item.kind === "aggregate") {
     if (current.changeRef !== objectiveCandidate(state)?.commitSha)
       throw new Error(`QA ${item.id} selected integration is stale`);
@@ -1800,7 +1809,8 @@ export function objectiveReviewEvidence(args: {
     candidateTreeSha,
     "Final candidate",
   );
-  const evidence: ResultReviewEvidenceSource[] = [];
+  const evidence: ResultReviewEvidenceSource[] =
+    nativePrerequisiteReviewEvidence(args);
   const integrationRecords: Parameters<typeof assertIntegrationBindings>[1] =
     [];
   const textBudget = newReviewTextBudget();

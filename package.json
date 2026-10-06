@@ -30,15 +30,12 @@
     "dist",
     "skills",
     "assets",
-    "docs/AGENT-HARNESSES.md",
     "docs/USER-GUIDE.md",
     ".codex-plugin",
     ".claude-plugin/plugin.json",
     "README.md",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md",
-    "docs/REMOTE-EXECUTION.md",
-    "docs/CAPTURE.md"
+    "THIRD_PARTY_NOTICES.md"
   ],
   "publishConfig": {
     "access": "public"

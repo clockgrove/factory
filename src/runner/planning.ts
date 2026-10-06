@@ -38,6 +38,7 @@ import {
   type LocalOwner,
   type ObjectiveStep,
   configuredDiagnosticSecrets,
+  cancelRecordedSubprocesses,
   canHandoff,
   CoordinatorHandoff,
   mutationLock,
@@ -339,6 +340,12 @@ export async function prepareObjective(args: {
         ? `Objective, sources or configuration changed during projection; restore what changed, or run \`factory cancel --objective ${objective}\``
         : "Objective, sources or configuration changed since planning; refuse the plan with factory decide to plan again",
     );
+  // Native planning processes retained by an interrupted controller must
+  // cease before a resumed preparation can make another paid call.
+  if (preparation.coordinator.processes?.length) {
+    await cancelRecordedSubprocesses(preparation);
+    saveState(path, preparation);
+  }
   if (owner.handoff && canHandoff(preparation)) throw new CoordinatorHandoff();
   const planningScopeId = preparation.runId;
   // Planning that stopped without a reviewable plan waits for an operator refusal.

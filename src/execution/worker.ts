@@ -109,10 +109,12 @@ export async function runCodexWorker(
   // worktree, the private HOME and TMPDIR, and the platform runtime alone.
   const sandbox = { workspace: "write", network: network === "host" } as const;
   const home = createCodexHome({
+    root: `${inputPath}.codex-home`,
     config: "",
     sandbox: { ...sandbox, directory: request.worktree },
     keep: allowedSecretNames,
   });
+  let invocationStarted = false;
   try {
     const codex = new Codex({ env: home.env });
     const thread = codex.startThread({
@@ -172,11 +174,13 @@ export async function runCodexWorker(
         permissions: sandbox,
         approvalPolicy: "never",
       });
+      invocationStarted = true;
       const streamed = await turn.race(
         thread.runStreamed(prompt, { signal: turn.signal }),
       );
       let finalResponse = "";
       let turnCompleted = false;
+      let streamError: ProviderStreamError | undefined;
       const commandOffsets = new Map<string, number>();
       const events = streamed.events[Symbol.asyncIterator]();
       let closeStarted = false;
@@ -208,14 +212,17 @@ export async function runCodexWorker(
             finalResponse = event.item.text;
           if (event.type === "turn.completed") {
             turnCompleted = true;
+            providerCompleted = true;
+            capture.providerCompleted();
             usage = codexRawTokenUsage(event.usage);
             observeUsage("progress");
           }
           if (event.type === "turn.failed")
             throw new Error(event.error.message);
           if (event.type === "error")
-            throw new ProviderStreamError(event.message);
-          if (turnCompleted) break;
+            streamError = new ProviderStreamError(event.message);
+          // Stream errors can precede a CLI-managed retry. Read through the
+          // terminal turn and natural EOF to retain its usage and exit error.
         }
         closeStarted = true;
         await closeProviderEventStream(events, turn, true);
@@ -232,20 +239,10 @@ export async function runCodexWorker(
       } finally {
         if (!closeStarted) void closeProviderEventStream(events, turn, false);
       }
+      if (!turnCompleted && streamError) throw streamError;
       requireCompletedProviderTurn(turnCompleted);
       turn.finish();
-      providerCompleted = true;
-      capture.providerCompleted();
       const parsedAssets = readProducedAssets(request);
-      writeHarnessResult(resultPath, {
-        state: "complete",
-        assets: parsedAssets,
-        evidence: {
-          finalResponse,
-          threadId: thread.id,
-          usage,
-        },
-      });
       observeUsage("completed");
       capture.outcome(
         "completed",
@@ -253,12 +250,17 @@ export async function runCodexWorker(
         undefined,
         "protocol",
       );
+      writeHarnessResult(resultPath, {
+        state: "complete",
+        assets: parsedAssets,
+        evidence: { finalResponse, threadId: thread.id, usage },
+      });
       return true;
     } catch (caught) {
       const error = caught;
-      writeHarnessResult(
-        resultPath,
-        harnessFailure("codex", error, redactionValues),
+      capture.nativeFailure(
+        () => home.nativeMetadata(thread.id ?? undefined),
+        thread.id ?? undefined,
       );
       observeUsage("failed");
       capture.outcome(
@@ -267,12 +269,17 @@ export async function runCodexWorker(
         error,
         providerCompleted ? "protocol" : "provider",
       );
+      writeHarnessResult(
+        resultPath,
+        harnessFailure("codex", error, redactionValues),
+      );
       return false;
     } finally {
       turn?.finish();
     }
   } finally {
-    home.dispose();
+    // Once launched, the durable harness owner disposes the home after group cessation.
+    if (!invocationStarted) home.dispose();
   }
 }
 

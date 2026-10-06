@@ -1099,6 +1099,9 @@ export interface OwnedSubprocess {
   pid: number;
   startTime: string;
 }
+export class UnsettledSubprocessError extends Error {
+  override readonly name = "UnsettledSubprocessError";
+}
 interface ProcessScope {
   unresolved?: boolean;
   signal?: AbortSignal;
@@ -1213,7 +1216,7 @@ export async function subprocessAsync(
     // SIGKILL is asynchronous. Allow the kernel to reap runnable descendants.
     if (cancellationError || !(await groupEnds(child.pid, 1_000))) {
       if (scope) scope.unresolved = true;
-      throw new Error(
+      throw new UnsettledSubprocessError(
         "Owned subprocess cessation could not be verified; outcome unknown",
         { cause: cancellationError },
       );
@@ -1234,7 +1237,7 @@ export async function subprocessAsync(
     }
     if (stopError || !(await groupEnds(owned.pid, 1_000))) {
       if (scope) scope.unresolved = true;
-      throw new Error(
+      throw new UnsettledSubprocessError(
         "Owned subprocess group remains active; outcome unknown",
         { cause: stopError },
       );

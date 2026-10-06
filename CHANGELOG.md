@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Planning refuses prose around a command code span, raw Markdown validation entries and whitespace-padded ownership paths before graph admission (#735). Source-line choices extract only standalone command text or a complete single code span; surrounding prose is never converted into authority.
+
 - Split the runner into planning, projection, execution and finalization modules, and separate validation command execution from result evidence and acceptance review (#518). Public APIs, atomic continuation state, ownership, accounting and acceptance rules remain unchanged.
 
 - Status and run recovery commands retain an explicitly selected configuration, including quoted paths. Local setup reports measured host recommendations for coding, validation and review while preserving configured and recorded limits (#517).

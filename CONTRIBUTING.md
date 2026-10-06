@@ -17,7 +17,7 @@ npm run build
 
 Keep optional dependencies enabled for source development: TypeScript and notice checks inspect the optional harness SDKs.
 
-Read [AGENTS.md](AGENTS.md) for contributor rules and the [architecture](docs/ARCHITECTURE.md) for how Factory works and its safety invariants. Factory must never execute an Objective against its own source repository.
+Read [AGENTS.md](AGENTS.md) for contributor rules. Use the [architecture](docs/ARCHITECTURE.md) as a reference when needed. Factory must never execute an Objective against its own source repository.
 
 ## Run the CLI from a checkout
 
@@ -48,7 +48,7 @@ Then run the setup skill, or `factory setup`, as the README describes. Rules:
 
 ## Checks
 
-Check a completed batch with the relevant commands:
+CI runs these checks. Run only an affected command locally when needed:
 
 ```sh
 npm run lint
@@ -59,11 +59,9 @@ npm test
 
 `npm test` builds Factory and runs the small integration suite against real temporary Git repositories, processes, files, the secret scanner, and the packed CLI installed offline. These checks need no provider credentials or live GitHub target.
 
-The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one integration-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release runs the same integration suite and separately verifies the exact tarball it publishes.
+The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one integration-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
 
-`npm run lint` is Biome's recommended rules plus the few deviations in `biome.json`, then `scripts/check-ts-directives.mjs`, which refuses `@ts-nocheck`, `@ts-ignore`, triple-slash references and `@ts-expect-error` without a reason in `src`. `npm run format` applies formatting.
-
-`npm ci` installs a pre-commit hook (`.githooks/pre-commit`). It formats staged `.ts`, `.mts`, `.js`, `.mjs` and `.json` files with Biome, re-stages them, and runs `biome lint` on them. It does not run `tsc`, the directive check, or Prettier (Markdown, YAML, `package-lock.json`), so run the commands above before you push.
+`npm run lint` uses Biome. `npm run format` applies formatting. Commits do not install hooks or re-stage files; CI enforces the checks.
 
 For an affected integration check after the batch, build and run its file directly:
 
@@ -74,7 +72,7 @@ node --import ./test/isolate-env.mjs --test test/git-registry-lock.test.mjs
 
 Keep coverage small and tied to demonstrated failures. Reuse an existing real workflow before adding a test. Do not add unit tests, mocks, fake services, scripted provider responses, fault matrices or fixture frameworks. CI runs the complete small suite; avoid repeatedly running it locally when the affected check already passed and nothing changed.
 
-For documentation-only changes, check the relevant commands, links and formatting. Real provider, GitHub delivery and staging acceptance comes from the phase's approved adopter outcomes under the [release procedure](docs/RELEASING.md). Review those outcomes once the phase is complete. A disposable public fixture can diagnose a concrete failure; it is not a prerequisite to adopter work. Local integration checks cannot establish live acceptance.
+Check documentation commands, links and formatting when they change. Use the [release procedure](docs/RELEASING.md) for the release issue’s actual milestone acceptance; do not add per-fix live runs or a separate public-fixture gate. Local CI does not claim live provider or GitHub acceptance.
 
 ## Pull requests
 

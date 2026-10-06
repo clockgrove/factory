@@ -1,3 +1,3 @@
-# Factory disposable target fixture
+# Media test fixture
 
-This directory is a minimal public target baseline for installed-package acceptance. Copy its files into a new GitHub repository you control, commit and push `main`, then create an Objective Issue from a template in `../objectives/`. The included `assets/source.png` is a valid 2×2 RGB image for the media/LFS gate. Factory state and credentials belong outside this repository. This fixture is disposable and contains no Clockgrove product requirements.
+`assets/source.png` is the 2×2 RGB image used by the real media/LFS integration test.

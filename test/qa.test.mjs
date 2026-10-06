@@ -32,6 +32,7 @@ import {
   git,
   makeApplication,
   readEvents,
+  ScriptedPlanningModel,
 } from "./support/integration-fixture.mjs";
 import { resultFindings } from "./support/review-protocol.mjs";
 import { compilePlan, planningDiagnosis } from "./support/plan.mjs";
@@ -988,6 +989,77 @@ test("unavailable real environment stops before a worker starts", async () =>
       0,
     );
   }));
+
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: failed QA subset readiness probe retains its original failure without candidate receipts`, async () =>
+    fixture(async (root) => {
+      const target = createTarget(root, ciWorkflow);
+      const value = graph(target.baseSha);
+      // Readiness runs the second command alone, whereas actual QA owns the
+      // ordered pair. The QA attempt already has its selected candidate.
+      value.items[2].validation.unshift(value.items[1].validation[0]);
+      const config = factoryConfig(
+        target.checkout,
+        `example/qa-subset-${delivery}`,
+        delivery,
+      );
+      const model = new ScriptedPlanningModel(
+        value,
+        join(root, "planning.ndjson"),
+      );
+      const generate = model.generateStructured.bind(model);
+      model.generateStructured = async (request) =>
+        request.purpose === "diagnosis"
+          ? {
+              decision: "operator",
+              diagnosis:
+                "The source-authorized readiness condition is unavailable.",
+              correction: "",
+              predecessor: "",
+              path: "",
+            }
+          : generate(request);
+      const { application, eventsPath, github } = makeApplication({
+        config,
+        graph: value,
+        objectiveBody: body,
+        fakeRoot: join(root, "fake"),
+        planningModel: model,
+        actions: {
+          unit: { files: [{ path: "unit.txt", text: "unit" }] },
+          integration: {
+            files: [{ path: "integration.txt", text: "integration" }],
+          },
+        },
+      });
+      github.namedCheck = async (headSha, name) => ({
+        id: 1001,
+        headSha,
+        name,
+        status: "completed",
+        conclusion: "success",
+        detailsUrl: "https://github.com/example/target/actions/runs/1001",
+      });
+      const stopped = await application.runObjective(1);
+      const failed = stopped.work.qa;
+      assert.equal(failed.status, "failed");
+      assert.equal(failed.step, "validate");
+      assert.ok(failed.attempt && failed.changeRef && failed.treeSha);
+      assert.match(
+        failed.recovery.failure.detail,
+        /Validation command failed \(1\): test -s real-environment.txt/,
+      );
+      assert.equal(failed.recovery.failure.classification, "implementation");
+      assert.equal(failed.failedValidation, undefined);
+      assert.equal(failed.recovery.failure.validationCaptureDigest, undefined);
+      assert.equal(failed.validation, undefined);
+      assert.equal(
+        readEvents(eventsPath).filter(
+          (entry) => entry.type === "start" && entry.item === "qa",
+        ).length,
+        0,
+      );
+    }));
 
 test("authorized prerequisite creates the real environment before late QA probes it", async () =>
   fixture(async (root) => {

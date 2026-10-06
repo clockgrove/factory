@@ -183,6 +183,8 @@ const startFresh = (what: string) =>
   `State records ${what} from an earlier Factory version; start the Objective fresh`;
 export interface FailureDisposition {
   digest: string;
+  /** Optional canonical failed-validation capture; absence never supplies receipts. */
+  validationCaptureDigest?: string;
   /**
    * The failure event a correction charges. Only a wrong result has one; a
    * transient or configuration failure is never charged.

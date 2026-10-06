@@ -2,6 +2,10 @@ import { objectiveCandidate } from "./qa.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
 import { assertRepairLedger, type Autonomy } from "./repair-policy.js";
+import {
+  assertFailedValidationRecord,
+  type FailedValidationRecord,
+} from "./failed-validation.js";
 import { type Capacity, validateCapacity } from "./config.js";
 import type {
   AssetSelectionDecision,
@@ -118,6 +122,8 @@ export interface WorkState {
   replacedHeads?: string[];
   treeSha?: string;
   validation?: ValidationEvidence;
+  /** Partial unsuccessful validation, separate from pass-only acceptance evidence. */
+  failedValidation?: FailedValidationRecord;
   acceptancePending?: AcceptancePending;
   acceptanceDecisions?: AcceptanceDecision[];
   assets?: CapturedAssetSet[];
@@ -749,6 +755,36 @@ export function parseFactoryState(
     const accepted = (graph.items as WorkGraph["items"]).find(
       (candidate) => candidate.id === id,
     )!;
+    const controllerState = state as unknown as FactoryState;
+    const currentWork = item as unknown as WorkState;
+    const failure = currentWork.recovery?.failure;
+    // Repair keeps the original failure beside the new attempt, while its
+    // capture belongs to the archived work. Validate that pair below.
+    const archivedFailure = currentWork.recovery?.history?.some(
+      (prior) =>
+        prior.work.attempt !== currentWork.attempt &&
+        prior.failure?.digest === failure?.digest &&
+        prior.failure?.event === failure?.event &&
+        prior.failure?.validationCaptureDigest ===
+          failure?.validationCaptureDigest,
+    );
+    assertFailedValidationRecord(
+      currentWork.failedValidation,
+      controllerState,
+      id,
+      currentWork,
+      archivedFailure && currentWork.failedValidation === undefined
+        ? undefined
+        : failure,
+    );
+    for (const prior of currentWork.recovery?.history ?? [])
+      assertFailedValidationRecord(
+        prior.work.failedValidation,
+        controllerState,
+        id,
+        prior.work,
+        prior.failure,
+      );
     if (
       (accepted.kind === "qa" || accepted.kind === "aggregate") &&
       (item.execution !== undefined ||

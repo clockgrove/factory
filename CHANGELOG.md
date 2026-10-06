@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Replace unit and mock-based verification with a small real integration suite covering Git, processes, disk content, LFS, secret scanning and offline package installation. Remove the fake providers, scripted workers, fault matrices and eight-way test sharding; contributor instructions require this smaller pattern.
+
 - Automatic implementation repair now checks structured readiness against retained failed-command outcomes and complete owned candidate evidence (#856). Unmet or unknown operator prerequisites stop with a question and admit no worker. Saved corrections preserve their original failure, charge and checked input binding across restart; legacy missing readiness stays unavailable, and operator proposals remain declared corrections.
 
 - Retain authenticated native Objective prerequisite seals through activation and supply their bound historical facts to result, QA and final review (#853). Missing legacy facts remain unavailable, and predecessor acceptance never substitutes for current-result acceptance.

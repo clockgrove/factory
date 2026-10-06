@@ -1,4 +1,4 @@
-// Records what real GitHub answers where test/support/github-http-fake.mjs
+// Records actual GitHub responses during the live integration check.
 // makes an assumption: native stacks and merge-async, merge refusals, error
 // bodies, pull fields under API 2026-03-10, pagination and read-after-write
 // lag. Run `node scripts/live-check-probe.mjs`. Creates throwaway

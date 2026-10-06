@@ -20,7 +20,7 @@ Factory is an open-source plugin for Codex and Claude Code, built for developers
 - Your target's build and validation tools; Git LFS for LFS-backed media work.
 - A trusted repository with committed instructions and requirements. Local workers run under your OS account; they are not a security boundary for hostile code.
 
-Planning, review, and workers consume your provider's usage. Different Objectives can run in parallel, each from its own foreground run, while the background service queue stays sequential. Factory runs with a configured local harness or compile-time assigned local execution profiles. [Remote execution](https://github.com/clockgrove/factory/blob/main/docs/REMOTE-EXECUTION.md) (Claude and OpenAI managed agents) is not yet live-qualified. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md) for optional-provider requirements and boundaries.
+Planning, review, and workers consume your provider's usage. Different Objectives can run in parallel, each from its own foreground run, while the background service queue stays sequential. Factory runs with a configured local harness or compile-time assigned local execution profiles. [Remote execution](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#managed-execution) (Claude and OpenAI managed agents) is not yet live-qualified. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#local-providers) for optional-provider requirements and boundaries.
 
 ## Install
 
@@ -116,11 +116,11 @@ To add features or fix bugs **in Factory itself**, use a source checkout and fol
 | I want to…                                                          | Read                                                                                                                                            |
 | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | Configure models, inspect progress, review media, or handle a pause | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                                |
-| Capture, analyze or export model usage                              | [Capture and analysis](https://github.com/clockgrove/factory/blob/main/docs/CAPTURE.md)                                                         |
-| Select or implement a local agent harness                           | [Local harnesses](https://github.com/clockgrove/factory/blob/main/docs/AGENT-HARNESSES.md)                                                      |
-| Report a bug or ask for help                                        | [Support](https://github.com/clockgrove/factory/blob/main/SUPPORT.md)                                                                           |
+| Capture, analyze or export model usage                              | [Capture and analysis](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#diagnostic-capture-and-export)                                                         |
+| Select or implement a local agent harness                           | [Local harnesses](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#local-providers)                                                      |
+| Report a bug or ask for help                                        | [Issue tracker](https://github.com/clockgrove/factory/issues)                                                                           |
 | Build from source or contribute                                     | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                                 |
 | Understand the architecture and roadmap                             | [Architecture](https://github.com/clockgrove/factory/blob/main/docs/ARCHITECTURE.md) · [Project](https://github.com/orgs/clockgrove/projects/2) |
 | Inspect release changes or the release process                      | [Releases](https://github.com/clockgrove/factory/releases) · [Releasing](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md)     |
 
-Factory is [MIT licensed](https://github.com/clockgrove/factory/blob/main/LICENSE) and maintained by Clockgrove. Contributions follow the [code of conduct](https://github.com/clockgrove/factory/blob/main/CODE_OF_CONDUCT.md). Report vulnerabilities through the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).
+Factory is [MIT licensed](https://github.com/clockgrove/factory/blob/main/LICENSE) and maintained by Clockgrove. Report vulnerabilities through the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).

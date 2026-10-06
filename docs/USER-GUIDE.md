@@ -354,3 +354,22 @@ factory propose --source 'docs/waves/wave.md#Exact heading' --output /private/ex
 sha256sum /private/existing-dir/objectives.json
 factory propose --file /private/existing-dir/objectives.json --approve REVIEWED_SHA256 --enqueue --config /private/factory.json
 ```
+
+## Learning and Dream
+
+Learning episodes retain terminal Objective history privately and append-only. Collect an episode explicitly without a model call; nonterminal, unsettled or unknown work is refused. `dream` makes one bounded proposal pass through the configured provider, producing an editable private draft outside the target checkout. Its default active playbook budget is 16 KiB; later proposals retain the existing budget unless you specify `--budget-bytes N`. Dream does not approve its own proposal or start an Objective.
+
+```sh
+factory dream --record --objective N --config /private/factory.json
+factory dream --config /private/factory.json
+# Review/edit the printed draft path, then hash the exact bytes you reviewed
+sha256sum /private/learning/proposals/ID.draft.json
+factory dream --file /private/learning/proposals/ID.draft.json --approve REVIEWED_SHA256 --config /private/factory.json
+# Or reject that exact draft
+factory dream --file /private/learning/proposals/ID.draft.json --reject REVIEWED_SHA256 --config /private/factory.json
+factory dream --show --config /private/factory.json
+```
+
+Use the actual path and next commands printed by Dream; drafts default to the repository's private state `learning/proposals/` directory. Review consolidated entries, source links, dated summaries and contradictions before approval. Merge or retire redundant guidance to fit the budget while preserving original episodes and sources. After editing, recompute the file digest; approval or rejection applies only to those exact bytes. `--show` reads the current approved playbook without a model call.
+
+Only an approved compact version enters subsequent Objective planning and review inputs. Each Objective pins its version: later approval cannot change an active run. Learning is advisory, never command authority, permission or acceptance evidence, and it cannot override pinned Sources or limits. Episodes and drafts stay private locally and may be sent only to the already configured provider when Dream is authorized; review source-derived private text before sharing it.

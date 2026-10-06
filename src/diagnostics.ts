@@ -625,6 +625,8 @@ export function summarizeModelInvocations(
     };
   };
   const phases: ModelInvocationPhase[] = [
+    "propose",
+    "dream",
     "compile",
     "diagnosis",
     "graph-review",

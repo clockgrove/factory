@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { graphDigest } from "./graph-amendments.js";
+import { ownsPath, validOwnershipPath } from "./ownership.js";
+import { itemEvent, type FailureDisposition } from "./repair-policy.js";
 import type { FactoryState, WorkState } from "./state.js";
 import { refuseUnknownFields } from "./unknown-fields.js";
 
@@ -168,11 +170,7 @@ export function assertFailedValidationRecord(
   state: FactoryState,
   itemId: string,
   work: Omit<WorkState, "recovery">,
-  failure?: {
-    digest: string;
-    event?: string;
-    validationCaptureDigest?: string;
-  },
+  failure?: FailureDisposition,
 ): asserts value is FailedValidationRecord | undefined {
   if (value === undefined) {
     if (failure?.validationCaptureDigest !== undefined)
@@ -210,6 +208,70 @@ export function assertFailedValidationRecord(
       ? state.graph
       : undefined);
   const item = revision?.items.find((entry) => entry.id === itemId);
+  const history = state.work[itemId]?.recovery?.history ?? [];
+  const retainedIndexes = history.flatMap((prior, index) =>
+    prior.work.attempt === work.attempt &&
+    prior.failure?.validationCaptureDigest === failure?.validationCaptureDigest
+      ? [index]
+      : [],
+  );
+  if (retainedIndexes.length > 1)
+    throw new Error(
+      `Work Item ${itemId} failed validation has ambiguous retained attempts`,
+    );
+  const retainedIndex = retainedIndexes[0] ?? -1;
+  const originalEvent = itemEvent(
+    itemId,
+    "validate",
+    retainedIndex < 0 ? history.length : retainedIndex,
+  );
+  // A checked predecessor blame releases the charge and removes the active
+  // event. The immutable capture still names the original failed attempt.
+  const predecessor = failure?.predecessor;
+  // Diagnosis can be deferred across an accepted amendment. Its decision
+  // graph is independent of the capture's original immutable command map.
+  const decisionGraph =
+    state.graphRevisions?.find(
+      (entry) => entry.digest === predecessor?.graphDigest,
+    )?.graph ??
+    (graphDigest(state.graph) === predecessor?.graphDigest
+      ? state.graph
+      : undefined);
+  const dependencies = new Set<string>();
+  const visit = (id: string): void => {
+    for (const dependency of decisionGraph?.items.find(
+      (entry) => entry.id === id,
+    )?.dependencies ?? []) {
+      if (dependencies.has(dependency)) continue;
+      dependencies.add(dependency);
+      visit(dependency);
+    }
+  };
+  visit(itemId);
+  const decisionItem = decisionGraph?.items.find(
+    (entry) => entry.id === itemId,
+  );
+  const owner = decisionGraph?.items.find(
+    (entry) => entry.id === predecessor?.item,
+  );
+  const ownerWork = owner && state.work[owner.id];
+  const predecessorDecision =
+    failure?.event === undefined &&
+    failure?.classification === "decision" &&
+    failure?.continuation === "operator-decision" &&
+    predecessor !== undefined &&
+    decisionGraph &&
+    graphDigest(decisionGraph) === predecessor.graphDigest &&
+    owner &&
+    ownerWork?.status === "done" &&
+    sha(ownerWork.integratedSha) &&
+    predecessor.pullRequest === ownerWork.pullRequest &&
+    dependencies.has(owner.id) &&
+    validOwnershipPath(predecessor.path) &&
+    !predecessor.path.endsWith("/") &&
+    ownsPath(predecessor.path, owner.ownedPaths) &&
+    decisionItem &&
+    !ownsPath(predecessor.path, decisionItem.ownedPaths);
   if (
     record.repository !== state.repository ||
     record.objective !== state.objective ||
@@ -231,7 +293,11 @@ export function assertFailedValidationRecord(
       record.graphRevisionDigest !== work.graphRevisionDigest) ||
     record.failureDigest !== failure?.digest ||
     !sha(record.failureDigest, 64) ||
-    record.failureEvent !== failure?.event ||
+    (record.failureEvent !== undefined &&
+      record.failureEvent !== originalEvent) ||
+    (predecessor !== undefined &&
+      (record.failureEvent !== originalEvent || !predecessorDecision)) ||
+    (record.failureEvent !== failure?.event && !predecessorDecision) ||
     !sha(failure?.validationCaptureDigest, 64) ||
     failure?.validationCaptureDigest !==
       failedValidationDigest(value as FailedValidationRecord) ||

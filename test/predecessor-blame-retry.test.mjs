@@ -4,6 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { failedValidationDigest } from "../dist/failed-validation.js";
+import { consumption } from "../dist/repair-policy.js";
+import { parseFactoryState } from "../dist/state.js";
 import { readContinuation, readState } from "../dist/state-store.js";
 import {
   createTarget,
@@ -85,11 +88,15 @@ async function fixture(name, nextValidation, run) {
       join(fakeRoot, "planning.ndjson"),
     );
     let diagnoses = 0;
+    const originalFailures = [];
     const planningModel = Object.create(scripted);
     planningModel.generateStructured = async (request) => {
       if (request.purpose !== "diagnosis")
         return scripted.generateStructured(request);
       diagnoses++;
+      originalFailures.push(
+        structuredClone(readContinuation(config.repository, 1).work.next),
+      );
       return {
         decision: "predecessor",
         diagnosis: "result.txt holds the wrong content",
@@ -130,6 +137,7 @@ async function fixture(name, nextValidation, run) {
       config,
       checks,
       diagnoses: () => diagnoses,
+      originalFailures,
     });
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME;
@@ -155,6 +163,49 @@ test("retry after a blame stop at validation starts a new attempt on the integra
         "result",
       );
       assert.equal(f.diagnoses(), 1);
+      const original = f.originalFailures[0];
+      const capture = stopped.work.next.failedValidation;
+      const failure = stopped.work.next.recovery.failure;
+      assert.deepEqual(capture, original.failedValidation);
+      assert.equal(
+        failure.validationCaptureDigest,
+        original.recovery.failure.validationCaptureDigest,
+      );
+      assert.equal(capture.failureEvent, "item/next/validate/0");
+      assert.equal(failure.event, undefined);
+      assert.equal(failure.classification, "decision");
+      assert.equal(consumption(stopped).implementationRepairs, 0);
+      assert.equal(stopped.charges[capture.failureEvent], undefined);
+      parseFactoryState(stopped, f.config.repository, 1);
+      for (const alter of [
+        (state) => delete state.work.next.recovery.failure.predecessor,
+        (state) => {
+          state.work.next.recovery.failure.classification = "implementation";
+        },
+        (state) => {
+          state.work.next.recovery.failure.predecessor.graphDigest = "a".repeat(
+            64,
+          );
+        },
+        (state) => {
+          state.work.next.recovery.failure.predecessor.item = "next";
+        },
+        (state) => {
+          state.work.next.failedValidation.failureEvent =
+            "item/next/validate/1";
+          state.work.next.recovery.failure.validationCaptureDigest =
+            failedValidationDigest(state.work.next.failedValidation);
+        },
+        (state) => {
+          delete state.work.next.failedValidation.failureEvent;
+          state.work.next.recovery.failure.validationCaptureDigest =
+            failedValidationDigest(state.work.next.failedValidation);
+        },
+      ]) {
+        const corrupt = structuredClone(stopped);
+        alter(corrupt);
+        assert.throws(() => parseFactoryState(corrupt, f.config.repository, 1));
+      }
       const first = stopped.work.next.attempt;
 
       // The same attempt would fail and be blamed again: retry starts a new one.
@@ -165,12 +216,32 @@ test("retry after a blame stop at validation starts a new attempt on the integra
         retried.work.next.recovery.history.at(-1).work.attempt,
         first,
       );
+      assert.deepEqual(
+        retried.work.next.recovery.history.at(-1).work.failedValidation,
+        capture,
+      );
+      const ambiguous = structuredClone(retried);
+      ambiguous.work.next.recovery.history.push(
+        structuredClone(ambiguous.work.next.recovery.history[0]),
+      );
+      assert.throws(
+        () => parseFactoryState(ambiguous, f.config.repository, 1),
+        /ambiguous retained attempts/,
+      );
 
       await f.application.runObjective(1);
       const again = stateOf(f);
       assert.equal(f.diagnoses(), 2, "the new attempt ran and was diagnosed");
       assert.notEqual(again.work.next.attempt, first);
       assert.equal(again.work.next.baseSha, again.work.result.integratedSha);
+      assert.deepEqual(
+        again.work.next.recovery.history[0].work.failedValidation,
+        capture,
+      );
+      assert.equal(
+        again.work.next.failedValidation.failureEvent,
+        "item/next/validate/1",
+      );
     },
   ));
 

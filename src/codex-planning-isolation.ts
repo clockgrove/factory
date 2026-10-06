@@ -9,6 +9,12 @@ import {
   writeFileSync,
   existsSync,
   realpathSync,
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  opendirSync,
+  readSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
@@ -74,7 +80,7 @@ export interface CodexSandbox {
 }
 
 /** The installed Codex runtime; its Linux sandbox helper re-executes it. */
-function codexRuntimeDirectory(): string {
+export function codexRuntimeDirectory(): string {
   const cli = createRequire(
     createRequire(import.meta.url).resolve("@openai/codex/package.json"),
   );
@@ -149,8 +155,9 @@ function gitMetadata(workspace: string): string[] {
  * The directories a worker's shell reads, never writes, so the tools on its
  * PATH run: every PATH directory, and the directory of the real file behind
  * each link in one. A directory named `bin` or `sbin` stands for its install
- * prefix, where a tool keeps its libraries, unless the prefix is a hidden
- * directory (`~/.local`, `~/.cargo`: settings and logins live there).
+ * prefix, where a tool keeps its libraries, unless the prefix is hidden,
+ * the HOME or Windows profile itself, or a direct child of either. Those
+ * directories can contain unrelated private files; mount only bin there.
  *
  * Nothing here may show the operator's HOME as a whole, a login (SSH, gh,
  * Codex, Claude, Copilot), Factory's config or state, or the checkout's git
@@ -164,25 +171,60 @@ function toolchainDirectories(
   const home = real(source.HOME || homedir());
   const config = source.XDG_CONFIG_HOME || join(home, ".config");
   const state = source.XDG_STATE_HOME || join(home, ".local", "state");
+  const data = source.XDG_DATA_HOME || join(home, ".local", "share");
+  const credentialDirectories = [
+    "ssh",
+    "aws",
+    "docker",
+    "kube",
+    "gnupg",
+    "gh",
+    "codex",
+    "claude",
+    "copilot",
+  ];
+  const windowsProfile = (directory: string) =>
+    /^\/mnt\/[a-z]\/Users\/[^/]+(?=\/|$)/i.exec(directory)?.[0];
   const linked = linkedGit(workspace);
   const sealed = [
     join(home, ".ssh"),
     join(home, ".claude"),
     join(home, ".copilot"),
+    join(home, ".aws"),
+    join(home, ".docker"),
+    join(home, ".kube"),
+    join(home, ".gnupg"),
+    ...[config, data].flatMap((root) =>
+      credentialDirectories.map((name) => join(root, name)),
+    ),
     source.CODEX_HOME || join(home, ".codex"),
-    join(config, "gh"),
     join(config, "clockgrove-factory"),
+    join(data, "clockgrove-factory"),
+    join(data, "factory-copilot-auth"),
     join(state, "clockgrove-factory"),
     ...(linked ? [linked.common] : []),
   ].map(real);
-  const exposes = (directory: string) =>
-    within(home, directory) ||
-    sealed.some((path) => within(path, directory) || within(directory, path));
+  const exposes = (directory: string) => {
+    const profile = windowsProfile(directory);
+    const protectedPaths = profile
+      ? credentialDirectories.map((name) => real(join(profile, `.${name}`)))
+      : [];
+    return (
+      within(home, directory) ||
+      /^\/mnt(?:\/[a-z](?:\/Users)?)?\/?$/i.test(directory) ||
+      (profile !== undefined && within(profile, directory)) ||
+      [...sealed, ...protectedPaths].some(
+        (path) => within(path, directory) || within(directory, path),
+      )
+    );
+  };
   const root = (directory: string) => {
     const prefix = dirname(directory);
     if (
       ["bin", "sbin"].includes(basename(directory)) &&
       !basename(prefix).startsWith(".") &&
+      dirname(prefix) !== home &&
+      dirname(prefix) !== windowsProfile(prefix) &&
       !exposes(prefix)
     )
       return prefix;
@@ -266,8 +308,108 @@ enabled = ${sandbox.network}
 export interface CodexHome {
   /** Environment for the Codex process; it replaces `process.env`. */
   env: Record<string, string>;
+  /** Bounded native event metadata only; no payloads or cessation proof. */
+  nativeMetadata(threadId?: string): unknown;
   /** Removes the scratch home. */
   dispose(): void;
+}
+
+function nativeMetadata(home: string, threadId?: string): unknown {
+  const unavailable = { source: "codex-rollout", status: "unavailable" };
+  if (!threadId || !/^[0-9a-f-]{36}$/.test(threadId)) return unavailable;
+  let remaining = 128;
+  const visit = (directory: string, depth: number): unknown => {
+    if (--remaining < 0) return undefined;
+    const fd = openSync(
+      directory,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY,
+    );
+    try {
+      // Hold each directory open while reading its children: a substituted
+      // symlink cannot redirect the scan outside this owned native home.
+      const anchor = `/proc/self/fd/${fd}`;
+      const entries = opendirSync(anchor);
+      try {
+        for (
+          let entry = entries.readSync();
+          entry;
+          entry = entries.readSync()
+        ) {
+          if (--remaining < 0) break;
+          const path = join(anchor, entry.name);
+          if (entry.isFile() && entry.name.endsWith(`-${threadId}.jsonl`))
+            return readRollout(path);
+          if (entry.isDirectory() && depth > 0) {
+            const found = visit(path, depth - 1);
+            if (found !== undefined) return found;
+          }
+        }
+      } finally {
+        entries.closeSync();
+      }
+      return undefined;
+    } finally {
+      closeSync(fd);
+    }
+  };
+  const readRollout = (path: string): unknown => {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) return unavailable;
+      const head = Buffer.alloc(Math.min(stat.size, 256 * 1024));
+      const headBytes = readSync(fd, head, 0, head.length, 0);
+      const firstLine = head
+        .subarray(0, headBytes)
+        .toString("utf8")
+        .split("\n")[0]!;
+      const session = JSON.parse(firstLine);
+      if (session.type !== "session_meta" || session.payload?.id !== threadId)
+        return unavailable;
+      const offset = Math.max(0, stat.size - 64 * 1024);
+      const tail = Buffer.alloc(stat.size - offset);
+      const tailBytes = readSync(fd, tail, 0, tail.length, offset);
+      const lines = tail.subarray(0, tailBytes).toString("utf8").split("\n");
+      if (offset) lines.shift();
+      const events: unknown[] = [];
+      for (const line of lines.slice(-256)) {
+        try {
+          const item = JSON.parse(line);
+          const kind = (value: unknown) =>
+            typeof value === "string" && /^[a-z_]{1,64}$/.test(value)
+              ? value
+              : undefined;
+          events.push({
+            at:
+              typeof item.timestamp === "string" &&
+              /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(item.timestamp)
+                ? item.timestamp
+                : undefined,
+            type: kind(item.type),
+            event: kind(item.payload?.type),
+          });
+        } catch {
+          /* Partial or oversized native records are not reconstructed. */
+        }
+      }
+      return {
+        source: "codex-rollout",
+        status: "partial",
+        bytes: stat.size,
+        readAt: new Date().toISOString(),
+        events,
+        processCessation: "unavailable",
+        networkStream: "unavailable",
+      };
+    } finally {
+      closeSync(fd);
+    }
+  };
+  try {
+    return visit(join(home, "sessions"), 3) ?? unavailable;
+  } catch {
+    return unavailable;
+  }
 }
 
 /**
@@ -279,13 +421,16 @@ export interface CodexHome {
  * `keep` names further variables to pass through, such as declared secrets.
  */
 export function createCodexHome(options: {
+  /** A harness-owned path, removed only after its process group is settled. */
+  root?: string;
   source?: NodeJS.ProcessEnv;
   config: string;
   sandbox?: CodexSandbox;
   keep?: readonly string[];
 }): CodexHome {
   const source = options.source ?? process.env;
-  const root = mkdtempSync(join(tmpdir(), "factory-codex-"));
+  const root = options.root ?? mkdtempSync(join(tmpdir(), "factory-codex-"));
+  if (options.root) mkdirSync(root, { mode: 0o700 });
   try {
     const home = join(root, "home");
     const codexHome = join(root, "codex-home");
@@ -319,6 +464,7 @@ export function createCodexHome(options: {
     if (options.sandbox) env.GIT_OPTIONAL_LOCKS = "0";
     return {
       env,
+      nativeMetadata: (threadId) => nativeMetadata(codexHome, threadId),
       dispose: () => rmSync(root, { recursive: true, force: true }),
     };
   } catch (error) {

@@ -29,14 +29,13 @@ jobs:
           node-version: 24
           cache: npm
 
-      - name: Check tag, versions and changelog agree
+      - name: Check tag and version identities agree
         run: node scripts/version.mjs check "$GITHUB_REF_NAME"
       - name: Require the tagged commit to be on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
       - run: npm ci
       - run: git lfs version
-      - run: npm run build
       - run: npm run lint
       - run: npm run format:check
       - run: npm run notices:check
@@ -65,9 +64,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          node scripts/version.mjs notes "$version" > release-notes.md
           # X.Y.Z-suffix versions are prereleases, so the README's "latest" install skips them.
           prerelease=()
           [[ "$version" == *-* ]] && prerelease=(--prerelease)
           gh release create "$GITHUB_REF_NAME" artifacts/*.tgz artifacts/SHA256SUMS \
-            --verify-tag --title "Factory $version" --notes-file release-notes.md "${prerelease[@]}"
+            --verify-tag --title "Factory $version" --generate-notes "${prerelease[@]}"

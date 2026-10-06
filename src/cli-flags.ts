@@ -32,6 +32,16 @@ const commandFlags: Record<string, string[]> = {
     "credential-file",
     ...installFlags,
   ],
+  propose: ["source", "output", "file", "approve", "enqueue"],
+  dream: [
+    "budget-bytes",
+    "file",
+    "approve",
+    "reject",
+    "show",
+    "record",
+    "objective",
+  ],
   run: ["objective", "deadline"],
   queue: [],
   supervisor: ["cli", "disable", "service-credential"],
@@ -73,6 +83,8 @@ export const booleanFlags = new Set([
   "gantt",
   "disable",
   "rereview",
+  "show",
+  "record",
 ]);
 const removedFlags = ["source", "authority", "admission", "abandon"];
 /** Flags dropped when running a command became its own consent. */
@@ -135,7 +147,10 @@ export function assertKnownFlags(command: string, args: string[]): void {
   for (const arg of args) {
     if (!arg.startsWith("--")) continue;
     const name = arg.slice(2);
-    if (removedFlags.includes(name))
+    if (
+      removedFlags.includes(name) &&
+      !(command === "propose" && name === "source")
+    )
       throw new Error(
         `${arg} was removed; Objectives declare their own sources and running is the consent (see factory help)`,
       );

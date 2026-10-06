@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DiagnosticEmitter } from "./diagnostics.js";
-import { attachFault, faultOf, StepFault, transient } from "./fault.js";
+import {
+  attachFault,
+  faultOf,
+  StepFault,
+  transient,
+  workFault,
+} from "./fault.js";
 import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
 import type { PlanningModel, WorkItem } from "./contracts.js";
 import { blameDecision, cappedDiagnosis } from "./blame-decision.js";
@@ -174,6 +180,65 @@ export function recordWorkFailure(
     phase: "stopped",
   };
   return isolated;
+}
+
+/** A retained current unpublished refusal; this preview creates no failure event. */
+export function savedResultRefusal(state: FactoryState, id: string) {
+  const work = state.work[id];
+  const refusal = work?.acceptanceDecisions?.at(-1);
+  const item = state.graph.items.find((item) => item.id === id);
+  if (
+    !work ||
+    work.recovery?.failure ||
+    work.status !== "failed" ||
+    work.step !== "validate" ||
+    work.integratedSha ||
+    work.pullRequest ||
+    work.acceptancePending ||
+    !work.attempt ||
+    !work.changeRef ||
+    !work.treeSha ||
+    work.validation?.treeSha !== work.treeSha ||
+    refusal?.outcome !== "refuse" ||
+    refusal.treeSha !== work.treeSha ||
+    !item?.acceptance.includes(refusal.criterion) ||
+    work.error !== `Acceptance refused: ${refusal.criterion}` ||
+    state.error ||
+    state.cancelRequested ||
+    state.cancelledAt ||
+    state.finalAcceptance ||
+    state.finalValidation?.passed ||
+    state.objectiveClosure === "complete"
+  )
+    return undefined;
+  return { detail: work.error, digest: failureDigest(work.error) };
+}
+
+/** Reconcile a genuine saved refusal only during locked, settled operator repair. */
+export function recordSavedResultRefusal(
+  state: FactoryState,
+  id: string,
+  checkout: string,
+): boolean {
+  const refusal = savedResultRefusal(state, id);
+  if (!refusal) return false;
+  if (
+    !["paused", "draining"].includes(state.coordinator?.mode ?? "") ||
+    state.coordinator?.cancelError ||
+    state.coordinator?.processes?.length ||
+    Object.values(state.repeats ?? {}).some((record) => record.inFlight)
+  )
+    throw new Error("Saved refusal repair requires paused, settled ownership");
+  const work = state.work[id]!;
+  const tree = pinnedGitRaw(checkout, "rev-parse", `${work.changeRef}^{tree}`)
+    .toString("utf8")
+    .trim();
+  if (tree !== work.treeSha)
+    throw new Error("Saved refusal differs from the exact candidate tree");
+  // recordWorkFailure observes the failure now. The original decision and
+  // its time/reason stay in acceptanceDecisions; no command receipt is invented.
+  recordWorkFailure(state, id, workFault(refusal.detail));
+  return true;
 }
 export function applyWorkCorrection(
   state: FactoryState,

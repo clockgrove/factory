@@ -1,3 +1,7 @@
+import {
+  assertApprovedPlaybookAdmission,
+  assertApprovedPlaybookPin,
+} from "./contracts.js";
 import { objectiveCandidate } from "./qa.js";
 import { assertNativePrerequisites } from "./native-prerequisite-evidence.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
@@ -161,6 +165,8 @@ export interface CoordinatorDisposition {
 
 /** Preparation shares the atomic state path; no executable graph is invented. */
 export interface PreparationState {
+  /** Immutable advisory selection; absence is legacy no-input, null is explicit no-input. */
+  approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
   sourcePacketDigest?: string;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
   /** Limits snapshotted from configuration when the Objective started. */
@@ -257,6 +263,8 @@ export interface FactoryState {
   /** Immutable authenticated admission facts, bound to prerequisitesDigest. */
   prerequisites?: import("./contracts.js").PlanningPrerequisites;
   schemaVersion: 7;
+  approvedPlaybookAdmission?: import("./contracts.js").ApprovedPlaybookAdmission;
+  approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
   repository: string;
   objective: number;
   runId: string;
@@ -500,7 +508,16 @@ export function parseFactoryState(
     );
   string(state.runId, "runId");
   sha(state.configDigest, "configDigest", 64);
+  if (Object.hasOwn(state, "approvedPlaybookPin"))
+    assertApprovedPlaybookPin(state.approvedPlaybookPin);
   sha(state.planGraphDigest, "planGraphDigest", 64);
+  assertApprovedPlaybookAdmission(
+    state.approvedPlaybookPin,
+    state.approvedPlaybookAdmission,
+    state.configDigest,
+    state.planGraphDigest,
+    Object.hasOwn(state, "approvedPlaybookPin"),
+  );
   validateCapacity(state.capacity as Capacity);
   if (state.prerequisitesDigest !== undefined)
     sha(state.prerequisitesDigest, "prerequisitesDigest", 64);

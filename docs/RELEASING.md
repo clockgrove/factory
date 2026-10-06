@@ -22,11 +22,11 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
    node scripts/version.mjs set X.Y.Z
    ```
 
-   This updates `package.json`, `package-lock.json`, the Codex and Claude Code plugin manifests and both marketplace refs, and adds a `## X.Y.Z` heading to `CHANGELOG.md`. Replace its TODO with the user-visible changes. If production dependencies changed, run `npm run notices`.
+   This updates `package.json`, `package-lock.json`, the Codex and Claude Code plugin manifests and both marketplace refs. If production dependencies changed, run `npm run notices`. GitHub Release notes are generated from the merged pull requests; Git history retains the changes.
 
 2. **Review the batch.** Merge the phase's diagnosed fixes through the normal protected pull request path with green Quality checks. Retain focused independent review for changes to credentials, isolation or persisted state. Refresh the release branch after the batch is complete, and independently review its exact candidate.
 
-3. **Accept the phase.** Before merging `X.Y.0`, complete the release issue's actual adopter outcomes, including real staging when its exit criteria require it, and independent phase review. Run the phase acceptance after the batch is complete; a separate public fixture qualification is optional diagnosis, not an additional release or adopter-start gate. Retain the final reviewed source commit, tree, packed archive checksum, installation and outcome evidence for the distribution comparison. CI supplies the packed CLI integration check. Keeping the version PR unmerged until these gates pass leaves the marketplaces on an existing release tag.
+3. **Accept the phase.** Before merging `X.Y.0`, complete the release issue's recorded phase exits and independent completed-batch review. Run the phase acceptance after the batch is complete; a separate public fixture qualification is optional diagnosis, not an additional release or adopter-start gate. Retain the final reviewed source commit, tree, packed archive checksum, installation and outcome evidence for the distribution comparison. CI supplies the packed CLI integration check. Keeping the version PR unmerged until these gates pass leaves the marketplaces on an existing release tag.
 
 4. **Merge.** Merge through the normal protected path after the required phase exits pass. For a minor version, verify that the merged tree equals the retained phase-accepted tree before tagging.
 
@@ -39,7 +39,7 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
 
    Verify active protection against updates and deletion for that exact `refs/tags/vX.Y.Z`, with no bypass actors or exclusions. Preserve existing tag protections. Recheck the remote annotated tag and its peeled commit after pushing.
 
-The Release workflow then checks that the tag, every version identity and the changelog agree and that the commit is on `main`. It runs the complete build, lint, format, notices and test suite (including the packed-artifact tests), packs the tarball, installs it offline from an empty npm cache, attests its provenance and publishes the GitHub Release with the changelog section as notes. If it fails before publishing, fix the problem on `main` and release the next patch version; do not move the tag.
+The Release workflow then checks that the tag and every version identity agree and that the commit is on `main`. It runs the complete build, lint, format, notices and test suite (including the packed-artifact tests), packs the tarball, installs it offline from an empty npm cache, attests its provenance and publishes the GitHub Release with [automatically generated notes](https://cli.github.com/manual/gh_release_create) from the merged pull requests. If it fails before publishing, fix the problem on `main` and release the next patch version; do not move the tag.
 
 ## Verify a release
 
@@ -56,14 +56,14 @@ For a minor version, also compare the downloaded archive byte for byte with the 
 
 ## Phase acceptance
 
-The release issue defines the phase's actual adopter outcomes and staging exits. Complete those outcomes with the approved providers, targets, substantive acceptance and resource limits. Keep exact candidate identities, real results, failures, usage and consumed allowances. Local checks and historical accepted work do not substitute for the current outcome's acceptance.
+The release issue defines the required phase outcomes and their order. Complete those outcomes with the approved providers, targets, substantive acceptance and resource limits. Keep exact candidate identities, real results, failures, usage and consumed allowances. Local checks and historical accepted work do not substitute for the current outcome's acceptance.
 
-Batch corrections before the phase review. Repeat an affected failed check after a demonstrated correction; do not add a separate qualification cycle for every fix. Preserve terminal public runs and their accounting without reviving them or treating them as successful evidence. The [public fixtures](../test/fixtures/) remain available for a concrete reproduction when needed.
+Batch corrections before the milestone review, and repeat a failed check only after a demonstrated correction. Preserve terminal runs and their accounting without reviving them or treating them as successful evidence. The release issue holds the current roadmap and acceptance evidence; do not duplicate that tracking here.
 
 ## Version numbers
 
-Factory is pre-1.0. Patch versions carry fixes and small improvements. Minor versions mark a qualified baseline or an incompatible change to configuration, state or the CLI. Factory does not migrate state between incompatible versions; the changelog says when an upgrade requires finishing or cancelling active Objectives first.
+Factory is pre-1.0. Patch versions carry fixes and small improvements. Minor versions mark a qualified baseline or an incompatible change to configuration, state or the CLI. Factory does not migrate state between incompatible versions. Finish or cancel active Objectives before upgrading across a state-version change.
 
 ## History
 
-Releases up to v0.1.74 used a manual procedure; their verification is linked from each [changelog](../CHANGELOG.md) entry.
+Releases up to v0.1.74 used a manual procedure; their verification is linked from the [historical release record](https://github.com/clockgrove/factory/blob/v0.1.75/CHANGELOG.md). Published release notes and Git history remain the record for those versions.

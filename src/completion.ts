@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { graphDigest, amendmentBlocksDispatch } from "./graph-amendments.js";
 import { assertCompletedCoverage, objectiveCandidate } from "./qa.js";
+import { assertApprovedPlaybookAdmission } from "./contracts.js";
 import type { GitHubGateway } from "./contracts.js";
 import type { ContinuationState, FactoryState } from "./state.js";
 import { attachFault, decision } from "./fault.js";
@@ -29,6 +30,12 @@ function evidenceDigest(state: FactoryState): string {
     .update(
       JSON.stringify({
         objectiveBodyDigest: state.objectiveBodyDigest,
+        ...(state.approvedPlaybookAdmission
+          ? {
+              approvedPlaybookAdmission: state.approvedPlaybookAdmission,
+              approvedPlaybookPin: state.approvedPlaybookPin,
+            }
+          : {}),
         ...(state.prerequisites
           ? {
               nativePrerequisites: {
@@ -49,6 +56,13 @@ function evidenceDigest(state: FactoryState): string {
 }
 
 export function assertTerminalEligibility(state: FactoryState): void {
+  assertApprovedPlaybookAdmission(
+    state.approvedPlaybookPin,
+    state.approvedPlaybookAdmission,
+    state.configDigest,
+    state.planGraphDigest,
+    Object.hasOwn(state, "approvedPlaybookPin"),
+  );
   const candidate = objectiveCandidate(state);
   if (
     !state.finalValidation?.passed ||

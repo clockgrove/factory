@@ -237,7 +237,10 @@ export function codexCaptureEvent(
         () => ({ query: item.query }),
       );
     else if (item.type === "error")
-      record(base, () => ({ error: item.message }));
+      record(
+        { ...base, outcome: { stage: "provider", status: "warning" } },
+        () => ({ error: item.message }),
+      );
     // Reasoning/todo internals are not captured as assistant response text.
     else record(base);
   } else record(base);
@@ -415,6 +418,20 @@ export class WorkerInteractionCapture {
       const projected = codexCaptureEvent(event, sessionId, this.secrets);
       this.writer!.record(projected.event, projected.content);
     });
+  }
+
+  nativeFailure(content: () => unknown, sessionId?: string): void {
+    this.safely(() =>
+      this.writer!.record(
+        {
+          kind: "interaction",
+          providerEvent: "codex.native-failure",
+          providerSessionId: sessionId,
+          coverage: "boundary",
+        },
+        content,
+      ),
+    );
   }
 
   claude(message: SDKMessage, observedUsage?: Record<string, unknown>): void {

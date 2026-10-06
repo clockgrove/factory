@@ -6,7 +6,10 @@ export function validOwnershipPath(path: string): boolean {
     !/[\\*?]/.test(normalized) &&
     normalized
       .split("/")
-      .every((part) => part !== "" && part !== "." && part !== "..")
+      .every(
+        (part) =>
+          part !== "" && part === part.trim() && part !== "." && part !== "..",
+      )
   );
 }
 

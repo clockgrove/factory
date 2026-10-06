@@ -5,30 +5,32 @@ import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
 import {
   configPath,
-  factoryConfigDigest,
   type FactoryConfig,
+  factoryConfigDigest,
   readConfig,
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import { requestControl } from "./coordinator-control.js";
-import { runDiagnosticsCommand } from "./diagnostics-cli.js";
 import {
   continuationStatusDocument,
   redactDiagnosticDetail,
 } from "./diagnostics.js";
+import { runDiagnosticsCommand } from "./diagnostics-cli.js";
 import { compose, composeIntake, composePlanning } from "./index.js";
 import { type IntakeAuthorization, intakeControl } from "./intake.js";
 import { operatorName } from "./operator.js";
+import { runProposeCommand } from "./proposals.js";
+import { runDreamCommand } from "./learning.js";
 import { loadServiceLoginCredentials } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
-import { controlObjective, selectAssetSetFromCli } from "./runner.js";
 import {
   AwaitingBeforeState,
   awaitingOutcome,
   intakeExitCode,
   runOutcome,
 } from "./run-outcome.js";
+import { controlObjective, selectAssetSetFromCli } from "./runner.js";
 import { setupTarget } from "./setup.js";
 import type { ContinuationState } from "./state.js";
 import {
@@ -38,7 +40,11 @@ import {
   readContinuation,
   readPreState,
 } from "./state-store.js";
-import { renderServiceStatus, renderStatusText } from "./status-summary.js";
+import {
+  configurationCommand,
+  renderServiceStatus,
+  renderStatusText,
+} from "./status-summary.js";
 import { checkIntakeServiceState, supervise } from "./supervision.js";
 
 /** Whether a live controller owns this Objective; null when a lock is unreadable. */
@@ -71,6 +77,12 @@ function help(): void {
       "      Write the configuration (first run) or verify it against the options given",
       `  setup --background ${INSTALL_OPTIONS} [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...]`,
       "      Configure if needed, check readiness, then install and start the background service that runs the queue (this command is the consent)",
+      "  propose --source DOC#HEADING [--output ABSOLUTE_NEW_FILE]",
+      "  propose --file ABSOLUTE_FILE --approve SHA256 [--enqueue]",
+      "      Draft and review Objectives, then explicitly approve their exact file before issue creation",
+      "  dream [--budget-bytes N] | --show | --record --objective N",
+      "  dream --file ABSOLUTE_DRAFT --approve|--reject SHA256",
+      "      Collect terminal experience, propose a compact playbook, then explicitly approve its exact draft before advisory use",
       "  run --objective N [--deadline ISO_TIMESTAMP]",
       "      Plan if needed and run the Objective until it is done or needs you; the first run checks readiness",
       "  queue add N [N ...] | list | remove N | pause | resume | drain",
@@ -283,6 +295,9 @@ async function main(): Promise<void> {
     if (result.status === "blocked") process.exitCode = 1;
     return;
   }
+  if (command === "propose")
+    return runProposeCommand(readConfig(path), args, path);
+  if (command === "dream") return runDreamCommand(readConfig(path), args, path);
   if (command === "queue") return queueCommand(args, path);
   if (command === "supervisor") return supervisorCommand(args, path);
   if (command === "status" && option(args, "objective") === undefined)
@@ -489,6 +504,12 @@ function statusDocument(config: FactoryConfig, objective: number) {
     continuation ? undefined : readPreState(config.repository, objective),
     factoryConfigDigest(config),
   );
+  const configuration = option(process.argv.slice(3), "config");
+  if (document.nextAction)
+    document.nextAction.command = configurationCommand(
+      document.nextAction.command,
+      configuration,
+    );
   return { document, secrets };
 }
 
@@ -496,9 +517,10 @@ function statusLines(
   document: ReturnType<typeof statusDocument>["document"],
   secrets: string[],
 ): string[] {
-  return renderStatusText(document).map((line) =>
-    redactDiagnosticDetail(line, secrets),
-  );
+  return renderStatusText(
+    document,
+    option(process.argv.slice(3), "config"),
+  ).map((line) => redactDiagnosticDetail(line, secrets));
 }
 
 /** Print how a run ended and set the documented exit code. */
@@ -506,13 +528,21 @@ function reportRun(
   config: FactoryConfig,
   state: ContinuationState | AwaitingBeforeState,
 ): void {
+  const configuration = option(process.argv.slice(3), "config");
   const outcome =
     state instanceof AwaitingBeforeState
-      ? awaitingOutcome(state)
-      : runOutcome(state, () => {
-          const { document, secrets } = statusDocument(config, state.objective);
-          return statusLines(document, secrets);
-        });
+      ? awaitingOutcome(state, configuration)
+      : runOutcome(
+          state,
+          () => {
+            const { document, secrets } = statusDocument(
+              config,
+              state.objective,
+            );
+            return statusLines(document, secrets);
+          },
+          configuration,
+        );
   console.log(outcome.message);
   process.exitCode = outcome.code;
 }

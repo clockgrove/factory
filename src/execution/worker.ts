@@ -109,159 +109,177 @@ export async function runCodexWorker(
   // worktree, the private HOME and TMPDIR, and the platform runtime alone.
   const sandbox = { workspace: "write", network: network === "host" } as const;
   const home = createCodexHome({
+    root: `${inputPath}.codex-home`,
     config: "",
     sandbox: { ...sandbox, directory: request.worktree },
     keep: allowedSecretNames,
   });
-  const codex = new Codex({ env: home.env });
-  const thread = codex.startThread({
-    workingDirectory: request.worktree,
-    approvalPolicy: "never",
-    model: model.model,
-    modelReasoningEffort: model.reasoningEffort,
-  });
-  const prompt = workItemPrompt(request);
-  let providerCompleted = false;
-  let turn: ProviderTurnGuard | undefined;
-  let usage: unknown = null;
-  let progressLost = false;
-  const observe = (event: unknown): void => {
-    if (progressLost) return;
-    try {
-      privateProgress(progressPath, event);
-    } catch (error) {
-      progressLost = true;
-      process.stderr.write(
-        `Factory worker progress unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    }
-  };
-  const observeUsage = (type: WorkerUsageObservation["type"]): void => {
-    const workerUsage: WorkerUsageObservation = {
-      type,
-      invocationId: request.attemptId ?? "",
-      providerAttempt: 1,
-      ...(request.item.executionBinding
-        ? {
-            profileId: request.item.executionBinding.id,
-            adapter: request.item.executionBinding.adapter,
-          }
-        : {}),
-      role: "worker",
-      phase: "implementation",
-      provider: "codex",
-      model: model.model,
-      reasoningEffort: model.reasoningEffort,
-      usage: codexTokenUsage(usage),
-    };
-    observe({
-      eventId: randomUUID(),
-      at: new Date().toISOString(),
-      attemptId: request.attemptId ?? "",
-      operation: "worker-usage",
-      workerUsage,
-    });
-  };
+  let invocationStarted = false;
   try {
-    turn = new ProviderTurnGuard(
-      providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
-    );
-    observeUsage("started");
-    capture.request(prompt, {
-      permissions: sandbox,
+    const codex = new Codex({ env: home.env });
+    const thread = codex.startThread({
+      workingDirectory: request.worktree,
       approvalPolicy: "never",
+      model: model.model,
+      modelReasoningEffort: model.reasoningEffort,
     });
-    const streamed = await turn.race(
-      thread.runStreamed(prompt, { signal: turn.signal }),
-    );
-    let finalResponse = "";
-    let turnCompleted = false;
-    const commandOffsets = new Map<string, number>();
-    const events = streamed.events[Symbol.asyncIterator]();
-    let closeStarted = false;
-    try {
-      for (;;) {
-        const next = await turn.race(events.next());
-        if (next.done) break;
-        const event = next.value;
-        turn.progress();
-        capture.codex(event, thread.id ?? undefined);
-        const observation = progressEvent(
-          event,
-          request.attemptId ?? "",
-          redactionValues,
-          commandOffsets,
+    const prompt = workItemPrompt(request);
+    let providerCompleted = false;
+    let turn: ProviderTurnGuard | undefined;
+    let usage: unknown = null;
+    let progressLost = false;
+    const observe = (event: unknown): void => {
+      if (progressLost) return;
+      try {
+        privateProgress(progressPath, event);
+      } catch (error) {
+        progressLost = true;
+        process.stderr.write(
+          `Factory worker progress unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
         );
-        observe({
-          ...observation,
-          threadId: thread.id ? redact(thread.id, redactionValues) : undefined,
-        });
-        if (
-          (event.type === "item.started" ||
-            event.type === "item.updated" ||
-            event.type === "item.completed") &&
-          event.item.type === "agent_message"
-        )
-          finalResponse = event.item.text;
-        if (event.type === "turn.completed") {
-          turnCompleted = true;
-          usage = codexRawTokenUsage(event.usage);
-          observeUsage("progress");
-        }
-        if (event.type === "turn.failed") throw new Error(event.error.message);
-        if (event.type === "error")
-          throw new ProviderStreamError(event.message);
-        if (turnCompleted) break;
       }
-      closeStarted = true;
-      await closeProviderEventStream(events, turn, true);
-    } catch (error) {
-      if (!closeStarted && !turn.signal.aborted) {
+    };
+    const observeUsage = (type: WorkerUsageObservation["type"]): void => {
+      const workerUsage: WorkerUsageObservation = {
+        type,
+        invocationId: request.attemptId ?? "",
+        providerAttempt: 1,
+        ...(request.item.executionBinding
+          ? {
+              profileId: request.item.executionBinding.id,
+              adapter: request.item.executionBinding.adapter,
+            }
+          : {}),
+        role: "worker",
+        phase: "implementation",
+        provider: "codex",
+        model: model.model,
+        reasoningEffort: model.reasoningEffort,
+        usage: codexTokenUsage(usage),
+      };
+      observe({
+        eventId: randomUUID(),
+        at: new Date().toISOString(),
+        attemptId: request.attemptId ?? "",
+        operation: "worker-usage",
+        workerUsage,
+      });
+    };
+    try {
+      turn = new ProviderTurnGuard(
+        providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+      );
+      observeUsage("started");
+      capture.request(prompt, {
+        permissions: sandbox,
+        approvalPolicy: "never",
+      });
+      invocationStarted = true;
+      const streamed = await turn.race(
+        thread.runStreamed(prompt, { signal: turn.signal }),
+      );
+      let finalResponse = "";
+      let turnCompleted = false;
+      let streamError: ProviderStreamError | undefined;
+      const commandOffsets = new Map<string, number>();
+      const events = streamed.events[Symbol.asyncIterator]();
+      let closeStarted = false;
+      try {
+        for (;;) {
+          const next = await turn.race(events.next());
+          if (next.done) break;
+          const event = next.value;
+          turn.progress();
+          capture.codex(event, thread.id ?? undefined);
+          const observation = progressEvent(
+            event,
+            request.attemptId ?? "",
+            redactionValues,
+            commandOffsets,
+          );
+          observe({
+            ...observation,
+            threadId: thread.id
+              ? redact(thread.id, redactionValues)
+              : undefined,
+          });
+          if (
+            (event.type === "item.started" ||
+              event.type === "item.updated" ||
+              event.type === "item.completed") &&
+            event.item.type === "agent_message"
+          )
+            finalResponse = event.item.text;
+          if (event.type === "turn.completed") {
+            turnCompleted = true;
+            providerCompleted = true;
+            capture.providerCompleted();
+            usage = codexRawTokenUsage(event.usage);
+            observeUsage("progress");
+          }
+          if (event.type === "turn.failed")
+            throw new Error(event.error.message);
+          if (event.type === "error")
+            streamError = new ProviderStreamError(event.message);
+          // Stream errors can precede a CLI-managed retry. Read through the
+          // terminal turn and natural EOF to retain its usage and exit error.
+        }
         closeStarted = true;
-        try {
-          await closeProviderEventStream(events, turn, true);
-        } catch {
-          // Preserve the provider failure that required cleanup.
+        await closeProviderEventStream(events, turn, true);
+      } catch (error) {
+        if (!closeStarted && !turn.signal.aborted) {
+          closeStarted = true;
+          try {
+            await closeProviderEventStream(events, turn, true);
+          } catch {
+            // Preserve the provider failure that required cleanup.
+          }
         }
+        throw error;
+      } finally {
+        if (!closeStarted) void closeProviderEventStream(events, turn, false);
       }
-      throw error;
+      if (!turnCompleted && streamError) throw streamError;
+      requireCompletedProviderTurn(turnCompleted);
+      turn.finish();
+      const parsedAssets = readProducedAssets(request);
+      observeUsage("completed");
+      capture.outcome(
+        "completed",
+        codexTokenUsage(usage),
+        undefined,
+        "protocol",
+      );
+      writeHarnessResult(resultPath, {
+        state: "complete",
+        assets: parsedAssets,
+        evidence: { finalResponse, threadId: thread.id, usage },
+      });
+      return true;
+    } catch (caught) {
+      const error = caught;
+      capture.nativeFailure(
+        () => home.nativeMetadata(thread.id ?? undefined),
+        thread.id ?? undefined,
+      );
+      observeUsage("failed");
+      capture.outcome(
+        "failed",
+        codexTokenUsage(usage),
+        error,
+        providerCompleted ? "protocol" : "provider",
+      );
+      writeHarnessResult(
+        resultPath,
+        harnessFailure("codex", error, redactionValues),
+      );
+      return false;
     } finally {
-      if (!closeStarted) void closeProviderEventStream(events, turn, false);
+      turn?.finish();
     }
-    requireCompletedProviderTurn(turnCompleted);
-    turn.finish();
-    providerCompleted = true;
-    capture.providerCompleted();
-    const parsedAssets = readProducedAssets(request);
-    writeHarnessResult(resultPath, {
-      state: "complete",
-      assets: parsedAssets,
-      evidence: {
-        finalResponse,
-        threadId: thread.id,
-        usage,
-      },
-    });
-    observeUsage("completed");
-    capture.outcome("completed", codexTokenUsage(usage), undefined, "protocol");
-    return true;
-  } catch (caught) {
-    const error = caught;
-    writeHarnessResult(
-      resultPath,
-      harnessFailure("codex", error, redactionValues),
-    );
-    observeUsage("failed");
-    capture.outcome(
-      "failed",
-      codexTokenUsage(usage),
-      error,
-      providerCompleted ? "protocol" : "provider",
-    );
-    return false;
   } finally {
-    turn?.finish();
-    home.dispose();
+    // Once launched, the durable harness owner disposes the home after group cessation.
+    if (!invocationStarted) home.dispose();
   }
 }
 

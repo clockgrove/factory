@@ -1055,6 +1055,20 @@ export class StructuredPlanningModel implements PlanningModel {
       throw attachFault(error, fault);
     }
   }
+  /** Operator proposals use the same bounded provider transport and observations as planning. */
+  async generateProposal<T>(args: {
+    prompt: string;
+    schema: unknown;
+    invocation: ModelInvocationContext;
+    sourcePacket: string;
+  }): Promise<T> {
+    return this.runStructured<T>({
+      ...args,
+      role: "planner",
+      defaultPhase: args.invocation.phase,
+    });
+  }
+
   async generateStructured<T>(request: PlanningRequest<T>): Promise<T> {
     if (request.purpose === "diagnosis") {
       if (!request.schema)

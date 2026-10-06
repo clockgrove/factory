@@ -214,7 +214,7 @@ const REASON = '"WHY"';
 const ANSWER = '"ANSWER"';
 
 /** A criterion as one shell word, so the printed command runs as shown. */
-function shellWord(text: string): string {
+export function shellWord(text: string): string {
   return `'${text.replace(/'/g, `'\\''`)}'`;
 }
 

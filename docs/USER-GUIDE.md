@@ -344,3 +344,13 @@ Use an HTTPS base URL without credentials, query or fragment; Factory appends `/
 Headers come from `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, falling back to `OTEL_EXPORTER_OTLP_HEADERS`, as comma-separated URL-encoded `key=value` pairs. Duplicate or malformed names/values are refused without echo; values are never printed. The preview digest binds selection, endpoint, payload and headers (values are hashed); changes require another preview, except header-name case alone.
 
 Each send makes one request with a 30-second timeout, no redirects or retries and a 4 MiB response cap. Only a full acknowledgement succeeds; other outcomes exit nonzero and discard response text. Re-sends retain trace/span IDs, but collectors may duplicate records: inspect the destination before repeating a send.
+
+## Propose Objectives
+
+Draft from a tracked roadmap section (repeat `--source` for referenced ADRs/runbooks whose complete contents govern the proposal), review/edit the private JSON Objectives and their displayed citation presence (primary-wave sections and supporting context are separate; citations alone do not prove semantic completeness), then approve the exact file digest. Drafting creates no issues or work; without `--output`, its editable file stays under the private proposal state directory. Approval publishes ordinary issues and native dependencies; `--enqueue` additionally authorizes their batch intake. Keep the proposal/source/configuration binding unchanged. Changed sources need a new draft; unknown submitted GitHub mutations refuse replay and retain their evidence. Existing provider limits and independent Objective reviews still apply.
+
+```sh
+factory propose --source 'docs/waves/wave.md#Exact heading' --output /private/existing-dir/objectives.json --config /private/factory.json
+sha256sum /private/existing-dir/objectives.json
+factory propose --file /private/existing-dir/objectives.json --approve REVIEWED_SHA256 --enqueue --config /private/factory.json
+```

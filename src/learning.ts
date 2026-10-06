@@ -35,8 +35,6 @@ import {
   releaseControllerLock,
   statePath,
 } from "./state-store.js";
-import { composePlanningModel } from "./application.js";
-import { StructuredPlanningModel } from "./compiler.js";
 import { option } from "./cli-flags.js";
 import { operatorName } from "./operator.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
@@ -884,6 +882,8 @@ async function dream(
     JSON.stringify({ episodes, parent, budgetBytes }),
     secrets(config),
   );
+  const { composePlanningModel } = await import("./application.js");
+  const { StructuredPlanningModel } = await import("./compiler.js");
   const model = composePlanningModel(config);
   if (!(model instanceof StructuredPlanningModel))
     throw new Error("Configured provider does not support dreaming");

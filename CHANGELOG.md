@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Status and run recovery commands retain an explicitly selected configuration, including quoted paths. Local setup reports measured host recommendations for coding, validation and review while preserving configured and recorded limits (#517).
+
 - A planning diagnosis that asks an operator question no longer spends a planning revision before any engineering correction is applied (#846). Accepting the exact reviewed plan leaves that revision available for an independently reviewed ownership-discovery amendment. Existing recorded charges and limits remain unchanged.
 
 - Replace unit and mock-based verification with a small real integration suite covering Git, processes, disk content, LFS, secret scanning and offline package installation. Remove the fake providers, scripted workers, fault matrices and eight-way test sharding; contributor instructions require this smaller pattern.

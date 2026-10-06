@@ -241,7 +241,7 @@ function outputPath(config: FactoryConfig, path: string | undefined): string {
     throw new Error("propose --source requires --output ABSOLUTE_NEW_FILE");
   const target = join(realpathSync(dirname(path)), basename(path));
   const local = relative(realpathSync(config.checkout), target);
-  if (!local.startsWith("..") && !isAbsolute(local))
+  if (local !== ".." && !local.startsWith("../") && !isAbsolute(local))
     throw new Error("Proposal output must be outside the target checkout");
   return target;
 }
@@ -423,10 +423,7 @@ async function publish(
     const issue = journal.issues[objective.id]!;
     const expected = objective.dependencies.map((id) => journal.issues[id]!);
     const route = `repos/${config.repository}/issues/${issue.number}/dependencies/blocked_by`;
-    let actual = await sharedGitHubClient.request<{ id: number }[]>(
-      "GET",
-      route,
-    );
+    let actual = await sharedGitHubClient.paginate<{ id: number }>(route);
     if (
       actual.some(
         (dependency) => !expected.some(({ id }) => id === dependency.id),
@@ -445,7 +442,7 @@ async function publish(
       await sharedGitHubClient.request("POST", route, {
         issue_id: dependency.id,
       });
-      actual = await sharedGitHubClient.request<{ id: number }[]>("GET", route);
+      actual = await sharedGitHubClient.paginate<{ id: number }>(route);
       if (!actual.some(({ id }) => id === dependency.id))
         throw new Error("Dependency outcome remains unverified");
       delete journal.pending;

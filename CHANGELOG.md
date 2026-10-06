@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Split the runner into planning, projection, execution and finalization modules, and separate validation command execution from result evidence and acceptance review (#518). Public APIs, atomic continuation state, ownership, accounting and acceptance rules remain unchanged.
+
 - Status and run recovery commands retain an explicitly selected configuration, including quoted paths. Local setup reports measured host recommendations for coding, validation and review while preserving configured and recorded limits (#517).
 
 - Planner and plan-review guidance includes concise examples of existing source, command, ownership and evidence rules (#516). The Markdown Objective template keeps only Outcome, Acceptance, Sources and Constraints; package-addition and package-manager authority remains an explicit opt-in with syntax in the user guide. Both planning providers continue to share the same compiler and validation.

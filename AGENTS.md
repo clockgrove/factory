@@ -1,76 +1,29 @@
 # Factory contributor rules
 
-These instructions are for human and agent contributors **building Factory in this repository**. End-user instructions for using the installed plugin belong in the [README](README.md) and packaged `director`/`setup` skills; contributors do not invoke Factory Director to build Factory.
+These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout. Read the relevant issue and code; use [the architecture](docs/ARCHITECTURE.md) as a reference.
 
-Read [the architecture](docs/ARCHITECTURE.md) and the relevant [project](https://github.com/orgs/clockgrove/projects/2) issue before changing code. Public files and issues are the complete contributor handoff; private adopter material is never required. Factory is a plugin for a target repository, not a hosted service. Never install, activate, or qualify it against a Factory source checkout. Use an approved adopter target or a disposable target built from [the public fixtures](test/fixtures/).
+## Delivery
 
-## Priority
+- Finish one phase at a time. Use concurrent agents within that phase with clear file ownership.
+- Batch related fixes into a complete outcome. Merge with green CI and the maintainer’s read; independently review the completed milestone once. Credentials, isolation and persisted-state changes also need one focused independent review.
+- CI is the routine check. Run an affected local check only when it resolves an actual uncertainty; do not repeat full suites or add per-fix qualification.
+- Issues and pull requests record scope, decisions and results. Comment when a fix merges, an actual blocker appears or the plan changes. No separate status documents, per-PR changelog entries, mandatory issue-heading templates or label taxonomy.
+- Follow [the release procedure](docs/RELEASING.md) and the release issue’s actual exits. Do not invent additional release gates. GitHub release notes record changes.
 
-Factory is a general-purpose open-source tool. No adopter is its design center, and adopter-specific behavior does not belong in its source.
+## Product boundaries
 
-Keep the trunk path working: Objective → Work Item DAG → local execution → exact validation → GitHub delivery → Objective final validation. Trunk includes native linear PR stacks, media assets, Git LFS, restart/cancel/status, and packaging. Managed execution (#7) and its provider are branches built on the same contracts; keep provider-specific APIs and configuration inside the adapter. A declared interface or scripted fixture does not qualify a real provider.
+Factory is a general-purpose plugin. Keep adopter-specific behavior out of its source. Preserve Objective → Work Item graph → execution → exact validation → GitHub delivery → final acceptance, including media/LFS and restart/cancel/status.
 
-## Working process
+Keep credentials, configuration and continuation state outside targets. Preserve isolation, branch protection, ownership, source/command authority, exact commit/tree/head checks, substantive acceptance and recorded provider/resource limits. Contributor authority never transfers to workers or adopters.
 
-Work like a normal open-source project:
+Continue external effects only from verified recorded outcomes. Unknown is unknown: do not replay ambiguous mutations, revive terminal runs, bypass fences, manually repair state or fabricate evidence. Preserve results, failures, artifacts, usage and spent allowances. Private adopter content and raw prompts/logs stay private.
 
-1. Start from an issue's outcome. Keep each pull request focused on one outcome.
-2. Branch from `main`, batch the phase's diagnosed fixes, and run the affected [checks](CONTRIBUTING.md#checks) when the batch is complete.
-3. Open focused pull requests that link the issues and report the changes and checks. Merge after the maintainer's read and green Quality. Review the completed phase independently, with an additional focused independent review for changes to credentials, isolation or persisted state.
-4. Release by following [RELEASING.md](docs/RELEASING.md), using the phase's actual adopter and staging exits. A separate public fixture qualification is optional diagnosis.
+Use the existing atomic continuation snapshot. Diagnostics observe; they never drive recovery. Keep provider-specific APIs in adapters. Use narrow contracts only at the existing PlanningModel, ExecutionDriver, AgentHarness, DeliveryStrategy, ContentStore and GitHubGateway seams; do not add a framework or duplicate lifecycle/state layer.
 
-Comment on an issue when something meaningful changes: a merged fix, a release, a blocker or a changed plan. Do not post routine progress pings, and do not maintain separate status documents; issues, pull requests, releases and the changelog are the record.
+## Coverage and model contracts
 
-Prefer simplification. Add a new safeguard, state field, gate or procedure only for a demonstrated failure, and prefer removing a cause over guarding against it. Do not add process that a contributor must perform by hand when the code, CI or GitHub can enforce the same thing.
+Keep the small real integration suite: actual Git repositories, processes, files, scanner and offline packed CLI. Reuse an existing workflow for a demonstrated regression. Do not add unit tests, mocks, fake services/providers, scripted responses, fault matrices or fixture frameworks. Real provider/GitHub acceptance occurs at the approved milestone when its substantive exits require it; CI does not claim that acceptance.
 
-## Scope
+Models decide semantics; code supplies verified identities, hashes and derived facts. Inspect producers, actual schemas, decoders, validators and supplied evidence together. Preserve complete required source evidence and deterministic grounding. Never normalize an invalid answer into accepted evidence or invent command catalogs. Check official contracts when changing provider APIs.
 
-A finding is a blocker only when it prevents the current outcome; file useful follow-ups as separate issues. Stop when the behavior works and its tests pass. The target repository owns product requirements, documentation authority, commands, branch protection, and Objective exit conditions.
-
-When a provider or workflow cannot satisfy a chosen mechanism, distinguish the required outcome from that mechanism. Propose the simplest alternative with its tradeoffs instead of declaring the work blocked. Never silently weaken validation, permissions, ownership, spending or acceptance.
-
-## Issues
-
-Search open and closed issues before filing. Use this structure for a Factory issue, adapting headings when needed:
-
-```markdown
-## Outcome
-
-The user- or operator-visible result.
-
-## Gap
-
-Current behavior, a public reproduction, and why existing issues do not cover it.
-
-## Acceptance
-
-- Observable behavior and regression coverage.
-```
-
-Label each issue `trunk`, `branch`, `leaf` or `release-gate` by delivery scope, plus `bug`, `enhancement`, `decision` or `blocked` when accurate. Do not publish private adopter content, credentials, raw model prompts or responses. The [Objective form](docs/templates/objective.yml) is for target repositories, not for Factory issues.
-
-## Design
-
-Define narrow contracts for the named variation points: PlanningModel, ExecutionDriver, AgentHarness, DeliveryStrategy, ContentStore, and GitHubGateway. Compose only implementations a feature needs. Do not abstract the state store, scheduler, lifecycle, validator, runner, Git model, or controller host.
-
-Use one atomic local snapshot for continuation state. Do not add operational event journals, recovery journals, custom state refs, provider ranking or fallback chains. [Diagnostics](docs/ARCHITECTURE.md#state-and-recovery) record correlated local observations but never reconstruct or control lifecycle state. The configured AgentHarness owns model and tool execution; media reenters ordinary validation and delivery.
-
-Do not invent Factory limits beneath dependencies or operator policy. A failed Work Item stops with evidence, and a new attempt requires explicit retry or a remaining configured repair allowance. Give every external effect a stable identity and find it by that identity before repeating it. Continue when the record shows it happened, repeat it only when the record shows it never happened, and otherwise discard the attempt and start a fresh one. Contributor authority is not inherited by Factory workers or adopter sessions.
-
-## Minimal integration coverage
-
-Keep the test suite small. Test real observable boundaries using temporary Git repositories, actual processes and files, the real secret scanner, and the packed CLI installed offline. Reuse an existing integration workflow for a demonstrated regression; add a new check only when that workflow cannot exercise the concrete failure.
-
-Do not add unit tests, mocks, fake providers or GitHub services, scripted model responses, fault matrices, or fixture frameworks. Do not build coverage around internal functions or speculative combinations. Real provider and GitHub acceptance belongs in approved disposable-target qualification, separate from credential-free CI. Passing local checks never substitutes for that acceptance.
-
-During development, run the affected integration check. CI runs the small complete suite once per candidate; do not repeat full suites before opening a pull request without a new change or unresolved failure.
-
-### Model-facing contracts
-
-Ask models for semantic decisions; keep controller-known identities, hashes, constants and derived relationships in deterministic code. Hydrate canonical facts from verified inputs instead of asking a model to copy them. Do not invent finite catalogs for base-observed commands.
-
-Before changing a model contract, review related fields together through producers, provider schemas, decoders, validators and review inputs. Prefer direct changes at those boundaries over generic frameworks, extra model calls or persistent state. Preserve evidence grounding, security, source and command authority, and fail-closed validation. Never repair invalid responses into accepted facts.
-
-Prerelease interfaces may change coherently; do not add a fallback, migration or duplicate format solely for compatibility without an explicit requirement.
-
-Inspect actual emitted schemas, decoders and preserved failure evidence together. Verify provider changes through the relevant real integration or approved live qualification; do not create a model double to stand in for that evidence. When changing a provider API version, check the official response contract and every affected consumer.
+Prefer the smallest correction to a demonstrated defect. Prerelease contracts may change coherently; do not add compatibility formats, migrations or extra safeguards without a concrete requirement.

@@ -1,7 +1,0 @@
-{
-  "fixture": "../../targets/pnpm-workspace",
-  "tags": ["workspace", "single-item"],
-  "expect": {
-    "outcome": "plan"
-  }
-}

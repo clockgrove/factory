@@ -1,5 +1,7 @@
 import { pathsOverlap, validOwnershipPath } from "./ownership.js";
+
 export { pathsOverlap } from "./ownership.js";
+
 import type { WorkGraph, WorkItem } from "./contracts.js";
 import { assertCoverageShape } from "./qa.js";
 import type { WorkState } from "./state.js";
@@ -110,6 +112,15 @@ export function itemsConflict(left: WorkItem, right: WorkItem): boolean {
   );
 }
 
+/** A command line is executable text, never a Markdown wrapper or list item. */
+export function validValidationCommand(command: string): boolean {
+  return (
+    command.trim().length > 0 &&
+    !/[\r\n\0]/.test(command) &&
+    !/^(?:`|#{1,6}(?:\s|$)|[-*]\s|>\s)/.test(command.trimStart())
+  );
+}
+
 /** Stable topological order: ties follow accepted graph order. */
 export function validateAndOrderGraph(
   graph: WorkGraph,
@@ -171,6 +182,10 @@ export function validateAndOrderGraph(
         "Read-only QA nodes cannot own changes, assets, or workers",
       );
     for (const check of item.validation) {
+      if (!validValidationCommand(check.command))
+        throw new Error(
+          `Work Item ${item.id} validation needs an executable command line, not Markdown or prose surrounding a code span`,
+        );
       if (
         !check.command ||
         !["base-observed", "source-declared"].includes(check.provenance) ||

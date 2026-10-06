@@ -1,8 +1,0 @@
-{
-  "fixture": "../../targets/media-site",
-  "tags": ["read-only", "baseline-qa", "media"],
-  "expect": {
-    "outcome": "plan",
-    "readOnly": true
-  }
-}

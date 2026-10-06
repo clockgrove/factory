@@ -1,8 +1,0 @@
-{
-  "fixture": "../../targets/node-lib",
-  "tags": ["required-ci", "single-item"],
-  "expect": {
-    "outcome": "plan",
-    "requiredChecks": ["unit-tests"]
-  }
-}

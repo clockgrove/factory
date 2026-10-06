@@ -1,20 +1,33 @@
 import { existsSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { option, options } from "./cli-flags.js";
-import { readConfig, resolveCapacity } from "./config.js";
+import {
+  hostSchedulingDefaults,
+  readConfig,
+  resolveCapacity,
+} from "./config.js";
 import { requestControl } from "./coordinator-control.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
 import { sharedGitHubClient } from "./github-client.js";
 import { writeConfiguration } from "./install.js";
 import {
+  type IntakeAuthorization,
   queuePollSeconds,
   readIntake,
   watchIntake,
-  type IntakeAuthorization,
 } from "./intake.js";
 import { checkReadiness } from "./readiness.js";
+import { configurationCommand } from "./status-summary.js";
+import { requiredProviderCredentials } from "./provider-credentials.js";
 import { supervise, supervisorHost } from "./supervision.js";
 
 const cli = () =>
@@ -39,6 +52,32 @@ export async function setupTarget(
 ): Promise<Record<string, unknown>> {
   const background = args.includes("--background"),
     configOnly = args.includes("--config-only");
+  const repeatedArgs = args.filter(
+    (_, index) => args[index] !== "--config" && args[index - 1] !== "--config",
+  );
+  const safeToRepeat =
+    [...args, configPath].every(
+      (value) => redactDiagnosticDetail(value) === value,
+    ) &&
+    options(args, "credential-file").every((binding) => {
+      const separator = binding.indexOf("=");
+      return (
+        /^[A-Z_][A-Z0-9_]*$/.test(binding.slice(0, separator)) &&
+        isAbsolute(binding.slice(separator + 1))
+      );
+    }) &&
+    !args.some(
+      (value, index) => value === "--credential-file" && !args[index + 1],
+    );
+  const verification = safeToRepeat
+    ? configurationCommand(
+        `factory setup ${repeatedArgs.map((value) => `'${redactDiagnosticDetail(value).replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
+        redactDiagnosticDetail(configPath),
+      )
+    : null;
+  const verificationNote = verification
+    ? null
+    : "Correct malformed or sensitive setup arguments. Supply credentials only as NAME=ABSOLUTE_PRIVATE_FILE, never as credential values, then repeat the original approved setup invocation.";
   const result: Record<string, unknown> = {
     status: "blocked",
     mode: background ? "background" : "config-only",
@@ -70,17 +109,47 @@ export async function setupTarget(
     }
     const config = readConfig(configPath);
     result.repository = config.repository;
+    result.requirements = {
+      providerCredentials: requiredProviderCredentials(config),
+      workerSecrets: (config.autonomy?.requiredEnvironment ?? []).map(
+        (name) => ({
+          name,
+          presence: process.env[name] ? "present" : "missing",
+          allowed: config.policy.allowedSecretNames.includes(name),
+        }),
+      ),
+      accountAccess: "not verified",
+      workerSecretSource:
+        "setup process environment; service worker environment not verified",
+      guidance:
+        "Keep credential values in the configured private files or controller environment, never in chat. Presence does not verify account access, billing, environment readiness or deployment approval.",
+    };
+    const host = {
+      cpus: availableParallelism(),
+      memoryBytes: totalmem(),
+    };
     result.capacity = {
       ...resolveCapacity(config),
       ...(config.execution.concurrency === undefined
         ? {
             sizedFromHost: {
-              cpus: availableParallelism(),
-              memoryMiB: Math.floor(totalmem() / 1024 ** 2),
+              cpus: host.cpus,
+              memoryMiB: Math.floor(host.memoryBytes / 1024 ** 2),
             },
           }
         : {}),
     };
+    if (config.execution.kind === "local")
+      result.capacityRecommendation = {
+        host: {
+          cpus: host.cpus,
+          memoryMiB: Math.floor(host.memoryBytes / 1024 ** 2),
+        },
+        ...hostSchedulingDefaults(host),
+        configuredLimitsPreserved: true,
+        detail:
+          "Local host capacity only: coding, validation and review reserve different resources. Explicit concurrency and scheduling overrides remain in force. A larger provider or spending allowance needs operator authorization; existing Objectives retain their recorded limits.",
+      };
     if (
       withinCheckout(config.checkout, configPath) ||
       withinCheckout(config.checkout, cli())
@@ -272,9 +341,75 @@ export async function setupTarget(
       detail: redactDiagnosticDetail(
         error instanceof Error ? error.message : String(error),
       ),
-      continuation:
-        "Preserve completed stages and retained state. Resolve the stated prerequisite (`factory status` shows the service and queue), then repeat `factory setup --background`.",
+      continuation: verification
+        ? `Preserve completed stages and retained state. Resolve the stated prerequisite, then repeat ${verification}.`
+        : verificationNote,
     };
     return result;
+  } finally {
+    const stages = [
+      [
+        "intent",
+        "Select configuration only or explicitly consent to a background service.",
+      ],
+      [
+        "configuration",
+        "Bind the trusted repository/checkout and keep configuration, state and installed CLI outside the target.",
+      ],
+      [
+        "host-readiness",
+        "Background operation requires a running Linux systemd user manager.",
+      ],
+      [
+        "service-binding",
+        "Preserve the existing service/configuration binding; inspect factory status before changing it.",
+      ],
+      [
+        "execution-readiness",
+        "Supply configured private credentials/login and a usable worker sandbox; readiness details name the observed check and fix.",
+      ],
+      [
+        "github-readiness",
+        "Authenticate gh for the target; setup verifies issue-read access, not deployment or administrative authority.",
+      ],
+      [
+        "queue-binding",
+        "Only explicitly queued Objectives are authorized; inspect factory queue list and resolve any pause before resuming.",
+      ],
+      [
+        "service-registration",
+        "Register or upgrade the installed artifact through supported supervisor operations.",
+      ],
+      [
+        "service-start",
+        "Start the service only with background consent and preserve existing Objective limits.",
+      ],
+      [
+        "service-verification",
+        "Verify the active enabled service and responsive exact owner.",
+      ],
+      [
+        "service-observation",
+        "Verify a fresh authenticated GitHub observation; no Objective or provider call is required.",
+      ],
+    ];
+    const reached = stages.findIndex(([name]) => name === stage);
+
+    result.prerequisites = stages.map(([name, guidance], index) => ({
+      stage: name,
+      status:
+        !background && index > 1
+          ? "not-requested"
+          : result.status !== "blocked" || index < reached
+            ? "complete"
+            : index === reached
+              ? "blocked"
+              : "not-checked",
+      guidance,
+      verification,
+      ...(verificationNote ? { verificationNote } : {}),
+    }));
+    result.independentWork =
+      "This handoff admits no Objective. Configuration-only starts nothing; blocked setup does not establish a ready service. Already admitted work retains its own ownership, readiness and limits.";
   }
 }

@@ -119,6 +119,7 @@ export async function checkReadiness(
     ...result,
     ...(planning && { planning }),
     scope: "configured default implementation harness",
+    accountAccess: "not verified",
     controllerValidation:
       "not assessed; run source-declared acceptance commands in their declared environment",
   };

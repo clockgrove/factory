@@ -44,7 +44,7 @@ import {
   statePath,
 } from "./state-store.js";
 import { setCoordinatorMode } from "./state.js";
-import type { PreparationState, ContinuationState } from "./state.js";
+import type { ContinuationState } from "./state.js";
 
 /**
  * The queue and its service switch. Pending order is derived from `objectives`, never copied
@@ -193,6 +193,21 @@ function terminal(state: ContinuationState): boolean {
     !!state.cancelledAt ||
     (state.schemaVersion === 7 && objectiveComplete(state))
   );
+}
+/** Under the installation lock, sync dormant queued snapshots; the active controller owns its state. */
+function syncQueuedCoordinators(
+  config: FactoryConfig,
+  record: IntakeAuthorization,
+  activeObjective?: number,
+): void {
+  for (const objective of record.objectives) {
+    if (objective === activeObjective || record.dequeued.includes(objective))
+      continue;
+    const current = readContinuation(config.repository, objective);
+    if (!current?.coordinator || terminal(current)) continue;
+    setCoordinatorMode(current, record.mode);
+    saveState(statePath(config.repository, objective), current);
+  }
 }
 export function intakeSettled(config: FactoryConfig): boolean {
   return continuations(config).every(terminal);
@@ -374,16 +389,8 @@ export async function intakeControl(
       );
     }
     applyControl(config, record, action, objective);
-    if (["pause", "resume", "drain"].includes(action)) {
-      for (const current of continuations(config).filter(
-        (state) => !terminal(state),
-      )) {
-        if (current.coordinator) {
-          setCoordinatorMode(current, record.mode);
-          saveState(statePath(config.repository, current.objective), current);
-        }
-      }
-    }
+    if (["pause", "resume", "drain"].includes(action))
+      syncQueuedCoordinators(config, record);
     return record;
   } finally {
     releaseControllerLock(path, lock);
@@ -578,19 +585,8 @@ export async function runIntake(
         objective: activeObjective,
         action: request.action,
       });
-    if (
-      !objectiveControl &&
-      ["pause", "resume", "drain", "handoff"].includes(request.action)
-    ) {
-      const preparing = continuations(config).find(
-        (state): state is PreparationState =>
-          state.schemaVersion === 8 && !terminal(state),
-      );
-      if (preparing) {
-        setCoordinatorMode(preparing, record.mode);
-        saveState(statePath(config.repository, preparing.objective), preparing);
-      }
-    }
+    if (["pause", "resume", "drain", "handoff"].includes(request.action))
+      syncQueuedCoordinators(config, record, activeObjective);
     wake?.();
     return { ...record, activeObjective: activeObjective ?? null };
   };

@@ -60,7 +60,7 @@ const CLAUDE_TREE_REVIEW_MAX_TURNS = 40;
 /** Read-only tools a result review gets over the exact candidate tree. */
 const TREE_REVIEW_TOOLS = ["Read", "Grep", "Glob"];
 
-/** Shared by every Claude planning call; plan-eval judges hash it into their digest. */
+/** Stable system context shared by every Claude planning call. */
 export const CLAUDE_PLANNING_SYSTEM_PROMPT = [
   "You are the planning and review model for Clockgrove Factory.",
   "The user message is the complete request; you have no tools, files or network.",
@@ -80,7 +80,7 @@ export type ClaudePlanningConfig = Extract<
   { kind: "claude-agent-sdk" }
 >;
 
-/** The narrow Agent SDK surface the transport uses; tests supply a fake. */
+/** The narrow Agent SDK call surface the transport uses. */
 export type ClaudePlanningQuery = (params: {
   prompt: string;
   options: Options;

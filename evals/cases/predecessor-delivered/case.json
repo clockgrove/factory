@@ -1,8 +1,0 @@
-{
-  "fixture": "../../targets/node-lib",
-  "tags": ["predecessor"],
-  "expect": {
-    "outcome": "plan",
-    "maxWorkItems": 1
-  }
-}

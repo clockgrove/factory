@@ -3,8 +3,9 @@
  * command. Text and JSON status both use `summarizeStatus`, so they never
  * disagree. It reads only the redacted status document.
  */
-import type { Wait } from "./fault.js";
+
 import { type Refusal, settlesFirst } from "./amendment-admission.js";
+import type { Wait } from "./fault.js";
 
 /** A step in a run of transient faults (src/step.ts `outageOf`). */
 export interface OutageView {
@@ -105,6 +106,12 @@ export interface PreparingStatusView extends WaitView {
     /** False when Factory refuses the plan: only `refuse` can answer it. */
     acceptable?: boolean;
     question: string | null;
+    findings?: {
+      detail: string | null;
+      question: string | null;
+      evidence: { path: string | null }[];
+    }[];
+    failure?: { detail: string | null; question: string | null } | null;
     digest: string;
   } | null;
   /** Planning stopped for a decision before producing a reviewable plan. */
@@ -207,7 +214,7 @@ const REASON = '"WHY"';
 const ANSWER = '"ANSWER"';
 
 /** A criterion as one shell word, so the printed command runs as shown. */
-function shellWord(text: string): string {
+export function shellWord(text: string): string {
   return `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -1159,8 +1166,20 @@ export function summarizeStatus(view: StatusView): StatusSummary {
 
 const phaseLabel = (phase: StatusPhase) => phase.replaceAll("-", " ");
 
+/** Keep a displayed command bound to the explicitly selected installation. */
+export function configurationCommand(command: string, path?: string): string {
+  return path &&
+    command.startsWith("factory ") &&
+    !command.includes(" --config ")
+    ? `${command} --config '${path.replaceAll("'", "'\"'\"'")}'`
+    : command;
+}
+
 /** Text status: the summary line, the next command, then compact detail. */
-export function renderStatusText(view: StatusView & StatusSummary): string[] {
+export function renderStatusText(
+  view: StatusView & StatusSummary,
+  configuration?: string,
+): string[] {
   const lines = [
     `Objective #${view.objective}: ${phaseLabel(view.phase)} — ${view.summary}`,
   ];
@@ -1171,8 +1190,30 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
     );
   if (view.state === "not-started") return lines;
   if (view.state === "preparing") {
-    if (view.planReview?.question)
-      lines.push("", `Question: ${view.planReview.question}`);
+    const review = view.planReview;
+    if (review?.findings?.length || review?.failure) {
+      lines.push(
+        "",
+        `Plan handoff (${review.status})${["needs-human", "refused"].includes(review.status) ? " — planning is blocked; no Work Items are admitted" : " — retained review findings; readiness is not established by this text"}:`,
+      );
+      for (const finding of review.findings ?? []) {
+        lines.push(
+          `  Requirement: ${finding.detail ?? "unknown"}`,
+          `  Question: ${finding.question ?? "unknown"}`,
+        );
+        lines.push(
+          `  Sources: ${finding.evidence.map((entry) => entry.path ?? "unknown").join(", ")}`,
+        );
+      }
+      if (review.failure)
+        lines.push(
+          `  Review failure: ${review.failure.detail ?? "unknown"}`,
+          `  Question: ${review.failure.question ?? "unknown"}`,
+        );
+      lines.push(
+        "  Resolve these against the pinned requirements through the existing decision/readiness path. Do not send secret values in chat; guidance grants no additional authority.",
+      );
+    } else if (review?.question) lines.push("", `Question: ${review.question}`);
     if (view.error) lines.push("", `Error: ${view.error}`);
     return lines;
   }
@@ -1224,7 +1265,7 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
         `  Evidence: ${pending.detail}`,
         ...(all.length > 1
           ? [
-              `  Decide: ${decideCriterion(view.objective, itemId, pending, true)}`,
+              `  Decide: ${configurationCommand(decideCriterion(view.objective, itemId, pending, true), configuration)}`,
             ]
           : []),
       );
@@ -1243,7 +1284,7 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
       lines.push(
         "",
         `${item.id}: ${item.lastError ?? "failed"}`,
-        `  Evidence: factory diagnostics --objective ${view.objective} --logs ${item.id}`,
+        `  Evidence: ${configurationCommand(`factory diagnostics --objective ${view.objective} --logs ${item.id}`, configuration)}`,
       );
   }
   if (view.finalAcceptancePending)

@@ -2,7 +2,7 @@ import { objectiveComplete } from "./completion.js";
 import type { IntakeAuthorization } from "./intake.js";
 import { objectiveCandidate } from "./qa.js";
 import type { ContinuationState } from "./state.js";
-import { shortPlanDigest } from "./status-summary.js";
+import { configurationCommand, shortPlanDigest } from "./status-summary.js";
 import { awaitsOperator } from "./step.js";
 
 /** Process exit codes for run and the background service (supervisor serve). */
@@ -27,13 +27,16 @@ export class AwaitingBeforeState extends Error {
 }
 
 /** Exit code and message for a run that stopped before any state existed. */
-export function awaitingOutcome(wait: AwaitingBeforeState): {
+export function awaitingOutcome(
+  wait: AwaitingBeforeState,
+  configuration?: string,
+): {
   code: number;
   message: string;
 } {
   return {
     code: EXIT_NEEDS_DECISION,
-    message: `Objective #${wait.objective} waits before it starts: ${wait.detail}${wait.fix ? `\nFix: ${wait.fix}` : ""}\nResolve it, then run \`factory run --objective ${wait.objective}\` again`,
+    message: `Objective #${wait.objective} waits before it starts: ${wait.detail}${wait.fix ? `\nFix: ${wait.fix}` : ""}\nResolve it, then run \`${configurationCommand(`factory run --objective ${wait.objective}`, configuration)}\` again`,
   };
 }
 
@@ -59,14 +62,21 @@ export function runOutcome(
   state: ContinuationState,
   /** `factory status` for this Objective, for a stop no message above names. */
   statusLines: () => string[],
+  configuration?: string,
 ): {
   code: number;
   message: string;
 } {
   const objective = state.objective;
-  const rerun = `factory run --objective ${objective}`;
+  const rerun = configurationCommand(
+    `factory run --objective ${objective}`,
+    configuration,
+  );
   // A step's decision stands until the operator's retry clears it.
-  const retry = `factory retry --objective ${objective}`;
+  const retry = configurationCommand(
+    `factory retry --objective ${objective}`,
+    configuration,
+  );
   // An Objective step waits for the operator: a prerequisite to fix, or a decision.
   const wait = state.wait;
   if (
@@ -83,16 +93,16 @@ export function runOutcome(
   )
     return {
       code: EXIT_NEEDS_DECISION,
-      message: `Objective #${objective} needs a decision: ${wait.detail}\nAnswer with \`${retry}\` (the step runs again on \`${rerun}\`), or \`factory cancel --objective ${objective}\``,
+      message: `Objective #${objective} needs a decision: ${wait.detail}\nAnswer with \`${retry}\` (the step runs again on \`${rerun}\`), or \`${configurationCommand(`factory cancel --objective ${objective}`, configuration)}\``,
     };
   if (state.schemaVersion === 8)
     return {
       code: EXIT_NEEDS_DECISION,
       message: state.plan
         ? state.plan.review.acceptable === false
-          ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} cannot be accepted: ${state.coordinator.waitReason ?? "inspect status"}\nRefuse it with \`factory decide --objective ${objective} --outcome refuse --reason "…"\`, then rerun \`${rerun}\``
-          : `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nDecide with \`factory decide --objective ${objective} --outcome accept|refuse --answer "…" --reason "…"\`, then rerun \`${rerun}\``
-        : `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nResolve it in the Objective, or on the default branch when it is a repository change that is yours to make; discard the stopped planning with \`factory decide --objective ${objective} --outcome refuse --reason "…"\`, then rerun \`${rerun}\``,
+          ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} cannot be accepted: ${state.coordinator.waitReason ?? "inspect status"}\nRefuse it with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, then rerun \`${rerun}\``
+          : `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nDecide with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept|refuse --answer "…" --reason "…"`, configuration)}\`, then rerun \`${rerun}\``
+        : `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nResolve it in the Objective, or on the default branch when it is a repository change that is yours to make; discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, then rerun \`${rerun}\``,
     };
   if (objectiveComplete(state))
     return {
@@ -127,13 +137,13 @@ export function runOutcome(
       message:
         work.wait!.kind === "prerequisite"
           ? `Objective #${objective} Work Item ${id} waits for a prerequisite: ${work.wait!.detail}\nFix: ${work.wait!.fix ?? "see the detail"}; then \`${itemRetry}\` and \`${rerun}\``
-          : `Objective #${objective} Work Item ${id} needs a decision: ${work.wait!.detail}\nAnswer with \`${itemRetry}\` (the step runs again on \`${rerun}\`), or \`factory cancel --objective ${objective}\``,
+          : `Objective #${objective} Work Item ${id} needs a decision: ${work.wait!.detail}\nAnswer with \`${itemRetry}\` (the step runs again on \`${rerun}\`), or \`${configurationCommand(`factory cancel --objective ${objective}`, configuration)}\``,
     };
   }
   if (state.error)
     return {
       code: EXIT_FAILED,
-      message: `Objective #${objective} stopped: ${state.error}\nFix the cause, then \`${stopRetryCommand(state)}\` and \`${rerun}\`; or \`factory cancel --objective ${objective}\``,
+      message: `Objective #${objective} stopped: ${state.error}\nFix the cause, then \`${configurationCommand(stopRetryCommand(state), configuration)}\` and \`${rerun}\`; or \`${configurationCommand(`factory cancel --objective ${objective}`, configuration)}\``,
     };
   // The pending decision is whatever status shows: its headline, question and
   // exact next command.

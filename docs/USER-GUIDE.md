@@ -6,7 +6,7 @@ Agents operate Factory through the `setup` and `director` skills, and the skills
 
 ## Prerequisites
 
-- Linux x64 (WSL2 works), Node.js 22 or later, Git 2.31 or later, an authenticated `gh`, and a Codex login. Other providers are in [agent harnesses](AGENT-HARNESSES.md).
+- Linux x64 (WSL2 works), Node.js 22 or later, Git 2.31 or later, an authenticated `gh`, and a Codex login. Other providers are in [local providers](#local-providers).
 - A trusted checkout whose `origin` fetch and push URLs resolve to the same GitHub `OWNER/REPO`. Factory refuses local-path origins, mismatched push URLs and its own source repositories.
 - The target's toolchain on the validation `PATH`. Factory installs no package manager or build tool. Validation runs commands with non-login `sh -c`, so shell profiles do not provision it.
 - Requirements and validation instructions committed. Planning reads the pinned Git base, not uncommitted or unpushed edits. The base is the head of the default branch on `origin`, fetched when the run first plans; the Objective keeps that base on every later run.
@@ -23,6 +23,8 @@ factory setup --background  --repository OWNER/REPO --checkout /abs/path/to/targ
 
 `--config-only` writes the configuration and starts nothing. `--background` also checks readiness, then installs and starts the service that runs the queue. Running it is the service consent. It grants no provider spending and runs no Objective. The command prints JSON: `status` is `configured`, `ready` or `blocked`. A `blocked` result names the failed stage; fix it and repeat the same command.
 
+When a prerequisite needs you, Factory’s operator should collect all retained review findings, available readiness results and source-verified requirements into one checklist. Each missing or unknown item should include its reason, source, setup step and verification command; an unchecked stage remains unknown. Answer required choices together and put secrets only in the approved secret store or private credential file, never chat or issues. Verify the requirements before answering a decision. The checklist grants no new authority; independent work can continue only where already authorized and admitted by the current gates.
+
 Repeating setup with a matching binding reuses the configuration. A conflicting option stops, because Factory never changes an active binding.
 
 Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` and state under `$XDG_STATE_HOME/clockgrove-factory` (defaults `~/.config` and `~/.local/state`). Keep both, and all plan output and logs, outside the checkout.
@@ -33,21 +35,122 @@ Choose these at setup. Defaults: `gpt-6.1-sol` for planner, reviewer and worker,
 
 | Option                                                      | Effect                                                                                                                                    |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `--concurrency N`                                           | Worker ceiling. Omit it to size workers from the host; setup reports `capacity`.                                                          |
+| `--concurrency N`                                           | Worker ceiling. Omit it to size workers from the host; setup reports effective `capacity` and a local host recommendation.                |
 | `--planning-model` `--review-model` `--worker-model`        | Role models. Each has a matching `--*-reasoning`.                                                                                         |
 | `--planning claude-agent-sdk`                               | Plan and review with Claude. Pass both models. It uses `claude auth login`.                                                               |
-| `--harness codex-sdk\|claude-agent-sdk\|github-copilot-sdk` | The worker agent. Details in [agent harnesses](AGENT-HARNESSES.md).                                                                       |
+| `--harness codex-sdk\|claude-agent-sdk\|github-copilot-sdk` | The worker agent. Details in [local providers](#local-providers).                                                                         |
 | `--delivery regular\|native-stack`                          | Pull requests, or native linear stacks.                                                                                                   |
 | `--network host\|off`                                       | Worker network policy. `off` works for Codex only.                                                                                        |
-| `--capture-content`                                         | Keep prompts and responses locally. See [capture](CAPTURE.md).                                                                            |
+| `--capture-content`                                         | Keep prompts and responses locally. See [diagnostic capture and export](#diagnostic-capture-and-export).                                  |
 | `--credential-file NAME=/abs/private/file`                  | With `--background`: bind a provider credential to the service. Repeat per credential.                                                    |
 | `--outside-directory /abs/dir`                              | With `--background`: the directory for the Codex write-refusal check. The default is your home; change it if home is inside the checkout. |
 
-Remote execution (`execution.kind: "managed-agent"`) runs Work Items in a provider-hosted session. It is implemented, not yet qualified against live providers; see [managed execution](REMOTE-EXECUTION.md).
+Remote execution (`execution.kind: "managed-agent"`) runs Work Items in a provider-hosted session. It is implemented, not yet qualified against live providers; see [managed execution](#managed-execution).
+
+## Local providers
+
+The harness executes Work Items; `--planning` selects the separate planner and reviewer. Codex is the default. Factory never falls back to another provider. Local logins must belong to the OS user running the controller; on WSL2, log in inside that distribution.
+
+| Harness              | Setup requirements                                              | Login                                                | Worker network  |
+| -------------------- | --------------------------------------------------------------- | ---------------------------------------------------- | --------------- |
+| `codex-sdk`          | No extra flags                                                  | `codex login`                                        | `host` or `off` |
+| `claude-agent-sdk`   | `--worker-model MODEL --claude-max-turns N`                     | `claude auth login`, or supported Claude credentials | `host`          |
+| `github-copilot-sdk` | `--worker-model MODEL --copilot-timeout-seconds N`; Node 22.12+ | `copilot`, or supported Copilot credentials          | `host`          |
+
+For example, add `--harness claude-agent-sdk --worker-model MODEL --claude-max-turns 12` to setup. A normal npm install includes both optional SDKs; `--omit=optional` leaves Codex and registered adapters. Claude planning also requires `--planning-model` and `--review-model`. It supports the local Claude login, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, without settings files; Bedrock, Vertex and `apiKeyHelper` are unsupported. Factory stores no tokens in its configuration. A missing login stops the attempt; status names the login command and the retry command.
+
+Claude worker credentials can also use `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE`, `ANTHROPIC_CONFIG_DIR` or `CLAUDE_CONFIG_DIR`. Copilot supports `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_API_URL` and `COPILOT_PROVIDER_*`. Its local login must work without the system keychain. For a headless Claude service, bind `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` with `--credential-file`.
+
+Claude's default tools are `Read`, `Edit`, `Write`, `Glob`, `Grep`; `--claude-tool` replaces them and `--claude-allow-tool` sets permissions. `--claude-permission` accepts `acceptEdits` (default) or `dontAsk`. No settings files load unless you add `--claude-setting-source user|project|local`; those settings and hooks are trusted local code. Copilot defaults to `view`, `create`, `edit`, `apply_patch`, `grep`, `glob`; `--copilot-tool` replaces that list. Keep `apply_patch` for models that need it to edit.
+
+Codex workers and reviewers use a private `HOME`, `CODEX_HOME` and `TMPDIR` with the controller's Codex authentication. Personal Codex configuration, instructions, skills and MCP servers do not apply. Workers get read-only Git access in their own worktree and read-only tools from the controller’s `PATH`; commits and publication belong to the controller. Keep credentials out of Git config and remote URLs. Package stores are private to each worker, so a first install needs `--network host`.
+
+Use real tool installation directories on `PATH`, rather than version-manager shims. A `bin` or `sbin` path normally exposes its install prefix read-only; under hidden prefixes such as `~/.local` only the bin directory is mounted. Directories containing your home, credentials, Factory state/configuration or checkout Git metadata are refused. Links into those directories and tools needing other unmounted files cannot run. The refusal names the path to remove or relocate.
+
+Claude and Copilot keep the login-bearing home in the SDK process, but the model has no shell and its file tools stay inside the worktree. Claude personal instructions, skills, plugins, subagents and memory are disabled; explicitly selected settings and administrator-managed components remain trusted. Copilot shell, web, GitHub, MCP, plugins and configuration discovery are disabled. Harness processes run as your OS user; these controls do not isolate hostile code.
+
+### Execution profiles and adapters
+
+To let planning select a harness per item, replace `execution.harness` with `execution.profiles` and an eligible `execution.defaultProfile`:
+
+```json
+{
+  "kind": "local",
+  "concurrency": 2,
+  "defaultProfile": "standard",
+  "profiles": {
+    "standard": {
+      "description": "General implementation.",
+      "selectionHints": ["Default for routine work."],
+      "harness": {
+        "kind": "codex-sdk",
+        "model": "gpt-6.1-sol",
+        "reasoningEffort": "medium"
+      }
+    }
+  }
+}
+```
+
+Copy other harness objects from setup output. Listing a profile authorizes its provider to read the whole worktree and supplied inputs; ownership limits writes. Keep secrets out of descriptions and hints. Assignments and reasons persist through restart and collection; editing an issue cannot change an item's binding.
+
+A profile's optional `environment.instructions` appends worker instructions without granting permissions. `environment.mcp: {"kind":"factory-worktree-read","version":1}` is Claude-only, requires `Read` in both tool lists and exposes only regular files inside the worktree. Registered profiles accept no environment. Unknown configuration fields are refused; changing configuration changes its digest and stops an existing Objective at its next step.
+
+Custom adapters use the exported `AgentHarness` contract and `composeWithLocalHarness`, or `composeWithLocalProfiles` keyed by profile ID. Configure `{"kind":"registered","adapter":"IDENTITY","config":{...}}`; the registration's identity and config must match. Adapters must preserve HEAD, use only the supplied worktree, return durable JSON-safe handles, and make observation, cancellation and collection restart-safe without duplicating attempts. They never publish. Factory still validates and reviews results and assets. A behavior change needs a new adapter identity; see the exported types in `@clockgrove/factory`.
+
+## Managed execution
+
+`execution.kind: "managed-agent"` runs Work Items with `claude-managed-agents` or `openai-agents`; planning, validation, review and delivery stay on the controller. Neither provider is live-qualified. First authorize the source leaving the host (pinned base and supplied assets), provider account, model, data handling and spending limit. Installation grants none of those permissions. The removed `sandbox` execution kind is refused.
+
+Edit the installation's `execution` object before starting an Objective. Set `policy.network` to `off` and `policy.allowedSecretNames` to `[]`; the controller still needs provider and GitHub connectivity. `execution.concurrency` bounds Factory’s workers, not provider capacity. Input is a shallow base snapshot without history or local Git configuration; symlinks and submodules are refused. Results pass the same path, digest, validation and review checks as local work.
+
+OpenAI configuration:
+
+```json
+{
+  "kind": "managed-agent",
+  "provider": "openai-agents",
+  "concurrency": 1,
+  "config": {
+    "model": "APPROVED_MODEL",
+    "reasoningEffort": "medium",
+    "containerSize": "small",
+    "apiKeyEnv": "FACTORY_OPENAI_API_KEY",
+    "timeoutSeconds": 600
+  }
+}
+```
+
+All five config fields are required. Reasoning is `low|medium|high`; container size is `small|medium|large`. Input is limited to 5 MiB, output to 200 MiB. Extra turns, subagents, networking, extra tools, plugins and credentials are refused.
+
+Claude configuration requires `agentId`, pinned positive `agentVersion`, `environmentId`, `workspaceId`, `credentialEnv`, the full resolved `agent` snapshot including its model, and this `environment`:
+
+```json
+{
+  "type": "cloud",
+  "networking": {
+    "type": "limited",
+    "allowed_hosts": [],
+    "allow_mcp_servers": false,
+    "allow_package_managers": false
+  },
+  "packages": { "type": "packages" }
+}
+```
+
+Place those fields in `execution.config` with `execution.provider: "claude-managed-agents"`. The agent snapshot must match its ID and version, disable the default toolset, MCP, skills and subagents, and enable only `bash`, `read`, `write`, `edit`, `glob`, `grep`; `bash` is required. Obtain the full snapshot from the provider; a placeholder is not valid configuration. `timeoutSeconds` defaults to 900. Optional `budgetCents` is a positive integer string and is a cost threshold, not a hard cap: a request can cross it. Factory must own the session exclusively; reusable agents and environments are not deleted.
+
+The named API key belongs in the foreground controller environment, never the config or model input. Local CLI logins do not supply it. For background operation, put only the key in an owner-private `0600` file outside the target checkout and pass `--credential-file NAME=/absolute/private/file`. This requires systemd `LoadCredential`; restart the service after rotation. A missing service credential stops execution without ambient fallback. Readiness checks presence without a provider call, so they do not establish account access, billing or hosted support.
+
+The timeout bounds the entire attempt; cleanup gets a fresh window of the same length. Factory checkpoints calls, reconciles lost responses where possible and reattaches collection after transient failures. Nontransient failures stop the old resource before a fresh attempt or repair. Cleanup after completion or cancellation confirms deletion; unconfirmed cleanup remains visible and retries on restart. Never start replacement work beside an unresolved old resource.
+
+`factory diagnostics` records `possible-orphan` resources with attempt ID and time. For Claude lost uploads, inspect and delete unreferenced uploads from that interval. For an OpenAI lost session creation, find sessions tagged `factory_attempt=<attempt ID>` and delete them, confirming the environment is gone. Token counters are not a bill; absent counters stay unknown.
 
 ## Write an Objective
 
 Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). An Objective has four sections. Keep it to one page.
+
+The Markdown template contains the four core sections. Add an optional authority section only for a change this Objective actually requests; its examples are syntax guidance, not default package or version choices. The issue form keeps those fields optional.
 
 - **Outcome:** one paragraph: what changes, for whom, and what is out of scope.
 - **Acceptance:** one observable fact per bullet. A bullet that is exactly one backticked command means that command must pass on the integrated result. "Run the tests" is not a command. Put a path or other code span inside a sentence, not as a bullet of its own.
@@ -62,14 +165,14 @@ Keep the first Objective small. Editing the issue after planning invalidates the
 
 ### Writing Objectives that deliver
 
-Short rules from real runs. Each has its reason.
+Keep Objectives small and executable:
 
-- **One packet per Objective.** Do not bundle unrelated fixes. _Because_ one bad part stops the whole Objective, and a bundle cannot be reviewed as one outcome.
-- **Check that the work it depends on is delivered, and that every Source exists on the default branch.** _Because_ Factory plans from the base branch, so a file that is still in an open PR is missing for the planner and the workers.
-- **Say where a new check gets wired.** Name a file the fixed acceptance scripts already run. _Because_ acceptance script bodies are fixed: a new test or check that no existing script runs is never run.
-- **Leave dependency build approvals and other workspace configuration to the operator.** Set them on the base branch before the run. _Because_ a worker's change to them is out of its ownership and is blocked.
-- **Inject what does not exist yet; do not require it.** Pass a missing file, service or value in through the code under test. _Because_ an Acceptance bullet that needs something absent can never pass.
-- **Put stable repository facts in the target's own contributor docs** (for example its `AGENTS.md` or `CONTRIBUTING.md`), not in every Objective. _Because_ workers read them each run, and an Objective stays short and about one outcome.
+- Deliver one packet per Objective, without unrelated fixes.
+- Confirm prerequisites are delivered and every Source exists on the default branch.
+- Name where each new check is wired into the fixed acceptance scripts.
+- Put dependency build approvals and other workspace configuration on the base branch before running.
+- Inject missing services or values rather than requiring prerequisites that do not exist.
+- Keep stable repository facts in the target’s contributor docs instead of repeating them in every Objective.
 
 A version refresh of an existing exact stable npm or pnpm `packageManager` pin needs an optional **Package manager update** section. Use exactly one backticked pin in one bullet, under a level-two or level-three heading:
 
@@ -97,7 +200,7 @@ Running is the consent to execute that Objective. `run` plans if needed, saves t
 | 2    | It needs you. The message names the decision and command. |
 | 1    | It failed or was cancelled. The message says why.         |
 
-Run the same command again to resume. A saved plan is never planned again, and every step is safe to repeat. The first run also checks host and worker readiness, without a model call, and names any failing check and its fix. Control a live run from another terminal with `factory pause|drain|resume|cancel --objective N`. Pause and drain survive restarts, and `resume` continues either. `--deadline` is absolute and a restart cannot extend it. Different Objectives can run at the same time, each from its own terminal with its own configured concurrency; a second live run of the same Objective is refused.
+Run the same command again to resume from recorded state. A saved plan is reused rather than planned again. The first run also checks host and worker readiness, without a model call, and names any failing check and its fix. Control a live run from another terminal with `factory pause|drain|resume|cancel --objective N`. Pause and drain survive restarts, and `resume` continues either. `--deadline` is absolute and a restart cannot extend it. Different Objectives can run at the same time, each from its own terminal with its own configured concurrency; a second live run of the same Objective is refused.
 
 ## Queue and background
 
@@ -124,19 +227,11 @@ factory status
 
 The first line is the headline, for example `Objective #7: needs plan decision — plan review needs a human decision`. The next lines give `Next:`, the exact command that answers it. Then come the question, if any, and a table of Work Items. The phases are `not started`, `planning`, `needs plan decision`, `running`, `waiting`, `needs decision`, `failed`, `cancelled` and `complete`. `--json` carries the same summary plus the plan, graph, consumed allowances and failure identities. Without `--objective`, status shows the service and the queue.
 
-Status names a command only while Factory would accept it. `status --json` reports `repairs.ID.repairable` (the `implementation` class is enabled and an allowance fits; otherwise status names `factory retry --item`). For a rejected graph amendment, `pendingAmendment.replacementRefusal` is null when `factory propose-amendment` would take a replacement, else `{kind, message}` for the first refusal. Branch on `kind`, never on `message`. A rejection holds the Objective paused, so `factory resume` and `drain` leave it paused and report `hold` with the command that lifts it; `factory queue resume` leaves it paused too. The replacement lifts the hold. Status names the command that works for each kind:
-
-- `not-paused` (a state from before the hold, or one the hold did not reach): `factory pause`.
-- `stop` (an unrelated stop is recorded): `factory retry`.
-- `live-work` (Work Items are still live): `factory retry` while the Objective is failed, else `factory run` with no owner, else `factory cancel`; a paused owner cannot settle them because the rejection blocks delivery.
-- `unsettled` (a recorded subprocess or an unresolved cancellation): `factory cancel`.
-- `intake` (the Objective is closing or finished), `not-replaceable` (an operator-supplied graph, or a rejection the validator does not know), `planning-class` (no planning class in `autonomy.repairClasses`) and `planning-limit` (no planning revision left): `factory cancel`. A raised limit applies to a new Objective.
-
-After the first three commands status names the replacement.
+Status names a command only while Factory would accept it; follow the live `Next:` command. In JSON, `repairs.ID.repairable` reports whether an implementation repair is enabled and fits the remaining allowance. `pendingAmendment.replacementRefusal` is null when a replacement is admitted, otherwise `{kind, message}`; automation should branch on `kind` rather than prose. Replacing a rejected amendment requires a paused, settled Objective and a remaining planning allowance. The rejection holds work paused until its replacement is admitted; resume, drain and queue resume do not lift that hold. Limits raised in configuration apply only to a new Objective.
 
 When the configuration changed after an Objective started, a new run refuses it. Status then says to restore the configuration it started with, then `factory run`, or to end it: `factory decide --outcome refuse` while planning, before projection starts; otherwise `factory cancel`. Status compares the configuration live, so restoring it is enough. A run also records `changedSincePlanning` (in `status --json`) when the Objective body or the sources differ from what the plan was made from, and status names the same two commands; restoring them and running again clears it. While planning, a pause or drain comes first (`factory resume`), because a refusal would discard it. Once the final acceptance is sealed, cancel is refused, so only the restore and `factory run` reconcile it. While an owner is running it keeps its loaded configuration, so status keeps naming `resume`, `decide` and `select`.
 
-Observe further with `factory diagnostics --objective N` (the agent timeline; add `--follow` or `--logs ITEM`; `--summary` prints the efficiency report: wall time per stage, operator waits, attempts and tokens per role, and `--summary --json` the same for tools). A quiet timeline means no new provider event. It does not mean done, and missing usage is unknown, not zero. Diagnostics can hold private source, so keep them out of public issues. Timing and capture analysis are in [capture](CAPTURE.md).
+Observe further with `factory diagnostics --objective N` (the agent timeline; add `--follow` or `--logs ITEM`; `--summary` prints the efficiency report: wall time per stage, operator waits, attempts and tokens per role, and `--summary --json` the same for tools). A quiet timeline means no new provider event. It does not mean done, and missing usage is unknown, not zero. Diagnostics can hold private source, so keep them out of public issues. Timing and capture analysis are in [diagnostic capture and export](#diagnostic-capture-and-export).
 
 ## Decisions
 
@@ -205,12 +300,57 @@ Runs repair and amend within bounded limits. The optional `autonomy` configurati
 }
 ```
 
-`allowances` cap the Objective and `perPath` caps each original Work Item. Zero is valid, and `repairClasses: []` stops for a human on every failure. `requiredEnvironment` lists worker secrets that must exist before planning; each must also be in `policy.allowedSecretNames`. Only a wrong result is charged: a failed validation, a refused criterion or a plan finding. A transient or configuration failure never is. Each Objective snapshots its limits when it starts, and consumption never resets. Exhausted limits stop for a decision. The optional `scheduling` section sets CPU, memory, review and validation reservations, and by default these come from the host.
+`allowances` cap the Objective and `perPath` caps each original Work Item. Zero is valid, and `repairClasses: []` stops for a human on every failure. `requiredEnvironment` lists worker secrets that must exist before planning; each must also be in `policy.allowedSecretNames`. Only a wrong result or an admitted engineering correction is charged. A planning diagnosis that only asks an operator question consumes no planning revision; the independent diagnosis-call bound and actual usage remain recorded. A transient or configuration failure never is. Each Objective snapshots its limits when it starts, and consumption never resets. Exhausted limits stop for a decision. The optional `scheduling` section sets CPU, memory, review and validation reservations. When concurrency is omitted, defaults come from the host; an explicit concurrency keeps only explicitly declared scheduling. Local setup reports `capacityRecommendation` even with an override: it measures cores/memory, reserves 2 CPUs/4 GiB for the controller and OS, then sizes coding at 2 CPUs/2 GiB, validation at 4 CPUs/4 GiB, and review/delivery at 0.5 CPU/512 MiB. Reservations are capped by available totals. Recommendations never increase configured provider/spending limits or change an existing Objective’s saved capacity. Authorize and configure overrides before starting a new Objective.
 
 ## Stopping and recovery
 
-Every step is safe to repeat, so after any interruption run the Objective again: Factory re-reads its state and GitHub, finds its issues, pull requests and merges by stable identity, reattaches a running worker, and repeats only the step it was on. A real failure keeps its evidence and stops until you `retry`, `repair` or `cancel`. See [Architecture, State and recovery](https://github.com/clockgrove/factory/blob/main/docs/ARCHITECTURE.md#state-and-recovery) for the state layout, the step rules and the retry limits. Never delete state or start a new root to get past a stop.
+After an interruption, use `factory run` to reconcile the recorded state: Factory finds GitHub issues, pull requests and merges by stable identity and reattaches running workers. Unresolved external mutations stay stopped rather than being blindly repeated. A real failure keeps its evidence and stops until you `retry`, `repair` or `cancel`. Never delete state or start a new root to get past a stop. See [Architecture](ARCHITECTURE.md#state-and-recovery) for the recovery model.
 
 ## Safety
 
 Factory checks changed-path ownership, unsafe links and special files, and scans staged content with its packaged Secretlint rules before publishing. A finding names the rule and path, never the value. Review false positives outside the checkout, then point `FACTORY_SECRETLINT_CONFIG` at a reviewed config and retry. Workers get a filtered environment without controller GitHub, Git or SSH credentials. Workers run as your OS user and are not a boundary against hostile code. Follow the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).
+
+## Diagnostic capture and export
+
+Factory records invocation metadata locally; content capture is off by default. Before planning, add `--capture-content --capture-max-bytes 8388608` to setup, or set `"capture": {"enabled": true, "maxBytesPerInvocation": 8388608}` in the installation config. Capture changes the config digest. The default 8 MiB allowance covers one invocation including provider retries; excess content is marked truncated and may be incomplete JSON.
+
+Capture includes rendered planning/review prompts and schemas, worker prompts/settings and SDK-exposed messages and tool traffic. It does not expose hidden reasoning or provider system prompts, and does not intentionally record credentials, environment or client options. Metadata includes identities, configured/reported models, digests, usage and content availability. Missing usage stays unknown; use the latest cumulative snapshot per attempt rather than adding alternate views. Cost estimates are not bills. Codex SDK error items are nonterminal warnings: terminal outcomes and validation determine success or failure, and incomplete invocations remain incomplete.
+
+Metadata stays in private Objective diagnostics; content is under the state root’s `captures/`, outside the target checkout, in `0600` files and `0700` directories. Secret redaction is best-effort and does not make private source publishable. Nothing is pruned automatically; you own retention. Removing capture files does not change a run. Capture failures appear in diagnostics and cannot accept, reject or retry work.
+
+```sh
+factory diagnostics --objective N --summary              # stage time, waits, attempts and tokens
+factory diagnostics --objective N --summary --json
+factory diagnostics --objective N --captures             # metadata only
+factory diagnostics --objective N --captures --content RECORD_ID
+factory diagnostics --objective N --analyze --group-by provider --group-by model
+factory diagnostics --objective N --analyze --filter phase=implementation --json
+factory diagnostics --objective N --analyze --filter runId=RUN_ID --gantt --output /abs/private/existing-dir/timeline.svg
+```
+
+Summary stage times count overlapping intervals once; operator waits and time outside a stage appear separately. Analysis reads metadata without captured text or provider calls. Grouping defaults to phase; repeat `--group-by` for combined fields. Filters match exactly (`reportedModel=null` selects missing reported models); unknown fields list allowed choices. Diagnosis uses phase `diagnosis`, graph compilation `compile`. Partial totals are marked; cached/reasoning counters are subsets, and concurrent elapsed times must not be summed. Gantt blue bars are model invocations, amber bars controller operations; validation labels are command indices.
+
+Analysis `--output` creates a new `0600` file in an existing directory outside the target checkout without symlinked parents. `--gantt` requires output and excludes `--json`. API users can call `readInteractionMetadata`, `readInteractionContent` and `analyzeInteractions` from the package root.
+
+Export is an explicit OTLP/HTTP JSON send to an approved collector, never a background action. Metadata is sensitive too. Preview the exact selection and destination, then authorize its digest:
+
+```sh
+factory export-captures --objective N --endpoint https://collector.example.com --content metadata
+factory export-captures --objective N --endpoint https://collector.example.com --content metadata --send --authorize PREVIEW_DIGEST
+```
+
+Use an HTTPS base URL without credentials, query or fragment; Factory appends `/v1/traces`. HTTP is allowed only for loopback collectors. `metadata` reads no captured text; `retained` adds retained redacted content. Repeat `--run ID` and `--invocation ID` to intersect selections; unknown IDs or an empty selection are refused.
+
+Headers come from `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, falling back to `OTEL_EXPORTER_OTLP_HEADERS`, as comma-separated URL-encoded `key=value` pairs. Duplicate or malformed names/values are refused without echo; values are never printed. The preview digest binds selection, endpoint, payload and headers (values are hashed); changes require another preview, except header-name case alone.
+
+Each send makes one request with a 30-second timeout, no redirects or retries and a 4 MiB response cap. Only a full acknowledgement succeeds; other outcomes exit nonzero and discard response text. Re-sends retain trace/span IDs, but collectors may duplicate records: inspect the destination before repeating a send.
+
+## Propose Objectives
+
+Draft from a tracked roadmap section (repeat `--source` for referenced ADRs/runbooks whose complete contents govern the proposal), review/edit the private JSON Objectives and their displayed citation presence (primary-wave sections and supporting context are separate; citations alone do not prove semantic completeness), then approve the exact file digest. Drafting creates no issues or work; without `--output`, its editable file stays under the private proposal state directory. Approval publishes ordinary issues and native dependencies; `--enqueue` additionally authorizes their batch intake. Keep the proposal/source/configuration binding unchanged. Changed sources need a new draft; unknown submitted GitHub mutations refuse replay and retain their evidence. Existing provider limits and independent Objective reviews still apply.
+
+```sh
+factory propose --source 'docs/waves/wave.md#Exact heading' --output /private/existing-dir/objectives.json --config /private/factory.json
+sha256sum /private/existing-dir/objectives.json
+factory propose --file /private/existing-dir/objectives.json --approve REVIEWED_SHA256 --enqueue --config /private/factory.json
+```

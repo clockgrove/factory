@@ -237,7 +237,10 @@ export function codexCaptureEvent(
         () => ({ query: item.query }),
       );
     else if (item.type === "error")
-      record(base, () => ({ error: item.message }));
+      record(
+        { ...base, outcome: { stage: "provider", status: "warning" } },
+        () => ({ error: item.message }),
+      );
     // Reasoning/todo internals are not captured as assistant response text.
     else record(base);
   } else record(base);

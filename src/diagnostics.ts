@@ -1435,6 +1435,28 @@ export function preparationStatusDocument(
           status: review.status,
           acceptable: review.acceptable !== false,
           question: redact(question),
+          findings: review.findings.map((finding) => ({
+            detail: redact(finding.detail),
+            question: redact(finding.question),
+            evidence:
+              "evidence" in finding
+                ? finding.evidence.map((entry) => ({
+                    ...entry,
+                    path: redact(entry.path),
+                  }))
+                : [
+                    {
+                      path: redact(finding.source),
+                      quote: redact(finding.quote),
+                    },
+                  ],
+          })),
+          failure: review.failure
+            ? {
+                detail: redact(review.failure.detail),
+                question: redact(review.failure.question),
+              }
+            : null,
           digest: shortPlanDigest(preparation.plan!),
         }
       : null,

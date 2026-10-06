@@ -149,8 +149,9 @@ function gitMetadata(workspace: string): string[] {
  * The directories a worker's shell reads, never writes, so the tools on its
  * PATH run: every PATH directory, and the directory of the real file behind
  * each link in one. A directory named `bin` or `sbin` stands for its install
- * prefix, where a tool keeps its libraries, unless the prefix is a hidden
- * directory (`~/.local`, `~/.cargo`: settings and logins live there).
+ * prefix, where a tool keeps its libraries, unless the prefix is hidden,
+ * the HOME or Windows profile itself, or a direct child of either. Those
+ * directories can contain unrelated private files; mount only bin there.
  *
  * Nothing here may show the operator's HOME as a whole, a login (SSH, gh,
  * Codex, Claude, Copilot), Factory's config or state, or the checkout's git
@@ -164,25 +165,60 @@ function toolchainDirectories(
   const home = real(source.HOME || homedir());
   const config = source.XDG_CONFIG_HOME || join(home, ".config");
   const state = source.XDG_STATE_HOME || join(home, ".local", "state");
+  const data = source.XDG_DATA_HOME || join(home, ".local", "share");
+  const credentialDirectories = [
+    "ssh",
+    "aws",
+    "docker",
+    "kube",
+    "gnupg",
+    "gh",
+    "codex",
+    "claude",
+    "copilot",
+  ];
+  const windowsProfile = (directory: string) =>
+    /^\/mnt\/[a-z]\/Users\/[^/]+(?=\/|$)/i.exec(directory)?.[0];
   const linked = linkedGit(workspace);
   const sealed = [
     join(home, ".ssh"),
     join(home, ".claude"),
     join(home, ".copilot"),
+    join(home, ".aws"),
+    join(home, ".docker"),
+    join(home, ".kube"),
+    join(home, ".gnupg"),
+    ...[config, data].flatMap((root) =>
+      credentialDirectories.map((name) => join(root, name)),
+    ),
     source.CODEX_HOME || join(home, ".codex"),
-    join(config, "gh"),
     join(config, "clockgrove-factory"),
+    join(data, "clockgrove-factory"),
+    join(data, "factory-copilot-auth"),
     join(state, "clockgrove-factory"),
     ...(linked ? [linked.common] : []),
   ].map(real);
-  const exposes = (directory: string) =>
-    within(home, directory) ||
-    sealed.some((path) => within(path, directory) || within(directory, path));
+  const exposes = (directory: string) => {
+    const profile = windowsProfile(directory);
+    const protectedPaths = profile
+      ? credentialDirectories.map((name) => real(join(profile, `.${name}`)))
+      : [];
+    return (
+      within(home, directory) ||
+      /^\/mnt(?:\/[a-z](?:\/Users)?)?\/?$/i.test(directory) ||
+      (profile !== undefined && within(profile, directory)) ||
+      [...sealed, ...protectedPaths].some(
+        (path) => within(path, directory) || within(directory, path),
+      )
+    );
+  };
   const root = (directory: string) => {
     const prefix = dirname(directory);
     if (
       ["bin", "sbin"].includes(basename(directory)) &&
       !basename(prefix).startsWith(".") &&
+      dirname(prefix) !== home &&
+      dirname(prefix) !== windowsProfile(prefix) &&
       !exposes(prefix)
     )
       return prefix;

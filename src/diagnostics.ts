@@ -43,6 +43,7 @@ import {
   repairScopes,
 } from "./repair-policy.js";
 import { itemsConflict } from "./scheduler.js";
+import { savedResultRefusal } from "./work-repair.js";
 import type {
   ContinuationState,
   CoordinatorDisposition,
@@ -1350,35 +1351,38 @@ export function statusDocument(
     charges: state.charges ?? {},
     repairs: Object.fromEntries(
       Object.entries(state.work)
-        .filter(([, work]) => work.recovery)
+        .filter(([id, work]) => work.recovery || savedResultRefusal(state, id))
         .map(([id, work]) => [
           id,
           {
-            phase: work.recovery!.phase ?? null,
-            failureClass: work.recovery!.failure?.classification ?? null,
-            failureDigest: work.recovery!.failure?.digest ?? null,
-            failureEvent: work.recovery!.failure?.event ?? null,
+            phase: work.recovery?.phase ?? null,
+            failureClass: work.recovery?.failure?.classification ?? null,
+            failureDigest:
+              work.recovery?.failure?.digest ??
+              savedResultRefusal(state, id)?.digest ??
+              null,
+            failureEvent: work.recovery?.failure?.event ?? null,
             blamedPredecessor:
-              work.recovery!.failure?.predecessor?.item ?? null,
-            blamedPath: work.recovery!.failure?.predecessor?.path ?? null,
+              work.recovery?.failure?.predecessor?.item ?? null,
+            blamedPath: work.recovery?.failure?.predecessor?.path ?? null,
             blamedGraphDigest:
-              work.recovery!.failure?.predecessor?.graphDigest ?? null,
+              work.recovery?.failure?.predecessor?.graphDigest ?? null,
             // Whether `factory repair` would be accepted for the failure
             // event: implementation repair is enabled and an allowance fits
             // (an event already charged does). Status names `factory repair`
             // only then; otherwise `factory retry`.
-            repairable: work.recovery!.failure?.event
+            repairable: work.recovery?.failure?.event
               ? implementationRepairable(
                   state,
-                  work.recovery!.failure.event,
+                  work.recovery.failure.event,
                   repairScopes(state, id),
                 )
               : null,
-            continuation: work.recovery!.failure?.continuation ?? null,
-            unfinishedEdits: work.recovery!.failure?.unfinishedEdits ?? null,
-            priorAttempts: work.recovery!.history?.length ?? 0,
-            nextDecision: work.recovery!.failure?.decision
-              ? redactDiagnosticDetail(work.recovery!.failure.decision, secrets)
+            continuation: work.recovery?.failure?.continuation ?? null,
+            unfinishedEdits: work.recovery?.failure?.unfinishedEdits ?? null,
+            priorAttempts: work.recovery?.history?.length ?? 0,
+            nextDecision: work.recovery?.failure?.decision
+              ? redactDiagnosticDetail(work.recovery.failure.decision, secrets)
               : null,
           },
         ]),

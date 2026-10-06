@@ -200,7 +200,7 @@ Running is the consent to execute that Objective. `run` plans if needed, saves t
 | 2    | It needs you. The message names the decision and command. |
 | 1    | It failed or was cancelled. The message says why.         |
 
-Run the same command again to resume from recorded state. A saved plan is reused rather than planned again. The first run also checks host and worker readiness, without a model call, and names any failing check and its fix. Control a live run from another terminal with `factory pause|drain|resume|cancel --objective N`. Pause and drain survive restarts, and `resume` continues either. `--deadline` is absolute and a restart cannot extend it. Different Objectives can run at the same time, each from its own terminal with its own configured concurrency; a second live run of the same Objective is refused.
+Run the same command again to resume from recorded state. A saved plan is reused rather than planned again. The first run also checks host and worker readiness, without a model call, and names any failing check and its fix. Control a live run from another terminal with `factory pause|drain|resume|cancel --objective N`. Pause and drain let an already running try settle, then block new tries and paid calls. They survive restarts, and `resume` continues either. `--deadline` is absolute and a restart cannot extend it. Different Objectives can run at the same time, each from its own terminal with its own configured concurrency; a second live run of the same Objective is refused.
 
 ## Queue and background
 
@@ -246,7 +246,7 @@ factory decide --objective N --outcome refuse --reason "Why"
 factory decide --objective N --item ITEM --outcome accept|refuse --reason "Reviewed evidence"
 ```
 
-Decisions read the exact plan or tree from state, apply only to that plan or tree, and never bypass branch protection. Review excerpts can be truncated, and a truncated excerpt cannot auto-pass, so inspect the full tree before accepting. Raising `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` may allow a complete automatic review.
+Decisions read the exact plan or tree from state, apply only to that plan or tree, and never bypass branch protection. Refusing a Work Item result records a failed-result event for the existing bounded correction path; it never turns passing command receipts into failed ones. Review excerpts can be truncated, and a truncated excerpt cannot auto-pass, so inspect the full tree before accepting. Raising `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` may allow a complete automatic review.
 
 ```sh
 # Run validation and review again on a pending Work Item result. No model call, accepts nothing.
@@ -263,6 +263,8 @@ factory propose-amendment --objective N --proposal /abs/proposal.json
 ```
 
 An automatic implementation repair must be actionable now: every retained failed command is assessed, its concrete change stays within the Work Item’s ownership, and no unmet or unknown operator prerequisite remains. A conditional correction stops with a concrete question and starts no worker. Establish the operator condition before submitting `factory repair`; a proposal is your declared diagnosis and correction, not a controller receipt proving an external action happened. Automatic diagnosis uses the original command outcomes and actual owned candidate contents. Missing or truncated facts cannot establish readiness. A saved automatic correction without checked readiness remains historical evidence and needs an operator correction before admission.
+
+For an older saved unpublished refusal without a failure event, status exposes its expected `failureDigest` while leaving the event and repairability unknown. Operator repair requires paused or drained, settled ownership and verifies the original refusal against the accepted graph and exact current Git tree. It records a new failure observation before applying the correction, preserving the original decision, time, reason, receipts and spent limits.
 
 - **repair file:** `{"item": "ITEM", "correction": {"kind": "implementation", "failureDigest": "...", "diagnosis": "...", "correction": "...", "actor": "NAME"}}`. The `failureDigest` is `repairs.ITEM.failureDigest` in `status --json`. The correction starts a new attempt from the accepted base and uses the allowance already charged for the failure. `factory-controller` is reserved for automatic diagnosis; operator proposals must use their own actor and omit controller-generated `readiness`.
 - **blamed on a merged predecessor:** when the failing file belongs to a merged predecessor (by the accepted graph's `ownedPaths`), the item stops with a decision that names the predecessor, its PR and the file, and no repair is spent, because repairing the dependent cannot fix it. Submit an amendment that adds a Work Item after the predecessor and owns the file, then `factory run` to merge it, `factory retry --objective N --item ITEM` for a new attempt on the integrated head, and `factory run`. `factory status` names whichever step is due. An amendment costs a planning revision (default 1) and is refused when none is left; then only `factory cancel` and a new Objective with a higher `autonomy.allowances.planningRevisions` helps, because limits are fixed when an Objective starts.

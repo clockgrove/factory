@@ -154,6 +154,9 @@ export function activateProjectedObjective(args: {
   const graph = plan.graph;
   return {
     schemaVersion: 7,
+    ...(preparation.approvedPlaybookPin !== undefined
+      ? { approvedPlaybookPin: preparation.approvedPlaybookPin }
+      : {}),
     ...(preparation.planningRecovery
       ? { planningRecovery: preparation.planningRecovery }
       : {}),

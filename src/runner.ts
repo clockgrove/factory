@@ -1,3 +1,4 @@
+import { bindPlanningPlaybook } from "./compiler.js";
 import { hasReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
@@ -288,6 +289,11 @@ export async function runObjective(
   let snapshot: ContinuationState | undefined;
   try {
     snapshot = readContinuation(config.repository, objective);
+    bindPlanningPlaybook(
+      services.planningModel,
+      config.repository,
+      snapshot?.approvedPlaybookPin,
+    );
   } catch (error) {
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
     throw error;

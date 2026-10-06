@@ -759,6 +759,8 @@ async function advanceAmendment(args: {
           state.baseSha,
           config.checkout,
           {
+            approvedPlaybook: args.model.approvedPlaybook,
+            approvedPlaybookPin: args.model.approvedPlaybookPin,
             generateStructured: async (request) => {
               const response = await args.model.generateStructured(request);
               compilationResponseObserved = true;
@@ -814,6 +816,7 @@ async function advanceAmendment(args: {
         prerequisites,
         localExecutables,
         { configuredConcurrency: state.capacity.concurrency },
+        state.approvedPlaybookPin,
       );
       packet.amendment = {
         previousGraph: state.graph,

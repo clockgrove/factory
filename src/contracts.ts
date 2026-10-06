@@ -265,7 +265,33 @@ export function assertPlanningExecutionBounds(
     throw new Error("Invalid controller planning execution bounds");
 }
 
+/** Approved advisory history; never current source evidence or execution authority. */
+export interface ApprovedPlaybook {
+  repository: string;
+  version: number;
+  digest: string;
+  content: string;
+}
+export type ApprovedPlaybookPin = { version: number; digest: string } | null;
+export function assertApprovedPlaybookPin(
+  value: unknown,
+): asserts value is ApprovedPlaybookPin {
+  if (value === null) return;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid approved playbook pin");
+  const pin = value as Record<string, unknown>;
+  if (
+    Object.keys(pin).sort().join(",") !== "digest,version" ||
+    !Number.isSafeInteger(pin.version) ||
+    Number(pin.version) < 1 ||
+    typeof pin.digest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(pin.digest)
+  )
+    throw new Error("Invalid approved playbook pin");
+}
+
 export interface PlanningRequest<T> {
+  approvedPlaybookPin?: ApprovedPlaybookPin;
   /** Trusted transient compile input; not part of canonical or persisted graphs. */
   compileContext?: {
     objectiveNumber: number;
@@ -307,6 +333,7 @@ export interface PlanCommandAuthorization {
 }
 
 export interface PlanReviewRequest {
+  approvedPlaybookPin?: ApprovedPlaybookPin;
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;
@@ -358,6 +385,8 @@ export interface ResultReviewCandidate {
 export type ResultReviewFinding = ReviewChoiceFinding;
 
 export interface PlanningModel {
+  approvedPlaybook?: ApprovedPlaybook;
+  approvedPlaybookPin?: ApprovedPlaybookPin;
   generateStructured<T>(request: PlanningRequest<T>): Promise<T>;
   reviewGraph(
     request: PlanReviewRequest,

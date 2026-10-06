@@ -41,6 +41,8 @@ The command prints JSON and sets its exit status.
 - `ready`: the service is active and its owner verified. Report the binding, the poll interval (`queue.pollSeconds`, default 30), the queued IDs or idle reason, and that sleep pauses and shutdown stops the service.
 - `blocked`: names the failed stage. Fix the stated prerequisite and repeat the same command. Never remove completed stages to get past it.
 
+For local execution, report `capacityRecommendation`: measured cores/memory, coding workers, validation/review ceilings and per-phase reservations. Compare it with the effective `capacity`; explicit overrides and recorded Objective limits stay fixed. A host recommendation grants no additional provider usage or spending. Keep existing limits unless the operator authorizes a change.
+
 An idle service with an empty queue makes no model calls.
 
 ## Queue work

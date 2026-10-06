@@ -3,8 +3,9 @@
  * command. Text and JSON status both use `summarizeStatus`, so they never
  * disagree. It reads only the redacted status document.
  */
-import type { Wait } from "./fault.js";
+
 import { type Refusal, settlesFirst } from "./amendment-admission.js";
+import type { Wait } from "./fault.js";
 
 /** A step in a run of transient faults (src/step.ts `outageOf`). */
 export interface OutageView {
@@ -1159,8 +1160,20 @@ export function summarizeStatus(view: StatusView): StatusSummary {
 
 const phaseLabel = (phase: StatusPhase) => phase.replaceAll("-", " ");
 
+/** Keep a displayed command bound to the explicitly selected installation. */
+export function configurationCommand(command: string, path?: string): string {
+  return path &&
+    command.startsWith("factory ") &&
+    !command.includes(" --config ")
+    ? `${command} --config '${path.replaceAll("'", "'\"'\"'")}'`
+    : command;
+}
+
 /** Text status: the summary line, the next command, then compact detail. */
-export function renderStatusText(view: StatusView & StatusSummary): string[] {
+export function renderStatusText(
+  view: StatusView & StatusSummary,
+  configuration?: string,
+): string[] {
   const lines = [
     `Objective #${view.objective}: ${phaseLabel(view.phase)} — ${view.summary}`,
   ];
@@ -1224,7 +1237,7 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
         `  Evidence: ${pending.detail}`,
         ...(all.length > 1
           ? [
-              `  Decide: ${decideCriterion(view.objective, itemId, pending, true)}`,
+              `  Decide: ${configurationCommand(decideCriterion(view.objective, itemId, pending, true), configuration)}`,
             ]
           : []),
       );
@@ -1243,7 +1256,7 @@ export function renderStatusText(view: StatusView & StatusSummary): string[] {
       lines.push(
         "",
         `${item.id}: ${item.lastError ?? "failed"}`,
-        `  Evidence: factory diagnostics --objective ${view.objective} --logs ${item.id}`,
+        `  Evidence: ${configurationCommand(`factory diagnostics --objective ${view.objective} --logs ${item.id}`, configuration)}`,
       );
   }
   if (view.finalAcceptancePending)

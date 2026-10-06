@@ -25,12 +25,12 @@ factory status --objective N [--json]
 
 `run` plans, runs the plan and exits: 0 complete, 1 failed, 2 needs a human. Report its final message. Run it again to resume; a saved plan is never planned again. To batch Objectives, use `factory queue add N [N ...]`.
 
-The first line of `status` is the phase and a one-line summary. `Next:` is the exact command that answers it; run it only when the request covers it. Without `--objective`, status shows the service and the queue.
+The first line of `status` is the phase and a one-line summary. `Next:` is the exact command that answers it; run it only when the request covers it. Without `--objective`, status shows the service and the queue. Keep the same `--config PATH` for every command; emitted status commands retain an explicitly selected configuration.
 
 ## Decide
 
 - **Plan question** (phase `needs plan decision`): `factory decide --objective N --outcome accept|refuse [--answer TEXT] --reason TEXT`, then run. Accepting needs `--answer`. A refusal discards the plan, so the next run plans again.
-- **Result criterion** (a Work Item, or final acceptance): have the operator inspect the full tree, because a truncated excerpt cannot auto-pass. Then `factory decide --objective N [--item ITEM] --outcome accept|refuse --reason TEXT`. Omit `--item` for final acceptance.
+- **Result criterion** (a Work Item, or final acceptance): have the operator inspect the full tree, because a truncated excerpt cannot auto-pass. Then `factory decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse --reason TEXT`. Omit `--item` for final acceptance.
 - **Review again** a pending Work Item result: `factory retry --objective N --item ITEM --rereview`, then run. It makes no model call and accepts nothing.
 - **Media:** `factory select --objective N --item ITEM --output ABSOLUTE_NEW_DIRECTORY` writes the candidate sets for review. After the human picks one whole set: `factory select --objective N --item ITEM --set SET_ID [--bind DEPENDENT ...]`, then run.
 

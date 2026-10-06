@@ -3,16 +3,20 @@ import { availableParallelism, totalmem } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { option, options } from "./cli-flags.js";
-import { readConfig, resolveCapacity } from "./config.js";
+import {
+  hostSchedulingDefaults,
+  readConfig,
+  resolveCapacity,
+} from "./config.js";
 import { requestControl } from "./coordinator-control.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
 import { sharedGitHubClient } from "./github-client.js";
 import { writeConfiguration } from "./install.js";
 import {
+  type IntakeAuthorization,
   queuePollSeconds,
   readIntake,
   watchIntake,
-  type IntakeAuthorization,
 } from "./intake.js";
 import { checkReadiness } from "./readiness.js";
 import { supervise, supervisorHost } from "./supervision.js";
@@ -70,17 +74,32 @@ export async function setupTarget(
     }
     const config = readConfig(configPath);
     result.repository = config.repository;
+    const host = {
+      cpus: availableParallelism(),
+      memoryBytes: totalmem(),
+    };
     result.capacity = {
       ...resolveCapacity(config),
       ...(config.execution.concurrency === undefined
         ? {
             sizedFromHost: {
-              cpus: availableParallelism(),
-              memoryMiB: Math.floor(totalmem() / 1024 ** 2),
+              cpus: host.cpus,
+              memoryMiB: Math.floor(host.memoryBytes / 1024 ** 2),
             },
           }
         : {}),
     };
+    if (config.execution.kind === "local")
+      result.capacityRecommendation = {
+        host: {
+          cpus: host.cpus,
+          memoryMiB: Math.floor(host.memoryBytes / 1024 ** 2),
+        },
+        ...hostSchedulingDefaults(host),
+        configuredLimitsPreserved: true,
+        detail:
+          "Local host capacity only: coding, validation and review reserve different resources. Explicit concurrency and scheduling overrides remain in force. A larger provider or spending allowance needs operator authorization; existing Objectives retain their recorded limits.",
+      };
     if (
       withinCheckout(config.checkout, configPath) ||
       withinCheckout(config.checkout, cli())

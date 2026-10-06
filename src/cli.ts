@@ -5,30 +5,30 @@ import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
 import {
   configPath,
-  factoryConfigDigest,
   type FactoryConfig,
+  factoryConfigDigest,
   readConfig,
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import { requestControl } from "./coordinator-control.js";
-import { runDiagnosticsCommand } from "./diagnostics-cli.js";
 import {
   continuationStatusDocument,
   redactDiagnosticDetail,
 } from "./diagnostics.js";
+import { runDiagnosticsCommand } from "./diagnostics-cli.js";
 import { compose, composeIntake, composePlanning } from "./index.js";
 import { type IntakeAuthorization, intakeControl } from "./intake.js";
 import { operatorName } from "./operator.js";
 import { loadServiceLoginCredentials } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
-import { controlObjective, selectAssetSetFromCli } from "./runner.js";
 import {
   AwaitingBeforeState,
   awaitingOutcome,
   intakeExitCode,
   runOutcome,
 } from "./run-outcome.js";
+import { controlObjective, selectAssetSetFromCli } from "./runner.js";
 import { setupTarget } from "./setup.js";
 import type { ContinuationState } from "./state.js";
 import {
@@ -38,7 +38,11 @@ import {
   readContinuation,
   readPreState,
 } from "./state-store.js";
-import { renderServiceStatus, renderStatusText } from "./status-summary.js";
+import {
+  configurationCommand,
+  renderServiceStatus,
+  renderStatusText,
+} from "./status-summary.js";
 import { checkIntakeServiceState, supervise } from "./supervision.js";
 
 /** Whether a live controller owns this Objective; null when a lock is unreadable. */
@@ -489,6 +493,12 @@ function statusDocument(config: FactoryConfig, objective: number) {
     continuation ? undefined : readPreState(config.repository, objective),
     factoryConfigDigest(config),
   );
+  const configuration = option(process.argv.slice(3), "config");
+  if (document.nextAction)
+    document.nextAction.command = configurationCommand(
+      document.nextAction.command,
+      configuration,
+    );
   return { document, secrets };
 }
 
@@ -496,9 +506,10 @@ function statusLines(
   document: ReturnType<typeof statusDocument>["document"],
   secrets: string[],
 ): string[] {
-  return renderStatusText(document).map((line) =>
-    redactDiagnosticDetail(line, secrets),
-  );
+  return renderStatusText(
+    document,
+    option(process.argv.slice(3), "config"),
+  ).map((line) => redactDiagnosticDetail(line, secrets));
 }
 
 /** Print how a run ended and set the documented exit code. */
@@ -506,13 +517,21 @@ function reportRun(
   config: FactoryConfig,
   state: ContinuationState | AwaitingBeforeState,
 ): void {
+  const configuration = option(process.argv.slice(3), "config");
   const outcome =
     state instanceof AwaitingBeforeState
-      ? awaitingOutcome(state)
-      : runOutcome(state, () => {
-          const { document, secrets } = statusDocument(config, state.objective);
-          return statusLines(document, secrets);
-        });
+      ? awaitingOutcome(state, configuration)
+      : runOutcome(
+          state,
+          () => {
+            const { document, secrets } = statusDocument(
+              config,
+              state.objective,
+            );
+            return statusLines(document, secrets);
+          },
+          configuration,
+        );
   console.log(outcome.message);
   process.exitCode = outcome.code;
 }

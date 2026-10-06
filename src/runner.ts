@@ -1674,6 +1674,7 @@ async function runObjectivePass(
               prerequisitesDigest: createHash("sha256")
                 .update(JSON.stringify(plan.prerequisites))
                 .digest("hex"),
+              prerequisites: plan.prerequisites,
             }
           : {}),
         repository: config.repository,

@@ -706,14 +706,16 @@ async function advanceAmendment(args: {
     };
     const prerequisites = await observePrerequisites();
     const verifyPrerequisites = async () => {
-      // Reobserve the original sources; retain only the activation digest,
-      // never a duplicate predecessor projection.
+      // Reobserve the original sources against the immutable admission facts
+      // and their activation digest; never change them during an amendment.
       const current = await observePrerequisites();
       const observed = current
         ? createHash("sha256").update(JSON.stringify(current)).digest("hex")
         : undefined;
       if (
         observed !== state.prerequisitesDigest ||
+        (state.prerequisites !== undefined &&
+          !isDeepStrictEqual(current, state.prerequisites)) ||
         !isDeepStrictEqual(current, prerequisites)
       )
         // The predecessor's evidence changed: the operator decides, and the

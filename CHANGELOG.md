@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Retain authenticated native Objective prerequisite seals through activation and supply their bound historical facts to result, QA and final review (#853). Missing legacy facts remain unavailable, and predecessor acceptance never substitutes for current-result acceptance.
+
 - Retain actual failed validation outcomes and checked configured repair authority in result, dependency, QA and final review evidence, while keeping historical failures separate from acceptance receipts (#851).
 
 - An Objective can refresh an existing exact stable npm or pnpm `packageManager` pin through a `Package manager update` section containing one backticked same-manager pin (#847). Planning, worker inputs, both deliveries, QA and final validation carry the exact source-bound authority. Final acceptance requires the declared pin; acceptance-command scripts and their lifecycle hooks remain fixed. Explicit update authority preserves security configuration and manager-hook files even without npm/pnpm validation commands. Host readiness checks the declared target version.

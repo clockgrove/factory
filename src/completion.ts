@@ -29,6 +29,14 @@ function evidenceDigest(state: FactoryState): string {
     .update(
       JSON.stringify({
         objectiveBodyDigest: state.objectiveBodyDigest,
+        ...(state.prerequisites
+          ? {
+              nativePrerequisites: {
+                digest: state.prerequisitesDigest,
+                facts: state.prerequisites,
+              },
+            }
+          : {}),
         finalValidation: state.finalValidation,
         decisions: state.finalAcceptanceDecisions,
         work: state.graph.items.map(({ id }) => ({

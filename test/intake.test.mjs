@@ -2,7 +2,14 @@ import { consumption } from "../dist/repair-policy.js";
 import { attachFault, faultOf, transient } from "../dist/fault.js";
 import { now, realDelay } from "../dist/clock.js";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,6 +30,16 @@ import { stateRoot, factoryConfigDigest } from "../dist/config.js";
 import { resolveAutonomy } from "../dist/index.js";
 import { createHash } from "node:crypto";
 import { objectiveComplete } from "../dist/completion.js";
+import { parseFactoryState } from "../dist/state.js";
+import {
+  nativePrerequisiteReviewEvidence,
+  prerequisitesDigest,
+} from "../dist/native-prerequisite-evidence.js";
+import {
+  objectiveReviewEvidence,
+  workItemReviewEvidence,
+} from "../dist/validation.js";
+import { workItemPrompt } from "../dist/execution/harness-support.js";
 import {
   readState,
   readControllerOwner,
@@ -78,14 +95,19 @@ const item = (id) => ({
   minimumAssetSets: 0,
   requiredLfsRoles: [],
 });
-async function fixture(fn, autonomy = limits, queue = { pollSeconds: 0.01 }) {
+async function fixture(
+  fn,
+  autonomy = limits,
+  queue = { pollSeconds: 0.01 },
+  delivery = "regular",
+) {
   const root = mkdtempSync(join(tmpdir(), "factory-intake-"));
   const previous = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = join(root, "state");
   try {
     const target = createTarget(root);
     const config = {
-      ...factoryConfig(target.checkout, "example/intake"),
+      ...factoryConfig(target.checkout, "example/intake", delivery),
       autonomy,
       queue,
     };
@@ -111,6 +133,7 @@ async function fixture(fn, autonomy = limits, queue = { pollSeconds: 0.01 }) {
           objective,
           base: request.baseSha,
           prerequisites: request.prerequisites,
+          sources: request.sources,
         });
         return withCoverage(request, {
           objective,
@@ -226,6 +249,407 @@ test("two explicitly authorized Objectives advance with accepted predecessor bas
       2,
     );
   }));
+
+for (const delivery of ["regular", "native-stack"])
+  test(`${delivery}: native sealed admission survives activation and reaches literal item, QA and final review inputs`, async () =>
+    fixture(
+      async (f) => {
+        const rendered = [];
+        f.issues.get(2).body = body(2).replace(
+          "\n\n## Commands",
+          "\n- The first Objective has accepted-and-closed native admission at this pinned baseline.\n\n## Commands",
+        );
+        f.issues.get(2).body += "\n## Sources\n- result-1.txt\n";
+        const renderer = new CodexPlanningModel(f.config.checkout);
+        renderer.runStructured = async ({ prompt, defaultPhase }) => {
+          const packet = packetFromPrompt(prompt);
+          rendered.push({ packet, prompt, phase: defaultPhase });
+          const native = packet.evidence.find(
+            (entry) => entry.path === "Native Objective prerequisite evidence",
+          );
+          if (native) {
+            const proof = JSON.parse(native.content);
+            const state = readState(f.config.repository, 2);
+            assert.equal(proof.availability, "available");
+            assert.deepEqual(proof.facts, f.plans[1].prerequisites);
+            assert.deepEqual(state.prerequisites, proof.facts);
+            assert.equal(
+              state.prerequisitesDigest,
+              prerequisitesDigest(proof.facts),
+            );
+            assert.equal(
+              proof.binding.prerequisitesDigest,
+              state.prerequisitesDigest,
+            );
+            assert.equal(proof.binding.runId, state.runId);
+            assert.equal(proof.binding.configDigest, state.configDigest);
+            assert.equal(
+              proof.binding.acceptedPlanGraphDigest,
+              state.planGraphDigest,
+            );
+            assert.equal(proof.binding.acceptedBaseCommitSha, state.baseSha);
+            assert.equal(
+              proof.binding.reviewedTreeSha,
+              packet.evidence
+                .find((entry) => entry.path === "Command pass evidence")
+                .content.match(/"treeSha":"([a-f0-9]+)"/)[1],
+            );
+            assert.equal(native.origin, "controller");
+            assert.equal(native.complete, true);
+            assert.equal(
+              native.digest,
+              createHash("sha256").update(native.content).digest("hex"),
+            );
+            assert(prompt.includes(JSON.stringify(packet)));
+            assert.doesNotMatch(
+              native.content,
+              /prior-model-verdict|"criteria"|"verdict"/,
+            );
+          }
+          return {
+            packetId: packet.packetId,
+            findings: packet.criteria.map((criterion, criterionIndex) => ({
+              criterionIndex,
+              verdict: "pass",
+              evidenceIndices: [
+                packet.evidence.findIndex(
+                  (entry) =>
+                    entry.path ===
+                    (native
+                      ? "Native Objective prerequisite evidence"
+                      : "OBJECTIVE"),
+                ),
+              ],
+              detail:
+                "Synthetic semantics; actual controller producer and literal request binding inspected separately.",
+              question: "",
+            })),
+          };
+        };
+        f.model.reviewResult = (request) => renderer.reviewResult(request);
+        const generate = f.model.generateStructured.bind(f.model);
+        f.model.generateStructured = async (request) => {
+          const graph = await generate(request);
+          if (graph.objective === 2) {
+            graph.items[0].citations.push({
+              path: "result-1.txt",
+              heading: "",
+            });
+            graph.items.push({
+              ...item(2),
+              id: "qa-2",
+              kind: "qa",
+              acceptance: [
+                "The first Objective has accepted-and-closed native admission at this pinned baseline.",
+              ],
+              ownedPaths: [],
+              dependencies: ["result-2"],
+            });
+            graph.coverage[1].itemId = "qa-2";
+            graph.coverage[1].proof = {
+              kind: "integrated-semantic",
+              acceptanceIndex: 0,
+            };
+          }
+          return graph;
+        };
+        const graphEntered = Promise.withResolvers();
+        const graphRelease = Promise.withResolvers();
+        const reviewGraph = f.model.reviewGraph.bind(f.model);
+        f.model.reviewGraph = async (request) => {
+          if (request.graph.objective === 2) {
+            graphEntered.resolve();
+            await graphRelease.promise;
+          }
+          return reviewGraph(request);
+        };
+        const start = f.driver.start.bind(f.driver);
+        const workerPrompts = [];
+        f.driver.start = async (request) => {
+          if (request.item.id === "result-2") {
+            const sources = request.item.inputSources;
+            assert.equal(
+              sources.find((entry) => entry.path === "result-1.txt").content,
+              "Objective 1\n",
+            );
+            const prompt = workItemPrompt({ item: request.item });
+            assert(prompt.includes(JSON.stringify(sources)));
+            workerPrompts.push({ itemId: request.item.id, sources, prompt });
+          }
+          return start(request);
+        };
+        await f.application.enqueueIntake(objectives);
+        const running = f.application.runIntake();
+        await graphEntered.promise;
+        const preparing = readContinuation(f.config.repository, 2);
+        assert.equal(preparing.schemaVersion, 8);
+        await controlObjective(f.config, { objective: 2, action: "pause" });
+        graphRelease.resolve();
+        await eventually(
+          () =>
+            readContinuation(f.config.repository, 2).plan?.review.status ===
+            "clean",
+        );
+        const paused = readContinuation(f.config.repository, 2);
+        assert.deepEqual(paused.plan.prerequisites, f.plans[1].prerequisites);
+        assert.equal(paused.coordinator.mode, "paused");
+        assert.equal(
+          readEvents(f.eventsPath).filter((event) => event.type === "start")
+            .length,
+          1,
+        );
+        await requestControl(f.config.repository, {
+          objective: 0,
+          action: "handoff",
+        });
+        await running;
+        await intakeControl(f.config, "resume");
+        await f.application.runIntake();
+        const first = readState(f.config.repository, 1);
+        const continuation = readContinuation(f.config.repository, 2);
+        assert.equal(
+          continuation.schemaVersion,
+          7,
+          JSON.stringify(continuation),
+        );
+        const second = readState(f.config.repository, 2);
+        assert(objectiveComplete(first));
+        assert(objectiveComplete(second));
+        const actual = rendered.filter(({ packet }) =>
+          packet.evidence.some(
+            (entry) => entry.path === "Native Objective prerequisite evidence",
+          ),
+        );
+        assert.deepEqual(
+          actual.map(({ phase }) => phase),
+          ["result-review", "result-review", "objective-review"],
+        );
+        assert.deepEqual(second.prerequisites, f.plans[1].prerequisites);
+        assert.equal(second.runId, preparing.runId);
+        assert.equal(f.plans.length, 2);
+        assert.equal(workerPrompts.length, 1);
+        assert.equal(
+          f.plans[1].sources.find((entry) => entry.path === "result-1.txt")
+            .content,
+          "Objective 1\n",
+        );
+        assert.equal(
+          second.prerequisites.predecessors[0].acceptance.evidenceDigest,
+          first.finalAcceptance.evidenceDigest,
+        );
+        assert.equal(
+          second.prerequisites.predecessors[0].acceptance.commit,
+          second.baseSha,
+        );
+        assert.deepEqual(second.graph.items[0].dependencies, []);
+        assert.deepEqual(consumption(second), {
+          planningRevisions: 0,
+          implementationRepairs: 0,
+          resultRereviews: 0,
+        });
+        assert.deepEqual(
+          parseFactoryState(structuredClone(second), second.repository, 2)
+            .prerequisites,
+          second.prerequisites,
+        );
+        // Both entry points reject changed bindings before a provider sees them.
+        for (const [mutate, expected] of [
+          [
+            (s) => {
+              s.prerequisites.predecessors[0].bodyDigest = "a".repeat(64);
+            },
+            /activation binding/,
+          ],
+          [
+            (s) => {
+              delete s.prerequisitesDigest;
+            },
+            /activation binding/,
+          ],
+          [
+            (s) => {
+              s.prerequisites.objective = 9;
+              s.prerequisitesDigest = prerequisitesDigest(s.prerequisites);
+            },
+            /activation binding/,
+          ],
+          [
+            (s) => {
+              s.prerequisites.baseSha = f.target.baseSha;
+              s.prerequisitesDigest = prerequisitesDigest(s.prerequisites);
+            },
+            /activation binding/,
+          ],
+          [
+            (s) => {
+              s.prerequisites.predecessors[0].acceptance.tree = "a".repeat(40);
+              s.prerequisitesDigest = prerequisitesDigest(s.prerequisites);
+            },
+            /sealed tree/,
+          ],
+          [
+            (s) => {
+              s.prerequisites.predecessors[0].acceptance.commit =
+                s.integratedSha;
+              s.prerequisites.predecessors[0].acceptance.tree =
+                s.finalValidation.treeSha;
+              s.prerequisites.predecessors[0].baseRelationship = "descendant";
+              s.prerequisitesDigest = prerequisitesDigest(s.prerequisites);
+            },
+            /not in the reviewed baseline/,
+          ],
+          [
+            (s) => {
+              s.prerequisites.predecessors[0].status = "closed";
+              s.prerequisitesDigest = prerequisitesDigest(s.prerequisites);
+            },
+            /activation binding/,
+          ],
+          [
+            (s) => {
+              s.prerequisites.predecessors.push(
+                s.prerequisites.predecessors[0],
+              );
+              s.prerequisitesDigest = prerequisitesDigest(s.prerequisites);
+            },
+            /activation binding/,
+          ],
+          [
+            (s) => {
+              s.prerequisites.predecessors[0].acceptance.verdict = "pass";
+              s.prerequisitesDigest = prerequisitesDigest(s.prerequisites);
+            },
+            /activation binding/,
+          ],
+          [
+            (s) => {
+              s.prerequisites.extraAuthority = "accept current result";
+              s.prerequisitesDigest = prerequisitesDigest(s.prerequisites);
+            },
+            /activation binding/,
+          ],
+        ]) {
+          const changed = structuredClone(second);
+          delete changed.finalAcceptance;
+          mutate(changed);
+          if (expected.source === "activation binding") {
+            const snapshot = statePath(second.repository, 2);
+            const original = readFileSync(snapshot, "utf8");
+            assert.throws(
+              () => parseFactoryState(changed, second.repository, 2),
+              expected,
+            );
+            assert.throws(
+              () => saveState(snapshot, changed),
+              /Refusing to save invalid Factory state/,
+            );
+            assert.equal(readFileSync(snapshot, "utf8"), original);
+          }
+          assert.throws(
+            () =>
+              workItemReviewEvidence({
+                state: changed,
+                item: changed.graph.items[0],
+                checkout: f.config.checkout,
+                delivery,
+              }),
+            expected,
+          );
+          assert.throws(
+            () =>
+              objectiveReviewEvidence({
+                state: changed,
+                checkout: f.config.checkout,
+                candidateCommitSha: changed.integratedSha,
+                candidateTreeSha: changed.finalValidation.treeSha,
+              }),
+            expected,
+          );
+        }
+        const legacy = structuredClone(second);
+        delete legacy.prerequisites;
+        delete legacy.finalAcceptance;
+        parseFactoryState(legacy, legacy.repository, 2);
+        const unavailable = nativePrerequisiteReviewEvidence({
+          state: legacy,
+          checkout: f.config.checkout,
+          candidateCommitSha: legacy.integratedSha,
+          candidateTreeSha: legacy.finalValidation.treeSha,
+        });
+        assert.equal(
+          JSON.parse(unavailable[0].content).availability,
+          "unavailable",
+        );
+        assert.equal(JSON.parse(unavailable[0].content).facts, undefined);
+        assert.equal(
+          JSON.parse(unavailable[0].content).binding.prerequisitesDigest,
+          second.prerequisitesDigest,
+        );
+        assert.throws(
+          () =>
+            nativePrerequisiteReviewEvidence({
+              state: second,
+              checkout: f.config.checkout,
+              candidateCommitSha: f.target.baseSha,
+              candidateTreeSha: git(
+                f.config.checkout,
+                "rev-parse",
+                `${f.target.baseSha}^{tree}`,
+              ),
+            }),
+          /not in the reviewed baseline/,
+        );
+        const sealChanged = structuredClone(second);
+        sealChanged.prerequisites.predecessors[0].bodyDigest = "a".repeat(64);
+        sealChanged.prerequisitesDigest = prerequisitesDigest(
+          sealChanged.prerequisites,
+        );
+        assert.throws(
+          () => parseFactoryState(sealChanged, second.repository, 2),
+          /sealed candidate or evidence/,
+        );
+        const sealedWithoutFacts = structuredClone(second);
+        delete sealedWithoutFacts.prerequisites;
+        assert.throws(
+          () => parseFactoryState(sealedWithoutFacts, second.repository, 2),
+          /sealed candidate or evidence/,
+        );
+        // Optional local artifacts use the same natural producers. They are
+        // synthetic transport evidence, never live-provider acceptance.
+        const capture = process.env.FACTORY_PREREQUISITE_TEST_CAPTURE_DIR;
+        if (capture) {
+          const destination = join(capture, delivery);
+          mkdirSync(destination, { recursive: true });
+          writeFileSync(
+            join(destination, "natural-producer-rehearsal.json"),
+            `${JSON.stringify(
+              {
+                qualification:
+                  "model-free-local-controller-rehearsal; synthetic GitHub and semantic transports",
+                first,
+                preparing,
+                paused,
+                second,
+                plans: f.plans,
+                rendered,
+                workerPrompts,
+              },
+              null,
+              2,
+            )}\n`,
+          );
+          cpSync(f.target.checkout, join(destination, "target"), {
+            recursive: true,
+          });
+          cpSync(f.target.origin, join(destination, "origin.git"), {
+            recursive: true,
+          });
+        }
+      },
+      limits,
+      { pollSeconds: 0.01 },
+      delivery,
+    ));
 
 /** One diagnosed planning-evidence revision, nothing else. */
 const plannedRevision = {
@@ -752,6 +1176,7 @@ for (const [descendant, dependent, historical] of [
       assert.equal(second.baseSha, candidate.baseSha);
       assert.equal(second.objectiveBodyDigest, candidate.bodyDigest);
       assert.equal(second.configDigest, candidate.configDigest);
+      assert.deepEqual(second.prerequisites, candidate.prerequisites);
       if (historical) {
         assert.equal(
           Object.hasOwn(

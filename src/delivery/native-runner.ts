@@ -471,6 +471,14 @@ export async function runNativeGraph(args: {
         // A decision or a configuration fix is the item's wait (its step
         // saved it), and cancel stops it quietly: the unit keeps its place.
         if (staysInPlace(error)) return settlePrepared();
+        // Read-only QA retains and diagnoses its failed attempt under the
+        // same configured policy as coding results, before the unit stops.
+        const isolated = recordWorkFailure(state, item.id, error);
+        save();
+        if (isolated && !stopped()) {
+          await diagnose(item);
+          return settlePrepared();
+        }
         throw error;
       }
       if (state.work[item.id]?.status !== "done") return settlePrepared();

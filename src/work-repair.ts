@@ -13,6 +13,13 @@ import {
 } from "./controller-capabilities.js";
 import type { FactoryState } from "./state.js";
 import {
+  assertFailedValidationEvidence,
+  assertFailedValidationRecord,
+  failedValidationDigest,
+  type FailedValidationEvidence,
+  type FailedValidationRecord,
+} from "./failed-validation.js";
+import {
   archiveAttempt,
   chargeRepair,
   consumption,
@@ -29,8 +36,13 @@ import {
 
 /** The exact collected candidate exists, but settled local validation failed: a wrong result. */
 export class CandidateValidationFailure extends Error {
-  constructor(detail: string) {
+  readonly failedValidation?: FailedValidationEvidence;
+  constructor(detail: string, failedValidation?: FailedValidationEvidence) {
     super(detail);
+    if (failedValidation) {
+      assertFailedValidationEvidence(failedValidation);
+      this.failedValidation = structuredClone(failedValidation);
+    }
     attachFault(this, { kind: "work", evidence: { detail } });
   }
 }
@@ -127,6 +139,32 @@ export function recordWorkFailure(
         : "unavailable",
     decision: decisions[classification],
   };
+  // Readiness probes also validate the accepted base before any result or
+  // attempt exists. They cannot supply a failed result's candidate receipts.
+  if (
+    error instanceof CandidateValidationFailure &&
+    error.failedValidation &&
+    work.step === "validate"
+  ) {
+    const retained: FailedValidationRecord = {
+      repository: state.repository,
+      objective: state.objective,
+      runId: state.runId,
+      configDigest: state.configDigest,
+      itemId: id,
+      attemptId: work.attempt!,
+      acceptedBaseSha: state.baseSha,
+      executionBaseSha: work.executionBaseSha!,
+      resultBaseSha: work.baseSha!,
+      graphRevisionDigest: work.graphRevisionDigest ?? graphDigest(state.graph),
+      failureDigest: failure.digest,
+      ...(failure.event && { failureEvent: failure.event }),
+      evidence: error.failedValidation,
+    };
+    failure.validationCaptureDigest = failedValidationDigest(retained);
+    assertFailedValidationRecord(retained, state, id, work, failure);
+    work.failedValidation = structuredClone(retained);
+  }
   // A new failure starts a fresh record: an earlier correction belongs to
   // the attempt it corrected, which the history keeps.
   work.recovery = {

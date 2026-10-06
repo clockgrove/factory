@@ -79,6 +79,8 @@ Validation runs in a fresh worktree checked out at the exact result tree:
 
 An independent reviewer model then judges each acceptance criterion against the change, the receipts and the cited sources. It must cite evidence; a criterion it cannot support from complete evidence stays pending for the operator.
 
+Unsuccessful validation retains a separate controller record of actual ordered command outcomes, including partial passes and failed exits; a settled child with no observed exit code retains null. Readiness probes are a separate phase and never become candidate receipts. It binds the original run, Work Item, attempt, result commit/tree, bases and historical accepted command map. Before/after observations compare HEAD, tree and the post-hydration porcelain baseline; a modified observation cannot authenticate later commands against the original candidate. Settled process ownership is required, and failed-path selected LFS byte binding remains unavailable. These records contain no stdout or stderr and never enter the pass-only acceptance receipt decoder. Supported repair archives the original record without resetting consumption or usage. Result, dependency, QA and final review receive the checked configuration/autonomy binding, original failure event, actual charged scopes and finite limits alongside the retained outcomes. Diagnosis and correction text remain declarations. Legacy missing records remain unavailable; diagnostics and current passes never backfill them.
+
 ## Delivery
 
 The `regular` strategy publishes and merges one pull request at a time. The `native-stack` strategy groups each unbranched chain of Work Items into a GitHub stacked pull request; forks and joins start new stacks after their predecessors merge.

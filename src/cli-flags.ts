@@ -32,6 +32,7 @@ const commandFlags: Record<string, string[]> = {
     "credential-file",
     ...installFlags,
   ],
+  propose: ["source", "output", "file", "approve", "enqueue"],
   run: ["objective", "deadline"],
   queue: [],
   supervisor: ["cli", "disable", "service-credential"],

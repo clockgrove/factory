@@ -214,3 +214,26 @@ Every step is safe to repeat, so after any interruption run the Objective again:
 ## Safety
 
 Factory checks changed-path ownership, unsafe links and special files, and scans staged content with its packaged Secretlint rules before publishing. A finding names the rule and path, never the value. Review false positives outside the checkout, then point `FACTORY_SECRETLINT_CONFIG` at a reviewed config and retry. Workers get a filtered environment without controller GitHub, Git or SSH credentials. Workers run as your OS user and are not a boundary against hostile code. Follow the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).
+
+## Propose Objectives
+
+Use a tracked wave or roadmap section to draft Objectives before creating issues:
+
+```sh
+factory propose --source 'docs/waves/wave.md#Exact heading' --output /private/existing-directory/objectives.json
+```
+
+The configured planning provider receives complete pinned source sections. The private draft contains Outcome, Acceptance, Sources, Constraints and dependencies; the command shows source coverage, including uncovered and overlapping sections. It creates no issues and starts no work. Review or edit the Objective definitions in the JSON file; keep its proposal identity and source/configuration binding unchanged. External prerequisites in a draft are obligations, not verified readiness.
+
+Approve the exact reviewed file explicitly:
+
+```sh
+sha256sum /private/existing-directory/objectives.json
+factory propose --file /private/existing-directory/objectives.json --approve REVIEWED_SHA256
+```
+
+Approval creates ordinary Objectives in the configured repository and their native dependencies. Add `--enqueue` to admit the complete approved batch to ordinary intake; omit it to publish without authorizing execution. Dependencies name earlier draft IDs. Edited drafts must still cite supplied source indices, preserve the four-section Objective form and have an acyclic dependency order. Review coverage before approval; citation counts alone do not prove substantive completeness.
+
+The retained private proposal snapshot records source identity, provider observations and available usage, exact approval digest/actor, and verified issue mappings. Generation uses one bounded provider invocation; an unknown usage value stays unknown. Publication uses the existing exclusive installation lock; stop a live background owner before publishing, then restart it and admit the batch if required. Repeating the same approved file verifies existing issue bodies/authors and dependencies instead of creating duplicates. If a submitted creation/dependency outcome is unknown, publication refuses replay and retains that uncertainty for inspection. Never edit the retained snapshot to bypass the refusal. Changed source contents require a newly reviewed draft.
+
+This command does not approve a product plan, widen providers or permissions, or replace the independent plan and result reviews of each admitted Objective. Real-wave evaluation is recorded separately before support is claimed.

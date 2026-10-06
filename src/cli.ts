@@ -5,30 +5,31 @@ import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
 import {
   configPath,
-  factoryConfigDigest,
   type FactoryConfig,
+  factoryConfigDigest,
   readConfig,
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import { requestControl } from "./coordinator-control.js";
-import { runDiagnosticsCommand } from "./diagnostics-cli.js";
 import {
   continuationStatusDocument,
   redactDiagnosticDetail,
 } from "./diagnostics.js";
+import { runDiagnosticsCommand } from "./diagnostics-cli.js";
 import { compose, composeIntake, composePlanning } from "./index.js";
 import { type IntakeAuthorization, intakeControl } from "./intake.js";
 import { operatorName } from "./operator.js";
+import { runProposeCommand } from "./proposals.js";
 import { loadServiceLoginCredentials } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
-import { controlObjective, selectAssetSetFromCli } from "./runner.js";
 import {
   AwaitingBeforeState,
   awaitingOutcome,
   intakeExitCode,
   runOutcome,
 } from "./run-outcome.js";
+import { controlObjective, selectAssetSetFromCli } from "./runner.js";
 import { setupTarget } from "./setup.js";
 import type { ContinuationState } from "./state.js";
 import {
@@ -71,6 +72,9 @@ function help(): void {
       "      Write the configuration (first run) or verify it against the options given",
       `  setup --background ${INSTALL_OPTIONS} [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...]`,
       "      Configure if needed, check readiness, then install and start the background service that runs the queue (this command is the consent)",
+      "  propose --source DOC#HEADING --output ABSOLUTE_NEW_FILE",
+      "  propose --file ABSOLUTE_FILE --approve SHA256 [--enqueue]",
+      "      Draft and review Objectives, then explicitly approve their exact file before issue creation",
       "  run --objective N [--deadline ISO_TIMESTAMP]",
       "      Plan if needed and run the Objective until it is done or needs you; the first run checks readiness",
       "  queue add N [N ...] | list | remove N | pause | resume | drain",
@@ -283,6 +287,7 @@ async function main(): Promise<void> {
     if (result.status === "blocked") process.exitCode = 1;
     return;
   }
+  if (command === "propose") return runProposeCommand(readConfig(path), args);
   if (command === "queue") return queueCommand(args, path);
   if (command === "supervisor") return supervisorCommand(args, path);
   if (command === "status" && option(args, "objective") === undefined)

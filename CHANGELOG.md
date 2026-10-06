@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- `factory propose` drafts source-grounded Objectives for operator review, then publishes exact-file-approved issues with native dependencies and optional batch intake. Private source, provider usage, approval and external-mutation uncertainty stay retained; drafting starts no work (#522).
+
 - A planning diagnosis that asks an operator question no longer spends a planning revision before any engineering correction is applied (#846). Accepting the exact reviewed plan leaves that revision available for an independently reviewed ownership-discovery amendment. Existing recorded charges and limits remain unchanged.
 
 - Replace unit and mock-based verification with a small real integration suite covering Git, processes, disk content, LFS, secret scanning and offline package installation. Remove the fake providers, scripted workers, fault matrices and eight-way test sharding; contributor instructions require this smaller pattern.

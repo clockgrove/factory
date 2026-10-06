@@ -377,6 +377,10 @@ for (const delivery of ["regular", "native-stack"])
     changed.work.result.recovery.correction.readiness.inputDigest = "d".repeat(
       64,
     );
+    assert.throws(
+      () => parseFactoryState(changed, f.config.repository, 1),
+      /readiness/,
+    );
     assert.equal(
       await diagnoseWorkRepair({
         ...args,
@@ -387,8 +391,10 @@ for (const delivery of ["regular", "native-stack"])
     );
     assert.match(
       changed.work.result.recovery.failure.decision,
-      /inputs changed/,
+      /readiness does not bind/,
     );
+    assert.deepEqual(changed.charges, charges);
+    assert.equal(calls, 1);
     const resumed = JSON.parse(JSON.stringify(saved));
     assert.equal(
       await diagnoseWorkRepair({
@@ -410,6 +416,31 @@ for (const delivery of ["regular", "native-stack"])
       original.recovery.failure,
     );
     parseFactoryState(resumed, f.config.repository, 1);
+    for (const records of ["current", "archived", "both"]) {
+      // The records are the real supported admission's retained attempt,
+      // with independent JSON copies as they have in persisted state.
+      const altered = JSON.parse(JSON.stringify(resumed));
+      if (records !== "archived")
+        altered.work.result.recovery.correction.readiness.inputDigest =
+          "e".repeat(64);
+      if (records !== "current")
+        altered.work.result.recovery.history[0].correction.readiness.inputDigest =
+          "e".repeat(64);
+      assert.throws(
+        () => parseFactoryState(altered, f.config.repository, 1),
+        /readiness/,
+        records,
+      );
+      assert.deepEqual(altered.charges, charges);
+      assert.deepEqual(
+        altered.work.result.recovery.history[0].work.failedValidation,
+        original.failedValidation,
+      );
+      assert.deepEqual(
+        altered.work.result.recovery.history[0].failure,
+        original.recovery.failure,
+      );
+    }
     saveState(statePath(f.config.repository, 1), resumed);
     f.actions.result.files[0].text = "correct";
     const completed = await f.fixture.application.runObjective(1);

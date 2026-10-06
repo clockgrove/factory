@@ -356,6 +356,7 @@ const readinessContext = (
     failureEvent: failure.event,
     validationCaptureDigest: failure.validationCaptureDigest ?? null,
     graphDigest: graph,
+    inputDigest: correction.readiness?.inputDigest,
     ownedPath: correction.readiness?.ownedPath,
     diagnosis: correction.diagnosis,
     correction: correction.correction,

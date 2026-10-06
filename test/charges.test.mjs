@@ -1,3 +1,4 @@
+import { actionableDiagnosis } from "./support/repair-diagnosis.mjs";
 // A charge is made once per failure event (#515, recovery v2.2 rule 5).
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -87,13 +88,11 @@ const item = {
 };
 const body =
   "# Charges fixture\n## Acceptance\n- `test -s result.txt`\n## Commands\n- test -s result.txt\n";
-const failedAttempt = (attempt, step = "validate") => ({
+const failedAttempt = (attempt, step = "execute") => ({
   status: "failed",
   step,
   attempt,
   baseSha: "a".repeat(40),
-  changeRef: "b".repeat(40),
-  treeSha: "c".repeat(40),
 });
 const itemState = (limit) => ({
   objective: 1,
@@ -113,14 +112,13 @@ const lostResponse = (detail = "diagnosis response lost") =>
 function diagnoser(lose = 0) {
   const model = {
     calls: 0,
-    generateStructured: async () => {
+    generateStructured: async (request) => {
       model.calls++;
       if (model.calls <= lose) throw lostResponse();
-      return {
-        decision: "repair",
+      return actionableDiagnosis(request, {
         diagnosis: `The required file was not written (${model.calls})`,
         correction: `Write result.txt from the accepted base (${model.calls})`,
-      };
+      });
     },
   };
   return model;
@@ -182,7 +180,7 @@ test("a wrong result is charged once, at its failure event, whatever repeats", a
   let state = itemState(2);
   fail(state, "Validation command failed (1)");
   const event = state.work.result.recovery.failure.event;
-  assert.equal(event, "item/result/validate/0");
+  assert.equal(event, "item/result/execute/0");
   // Recording the same failure again names the same event.
   fail(state, "Validation command failed (1)");
   assert.equal(state.work.result.recovery.failure.event, event);
@@ -207,7 +205,7 @@ test("a wrong result is charged once, at its failure event, whatever repeats", a
   fail(state, "Validation command failed (2)");
   assert.equal(
     state.work.result.recovery.failure.event,
-    "item/result/validate/1",
+    "item/result/execute/1",
   );
   assert.equal(await diagnose(state, model), true);
   assert.equal(consumption(state).implementationRepairs, 2);
@@ -252,7 +250,7 @@ test("a configuration fault in the diagnosis leaves it due; the next run asks ag
   let expired = true;
   const model = {
     calls: 0,
-    generateStructured: async () => {
+    generateStructured: async (request) => {
       model.calls++;
       if (expired)
         throw attachFault(new Error("Run claude auth login"), {
@@ -260,11 +258,10 @@ test("a configuration fault in the diagnosis leaves it due; the next run asks ag
           detail: "The model login expired",
           fix: "Run claude auth login",
         });
-      return {
-        decision: "repair",
+      return actionableDiagnosis(request, {
         diagnosis: "The required file was not written",
         correction: "Write result.txt from the accepted base",
-      };
+      });
     },
   };
   assert.equal(await diagnose(state, model), false);
@@ -330,11 +327,10 @@ test("an invalid diagnosis is asked again with its validation error", async () =
   const model = {
     generateStructured: async (request) => {
       prompts.push(request.objective);
-      return {
-        decision: "repair",
+      return actionableDiagnosis(request, {
         diagnosis: "The required file was not written",
         correction: prompts.length === 1 ? "" : "Write result.txt",
-      };
+      });
     },
   };
   assert.equal(await diagnose(state, model), true);
@@ -821,11 +817,10 @@ for (const delivery of ["regular", "native-stack"]) {
               return withCoverage(request, graph);
             diagnoses++;
             if (diagnoses === 1) throw lostResponse();
-            return {
-              decision: "repair",
+            return actionableDiagnosis(request, {
               diagnosis: "The worker did not write the required file",
               correction: "Write result.txt from the accepted base",
-            };
+            });
           },
           reviewGraph: async (request) => ({
             packetId: request.reviewPacket.id,
@@ -961,11 +956,10 @@ for (const delivery of ["regular", "native-stack"])
             if (request.purpose !== "diagnosis")
               return withCoverage(request, graph);
             diagnoses++;
-            return {
-              decision: "repair",
+            return actionableDiagnosis(request, {
               diagnosis: `The worker did not write the required file (${diagnoses})`,
               correction: `Write result.txt from the accepted base (${diagnoses})`,
-            };
+            });
           },
           reviewGraph: async (request) => ({
             packetId: request.reviewPacket.id,

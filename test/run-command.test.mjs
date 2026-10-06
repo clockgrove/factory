@@ -1,3 +1,4 @@
+import { actionableDiagnosis } from "./support/repair-diagnosis.mjs";
 import { consumption } from "../dist/repair-policy.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -101,11 +102,10 @@ function model(
               diagnosis: "The Objective leaves the owner undecided",
               correction: "Assign result.txt to the result item",
             }
-          : {
-              decision: "repair",
+          : actionableDiagnosis(request, {
               diagnosis: "The worker stopped before collection",
               correction: "Start again from the accepted base",
-            };
+            });
       return malformedCompile ? {} : withCoverage(request, graph);
     },
     async reviewGraph(request) {

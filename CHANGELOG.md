@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Automatic implementation repair now checks structured readiness against retained failed-command outcomes and complete owned candidate evidence (#856). Unmet or unknown operator prerequisites stop with a question and admit no worker. Saved corrections preserve their original failure, charge and checked input binding across restart; legacy missing readiness stays unavailable, and operator proposals remain declared corrections.
+
 - Retain authenticated native Objective prerequisite seals through activation and supply their bound historical facts to result, QA and final review (#853). Missing legacy facts remain unavailable, and predecessor acceptance never substitutes for current-result acceptance.
 
 - Retain actual failed validation outcomes and checked configured repair authority in result, dependency, QA and final review evidence, while keeping historical failures separate from acceptance receipts (#851).

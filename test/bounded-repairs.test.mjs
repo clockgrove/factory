@@ -1,3 +1,4 @@
+import { actionableDiagnosis } from "./support/repair-diagnosis.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
@@ -115,13 +116,13 @@ function reviewer(request) {
 }
 function model(
   graph,
-  diagnosis = () => ({
-    decision: "repair",
-    diagnosis:
-      "The worker stopped before collection; its owned checkout is now removed and connectivity is restored",
-    correction:
-      "Start from the accepted base and produce the required file with the original validation unchanged",
-  }),
+  diagnosis = (request) =>
+    actionableDiagnosis(request, {
+      diagnosis:
+        "The worker stopped before collection; its owned checkout is now removed and connectivity is restored",
+      correction:
+        "Start from the accepted base and produce the required file with the original validation unchanged",
+    }),
 ) {
   return {
     generateStructured: async (request) =>
@@ -1055,11 +1056,9 @@ test("a failure while paused or an amendment is pending is diagnosed once the ru
   );
   const work = {
     status: "failed",
-    step: "validate",
+    step: "execute",
     attempt: "first",
     baseSha: "a".repeat(40),
-    changeRef: "b".repeat(40),
-    treeSha: "c".repeat(40),
   };
   const state = {
     autonomy: autonomy(),
@@ -1077,13 +1076,12 @@ test("a failure while paused or an amendment is pending is diagnosed once the ru
     true,
   );
   let calls = 0;
-  const planner = model({ items: [item()] }, () => {
+  const planner = model({ items: [item()] }, (request) => {
     calls++;
-    return {
-      decision: "repair",
+    return actionableDiagnosis(request, {
       diagnosis: "The result file was left empty by the worker",
       correction: "Write non-empty content to result.txt",
-    };
+    });
   });
   // The Objective is paused (or an amendment is pending) when the item fails.
   assert.equal(

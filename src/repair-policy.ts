@@ -218,6 +218,18 @@ export interface RepairCorrection {
   diagnosis: string;
   correction: string;
   actor: string;
+  /** Checked automatic diagnosis input; absent in legacy and operator declarations. */
+  readiness?: {
+    origin: "checked-model-diagnosis";
+    failureEvent: string;
+    attemptId: string | null;
+    treeSha: string | null;
+    graphDigest: string;
+    validationCaptureDigest: string | null;
+    inputDigest: string;
+    contextDigest: string;
+    ownedPath: string;
+  };
 }
 export interface WorkRecovery {
   failure?: FailureDisposition;
@@ -581,10 +593,48 @@ export function assertRepairLedger(
       correction: RepairCorrection | undefined,
     ): Allowance | undefined => {
       if (!correction) return undefined;
+      if (correction.readiness) {
+        const ready = correction.readiness;
+        onlyKeys(
+          ready,
+          [
+            "origin",
+            "failureEvent",
+            "attemptId",
+            "treeSha",
+            "graphDigest",
+            "validationCaptureDigest",
+            "inputDigest",
+            "contextDigest",
+            "ownedPath",
+          ],
+          "correction.readiness",
+        );
+        if (
+          correction.actor !== "factory-controller" ||
+          ready.origin !== "checked-model-diagnosis" ||
+          ready.failureEvent !== failure?.event ||
+          correction.failureDigest !== failure?.digest ||
+          !EVENT.test(ready.failureEvent) ||
+          (ready.attemptId !== null &&
+            (typeof ready.attemptId !== "string" || !ready.attemptId)) ||
+          (ready.treeSha !== null && !/^[a-f0-9]{40}$/.test(ready.treeSha)) ||
+          !/^[a-f0-9]{64}$/.test(ready.graphDigest) ||
+          (ready.validationCaptureDigest !== null &&
+            !/^[a-f0-9]{64}$/.test(ready.validationCaptureDigest)) ||
+          !/^[a-f0-9]{64}$/.test(ready.inputDigest) ||
+          !/^[a-f0-9]{64}$/.test(ready.contextDigest) ||
+          typeof ready.ownedPath !== "string" ||
+          !ready.ownedPath
+        )
+          throw new Error("Invalid checked repair readiness");
+      }
       if (correction.event !== failure?.event)
         throw new Error("Correction is not bound to its failure event");
       return correction.event ? allowanceKey(correction.kind) : undefined;
     };
+    if (recovery.correction?.readiness)
+      bound(recovery.failure, recovery.correction);
     assertCharged(
       recovery.failure,
       recovery.phase === "diagnosing"

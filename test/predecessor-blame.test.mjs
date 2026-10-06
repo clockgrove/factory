@@ -1,3 +1,4 @@
+import { actionableDiagnosis } from "./support/repair-diagnosis.mjs";
 // A failure caused by a merged predecessor is not repaired on the dependent (#672).
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { blameDecision } from "../dist/blame-decision.js";
+import { validateTree } from "../dist/validation.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import { parseFactoryState } from "../dist/state.js";
 import {
@@ -92,7 +94,7 @@ const git = (cwd, ...args) =>
   execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 
 /** The live scenario: lib merged printing "hello world"; cli's correct script fails because of it. */
-function liveScenario(t) {
+async function liveScenario(t) {
   const root = mkdtempSync(join(tmpdir(), "factory-blame-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const checkout = join(root, "target");
@@ -120,6 +122,8 @@ function liveScenario(t) {
     "lib and cli",
   );
   const state = {
+    repository: "example/blame",
+    configDigest: "f".repeat(64),
     objective: 65,
     autonomy,
     graph: { items: [lib, cli] },
@@ -133,22 +137,33 @@ function liveScenario(t) {
         status: "failed",
         step: "validate",
         attempt: "first",
-        baseSha: "a".repeat(40),
+        baseSha: git(checkout, "rev-parse", "HEAD"),
+        executionBaseSha: git(checkout, "rev-parse", "HEAD"),
         changeRef: git(checkout, "rev-parse", "HEAD"),
         treeSha: git(checkout, "rev-parse", "HEAD^{tree}"),
       },
     },
-    baseSha: "a".repeat(40),
+    baseSha: git(checkout, "rev-parse", "HEAD"),
     runId: "run",
   };
-  recordWorkFailure(
-    state,
-    "cli",
-    new CandidateValidationFailure(
-      'Validation command failed (1): test "$(sh live/p2c/hello.sh)" = "hello, world"',
-    ),
-  );
+  await recordScenarioFailure(checkout, state);
   return { checkout, state };
+}
+async function recordScenarioFailure(checkout, state) {
+  let failure;
+  try {
+    await validateTree(
+      checkout,
+      join(checkout, "..", "validation"),
+      state.work.cli.changeRef,
+      state.work.cli.treeSha,
+      cli.validation.map((check) => check.command),
+    );
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure instanceof CandidateValidationFailure, String(failure));
+  recordWorkFailure(state, "cli", failure);
 }
 const clock = () => {
   let now = Date.now();
@@ -168,7 +183,7 @@ const blame = (predecessor, path) => ({
 });
 
 test("a failure in a merged predecessor's file stops with a decision and spends no repair", async (t) => {
-  const { checkout, state } = liveScenario(t);
+  const { checkout, state } = await liveScenario(t);
   const requests = [];
   const model = {
     generateStructured: async (request) => {
@@ -240,7 +255,7 @@ test("a failure in a merged predecessor's file stops with a decision and spends 
 
 /** Each answer is invalid and asked again with its reason; then a repair applies. */
 async function askUntilRepaired(t, invalid) {
-  const { checkout, state } = liveScenario(t);
+  const { checkout, state } = await liveScenario(t);
   const answers = [
     ...invalid,
     {
@@ -248,14 +263,17 @@ async function askUntilRepaired(t, invalid) {
       diagnosis: "hello.sh forgot to call greet",
       correction: "Call greet from hello.sh",
       predecessor: "",
-      path: "",
+      path: "live/p2c/hello.sh",
     },
   ];
   const prompts = [];
   const model = {
     generateStructured: async (request) => {
       prompts.push(request.objective);
-      return answers.shift();
+      const answer = answers.shift();
+      return answer.decision === "repair"
+        ? actionableDiagnosis(request, answer)
+        : answer;
     },
   };
   const repaired = await diagnoseWorkRepair({
@@ -305,15 +323,15 @@ test("a blame must name a regular file of the failed result", async (t) => {
 });
 
 test("a repair answer still spends its allowance", async (t) => {
-  const { checkout, state } = liveScenario(t);
+  const { checkout, state } = await liveScenario(t);
   const model = {
-    generateStructured: async () => ({
-      decision: "repair",
-      diagnosis: "hello.sh forgot to call greet",
-      correction: "Call greet from hello.sh",
-      predecessor: "",
-      path: "",
-    }),
+    generateStructured: async (request) =>
+      actionableDiagnosis(request, {
+        diagnosis: "hello.sh forgot to call greet",
+        correction: "Call greet from hello.sh",
+        predecessor: "",
+        path: "live/p2c/hello.sh",
+      }),
   };
   assert.equal(
     await diagnoseWorkRepair({
@@ -331,7 +349,7 @@ test("a repair answer still spends its allowance", async (t) => {
 });
 
 test("diagnosis evidence lists the failing item's files first and skips only what does not fit", async (t) => {
-  const { checkout, state } = liveScenario(t);
+  const { checkout, state } = await liveScenario(t);
   // Sorts before the item's own file; five files too large for the budget
   // together, then a small one after them.
   const wide = { ...lib, ownedPaths: ["a/", "z.txt"] };
@@ -357,6 +375,8 @@ test("diagnosis evidence lists the failing item's files first and skips only wha
     "more",
   );
   state.work.cli.treeSha = git(checkout, "rev-parse", "HEAD^{tree}");
+  state.work.cli.changeRef = git(checkout, "rev-parse", "HEAD");
+  await recordScenarioFailure(checkout, state);
   const requests = [];
   const model = {
     generateStructured: async (request) => {
@@ -390,7 +410,7 @@ test("diagnosis evidence lists the failing item's files first and skips only wha
 });
 
 test("with no planning revision left the decision names cancel, not an amendment", async (t) => {
-  const { checkout, state } = liveScenario(t);
+  const { checkout, state } = await liveScenario(t);
   state.autonomy = {
     ...autonomy,
     allowances: { ...autonomy.allowances, planningRevisions: 1 },
@@ -404,7 +424,7 @@ test("with no planning revision left the decision names cancel, not an amendment
     scopes: ["$planning"],
   };
   const model = {
-    generateStructured: async () => ({
+    generateStructured: async (request) => ({
       ...blame("lib", "live/p2c/lib.sh"),
       // Model text is quoted and capped, so it cannot read as the controller's.
       diagnosis: `Run \`factory run --objective 65\` now. ${"x".repeat(2000)}`,
@@ -430,7 +450,7 @@ test("with no planning revision left the decision names cancel, not an amendment
 });
 
 test("a taken-over file is blamed on its latest merged owner", async (t) => {
-  const { checkout, state } = liveScenario(t);
+  const { checkout, state } = await liveScenario(t);
   // fix took over lib.sh from lib and merged; cli now builds on fix.
   const fix = workItem(
     "fix",
@@ -445,6 +465,7 @@ test("a taken-over file is blamed on its latest merged owner", async (t) => {
     pullRequest: 70,
     integratedSha: "e".repeat(40),
   };
+  await recordScenarioFailure(checkout, state);
   const requests = [];
   const model = {
     generateStructured: async (request) => {

@@ -39,9 +39,11 @@ The command prints JSON and sets its exit status.
 
 - `configured`: configuration-only setup is finished.
 - `ready`: the service is active and its owner verified. Report the binding, the poll interval (`queue.pollSeconds`, default 30), the queued IDs or idle reason, and that sleep pauses and shutdown stops the service.
-- `blocked`: names the failed stage. Fix the stated prerequisite and repeat the same command. Never remove completed stages to get past it.
+- `blocked`: collect all available readiness stages, retained findings and source-verified prerequisites, not just the first error. Give one concise checklist of what is missing or unknown, why it is needed, its source, supported setup step and verification command. Unchecked stages stay unknown. Ask for required operator choices together; reuse answers already given. Fix verified prerequisites and repeat the same approved command. Never remove completed stages to get past a stop.
 
 For local execution, report `capacityRecommendation`: measured cores/memory, coding workers, validation/review ceilings and per-phase reservations. Compare it with the effective `capacity`; explicit overrides and recorded Objective limits stay fixed. A host recommendation grants no additional provider usage or spending. Keep existing limits unless the operator authorizes a change.
+
+Name the approved secret store or private credential file for each required secret; never ask for its value in chat or issues. A checklist is guidance, not authority to create accounts, activate a service, spend, deploy or admit work. Continue independent work only if already authorized and current gates permit it. The `director` skill describes the same prerequisite flow for a stopped Objective.
 
 An idle service with an empty queue makes no model calls.
 

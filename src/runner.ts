@@ -2639,6 +2639,13 @@ export function repairWorkItem(
       state.configDigest !== factoryConfigDigest(config)
     )
       throw new Error("Objective is not available for diagnosed repair");
+    if (
+      input.correction.readiness ||
+      input.correction.actor === "factory-controller"
+    )
+      throw new Error(
+        "Operator corrections must declare their own provenance, not controller-checked readiness",
+      );
     applyWorkCorrection(state, input.item, input.correction);
     // The repair answers the stop the item's failure caused, as retry does.
     delete state.error;

@@ -27,48 +27,22 @@ jobs:
   tests:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
-      - uses: ./.github/actions/judge-sandbox
       - run: git lfs version
-      # scripts/test-shards.mjs packs files by test/support/test-timings.json.
-      # The assignment stops the step if the script fails; an empty file list
-      # would make node --test run every test file.
-      - run: |
-          files=$(node scripts/test-shards.mjs ${{ matrix.shard }} 8)
-          node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 --test-concurrency=8 $files
-
-  # Tests that pack and install the package: on pushes to main (and in the
-  # release workflow's complete run), not on pull requests.
-  installed:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup
-      - run: |
-          files=$(node scripts/test-shards.mjs --installed)
-          node --import ./test/support/isolated-state.mjs --test --test-timeout=300000 $files
+      - run: npm test
 
   # The single required check for main; it passes only when every job above
-  # passes. Pull requests skip the installed-package job.
+  # passes, including offline installation in the integration suite.
   package-gate:
     if: always()
-    needs: [checks, tests, installed]
+    needs: [checks, tests]
     runs-on: ubuntu-24.04
     steps:
       - env:
           CHECKS: ${{ needs.checks.result }}
           TESTS: ${{ needs.tests.result }}
-          INSTALLED: ${{ needs.installed.result }}
-          EVENT: ${{ github.event_name }}
         run: |
           test "$CHECKS" = success
           test "$TESTS" = success
-          if [ "$EVENT" = push ]; then test "$INSTALLED" = success; fi

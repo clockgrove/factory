@@ -1622,6 +1622,12 @@ function retainedRepairProof(
       currentResultCommitSha: current.changeRef ?? null,
       currentResultTreeSha: current.treeSha ?? null,
       repairClass: correction.kind,
+      automaticReadiness:
+        correction.actor === "factory-controller"
+          ? correction.readiness
+            ? { availability: "available", ...correction.readiness }
+            : { availability: "unavailable" }
+          : { availability: "not-applicable", origin: "operator-declaration" },
       snapshotConsumption: {
         allowance: key,
         objective: {

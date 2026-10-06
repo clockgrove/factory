@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
@@ -193,6 +193,20 @@ export function applyWorkCorrection(
       "Repair cannot cross an unsettled, integrated or cancelled boundary",
     );
   validateCorrection(work, correction);
+  if (correction.actor === "factory-controller") {
+    assertRepairReadiness(state, id, work, correction, work.recovery?.failure);
+    const current = state.graph.items.find((item) => item.id === id);
+    if (
+      !current ||
+      !ownsPath(correction.readiness!.ownedPath, current.ownedPaths)
+    )
+      throw new Error(
+        "Automatic repair readiness no longer has current ownership",
+      );
+  } else if (correction.readiness)
+    throw new Error(
+      "Operator corrections cannot declare controller-checked readiness",
+    );
   if (correction.kind !== "implementation")
     throw new Error(
       "Only an implementation correction is supported: a diagnosed new attempt",
@@ -237,17 +251,379 @@ export function applyWorkCorrection(
 const diagnosisSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["diagnosis", "correction", "decision", "predecessor", "path"],
+  required: [
+    "diagnosis",
+    "correction",
+    "decision",
+    "predecessor",
+    "path",
+    "readiness",
+    "prerequisites",
+    "question",
+    "evidenceIndices",
+    "commandAssessments",
+  ],
   properties: {
     diagnosis: { type: "string" },
     correction: { type: "string" },
     decision: { type: "string", enum: ["repair", "operator", "predecessor"] },
-    // With "predecessor": the merged predecessor Work Item that owns the
-    // faulty file, and that file's path. Empty otherwise.
+    // With "predecessor": its id and faulty file. With repair: the owned file.
     predecessor: { type: "string" },
     path: { type: "string" },
+    readiness: {
+      type: "string",
+      enum: ["actionable", "operator-required", "unknown"],
+    },
+    prerequisites: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["status", "question"],
+        properties: {
+          status: { type: "string", enum: ["unmet", "unknown"] },
+          question: { type: "string" },
+        },
+      },
+    },
+    question: { type: "string" },
+    evidenceIndices: { type: "array", items: { type: "integer", minimum: 0 } },
+    commandAssessments: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["commandIndex", "disposition"],
+        properties: {
+          commandIndex: { type: "integer", minimum: 0 },
+          disposition: {
+            type: "string",
+            enum: ["owned-change", "operator-required", "unknown"],
+          },
+        },
+      },
+    },
   },
 };
+
+type DiagnosisAnswer = {
+  diagnosis: string;
+  correction: string;
+  decision: string;
+  predecessor?: string;
+  path?: string;
+  readiness?: "actionable" | "operator-required" | "unknown";
+  prerequisites?: { status: "unmet" | "unknown"; question: string }[];
+  question?: string;
+  evidenceIndices?: number[];
+  commandAssessments?: {
+    commandIndex: number;
+    disposition: "owned-change" | "operator-required" | "unknown";
+  }[];
+};
+const inputDigest = (value: unknown) =>
+  createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const readinessContext = (
+  state: FactoryState,
+  id: string,
+  work: Pick<
+    import("./state.js").WorkState,
+    | "attempt"
+    | "treeSha"
+    | "changeRef"
+    | "baseSha"
+    | "executionBaseSha"
+    | "graphRevisionDigest"
+  >,
+  correction: RepairCorrection,
+  failure: FailureDisposition,
+  graph: string,
+) =>
+  inputDigest({
+    repository: state.repository,
+    objective: state.objective,
+    runId: state.runId,
+    configDigest: state.configDigest,
+    acceptedBaseSha: state.baseSha,
+    itemId: id,
+    attemptId: work.attempt ?? null,
+    treeSha: work.treeSha ?? null,
+    commitSha: work.changeRef ?? null,
+    resultBaseSha: work.baseSha ?? null,
+    executionBaseSha: work.executionBaseSha ?? null,
+    attemptGraphDigest: work.graphRevisionDigest ?? null,
+    failureDigest: failure.digest,
+    failureEvent: failure.event,
+    validationCaptureDigest: failure.validationCaptureDigest ?? null,
+    graphDigest: graph,
+    inputDigest: correction.readiness?.inputDigest,
+    ownedPath: correction.readiness?.ownedPath,
+    diagnosis: correction.diagnosis,
+    correction: correction.correction,
+    kind: correction.kind,
+  });
+
+/** Recheck immutable admission bindings for both current and archived attempts. */
+export function assertRepairReadiness(
+  state: FactoryState,
+  id: string,
+  work: Pick<
+    import("./state.js").WorkState,
+    | "attempt"
+    | "treeSha"
+    | "changeRef"
+    | "baseSha"
+    | "executionBaseSha"
+    | "graphRevisionDigest"
+  >,
+  correction: RepairCorrection,
+  failure: FailureDisposition | undefined,
+): void {
+  const ready = correction.readiness;
+  if (!ready)
+    throw new Error(
+      "Automatic repair readiness is unavailable; which original failed command or operator prerequisite has been resolved? Supply an operator correction after establishing it",
+    );
+  const graph = [
+    state.graph,
+    ...(state.graphRevisions ?? []).map((revision) => revision.graph),
+  ].find((candidate) => graphDigest(candidate) === ready.graphDigest);
+  const item = graph?.items.find((entry) => entry.id === id);
+  if (
+    ready.origin !== "checked-model-diagnosis" ||
+    correction.actor !== "factory-controller" ||
+    ready.failureEvent !== correction.event ||
+    !failure ||
+    correction.failureDigest !== failure.digest ||
+    ready.validationCaptureDigest !==
+      (failure.validationCaptureDigest ?? null) ||
+    ready.contextDigest !==
+      readinessContext(
+        state,
+        id,
+        work,
+        correction,
+        failure,
+        ready.graphDigest,
+      ) ||
+    ready.attemptId !== (work.attempt ?? null) ||
+    ready.treeSha !== (work.treeSha ?? null) ||
+    !item ||
+    !validOwnershipPath(ready.ownedPath) ||
+    ready.ownedPath.endsWith("/") ||
+    !ownsPath(ready.ownedPath, item.ownedPaths)
+  )
+    throw new Error(
+      "Automatic repair readiness does not bind the retained attempt and ownership",
+    );
+}
+
+/** Canonical outcomes and actual candidate contents supplied to this diagnosis. */
+function repairEvidence(
+  state: FactoryState,
+  item: WorkItem,
+  files: ReturnType<typeof diagnosisFiles>,
+) {
+  const work = state.work[item.id]!;
+  const failure = work.recovery!.failure!;
+  assertFailedValidationRecord(
+    work.failedValidation,
+    state,
+    item.id,
+    work,
+    failure,
+  );
+  return [
+    { kind: "failure", content: failure.detail, complete: true },
+    {
+      kind: "validation",
+      availability: work.failedValidation ? "available" : "unavailable",
+      record: work.failedValidation ?? null,
+    },
+    ...files.map((file) => ({ kind: "candidate-file", ...file })),
+  ];
+}
+
+/** Semantic causes are declared; indices, outcomes and ownership are checked facts. */
+function actionableReadiness(
+  state: FactoryState,
+  item: WorkItem,
+  answer: DiagnosisAnswer,
+  evidence: ReturnType<typeof repairEvidence>,
+  checkout?: string,
+): RepairCorrection["readiness"] | string {
+  const work = state.work[item.id]!;
+  const failure = work.recovery!.failure!;
+  const question = (text?: string) =>
+    (typeof text === "string" && text.trim()) ||
+    `What concrete correction or operator prerequisite makes Work Item ${item.id} ready to proceed? Supply a diagnosed operator correction after establishing it.`;
+  if (
+    Object.keys(answer).sort().join(",") !==
+      [...diagnosisSchema.required].sort().join(",") ||
+    ![
+      answer.diagnosis,
+      answer.correction,
+      answer.predecessor,
+      answer.path,
+      answer.question,
+    ].every((value) => typeof value === "string")
+  )
+    return question();
+  if (answer.readiness !== "actionable") return question(answer.question);
+  if (!Array.isArray(answer.prerequisites)) return question();
+  if (answer.prerequisites.length) {
+    if (
+      answer.prerequisites.some(
+        (entry) =>
+          !entry ||
+          typeof entry !== "object" ||
+          !["unmet", "unknown"].includes(entry.status) ||
+          typeof entry.question !== "string" ||
+          !entry.question.trim(),
+      )
+    )
+      return question();
+    return answer.prerequisites
+      .map((entry) => entry.question.trim())
+      .join("\n");
+  }
+  if (typeof answer.question !== "string") return question();
+  if (answer.question.trim()) return question(answer.question);
+  const path = answer.path ?? "";
+  if (
+    typeof path !== "string" ||
+    !validOwnershipPath(path) ||
+    path.endsWith("/") ||
+    !ownsPath(path, item.ownedPaths)
+  )
+    return question(
+      `Which owned file requires a concrete implementation change? ${path || "The diagnosis"} does not establish an actionable owned correction.`,
+    );
+  const indices = answer.evidenceIndices;
+  if (
+    !Array.isArray(indices) ||
+    !indices.includes(0) ||
+    new Set(indices).size !== indices.length ||
+    indices.some(
+      (index) =>
+        !Number.isSafeInteger(index) || index < 0 || index >= evidence.length,
+    )
+  )
+    return question(
+      "Which supplied original failure and owned candidate evidence establish the correction? Readiness grounding is unavailable.",
+    );
+  const capture = work.failedValidation;
+  if (work.step === "validate" && !capture)
+    return question(
+      "Can the original validation failure be established from retained command outcomes? Those outcomes are unavailable; supply a diagnosed operator correction.",
+    );
+  const failed =
+    capture?.evidence.commands.filter((command) => !command.passed) ?? [];
+  const assessments = answer.commandAssessments;
+  if (
+    !Array.isArray(assessments) ||
+    assessments.length !== failed.length ||
+    assessments.some((entry) => !entry || typeof entry !== "object") ||
+    new Set(assessments.map((entry) => entry.commandIndex)).size !==
+      failed.length ||
+    assessments.some(
+      (entry) =>
+        Object.keys(entry).sort().join(",") !== "commandIndex,disposition" ||
+        !failed.some((command) => command.index === entry.commandIndex) ||
+        !["owned-change", "operator-required", "unknown"].includes(
+          entry.disposition,
+        ),
+    )
+  )
+    return question(
+      "What makes each retained failed validation command actionable now? The diagnosis omits or misbinds a failed command.",
+    );
+  if (assessments.some((entry) => entry.disposition !== "owned-change"))
+    return question(
+      "Which operator prerequisite remains unmet or unestablished for the retained failed validation command? Establish it before supplying a correction.",
+    );
+  if (
+    capture &&
+    (!indices.includes(1) ||
+      capture.evidence.postCommandStatus !== "unchanged" ||
+      capture.evidence.selectedLfsContentBinding !== "not-applicable" ||
+      capture.evidence.commands.some(
+        (command) =>
+          command.worktreeStatusBefore !== "unchanged" ||
+          command.worktreeStatusAfter !== "unchanged",
+      ))
+  )
+    return question(
+      "Can the failed validation outcomes and candidate bytes be bound exactly? That readiness evidence is unavailable.",
+    );
+  const fileIndex = evidence.findIndex(
+    (entry) =>
+      "path" in entry && entry.path === path && entry.kind === "candidate-file",
+  );
+  if (work.treeSha) {
+    let present: boolean;
+    try {
+      present = Boolean(
+        checkout &&
+          treeFiles(checkout, work.treeSha, path).some(
+            (file) => file.path === path,
+          ),
+      );
+      if (
+        checkout &&
+        !present &&
+        pinnedGitRaw(checkout, "ls-tree", "-z", work.treeSha, "--", path).length
+      )
+        return question(
+          `Can the original candidate content of ${path} be supplied completely? It is not a readable regular file.`,
+        );
+    } catch {
+      return question(
+        `Can the original candidate content of ${path} be supplied completely? It is unavailable.`,
+      );
+    }
+    if (
+      !checkout ||
+      (present &&
+        (fileIndex < 0 ||
+          !indices.includes(fileIndex) ||
+          !(
+            "complete" in evidence[fileIndex]! && evidence[fileIndex]!.complete
+          )))
+    )
+      return question(
+        `Can the original candidate content of ${path} be supplied completely? It is missing or truncated.`,
+      );
+  }
+  const ready: NonNullable<RepairCorrection["readiness"]> = {
+    origin: "checked-model-diagnosis",
+    failureEvent: failure.event!,
+    attemptId: work.attempt ?? null,
+    treeSha: work.treeSha ?? null,
+    graphDigest: graphDigest(state.graph),
+    validationCaptureDigest: failure.validationCaptureDigest ?? null,
+    inputDigest: inputDigest(evidence),
+    contextDigest: "",
+    ownedPath: path,
+  };
+  ready.contextDigest = readinessContext(
+    state,
+    item.id,
+    work,
+    {
+      failureDigest: failure.digest,
+      event: failure.event,
+      kind: "implementation",
+      diagnosis: answer.diagnosis,
+      correction: answer.correction,
+      actor: "factory-controller",
+      readiness: ready,
+    },
+    failure,
+    ready.graphDigest,
+  );
+  return ready;
+}
 
 type Blame = Omit<
   NonNullable<FailureDisposition["predecessor"]>,
@@ -404,11 +780,16 @@ function diagnosisFiles(
   state: FactoryState,
   item: WorkItem,
   checkout: string | undefined,
-): { path: string; heading: string; content: string }[] {
+): { path: string; heading: string; content: string; complete: boolean }[] {
   const treeSha = state.work[item.id]?.treeSha;
   if (!checkout || !treeSha) return [];
   const predecessors = mergedPredecessors(state, item);
-  const files: { path: string; heading: string; content: string }[] = [];
+  const files: {
+    path: string;
+    heading: string;
+    content: string;
+    complete: boolean;
+  }[] = [];
   let total = 0;
   try {
     const listed = treeFiles(checkout, treeSha);
@@ -444,7 +825,8 @@ function diagnosisFiles(
       } catch {
         continue;
       }
-      if (content.length > EVIDENCE_FILE_BYTES)
+      const complete = content.length <= EVIDENCE_FILE_BYTES;
+      if (!complete)
         content = `${content.slice(0, EVIDENCE_FILE_BYTES)}\n[truncated]`;
       // One file too large for what is left does not hide the smaller
       // ones after it.
@@ -456,6 +838,7 @@ function diagnosisFiles(
           ? `owned by ${owner.item.id} (merged)`
           : `owned by ${item.id} (the failing item)`,
         content,
+        complete,
       });
     }
   } catch {
@@ -490,19 +873,38 @@ export async function diagnoseWorkRepair(args: {
   if (!failure?.event || work.status !== "failed" || args.signal?.aborted)
     return false;
   const retry = retryCommand(state, item.id);
-  if (work.recovery?.phase === "ready" && work.recovery.correction) {
-    // The next pass applies a ready correction once the run goes on.
-    if (args.stopped()) return false;
-    applyWorkCorrection(state, item.id, work.recovery.correction);
-    save();
-    return true;
-  }
   const stop = (decision: string): false => {
     work.recovery!.phase = "stopped";
     failure.decision = decision;
     save();
     return false;
   };
+  if (work.recovery?.phase === "ready" && work.recovery.correction) {
+    // The next pass applies a ready correction once the run goes on.
+    if (args.stopped()) return false;
+    const correction = work.recovery.correction;
+    try {
+      assertRepairReadiness(state, item.id, work, correction, failure);
+      if (
+        correction.readiness!.inputDigest !==
+        inputDigest(
+          repairEvidence(
+            state,
+            item,
+            diagnosisFiles(state, item, args.checkout),
+          ),
+        )
+      )
+        throw new Error(
+          "Saved automatic repair inputs changed or are unavailable; which concrete correction is ready now?",
+        );
+      applyWorkCorrection(state, item.id, correction);
+    } catch (error) {
+      return stop(error instanceof Error ? error.message : String(error));
+    }
+    save();
+    return true;
+  }
   // The charge is keyed by the failure event, so a diagnosis repeated after
   // a restart or a lost response is not charged again.
   try {
@@ -527,6 +929,7 @@ export async function diagnoseWorkRepair(args: {
   // its validation error, until the paid bound makes it a decision.
   const predecessors = mergedPredecessors(state, item);
   const files = diagnosisFiles(state, item, args.checkout);
+  const evidence = repairEvidence(state, item, files);
   let answer: RepairCorrection | string | { blame: Blame; diagnosis: string };
   try {
     answer = await step(
@@ -536,32 +939,34 @@ export async function diagnoseWorkRepair(args: {
         // The last answer's error, kept in the step's record across a restart.
         const rejected = context.previousInvalid();
         return context.paid(async () => {
-          const response = await args.model.generateStructured<{
-            diagnosis: string;
-            correction: string;
-            decision: string;
-            predecessor?: string;
-            path?: string;
-          }>({
-            purpose: "diagnosis",
-            objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef })}`,
-            baseSha: work.executionBaseSha ?? state.baseSha,
-            sources: [...(args.sources ?? []), ...files],
-            controllerCapabilities: installedControllerCapabilities(),
-            controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-            schema: diagnosisSchema,
-            invocation: {
-              invocationId: randomUUID(),
-              phase: "diagnosis",
-              ordinal: consumption(state).implementationRepairs,
-              observe: args.diagnostics?.modelObserver({
-                scopeId: work.attempt!,
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-              }),
+          const response = await args.model.generateStructured<DiagnosisAnswer>(
+            {
+              purpose: "diagnosis",
+              objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: evidence })}`,
+              baseSha: work.executionBaseSha ?? state.baseSha,
+              sources: [...(args.sources ?? []), ...files],
+              controllerCapabilities: installedControllerCapabilities(),
+              controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+              schema: diagnosisSchema,
+              invocation: {
+                invocationId: randomUUID(),
+                phase: "diagnosis",
+                ordinal: consumption(state).implementationRepairs,
+                observe: args.diagnostics?.modelObserver({
+                  scopeId: work.attempt!,
+                  runId: state.runId,
+                  itemId: item.id,
+                  attemptId: work.attempt,
+                }),
+              },
             },
-          });
+          );
+          if (
+            !response ||
+            typeof response !== "object" ||
+            Array.isArray(response)
+          )
+            return "What concrete correction or operator prerequisite makes the original failure ready to proceed? The diagnosis is unavailable.";
           if (response.decision === "predecessor") {
             try {
               return {
@@ -579,8 +984,17 @@ export async function diagnoseWorkRepair(args: {
           }
           if (response.decision !== "repair")
             return (
-              response.diagnosis || "Failure requires an operator decision"
+              response.question?.trim() ||
+              "What concrete operator decision resolves the original failure?"
             );
+          const readiness = actionableReadiness(
+            state,
+            item,
+            response,
+            evidence,
+            args.checkout,
+          );
+          if (typeof readiness === "string") return readiness;
           const proposed: RepairCorrection = {
             kind: "implementation",
             failureDigest: failure.digest,
@@ -588,6 +1002,7 @@ export async function diagnoseWorkRepair(args: {
             diagnosis: response.diagnosis,
             correction: response.correction,
             actor: "factory-controller",
+            readiness,
           };
           try {
             validateCorrection(work, proposed);

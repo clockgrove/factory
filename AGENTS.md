@@ -57,7 +57,13 @@ Use one atomic local snapshot for continuation state. Do not add operational eve
 
 Do not invent Factory limits beneath dependencies or operator policy. A failed Work Item stops with evidence, and a new attempt requires explicit retry or a remaining configured repair allowance. Give every external effect a stable identity and find it by that identity before repeating it. Continue when the record shows it happened, repeat it only when the record shows it never happened, and otherwise discard the attempt and start a fresh one. Contributor authority is not inherited by Factory workers or adopter sessions.
 
-Prefer deterministic integration tests with real temporary Git repositories, and stub remote services at narrow contracts. Add a regression test for each concrete bug.
+## Minimal integration coverage
+
+Keep the test suite small. Test real observable boundaries using temporary Git repositories, actual processes and files, the real secret scanner, and the packed CLI installed offline. Reuse an existing integration workflow for a demonstrated regression; add a new check only when that workflow cannot exercise the concrete failure.
+
+Do not add unit tests, mocks, fake providers or GitHub services, scripted model responses, fault matrices, or fixture frameworks. Do not build coverage around internal functions or speculative combinations. Real provider and GitHub acceptance belongs in approved disposable-target qualification, separate from credential-free CI. Passing local checks never substitutes for that acceptance.
+
+During development, run the affected integration check. CI runs the small complete suite once per candidate; do not repeat full suites before opening a pull request without a new change or unresolved failure.
 
 ### Model-facing contracts
 
@@ -67,4 +73,4 @@ Before changing a model contract, review related fields together through produce
 
 Prerelease interfaces may change coherently; do not add a fallback, migration or duplicate format solely for compatibility without an explicit requirement.
 
-Test actual emitted schemas and decoders, current supported variants and refusals, and replay a complete preserved failing response rather than a hand-built fragment. When changing a provider API version, check the official response contract and every affected consumer; fixtures must match that version.
+Inspect actual emitted schemas, decoders and preserved failure evidence together. Verify provider changes through the relevant real integration or approved live qualification; do not create a model double to stand in for that evidence. When changing a provider API version, check the official response contract and every affected consumer.

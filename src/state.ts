@@ -3,6 +3,7 @@ import { assertNativePrerequisites } from "./native-prerequisite-evidence.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
 import { assertRepairLedger, type Autonomy } from "./repair-policy.js";
+import { assertRepairReadiness } from "./work-repair.js";
 import {
   assertFailedValidationRecord,
   type FailedValidationRecord,
@@ -781,7 +782,7 @@ export function parseFactoryState(
         ? undefined
         : failure,
     );
-    for (const prior of currentWork.recovery?.history ?? [])
+    for (const prior of currentWork.recovery?.history ?? []) {
       assertFailedValidationRecord(
         prior.work.failedValidation,
         controllerState,
@@ -789,6 +790,33 @@ export function parseFactoryState(
         prior.work,
         prior.failure,
       );
+      if (prior.correction?.readiness)
+        assertRepairReadiness(
+          controllerState,
+          id,
+          prior.work,
+          prior.correction,
+          prior.failure,
+        );
+    }
+    const correction = currentWork.recovery?.correction;
+    if (correction?.readiness) {
+      const retained = currentWork.recovery?.history?.filter(
+        (prior) => prior.failure?.event === correction.event,
+      );
+      if (retained && retained.length > 1)
+        throw new Error(
+          "Automatic repair readiness has ambiguous retained attempts",
+        );
+      const prior = retained?.[0];
+      assertRepairReadiness(
+        controllerState,
+        id,
+        prior?.work ?? currentWork,
+        correction,
+        prior?.failure ?? failure,
+      );
+    }
     if (
       (accepted.kind === "qa" || accepted.kind === "aggregate") &&
       (item.execution !== undefined ||

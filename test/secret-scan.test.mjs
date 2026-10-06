@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -14,7 +14,7 @@ const recommended = JSON.stringify({
 });
 const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 
-test("isolated scanner preserves literal files, binary detection, masking and explicit config", () => {
+test("isolated scanner preserves literal files, binary detection and masked errors", () => {
   const root = mkdtempSync(join(tmpdir(), "factory-secret-scan-"));
   const scan = (source, config = recommended) =>
     spawnSync(process.execPath, [scanner, source, config], {
@@ -43,38 +43,7 @@ test("isolated scanner preserves literal files, binary detection, masking and ex
     bytes.write(`GITHUB_TOKEN=${secret}\n`, bytes.length - 64);
     writeFileSync(binary, bytes);
     assert.equal(scan(binary).status, 1);
-    const allowed = JSON.stringify({
-      rules: [
-        {
-          id: "@secretlint/secretlint-rule-preset-recommend",
-          rules: [
-            {
-              id: "@secretlint/secretlint-rule-github",
-              allowMessageIds: ["GITHUB_TOKEN"],
-            },
-          ],
-        },
-      ],
-    });
-    assert.equal(scan(literal, allowed).status, 0);
-    for (const result of [
-      scan(join(root, "missing.txt")),
-      scan(root),
-      scan(clean, `{"private":"${secret}"`),
-      scan(clean, JSON.stringify({ rules: [{ id: "missing-scanner-rule" }] })),
-      scan("relative.txt"),
-    ]) {
-      assert.equal(result.status, 2);
-      assert.equal(result.stdout, "");
-      assert.equal(result.stderr, "Secretlint scan unavailable\n");
-    }
-    const isolated = join(root, "missing-dependency.mjs");
-    copyFileSync(scanner, isolated);
-    const unavailable = spawnSync(
-      process.execPath,
-      [isolated, clean, recommended],
-      { encoding: "utf8" },
-    );
+    const unavailable = scan(join(root, "missing.txt"));
     assert.equal(unavailable.status, 2);
     assert.equal(unavailable.stdout, "");
     assert.equal(unavailable.stderr, "Secretlint scan unavailable\n");

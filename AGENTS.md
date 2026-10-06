@@ -2,7 +2,7 @@
 
 These instructions are for human and agent contributors **building Factory in this repository**. End-user instructions for using the installed plugin belong in the [README](README.md) and packaged `director`/`setup` skills; contributors do not invoke Factory Director to build Factory.
 
-Read [the architecture](docs/ARCHITECTURE.md) and the relevant [project](https://github.com/orgs/clockgrove/projects/2) issue before changing code. Public files and issues are the complete contributor handoff; private adopter material is never required. Factory is a plugin for a target repository, not a hosted service. Never install, activate, or qualify it against a Factory source checkout. Use a disposable target built from [the public fixtures](test/fixtures/).
+Read [the architecture](docs/ARCHITECTURE.md) and the relevant [project](https://github.com/orgs/clockgrove/projects/2) issue before changing code. Public files and issues are the complete contributor handoff; private adopter material is never required. Factory is a plugin for a target repository, not a hosted service. Never install, activate, or qualify it against a Factory source checkout. Use an approved adopter target or a disposable target built from [the public fixtures](test/fixtures/).
 
 ## Priority
 
@@ -15,9 +15,9 @@ Keep the trunk path working: Objective → Work Item DAG → local execution →
 Work like a normal open-source project:
 
 1. Start from an issue's outcome. Keep each pull request focused on one outcome.
-2. Branch from `main`, implement with focused tests, and run the [checks](CONTRIBUTING.md#checks) that the change affects.
-3. Open a pull request that links the issue and says what changed and what was tested. It merges after review and a green Quality check.
-4. Release by following [RELEASING.md](docs/RELEASING.md). A merged fix can ship in a patch release the same day.
+2. Branch from `main`, batch the phase's diagnosed fixes, and run the affected [checks](CONTRIBUTING.md#checks) when the batch is complete.
+3. Open focused pull requests that link the issues and report the changes and checks. Merge after the maintainer's read and green Quality. Review the completed phase independently, with an additional focused independent review for changes to credentials, isolation or persisted state.
+4. Release by following [RELEASING.md](docs/RELEASING.md), using the phase's actual adopter and staging exits. A separate public fixture qualification is optional diagnosis.
 
 Comment on an issue when something meaningful changes: a merged fix, a release, a blocker or a changed plan. Do not post routine progress pings, and do not maintain separate status documents; issues, pull requests, releases and the changelog are the record.
 

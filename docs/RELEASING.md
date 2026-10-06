@@ -60,7 +60,7 @@ The release issue defines the required phase outcomes and their order. Complete 
 
 For v0.2.0, finish B (#516), C (#517), D (#518), G (#520), H (#522) and I (#523), then perform one completed-batch evaluation and independent review under E (#519), then publish and verify the release under #521. Adopter staging deployment and staging qualification follow the release; they are not a pre-release gate. The authoritative exits are recorded in #519 and #521.
 
-Batch corrections before the phase review. Repeat an affected failed check after a demonstrated correction; do not add a separate qualification cycle for every fix. Preserve terminal public runs and their accounting without reviving them or treating them as successful evidence. The [public fixtures](../test/fixtures/) remain available for a concrete reproduction when needed.
+Batch corrections before the phase review. Repeat an affected failed check after a demonstrated correction; do not add a separate qualification cycle for every fix. Preserve terminal public runs and their accounting without reviving them or treating them as successful evidence. Use an approved target for a concrete reproduction when needed.
 
 ## Version numbers
 

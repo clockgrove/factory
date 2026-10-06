@@ -1,6 +1,13 @@
 import { existsSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { option, options } from "./cli-flags.js";
 import {
@@ -48,10 +55,29 @@ export async function setupTarget(
   const repeatedArgs = args.filter(
     (_, index) => args[index] !== "--config" && args[index - 1] !== "--config",
   );
-  const verification = configurationCommand(
-    `factory setup ${repeatedArgs.map((value) => `'${value.replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
-    configPath,
-  );
+  const safeToRepeat =
+    [...args, configPath].every(
+      (value) => redactDiagnosticDetail(value) === value,
+    ) &&
+    options(args, "credential-file").every((binding) => {
+      const separator = binding.indexOf("=");
+      return (
+        /^[A-Z_][A-Z0-9_]*$/.test(binding.slice(0, separator)) &&
+        isAbsolute(binding.slice(separator + 1))
+      );
+    }) &&
+    !args.some(
+      (value, index) => value === "--credential-file" && !args[index + 1],
+    );
+  const verification = safeToRepeat
+    ? configurationCommand(
+        `factory setup ${repeatedArgs.map((value) => `'${redactDiagnosticDetail(value).replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
+        redactDiagnosticDetail(configPath),
+      )
+    : null;
+  const verificationNote = verification
+    ? null
+    : "Correct malformed or sensitive setup arguments. Supply credentials only as NAME=ABSOLUTE_PRIVATE_FILE, never as credential values, then repeat the original approved setup invocation.";
   const result: Record<string, unknown> = {
     status: "blocked",
     mode: background ? "background" : "config-only",
@@ -315,7 +341,9 @@ export async function setupTarget(
       detail: redactDiagnosticDetail(
         error instanceof Error ? error.message : String(error),
       ),
-      continuation: `Preserve completed stages and retained state. Resolve the stated prerequisite, then repeat ${verification}.`,
+      continuation: verification
+        ? `Preserve completed stages and retained state. Resolve the stated prerequisite, then repeat ${verification}.`
+        : verificationNote,
     };
     return result;
   } finally {
@@ -379,6 +407,7 @@ export async function setupTarget(
               : "not-checked",
       guidance,
       verification,
+      ...(verificationNote ? { verificationNote } : {}),
     }));
     result.independentWork =
       "This handoff admits no Objective. Configuration-only starts nothing; blocked setup does not establish a ready service. Already admitted work retains its own ownership, readiness and limits.";

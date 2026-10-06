@@ -24,17 +24,20 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
 
    This updates `package.json`, `package-lock.json`, the Codex and Claude Code plugin manifests and both marketplace refs, and adds a `## X.Y.Z` heading to `CHANGELOG.md`. Replace its TODO with the user-visible changes. If production dependencies changed, run `npm run notices`.
 
-2. **Merge.** Open a pull request. It merges after review and a green Quality check, like any other change.
+2. **Review the batch.** Merge the phase's diagnosed fixes through the normal protected pull request path with green Quality checks. Retain focused independent review for changes to credentials, isolation or persisted state. Refresh the release branch after the batch is complete, and independently review its exact candidate.
 
-3. **Qualify minor versions.** Before tagging `X.Y.0`, complete the [live qualification](#live-qualification) on the frozen packed artifact from the merged commit. Retain its checksum and installation for the final distribution comparison.
+3. **Accept the phase.** Before merging `X.Y.0`, complete the release issue's actual adopter outcomes, including real staging when its exit criteria require it, and independent phase review. Run the phase acceptance after the batch is complete; a separate public fixture qualification is optional diagnosis, not an additional release or adopter-start gate. Retain the final reviewed source commit, tree, packed archive checksum, installation and outcome evidence for the distribution comparison. CI supplies the packed CLI integration check. Keeping the version PR unmerged until these gates pass leaves the marketplaces on an existing release tag.
 
-4. **Tag.** On the merged commit:
+4. **Merge.** Merge through the normal protected path after the required phase exits pass. For a minor version, verify that the merged tree equals the retained phase-accepted tree before tagging.
+
+5. **Tag.** Tag that verified merged commit:
 
    ```sh
-   git switch main && git pull --ff-only
-   git tag -a vX.Y.Z -m "Factory X.Y.Z"
+   git tag -a vX.Y.Z MERGED_COMMIT_SHA -m "Factory X.Y.Z"
    git push origin vX.Y.Z
    ```
+
+   Verify active protection against updates and deletion for that exact `refs/tags/vX.Y.Z`, with no bypass actors or exclusions. Preserve existing tag protections. Recheck the remote annotated tag and its peeled commit after pushing.
 
 The Release workflow then checks that the tag, every version identity and the changelog agree and that the commit is on `main`. It runs the complete build, lint, format, notices and test suite (including the packed-artifact tests), packs the tarball, installs it offline from an empty npm cache, attests its provenance and publishes the GitHub Release with the changelog section as notes. If it fails before publishing, fix the problem on `main` and release the next patch version; do not move the tag.
 
@@ -49,19 +52,13 @@ sha256sum --check SHA256SUMS
 
 The attestation verification is the independent check: it proves that the bytes were built by this repository's Release workflow, without trusting the release page that served them.
 
-For a live-qualified minor version, also compare the downloaded archive byte for byte with the retained qualified archive. A mismatch leaves that release unaccepted; preserve both identities and diagnose it without replacing the tag or assets.
+For a minor version, also compare the downloaded archive byte for byte with the retained phase-accepted archive. A mismatch leaves that release unaccepted; preserve both identities and diagnose it without replacing the tag or assets.
 
-## Live qualification
+## Phase acceptance
 
-The small real integration suite runs on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [autonomous target](../test/fixtures/autonomous-target/) with its [first](../test/fixtures/objectives/autonomy-first.md) and [second](../test/fixtures/objectives/autonomy-second.md) Objectives ([#519](https://github.com/clockgrove/factory/issues/519)), and link the result from the release notes. Historical failed qualifications remain unaccepted; a corrected successor needs a concrete diagnosis and its own recorded finite bounds.
+The release issue defines the phase's actual adopter outcomes and staging exits. Complete those outcomes with the approved providers, targets, substantive acceptance and resource limits. Keep exact candidate identities, real results, failures, usage and consumed allowances. Local checks and historical accepted work do not substitute for the current outcome's acceptance.
 
-1. Before creating the target or calling a provider, run `npm run build && node test/autonomy-fixture-preflight.mjs`. It checks the fixture's commands, planner-visible CI check and complete pinned worker sources without model calls. Freeze the source/tree/archive, installed path, fixture bytes, owner, acceptance, providers, concurrency and finite per-run repair limits. Inspect the actual installed compiler, review and worker inputs, exact-tree validator observations, command authority, evidence grounding and hydration. Model-free checks do not accept a live Objective.
-2. Pack the merged candidate with the Release workflow's locked dependency/build toolchain and install it offline outside a fresh public target copied from the fixture. Keep this artifact for both Objectives and later distribution verification. Supply the external `factory-fixture-prerequisite` executable on the supervisor's PATH before planning, with its operator-owned condition unavailable. The tool must be present even while the condition fails; it is an acceptance probe, not a coding-readiness prerequisite.
-3. Run `factory setup --background --repository OWNER/REPO --checkout ABSOLUTE_TARGET --concurrency 2`. Verify explicit service consent, readiness, the exact manager/controller owner and a successful authenticated service observation. With an empty queue, it must make no model calls. Admit only the first Objective with `factory queue add FIRST`.
-4. After a worker starts, perform one supported controlled restart: `factory supervisor stop`, then `factory queue resume` and `factory supervisor start`. Retain and compare the same run, attempt, worker and existing issue/PR identities; the restart must not duplicate submission.
-5. Retain beta's actual failed candidate and prerequisite receipt. Restore the operator-owned condition, then submit `factory repair --objective FIRST --proposal FILE` with a diagnosis bound to its failure digest. This permits one new beta implementation attempt through the current supported repair contract, preserving the original failure, candidate, identities, usage and consumed allowance. It is distinct from restart identity preservation. If the service exited for the decision, continue with `factory queue resume` and `factory supervisor start`. Do not repeat an unchanged failure or manually accept it.
-6. Require all three implementation items' independent acceptance, successful `source-check` receipts on their exact published heads before integration, and the first Objective's final QA and independent acceptance. Then observe the same active service waiting with an exhausted queue and no model calls.
-7. Create the second Objective with a native blocked-by dependency on the accepted first Objective. Leave it unqueued through idle observations, then admit it explicitly with `factory queue add SECOND`. Its plan must pin the actual accepted predecessor head and complete implementation sources. Verify that activation retains the original authenticated native prerequisite facts and digest, and that the actual guide/QA and final review inputs carry their checked controller binding to this run, base and candidate. Historical predecessor acceptance must remain distinct from the guide's own independent acceptance. Require guide review, exact-head CI and final guide/QA acceptance on the same installed artifact. Retain the full evidence and accounting for independent scenario review before release acceptance.
+Batch corrections before the phase review. Repeat an affected failed check after a demonstrated correction; do not add a separate qualification cycle for every fix. Preserve terminal public runs and their accounting without reviving them or treating them as successful evidence. The [public fixtures](../test/fixtures/) remain available for a concrete reproduction when needed.
 
 ## Version numbers
 

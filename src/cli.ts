@@ -76,7 +76,7 @@ function help(): void {
       "      Write the configuration (first run) or verify it against the options given",
       `  setup --background ${INSTALL_OPTIONS} [--outside-directory ABSOLUTE_EXISTING_DIRECTORY] [--credential-file NAME=ABSOLUTE_PRIVATE_FILE ...]`,
       "      Configure if needed, check readiness, then install and start the background service that runs the queue (this command is the consent)",
-      "  propose --source DOC#HEADING --output ABSOLUTE_NEW_FILE",
+      "  propose --source DOC#HEADING [--output ABSOLUTE_NEW_FILE]",
       "  propose --file ABSOLUTE_FILE --approve SHA256 [--enqueue]",
       "      Draft and review Objectives, then explicitly approve their exact file before issue creation",
       "  run --objective N [--deadline ISO_TIMESTAMP]",
@@ -291,7 +291,8 @@ async function main(): Promise<void> {
     if (result.status === "blocked") process.exitCode = 1;
     return;
   }
-  if (command === "propose") return runProposeCommand(readConfig(path), args);
+  if (command === "propose")
+    return runProposeCommand(readConfig(path), args, path);
   if (command === "queue") return queueCommand(args, path);
   if (command === "supervisor") return supervisorCommand(args, path);
   if (command === "status" && option(args, "objective") === undefined)

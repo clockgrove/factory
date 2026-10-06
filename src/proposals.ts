@@ -17,6 +17,7 @@ import {
 } from "./compiler.js";
 import {
   type FactoryConfig,
+  configPath,
   factoryConfigDigest,
   stateRoot,
   validateTarget,
@@ -25,6 +26,7 @@ import type { ModelInvocationObservation } from "./contracts.js";
 import { sharedGitHubClient } from "./github-client.js";
 import { operatorName } from "./operator.js";
 import { fetchHead } from "./process.js";
+import { configurationCommand, shellWord } from "./status-summary.js";
 import {
   acquireInstallationLock,
   installationLockPath,
@@ -245,16 +247,24 @@ function outputPath(config: FactoryConfig, path: string | undefined): string {
     throw new Error("Proposal output must be outside the target checkout");
   return target;
 }
-async function generate(config: FactoryConfig, args: string[]): Promise<void> {
+async function generate(
+  config: FactoryConfig,
+  args: string[],
+  configuration: string,
+): Promise<void> {
   const source = option(args, "source");
   if (!source)
     throw new Error(
       "propose requires --source DOC#HEADING or --file FILE --approve SHA256",
     );
-  const output = outputPath(config, option(args, "output"));
-  const binding = await sourceBinding(config, source);
   const proposalId = randomUUID();
   const path = journalPath(config, proposalId);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const output = outputPath(
+    config,
+    option(args, "output") ?? join(dirname(path), `${proposalId}.draft.json`),
+  );
+  const binding = await sourceBinding(config, source);
   const journal: ProposalState = {
     schemaVersion: 1,
     binding,
@@ -299,7 +309,12 @@ async function generate(config: FactoryConfig, args: string[]): Promise<void> {
         draft: output,
         digest: hash(bytes),
         coverage: coverage(draft.objectives, binding),
-        next: `Review or edit the draft, then factory propose --file ${output} --approve SHA256 [--enqueue]`,
+        next: configurationCommand(
+          `factory propose --file ${shellWord(output)} --approve ${hash(bytes)}`,
+          configuration,
+        ),
+        review:
+          "Review the draft before approval. After editing, recalculate its SHA256. Add --enqueue only to authorize batch execution.",
       },
       null,
       2,
@@ -372,7 +387,9 @@ async function publish(
   const actor = await sharedGitHubClient.viewer();
   for (const objective of approved) {
     const body = issueBody(objective, journal.binding);
-    const retained = journal.issues[objective.id];
+    const retained = Object.hasOwn(journal.issues, objective.id)
+      ? journal.issues[objective.id]
+      : undefined;
     if (retained) {
       const actual = await sharedGitHubClient.request<{
         id: number;
@@ -463,6 +480,7 @@ async function publish(
 export async function runProposeCommand(
   config: FactoryConfig,
   args: string[],
+  configuration = configPath(),
 ): Promise<void> {
   validateTarget(config.repository, config.checkout);
   if (
@@ -481,7 +499,7 @@ export async function runProposeCommand(
   let published: number[] | undefined;
   try {
     if (option(args, "file")) published = await publish(config, args);
-    else await generate(config, args);
+    else await generate(config, args, configuration);
   } finally {
     releaseControllerLock(installationLockPath(config.repository), lock);
   }

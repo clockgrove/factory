@@ -136,7 +136,10 @@ export function assertKnownFlags(command: string, args: string[]): void {
   for (const arg of args) {
     if (!arg.startsWith("--")) continue;
     const name = arg.slice(2);
-    if (removedFlags.includes(name))
+    if (
+      removedFlags.includes(name) &&
+      !(command === "propose" && name === "source")
+    )
       throw new Error(
         `${arg} was removed; Objectives declare their own sources and running is the consent (see factory help)`,
       );

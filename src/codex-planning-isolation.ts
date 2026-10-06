@@ -193,6 +193,8 @@ function toolchainDirectories(
     ),
     source.CODEX_HOME || join(home, ".codex"),
     join(config, "clockgrove-factory"),
+    join(data, "clockgrove-factory"),
+    join(data, "factory-copilot-auth"),
     join(state, "clockgrove-factory"),
     ...(linked ? [linked.common] : []),
   ].map(real);
@@ -203,6 +205,7 @@ function toolchainDirectories(
       : [];
     return (
       within(home, directory) ||
+      /^\/mnt(?:\/[a-z](?:\/Users)?)?\/?$/i.test(directory) ||
       (profile !== undefined && within(profile, directory)) ||
       [...sealed, ...protectedPaths].some(
         (path) => within(path, directory) || within(directory, path),

@@ -26,7 +26,7 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
 
 2. **Review.** Open a pull request and require review and a green Quality check on its exact head.
 
-3. **Qualify minor versions.** Before merging `X.Y.0`, run the installed-package checks locally (Quality skips them on pull requests), then complete the [live qualification](#live-qualification) and the release issue's required adopter gates on the frozen packed artifact from that reviewed PR head. Public qualification precedes adopter qualification. Retain the source commit, tree, archive checksum and installation for the final distribution comparison. Keeping the version PR unmerged until these gates pass leaves the marketplaces on an existing release tag.
+3. **Qualify minor versions.** Before merging `X.Y.0`, complete the packed CLI integration check, then complete the [live qualification](#live-qualification) and the release issue's required adopter gates on the frozen packed artifact from that reviewed PR head. Public qualification precedes adopter qualification. Retain the source commit, tree, archive checksum and installation for the final distribution comparison. Keeping the version PR unmerged until these gates pass leaves the marketplaces on an existing release tag.
 
 4. **Merge.** Merge through the normal protected path after the required qualification gates pass. For a qualified minor version, verify that the merged tree equals the retained qualified tree before tagging.
 
@@ -37,7 +37,7 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
    git push origin vX.Y.Z
    ```
 
-The Release workflow then checks that the tag, every version identity and the changelog agree and that the commit is on `main`. It runs the complete build, lint, format, notices and test suite (including the packed-artifact tests), packs the tarball, installs it offline from an empty npm cache, attests its provenance and publishes the GitHub Release with the changelog section as notes. It takes about ten minutes. If it fails before publishing, fix the problem on `main` and release the next patch version; do not move the tag.
+The Release workflow then checks that the tag, every version identity and the changelog agree and that the commit is on `main`. It runs the complete build, lint, format, notices and test suite (including the packed-artifact tests), packs the tarball, installs it offline from an empty npm cache, attests its provenance and publishes the GitHub Release with the changelog section as notes. If it fails before publishing, fix the problem on `main` and release the next patch version; do not move the tag.
 
 ## Verify a release
 
@@ -54,7 +54,7 @@ For a live-qualified minor version, also compare the downloaded archive byte for
 
 ## Live qualification
 
-Deterministic tests run on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [autonomous target](../test/fixtures/autonomous-target/) with its [first](../test/fixtures/objectives/autonomy-first.md) and [second](../test/fixtures/objectives/autonomy-second.md) Objectives ([#519](https://github.com/clockgrove/factory/issues/519)), and link the result from the release notes. Historical failed qualifications remain unaccepted; a corrected successor needs a concrete diagnosis and its own recorded finite bounds.
+The small real integration suite runs on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [autonomous target](../test/fixtures/autonomous-target/) with its [first](../test/fixtures/objectives/autonomy-first.md) and [second](../test/fixtures/objectives/autonomy-second.md) Objectives ([#519](https://github.com/clockgrove/factory/issues/519)), and link the result from the release notes. Historical failed qualifications remain unaccepted; a corrected successor needs a concrete diagnosis and its own recorded finite bounds.
 
 1. Before creating the target or calling a provider, run `npm run build && node test/autonomy-fixture-preflight.mjs`. It checks the fixture's commands, planner-visible CI check and complete pinned worker sources without model calls. Freeze the source/tree/archive, installed path, fixture bytes, owner, acceptance, providers, concurrency and finite per-run repair limits. Inspect the actual installed compiler, review and worker inputs, exact-tree validator observations, command authority, evidence grounding and hydration. Model-free checks do not accept a live Objective.
 2. Pack the reviewed exact PR candidate with the Release workflow's locked dependency/build toolchain and install it offline outside a fresh public target copied from the fixture. Keep this artifact for both Objectives and later distribution verification. Supply the external `factory-fixture-prerequisite` executable on the supervisor's PATH before planning, with its operator-owned condition unavailable. The tool must be present even while the condition fails; it is an acceptance probe, not a coding-readiness prerequisite.

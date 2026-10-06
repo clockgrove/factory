@@ -4,6 +4,9 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## 0.2.0 — 2026-10-06
 
+- Replace unit and mock-based verification with a small real integration suite covering Git, processes, disk content, LFS, secret scanning and offline package installation. Remove the fake providers, scripted workers, fault matrices and eight-way test sharding; contributor instructions require this smaller pattern (#858).
+- Automatic implementation repair now checks structured readiness against retained failed-command outcomes and complete owned candidate evidence (#856). Unmet or unknown operator prerequisites stop with a question and admit no worker. Saved corrections preserve their original failure, charge and checked input binding across restart; legacy missing readiness stays unavailable, and operator proposals remain declared corrections.
+
 - Retain actual failed validation outcomes and checked configured repair authority in result, dependency, QA and final review evidence, while keeping historical failures separate from acceptance receipts (#851).
 - Retain authenticated native Objective prerequisite seals through activation and supply their bound historical facts to result, QA and final review (#853). Missing legacy facts remain unavailable, and predecessor acceptance never substitutes for current-result acceptance.
 - Factory's matching plugin and pinned skills now install in Claude Code as well as Codex (#520). Claude planning and review use the Agent SDK with the operator's Claude login (#541).

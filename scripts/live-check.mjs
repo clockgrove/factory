@@ -1,7 +1,7 @@
 // Live crash-restart check against a real GitHub repository (#515 A6).
 //
 //   node scripts/live-check.mjs setup                   CI workflow + ruleset requiring `check`
-//   node scripts/live-check.mjs run [--kills LIST] [--delivery regular|native-stack] [--worker real|scripted] [-- INSTALL_ARGS]
+//   node scripts/live-check.mjs run [--kills LIST] [--delivery regular|native-stack] [--worker real] [-- INSTALL_ARGS]
 //   node scripts/live-check.mjs assert --objective N [--work /tmp/live-check-TAG]
 //   node scripts/live-check-probe.mjs                   record real stack/merge/error behaviour
 //   node scripts/live-check.mjs reset [--objective N]   close leftover live-check issues and PRs
@@ -23,13 +23,9 @@
 // The GitHub points use scripts/live-check-hook.mjs (a --import preload that
 // wraps fetch); Factory has no test hook. Needs `gh` logged in with repo
 // admin, and the planner/worker logins Factory's setup defaults use.
-// `--worker scripted` makes no model calls: the controller is
-// scripts/live-check-scripted.mjs, which composes Factory with the test
-// harness's scripted planner, reviewer and worker over real GitHub, and the
-// setup needs no model login. The nightly run uses it. The run exits 1
-// unless the last launch completed, every kill point was reached and GitHub
-// holds the expected counts. A tag is single-use: a finished run leaves
-// live/TAG/ on main, so `run` refuses a tag the repository already holds.
+// Uses real planner, reviewer and worker providers. Run only as an explicitly
+// approved qualification with recorded resource and attempt limits. A tag is
+// single-use: a finished run leaves live/TAG/ on main.
 // Run `npm run build` first. `reset` closes only what this harness made: Objectives
 // titled `Live check TAG` with this fixture's body and the gh login as author, their Work
 // Item issues, their `factory/objective-N/*` PRs and branches. `reset --objective N` limits
@@ -414,8 +410,7 @@ export async function run(options) {
       throw new Error(`No work dir ${work} for --tag ${tag}`);
   }
   const worker = options.worker ?? "real";
-  if (worker !== "real" && worker !== "scripted")
-    throw new Error(`--worker must be real or scripted: ${worker}`);
+  if (worker !== "real") throw new Error(`--worker must be real: ${worker}`);
   const kills = (options.kills ?? DEFAULT_KILLS.join(","))
     .split(",")
     .filter(Boolean);
@@ -480,23 +475,13 @@ export async function run(options) {
         stdio: ["ignore", "ignore", "inherit"],
       },
     );
-    if (worker === "scripted") registerScriptedHarness(work);
   }
-  // Stages a scripted run finishes before the harness can kill inside them.
-  const pace = kills.filter((point) => PACED.includes(point));
-  const controller =
-    worker === "scripted"
-      ? [
-          join(ROOT, "scripts", "live-check-scripted.mjs"),
-          "--objective",
-          String(objective),
-          "--tag",
-          tag,
-          "--work",
-          work,
-          ...(pace.length ? ["--pace", pace.join(",")] : []),
-        ]
-      : [join(ROOT, "dist", "cli.js"), "run", "--objective", String(objective)];
+  const controller = [
+    join(ROOT, "dist", "cli.js"),
+    "run",
+    "--objective",
+    String(objective),
+  ];
   log(
     `Objective #${objective} (${tag}) in ${work}; ${worker} worker; kills: ${kills.join(",") || "none"}`,
   );
@@ -536,21 +521,6 @@ export async function run(options) {
   console.log(JSON.stringify(report, null, 2));
   if (!report.pass) process.exitCode = 1;
   return report;
-}
-
-/** Kill points a scripted run is paced to make reachable. */
-const PACED = ["final-review", "execute"];
-
-/** Swap the installed worker for the scripted one; the config digest then names it. */
-function registerScriptedHarness(work) {
-  const path = join(work, "config", "clockgrove-factory", "config.json");
-  const config = JSON.parse(readFileSync(path, "utf8"));
-  config.execution.harness = {
-    kind: "registered",
-    adapter: "scripted-test@1",
-    config: {},
-  };
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
 function status(work, objective) {

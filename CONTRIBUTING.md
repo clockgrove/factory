@@ -57,45 +57,24 @@ npm run notices:check
 npm test
 ```
 
-`npm test` runs `tsc` (type-check and build), then the deterministic tests, including temporary Git and LFS repositories. These checks need no provider credentials or live GitHub target.
+`npm test` builds Factory and runs the small integration suite against real temporary Git repositories, processes, files, the secret scanner, and the packed CLI installed offline. These checks need no provider credentials or live GitHub target.
 
-The [Quality workflow](.github/workflows/quality.yml) runs these on every pull request and on `main`:
-
-- Setup builds with `tsc`, so a type error fails every job.
-- `checks` runs `npm run lint`, `npm run format:check` and `npm run notices:check`.
-- `tests` runs the test files in 8 shards instead of `npm test`.
-- `installed` packs and installs the package and tests the result (`node scripts/test-shards.mjs --installed`). It runs on `main` and at release, not on pull requests.
+The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one integration-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release runs the same integration suite and separately verifies the exact tarball it publishes.
 
 `npm run lint` is Biome's recommended rules plus the few deviations in `biome.json`, then `scripts/check-ts-directives.mjs`, which refuses `@ts-nocheck`, `@ts-ignore`, triple-slash references and `@ts-expect-error` without a reason in `src`. `npm run format` applies formatting.
 
 `npm ci` installs a pre-commit hook (`.githooks/pre-commit`). It formats staged `.ts`, `.mts`, `.js`, `.mjs` and `.json` files with Biome, re-stages them, and runs `biome lint` on them. It does not run `tsc`, the directive check, or Prettier (Markdown, YAML, `package-lock.json`), so run the commands above before you push.
 
-During development, run an affected test directly after building:
+During development, build and run the affected integration file directly:
 
 ```sh
 npm run build
-node --import ./test/support/isolated-state.mjs --test test/acceptance.test.mjs
+node --import ./test/isolate-env.mjs --test test/git-registry-lock.test.mjs
 ```
 
-Compare planner prompt, model or provider changes with [planning evals](docs/PLANNING-EVALS.md). Add a regression test for a concrete bug. For documentation-only changes, check the relevant commands, links, and formatting. Live acceptance is separate from deterministic testing: changes to GitHub delivery, process lifecycle, or binary content may also need a live run on a disposable target; minor releases are qualified that way under the [release procedure](docs/RELEASING.md).
+Keep coverage small and tied to demonstrated failures. Reuse an existing real workflow before adding a test. Do not add unit tests, mocks, fake services, scripted provider responses, fault matrices or fixture frameworks. CI runs the complete small suite; avoid repeatedly running it locally when the affected check already passed and nothing changed.
 
-## Live crash-restart check
-
-The fault tests run against a fake GitHub, which encodes our own assumptions about GitHub. `scripts/live-check.mjs` checks them against the real thing: it runs a three-item Objective in the private scratch repository `clockgrove/factory-smoke`, kills the controller at four points (after an issue, a PR and a merge are created, and mid final review), restarts it each time, and counts the result from GitHub alone. Its header lists the commands and kill points. Build first (`npm run build`).
-
-`--worker scripted` swaps in the test harness's scripted planner, reviewer and worker, so a run makes no model calls and costs only GitHub time. Use it for any repeatable check; the default `real` worker is for qualification with real models. The run exits 1 unless the last launch completed, every kill point was reached, and GitHub holds one issue per Work Item, one PR per branch, one merge per PR and a closed Objective.
-
-```sh
-node scripts/live-check.mjs run --worker scripted --delivery regular
-node scripts/live-check.mjs run --worker scripted --delivery native-stack
-node scripts/live-check.mjs reset --objective N   # close what that run left
-```
-
-### Nightly run
-
-The maintainer's machine runs the check nightly with a systemd user timer and the local `gh` login (no extra token): both deliveries with the scripted worker, then `reset`. A failure opens, or comments on, the one open issue labelled `live-check` with the log tail. Run it by hand the same way: `npm run build`, then `node scripts/live-check.mjs run --worker scripted --delivery regular` (and `native-stack`). `node scripts/live-check.mjs setup` installs the fixture's CI workflow and required check once (repository admin).
-
-A `--tag` is single-use: a finished run leaves `live/TAG/` on the scratch repository's main (`reset` does not rewrite it), and a rerun under the same tag would add nothing, so `run` refuses it. Without `--tag` the run picks a fresh one; the nightly job's tag carries the date, so a second run the same day needs its own tag.
+For documentation-only changes, check the relevant commands, links and formatting. Real provider, GitHub delivery and restart acceptance runs separately on an approved disposable target under the [release procedure](docs/RELEASING.md). Local integration checks cannot establish live acceptance.
 
 ## Pull requests
 

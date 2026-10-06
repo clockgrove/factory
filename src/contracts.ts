@@ -265,7 +265,94 @@ export function assertPlanningExecutionBounds(
     throw new Error("Invalid controller planning execution bounds");
 }
 
+/** Approved advisory history; never current source evidence or execution authority. */
+export interface ApprovedPlaybook {
+  repository: string;
+  version: number;
+  digest: string;
+  content: string;
+}
+export type ApprovedPlaybookPin = { version: number; digest: string } | null;
+/** Original admitted plan binding, retained when its executable graph evolves. */
+export interface ApprovedPlaybookAdmission {
+  approvedPlaybookPin: ApprovedPlaybookPin;
+  configDigest: string;
+  graphDigest: string;
+  packetDigest: string;
+  reviewDigest: string;
+  sourcePacketDigest: string;
+}
+export function assertApprovedPlaybookAdmission(
+  pin: unknown,
+  admission: unknown,
+  configDigest: unknown,
+  originalGraphDigest: unknown,
+  pinPresent: boolean,
+): void {
+  if (admission === undefined) {
+    if (pinPresent)
+      throw new Error(
+        "Approved playbook pin lacks its original admission binding",
+      );
+    return; // Historical absence remains no learned input.
+  }
+  if (
+    !pinPresent ||
+    !admission ||
+    typeof admission !== "object" ||
+    Array.isArray(admission)
+  )
+    throw new Error("Approved playbook admission differs from the active pin");
+  const receipt = admission as Record<string, unknown>;
+  if (
+    Object.keys(receipt).sort().join(",") !==
+    "approvedPlaybookPin,configDigest,graphDigest,packetDigest,reviewDigest,sourcePacketDigest"
+  )
+    throw new Error("Invalid approved playbook admission binding");
+  assertApprovedPlaybookPin(pin);
+  assertApprovedPlaybookPin(receipt.approvedPlaybookPin);
+  for (const key of [
+    "configDigest",
+    "graphDigest",
+    "packetDigest",
+    "reviewDigest",
+    "sourcePacketDigest",
+  ]) {
+    if (
+      typeof receipt[key] !== "string" ||
+      !/^[a-f0-9]{64}$/.test(receipt[key] as string)
+    )
+      throw new Error("Invalid approved playbook admission fingerprint");
+  }
+  if (
+    JSON.stringify(pin) !== JSON.stringify(receipt.approvedPlaybookPin) ||
+    receipt.configDigest !== configDigest ||
+    receipt.graphDigest !== originalGraphDigest
+  )
+    throw new Error(
+      "Approved playbook pin differs from the original admitted plan",
+    );
+}
+
+export function assertApprovedPlaybookPin(
+  value: unknown,
+): asserts value is ApprovedPlaybookPin {
+  if (value === null) return;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid approved playbook pin");
+  const pin = value as Record<string, unknown>;
+  if (
+    Object.keys(pin).sort().join(",") !== "digest,version" ||
+    !Number.isSafeInteger(pin.version) ||
+    Number(pin.version) < 1 ||
+    typeof pin.digest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(pin.digest)
+  )
+    throw new Error("Invalid approved playbook pin");
+}
+
 export interface PlanningRequest<T> {
+  approvedPlaybookPin?: ApprovedPlaybookPin;
   /** Trusted transient compile input; not part of canonical or persisted graphs. */
   compileContext?: {
     objectiveNumber: number;
@@ -307,6 +394,7 @@ export interface PlanCommandAuthorization {
 }
 
 export interface PlanReviewRequest {
+  approvedPlaybookPin?: ApprovedPlaybookPin;
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;
@@ -358,6 +446,8 @@ export interface ResultReviewCandidate {
 export type ResultReviewFinding = ReviewChoiceFinding;
 
 export interface PlanningModel {
+  approvedPlaybook?: ApprovedPlaybook;
+  approvedPlaybookPin?: ApprovedPlaybookPin;
   generateStructured<T>(request: PlanningRequest<T>): Promise<T>;
   reviewGraph(
     request: PlanReviewRequest,

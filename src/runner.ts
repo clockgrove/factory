@@ -1,8 +1,10 @@
+import { bindPlanningPlaybook } from "./compiler.js";
 import { hasReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
 import { operatorName } from "./operator.js";
+import { approvedPlaybook, observeRetrospective } from "./learning.js";
 import {
   amendmentBlocksDispatch,
   submitAmendment,
@@ -287,6 +289,20 @@ export async function runObjective(
   let snapshot: ContinuationState | undefined;
   try {
     snapshot = readContinuation(config.repository, objective);
+    const current = snapshot ? undefined : approvedPlaybook(config.repository);
+    const pin = snapshot
+      ? snapshot.approvedPlaybookPin
+      : current
+        ? { version: current.version, digest: current.digest }
+        : null;
+    services = {
+      ...services,
+      planningModel: bindPlanningPlaybook(
+        services.planningModel,
+        config.repository,
+        pin,
+      ),
+    };
   } catch (error) {
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
     throw error;
@@ -688,6 +704,7 @@ export async function runObjective(
     if (server)
       await new Promise<void>((resolve) => server.close(() => resolve()));
     await controlTail;
+    observeRetrospective(config, objective);
     owners.delete(ownerKey(config, objective));
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
   }
@@ -784,6 +801,7 @@ export async function cancelObjective(
     });
     return "cancelled";
   } finally {
+    observeRetrospective(config, objective);
     releaseMutationLock(config, objective, lockHandle);
   }
 }

@@ -108,6 +108,9 @@ export function compilerWire(
       JSON.stringify([
         context,
         request.baseSha,
+        ...(request.approvedPlaybookPin !== undefined
+          ? [request.approvedPlaybookPin]
+          : []),
         ...(request.prerequisites ? [request.prerequisites] : []),
         ...(request.localExecutables ? [request.localExecutables] : []),
         ...(request.executionBounds ? [request.executionBounds] : []),

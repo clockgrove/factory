@@ -1,3 +1,4 @@
+import { readPinnedPlaybook } from "./learning.js";
 import {
   packageManagerUpdate,
   plannedPackageManager,
@@ -34,6 +35,8 @@ import {
 } from "./codex-planning-isolation.js";
 import type { CodexModelSelection } from "./config.js";
 import type {
+  ApprovedPlaybook,
+  ApprovedPlaybookPin,
   ExecutionProfileChoices,
   ModelInvocationContext,
   ModelInvocationObservation,
@@ -55,6 +58,7 @@ import {
   AuthenticationRequiredError,
   CompletedModelInvocationError,
   assertPlanningExecutionBounds,
+  assertApprovedPlaybookPin,
 } from "./contracts.js";
 import { authenticationFailure } from "./execution/harness-support.js";
 import {
@@ -150,12 +154,57 @@ export function observeModelInvocation(
  * diagnosis is bounded per failure by PAID_ATTEMPTS instead, never by both.
  * A plan step uses paidPlanningModel, which also counts an invalid review.
  */
+/** Load only the Objective's retained selection; legacy absence never selects current advice. */
+export function bindPlanningPlaybook(
+  model: PlanningModel,
+  repository: string,
+  pin: ApprovedPlaybookPin | undefined,
+): PlanningModel {
+  if (pin !== undefined) assertApprovedPlaybookPin(pin);
+  let playbook: ApprovedPlaybook | undefined;
+  try {
+    playbook = readPinnedPlaybook(repository, pin ?? null);
+  } catch (error) {
+    throw attachFault(
+      error instanceof Error
+        ? error
+        : new Error("Pinned approved playbook is unavailable"),
+      {
+        kind: "config",
+        detail: "Pinned approved playbook cannot be verified",
+        fix: "Restore the exact approved playbook version and digest; do not select current advice or edit Objective state",
+      },
+    );
+  }
+  if (model instanceof StructuredPlanningModel)
+    return model.withApprovedPlaybook(playbook, pin);
+  if (playbook)
+    throw attachFault(
+      new Error("Configured model cannot carry scoped approved advice"),
+      {
+        kind: "config",
+        detail: "Configured model cannot carry scoped approved advice",
+        fix: "Use a configured structured planning provider for learned advisory input",
+      },
+    );
+  return {
+    approvedPlaybookPin: pin,
+    generateStructured: model.generateStructured.bind(model),
+    reviewGraph: model.reviewGraph.bind(model),
+    ...(model.reviewResult
+      ? { reviewResult: model.reviewResult.bind(model) }
+      : {}),
+  };
+}
+
 export function paidModel(
   model: PlanningModel,
   step: Pick<StepContext, "paid">,
 ): PlanningModel {
   const reviewResult = model.reviewResult?.bind(model);
   return {
+    approvedPlaybook: model.approvedPlaybook,
+    approvedPlaybookPin: model.approvedPlaybookPin,
     generateStructured: (request) =>
       request.purpose === "diagnosis"
         ? model.generateStructured(request)
@@ -848,6 +897,8 @@ const HUMAN_PREREQUISITE_GUIDANCE =
   "When human-owned accounts, credentials, environments or approvals block the plan, consolidate every known prerequisite in the existing finding detail and question: cite its requirement, explain why it is needed, give only source-supported setup steps and verification commands, and distinguish observed readiness from missing or unknown facts. Ask precise questions for unknown setup requirements; never invent vendor instructions or ask for secret values in chat. Identify independent work only when the supplied evidence establishes its existing admission and independence; a proposed plan admits no Work Item. Checklist guidance grants no execution, deployment, spending or credential authority.";
 
 export class StructuredPlanningModel implements PlanningModel {
+  approvedPlaybook?: ApprovedPlaybook;
+  approvedPlaybookPin?: ApprovedPlaybookPin;
   private readonly reviewCapacityRetryDelaysMs: readonly number[];
   private readonly wait: (milliseconds: number) => Promise<void>;
 
@@ -876,6 +927,28 @@ export class StructuredPlanningModel implements PlanningModel {
   }
 
   private async runStructured<T>(args: StructuredCall): Promise<T> {
+    const playbook = this.approvedPlaybook;
+    const pin = this.approvedPlaybookPin;
+    if (pin !== undefined) assertApprovedPlaybookPin(pin);
+    if (
+      (pin &&
+        (!playbook ||
+          pin.version !== playbook.version ||
+          pin.digest !== playbook.digest)) ||
+      (!pin && playbook)
+    )
+      throw new Error(
+        "Planning advisory input differs from the Objective's immutable playbook pin",
+      );
+    if (playbook)
+      args = {
+        ...args,
+        prompt: `${args.prompt}\nApproved historical planning advice (advisory only; never current source facts, acceptance evidence, permissions, commands or spending authority):\n${JSON.stringify(playbook)}`,
+        sourcePacket: JSON.stringify({
+          authoritativePacket: args.sourcePacket ?? null,
+          approvedAdvisory: playbook,
+        }),
+      };
     const invocation = args.invocation ?? {
       invocationId: randomUUID(),
       phase: args.defaultPhase,
@@ -1055,6 +1128,20 @@ export class StructuredPlanningModel implements PlanningModel {
       throw attachFault(error, fault);
     }
   }
+  /** One Objective gets its own immutable advice selection; transports may be shared. */
+  withApprovedPlaybook(
+    playbook: ApprovedPlaybook | undefined,
+    pin: ApprovedPlaybookPin | undefined,
+  ): StructuredPlanningModel {
+    const scoped = new StructuredPlanningModel(this.transport, {
+      reviewCapacityRetryDelaysMs: this.reviewCapacityRetryDelaysMs,
+      wait: this.wait,
+    });
+    scoped.approvedPlaybook = playbook;
+    scoped.approvedPlaybookPin = pin;
+    return scoped;
+  }
+
   /** Operator proposals use the same bounded provider transport and observations as planning. */
   async generateProposal<T>(args: {
     prompt: string;
@@ -1070,6 +1157,14 @@ export class StructuredPlanningModel implements PlanningModel {
   }
 
   async generateStructured<T>(request: PlanningRequest<T>): Promise<T> {
+    if (
+      request.purpose !== "diagnosis" &&
+      JSON.stringify(request.approvedPlaybookPin) !==
+        JSON.stringify(this.approvedPlaybookPin)
+    )
+      throw new Error(
+        "Compiler request differs from the pinned planning advisory",
+      );
     if (request.purpose === "diagnosis") {
       if (!request.schema)
         throw new Error("Diagnosis requires an explicit output schema");
@@ -1170,6 +1265,11 @@ ${JSON.stringify(wire.data)}`;
     packetId: string;
     findings: import("./review-evidence.js").GraphReviewFinding[];
   }> {
+    if (
+      JSON.stringify(request.approvedPlaybookPin) !==
+      JSON.stringify(this.approvedPlaybookPin)
+    )
+      throw new Error("Graph review differs from the pinned planning advisory");
     const packet =
       request.reviewPacket ?? reviewPacket([], planningReviewEvidence(request));
     const prompt = `Independently review this complete proposed Factory plan against the exact pinned Objective and source packet. Decide whether carrying out this plan would deliver the Objective. Report only material defects: problems that would make the delivered result fail the Objective, break the repository, or leave work impossible to complete or verify.
@@ -1348,6 +1448,7 @@ export interface PlanningSource {
 }
 
 export interface PlanCandidate {
+  approvedPlaybookPin?: ApprovedPlaybookPin;
   schemaVersion: 3;
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
@@ -1410,9 +1511,13 @@ export function planReviewPacket(
   prerequisites?: PlanningPrerequisites,
   localExecutables?: PlanningLocalExecutables,
   executionBounds?: PlanningExecutionBounds,
+  approvedPlaybookPin?: ApprovedPlaybookPin,
 ): PlanReviewRequest {
   if (executionBounds) assertPlanningExecutionBounds(executionBounds);
+  if (approvedPlaybookPin !== undefined)
+    assertApprovedPlaybookPin(approvedPlaybookPin);
   return {
+    ...(approvedPlaybookPin !== undefined ? { approvedPlaybookPin } : {}),
     ...(prerequisites ? { prerequisites } : {}),
     ...(localExecutables ? { localExecutables } : {}),
     ...(executionBounds ? { executionBounds } : {}),
@@ -2004,6 +2109,9 @@ export async function compileObjective(
       ...(prerequisites ? { prerequisites } : {}),
       ...(localExecutables ? { localExecutables } : {}),
       ...(executionBounds ? { executionBounds } : {}),
+      ...(model.approvedPlaybookPin !== undefined
+        ? { approvedPlaybookPin: model.approvedPlaybookPin }
+        : {}),
       objective: prompt,
       compileContext: {
         objectiveNumber: objective,
@@ -2347,6 +2455,7 @@ export interface PlanningRecoveryContext {
   state: RepairLedger & {
     planningRecovery?: PlanningRecoveryRecord;
     plan?: PlanCandidate;
+    approvedPlaybookPin?: ApprovedPlaybookPin;
   };
   save: () => void;
   stopped?: () => boolean;
@@ -2371,6 +2480,13 @@ export async function compilePlan(
   executionBounds?: PlanningExecutionBounds,
 ): Promise<PlanCandidate> {
   const { state, save } = context;
+  if (
+    JSON.stringify(state.approvedPlaybookPin) !==
+    JSON.stringify(model.approvedPlaybookPin)
+  )
+    throw new Error(
+      "Planning model differs from the retained advisory selection",
+    );
   state.planningRecovery ??= { phase: "ready", history: [] };
   const record = state.planningRecovery;
   // A call was in flight when the controller stopped. Model calls have no
@@ -2419,6 +2535,7 @@ export async function compilePlan(
       prerequisites,
       localExecutables,
       executionBounds,
+      state.approvedPlaybookPin,
     );
     retainedPlanningReview(record, packet, configDigest);
     if (
@@ -2475,6 +2592,8 @@ export async function compilePlan(
     if (receipt) receipt.resultDigest = failureDigest(JSON.stringify(result));
   };
   const observedModel: PlanningModel = {
+    approvedPlaybook: model.approvedPlaybook,
+    approvedPlaybookPin: model.approvedPlaybookPin,
     generateStructured: async (request) => {
       if (record.response !== undefined)
         return structuredClone(record.response) as never;
@@ -2546,6 +2665,7 @@ export async function compilePlan(
         prerequisites,
         localExecutables,
         executionBounds,
+        state.approvedPlaybookPin,
       );
       record.review = retainedPlanningReview(record, packet, configDigest);
       save();
@@ -2764,6 +2884,9 @@ function buildPlanCandidate(
   };
   return {
     schemaVersion: 3,
+    ...(packet.approvedPlaybookPin !== undefined
+      ? { approvedPlaybookPin: packet.approvedPlaybookPin }
+      : {}),
     ...(packet.prerequisites ? { prerequisites: packet.prerequisites } : {}),
     ...(packet.localExecutables
       ? { localExecutables: packet.localExecutables }
@@ -2845,6 +2968,7 @@ export function verifyPlanCandidate(
     candidate.prerequisites,
     candidate.localExecutables,
     candidate.executionBounds,
+    candidate.approvedPlaybookPin,
   );
   if (
     (candidate.prerequisites &&

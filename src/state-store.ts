@@ -27,7 +27,10 @@ import {
   type RepeatRecord,
   type Wait,
 } from "./fault.js";
-import { assertPlanningExecutionBounds } from "./contracts.js";
+import {
+  assertApprovedPlaybookPin,
+  assertPlanningExecutionBounds,
+} from "./contracts.js";
 import {
   assertCoordinator,
   type ContinuationState,
@@ -244,6 +247,14 @@ function parsePreparation(
     throw new Error(
       "Invalid preparation snapshot; operator direction required",
     );
+  if (Object.hasOwn(value, "approvedPlaybookPin"))
+    assertApprovedPlaybookPin(value.approvedPlaybookPin);
+  if (
+    value.plan &&
+    JSON.stringify(value.plan.approvedPlaybookPin) !==
+      JSON.stringify(value.approvedPlaybookPin)
+  )
+    throw new Error("Preparation plan advisory selection differs");
   if (
     value.sourcePacketDigest !== undefined &&
     !/^[a-f0-9]{64}$/.test(value.sourcePacketDigest)

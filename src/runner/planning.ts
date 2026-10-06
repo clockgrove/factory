@@ -1,8 +1,10 @@
+import { approvedPlaybook } from "../learning.js";
 import { checkRequiredEnvironment, resolveAutonomy } from "../repair-policy.js";
 import { planningPrerequisites } from "../objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
+  bindPlanningPlaybook,
   compilePlan,
   paidPlanningModel,
   type PlanCandidate,
@@ -47,8 +49,9 @@ function preparationSourceDigest(
   sources: PlanCandidate["sources"],
   prerequisites: PlanCandidate["prerequisites"],
   localExecutables: PlanCandidate["localExecutables"],
+  approvedPlaybookPin?: PlanCandidate["approvedPlaybookPin"],
 ): string {
-  return createHash("sha256")
+  const original = createHash("sha256")
     .update(
       JSON.stringify(
         localExecutables
@@ -63,6 +66,11 @@ function preparationSourceDigest(
       ),
     )
     .digest("hex");
+  return approvedPlaybookPin === undefined
+    ? original
+    : createHash("sha256")
+        .update(JSON.stringify([original, approvedPlaybookPin]))
+        .digest("hex");
 }
 
 /** A read-only preview: plans and reviews without writing Objective state. */
@@ -90,18 +98,27 @@ export async function planObjective(
   try {
     const issue = await services.github.objective(objective);
     const baseSha = git(config.checkout, "rev-parse", "HEAD");
+    const advisory = approvedPlaybook(config.repository);
+    const planningModel = bindPlanningPlaybook(
+      services.planningModel,
+      config.repository,
+      advisory ? { version: advisory.version, digest: advisory.digest } : null,
+    );
     const result = await compilePlan(
       objective,
       issue.body,
       baseSha,
       config.checkout,
-      services.planningModel,
+      planningModel,
       factoryConfigDigest(config),
       diagnostics.modelObserver({ scopeId: planningScopeId }),
       executionProfileChoices(config),
       // The same recoverable planning as run, over a ledger nothing saves.
       {
-        state: { autonomy: resolveAutonomy(config.autonomy) },
+        state: {
+          autonomy: resolveAutonomy(config.autonomy),
+          approvedPlaybookPin: planningModel.approvedPlaybookPin,
+        },
         save: () => undefined,
       },
       await planningPrerequisites(config, services.github, objective, baseSha),
@@ -238,7 +255,6 @@ export async function prepareObjective(args: {
     issue,
     path,
     diagnostics,
-    planningModel,
     github,
     owner,
     installationConfigDigest,
@@ -247,6 +263,7 @@ export async function prepareObjective(args: {
     reportRunStatus,
   } = args;
   let { preparation } = args;
+  let planningModel = args.planningModel;
   // A new plan starts from the default branch as origin has it now; the
   // checkout's own refs are only as new as its last fetch. A preparation
   // keeps the base it recorded, like every later run of the Objective.
@@ -262,13 +279,23 @@ export async function prepareObjective(args: {
   );
   assertNoEarlierVersion(config.repository);
   const localExecutables = preflightObjective(config, issue.body, baseSha);
+  const approvedPlaybookPin = preparation
+    ? preparation.approvedPlaybookPin
+    : (planningModel.approvedPlaybookPin ?? null);
+  planningModel = bindPlanningPlaybook(
+    planningModel,
+    config.repository,
+    approvedPlaybookPin,
+  );
   const sourcePacketDigest = preparationSourceDigest(
     planningSources(issue.body, baseSha, config.checkout),
     prerequisites,
     localExecutables,
+    approvedPlaybookPin,
   );
   if (!preparation) {
     preparation = {
+      approvedPlaybookPin,
       sourcePacketDigest,
       schemaVersion: 8,
       kind: "preparing",
@@ -422,6 +449,13 @@ export async function prepareObjective(args: {
     false,
     capacity.concurrency,
   );
+  if (
+    JSON.stringify(plan.approvedPlaybookPin) !==
+    JSON.stringify(preparation.approvedPlaybookPin)
+  )
+    throw new Error(
+      "Plan advisory selection differs from the retained preparation",
+    );
   if (JSON.stringify(plan.prerequisites) !== JSON.stringify(prerequisites))
     throw new Error("Planning native prerequisites changed before activation");
   if (

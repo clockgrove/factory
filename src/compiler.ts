@@ -802,6 +802,9 @@ class CodexPlanningTransport implements PlanningTransport {
             providerItemId: item?.id,
             providerItemType: item?.type,
             tool,
+            ...(item?.type === "error"
+              ? { detail: `Nonfatal Codex SDK warning: ${item.message}` }
+              : {}),
             ...(state.usage
               ? { usage: state.usage, usageAvailable: true }
               : {}),

@@ -29,6 +29,8 @@ Each metadata record ([`InteractionMetadata`](https://github.com/clockgrove/fact
 
 Usage records keep allowlisted token counters; missing counters stay unknown, never zero. Use the latest cumulative snapshot per attempt; other usage records are alternate views, not extra totals. Claude's USD figure is an estimate, not a bill.
 
+Codex SDK error items are nonfatal warnings. Their interaction records carry a provider `warning` outcome, and planning diagnostics show the redacted message. The pinned runtime can emit a Code Mode availability warning when its host is disabled for tool-free planning. Factory keeps that isolation: a warning proves neither tool execution nor invocation success or failure. Terminal outcomes, decoding and validation still determine the result; incomplete invocations stay incomplete.
+
 ## Privacy and retention
 
 - Metadata lives in the private Objective diagnostics. Content lives under the private state root's `captures/` directory, outside the target checkout, as NDJSON files with mode `0600` in `0700` directories. Readers reject anything that is not a private regular file.

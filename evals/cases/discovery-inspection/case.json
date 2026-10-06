@@ -1,8 +1,0 @@
-{
-  "fixture": "../../targets/node-lib",
-  "tags": ["amendment", "discovery"],
-  "expect": {
-    "outcome": "plan",
-    "maxWorkItems": 1
-  }
-}

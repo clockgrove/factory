@@ -6,8 +6,8 @@ import {
   type WorkGraph,
 } from "./contracts.js";
 import { ownsPath } from "./ownership.js";
-import { assertWorkItemFields } from "./scheduler.js";
 import { aggregateAcceptance } from "./qa.js";
+import { assertWorkItemFields, validValidationCommand } from "./scheduler.js";
 
 type Schema = {
   [key: string]: unknown;
@@ -138,7 +138,7 @@ export function compilerWire(
       items: {
         ...text,
         description:
-          "Literal repository-relative files or trailing-slash directory prefixes; no wildcard, absolute path, empty, dot or parent components.",
+          "Literal repository-relative files or trailing-slash directory prefixes; no wildcard, absolute path, empty, dot, parent or whitespace-padded components.",
       },
     },
     newPackages: {
@@ -158,11 +158,19 @@ export function compilerWire(
           strict({
             kind: { type: "string", enum: ["source-line"] },
             sourceIndex: integer(request.sources.length),
-            lineIndex: integer(),
+            lineIndex: {
+              ...integer(),
+              description:
+                "A standalone executable command line or one complete backticked command bullet; never prose around a code span.",
+            },
           }),
           strict({
             kind: { type: "string", enum: ["base-observed"] },
-            command: text,
+            command: {
+              ...text,
+              description:
+                "Exact executable command text from the named pinned file, with no Markdown wrapper or surrounding prose.",
+            },
             source: text,
           }),
         ],
@@ -532,15 +540,17 @@ export function compilerWire(
               ]!.trim()
                 .replace(/^[-*]\s+/, "")
                 .trim();
-              if (
-                command.startsWith("`") &&
-                command.endsWith("`") &&
-                command.length > 1
-              )
-                command = command.slice(1, -1);
-              if (!command)
+              if (command.startsWith("`")) {
+                const literal = /^`([^`]+)`$/.exec(command);
+                if (!literal)
+                  throw new PlannerChoiceError(
+                    "Planner source line is prose around a code span; select a standalone command line",
+                  );
+                command = literal[1]!;
+              }
+              if (!validValidationCommand(command))
                 throw new PlannerChoiceError(
-                  "Planner source command line is empty",
+                  "Planner source line is not an executable command line",
                 );
               return {
                 command,

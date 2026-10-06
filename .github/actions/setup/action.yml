@@ -1,5 +1,5 @@
 name: Set up Factory
-description: Node 24, dependencies restored from cache when the lockfile is unchanged, and a build.
+description: Node 24 and dependencies restored from cache when the lockfile is unchanged.
 runs:
   using: composite
   steps:
@@ -13,6 +13,4 @@ runs:
         key: node-modules-${{ runner.os }}-node24-${{ hashFiles('package-lock.json') }}
     - if: steps.modules.outputs.cache-hit != 'true'
       run: npm ci
-      shell: bash
-    - run: npm run build
       shell: bash

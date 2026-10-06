@@ -94,7 +94,7 @@ test("packed Factory installs offline and runs its CLI and bundled scanner", () 
     }
 
     const cli = join(prefix, "node_modules", ".bin", "factory");
-    const config = join(root, "config", "factory.json");
+    const config = join(root, "selected config's", "factory.json");
     const environment = {
       ...process.env,
       XDG_CONFIG_HOME: join(root, "xdg-config"),
@@ -118,12 +118,20 @@ test("packed Factory installs offline and runs its CLI and bundled scanner", () 
       ),
     );
     assert.equal(setup.status, "configured");
+    assert.equal(setup.capacity.concurrency, 1);
+    assert.equal(setup.capacityRecommendation.configuredLimitsPreserved, true);
+    assert.ok(setup.capacityRecommendation.host.cpus > 0);
     const installedConfig = JSON.parse(readFileSync(config, "utf8"));
     assert.equal(installedConfig.repository, "example/package-smoke");
     assert.equal(installedConfig.checkout, checkout);
-    assert.match(
-      run("status", "--objective", "1", "--config", config),
-      /^Objective #1: not started — no Factory run recorded\nNext: factory run --objective 1\n/,
+    const status = run("status", "--objective", "1", "--config", config);
+    assert.equal(
+      status.split("\n")[0],
+      "Objective #1: not started — no Factory run recorded",
+    );
+    assert.equal(
+      status.split("\n")[1],
+      `Next: factory run --objective 1 --config '${root}/selected config'"'"'s/factory.json'`,
     );
 
     const scanner = join(installedRoot, "dist", "execution", "secret-scan.js");

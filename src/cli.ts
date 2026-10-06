@@ -39,7 +39,11 @@ import {
   readContinuation,
   readPreState,
 } from "./state-store.js";
-import { renderServiceStatus, renderStatusText } from "./status-summary.js";
+import {
+  configurationCommand,
+  renderServiceStatus,
+  renderStatusText,
+} from "./status-summary.js";
 import { checkIntakeServiceState, supervise } from "./supervision.js";
 
 /** Whether a live controller owns this Objective; null when a lock is unreadable. */
@@ -494,6 +498,12 @@ function statusDocument(config: FactoryConfig, objective: number) {
     continuation ? undefined : readPreState(config.repository, objective),
     factoryConfigDigest(config),
   );
+  const configuration = option(process.argv.slice(3), "config");
+  if (document.nextAction)
+    document.nextAction.command = configurationCommand(
+      document.nextAction.command,
+      configuration,
+    );
   return { document, secrets };
 }
 
@@ -501,9 +511,10 @@ function statusLines(
   document: ReturnType<typeof statusDocument>["document"],
   secrets: string[],
 ): string[] {
-  return renderStatusText(document).map((line) =>
-    redactDiagnosticDetail(line, secrets),
-  );
+  return renderStatusText(
+    document,
+    option(process.argv.slice(3), "config"),
+  ).map((line) => redactDiagnosticDetail(line, secrets));
 }
 
 /** Print how a run ended and set the documented exit code. */
@@ -511,13 +522,21 @@ function reportRun(
   config: FactoryConfig,
   state: ContinuationState | AwaitingBeforeState,
 ): void {
+  const configuration = option(process.argv.slice(3), "config");
   const outcome =
     state instanceof AwaitingBeforeState
-      ? awaitingOutcome(state)
-      : runOutcome(state, () => {
-          const { document, secrets } = statusDocument(config, state.objective);
-          return statusLines(document, secrets);
-        });
+      ? awaitingOutcome(state, configuration)
+      : runOutcome(
+          state,
+          () => {
+            const { document, secrets } = statusDocument(
+              config,
+              state.objective,
+            );
+            return statusLines(document, secrets);
+          },
+          configuration,
+        );
   console.log(outcome.message);
   process.exitCode = outcome.code;
 }

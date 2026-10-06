@@ -2,7 +2,14 @@
 
 This file records public releases of Factory. Release artifacts and provenance attestations are on [GitHub Releases](https://github.com/clockgrove/factory/releases); evidence for releases up to v0.1.74 is in the [historical artifact records](https://github.com/clockgrove/factory/blob/3ddcf5c16d5f067853654b520339029da25e1026/docs/history/BUILD-STATUS-2026-10-03.md).
 
-## Unreleased
+## 0.2.0 — 2026-10-06
+
+- Factory's matching plugin and pinned skills now install in Claude Code as well as Codex (#520). Claude planning and review use the Agent SDK with the operator's Claude login (#541).
+- Interrupted issue projection, review and delivery are reconciled from stable identities, and transient failures repeat with backoff (#515). Paid unknown outcomes remain bounded; wrong results use diagnosed repair allowances and configuration failures wait for their fix. The legacy `--abandon` option is removed.
+- Foreground runs of different Objectives can run in parallel, with one owner per Objective; the background service queue remains sequential (#810).
+- A failed frozen-lockfile dependency install repeats as a transient failure when the candidate left every package manifest, pnpm lockfile and workspace declaration unchanged from the accepted base (#839). Changed inputs keep it an implementation failure, so an environmental outage does not spend an implementation repair.
+- A result or final review stop lists every criterion that needs an operator decision (#836). Answer each with `factory decide --criterion`, without rerunning to discover the next question.
+- The public qualification fixture and release procedure require a three-item DAG with an exact-head PR check, one restart, a retained prerequisite failure and one supported beta repair, then idle observation and explicit second admission on the same installed artifact (#519, #521). Minor-release qualification precedes tag-triggered publication and final public archive comparison.
 
 - An Objective can refresh an existing exact stable npm or pnpm `packageManager` pin through a `Package manager update` section containing one backticked same-manager pin (#847). Planning, worker inputs, both deliveries, QA and final validation carry the exact source-bound authority. Final acceptance requires the declared pin; acceptance-command scripts and their lifecycle hooks remain fixed. Explicit update authority preserves security configuration and manager-hook files even without npm/pnpm validation commands. Host readiness checks the declared target version.
 

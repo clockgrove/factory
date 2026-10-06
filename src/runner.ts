@@ -3,6 +3,7 @@ import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
 import { operatorName } from "./operator.js";
+import { observeRetrospective } from "./learning.js";
 import {
   amendmentBlocksDispatch,
   submitAmendment,
@@ -688,6 +689,7 @@ export async function runObjective(
     if (server)
       await new Promise<void>((resolve) => server.close(() => resolve()));
     await controlTail;
+    observeRetrospective(config, objective);
     owners.delete(ownerKey(config, objective));
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
   }
@@ -784,6 +786,7 @@ export async function cancelObjective(
     });
     return "cancelled";
   } finally {
+    observeRetrospective(config, objective);
     releaseMutationLock(config, objective, lockHandle);
   }
 }

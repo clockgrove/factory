@@ -1,3 +1,4 @@
+import { packageManagerUpdate } from "../package-manager-update.js";
 import {
   attachedFault,
   cancelledFault,
@@ -754,6 +755,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
           }),
         ...(environment && { environment: structuredClone(environment) }),
         item: request.item,
+        packageManagerUpdate: packageManagerUpdate(request.objectiveBody ?? ""),
         worktree,
         attemptId: identity,
         sourceAssets: sourceAssets.map(

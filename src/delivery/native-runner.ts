@@ -1,3 +1,4 @@
+import { packageManagerUpdate } from "../package-manager-update.js";
 import { assertIntegrated, laterIntegration } from "./integration.js";
 import { assertCheckSourcesAtIntegration } from "./check-sources.js";
 import { deliveryReadiness, unreportedGates } from "./readiness.js";
@@ -663,6 +664,7 @@ export async function runNativeGraph(args: {
                 ),
                 args.contentStore,
                 workspacePackageAdditions(args.objectiveBody),
+                packageManagerUpdate(args.objectiveBody),
               ),
           });
           await phases.reserve(item.id, "review");

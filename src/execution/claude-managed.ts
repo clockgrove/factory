@@ -1,3 +1,4 @@
+import { packageManagerUpdate } from "../package-manager-update.js";
 import { cancelledFault, classifyFaults } from "../fault.js";
 import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
@@ -232,6 +233,9 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     let privateIndex = 0;
     const prompt = workItemPrompt({
       ...data.request,
+      packageManagerUpdate: packageManagerUpdate(
+        data.request.objectiveBody ?? "",
+      ),
       worktree: workspace,
       sourceAssets: sources.map((source) => ({
         ...source,

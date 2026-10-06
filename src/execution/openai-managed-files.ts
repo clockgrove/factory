@@ -1,3 +1,4 @@
+import { packageManagerUpdate } from "../package-manager-update.js";
 import { prepareManagedBase } from "./managed-base.js";
 import { createHash } from "node:crypto";
 import {
@@ -111,6 +112,7 @@ export async function prepareOpenAIInput(args: {
     request: { ...request, sourceAssets },
     harnessRequest: {
       item: request.item,
+      packageManagerUpdate: packageManagerUpdate(request.objectiveBody ?? ""),
       worktree: "/workspace/repo",
       attemptId: request.attemptId,
       sourceAssets: boundSources,

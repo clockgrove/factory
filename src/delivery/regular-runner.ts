@@ -1,3 +1,4 @@
+import { packageManagerUpdate } from "../package-manager-update.js";
 import { assertIntegrated, laterIntegration } from "./integration.js";
 import { cancelledFault } from "../fault.js";
 import { assertCheckSourcesAtIntegration } from "./check-sources.js";
@@ -559,6 +560,7 @@ export async function runRegularGraph(args: {
           ),
           args.contentStore,
           workspacePackageAdditions(args.objectiveBody),
+          packageManagerUpdate(args.objectiveBody),
         ),
     });
     await phases.reserve(item.id, "review");

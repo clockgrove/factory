@@ -1,3 +1,4 @@
+import { plannedPackageManager } from "./package-manager-update.js";
 import { spawnSync } from "node:child_process";
 import {
   accessSync,
@@ -87,23 +88,12 @@ function literalEntrypoints(command: string): {
   return { names: [...new Set(names)], partial };
 }
 
-function packageManagerPolicy(checkout: string, baseSha: string): unknown {
-  try {
-    return JSON.parse(
-      pinnedGitRaw(checkout, "show", `${baseSha}:package.json`).toString(
-        "utf8",
-      ),
-    ).packageManager;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Resolve only fixed host lookups; never evaluate an admitted target command. */
 export function preflightLocalExecutables(input: {
   checkout: string;
   baseSha: string;
   graph: WorkGraph;
+  objectiveBody?: string;
   finalCommands: string[];
   privateRoot: string;
   credentialDirectory: string;
@@ -114,7 +104,11 @@ export function preflightLocalExecutables(input: {
   const redact = (value: string) =>
     redactDiagnosticDetail(value, input.secrets);
   const pathContext = redact(env.PATH ?? "(unset: validation shell default)");
-  const policy = packageManagerPolicy(input.checkout, input.baseSha);
+  const policy = plannedPackageManager(
+    input.objectiveBody ?? "",
+    input.checkout,
+    input.baseSha,
+  );
   const targetRoot = `${realpathSync(
     pinnedGitRaw(input.checkout, "rev-parse", "--show-toplevel")
       .toString("utf8")
@@ -389,6 +383,7 @@ export function preflightObjective(
       baseSha,
       graph: { objective: 1, baseSha, items: [], coverage: [] },
       finalCommands,
+      objectiveBody: body,
       privateRoot: root,
       credentialDirectory: join(root, "empty-gh-config"),
       secrets: config.policy.allowedSecretNames.flatMap((name) =>

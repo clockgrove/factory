@@ -1,3 +1,7 @@
+import {
+  assertPackageManagerUpdate,
+  packageMetadata,
+} from "./package-manager-update.js";
 import { objectiveCandidate } from "./qa.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { assertGraphRevisions } from "./graph-amendments.js";
@@ -2648,6 +2652,10 @@ export const PINNED_PNPM_BOOTSTRAP =
   "pnpm install --frozen-lockfile --ignore-scripts";
 
 export interface PackageScriptAuthority {
+  /** Exact stable same-manager pin declared by the pinned Objective. */
+  packageManagerUpdate?: string;
+  /** Final acceptance must include the declared update. */
+  requirePackageManagerUpdate?: boolean;
   /** Commands literally declared by a pinned source, not inferred by the model. */
   sourceDeclared?: readonly string[];
   /** Exact package directories admitted by the pinned Objective. */
@@ -2696,13 +2704,92 @@ export function assertPinnedNpmScripts(
     authority.workspacePackageAdditions,
     authority.predecessorSha,
   );
+  const file = (revision: string, path: string): string | undefined => {
+    try {
+      const entry = pinnedGit(checkout, "ls-tree", revision, "--", path);
+      if (!entry) return undefined;
+      if (!/^100(?:644|755) blob /.test(entry))
+        throw new Error(
+          `Package script validation blocked: ${path} is not a regular file`,
+        );
+      return pinnedGitRaw(checkout, "show", `${revision}:${path}`).toString(
+        "utf8",
+      );
+    } catch (error) {
+      if (
+        authority.packageManagerUpdate !== undefined ||
+        (error instanceof Error && error.message.includes("not a regular file"))
+      )
+        throw error;
+      return undefined;
+    }
+  };
+  const original = packageMetadata(checkout, acceptedBaseSha);
+  const predecessor =
+    authority.predecessorSha && authority.predecessorSha !== acceptedBaseSha
+      ? packageMetadata(checkout, authority.predecessorSha)
+      : original;
+  const after = packageMetadata(checkout, commit);
+  if (original || predecessor || authority.packageManagerUpdate !== undefined)
+    assertPackageManagerUpdate(
+      authority.packageManagerUpdate !== undefined
+        ? original?.packageManager
+        : (original ?? predecessor)?.packageManager,
+      after?.packageManager,
+      authority.packageManagerUpdate,
+      authority.requirePackageManagerUpdate,
+    );
+  if (
+    authority.packageManagerUpdate !== undefined &&
+    predecessor?.packageManager === authority.packageManagerUpdate &&
+    after?.packageManager !== authority.packageManagerUpdate
+  )
+    throw new Error("Package manager update cannot revert a predecessor pin");
   const managerToken = /\b(?:npm|pnpm)\b/;
   const selected = commands.filter((check) => managerToken.test(check));
-  if (!selected.length) return;
-  const declared = new Set(authority.sourceDeclared ?? []);
+  if (selected.length || authority.packageManagerUpdate !== undefined)
+    for (const key of ["config", "pnpm"])
+      if (
+        (original ?? predecessor) &&
+        !isDeepStrictEqual((original ?? predecessor)?.[key], after?.[key])
+      )
+        throw new Error(
+          `Package script validation blocked: ${key} differs from the accepted base`,
+        );
+  if (
+    authority.packageManagerUpdate !== undefined &&
+    file(acceptedBaseSha, "pnpm-workspace.yaml") === undefined &&
+    file(commit, "pnpm-workspace.yaml") !== undefined
+  )
+    throw new Error(
+      "Package manager update cannot create workspace security configuration",
+    );
+  if (authority.packageManagerUpdate !== undefined)
+    for (const path of [
+      ".npmrc",
+      ".pnpmfile.cjs",
+      ".pnpmfile.js",
+      ".pnpmfile.mjs",
+      "package.yaml",
+    ])
+      if (file(acceptedBaseSha, path) !== file(commit, path))
+        throw new Error(
+          `Package script validation blocked: ${path} differs from the accepted base; Package manager update grants no configuration or hook changes`,
+        );
   const bootstrap = selected.some(
     (check) => check.trim() === PINNED_PNPM_BOOTSTRAP,
   );
+  if (
+    (bootstrap || authority.packageManagerUpdate !== undefined) &&
+    [file(commit, ".npmrc"), file(commit, "pnpm-workspace.yaml")].some(
+      (content) => /pnpmfile/i.test(content ?? ""),
+    )
+  )
+    throw new Error(
+      "Package script validation blocked: configured pnpmfile hooks need separate authority",
+    );
+  if (!selected.length) return;
+  const declared = new Set(authority.sourceDeclared ?? []);
   if (
     bootstrap &&
     commands.findIndex((check) => check.trim() === PINNED_PNPM_BOOTSTRAP) >
@@ -2718,45 +2805,6 @@ export function assertPinnedNpmScripts(
       "Package script validation blocked: only root npm/pnpm test, pnpm check, or npm/pnpm run NAME can be pinned",
     );
 
-  const file = (revision: string, path: string): string | undefined => {
-    try {
-      const entry = pinnedGit(checkout, "ls-tree", revision, "--", path);
-      if (!entry) return undefined;
-      if (!/^100(?:644|755) blob /.test(entry))
-        throw new Error(
-          `Package script validation blocked: ${path} is not a regular file`,
-        );
-      return pinnedGitRaw(checkout, "show", `${revision}:${path}`).toString(
-        "utf8",
-      );
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.includes("not a regular file")
-      )
-        throw error;
-      return undefined;
-    }
-  };
-  const packageFile = (
-    revision: string,
-  ): Record<string, unknown> | undefined => {
-    const raw = file(revision, "package.json");
-    if (raw === undefined) return undefined;
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-        throw new Error("invalid package");
-      return parsed as Record<string, unknown>;
-    } catch {
-      throw new Error(
-        "Package script validation blocked: package.json is invalid",
-      );
-    }
-  };
-  const original = packageFile(acceptedBaseSha);
-  const predecessor = packageFile(authority.predecessorSha ?? acceptedBaseSha);
-  const after = packageFile(commit);
   if (!original && selected.some((command) => !declared.has(command)))
     throw new Error(
       "Package script validation blocked: a new package.json needs exact source-declared command authority",
@@ -2765,14 +2813,6 @@ export function assertPinnedNpmScripts(
     throw new Error(
       "Package script validation blocked: package.json is absent from the result tree",
     );
-  for (const key of ["packageManager", "config", "pnpm"])
-    if (
-      (original ?? predecessor) &&
-      !isDeepStrictEqual((original ?? predecessor)?.[key], after?.[key])
-    )
-      throw new Error(
-        `Package script validation blocked: ${key} differs from the accepted base`,
-      );
   const scripts = (pkg: Record<string, unknown>): Record<string, unknown> => {
     const value = pkg.scripts;
     if (!value || typeof value !== "object" || Array.isArray(value))
@@ -2878,15 +2918,6 @@ export function assertPinnedNpmScripts(
         `Package script validation blocked: ${path} differs from the accepted base`,
       );
   }
-  if (
-    bootstrap &&
-    [file(commit, ".npmrc"), file(commit, "pnpm-workspace.yaml")].some(
-      (content) => /pnpmfile/i.test(content ?? ""),
-    )
-  )
-    throw new Error(
-      "Package script validation blocked: configured pnpmfile hooks need separate authority",
-    );
 }
 
 /** Supported root script forms; shell wrappers and package-manager flags are ambiguous. */
@@ -2918,6 +2949,7 @@ export async function validateWorkItem(
   lfsMembers: ValidationLfsMember[] = [],
   contentStore?: ContentStore,
   workspacePackageAdditions: readonly string[] = [],
+  packageManagerUpdate?: string,
 ): Promise<ValidationEvidence> {
   assertPinnedNpmScripts(
     checkout,
@@ -2930,6 +2962,7 @@ export async function validateWorkItem(
         .map((v) => v.command),
       predecessorSha,
       workspacePackageAdditions,
+      packageManagerUpdate,
     },
   );
   return validateTree(

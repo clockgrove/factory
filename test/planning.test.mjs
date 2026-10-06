@@ -1191,7 +1191,18 @@ test("a plan refused by deterministic validation spends the one revision with th
         ["compile", "diagnosis", "compile"],
       );
       assert.equal(reviews, 1);
-      assert.equal(requests[0].compileContext.instructions, "");
+      assert.match(
+        requests[0].compileContext.instructions,
+        /Root package-manager metadata \(fixed\)/,
+      );
+      assert.match(
+        requests[0].compileContext.instructions,
+        /no exact Package manager update is authorized/,
+      );
+      assert.doesNotMatch(
+        requests[0].compileContext.instructions,
+        /Revise the complete graph|"source":"diagnosis"/,
+      );
       assert.match(
         requests[1].objective,
         /Work Item one has invalid ownership path .*\/absolute\/one\.txt/,

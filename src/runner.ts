@@ -1,3 +1,4 @@
+import { packageManagerUpdate } from "./package-manager-update.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import { hasReadinessWait, isReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
@@ -1324,10 +1325,11 @@ async function runObjectivePass(
         );
       if (
         !state.objectiveBodyDigest &&
-        workspacePackageAdditions(issue.body).length
+        (workspacePackageAdditions(issue.body).length ||
+          packageManagerUpdate(issue.body))
       )
         throw new Error(
-          "Workspace package authority requires a digest-bound Objective; create a new plan",
+          "Package update authority requires a digest-bound Objective; create a new plan",
         );
       // A decision, as when delivery observes the change: the observe
       // step saves the question, and `factory retry` asks it again.
@@ -1599,6 +1601,7 @@ async function runObjectivePass(
         baseSha,
         graph,
         finalCommands: plan.finalCommands,
+        objectiveBody: issue.body,
         privateRoot: root,
         credentialDirectory: join(root, "empty-gh-config"),
         secrets: configuredDiagnosticSecrets(config),
@@ -1966,6 +1969,8 @@ async function runObjectivePass(
           sourceDeclared:
             state.objectiveCommands ?? finalObjectiveCommands(issue.body),
           workspacePackageAdditions: workspacePackageAdditions(issue.body),
+          packageManagerUpdate: packageManagerUpdate(issue.body),
+          requirePackageManagerUpdate: true,
         },
       );
       // Validation and fresh-clone hydration read the remote: one step,

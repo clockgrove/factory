@@ -1,3 +1,4 @@
+import { packageManagerUpdate } from "./package-manager-update.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "./compiler.js";
@@ -68,6 +69,7 @@ export async function preflightItemEnvironment(args: {
     ),
     args.store,
     workspacePackageAdditions(args.objectiveBody ?? ""),
+    packageManagerUpdate(args.objectiveBody ?? ""),
   );
 }
 
@@ -249,6 +251,7 @@ export async function runQaItem(args: {
           ),
           args.store,
           workspacePackageAdditions(args.objectiveBody),
+          packageManagerUpdate(args.objectiveBody),
         );
       },
       {

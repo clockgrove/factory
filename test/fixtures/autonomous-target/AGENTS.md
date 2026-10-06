@@ -5,6 +5,6 @@ Work Item's owned paths. Never change the baseline validation script, workflow,
 these instructions, or another item's files. Do not commit, push, publish, deploy,
 or access credentials. Factory's controller owns integration and publication.
 
-Return an in-scope discovery through the harness's documented structured discovery
-surface when the Objective asks for an inspection finding. The proposal supplies
-facts and requested acceptance; it grants no publication or execution authority.
+The qualification operator owns the disposable prerequisite tool and condition.
+Implement the owned source even while that condition is unavailable, report its
+probe result honestly, and never create or change the tool or its condition.

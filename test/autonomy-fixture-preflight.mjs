@@ -10,8 +10,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse } from "yaml";
 
-import { finalObjectiveCommands, planningSources } from "../dist/compiler.js";
+import { workflowCheckNames } from "../dist/check-names.js";
+import {
+  finalObjectiveCommands,
+  hydrateWorkerInputSources,
+  planningSources,
+} from "../dist/compiler.js";
+import { workItemPrompt } from "../dist/execution/harness-support.js";
 
 const root = mkdtempSync(join(tmpdir(), "factory-autonomy-preflight-"));
 const git = (...args) =>
@@ -47,6 +54,26 @@ const sourcePacket = (name, base, expectedCommands, paths) => {
         : readFileSync(join(root, source.path), "utf8");
     assert.equal(source.content, expected, `Complete pinned ${source.path}`);
   }
+  const item = {
+    title: name,
+    goal: "Inspect complete pinned inputs without executing an Objective",
+    acceptance: [],
+    nonGoals: [],
+    ownedPaths: [],
+    brief: "Model-free source hydration check",
+    validation: [],
+    citations: packet.map(({ path }) => ({ path, heading: "" })),
+  };
+  hydrateWorkerInputSources({ items: [item] }, packet);
+  assert.deepEqual(
+    item.inputSources.map(({ path, content }) => ({ path, content })),
+    packet.map(({ path, content }) => ({ path, content })),
+    "Workers receive complete source bytes, including unchanged checks",
+  );
+  assert.ok(
+    workItemPrompt({ item }).includes(JSON.stringify(item.inputSources)),
+    "The actual worker prompt contains the complete hydrated source packet",
+  );
 };
 const check = (phase, pass) => {
   const result = spawnSync(process.execPath, ["scripts/check.mjs", phase], {
@@ -71,15 +98,36 @@ try {
     .map((event) => event.trim());
   assert.deepEqual(
     events,
-    ["push"],
+    ["pull_request"],
     "Each exact published head needs one unambiguous source-check receipt",
   );
+  const steps = parse(workflow).jobs["source-check"].steps;
+  const checkoutStep = steps.find((step) =>
+    step.uses?.startsWith("actions/checkout@"),
+  );
+  assert.equal(checkoutStep?.uses, "actions/checkout@v7");
+  assert.equal(
+    checkoutStep?.with?.ref,
+    "${{ github.event.pull_request.head.sha }}",
+    "The CI command checks the published head rather than a synthetic merge",
+  );
+  const nodeStep = steps.find((step) =>
+    step.uses?.startsWith("actions/setup-node@"),
+  );
+  assert.equal(nodeStep?.uses, "actions/setup-node@v7");
+  assert.equal(String(nodeStep?.with?.["node-version"]), "24");
   git("init", "-b", "main");
+  const baseline = commit("Public unfinished baseline");
+  assert.deepEqual(
+    workflowCheckNames(root, baseline),
+    ["source-check"],
+    "The required exact-head check is available to the installed planner",
+  );
   sourcePacket(
     "autonomy-first",
-    commit("Public unfinished baseline"),
+    baseline,
     ["node scripts/check.mjs qa", "factory-fixture-prerequisite"],
-    ["scripts/check.mjs"],
+    ["scripts/check.mjs", ".github/workflows/quality.yml"],
   );
   for (const phase of ["alpha", "beta", "join", "qa", "guide"]) {
     check(phase, false);
@@ -101,7 +149,13 @@ try {
     "autonomy-second",
     commit("Public completed first Objective baseline"),
     ["node scripts/check.mjs guide", "node scripts/check.mjs qa"],
-    ["scripts/check.mjs", "src/alpha.mjs", "src/beta.mjs", "src/summary.mjs"],
+    [
+      "scripts/check.mjs",
+      "src/alpha.mjs",
+      "src/beta.mjs",
+      "src/summary.mjs",
+      ".github/workflows/quality.yml",
+    ],
   );
   writeFileSync(
     join(root, "src/summary.mjs"),
@@ -115,7 +169,7 @@ try {
   );
   check("guide", true);
   console.log(
-    "Public fixture preflight passed: literal final commands and complete pinned sources match both baselines; incomplete implementation rejects; complete candidate passes; ordinary join permits mutation but independent QA rejects it. No runtime qualification claimed.",
+    "Public fixture preflight passed: planner-visible exact-head CI, literal final commands and complete pinned worker sources match both baselines; incomplete implementation rejects; complete candidate passes; ordinary join permits mutation but final QA rejects it. No runtime qualification claimed.",
   );
 } finally {
   // Only this process's temporary local mechanical fixture; no remote or runtime evidence.

@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { blameDecision } from "../dist/blame-decision.js";
 import { graphDigest } from "../dist/graph-amendments.js";
+import { parseFactoryState } from "../dist/state.js";
 import {
   assertRepairLedger,
   defaultAutonomy,
@@ -688,6 +689,10 @@ test("the stop's named commands, run as written while stopped, fix the predecess
     const stopped = f.stateOf();
     assert.equal(stopped.work.result.status, "done");
     assert.equal(stopped.work.next.status, "failed");
+    const originalCapture = structuredClone(stopped.work.next.failedValidation);
+    const captureDigest =
+      stopped.work.next.recovery.failure.validationCaptureDigest;
+    assert.equal(originalCapture.failureEvent, "item/next/validate/0");
     const commands = namedCommands(stopped.work.next.recovery.failure.decision);
     assert.deepEqual(
       commands.map((text) => text.split(" ")[1]),
@@ -712,6 +717,23 @@ test("the stop's named commands, run as written while stopped, fix the predecess
     assert.equal(f.amendments(), 1);
     assert.equal(fixed.work.fix.status, "done");
     assert.equal(fixed.work.next.status, "failed");
+    assert.deepEqual(fixed.work.next.failedValidation, originalCapture);
+    assert.equal(
+      fixed.work.next.recovery.failure.validationCaptureDigest,
+      captureDigest,
+    );
+    assert.notEqual(
+      graphDigest(fixed.graph),
+      originalCapture.graphRevisionDigest,
+    );
+    parseFactoryState(fixed, f.config.repository, 1);
+    // A diagnosis deferred to this actually accepted amendment would bind
+    // its decision to the new graph, while its commands remain original.
+    const deferred = structuredClone(fixed);
+    deferred.work.next.recovery.failure.predecessor.graphDigest = graphDigest(
+      deferred.graph,
+    );
+    parseFactoryState(deferred, f.config.repository, 1);
 
     // The blamed item starts over on the integrated head and passes.
     assert.match(await f.command(retry), /attempt/);
@@ -727,6 +749,14 @@ test("the stop's named commands, run as written while stopped, fix the predecess
     assert.equal(final.work.next.status, "done");
     assert.equal(final.finalValidation.passed, true);
     assert.equal(consumption(final).implementationRepairs, 0);
+    assert.deepEqual(
+      final.work.next.recovery.history[0].work.failedValidation,
+      originalCapture,
+    );
+    assert.equal(
+      final.work.next.recovery.history[0].failure.validationCaptureDigest,
+      captureDigest,
+    );
     // The fix owns the path the done predecessor owns.
     assert.deepEqual(
       final.graph.items

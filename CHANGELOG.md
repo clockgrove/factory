@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## Unreleased
 
+- Retain actual failed validation outcomes and checked configured repair authority in result, dependency, QA and final review evidence, while keeping historical failures separate from acceptance receipts (#851).
+
 - An Objective can refresh an existing exact stable npm or pnpm `packageManager` pin through a `Package manager update` section containing one backticked same-manager pin (#847). Planning, worker inputs, both deliveries, QA and final validation carry the exact source-bound authority. Final acceptance requires the declared pin; acceptance-command scripts and their lifecycle hooks remain fixed. Explicit update authority preserves security configuration and manager-hook files even without npm/pnpm validation commands. Host readiness checks the declared target version.
 
 - The worker brief tells the worker to run the Work Item's validation commands before finishing and fix what they report, using the repository's own formatter for format failures, and to name any command it cannot run instead of skipping it (#840). A formatting-only validation failure no longer costs a validation cycle and a repair.

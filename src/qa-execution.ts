@@ -70,6 +70,10 @@ export async function preflightItemEnvironment(args: {
     args.store,
     workspacePackageAdditions(args.objectiveBody ?? ""),
     packageManagerUpdate(args.objectiveBody ?? ""),
+    // These are subset readiness probes, not the candidate's accepted
+    // validation command map. Retain their original failure without
+    // claiming failed-result receipts for a different phase.
+    false,
   );
 }
 

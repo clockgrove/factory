@@ -10,6 +10,7 @@ import {
   assertRepairLedger,
   consumption,
   failureDigest,
+  itemEvent,
   repairScopes,
 } from "./repair-policy.js";
 import { ownsPath } from "./ownership.js";
@@ -70,6 +71,10 @@ import {
   reviewPacket,
 } from "./review-evidence.js";
 import type { AcceptancePending, FactoryState, WorkState } from "./state.js";
+import {
+  assertFailedValidationRecord,
+  type FailedValidationEvidence,
+} from "./failed-validation.js";
 import { deliveredHead } from "./delivery/branch-update.js";
 
 export interface CriterionEvidence {
@@ -1495,18 +1500,24 @@ function retainedRepairProof(
   const current = state.work[item.id]!;
   const correction = current.recovery?.correction;
   if (!correction) return undefined;
+  assertGraphRevisions(state);
   assertRepairLedger(state);
-  const prior = [...(current.recovery?.history ?? [])]
-    .reverse()
-    .find((entry) =>
-      correction.event
-        ? entry.failure?.event === correction.event
-        : entry.failure?.digest === correction.failureDigest,
-    );
+  const history = current.recovery?.history ?? [];
+  let priorIndex = -1;
+  for (const [index, entry] of history.entries())
+    if (entry.failure?.event === correction.event) priorIndex = index;
+  const prior = history[priorIndex];
   if (
     !prior?.failure ||
     prior.failure.digest !== failureDigest(prior.failure.detail) ||
-    !prior.work.attempt
+    prior.failure.digest !== correction.failureDigest ||
+    prior.failure.classification !== "implementation" ||
+    correction.kind !== "implementation" ||
+    !prior.work.attempt ||
+    prior.work.status !== "failed" ||
+    prior.failure.event !==
+      itemEvent(item.id, prior.work.step ?? "execute", priorIndex) ||
+    correction.event !== prior.failure.event
   )
     throw new Error(
       `Work Item ${item.id} correction lacks its retained failure`,
@@ -1524,32 +1535,89 @@ function retainedRepairProof(
   }
   const key = allowanceKey(correction.kind);
   const scopes = repairScopes(state, item.id);
+  const candidateRevision =
+    candidate.graphRevisionDigest ??
+    candidate.failedValidation?.graphRevisionDigest;
+  const candidateGraph =
+    state.graphRevisions?.find((entry) => entry.digest === candidateRevision)
+      ?.graph ??
+    (candidateRevision === state.planGraphDigest && !state.graphRevisions
+      ? state.graph
+      : undefined);
+  if (candidateRevision && !candidateGraph)
+    throw new Error(
+      `Work Item ${item.id} retained failure graph is unavailable`,
+    );
+  const derivedScopes = repairScopes(
+    {
+      ...state,
+      graph: candidateGraph ?? state.graph,
+      work: { ...state.work, [item.id]: { ...current, recovery: undefined } },
+    },
+    item.id,
+  );
+  const charged = state.charges?.[prior.failure.event!];
   // A wrong result is charged under its event; assertRepairLedger above
   // refuses a wrong result that lost its event.
   if (
     !state.autonomy.repairClasses.includes(correction.kind) ||
-    (prior.failure.classification === "implementation" &&
-      !state.charges?.[prior.failure.event ?? ""]?.allowances.includes(key))
+    !charged?.allowances.includes(key) ||
+    new Set(scopes).size !== scopes.length ||
+    new Set(charged.scopes).size !== charged.scopes.length ||
+    !isDeepStrictEqual([...scopes].sort(), [...derivedScopes].sort()) ||
+    !isDeepStrictEqual([...scopes].sort(), [...charged.scopes].sort()) ||
+    !/^[a-f0-9]{64}$/.test(state.configDigest)
   )
     throw new Error(
       `Work Item ${item.id} correction lacks charged consumption`,
     );
+  assertFailedValidationRecord(
+    candidate.failedValidation,
+    state,
+    item.id,
+    candidate,
+    prior.failure,
+  );
   return {
     controllerFacts: {
+      policyBinding: {
+        origin: "objective-autonomy-snapshot",
+        repository: state.repository,
+        objective: state.objective,
+        runId: state.runId,
+        configDigest: state.configDigest,
+        acceptedBaseCommitSha: state.baseSha,
+        failedGraphRevisionDigest: candidateRevision ?? null,
+        permittedRepairClasses: [...state.autonomy.repairClasses],
+        failureEvent: prior.failure.event,
+        chargedAllowances: [...charged.allowances],
+        chargedScopes: [...charged.scopes],
+      },
       failedAttempt: {
         attemptId: candidate.attempt,
         status: candidate.status,
         phase: candidate.step ?? null,
+        graphRevisionDigest: candidate.graphRevisionDigest ?? null,
+        executionBaseCommitSha: candidate.executionBaseSha ?? null,
+        resultBaseCommitSha: candidate.baseSha ?? null,
         resultCommitSha: candidate.changeRef ?? null,
         resultTreeSha: candidate.treeSha ?? null,
+        validation: candidate.failedValidation
+          ? { availability: "available", ...candidate.failedValidation }
+          : { availability: "unavailable" },
         failure: {
+          event: prior.failure.event,
           digest: prior.failure.digest,
+          validationCaptureDigest:
+            prior.failure.validationCaptureDigest ?? null,
           classification: prior.failure.classification,
           at: prior.failure.at,
           continuation: prior.failure.continuation,
         },
       },
       currentAttemptId: current.attempt ?? null,
+      currentExecutionBaseCommitSha: current.executionBaseSha ?? null,
+      currentResultBaseCommitSha: current.baseSha ?? null,
       currentResultCommitSha: current.changeRef ?? null,
       currentResultTreeSha: current.treeSha ?? null,
       repairClass: correction.kind,
@@ -2423,6 +2491,7 @@ export async function validateTree(
   lfsMembers: ValidationLfsMember[] = [],
   contentStore?: ContentStore,
   acceptedBaseSha?: string,
+  retainFailedValidation = true,
 ): Promise<ValidationEvidence> {
   const emptyCredentials = join(root, "empty-gh-config");
   try {
@@ -2464,7 +2533,34 @@ export async function validateTree(
       commands: [],
       ...(selectedLfs.length ? { selectedLfs } : {}),
     };
+    const partial: FailedValidationEvidence = {
+      commitSha: pinnedGit(worktree, "rev-parse", "HEAD"),
+      treeSha,
+      declaredCommands: [...commands],
+      commands: [],
+      reason: "command",
+      initialStatus: "clean",
+      postHydrationStatus: {
+        porcelainSha256: createHash("sha256")
+          .update(hydratedStatus)
+          .digest("hex"),
+        empty: hydratedStatus.length === 0,
+      },
+      postCommandStatus: "unchanged",
+      selectedLfsMembers: selectedLfs.length,
+      selectedLfsContentBinding: selectedLfs.length
+        ? "unavailable"
+        : "not-applicable",
+      subprocessOwnership: "settled",
+    };
+    const candidateStatus = () =>
+      pinnedGitRaw(worktree, "status", "--porcelain").equals(hydratedStatus) &&
+      pinnedGit(worktree, "rev-parse", "HEAD") === partial.commitSha &&
+      pinnedGit(worktree, "rev-parse", "HEAD^{tree}") === treeSha
+        ? ("unchanged" as const)
+        : ("modified" as const);
     for (const [index, check] of commands.entries()) {
+      const worktreeStatusBefore = candidateStatus();
       const started = Date.now();
       let stdout = "";
       let stderr = "";
@@ -2502,6 +2598,23 @@ export async function validateTree(
         durationMs: Date.now() - started,
         output,
       });
+      if (hasUnresolvedSubprocesses())
+        throw new Error(
+          "Validation subprocess ownership unresolved; checkout retained",
+        );
+      partial.postCommandStatus = candidateStatus();
+      partial.commands.push({
+        index,
+        command: check,
+        passed: result.status === 0,
+        exitCode: result.status,
+        treeSha,
+        worktreeStatusBefore,
+        worktreeStatusAfter: partial.postCommandStatus,
+        ...(result.stoppedLeftovers && {
+          stoppedLeftovers: result.stoppedLeftovers,
+        }),
+      });
       if (result.status !== 0) {
         const detail = `Validation command failed (${result.status}): ${check}: ${output}`;
         // The dependency install is the controller's own bootstrap step. When
@@ -2514,7 +2627,10 @@ export async function validateTree(
           !dependencyInputsChanged(worktree, acceptedBaseSha, commit)
         )
           throw new StepFault(transient(detail, false));
-        throw new CandidateValidationFailure(detail);
+        throw new CandidateValidationFailure(
+          detail,
+          retainFailedValidation ? partial : undefined,
+        );
       }
       evidence.commands.push({
         index,
@@ -2535,7 +2651,8 @@ export async function validateTree(
       throw new Error(
         "Validation subprocess ownership unresolved; checkout retained",
       );
-    if (!pinnedGitRaw(worktree, "status", "--porcelain").equals(hydratedStatus))
+    if (candidateStatus() !== "unchanged") {
+      partial.reason = "worktree-mutation";
       throw new CandidateValidationFailure(
         `Validation command modified the result tree: ${validationMutationDetail(
           hydratedPaths,
@@ -2547,7 +2664,9 @@ export async function validateTree(
             "--untracked-files=all",
           ),
         )}`,
+        retainFailedValidation ? partial : undefined,
       );
+    }
     evidence.worktreeObservation = {
       treeSha,
       initialStatus: "clean",
@@ -2950,6 +3069,7 @@ export async function validateWorkItem(
   contentStore?: ContentStore,
   workspacePackageAdditions: readonly string[] = [],
   packageManagerUpdate?: string,
+  retainFailedValidation = true,
 ): Promise<ValidationEvidence> {
   assertPinnedNpmScripts(
     checkout,
@@ -2976,5 +3096,6 @@ export async function validateWorkItem(
     lfsMembers,
     contentStore,
     acceptedBaseSha,
+    retainFailedValidation,
   );
 }

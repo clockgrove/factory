@@ -224,12 +224,24 @@ test("settled dirty refusals retain structured relative tracked, generated, spec
         1,
       );
       const state = {
+        repository: "example/failed-worktree",
+        objective: 1,
+        runId: "failed-worktree-run",
+        configDigest: "a".repeat(64),
+        baseSha: target.baseSha,
         autonomy: defaultAutonomy,
-        graph: { items: [{ id: "result", dependencies: [] }] },
+        graph: {
+          items: [
+            { id: "result", dependencies: [], validation: [{ command }] },
+          ],
+        },
         work: {
           result: {
             status: "failed",
             step: "validate",
+            attempt: "failed-worktree-attempt",
+            executionBaseSha: target.baseSha,
+            baseSha: target.baseSha,
             changeRef: target.baseSha,
             treeSha: target.treeSha,
             usage: { availability: "unavailable" },
@@ -566,6 +578,19 @@ test("selected LFS hydration records an honest nonempty baseline and unchanged p
       await assert.rejects(
         validate(["printf bad > asset.bin"], selected, store),
         /could not restore selected LFS bytes/,
+      );
+      await assert.rejects(
+        validate(["printf bad > asset.bin; exit 23"], selected, store),
+        (error) => {
+          assert.ok(error instanceof CandidateValidationFailure);
+          const failed = error.failedValidation;
+          assert.equal(failed.commands[0].exitCode, 23);
+          assert.equal(failed.postHydrationStatus.empty, false);
+          assert.equal(failed.postCommandStatus, "unchanged");
+          assert.equal(failed.selectedLfsMembers, 1);
+          assert.equal(failed.selectedLfsContentBinding, "unavailable");
+          return true;
+        },
       );
     },
     { "base.txt": "public baseline\n" },

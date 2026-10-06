@@ -48,7 +48,7 @@ Then run the setup skill, or `factory setup`, as the README describes. Rules:
 
 ## Checks
 
-Before submitting a code change, run:
+Check a completed batch with the relevant commands:
 
 ```sh
 npm run lint
@@ -65,7 +65,7 @@ The [Quality workflow](.github/workflows/quality.yml) runs lint, format and noti
 
 `npm ci` installs a pre-commit hook (`.githooks/pre-commit`). It formats staged `.ts`, `.mts`, `.js`, `.mjs` and `.json` files with Biome, re-stages them, and runs `biome lint` on them. It does not run `tsc`, the directive check, or Prettier (Markdown, YAML, `package-lock.json`), so run the commands above before you push.
 
-During development, build and run the affected integration file directly:
+For an affected integration check after the batch, build and run its file directly:
 
 ```sh
 npm run build
@@ -74,7 +74,7 @@ node --import ./test/isolate-env.mjs --test test/git-registry-lock.test.mjs
 
 Keep coverage small and tied to demonstrated failures. Reuse an existing real workflow before adding a test. Do not add unit tests, mocks, fake services, scripted provider responses, fault matrices or fixture frameworks. CI runs the complete small suite; avoid repeatedly running it locally when the affected check already passed and nothing changed.
 
-For documentation-only changes, check the relevant commands, links and formatting. Real provider, GitHub delivery and restart acceptance runs separately on an approved disposable target under the [release procedure](docs/RELEASING.md). Local integration checks cannot establish live acceptance.
+For documentation-only changes, check the relevant commands, links and formatting. Real provider, GitHub delivery and staging acceptance comes from the phase's approved adopter outcomes under the [release procedure](docs/RELEASING.md). Review those outcomes once the phase is complete. A disposable public fixture can diagnose a concrete failure; it is not a prerequisite to adopter work. Local integration checks cannot establish live acceptance.
 
 ## Pull requests
 

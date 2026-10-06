@@ -1194,7 +1194,7 @@ export function renderStatusText(
     if (review?.findings?.length || review?.failure) {
       lines.push(
         "",
-        `Plan handoff (${review.status}) — no Work Items are admitted while planning is blocked:`,
+        `Plan handoff (${review.status})${["needs-human", "refused"].includes(review.status) ? " — planning is blocked; no Work Items are admitted" : " — retained review findings; readiness is not established by this text"}:`,
       );
       for (const finding of review.findings ?? []) {
         lines.push(

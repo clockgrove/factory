@@ -45,6 +45,13 @@ export async function setupTarget(
 ): Promise<Record<string, unknown>> {
   const background = args.includes("--background"),
     configOnly = args.includes("--config-only");
+  const repeatedArgs = args.filter(
+    (_, index) => args[index] !== "--config" && args[index - 1] !== "--config",
+  );
+  const verification = configurationCommand(
+    `factory setup ${repeatedArgs.map((value) => `'${value.replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
+    configPath,
+  );
   const result: Record<string, unknown> = {
     status: "blocked",
     mode: background ? "background" : "config-only",
@@ -308,8 +315,7 @@ export async function setupTarget(
       detail: redactDiagnosticDetail(
         error instanceof Error ? error.message : String(error),
       ),
-      continuation:
-        "Preserve completed stages and retained state. Resolve the stated prerequisite (`factory status` shows the service and queue), then repeat `factory setup --background`.",
+      continuation: `Preserve completed stages and retained state. Resolve the stated prerequisite, then repeat ${verification}.`,
     };
     return result;
   } finally {
@@ -360,10 +366,7 @@ export async function setupTarget(
       ],
     ];
     const reached = stages.findIndex(([name]) => name === stage);
-    const verification = configurationCommand(
-      `factory setup --${background ? "background" : "config-only"}`,
-      configPath,
-    );
+
     result.prerequisites = stages.map(([name, guidance], index) => ({
       stage: name,
       status:
@@ -375,7 +378,7 @@ export async function setupTarget(
               ? "blocked"
               : "not-checked",
       guidance,
-      verification: `${verification} (retain the original setup options and private credential bindings)`,
+      verification,
     }));
     result.independentWork =
       "This handoff admits no Objective. Configuration-only starts nothing; blocked setup does not establish a ready service. Already admitted work retains its own ownership, readiness and limits.";

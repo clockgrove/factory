@@ -1,8 +1,17 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { finalObjectiveCommands, type PlanCandidate } from "../compiler.js";
+import {
+  finalObjectiveCommands,
+  verifyPlanCandidate,
+  type PlanCandidate,
+} from "../compiler.js";
 import type { FactoryConfig } from "../config.js";
-import type { ExecutionDriver, GitHubGateway } from "../contracts.js";
+import { assertApprovedPlaybookAdmission } from "../contracts.js";
+import type {
+  ApprovedPlaybookAdmission,
+  ExecutionDriver,
+  GitHubGateway,
+} from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
 import {
   executionProfileChoices,
@@ -152,8 +161,37 @@ export function activateProjectedObjective(args: {
   } = args;
   const { baseSha, capacity } = preparation;
   const graph = plan.graph;
+  verifyPlanCandidate(
+    plan,
+    objective,
+    issue.body,
+    baseSha,
+    config.checkout,
+    installationConfigDigest,
+    false,
+    capacity.concurrency,
+  );
+  const approvedPlaybookAdmission: ApprovedPlaybookAdmission | undefined =
+    plan.approvedPlaybookPin === undefined
+      ? undefined
+      : {
+          approvedPlaybookPin: structuredClone(plan.approvedPlaybookPin),
+          configDigest: plan.configDigest,
+          graphDigest: plan.graphDigest,
+          packetDigest: plan.packetDigest,
+          reviewDigest: plan.reviewDigest,
+          sourcePacketDigest: preparation.sourcePacketDigest!,
+        };
+  assertApprovedPlaybookAdmission(
+    preparation.approvedPlaybookPin,
+    approvedPlaybookAdmission,
+    installationConfigDigest,
+    plan.graphDigest,
+    preparation.approvedPlaybookPin !== undefined,
+  );
   return {
     schemaVersion: 7,
+    ...(approvedPlaybookAdmission ? { approvedPlaybookAdmission } : {}),
     ...(preparation.approvedPlaybookPin !== undefined
       ? { approvedPlaybookPin: preparation.approvedPlaybookPin }
       : {}),

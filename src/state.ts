@@ -1,4 +1,7 @@
-import { assertApprovedPlaybookPin } from "./contracts.js";
+import {
+  assertApprovedPlaybookAdmission,
+  assertApprovedPlaybookPin,
+} from "./contracts.js";
 import { objectiveCandidate } from "./qa.js";
 import { assertNativePrerequisites } from "./native-prerequisite-evidence.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
@@ -260,6 +263,7 @@ export interface FactoryState {
   /** Immutable authenticated admission facts, bound to prerequisitesDigest. */
   prerequisites?: import("./contracts.js").PlanningPrerequisites;
   schemaVersion: 7;
+  approvedPlaybookAdmission?: import("./contracts.js").ApprovedPlaybookAdmission;
   approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
   repository: string;
   objective: number;
@@ -507,6 +511,13 @@ export function parseFactoryState(
   if (Object.hasOwn(state, "approvedPlaybookPin"))
     assertApprovedPlaybookPin(state.approvedPlaybookPin);
   sha(state.planGraphDigest, "planGraphDigest", 64);
+  assertApprovedPlaybookAdmission(
+    state.approvedPlaybookPin,
+    state.approvedPlaybookAdmission,
+    state.configDigest,
+    state.planGraphDigest,
+    Object.hasOwn(state, "approvedPlaybookPin"),
+  );
   validateCapacity(state.capacity as Capacity);
   if (state.prerequisitesDigest !== undefined)
     sha(state.prerequisitesDigest, "prerequisitesDigest", 64);

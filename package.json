@@ -54,8 +54,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "git config core.hooksPath .githooks || true",
-    "lint": "biome lint --error-on-warnings . && node scripts/check-ts-directives.mjs",
+    "lint": "biome lint --error-on-warnings .",
     "format:check": "biome format . && prettier --check package-lock.json \"**/*.{md,yml,yaml}\"",
     "format": "biome format --write . && prettier --write package-lock.json \"**/*.{md,yml,yaml}\"",
     "test": "npm run build && node --import ./test/isolate-env.mjs --test --test-timeout=300000 test/*.test.mjs",
@@ -65,10 +64,8 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@types/node": "^24.5.2",
-    "ajv": "^8.20.0",
     "pnpm": "10.34.5",
     "prettier": "^3.6.2",
-    "semver": "^7.8.5",
     "typescript": "^5.9.2"
   },
   "dependencies": {

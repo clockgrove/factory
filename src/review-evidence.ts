@@ -144,7 +144,7 @@ export function renderReviewPacketId(packet: ReviewPacket): string {
   return JSON.stringify({ packetId: packet.id });
 }
 
-/** Bounds grow numerically, never by enumerating every criterion/evidence identity. */
+/** Packet-local choices; passing findings can cite only complete evidence. */
 export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
   const index = (length: number) => ({
     type: "integer",
@@ -152,43 +152,61 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
     // An empty packet has no valid selection; the decoder also checks membership.
     maximum: Math.max(0, length - 1),
   });
+  const finding = (
+    verdicts = ["pass", "needs-human", "refuse"],
+    evidenceIndex: unknown = index(packet.evidence.length),
+  ) => ({
+    type: "object",
+    properties: {
+      ...(graph
+        ? {}
+        : {
+            criterionIndex: index(packet.criteria.length),
+            verdict: {
+              type: "string",
+              enum: verdicts,
+            },
+          }),
+      ...(graph
+        ? { itemIds: { type: "array", items: { type: "string" } } }
+        : {}),
+      evidenceIndices: {
+        type: "array",
+        minItems: 1,
+        items: evidenceIndex,
+      },
+      detail: { type: "string" },
+      question: { type: "string" },
+    },
+    required: [
+      ...(graph ? ["itemIds"] : ["criterionIndex", "verdict"]),
+      "evidenceIndices",
+      "detail",
+      "question",
+    ],
+    additionalProperties: false,
+  });
+  const completeIndices = packet.evidence.flatMap((entry, index) =>
+    entry.complete ? [index] : [],
+  );
+  const items =
+    graph || completeIndices.length === packet.evidence.length
+      ? finding()
+      : completeIndices.length
+        ? {
+            anyOf: [
+              finding(["pass"], { type: "integer", enum: completeIndices }),
+              finding(["needs-human", "refuse"]),
+            ],
+          }
+        : finding(["needs-human", "refuse"]);
   return {
     type: "object",
     properties: {
       packetId: { type: "string", enum: [packet.id] },
       findings: {
         type: "array",
-        items: {
-          type: "object",
-          properties: {
-            ...(graph
-              ? {}
-              : {
-                  criterionIndex: index(packet.criteria.length),
-                  verdict: {
-                    type: "string",
-                    enum: ["pass", "needs-human", "refuse"],
-                  },
-                }),
-            ...(graph
-              ? { itemIds: { type: "array", items: { type: "string" } } }
-              : {}),
-            evidenceIndices: {
-              type: "array",
-              minItems: 1,
-              items: index(packet.evidence.length),
-            },
-            detail: { type: "string" },
-            question: { type: "string" },
-          },
-          required: [
-            ...(graph ? ["itemIds"] : ["criterionIndex", "verdict"]),
-            "evidenceIndices",
-            "detail",
-            "question",
-          ],
-          additionalProperties: false,
-        },
+        items,
       },
     },
     required: ["packetId", "findings"],

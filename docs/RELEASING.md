@@ -24,15 +24,16 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
 
    This updates `package.json`, `package-lock.json`, the Codex and Claude Code plugin manifests and both marketplace refs, and adds a `## X.Y.Z` heading to `CHANGELOG.md`. Replace its TODO with the user-visible changes. If production dependencies changed, run `npm run notices`.
 
-2. **Merge.** Open a pull request. It merges after review and a green Quality check, like any other change.
+2. **Review.** Open a pull request and require review and a green Quality check on its exact head.
 
-3. **Qualify minor versions.** Before tagging `X.Y.0`, complete the [live qualification](#live-qualification) on the frozen packed artifact from the merged commit. Retain its checksum and installation for the final distribution comparison.
+3. **Qualify minor versions.** Before merging `X.Y.0`, run the installed-package checks locally (Quality skips them on pull requests), then complete the [live qualification](#live-qualification) and the release issue's required adopter gates on the frozen packed artifact from that reviewed PR head. Public qualification precedes adopter qualification. Retain the source commit, tree, archive checksum and installation for the final distribution comparison. Keeping the version PR unmerged until these gates pass leaves the marketplaces on an existing release tag.
 
-4. **Tag.** On the merged commit:
+4. **Merge.** Merge through the normal protected path after the required qualification gates pass. For a qualified minor version, verify that the merged tree equals the retained qualified tree before tagging.
+
+5. **Tag.** Tag that verified merged commit:
 
    ```sh
-   git switch main && git pull --ff-only
-   git tag -a vX.Y.Z -m "Factory X.Y.Z"
+   git tag -a vX.Y.Z MERGED_COMMIT_SHA -m "Factory X.Y.Z"
    git push origin vX.Y.Z
    ```
 
@@ -56,7 +57,7 @@ For a live-qualified minor version, also compare the downloaded archive byte for
 Deterministic tests run on every release. A live qualification, a real Objective against a disposable public target with real models and GitHub delivery, is required for **minor** versions (`X.Y.0`) and optional for patches. Use the [autonomous target](../test/fixtures/autonomous-target/) with its [first](../test/fixtures/objectives/autonomy-first.md) and [second](../test/fixtures/objectives/autonomy-second.md) Objectives ([#519](https://github.com/clockgrove/factory/issues/519)), and link the result from the release notes. Historical failed qualifications remain unaccepted; a corrected successor needs a concrete diagnosis and its own recorded finite bounds.
 
 1. Before creating the target or calling a provider, run `npm run build && node test/autonomy-fixture-preflight.mjs`. It checks the fixture's commands, planner-visible CI check and complete pinned worker sources without model calls. Freeze the source/tree/archive, installed path, fixture bytes, owner, acceptance, providers, concurrency and finite per-run repair limits. Inspect the actual installed compiler, review and worker inputs, exact-tree validator observations, command authority, evidence grounding and hydration. Model-free checks do not accept a live Objective.
-2. Pack the merged candidate with the Release workflow's locked dependency/build toolchain and install it offline outside a fresh public target copied from the fixture. Keep this artifact for both Objectives and later distribution verification. Supply the external `factory-fixture-prerequisite` executable on the supervisor's PATH before planning, with its operator-owned condition unavailable. The tool must be present even while the condition fails; it is an acceptance probe, not a coding-readiness prerequisite.
+2. Pack the reviewed exact PR candidate with the Release workflow's locked dependency/build toolchain and install it offline outside a fresh public target copied from the fixture. Keep this artifact for both Objectives and later distribution verification. Supply the external `factory-fixture-prerequisite` executable on the supervisor's PATH before planning, with its operator-owned condition unavailable. The tool must be present even while the condition fails; it is an acceptance probe, not a coding-readiness prerequisite.
 3. Run `factory setup --background --repository OWNER/REPO --checkout ABSOLUTE_TARGET --concurrency 2`. Verify explicit service consent, readiness, the exact manager/controller owner and a successful authenticated service observation. With an empty queue, it must make no model calls. Admit only the first Objective with `factory queue add FIRST`.
 4. After a worker starts, perform one supported controlled restart: `factory supervisor stop`, then `factory queue resume` and `factory supervisor start`. Retain and compare the same run, attempt, worker and existing issue/PR identities; the restart must not duplicate submission.
 5. Retain beta's actual failed candidate and prerequisite receipt. Restore the operator-owned condition, then submit `factory repair --objective FIRST --proposal FILE` with a diagnosis bound to its failure digest. This permits one new beta implementation attempt through the current supported repair contract, preserving the original failure, candidate, identities, usage and consumed allowance. It is distinct from restart identity preservation. If the service exited for the decision, continue with `factory queue resume` and `factory supervisor start`. Do not repeat an unchanged failure or manually accept it.

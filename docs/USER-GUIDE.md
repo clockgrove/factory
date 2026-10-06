@@ -49,6 +49,8 @@ Remote execution (`execution.kind: "managed-agent"`) runs Work Items in a provid
 
 Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). An Objective has four sections. Keep it to one page.
 
+The Markdown template contains the four core sections. Add an optional authority section only for a change this Objective actually requests; its examples are syntax guidance, not default package or version choices. The issue form keeps those fields optional.
+
 - **Outcome:** one paragraph: what changes, for whom, and what is out of scope.
 - **Acceptance:** one observable fact per bullet. A bullet that is exactly one backticked command means that command must pass on the integrated result. "Run the tests" is not a command. Put a path or other code span inside a sentence, not as a bullet of its own.
 - **Sources:** files or `path#Exact Heading` sections workers need, one per bullet. Each costs tokens, so keep the list short.

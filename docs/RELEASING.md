@@ -58,9 +58,7 @@ For a minor version, also compare the downloaded archive byte for byte with the 
 
 The release issue defines the required phase outcomes and their order. Complete those outcomes with the approved providers, targets, substantive acceptance and resource limits. Keep exact candidate identities, real results, failures, usage and consumed allowances. Local checks and historical accepted work do not substitute for the current outcome's acceptance.
 
-For v0.2.0, finish B (#516), C (#517), D (#518), G (#520), H (#522) and I (#523), then perform one completed-batch evaluation and independent review under E (#519), then publish and verify the release under #521. Adopter staging deployment and staging qualification follow the release; they are not a pre-release gate. The authoritative exits are recorded in #519 and #521.
-
-Batch corrections before the phase review. Repeat an affected failed check after a demonstrated correction; do not add a separate qualification cycle for every fix. Preserve terminal public runs and their accounting without reviving them or treating them as successful evidence. Use an approved target for a concrete reproduction when needed.
+Batch corrections before the milestone review, and repeat a failed check only after a demonstrated correction. Preserve terminal runs and their accounting without reviving them or treating them as successful evidence. The release issue holds the current roadmap and acceptance evidence; do not duplicate that tracking here.
 
 ## Version numbers
 

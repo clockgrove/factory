@@ -88,4 +88,4 @@ Preserve these boundaries:
 
 Factory contributors work directly on this repository. To use Factory for work in another repository, follow the [README](README.md) and the installed `director` and `setup` skills. Target owners can copy the [Objective issue form](docs/templates/objective.yml) into their own repository's `.github/ISSUE_TEMPLATE/` directory; it is not a bug-report form for Factory.
 
-See the [governance policy](GOVERNANCE.md), [code of conduct](CODE_OF_CONDUCT.md), [support guide](SUPPORT.md), and [security policy](SECURITY.md) for participation and reporting. Factory uses the [MIT license](LICENSE).
+For help or bug reports, use the issue tracker and include the Factory version, operating system, command, expected and observed behavior, and a minimal reproduction with redacted output. Keep discussion respectful and private content private. Report suspected vulnerabilities through the [security policy](SECURITY.md). Factory uses the [MIT license](LICENSE).

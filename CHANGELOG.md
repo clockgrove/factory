@@ -4,6 +4,8 @@ This file records public releases of Factory. Release artifacts and provenance a
 
 ## 0.2.0 — 2026-10-06
 
+- A planning diagnosis that asks an operator question no longer spends a planning revision before any engineering correction is applied (#846). Accepting the exact reviewed plan leaves that revision available for an independently reviewed ownership-discovery amendment. Existing recorded charges and limits remain unchanged.
+
 - Replace unit and mock-based verification with a small real integration suite covering Git, processes, disk content, LFS, secret scanning and offline package installation. Remove the fake providers, scripted workers, fault matrices and eight-way test sharding; contributor instructions require this smaller pattern (#858).
 - Automatic implementation repair now checks structured readiness against retained failed-command outcomes and complete owned candidate evidence (#856). Unmet or unknown operator prerequisites stop with a question and admit no worker. Saved corrections preserve their original failure, charge and checked input binding across restart; legacy missing readiness stays unavailable, and operator proposals remain declared corrections.
 
@@ -14,7 +16,7 @@ This file records public releases of Factory. Release artifacts and provenance a
 - Foreground runs of different Objectives can run in parallel, with one owner per Objective; the background service queue remains sequential (#810).
 - A failed frozen-lockfile dependency install repeats as a transient failure when the candidate left every package manifest, pnpm lockfile and workspace declaration unchanged from the accepted base (#839). Changed inputs keep it an implementation failure, so an environmental outage does not spend an implementation repair.
 - A result or final review stop lists every criterion that needs an operator decision (#836). Answer each with `factory decide --criterion`, without rerunning to discover the next question.
-- The public qualification fixture and release procedure require a three-item DAG with an exact-head PR check, one restart, a retained prerequisite failure and one supported beta repair, then idle observation and explicit second admission on the same installed artifact (#519, #521). Minor-release qualification precedes tag-triggered publication and final public archive comparison.
+- Contributor and release procedures batch diagnosed fixes and accept the completed phase through its actual adopter outcomes, required staging, exact CI and independent phase review (#519, #521). A separate public fixture qualification is optional diagnosis. Focused review for credentials, isolation and persisted state, immutable tags, provenance and final public archive comparison remain required.
 
 - An Objective can refresh an existing exact stable npm or pnpm `packageManager` pin through a `Package manager update` section containing one backticked same-manager pin (#847). Planning, worker inputs, both deliveries, QA and final validation carry the exact source-bound authority. Final acceptance requires the declared pin; acceptance-command scripts and their lifecycle hooks remain fixed. Explicit update authority preserves security configuration and manager-hook files even without npm/pnpm validation commands. Host readiness checks the declared target version.
 

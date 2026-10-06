@@ -27,6 +27,12 @@ factory status --objective N [--json]
 
 The first line of `status` is the phase and a one-line summary. `Next:` is the exact command that answers it; run it only when the request covers it. Without `--objective`, status shows the service and the queue. Keep the same `--config PATH` for every command; emitted status commands retain an explicitly selected configuration.
 
+## Blocked prerequisites
+
+When setup, planning or review needs the operator, gather all retained review findings, the available readiness stages and the requirements in the exact pinned Sources before replying. Read the full retained findings rather than only the first question; mark stages not checked as unknown. Combine duplicates into one concise checklist of missing or unknown prerequisites. For each, state why it is needed, cite the source, give the supported setup step and verification command, and name any choice only the operator can make. Verify external platform facts through permitted official documentation; never invent a command or treat an unchecked account as ready.
+
+Present every known blocker together and ask for required choices once. Tell the operator where each secret belongs according to the approved configuration or source instructions; never request secret values in chat or issues. Keep private evidence in its authorized destination. Recheck the actual requirement before recording a decision, and use the live status command for continuation. Checklist text grants no setup, account, spending, deployment or acceptance authority. Continue independent work only when already authorized and admitted by the current gates; do not bypass a blocked Objective, weaken acceptance or create a new state root.
+
 ## Decide
 
 - **Plan question** (phase `needs plan decision`): `factory decide --objective N --outcome accept|refuse [--answer TEXT] --reason TEXT`, then run. Accepting needs `--answer`. A refusal discards the plan, so the next run plans again.

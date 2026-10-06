@@ -19,16 +19,19 @@ Objective issue
 
 Each step has one owner in the code:
 
-| Step     | Code                                          | What it does                                                                                               |
-| -------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Compile  | `src/compiler.ts`, `src/compiler-wire.ts`     | Pins the Objective and cited sources, asks the planning model for a graph, validates it, runs plan review. |
-| Project  | `src/github.ts`                               | Creates or reconciles Work Item issues, labels, sub-issues and dependencies.                               |
-| Schedule | `src/scheduler.ts`, `src/phase-admission.ts`  | Orders the graph, finds ready items, reserves capacity per phase.                                          |
-| Execute  | `src/execution/`                              | Runs one attempt through an `ExecutionDriver` and collects an exact change.                                |
-| Validate | `src/validation.ts`, `src/review-evidence.ts` | Runs validation commands on the result tree and asks an independent reviewer to judge acceptance criteria. |
-| Deliver  | `src/delivery/`                               | Publishes and merges pull requests, one at a time or as a native linear stack.                             |
-| Finalize | `src/completion.ts`, `src/qa.ts`              | Validates the integrated head, checks coverage of every criterion, seals acceptance, closes issues.        |
-| Run      | `src/runner.ts`                               | Coordinates the steps, owns the state snapshot and handles restart, pause and cancel.                      |
+| Step     | Code                                                                       | What it does                                                                                                                 |
+| -------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Compile  | `src/compiler.ts`, `src/compiler-wire.ts`                                  | Pins the Objective and cited sources, asks the planning model for a graph, validates it, runs plan review.                   |
+| Project  | `src/github.ts`                                                            | Creates or reconciles Work Item issues, labels, sub-issues and dependencies.                                                 |
+| Schedule | `src/scheduler.ts`, `src/phase-admission.ts`                               | Orders the graph, finds ready items, reserves capacity per phase.                                                            |
+| Execute  | `src/execution/`                                                           | Runs one attempt through an `ExecutionDriver` and collects an exact change.                                                  |
+| Validate | `src/validation.ts`, `src/validation-evidence.ts`                          | Runs validation commands on the exact result tree and validates their receipts.                                              |
+| Review   | `src/result-evidence.ts`, `src/result-review.ts`, `src/review-evidence.ts` | Builds bound result evidence and asks an independent reviewer to judge acceptance criteria.                                  |
+| Deliver  | `src/delivery/`                                                            | Publishes and merges pull requests, one at a time or as a native linear stack.                                               |
+| Finalize | `src/runner/finalization.ts`, `src/completion.ts`, `src/qa.ts`             | Validates the integrated head, checks coverage of every criterion, seals acceptance, closes issues.                          |
+| Run      | `src/runner.ts`, `src/runner/`                                             | Coordinates planning, projection, execution and finalization; owns the state snapshot and handles restart, pause and cancel. |
+
+The runner's phase bodies live in `planning.ts`, `projection.ts`, `execution.ts` and `finalization.ts`. Shared controller ownership and mutation-lock helpers live in `ownership.ts`; the existing public runner and validation exports stay at their original paths. This split adds no lifecycle layer or state store.
 
 ## Planning
 

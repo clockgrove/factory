@@ -11,7 +11,7 @@
       "source": {
         "source": "github",
         "repo": "clockgrove/factory",
-        "ref": "v0.2.0-rc.4"
+        "ref": "v0.2.0"
       },
       "description": "Run source-grounded development Objectives in a target repository.",
       "category": "development"

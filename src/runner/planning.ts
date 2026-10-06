@@ -99,7 +99,7 @@ export async function planObjective(
     const issue = await services.github.objective(objective);
     const baseSha = git(config.checkout, "rev-parse", "HEAD");
     const advisory = approvedPlaybook(config.repository);
-    bindPlanningPlaybook(
+    const planningModel = bindPlanningPlaybook(
       services.planningModel,
       config.repository,
       advisory ? { version: advisory.version, digest: advisory.digest } : null,
@@ -109,7 +109,7 @@ export async function planObjective(
       issue.body,
       baseSha,
       config.checkout,
-      services.planningModel,
+      planningModel,
       factoryConfigDigest(config),
       diagnostics.modelObserver({ scopeId: planningScopeId }),
       executionProfileChoices(config),
@@ -117,7 +117,7 @@ export async function planObjective(
       {
         state: {
           autonomy: resolveAutonomy(config.autonomy),
-          approvedPlaybookPin: services.planningModel.approvedPlaybookPin,
+          approvedPlaybookPin: planningModel.approvedPlaybookPin,
         },
         save: () => undefined,
       },
@@ -255,7 +255,6 @@ export async function prepareObjective(args: {
     issue,
     path,
     diagnostics,
-    planningModel,
     github,
     owner,
     installationConfigDigest,
@@ -264,6 +263,7 @@ export async function prepareObjective(args: {
     reportRunStatus,
   } = args;
   let { preparation } = args;
+  let planningModel = args.planningModel;
   // A new plan starts from the default branch as origin has it now; the
   // checkout's own refs are only as new as its last fetch. A preparation
   // keeps the base it recorded, like every later run of the Objective.
@@ -279,15 +279,14 @@ export async function prepareObjective(args: {
   );
   assertNoEarlierVersion(config.repository);
   const localExecutables = preflightObjective(config, issue.body, baseSha);
-  const advisory = preparation
-    ? undefined
-    : approvedPlaybook(config.repository);
   const approvedPlaybookPin = preparation
     ? preparation.approvedPlaybookPin
-    : advisory
-      ? { version: advisory.version, digest: advisory.digest }
-      : null;
-  bindPlanningPlaybook(planningModel, config.repository, approvedPlaybookPin);
+    : (planningModel.approvedPlaybookPin ?? null);
+  planningModel = bindPlanningPlaybook(
+    planningModel,
+    config.repository,
+    approvedPlaybookPin,
+  );
   const sourcePacketDigest = preparationSourceDigest(
     planningSources(issue.body, baseSha, config.checkout),
     prerequisites,

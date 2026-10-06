@@ -4,7 +4,7 @@ import { executionContext } from "./execution/checkpoint.js";
 import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
 import { applyWorkCorrection } from "./work-repair.js";
 import { operatorName } from "./operator.js";
-import { observeRetrospective } from "./learning.js";
+import { approvedPlaybook, observeRetrospective } from "./learning.js";
 import {
   amendmentBlocksDispatch,
   submitAmendment,
@@ -289,11 +289,20 @@ export async function runObjective(
   let snapshot: ContinuationState | undefined;
   try {
     snapshot = readContinuation(config.repository, objective);
-    bindPlanningPlaybook(
-      services.planningModel,
-      config.repository,
-      snapshot?.approvedPlaybookPin,
-    );
+    const current = snapshot ? undefined : approvedPlaybook(config.repository);
+    const pin = snapshot
+      ? snapshot.approvedPlaybookPin
+      : current
+        ? { version: current.version, digest: current.digest }
+        : null;
+    services = {
+      ...services,
+      planningModel: bindPlanningPlaybook(
+        services.planningModel,
+        config.repository,
+        pin,
+      ),
+    };
   } catch (error) {
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);
     throw error;

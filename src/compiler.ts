@@ -159,11 +159,11 @@ export function bindPlanningPlaybook(
   model: PlanningModel,
   repository: string,
   pin: ApprovedPlaybookPin | undefined,
-): void {
+): PlanningModel {
   if (pin !== undefined) assertApprovedPlaybookPin(pin);
-  model.approvedPlaybookPin = pin;
+  let playbook: ApprovedPlaybook | undefined;
   try {
-    model.approvedPlaybook = readPinnedPlaybook(repository, pin ?? null);
+    playbook = readPinnedPlaybook(repository, pin ?? null);
   } catch (error) {
     throw attachFault(
       error instanceof Error
@@ -176,6 +176,25 @@ export function bindPlanningPlaybook(
       },
     );
   }
+  if (model instanceof StructuredPlanningModel)
+    return model.withApprovedPlaybook(playbook, pin);
+  if (playbook)
+    throw attachFault(
+      new Error("Configured model cannot carry scoped approved advice"),
+      {
+        kind: "config",
+        detail: "Configured model cannot carry scoped approved advice",
+        fix: "Use a configured structured planning provider for learned advisory input",
+      },
+    );
+  return {
+    approvedPlaybookPin: pin,
+    generateStructured: model.generateStructured.bind(model),
+    reviewGraph: model.reviewGraph.bind(model),
+    ...(model.reviewResult
+      ? { reviewResult: model.reviewResult.bind(model) }
+      : {}),
+  };
 }
 
 export function paidModel(
@@ -1109,6 +1128,20 @@ export class StructuredPlanningModel implements PlanningModel {
       throw attachFault(error, fault);
     }
   }
+  /** One Objective gets its own immutable advice selection; transports may be shared. */
+  withApprovedPlaybook(
+    playbook: ApprovedPlaybook | undefined,
+    pin: ApprovedPlaybookPin | undefined,
+  ): StructuredPlanningModel {
+    const scoped = new StructuredPlanningModel(this.transport, {
+      reviewCapacityRetryDelaysMs: this.reviewCapacityRetryDelaysMs,
+      wait: this.wait,
+    });
+    scoped.approvedPlaybook = playbook;
+    scoped.approvedPlaybookPin = pin;
+    return scoped;
+  }
+
   /** Operator proposals use the same bounded provider transport and observations as planning. */
   async generateProposal<T>(args: {
     prompt: string;

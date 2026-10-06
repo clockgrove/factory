@@ -104,7 +104,14 @@ Custom adapters use the exported `AgentHarness` contract and `composeWithLocalHa
 
 Edit the installation's `execution` object before starting an Objective. Set `policy.network` to `off` and `policy.allowedSecretNames` to `[]`; the controller still needs provider and GitHub connectivity. `execution.concurrency` bounds Factory’s workers, not provider capacity. Input is a shallow base snapshot without history or local Git configuration; symlinks and submodules are refused. Results pass the same path, digest, validation and review checks as local work.
 
-OpenAI configuration:
+### OpenAI Agents API
+
+This provider uses the [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api/quickstart) and an OpenAI-hosted sandbox. API billing is [separate from ChatGPT subscriptions](https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform); a Codex login does not provide its application API key.
+
+1. Sign in to [OpenAI Platform](https://platform.openai.com/), select the intended organization and project, and confirm that the project can use Agents API and the selected model. Set up [API billing](https://platform.openai.com/settings/organization/billing/overview) and record the account's actual resource and spending limits; credentials alone do not establish access or available credit.
+2. In the project's **API Keys**, select **Create new secret key**. For a user-owned application key, choose restricted permissions with `api.agents.read`, `api.agents.write` and `api.responses.write`, as required by the [Agents quickstart](https://developers.openai.com/api/docs/guides/agents-api/quickstart). Save the displayed key in an owner-private file outside the target checkout; do not put it in Factory JSON, an issue, a prompt or chat. See [project/key management](https://help.openai.com/en/articles/9186755-managing-projects-in-the-api-platform) and [key permissions](https://help.openai.com/en/articles/8867743-assign-api-key-permissions).
+3. Choose the model and container under those limits. The current quickstart uses `gpt-6-astra`; `medium` reasoning, a `small` container and a 600-second timeout are a starting configuration. Confirm model availability in the selected project. Factory creates a fresh hosted environment for each attempt; no saved OpenAI agent or environment ID is required.
+4. Replace the installation's `execution` object with the following. `apiKeyEnv` names the controller variable holding the key; it is not the key itself. The key's Platform project supplies the account binding—Factory accepts no additional `projectId` or `organizationId` fields here.
 
 ```json
 {
@@ -112,7 +119,7 @@ OpenAI configuration:
   "provider": "openai-agents",
   "concurrency": 1,
   "config": {
-    "model": "APPROVED_MODEL",
+    "model": "gpt-6-astra",
     "reasoningEffort": "medium",
     "containerSize": "small",
     "apiKeyEnv": "FACTORY_OPENAI_API_KEY",
@@ -121,9 +128,20 @@ OpenAI configuration:
 }
 ```
 
-All five config fields are required. Reasoning is `low|medium|high`; container size is `small|medium|large`. Input is limited to 5 MiB, output to 200 MiB. Extra turns, subagents, networking, extra tools, plugins and credentials are refused.
+All five `execution.config` fields are required; `timeoutSeconds` must be a positive integer. Reasoning is `low|medium|high`; container size is `small|medium|large`. Input is limited to 5 MiB, output to 200 MiB. Extra turns, subagents, networking, extra tools, plugins and credentials are refused. Factory supplies the required `OpenAI-Beta: agents=v1` header.
 
-Claude configuration requires `agentId`, pinned positive `agentVersion`, `environmentId`, `workspaceId`, `credentialEnv`, the full resolved `agent` snapshot including its model, and this `environment`:
+For a foreground controller, load the private key file into `FACTORY_OPENAI_API_KEY` before running Factory. For a supervised controller, use `factory setup --background --config /absolute/config.json --credential-file FACTORY_OPENAI_API_KEY=/absolute/private/openai-key` after configuring and approving that installation; this starts the service. The file must be owned by the operator, have no group/other permissions (for example `0600`), and stay outside the checkout. The shared credential and readiness rules below apply.
+
+Provisioning does not establish live qualification. The current adapter holds completion and cancellation while authenticated physical cleanup cannot be proved; a successful task or deleted API resource cannot release that hold. Resolve the supported cleanup proof and complete bounded public qualification before claiming this provider is ready for delivery.
+
+### Anthropic Claude Managed Agents
+
+This is the hosted [Claude Managed Agents API](https://platform.claude.com/docs/en/managed-agents/overview), using Factory's bundled `@anthropic-ai/sdk` 0.129.0 and beta `managed-agents-2026-04-01`. A Claude Pro/Max subscription or `claude auth login` does not authenticate or pay for it: [API billing is separate](https://support.claude.com/en/articles/9876003-i-have-a-paid-claude-subscription-pro-max-team-or-enterprise-plans-why-do-i-have-to-pay-separately-to-use-the-claude-api-and-console). Managed Agents access is currently enabled by default for API accounts; that does not establish your account's billing or capacity.
+
+1. Sign in to the [Claude Console](https://platform.claude.com/), arrange [API billing](https://support.claude.com/en/articles/8977456-how-do-i-pay-for-my-claude-api-usage), and select the API workspace in [Settings → Workspaces](https://platform.claude.com/settings/workspaces). Record its ID and approved spend/rate limits. A workspace admin sets limits; a developer can use the API. The Limited Developer role cannot download files, which Factory needs for results. [Workspace roles and limits](https://platform.claude.com/docs/en/manage-claude/workspaces)
+2. Open [Settings → API keys](https://platform.claude.com/settings/keys), click **Create key**, and scope it to that workspace. Use a personal key for your own controller or a service account key for a shared service. Store it outside the checkout using the controller credential instructions below. Copy the workspace ID from the Workspaces ID column into `workspaceId`; Factory requires it even with a workspace-scoped key. [Key creation and scoping](https://platform.claude.com/docs/en/manage-claude/authentication#create-and-use-a-key)
+3. [Create a dedicated agent](https://platform.claude.com/docs/en/managed-agents/agent-setup) with your approved supported model. Disable the default `agent_toolset_20260401` toolset; enable only `bash`, `read`, `write`, `edit`, `glob` and `grep`, each with `always_allow` permission. `bash` is required. Use no MCP servers, skills or subagents. Save its ID, positive version and **complete resolved response**, including model defaults, as `agentId`, `agentVersion` and `agent`. A partial request or placeholder is not the resolved snapshot Factory compares with each session.
+4. [Create a cloud environment](https://platform.claude.com/docs/en/managed-agents/environments) with the networking settings below. **Omit `packages` from the CREATE request**: specifying it requires package-manager networking, which Factory forbids. Retrieve the resulting environment; bind its ID as `environmentId` and its complete resolved `config` as `environment`. Its resolved empty package arrays are included below. Environments are not versioned; Factory refuses drift.
 
 ```json
 {
@@ -134,11 +152,21 @@ Claude configuration requires `agentId`, pinned positive `agentVersion`, `enviro
     "allow_mcp_servers": false,
     "allow_package_managers": false
   },
-  "packages": { "type": "packages" }
+  "packages": {
+    "type": "packages",
+    "apt": [],
+    "cargo": [],
+    "gem": [],
+    "go": [],
+    "npm": [],
+    "pip": []
+  }
 }
 ```
 
-Place those fields in `execution.config` with `execution.provider: "claude-managed-agents"`. The agent snapshot must match its ID and version, disable the default toolset, MCP, skills and subagents, and enable only `bash`, `read`, `write`, `edit`, `glob`, `grep`; `bash` is required. Obtain the full snapshot from the provider; a placeholder is not valid configuration. `timeoutSeconds` defaults to 900. Optional `budgetCents` is a positive integer string and is a cost threshold, not a hard cap: a request can cross it. Factory must own the session exclusively; reusable agents and environments are not deleted.
+5. Set `execution.kind` to `managed-agent`, `execution.provider` to `claude-managed-agents` and an approved `execution.concurrency`. Put the fields above in `execution.config`, plus `credentialEnv: "FACTORY_ANTHROPIC_API_KEY"`. `timeoutSeconds` defaults to 900. Optional `budgetCents` is a positive whole-cent string; the in-flight request can finish past the threshold, so leave its margin inside your spending allowance. [Session budgets](https://platform.claude.com/docs/en/managed-agents/budgets)
+
+Factory creates and exclusively owns its sessions; do not create one manually for it. It keeps the reusable agent/environment and deletes owned sessions and uploads after retaining evidence. Account/key/workspace setup and a credential-presence check are not live qualification. Record actual resource/spending limits before running; token totals and unknown usage do not prove compliance with a bill.
 
 The named API key belongs in the foreground controller environment, never the config or model input. Local CLI logins do not supply it. For background operation, put only the key in an owner-private `0600` file outside the target checkout and pass `--credential-file NAME=/absolute/private/file`. This requires systemd `LoadCredential`; restart the service after rotation. A missing service credential stops execution without ambient fallback. Readiness checks presence without a provider call, so they do not establish account access, billing or hosted support.
 

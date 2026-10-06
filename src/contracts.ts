@@ -120,6 +120,8 @@ export interface WorkGraph {
 }
 
 export type ModelInvocationPhase =
+  | "propose"
+  | "dream"
   | "compile"
   | "diagnosis"
   | "graph-review"

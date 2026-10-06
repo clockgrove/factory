@@ -2583,7 +2583,8 @@ export async function compilePlan(
     const unchanged = record.history.some(
       (entry) => entry.failure === identity,
     );
-    // A diagnosis is itself part of the consumed planning repair, never an unmetered retry.
+    // Diagnosis is bounded independently; only an admitted engineering
+    // correction consumes a revision. An operator question changes no graph.
     const permitted = (
       ["planning-output", "planning-evidence", "planning-choice"] as const
     ).filter((kind) => state.autonomy.repairClasses.includes(kind));
@@ -2631,7 +2632,6 @@ export async function compilePlan(
     }
     if (context.stopped?.())
       throw new Error("Planning is paused or cancelled before diagnosis");
-    chargeRepair(state, event, permitted[0]!, ["$planning"]);
     record.phase = "submitted";
     record.invocation = { id: randomUUID(), phase: "diagnosis" };
     record.invocations ??= [];
@@ -2695,6 +2695,7 @@ export async function compilePlan(
         `Planning needs an undelegated decision: ${diagnosis.diagnosis || failure}`,
       );
     }
+    chargeRepair(state, event, diagnosis.kind as RepairClass, ["$planning"]);
     record.history.push({
       failure: identity,
       detail: failure,

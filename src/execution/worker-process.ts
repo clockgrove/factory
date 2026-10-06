@@ -137,6 +137,7 @@ export async function stopUnrecordedWorker(
     } else if (!processGroupExists(group)) continue;
     await killGroup(group, label);
   }
+  rmSync(`${paths.requestPath}.codex-home`, { recursive: true, force: true });
   for (const path of [paths.requestPath, paths.resultPath, paths.pidPath])
     rmSync(path, { force: true });
 }

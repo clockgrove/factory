@@ -65,12 +65,14 @@ import {
   processGroupExists,
   sanitizedWorkerEnvironment,
   removeWorktree,
+  UnsettledSubprocessError,
 } from "../process.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
 import { stoppedFault } from "./attempt.js";
 import { assertDurableValue } from "./checkpoint.js";
 import {
   launchWorker,
+  killGroup,
   observeWorker,
   stopUnrecordedWorker,
 } from "./worker-process.js";
@@ -190,29 +192,22 @@ export class CodexHarness implements AgentHarness {
 
   async cancel(handle: HarnessHandle): Promise<void> {
     const data = this.require(handle);
-    const current = linuxProcessIdentity(data.pid);
-    if (!current) {
-      if (processGroupExists(data.pid))
-        throw new Error(
-          "Worker cessation remains unresolved; checkout retained",
-        );
-      return;
-    }
-    if (current.startTime !== data.startTime || current.group !== data.pid)
-      throw new Error("Worker identity changed before cancellation");
     try {
-      process.kill(-data.pid, "SIGKILL");
+      const current = linuxProcessIdentity(data.pid);
+      if (
+        current &&
+        (current.startTime !== data.startTime || current.group !== data.pid)
+      )
+        throw new Error("Worker identity changed before cancellation");
+      if (current || processGroupExists(data.pid))
+        await killGroup(data.pid, "Codex harness");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      throw new UnsettledSubprocessError(
+        "Worker cessation remains unresolved; checkout retained",
+        { cause: error },
+      );
     }
-    for (
-      let attempt = 0;
-      attempt < 100 && processGroupExists(data.pid);
-      attempt++
-    )
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
-    if (processGroupExists(data.pid))
-      throw new Error("Worker cessation remains unresolved; checkout retained");
+    rmSync(`${data.requestPath}.codex-home`, { recursive: true, force: true });
   }
 
   async collect(handle: HarnessHandle): Promise<HarnessResult> {
@@ -223,6 +218,9 @@ export class CodexHarness implements AgentHarness {
         await new Promise<void>((resolve) => setTimeout(resolve, 100));
         continue;
       }
+      // Terminal observations are flushed before the result is published.
+      // Settle the durable owned group before collection can admit another attempt.
+      await this.cancel(handle);
       if (observed.state !== "complete") {
         if (observed.authentication)
           throw new AuthenticationRequiredError(
@@ -907,6 +905,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
     } catch (error) {
       collectionError = error;
     }
+    if (collectionError instanceof UnsettledSubprocessError)
+      throw collectionError;
     const observed = await this.resolveHarness(
       active.request.item,
       active.executionBinding,

@@ -420,6 +420,20 @@ export class WorkerInteractionCapture {
     });
   }
 
+  nativeFailure(content: () => unknown, sessionId?: string): void {
+    this.safely(() =>
+      this.writer!.record(
+        {
+          kind: "interaction",
+          providerEvent: "codex.native-failure",
+          providerSessionId: sessionId,
+          coverage: "boundary",
+        },
+        content,
+      ),
+    );
+  }
+
   claude(message: SDKMessage, observedUsage?: Record<string, unknown>): void {
     this.safely(() => {
       if (message.type === "result") {

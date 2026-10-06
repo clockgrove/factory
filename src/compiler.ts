@@ -27,7 +27,7 @@ import {
 } from "./workspace-membership.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
-import { Codex } from "@openai/codex-sdk";
+import { runCodexExec } from "./codex-exec.js";
 import {
   CODEX_PLANNING_CONFIG,
   CODEX_TREE_REVIEW_CONFIG,
@@ -79,9 +79,12 @@ import { codexCaptureEvent } from "./execution/interaction-capture.js";
 import { normalizeExecutionProfiles } from "./execution-profiles.js";
 import { markdownLines } from "./markdown.js";
 import { recognizedObjectiveAttachment } from "./media.js";
-import { pinnedGit, pinnedGitRaw } from "./process.js";
 import {
-  closeProviderEventStream,
+  pinnedGit,
+  pinnedGitRaw,
+  UnsettledSubprocessError,
+} from "./process.js";
+import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnGuard,
   ProviderTurnIncompleteError,
@@ -675,7 +678,7 @@ interface StructuredCall {
 }
 
 export const CODEX_PLANNING_PROVIDER = "openai-codex-sdk";
-export const CODEX_PLANNING_ADAPTER = "@openai/codex-sdk@0.160.0";
+export const CODEX_PLANNING_ADAPTER = "@openai/codex@0.160.0/native-owned";
 
 /**
  * Codex SDK transport: a read-only, never-approving, tool-free thread per
@@ -719,8 +722,10 @@ class CodexPlanningTransport implements PlanningTransport {
     const selection = this.selection(args.role);
     const started = Date.now();
     const turn = new ProviderTurnGuard(this.providerTurnIdleTimeoutMs);
-    let thread: ReturnType<Codex["startThread"]> | undefined;
+    const thread: { id?: string } = {};
+    let retainHome = false;
     let turnCompleted = false;
+    let streamError: Error | undefined;
     // A tree review's shell reads the tree alone, offline.
     const home = createCodexHome(
       args.tree
@@ -735,35 +740,37 @@ class CodexPlanningTransport implements PlanningTransport {
         : { config: CODEX_PLANNING_CONFIG },
     );
     try {
-      thread = new Codex({ env: home.env }).startThread({
-        workingDirectory: args.tree ?? this.checkout,
-        // The tree is a plain directory, not a repository.
-        // Its sandbox is the permission profile in Factory's config.
-        ...(args.tree
-          ? { skipGitRepoCheck: true }
-          : { sandboxMode: "read-only" as const }),
-        approvalPolicy: "never",
-        model: selection.model,
-        modelReasoningEffort: selection.reasoningEffort,
-      });
-      const streamed = await turn.race(
-        thread.runStreamed(args.prompt, {
-          outputSchema: args.schema,
-          signal: turn.signal,
-        }),
-      );
-      const events = streamed.events[Symbol.asyncIterator]();
-      let closeStarted = false;
-      try {
-        for (;;) {
-          const next = await turn.race(events.next());
-          if (next.done) break;
-          const event = next.value;
+      await runCodexExec({
+        env: home.env,
+        options: {
+          workingDirectory: args.tree ?? this.checkout,
+          // The tree's read-only permission profile is Factory's config.
+          ...(args.tree
+            ? { skipGitRepoCheck: true }
+            : { sandboxMode: "read-only" as const }),
+          approvalPolicy: "never",
+          model: selection.model,
+          modelReasoningEffort: selection.reasoningEffort,
+        },
+        prompt: args.prompt,
+        schema: args.schema,
+        signal: turn.signal,
+        event: (event) => {
+          if (event.type === "thread.started") thread.id = event.thread_id;
           turn.progress();
+          const item =
+            event.type === "item.started" ||
+            event.type === "item.updated" ||
+            event.type === "item.completed"
+              ? event.item
+              : undefined;
           // Codex emits turn.started before it sends the model request, so a
           // connection that fails after it reached no model and is unpaid.
-          // The first item or the usage report shows the model was reached.
-          if (event.type.startsWith("item.") || event.type === "turn.completed")
+          // Startup warnings do not prove inference; other items or usage do.
+          if (
+            (item && item.type !== "error") ||
+            event.type === "turn.completed"
+          )
             state.started = true;
           if (
             event.type === "item.completed" &&
@@ -819,12 +826,6 @@ class CodexPlanningTransport implements PlanningTransport {
                 reasoningOutputTokens: event.usage.reasoning_output_tokens,
               };
           }
-          const item =
-            event.type === "item.started" ||
-            event.type === "item.updated" ||
-            event.type === "item.completed"
-              ? event.item
-              : undefined;
           const tool =
             item?.type === "mcp_tool_call"
               ? `${item.server}/${item.tool}`
@@ -854,6 +855,7 @@ class CodexPlanningTransport implements PlanningTransport {
             ...(item?.type === "error"
               ? { detail: `Nonfatal Codex SDK warning: ${item.message}` }
               : {}),
+            ...(event.type === "error" ? { detail: event.message } : {}),
             ...(state.usage
               ? { usage: state.usage, usageAvailable: true }
               : {}),
@@ -862,29 +864,32 @@ class CodexPlanningTransport implements PlanningTransport {
             state.ended = true;
             throw new Error(event.error.message);
           }
-          if (event.type === "error") throw new Error(event.message);
-          if (turnCompleted) break;
-        }
-        closeStarted = true;
-        await closeProviderEventStream(events, turn, true);
-      } catch (error) {
-        if (!closeStarted && !turn.signal.aborted) {
-          closeStarted = true;
-          try {
-            await closeProviderEventStream(events, turn, true);
-          } catch {
-            // Preserve the provider failure that required cleanup.
-          }
-        }
-        throw error;
-      } finally {
-        if (!closeStarted) void closeProviderEventStream(events, turn, false);
-      }
+          if (event.type === "error") streamError = new Error(event.message);
+          // Stream errors can precede a CLI-managed retry. Native exit and
+          // process-group settlement remain part of this owned invocation.
+        },
+      });
+      if (!turnCompleted && streamError) throw streamError;
       requireCompletedProviderTurn(turnCompleted);
+    } catch (error) {
+      retainHome = error instanceof UnsettledSubprocessError;
+      observeModelInvocation(invocation, {
+        type: "progress",
+        capture: {
+          event: {
+            kind: "interaction",
+            providerEvent: "codex.native-failure",
+            providerSessionId: thread?.id ?? undefined,
+            coverage: "boundary",
+          },
+          content: () => home.nativeMetadata(thread?.id ?? undefined),
+        },
+      });
+      throw error;
     } finally {
-      state.providerThreadId = thread?.id ?? undefined;
+      state.providerThreadId = thread.id;
       turn.finish();
-      home.dispose();
+      if (!retainHome) home.dispose();
     }
   }
 }
@@ -1097,7 +1102,7 @@ export class StructuredPlanningModel implements PlanningModel {
         ended: turn.ended,
         started: turn.started,
         failureClass,
-        fault: turn.fault,
+        fault: turn.fault ?? attachedFault(error),
       });
       if (!invalidStructuredOutput) {
         observeModelInvocation(invocation, {
@@ -1123,6 +1128,8 @@ export class StructuredPlanningModel implements PlanningModel {
       }
       if (invalidStructuredOutput)
         throw attachFault(new MalformedPlannerOutput(error), fault);
+      if (error instanceof UnsettledSubprocessError)
+        throw attachFault(error, fault);
       if (turn.ended)
         throw attachFault(new CompletedModelInvocationError(error), fault);
       throw attachFault(error, fault);
@@ -2381,6 +2388,7 @@ export async function checkedPlanReview(
     // missing credentials, cancel, decision) belongs to the plan or amend
     // step, which repeats it within its paid bound. Only a received but
     // invalid answer, or an unclassified provider error, is a plan question.
+    if (error instanceof UnsettledSubprocessError) throw error;
     const fault = responseReceived ? undefined : attachedFault(error);
     if (fault && fault.kind !== "work" && fault.kind !== "defect") throw error;
     if (responseReceived) observeInvalidReview(invocation);
@@ -2711,6 +2719,7 @@ export async function compilePlan(
         (error instanceof MalformedPlannerOutput ||
           error instanceof PlanValidationError);
       if (
+        error instanceof UnsettledSubprocessError ||
         error instanceof PlanningReviewBindingError ||
         context.stopped?.() ||
         String(record.phase) === "submitted" ||

@@ -46,6 +46,13 @@ export function codexTokenUsage(value: unknown): ModelInvocationUsage {
   });
 }
 
+/** The pinned SDK fills an absent cache-write counter with zero. Keep that ambiguous category unknown. */
+export function codexSdkTokenUsage(value: unknown): ModelInvocationUsage {
+  const usage = codexTokenUsage(value);
+  if (usage.cacheWriteInputTokens === 0) delete usage.cacheWriteInputTokens;
+  return usage;
+}
+
 /** Safe raw counters only; never retain arbitrary provider usage payloads. */
 export function pickTokenCounters(
   value: unknown,

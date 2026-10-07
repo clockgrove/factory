@@ -19,6 +19,8 @@ Operate the installed Factory CLI on a target repository. `factory help` lists t
 
 ## Run and status
 
+An inspection-only request permits reading the issue, committed Sources and existing status. There is no plan-only CLI command. Do not use `run` to satisfy a request to see a plan before authorizing execution: a clean independently reviewed plan proceeds directly to workers and GitHub delivery.
+
 ```sh
 factory run --objective N
 factory status --objective N [--json]

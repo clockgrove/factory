@@ -104,7 +104,7 @@ function help(): void {
       "      Submit a graph amendment (or a replacement for a rejected one)",
       "  diagnostics --objective N [--follow | --summary | --analyze | --logs ITEM [--follow] | --captures [--content RECORD_ID]]",
       "  diagnostics --scorecard FILE [--json] [--output ABSOLUTE_NEW_FILE]",
-      "      The one observation command: agent timeline by default. --summary prints the efficiency report (time per stage, operator waits, attempts, tokens per role; --json for tools). --analyze takes [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE]",
+      "      The one observation command: agent timeline by default. --summary prints the efficiency report (time per stage, operator waits, attempts, tokens per role; --json for tools). --analyze takes [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--native-tool-content] [--json|--gantt] [--output ABSOLUTE_NEW_FILE]",
       "  export-captures --objective N --endpoint HTTPS_OTLP_BASE_URL --content metadata|retained [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST]",
       "      Preview, then send, retained captures off this host",
       "  select --objective N --item ITEM --output ABSOLUTE_NEW_DIRECTORY",

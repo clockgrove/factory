@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { DiagnosticEmitter } from "../dist/diagnostics.js";
 import { readInteractionContent } from "../dist/capture.js";
+import { analyzeInteractions } from "../dist/analysis.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
@@ -60,9 +61,11 @@ import { withProcessCancellation } from ${JSON.stringify(new URL("../dist/proces
 import { stateRoot } from ${JSON.stringify(new URL("../dist/config.js", import.meta.url).href)};
 import { createCodexHome } from ${JSON.stringify(new URL("../dist/codex-planning-isolation.js", import.meta.url).href)};
 const home = createCodexHome({ config: "", sandbox: { directory: process.cwd(), workspace: "write", network: false } });
+const nativeEvents = [];
 try {
   assert.equal(home.env.XDG_STATE_HOME, undefined);
   assert.equal(readFileSync(join(home.env.CODEX_HOME, "config.toml"), "utf8").includes(process.env.XDG_STATE_HOME), false);
+  home.nativeCapture("00000000-0000-4000-8000-000000000000", event => nativeEvents.push(event));
 } finally { home.dispose(); }
 const privateBin = join(stateRoot(${JSON.stringify(repository)}), "bin");
 mkdirSync(privateBin, { recursive: true });
@@ -86,7 +89,11 @@ assert.equal(Object.isFrozen(transport), true);
 const retained = readFileSync(join(stateRoot(${JSON.stringify(repository)}), "objectives", "1", "diagnostics.ndjson"), "utf8");
 assert.equal(retained.includes("private"), false);
 assert.deepEqual(JSON.parse(retained.trim()).transport, transport);
-new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, invocationId: "actual-child-capture", providerAttempt: 1, phase: "integration", adapter: "local-process", configured: { provider: "not-invoked", model: "none" } }, { enabled: true, maxBytesPerInvocation: 1024 }, [], metadata => process.stdout.write(JSON.stringify(metadata))).record({ kind: "interaction" }, () => ({ text: "real child process capture" }));`,
+const emitted = [];
+const writer = new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, invocationId: "actual-child-capture", providerAttempt: 1, phase: "integration", adapter: "local-process", configured: { provider: "not-invoked", model: "none" } }, { enabled: true, maxBytesPerInvocation: 1024 }, [], metadata => emitted.push(metadata));
+writer.record({ kind: "interaction" }, () => ({ text: "real child process capture" }));
+for (const event of nativeEvents) writer.record(event);
+process.stdout.write(JSON.stringify(emitted));`,
       ],
       {
         cwd: workspace,
@@ -94,7 +101,7 @@ new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, inv
       },
     );
     assert.equal(result.status, 0, result.stderr.toString());
-    const metadata = JSON.parse(result.stdout.toString());
+    const [metadata, unavailableNative] = JSON.parse(result.stdout.toString());
     assert.equal(metadata.content.status, "captured");
     assert.deepEqual(
       JSON.parse(
@@ -102,6 +109,24 @@ new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, inv
       ),
       { text: "real child process capture" },
     );
+    // A real private process capture is not a native model tool call. Even the
+    // explicit legacy-tool read must neither expose its text nor invent counts.
+    const analysis = analyzeInteractions([metadata], [], {
+      includeNativeToolContent: true,
+    });
+    assert.equal(analysis.nativeToolActivity.uniqueCalls, null);
+    assert.equal(analysis.invocations[0].nativeToolActivity.contentReads, 0);
+    assert.equal(
+      JSON.stringify(analysis).includes("real child process capture"),
+      false,
+    );
+    // The actual owned-home reader emits unavailable for a missing rollout;
+    // that observation must never turn into a fabricated zero-call history.
+    assert.equal(unavailableNative.nativeRollout.status, "unavailable");
+    const unavailable = analyzeInteractions([unavailableNative]);
+    assert.equal(unavailable.nativeToolActivity.availability, "unavailable");
+    assert.equal(unavailable.nativeToolActivity.uniqueCalls, null);
+    assert.equal(unavailable.nativeToolActivity.callRounds, null);
     new DiagnosticEmitter(repository, 1).emit({
       operation: "model-capture",
       outcome: "observed",
@@ -112,12 +137,12 @@ new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, inv
       1,
       ["--json"],
     );
-    const analysis = JSON.parse(analysisText);
-    assert.equal(analysis.invocationCount, 1);
-    assert.equal(analysis.nativeTools.calls, null);
-    assert.equal(analysis.nativeTools.coverage, "unavailable");
+    const cliAnalysis = JSON.parse(analysisText);
+    assert.equal(cliAnalysis.invocationCount, 1);
+    assert.equal(cliAnalysis.nativeTools.calls, null);
+    assert.equal(cliAnalysis.nativeTools.coverage, "unavailable");
     assert.equal(
-      analysis.invocations[0].native.descendants.accountingUnion,
+      cliAnalysis.invocations[0].native.descendants.accountingUnion,
       null,
     );
     assert.equal(analysisText.includes("real child process capture"), false);

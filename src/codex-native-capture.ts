@@ -8,6 +8,76 @@ export type NativeCaptureObserver = (
   content?: () => unknown,
 ) => void;
 
+/** Only explicit transport fields: never inspect shell text or nested output. */
+export function nativeToolObservation(
+  value: unknown,
+  rowTimestamp?: unknown,
+  turnId: string | null = null,
+): CaptureEvent["nativeTool"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const payload = value as Record<string, unknown>;
+  const event = ["function_call", "custom_tool_call"].includes(
+    String(payload.type),
+  )
+    ? "call"
+    : ["function_call_output", "custom_tool_call_output"].includes(
+          String(payload.type),
+        )
+      ? "output"
+      : undefined;
+  if (!event) return;
+  const passthrough = payload.internal_chat_message_metadata_passthrough;
+  const seconds =
+    passthrough && typeof passthrough === "object"
+      ? (passthrough as Record<string, unknown>).create_time
+      : undefined;
+  const payloadMs =
+    typeof seconds === "number" && Number.isFinite(seconds)
+      ? Math.floor(seconds * 1000)
+      : NaN;
+  const rowMs =
+    typeof rowTimestamp === "string" ? Date.parse(rowTimestamp) : NaN;
+  const observedMs =
+    Number.isSafeInteger(payloadMs) && payloadMs >= 0 && payloadMs <= 8.64e15
+      ? payloadMs
+      : Number.isSafeInteger(rowMs) && rowMs >= 0 && rowMs <= 8.64e15
+        ? rowMs
+        : undefined;
+  return {
+    source: "owned-codex-rollout",
+    endpoint: event,
+    callId: identifier(payload.call_id),
+    name: event === "call" ? (label(payload.name) ?? null) : null,
+    type: String(payload.type).startsWith("custom_") ? "custom" : "function",
+    turnId,
+    status:
+      payload.is_error === true || payload.status === "failed"
+        ? "reported-failed"
+        : "observed",
+    recordedAt:
+      observedMs !== undefined ? new Date(observedMs).toISOString() : null,
+    ...(observedMs !== undefined
+      ? {
+          timestampSource:
+            observedMs === payloadMs
+              ? ("native-payload" as const)
+              : ("native-row" as const),
+        }
+      : {}),
+    ...(["completed", "failed", "cancelled", "in_progress"].includes(
+      String(payload.status),
+    )
+      ? {
+          reportedStatus: payload.status as NonNullable<
+            CaptureEvent["nativeTool"]
+          >["reportedStatus"],
+        }
+      : {}),
+    ...(payload.is_error === true || payload.status === "failed"
+      ? { explicitFailure: true as const }
+      : {}),
+  };
+}
 export interface OwnedRolloutBudget {
   remainingBytes: number;
   remainingEvents: number;
@@ -144,7 +214,7 @@ export function captureOwnedRollout(
     role: CaptureEvent["role"],
     contextSnapshot = false,
     event = "codex.native-message",
-    tool?: CaptureEvent["nativeTool"],
+    rowTimestamp?: unknown,
   ) => {
     if (budget.remainingEvents <= 0) {
       partial = true;
@@ -174,8 +244,16 @@ export function captureOwnedRollout(
         providerEvent: event,
         providerSessionId: threadId,
         role,
+        ...(["codex.native-tool-call", "codex.native-tool-output"].includes(
+          event,
+        )
+          ? {
+              nativeTool: contextSnapshot
+                ? undefined
+                : nativeToolObservation(payload, rowTimestamp, turnId),
+            }
+          : {}),
         coverage: "boundary",
-        ...(tool ? { nativeTool: tool } : {}),
         visible: {
           source: "owned-codex-rollout",
           textBytes,
@@ -194,7 +272,11 @@ export function captureOwnedRollout(
       false,
       "codex.native-base-instructions",
     );
-  const message = (payload: Record<string, unknown>, snapshot = false) => {
+  const message = (
+    payload: Record<string, unknown>,
+    snapshot = false,
+    rowTimestamp?: unknown,
+  ) => {
     if (payload.type === "message") {
       const role = ["system", "developer", "user", "assistant"].includes(
         String(payload.role),
@@ -212,22 +294,7 @@ export function captureOwnedRollout(
         undefined,
         snapshot,
         "codex.native-tool-output",
-        snapshot
-          ? undefined
-          : {
-              source: "owned-codex-rollout",
-              endpoint: "output",
-              callId: identifier(payload.call_id),
-              name: null,
-              type:
-                payload.type === "custom_tool_call_output"
-                  ? "custom"
-                  : "function",
-              recordedAt: rowTime,
-              turnId,
-              status:
-                payload.is_error === true ? "reported-failed" : "observed",
-            },
+        rowTimestamp,
       );
     } else if (
       ["function_call", "custom_tool_call"].includes(String(payload.type))
@@ -237,22 +304,7 @@ export function captureOwnedRollout(
         undefined,
         snapshot,
         "codex.native-tool-call",
-        snapshot
-          ? undefined
-          : {
-              source: "owned-codex-rollout",
-              endpoint: "call",
-              callId: identifier(payload.call_id),
-              name:
-                typeof payload.name === "string" &&
-                /^[a-zA-Z0-9_.:-]{1,128}$/.test(payload.name)
-                  ? payload.name
-                  : null,
-              type: payload.type === "custom_tool_call" ? "custom" : "function",
-              recordedAt: rowTime,
-              turnId,
-              status: "observed",
-            },
+        rowTimestamp,
       );
     } else if (
       ["compaction", "context_compaction"].includes(String(payload.type))
@@ -423,7 +475,7 @@ export function captureOwnedRollout(
           : {};
     } else if (row.type === "response_item") {
       if (payload.name === "spawn_agent") childHistory = true;
-      message(payload);
+      message(payload, false, row.timestamp);
     } else if (row.type === "compacted") {
       visible(
         { text: payload.message ?? "" },

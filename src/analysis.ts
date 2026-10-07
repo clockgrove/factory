@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { InteractionMetadata } from "./capture.js";
 import type { DiagnosticEvent } from "./diagnostics.js";
+import { summarizeNativeTools } from "./native-tool-activity.js";
 import {
   normalizeCodexTokenUsage,
   normalizeTokenUsage,
@@ -36,6 +37,8 @@ type ControllerObservation = Omit<DiagnosticEvent, "detail">;
 export interface AnalysisOptions {
   filters?: Partial<Record<AnalysisField, string>>;
   groupBy?: AnalysisField[];
+  /** Explicit private-content read for legacy native call IDs/timestamps only. */
+  includeNativeToolContent?: boolean;
 }
 
 const stages = ["provider", "parse", "protocol", "semantic"] as const;
@@ -106,69 +109,27 @@ function transportObservation(value: ControllerObservation["transport"]) {
   };
 }
 
-function summarizeTools(records: InteractionMetadata[]) {
-  const endpoints = new Map<string, InteractionMetadata>();
-  const conflicts = new Set<string>();
-  let missingIdentity = 0;
-  for (const record of records) {
-    const tool = record.nativeTool;
-    if (!tool) continue;
-    if (!tool.callId || !record.providerSessionId) {
-      missingIdentity++;
-      continue;
-    }
-    const key = JSON.stringify([
-      record.providerSessionId,
-      tool.callId,
-      tool.endpoint,
-    ]);
-    const previous = endpoints.get(key);
-    if (
-      previous &&
-      (!isDeepStrictEqual(previous.nativeTool, tool) ||
-        previous.visible?.digest !== record.visible?.digest)
-    )
-      conflicts.add(key);
-    else endpoints.set(key, record);
-  }
-  const calls = [...endpoints.entries()].filter(
-    ([key, record]) =>
-      record.nativeTool!.endpoint === "call" && !conflicts.has(key),
-  );
-  const selected = calls.map(([, record]) => {
-    const call = record.nativeTool!;
-    const outputKey = JSON.stringify([
-      record.providerSessionId,
-      call.callId,
-      "output",
-    ]);
-    const output = conflicts.has(outputKey)
-      ? undefined
-      : endpoints.get(outputKey)?.nativeTool;
-    const duration =
-      call.recordedAt && output?.recordedAt
-        ? Date.parse(output.recordedAt) - Date.parse(call.recordedAt)
-        : NaN;
-    return {
-      sessionId: record.providerSessionId!,
-      callId: call.callId!,
-      name: call.name,
-      type: call.type,
-      turnId: call.turnId,
-      calledAt: call.recordedAt,
-      outputAt: output?.recordedAt ?? null,
-      outputObserved: Boolean(output),
-      status:
-        output?.status === "reported-failed"
-          ? "reported-failed"
-          : output
-            ? "output-observed"
-            : "output-unavailable",
-      durationMs: Number.isFinite(duration) && duration >= 0 ? duration : null,
-      commandSuccess: "unknown" as const,
-      nestedCommandsAndProcesses: "unknown" as const,
-    };
-  });
+function summarizeTools(activity: ReturnType<typeof summarizeNativeTools>) {
+  const selected = activity.calls.map((call) => ({
+    sessionId: call.sessionId,
+    callId: call.callId,
+    name: call.name,
+    type: call.type,
+    turnId: call.turnId,
+    calledAt: call.calledAt,
+    outputAt: call.outputAt,
+    outputObserved: call.observedOutput,
+    conflictingObservations: call.conflictingObservations,
+    status:
+      call.explicitFailure === true
+        ? "reported-failed"
+        : call.observedOutput
+          ? "output-observed"
+          : "output-unavailable",
+    durationMs: call.callToOutputMs,
+    commandSuccess: "unknown" as const,
+    nestedCommandsAndProcesses: "unknown" as const,
+  }));
   const group = (calls: typeof selected) => ({
     calls: calls.length,
     observedOutputs: calls.filter((call) => call.outputObserved).length,
@@ -176,81 +137,58 @@ function summarizeTools(records: InteractionMetadata[]) {
       .length,
     missingOutputs: calls.filter((call) => !call.outputObserved).length,
     observedRounds:
-      calls.length && calls.every((call) => call.turnId !== null)
+      calls.length &&
+      calls.every(
+        (call) => call.turnId !== null && !call.conflictingObservations,
+      )
         ? new Set(
             calls.map((call) => JSON.stringify([call.sessionId, call.turnId])),
           ).size
         : null,
+    roundMethod: "native-turn-identities" as const,
     observedDurationMs:
       calls.length && calls.every((call) => call.durationMs !== null)
         ? calls.reduce((sum, call) => sum + call.durationMs!, 0)
         : null,
     overlappingDurations: true,
   });
-  const orphanOutputs = [...endpoints.entries()].filter(
-    ([key, record]) =>
-      record.nativeTool!.endpoint === "output" &&
-      !conflicts.has(key) &&
-      !endpoints.has(
-        JSON.stringify([
-          record.providerSessionId,
-          record.nativeTool!.callId,
-          "call",
-        ]),
-      ),
-  ).length;
-  const observedSessions = [
-    ...new Set(
-      records
-        .filter((record) => record.nativeTool)
-        .map((record) => record.providerSessionId),
-    ),
-  ];
-  const completeHistory =
-    !records.some(
-      (record) =>
-        record.nativeRollout && record.nativeRollout.status !== "available",
-    ) &&
-    (observedSessions.length
-      ? observedSessions.every(
-          (session) =>
-            session &&
-            records.some(
-              (record) =>
-                record.providerSessionId === session &&
-                record.nativeRollout?.status === "available",
-            ),
-        )
-      : records.some((record) => record.nativeRollout?.status === "available"));
   return {
     source: "model-visible-native-calls" as const,
-    ...group(selected),
+    calls: activity.uniqueCalls,
+    observedOutputs: activity.callsWithObservedOutput,
+    reportedFailures: activity.observedExplicitFailureCalls,
+    missingOutputs: activity.callsWithoutObservedOutput,
+    observedRounds: group(selected).observedRounds,
+    roundMethod: "native-turn-identities" as const,
+    observedResponseBoundaryRounds: activity.callRounds,
+    responseBoundaryRoundMethod: activity.roundMethod,
+    observedDurationMs: group(selected).observedDurationMs,
+    sumObservedIntervalsMs: activity.callToOutputTiming.sumObservedIntervalsMs,
+    durationCoverage: activity.callToOutputTiming.availability,
+    durationScope: activity.callToOutputTiming.scope,
+    overlappingDurations: true,
     byName: [...new Set(selected.map((call) => call.name))]
       .sort()
       .map((name) => ({
         name,
         ...group(selected.filter((call) => call.name === name)),
       })),
-    endpointsWithoutCall: orphanOutputs,
-    missingIdentity,
-    conflictingEndpoints: conflicts.size,
-    coverage:
-      !records.some((record) => record.nativeTool) && !completeHistory
-        ? "unavailable"
-        : !completeHistory ||
-            missingIdentity ||
-            conflicts.size ||
-            orphanOutputs ||
-            selected.some((call) => !call.outputObserved)
-          ? "partial"
-          : "available",
+    endpointsWithoutCall: activity.outputsWithoutObservedCall,
+    missingIdentity:
+      activity.unidentifiedCallRecords + activity.unidentifiedOutputRecords,
+    conflictingEndpoints: activity.conflictingCallIdentities,
+    coverage: activity.availability,
     observations: selected,
     sdkItems: "separate-uncorrelated-view" as const,
     readValidationClassification: "unknown" as const,
   };
 }
 
-function summarizeNative(records: InteractionMetadata[]) {
+function summarizeNative(
+  records: InteractionMetadata[],
+  options: AnalysisOptions,
+  parentTools: ReturnType<typeof summarizeNativeTools>,
+) {
   const parent = records.filter((record) => !record.nativeOwnership);
   const children = new Map<string, InteractionMetadata[]>();
   for (const record of records)
@@ -270,7 +208,7 @@ function summarizeNative(records: InteractionMetadata[]) {
   ];
   return {
     ...summarizeNativeScope(parent),
-    tools: summarizeTools(parent),
+    tools: summarizeTools(parentTools),
     descendants: {
       observedChildren: ids.length,
       accountingUnion: null,
@@ -295,7 +233,12 @@ function summarizeNative(records: InteractionMetadata[]) {
             )
             .at(-1)?.status ?? "unknown",
         ...summarizeNativeScope(children.get(sessionId) ?? []),
-        tools: summarizeTools(children.get(sessionId) ?? []),
+        tools: summarizeTools(
+          summarizeNativeTools(
+            children.get(sessionId) ?? [],
+            options.includeNativeToolContent,
+          ),
+        ),
       })),
     },
   };
@@ -500,7 +443,10 @@ function summarizeNativeScope(records: InteractionMetadata[]) {
   };
 }
 
-function summarizeInvocation(records: InteractionMetadata[]) {
+function summarizeInvocation(
+  records: InteractionMetadata[],
+  options: AnalysisOptions,
+) {
   records.sort(order);
   const identity = Object.fromEntries(
     analysisFields.map((field) => {
@@ -534,6 +480,10 @@ function summarizeInvocation(records: InteractionMetadata[]) {
   const usage = usageRecord?.usage;
   const normalized = normalizeTokenUsage(usage?.normalized);
   const cost = usage?.cost;
+  const nativeToolActivity = summarizeNativeTools(
+    records.filter((record) => !record.nativeOwnership),
+    options.includeNativeToolContent,
+  );
   return {
     key: invocationKey(first),
     identity,
@@ -576,7 +526,8 @@ function summarizeInvocation(records: InteractionMetadata[]) {
           })),
       ]),
     ),
-    native: summarizeNative(records),
+    native: summarizeNative(records, options, nativeToolActivity),
+    nativeToolActivity,
     promptComponents: request?.promptComponents ?? null,
     usage: {
       scope: "invocation-cumulative" as const,
@@ -659,22 +610,27 @@ function aggregate(invocations: Invocation[]) {
     invocationCount: invocations.length,
     nativeTools: {
       scope: "parent-invocations-only" as const,
-      calls: invocations.some(
-        (invocation) => invocation.native.tools.coverage !== "unavailable",
-      )
-        ? invocations.reduce(
-            (sum, invocation) => sum + invocation.native.tools.calls,
-            0,
-          )
-        : null,
-      observedOutputs: invocations.some(
-        (invocation) => invocation.native.tools.coverage !== "unavailable",
-      )
-        ? invocations.reduce(
-            (sum, invocation) => sum + invocation.native.tools.observedOutputs,
-            0,
-          )
-        : null,
+      calls:
+        invocations.length > 0 &&
+        invocations.every(
+          (invocation) => invocation.native.tools.calls !== null,
+        )
+          ? invocations.reduce(
+              (sum, invocation) => sum + (invocation.native.tools.calls ?? 0),
+              0,
+            )
+          : null,
+      observedOutputs:
+        invocations.length > 0 &&
+        invocations.every(
+          (invocation) => invocation.native.tools.observedOutputs !== null,
+        )
+          ? invocations.reduce(
+              (sum, invocation) =>
+                sum + (invocation.native.tools.observedOutputs ?? 0),
+              0,
+            )
+          : null,
       eligibleInvocations: invocations.length,
       contributingInvocations: invocations.filter(
         (invocation) => invocation.native.tools.coverage !== "unavailable",
@@ -699,6 +655,67 @@ function aggregate(invocations: Invocation[]) {
       ).length,
     },
     usage,
+    nativeToolActivity: {
+      observedCallRecords: invocations.reduce(
+        (sum, invocation) =>
+          sum + invocation.nativeToolActivity.observedCallRecords,
+        0,
+      ),
+      observedOutputRecords: invocations.reduce(
+        (sum, invocation) =>
+          sum + invocation.nativeToolActivity.observedOutputRecords,
+        0,
+      ),
+      uniqueCalls:
+        invocations.length &&
+        invocations.every(
+          (invocation) => invocation.nativeToolActivity.uniqueCalls !== null,
+        )
+          ? invocations.reduce(
+              (sum, invocation) =>
+                sum + (invocation.nativeToolActivity.uniqueCalls ?? 0),
+              0,
+            )
+          : null,
+      uniqueCallContributingInvocations: invocations.filter(
+        (invocation) => invocation.nativeToolActivity.uniqueCalls !== null,
+      ).length,
+      callRounds:
+        invocations.length &&
+        invocations.every(
+          (invocation) => invocation.nativeToolActivity.callRounds !== null,
+        )
+          ? invocations.reduce(
+              (sum, invocation) =>
+                sum + (invocation.nativeToolActivity.callRounds ?? 0),
+              0,
+            )
+          : null,
+      roundContributingInvocations: invocations.filter(
+        (invocation) => invocation.nativeToolActivity.callRounds !== null,
+      ).length,
+      contributingInvocations: invocations.filter(
+        (invocation) =>
+          invocation.nativeToolActivity.availability !== "unavailable",
+      ).length,
+      eligibleInvocations: invocations.length,
+      availability:
+        invocations.length &&
+        invocations.every(
+          (invocation) =>
+            invocation.nativeToolActivity.availability === "available",
+        )
+          ? "available"
+          : invocations.some(
+                (invocation) =>
+                  invocation.nativeToolActivity.availability !== "unavailable",
+              )
+            ? "partial"
+            : "unavailable",
+      nestedCommandAndProcessCounts: null,
+      repeatedReads: null,
+      repeatedValidationCommands: null,
+    },
     providerCostEstimates: currencies.map((currency) => {
       const selected = invocations.filter(
         (invocation) => invocation.costEstimate?.currency === currency,
@@ -737,6 +754,11 @@ export function analyzeInteractions(
   controllerObservations: ControllerObservation[] = [],
   options: AnalysisOptions = {},
 ) {
+  if (
+    options.includeNativeToolContent !== undefined &&
+    typeof options.includeNativeToolContent !== "boolean"
+  )
+    throw new Error("includeNativeToolContent must be true or false");
   for (const field of [
     ...Object.keys(options.filters ?? {}),
     ...(options.groupBy ?? []),
@@ -761,16 +783,18 @@ export function analyzeInteractions(
     byInvocation.set(key, entries);
   }
   const invocations = [...byInvocation.values()]
-    .map(summarizeInvocation)
-    .filter((invocation) =>
-      Object.entries(options.filters ?? {}).every(
-        ([field, expected]) =>
-          expected === undefined ||
-          [invocation.identity[field as AnalysisField]]
-            .flat()
-            .some((value) => String(value) === expected),
-      ),
+    .filter((entries) =>
+      Object.entries(options.filters ?? {}).every(([field, expected]) => {
+        if (expected === undefined) return true;
+        const supplied = entries
+          .map((record) => value(record, field as AnalysisField))
+          .filter((entry) => entry !== undefined);
+        return (supplied.length ? supplied : [null]).some(
+          (entry) => String(entry) === expected,
+        );
+      }),
     )
+    .map((entries) => summarizeInvocation(entries, options))
     .sort((a, b) => a.key.localeCompare(b.key));
   const groupBy = [...new Set<AnalysisField>(options.groupBy ?? ["phase"])];
   const groups = new Map<
@@ -846,6 +870,9 @@ export function analyzeInteractions(
     scope: "retained-observations" as const,
     filters: options.filters ?? {},
     groupBy,
+    nativeToolContent: options.includeNativeToolContent
+      ? "explicit-private-content-read"
+      : "metadata-only",
     ...aggregate(invocations),
     groups: [...groups.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -863,8 +890,9 @@ export function analyzeInteractions(
       "Only the latest invocation-cumulative usage contributes to totals. Provider-call and model breakdown observations are alternate views, not additional usage.",
       "Provider cost estimates are not billed cost or subscription availability. Missing estimates are not zero; currencies remain separate.",
       "Compare scope, retries, model/reasoning, prompt/source/configuration identities and capture coverage before interpreting differences. No causal model-quality claim is made.",
+      "Capture may be disabled, redacted, truncated or incomplete. Default analysis never loads content. Explicit native-tool content analysis reads only complete authenticated tool payloads to recover legacy call IDs/timestamps; it returns no arguments, paths or error text and never reconstructs historical decisions.",
+      "Native tool counts deduplicate call IDs within each invocation and exclude SDK callbacks and replacement snapshots. Output observation proves returned transport, not nested command success. Response boundaries count observed tool-call rounds, not all upstream requests. Call-to-output durations use recorded native timestamps, never capture-write time, and can overlap. Nested command/process counts and repeated reads/validation remain unavailable without explicit structured facts.",
       "Native tool counts cover correlated model-visible calls only. SDK items, nested processes, model responses, parent invocations and child scopes are not extra calls; outputs never prove command success. Child accounting remains separate because parent inclusion is unknown. Reported child status is not resource cessation or acceptance.",
-      "Capture may be disabled, redacted, truncated or incomplete. Metadata analysis never loads content or reconstructs historical decisions.",
       "Controller observations are filtered by repository/Objective/run/item/attempt only; invocation/model filters do not imply ownership of shared validation or delivery. Related invocation keys express shared recorded scope, not causation.",
     ],
   };
@@ -884,6 +912,9 @@ export function renderAnalysis(
       `\n${Object.entries(group.identity)
         .map(([field, entry]) => `${field}=${entry ?? "unavailable"}`)
         .join(", ")}: ${group.invocationCount} attempts`,
+    );
+    lines.push(
+      `  native tool calls: ${group.nativeToolActivity.uniqueCalls ?? "unavailable"}; rounds: ${group.nativeToolActivity.callRounds ?? "unavailable"} (${group.nativeToolActivity.availability}; nested commands/processes unavailable)`,
     );
     for (const category of tokenCategories) {
       const usage = group.usage[category]!;

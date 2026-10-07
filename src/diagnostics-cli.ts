@@ -17,7 +17,14 @@ import {
 import { readContinuation, readState } from "./state-store.js";
 
 const modes = ["summary", "analyze", "logs", "captures"] as const;
-const analysisFlags = ["group-by", "filter", "json", "gantt", "output"];
+const analysisFlags = [
+  "group-by",
+  "filter",
+  "json",
+  "gantt",
+  "output",
+  "native-tool-content",
+];
 /** Flags that belong to --analyze alone; --json is shared with --summary. */
 const analyzeOnlyFlags = analysisFlags.filter((flag) => flag !== "json");
 

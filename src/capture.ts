@@ -69,6 +69,9 @@ export interface InteractionMetadata {
     recordedAt: string | null;
     turnId: string | null;
     status: "observed" | "reported-failed";
+    timestampSource?: "native-row" | "native-payload";
+    reportedStatus?: "completed" | "failed" | "cancelled" | "in_progress";
+    explicitFailure?: true;
   };
   /** Each descendant remains a separate accounting scope, bound to the invoking parent. */
   nativeOwnership?: { rootSessionId: string; parentSessionId: string };

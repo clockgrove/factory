@@ -97,7 +97,7 @@ function help(): void {
       "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT] --reason TEXT",
       "      Decide a plan (--answer is required to accept one) or a result criterion (--item names the Work Item; without it, the final acceptance)",
       "  retry --objective N [--item ITEM] [--rereview]",
-      "      Answer a step's decision or configuration fix, start a failed Work Item's new attempt, or (--item --rereview) run validation and review again on a pending result",
+      "      Answer a step's decision or configuration fix, start a failed Work Item's new attempt, or (--item --rereview) validate and review the same pending or settled command-failure result within resultRereviews limits",
       "  repair --objective N --proposal FILE",
       "      Record a diagnosed correction for a failed Work Item",
       "  propose-amendment --objective N --proposal FILE",

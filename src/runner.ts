@@ -1,7 +1,13 @@
 import { bindPlanningPlaybook } from "./compiler.js";
 import { hasReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
-import { archiveAttempt, type RepairCorrection } from "./repair-policy.js";
+import {
+  archiveAttempt,
+  charge,
+  repairScopes,
+  type RepairCorrection,
+} from "./repair-policy.js";
+import { assertFailedValidationRecord } from "./failed-validation.js";
 import {
   applyWorkCorrection,
   recordSavedResultRefusal,
@@ -11,6 +17,7 @@ import { operatorName } from "./operator.js";
 import { approvedPlaybook, observeRetrospective } from "./learning.js";
 import {
   amendmentBlocksDispatch,
+  graphDigest,
   submitAmendment,
   type AmendmentProposal,
 } from "./graph-amendments.js";
@@ -1044,8 +1051,8 @@ export function repairWorkItem(
 }
 
 /**
- * Request validation and automatic review again without deciding a criterion. The result is
- * the exact pending one in state; it must still be what the checkout holds.
+ * Request bounded validation and automatic review of the exact retained result.
+ * A settled command failure may be revalidated; a refused result cannot be reopened.
  */
 export function rereviewWorkItem(
   config: FactoryConfig,
@@ -1055,12 +1062,14 @@ export function rereviewWorkItem(
   const handle = mutationLock(config, objective);
   try {
     const state = mutationState(config, objective);
+    if (!state) throw new Error("Objective has no Factory state");
     if (
-      !state ||
       state.error ||
       state.cancelRequested ||
       state.cancelledAt ||
-      state.finalValidation?.passed
+      state.finalValidation?.passed ||
+      state.finalAcceptance ||
+      state.objectiveClosure === "complete"
     )
       throw new Error("Objective is not awaiting result re-review");
     if (state.configDigest !== factoryConfigDigest(config))
@@ -1070,17 +1079,37 @@ export function rereviewWorkItem(
     const work = state.work[input.item];
     if (
       !work ||
-      work.status !== "waiting" ||
-      work.step !== "approve-result" ||
-      !work.acceptancePending ||
       !work.baseSha ||
+      !work.attempt ||
       !work.changeRef ||
       !work.treeSha ||
       work.pullRequest ||
       work.integratedSha
     )
       throw new Error(
-        "Work Item has no unpublished pending result to re-review",
+        "Work Item has no unpublished retained result to re-review",
+      );
+    const pending =
+      work.status === "waiting" &&
+      work.step === "approve-result" &&
+      work.acceptancePending;
+    const failed = work.status === "failed" && work.step === "validate";
+    if (!pending && !failed)
+      throw new Error("Work Item is not awaiting result re-review");
+    if (
+      state.coordinator?.cancelError ||
+      state.coordinator?.processes?.length ||
+      Object.values(state.repeats ?? {}).some((record) => record.inFlight) ||
+      Object.values(state.work).some((entry) => entry.status === "running")
+    )
+      throw new Error("Result re-review requires settled owned work");
+    if (
+      state.pendingAmendment ||
+      (work.graphRevisionDigest !== undefined &&
+        work.graphRevisionDigest !== graphDigest(state.graph))
+    )
+      throw new Error(
+        "Result re-review graph differs from the retained result",
       );
     if (
       work.acceptanceDecisions?.some(
@@ -1093,16 +1122,54 @@ export function rereviewWorkItem(
       "rev-parse",
       `${work.changeRef}^{tree}`,
     );
-    const treeSha = work.acceptancePending.treeSha;
+    const treeSha = pending ? pending.treeSha : work.treeSha;
     if (treeSha !== work.treeSha || observedTree !== treeSha)
       throw new Error(
         "Result re-review tree differs from the pending exact result",
       );
     if (!input.actor.trim()) throw new Error("Result re-review requires actor");
-    work.recovery = archiveAttempt(work);
+    if (failed) {
+      assertFailedValidationRecord(
+        work.failedValidation,
+        state,
+        input.item,
+        work,
+        work.recovery?.failure,
+      );
+      const capture = work.failedValidation;
+      if (
+        !capture ||
+        capture.graphRevisionDigest !== graphDigest(state.graph) ||
+        capture.evidence.reason !== "command" ||
+        capture.evidence.commands.at(-1)?.exitCode === null ||
+        capture.evidence.postCommandStatus !== "unchanged" ||
+        capture.evidence.selectedLfsMembers !== 0 ||
+        capture.evidence.commands.some(
+          (command) =>
+            command.worktreeStatusBefore !== "unchanged" ||
+            command.worktreeStatusAfter !== "unchanged" ||
+            command.stoppedLeftovers !== undefined,
+        )
+      )
+        throw new Error(
+          "Result re-review requires a clean, unchanged, settled command failure capture",
+        );
+    }
+    // A new history position makes each admitted request a distinct charge;
+    // repeatedly charging the original failure would make later requests free.
+    const event = `item/${input.item}/result-rereview/${work.recovery?.history?.length ?? 0}`;
+    charge(state, event, "resultRereviews", repairScopes(state, input.item));
+    const recovery = archiveAttempt(work);
+    delete recovery.failure;
+    delete recovery.correction;
+    delete recovery.phase;
+    work.recovery = recovery;
     work.status = "running";
     work.step = "validate";
     delete work.acceptancePending;
+    delete work.failedValidation;
+    delete work.validation;
+    delete work.error;
     saveState(statePath(config.repository, objective), state);
     new DiagnosticEmitter(config.repository, objective).emit({
       runId: state.runId,
@@ -1110,7 +1177,7 @@ export function rereviewWorkItem(
       attemptId: work.attempt,
       operation: "result-rereview-request",
       outcome: "completed",
-      metadata: { treeSha, actor: input.actor },
+      metadata: { treeSha, actor: input.actor, event },
     });
   } finally {
     releaseMutationLock(config, objective, handle);

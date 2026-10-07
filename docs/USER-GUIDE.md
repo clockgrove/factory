@@ -283,7 +283,7 @@ factory decide --objective N --item ITEM --outcome accept|refuse --reason "Revie
 Decisions read the exact plan or tree from state, apply only to that plan or tree, and never bypass branch protection. Refusing a Work Item result records a failed-result event for the existing bounded correction path; it never turns passing command receipts into failed ones. Review excerpts can be truncated, and a truncated excerpt cannot auto-pass, so inspect the full tree before accepting. Raising `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` may allow a complete automatic review.
 
 ```sh
-# Run validation and review again on a pending Work Item result. No model call, accepts nothing.
+# Request validation and review again on the same retained result. Accepts nothing.
 factory retry --objective N --item ITEM --rereview
 
 # Start a failed or cancelled Work Item's new attempt, or answer the stopped step that status names
@@ -295,6 +295,8 @@ factory repair --objective N --proposal /abs/repair.json
 # Submit a graph amendment, or a replacement for a rejected one
 factory propose-amendment --objective N --proposal /abs/proposal.json
 ```
+
+`retry --rereview` admits an unpublished pending result, or a retained failed-validation command capture whose candidate stayed clean and unchanged and whose owned work settled. Use it after diagnosing a validation-environment failure when the implementation needs no change. It preserves the exact commit/tree and implementation attempt, archives the original failure and receipts, and spends one existing Objective/per-path `resultRereviews` allowance for each admitted request. The subsequent `factory run` performs real validation and automatic review again; the request itself calls no model and supplies no passing evidence. Refused acceptance, terminal/accepted results, changed graph/configuration, uncertain resources, candidate mutations and selected-LFS captures without complete byte binding are refused. A repeated failure remains failed; the consumed allowance is not refunded.
 
 An automatic implementation repair must be actionable now: every retained failed command is assessed, its concrete change stays within the Work Item’s ownership, and no unmet or unknown operator prerequisite remains. A conditional correction stops with a concrete question and starts no worker. Establish the operator condition before submitting `factory repair`; a proposal is your declared diagnosis and correction, not a controller receipt proving an external action happened. Automatic diagnosis uses the original command outcomes and actual owned candidate contents. Missing or truncated facts cannot establish readiness. A saved automatic correction without checked readiness remains historical evidence and needs an operator correction before admission.
 

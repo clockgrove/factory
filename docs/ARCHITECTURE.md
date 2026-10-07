@@ -16,21 +16,25 @@ The target owns requirements, validation commands, permissions, protection rules
 
 ## Module ownership
 
-| Responsibility                          | Code                                                                       |
-| --------------------------------------- | -------------------------------------------------------------------------- |
-| Planning choices, grounding and schemas | `src/compiler.ts`, `src/compiler-wire.ts`                                  |
-| Planning and graph projection           | `src/runner/planning.ts`, `src/runner/projection.ts`, `src/github.ts`      |
-| Controller ownership and execution      | `src/runner.ts`, `src/runner/ownership.ts`, `src/runner/execution.ts`      |
-| Scheduling and phase capacity           | `src/scheduler.ts`, `src/phase-admission.ts`                               |
-| Worker adapters and attempt collection  | `src/execution/`                                                           |
-| Command execution and receipt checks    | `src/validation.ts`, `src/validation-evidence.ts`                          |
-| Result evidence and acceptance review   | `src/result-evidence.ts`, `src/result-review.ts`, `src/review-evidence.ts` |
-| GitHub delivery and integration         | `src/delivery/`                                                            |
-| Final validation, sealing and closure   | `src/runner/finalization.ts`, `src/completion.ts`, `src/qa.ts`             |
-| Media selection and content             | `src/media.ts`, `src/content/`                                             |
-| Atomic continuation and diagnostics     | `src/state.ts`, `src/state-store.ts`, `src/diagnostics.ts`                 |
+| Responsibility                              | Code                                                                                                                    |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Structured model instructions and choices   | `src/compiler/model.ts`, `src/compiler-wire.ts`                                                                         |
+| Planning transport, faults and observations | `src/compiler/transport.ts`, `src/compiler/codex-transport.ts`, `src/compiler/faults.ts`, `src/compiler/observation.ts` |
+| Pinned sources and command authority        | `src/compiler/sources.ts`                                                                                               |
+| Planning packets and candidate verification | `src/compiler/packets.ts`, `src/compiler/candidate.ts`                                                                  |
+| Compilation, review and planning recovery   | `src/compiler/planning.ts`, `src/compiler/recovery.ts`                                                                  |
+| Planning and graph projection               | `src/runner/planning.ts`, `src/runner/projection.ts`, `src/github.ts`                                                   |
+| Controller ownership and execution          | `src/runner.ts`, `src/runner/ownership.ts`, `src/runner/execution.ts`                                                   |
+| Scheduling and phase capacity               | `src/scheduler.ts`, `src/phase-admission.ts`                                                                            |
+| Worker adapters and attempt collection      | `src/execution/`                                                                                                        |
+| Command execution and receipt checks        | `src/validation.ts`, `src/validation-evidence.ts`                                                                       |
+| Result evidence and acceptance review       | `src/result-evidence.ts`, `src/result-review.ts`, `src/review-evidence.ts`                                              |
+| GitHub delivery and integration             | `src/delivery/`                                                                                                         |
+| Final validation, sealing and closure       | `src/runner/finalization.ts`, `src/completion.ts`, `src/qa.ts`                                                          |
+| Media selection and content                 | `src/media.ts`, `src/content/`                                                                                          |
+| Atomic continuation and diagnostics         | `src/state.ts`, `src/state-store.ts`, `src/diagnostics.ts`                                                              |
 
-Keep the existing public runner and validation exports stable across internal moves. Use narrow adapters at PlanningModel, ExecutionDriver, AgentHarness, DeliveryStrategy, ContentStore and GitHubGateway. The scheduler, state store, validator and lifecycle remain direct code, without a parallel orchestration framework.
+`src/compiler.ts` retains the public compiler exports. Keep the existing public compiler, runner and validation exports stable across internal moves. Use narrow adapters at PlanningModel, ExecutionDriver, AgentHarness, DeliveryStrategy, ContentStore and GitHubGateway. The scheduler, state store, validator and lifecycle remain direct code, without a parallel orchestration framework.
 
 ## Planning and evidence
 

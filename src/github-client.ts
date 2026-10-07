@@ -1,4 +1,5 @@
 import { Octokit } from "@octokit/core";
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as time from "./clock.js";
 import { attachFault, decision, transient, type Fault } from "./fault.js";
 import {
@@ -6,6 +7,167 @@ import {
   currentProcessSignal,
   withProcessCancellation,
 } from "./process.js";
+
+/** Local transport facts only: no route, payload, header set or raw exception. */
+export interface GitHubTransportObservation {
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+  operation: "read" | "mutation";
+  /** `sent` means handed to the client, never proof that GitHub received it. */
+  dispatch: "not-sent" | "sent";
+  outcome: "completed" | "failed" | "cancelled";
+  category:
+    | "http"
+    | "timeout"
+    | "cancelled"
+    | "dns"
+    | "connection"
+    | "tls"
+    | "credential"
+    | "rate-limit"
+    | "unknown";
+  /** Octokit synthesizes status 500 for fetch failures; only a response is HTTP evidence. */
+  status: number | null;
+  timeout: boolean | null;
+  cancellation: boolean | null;
+  requestId: string | null;
+}
+
+const transportObserver = new AsyncLocalStorage<
+  (observation: GitHubTransportObservation) => void
+>();
+const TRANSPORT = Symbol("github-transport-observation");
+
+/** Scoped to one controller operation, including concurrent calls; never a global subscriber. */
+export function withGitHubTransportObserver<T>(
+  observe: (observation: GitHubTransportObservation) => void,
+  run: () => T,
+): T {
+  return transportObserver.run(observe, run);
+}
+
+/** The original observation follows error wrapping without changing its fault or replay authority. */
+export function gitHubTransportOf(
+  error: unknown,
+): GitHubTransportObservation | undefined {
+  for (
+    let current = error, depth = 0;
+    current !== null && typeof current === "object" && depth < 8;
+    current = (current as { cause?: unknown }).cause, depth++
+  ) {
+    const observation = (
+      current as { [TRANSPORT]?: GitHubTransportObservation }
+    )[TRANSPORT];
+    if (observation) return observation;
+  }
+  return undefined;
+}
+
+function observedError<E extends Error>(
+  error: E,
+  observation: GitHubTransportObservation,
+): E {
+  Object.defineProperty(error, TRANSPORT, {
+    value: Object.freeze(observation),
+    enumerable: false,
+  });
+  return error;
+}
+
+function observeTransport(observation: GitHubTransportObservation): void {
+  try {
+    transportObserver.getStore()?.(Object.freeze(observation));
+  } catch {
+    // Observational writes cannot alter a request, its result or lifecycle.
+  }
+}
+
+function responseFacts(
+  response:
+    | {
+        status?: unknown;
+        headers?: Record<string, unknown>;
+      }
+    | undefined,
+): Pick<GitHubTransportObservation, "status" | "requestId"> {
+  const status = response?.status;
+  const requestId = response?.headers?.["x-github-request-id"];
+  return {
+    status:
+      typeof status === "number" &&
+      Number.isInteger(status) &&
+      status >= 100 &&
+      status <= 599
+        ? status
+        : null,
+    // GitHub's correlation identifier is hex groups, not an arbitrary header string.
+    requestId:
+      typeof requestId === "string" &&
+      /^[A-Fa-f0-9]{1,16}(?::[A-Fa-f0-9]{1,16}){3,5}$/.test(requestId)
+        ? requestId
+        : null,
+  };
+}
+
+function transportFailure(
+  error: unknown,
+  signal: AbortSignal | undefined,
+): Pick<GitHubTransportObservation, "category" | "timeout" | "cancellation"> {
+  let category: GitHubTransportObservation["category"] = "unknown";
+  let timeout: boolean | null = null;
+  let cancellation: boolean | null = signal?.aborted ? true : null;
+  for (
+    let current = error, depth = 0;
+    current !== null && typeof current === "object" && depth < 8;
+    current = (current as { cause?: unknown }).cause, depth++
+  ) {
+    const { name, code: rawCode } = current as {
+      name?: unknown;
+      code?: unknown;
+    };
+    const code = typeof rawCode === "string" ? rawCode : "";
+    if (
+      name === "TimeoutError" ||
+      [
+        "ETIMEDOUT",
+        "UND_ERR_CONNECT_TIMEOUT",
+        "UND_ERR_HEADERS_TIMEOUT",
+        "UND_ERR_BODY_TIMEOUT",
+      ].includes(code)
+    ) {
+      timeout = true;
+      category = "timeout";
+    } else if (name === "AbortError" || code === "ABORT_ERR") {
+      cancellation = true;
+      if (category === "unknown") category = "cancelled";
+    } else if (["ENOTFOUND", "EAI_AGAIN"].includes(code)) {
+      if (category === "unknown") category = "dns";
+    } else if (
+      [
+        "ECONNRESET",
+        "ECONNREFUSED",
+        "EPIPE",
+        "ENETUNREACH",
+        "EHOSTUNREACH",
+        "UND_ERR_SOCKET",
+      ].includes(code)
+    ) {
+      if (category === "unknown") category = "connection";
+    } else if (
+      [
+        "CERT_HAS_EXPIRED",
+        "CERT_NOT_YET_VALID",
+        "DEPTH_ZERO_SELF_SIGNED_CERT",
+        "SELF_SIGNED_CERT_IN_CHAIN",
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "ERR_TLS_CERT_ALTNAME_INVALID",
+      ].includes(code)
+    ) {
+      if (category === "unknown") category = "tls";
+    }
+  }
+  if (category === "unknown" && cancellation) category = "cancelled";
+  return { category, timeout, cancellation };
+}
 
 /**
  * GitHub refusals recognised by their documented message or error code.
@@ -497,13 +659,32 @@ export class GitHubClient {
     readOnly: boolean,
   ): Promise<T> {
     const signal = currentProcessSignal();
+    let transport: GitHubTransportObservation = {
+      method: method as GitHubTransportObservation["method"],
+      operation: readOnly ? "read" : "mutation",
+      dispatch: "not-sent",
+      outcome: "failed",
+      category: "unknown",
+      status: null,
+      timeout: null,
+      cancellation: null,
+      requestId: null,
+    };
     // Cancelled before the request was sent: nothing reached GitHub.
     const cancelled = () =>
       attachFault(new Error("GitHub request cancelled before dispatch"), {
         kind: "cancelled",
         detail: `GitHub ${method} cancelled before it was sent`,
       });
-    if (signal?.aborted) throw cancelled();
+    if (signal?.aborted) {
+      transport = {
+        ...transport,
+        ...transportFailure(signal.reason, signal),
+        outcome: "cancelled",
+      };
+      observeTransport(transport);
+      throw observedError(cancelled(), transport);
+    }
     const previous = this.queue;
     let release!: () => void;
     this.queue = new Promise<void>((resolve) => {
@@ -519,10 +700,14 @@ export class GitHubClient {
     try {
       await Promise.race([previous, aborted]);
       if (signal?.aborted) throw cancelled();
-      const client = await this.octokit();
+      const client = await this.octokit().catch((error: unknown) => {
+        transport.category = "credential";
+        throw error;
+      });
       // Rate-limited: nothing is sent. The caller's step waits until the
       // gate opens, where pause, drain and handoff can stop it (#641).
       if (time.now() < this.notBefore) {
+        transport.category = "rate-limit";
         const until = new Date(this.notBefore).toISOString();
         // A command outside a step reports this message: name the reset.
         throw attachFault(
@@ -531,6 +716,7 @@ export class GitHubClient {
         );
       }
       try {
+        transport.dispatch = "sent";
         const response = await client.request(`${method} /${route}`, {
           ...body,
           baseUrl: "https://api.github.com",
@@ -540,6 +726,14 @@ export class GitHubClient {
           },
           request: { signal },
         });
+        transport = {
+          ...transport,
+          ...responseFacts(response),
+          category: "http",
+          outcome: "completed",
+          timeout: false,
+          cancellation: false,
+        };
         this.observeRate(response.headers, response.status);
         return (
           observation
@@ -556,17 +750,29 @@ export class GitHubClient {
           status?: number;
           message?: string;
           response?: {
+            status?: number;
             headers?: Record<string, string | number | undefined>;
             data?: unknown;
           };
         };
+        transport = {
+          ...transport,
+          ...responseFacts(error.response),
+          ...transportFailure(cause, signal),
+        };
+        if (transport.status !== null && transport.category === "unknown")
+          transport.category = "http";
+        if (transport.cancellation) transport.outcome = "cancelled";
         const limitedUntil = this.observeRate(
           error.response?.headers ?? {},
           error.status ?? 0,
           error.message,
         );
-        if (observation && method === "GET" && error.status === 304)
+        if (limitedUntil !== undefined) transport.category = "rate-limit";
+        if (observation && method === "GET" && error.status === 304) {
+          transport.outcome = "completed";
           return { status: 304, etag: error.response?.headers?.etag } as T;
+        }
         // Only facts that mean the same for every caller are classified
         // here; the gateway classifies statuses whose meaning depends on it.
         // A mutation may have reached GitHub even when its response was lost.
@@ -607,7 +813,17 @@ export class GitHubClient {
           transient("GitHub request failed in transit", false),
         );
       }
+    } catch (error) {
+      if (transport.dispatch === "not-sent" && signal?.aborted)
+        transport = {
+          ...transport,
+          ...transportFailure(signal.reason, signal),
+          outcome: "cancelled",
+        };
+      if (error instanceof Error) throw observedError(error, transport);
+      throw error;
     } finally {
+      observeTransport(transport);
       if (abortListener) signal?.removeEventListener("abort", abortListener);
       void previous.then(release);
     }

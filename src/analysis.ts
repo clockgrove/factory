@@ -66,8 +66,155 @@ function value(
   return record[field];
 }
 
+function transportObservation(value: ControllerObservation["transport"]) {
+  if (
+    !value ||
+    !["GET", "POST", "PATCH", "PUT", "DELETE"].includes(value.method) ||
+    !["read", "mutation"].includes(value.operation) ||
+    !["not-sent", "sent"].includes(value.dispatch) ||
+    !["completed", "failed", "cancelled"].includes(value.outcome) ||
+    ![
+      "http",
+      "timeout",
+      "cancelled",
+      "dns",
+      "connection",
+      "tls",
+      "credential",
+      "rate-limit",
+      "unknown",
+    ].includes(value.category)
+  )
+    return undefined;
+  return {
+    method: value.method,
+    operation: value.operation,
+    dispatch: value.dispatch,
+    outcome: value.outcome,
+    category: value.category,
+    status:
+      Number.isInteger(value.status) &&
+      value.status! >= 100 &&
+      value.status! <= 599
+        ? value.status
+        : null,
+    timeout: typeof value.timeout === "boolean" ? value.timeout : null,
+    cancellation:
+      typeof value.cancellation === "boolean" ? value.cancellation : null,
+    requestId:
+      typeof value.requestId === "string" &&
+      /^[A-Fa-f0-9]{1,16}(?::[A-Fa-f0-9]{1,16}){3,5}$/.test(value.requestId)
+        ? value.requestId
+        : null,
+  };
+}
+
+function summarizeTools(activity: ReturnType<typeof summarizeNativeTools>) {
+  const selected = activity.calls.map((call) => ({
+    sessionId: call.sessionId,
+    callId: call.callId,
+    name: call.name,
+    type: call.type,
+    turnId: call.turnId,
+    calledAt: call.calledAt,
+    outputAt: call.outputAt,
+    outputObserved: call.observedOutput,
+    status:
+      call.explicitFailure === true
+        ? "reported-failed"
+        : call.observedOutput
+          ? "output-observed"
+          : "output-unavailable",
+    durationMs: call.callToOutputMs,
+    commandSuccess: "unknown" as const,
+    nestedCommandsAndProcesses: "unknown" as const,
+  }));
+  return {
+    source: "model-visible-native-calls" as const,
+    calls: activity.uniqueCalls,
+    observedOutputs: activity.callsWithObservedOutput,
+    reportedFailures: activity.observedExplicitFailureCalls,
+    missingOutputs: activity.callsWithoutObservedOutput,
+    observedRounds: activity.callRounds,
+    roundMethod: activity.roundMethod,
+    observedDurationMs: activity.callToOutputTiming.sumObservedIntervalsMs,
+    durationCoverage: activity.callToOutputTiming.availability,
+    durationScope: activity.callToOutputTiming.scope,
+    overlappingDurations: true,
+    byName: activity.byName,
+    endpointsWithoutCall: activity.outputsWithoutObservedCall,
+    missingIdentity:
+      activity.unidentifiedCallRecords + activity.unidentifiedOutputRecords,
+    conflictingEndpoints: activity.conflictingCallIdentities,
+    coverage: activity.availability,
+    observations: selected,
+    sdkItems: "separate-uncorrelated-view" as const,
+    readValidationClassification: "unknown" as const,
+  };
+}
+
+function summarizeNative(
+  records: InteractionMetadata[],
+  options: AnalysisOptions,
+  parentTools: ReturnType<typeof summarizeNativeTools>,
+) {
+  const parent = records.filter((record) => !record.nativeOwnership);
+  const children = new Map<string, InteractionMetadata[]>();
+  for (const record of records)
+    if (record.nativeOwnership && record.providerSessionId) {
+      const selected = children.get(record.providerSessionId) ?? [];
+      selected.push(record);
+      children.set(record.providerSessionId, selected);
+    }
+  const observations = records
+    .filter((record) => record.nativeDescendant)
+    .map((record) => record.nativeDescendant!);
+  const ids = [
+    ...new Set([
+      ...observations.map((child) => child.childSessionId),
+      ...children.keys(),
+    ]),
+  ];
+  return {
+    ...summarizeNativeScope(parent),
+    tools: summarizeTools(parentTools),
+    descendants: {
+      observedChildren: ids.length,
+      accountingUnion: null,
+      parentUsageIncludesChildren: "unknown" as const,
+      resourceCessation: "unavailable" as const,
+      coverage:
+        observations.length ||
+        records.some((record) => record.nativeRollout?.childHistory)
+          ? "partial"
+          : "unknown",
+      children: ids.map((sessionId) => ({
+        sessionId,
+        observations: observations.filter(
+          (child) => child.childSessionId === sessionId,
+        ),
+        latestReportedStatus:
+          observations
+            .filter(
+              (child) =>
+                child.childSessionId === sessionId &&
+                child.status !== "unknown",
+            )
+            .at(-1)?.status ?? "unknown",
+        ...summarizeNativeScope(children.get(sessionId) ?? []),
+        tools: summarizeTools(
+          summarizeNativeTools(
+            children.get(sessionId) ?? [],
+            options.includeNativeToolContent,
+          ),
+        ),
+      })),
+    },
+  };
+}
+
 /** Native per-response observations are an alternate view of parent invocation totals. */
-function summarizeNative(records: InteractionMetadata[]) {
+function summarizeNativeScope(records: InteractionMetadata[]) {
   const snapshot = records
     .filter((record) => record.nativeRollout)
     .at(-1)?.nativeRollout;
@@ -302,6 +449,10 @@ function summarizeInvocation(
   const usage = usageRecord?.usage;
   const normalized = normalizeTokenUsage(usage?.normalized);
   const cost = usage?.cost;
+  const nativeToolActivity = summarizeNativeTools(
+    records.filter((record) => !record.nativeOwnership),
+    options.includeNativeToolContent,
+  );
   return {
     key: invocationKey(first),
     identity,
@@ -344,11 +495,8 @@ function summarizeInvocation(
           })),
       ]),
     ),
-    native: summarizeNative(records),
-    nativeToolActivity: summarizeNativeTools(
-      records,
-      options.includeNativeToolContent,
-    ),
+    native: summarizeNative(records, options, nativeToolActivity),
+    nativeToolActivity,
     promptComponents: request?.promptComponents ?? null,
     usage: {
       scope: "invocation-cumulative" as const,
@@ -429,6 +577,44 @@ function aggregate(invocations: Invocation[]) {
   ].sort();
   return {
     invocationCount: invocations.length,
+    nativeTools: {
+      scope: "parent-invocations-only" as const,
+      calls:
+        invocations.length > 0 &&
+        invocations.every(
+          (invocation) => invocation.native.tools.calls !== null,
+        )
+          ? invocations.reduce(
+              (sum, invocation) => sum + (invocation.native.tools.calls ?? 0),
+              0,
+            )
+          : null,
+      observedOutputs:
+        invocations.length > 0 &&
+        invocations.every(
+          (invocation) => invocation.native.tools.observedOutputs !== null,
+        )
+          ? invocations.reduce(
+              (sum, invocation) =>
+                sum + (invocation.native.tools.observedOutputs ?? 0),
+              0,
+            )
+          : null,
+      eligibleInvocations: invocations.length,
+      contributingInvocations: invocations.filter(
+        (invocation) => invocation.native.tools.coverage !== "unavailable",
+      ).length,
+      coverage: !invocations.some(
+        (invocation) => invocation.native.tools.coverage !== "unavailable",
+      )
+        ? "unavailable"
+        : invocations.every(
+              (invocation) => invocation.native.tools.coverage === "available",
+            )
+          ? "available"
+          : "partial",
+      descendantUnion: "unknown" as const,
+    },
     observedWindow: {
       firstObservationAt: first,
       lastObservationAt: last,
@@ -627,6 +813,9 @@ export function analyzeInteractions(
             outcome: event.outcome,
             durationMs: event.durationMs ?? null,
             metadata: event.metadata ?? {},
+            ...(transportObservation(event.transport)
+              ? { transport: transportObservation(event.transport) }
+              : {}),
             relatedInvocationKeys: invocations
               .filter(
                 (invocation) =>
@@ -672,6 +861,7 @@ export function analyzeInteractions(
       "Compare scope, retries, model/reasoning, prompt/source/configuration identities and capture coverage before interpreting differences. No causal model-quality claim is made.",
       "Capture may be disabled, redacted, truncated or incomplete. Default analysis never loads content. Explicit native-tool content analysis reads only complete authenticated tool payloads to recover legacy call IDs/timestamps; it returns no arguments, paths or error text and never reconstructs historical decisions.",
       "Native tool counts deduplicate call IDs within each invocation and exclude SDK callbacks and replacement snapshots. Output observation proves returned transport, not nested command success. Response boundaries count observed tool-call rounds, not all upstream requests. Call-to-output durations use recorded native timestamps, never capture-write time, and can overlap. Nested command/process counts and repeated reads/validation remain unavailable without explicit structured facts.",
+      "Native tool counts cover correlated model-visible calls only. SDK items, nested processes, model responses, parent invocations and child scopes are not extra calls; outputs never prove command success. Child accounting remains separate because parent inclusion is unknown. Reported child status is not resource cessation or acceptance.",
       "Controller observations are filtered by repository/Objective/run/item/attempt only; invocation/model filters do not imply ownership of shared validation or delivery. Related invocation keys express shared recorded scope, not causation.",
     ],
   };
@@ -683,6 +873,7 @@ export function renderAnalysis(
   const window = report.observedWindow;
   const lines = [
     `Factory retained observations: ${report.invocationCount} provider attempts`,
+    `Native model tool calls: ${report.nativeTools.calls ?? "unavailable"}; outputs: ${report.nativeTools.observedOutputs ?? "unavailable"} (${report.nativeTools.coverage}; descendant union unknown)`,
     `Observed elapsed time: ${window.elapsedMs === null ? "unavailable" : `${window.elapsedMs} ms`} (${window.incompleteIntervals} incomplete intervals)`,
   ];
   for (const group of report.groups) {

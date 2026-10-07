@@ -24,6 +24,7 @@ import {
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { objectiveComplete } from "./completion.js";
+import { withGitHubTransportObserver } from "./github-client.js";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest, stateRoot } from "./config.js";
 import type {
@@ -86,12 +87,46 @@ import {
   releaseMutationLock,
   closeCancelledIssues,
   cancelKnownWork,
+  configuredDiagnosticSecrets,
 } from "./runner/ownership.js";
 import { decidePlan } from "./runner/planning.js";
 import { runObjectivePass } from "./runner/execution.js";
 export type { ApplicationServices } from "./runner/ownership.js";
 export { CoordinatorHandoff } from "./runner/ownership.js";
 export { planObjective, decidePlan } from "./runner/planning.js";
+
+/** Local observations share the controller's async scope, never its mutation authority. */
+function withGitHubDiagnostics<T>(
+  config: FactoryConfig,
+  objective: number,
+  run: () => T,
+): T {
+  const diagnostics = new DiagnosticEmitter(
+    config.repository,
+    objective,
+    configuredDiagnosticSecrets(config),
+    config.capture,
+    factoryConfigDigest(config),
+  );
+  let retainedRunId: string | undefined;
+  try {
+    retainedRunId = readContinuation(config.repository, objective)?.runId;
+  } catch {
+    // Missing or unreadable context is unknown; normal lifecycle reads still decide.
+  }
+  return withGitHubTransportObserver(
+    (transport) =>
+      diagnostics.emit({
+        runId:
+          owners.get(ownerKey(config, objective))?.snapshot?.runId ??
+          retainedRunId,
+        operation: "github-transport",
+        outcome: transport.outcome === "completed" ? "completed" : "failed",
+        transport,
+      }),
+    run,
+  );
+}
 
 /** What `factory decide` was asked, before the Objective's state says which decision it is. */
 export interface DecisionInput {
@@ -271,6 +306,17 @@ export async function runObjective(
       handler: ((request: ControlRequest) => Promise<unknown>) | undefined,
     ) => void;
   } = {},
+): Promise<ContinuationState> {
+  return withGitHubDiagnostics(config, objective, () =>
+    runObjectiveOwned(config, objective, services, options),
+  );
+}
+
+async function runObjectiveOwned(
+  config: FactoryConfig,
+  objective: number,
+  services: ApplicationServices,
+  options: NonNullable<Parameters<typeof runObjective>[3]>,
 ): Promise<ContinuationState> {
   if (!!options.ownerLock !== !!options.observeControl)
     throw new Error(
@@ -724,6 +770,17 @@ export async function runObjective(
 }
 
 export async function cancelObjective(
+  config: FactoryConfig,
+  objective: number,
+  driver: ExecutionDriver,
+  github: GitHubGateway,
+): Promise<"requested" | "cancelled"> {
+  return withGitHubDiagnostics(config, objective, () =>
+    cancelObjectiveOwned(config, objective, driver, github),
+  );
+}
+
+async function cancelObjectiveOwned(
   config: FactoryConfig,
   objective: number,
   driver: ExecutionDriver,

@@ -45,16 +45,6 @@ export interface InteractionMetadata {
   toolCallId?: string;
   role?: "system" | "developer" | "user" | "assistant" | "tool";
   tool?: string;
-  /** Sanitized native call/output facts; no arguments, paths or error text. */
-  nativeTool?: {
-    event: "call" | "output";
-    callId?: string;
-    name?: string;
-    observedAt?: string;
-    timestampSource?: "native-row" | "native-payload";
-    reportedStatus?: "completed" | "failed" | "cancelled" | "in_progress";
-    explicitFailure?: true;
-  };
   configDigest?: string;
   sourceDigest?: string;
   promptDigest?: string;
@@ -69,8 +59,48 @@ export interface InteractionMetadata {
     digest: string;
     contextSnapshot: boolean;
   };
+  /** Native identifiers and timestamps, never tool arguments or process-success inference. */
+  nativeTool?: {
+    source: "owned-codex-rollout";
+    endpoint: "call" | "output";
+    callId: string | null;
+    name: string | null;
+    type: "function" | "custom";
+    recordedAt: string | null;
+    turnId: string | null;
+    status: "observed" | "reported-failed";
+    timestampSource?: "native-row" | "native-payload";
+    reportedStatus?: "completed" | "failed" | "cancelled" | "in_progress";
+    explicitFailure?: true;
+  };
+  /** Each descendant remains a separate accounting scope, bound to the invoking parent. */
+  nativeOwnership?: { rootSessionId: string; parentSessionId: string };
+  nativeDescendant?: {
+    parentSessionId: string;
+    childSessionId: string;
+    relation: "observed-spawn" | "authenticated-owned-home";
+    status:
+      | "pending-init"
+      | "running"
+      | "interrupted"
+      | "completed"
+      | "errored"
+      | "shutdown"
+      | "not-found"
+      | "unknown";
+    recordedAt: string | null;
+    model?: string;
+    reasoningEffort?: string;
+    history: "available" | "partial" | "unavailable";
+    resourceCessation: "unavailable";
+    parentUsageIncludesChild: "unknown";
+  };
   nativeRollout?: {
     cliVersion: string | null;
+    modelProvider?: string;
+    reportedModel?: string;
+    reportedReasoningEffort?: string;
+    modelContextWindow?: number;
     status: "available" | "partial" | "unavailable";
     readBytes: number | null;
     totalBytes: number | null;

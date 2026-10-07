@@ -3,16 +3,37 @@ import { isDeepStrictEqual } from "node:util";
 import { readInteractionContent, type InteractionMetadata } from "./capture.js";
 import { nativeToolObservation } from "./codex-native-capture.js";
 
-type Observation = NonNullable<InteractionMetadata["nativeTool"]>;
+type Observation = {
+  event: "call" | "output";
+  callId?: string;
+  name?: string;
+  observedAt?: string;
+  timestampSource?: "native-row" | "native-payload";
+  reportedStatus?: "completed" | "failed" | "cancelled" | "in_progress";
+  explicitFailure?: true;
+  type?: "function" | "custom";
+  turnId?: string;
+};
 
 function metadataObservation(
-  record: InteractionMetadata,
+  value: InteractionMetadata["nativeTool"],
 ): Observation | undefined {
-  const value = record.nativeTool;
-  if (!value || !["call", "output"].includes(value.event)) return;
+  if (
+    !value ||
+    value.source !== "owned-codex-rollout" ||
+    !["call", "output"].includes(value.endpoint)
+  )
+    return;
   // Metadata files can be selected externally: whitelist, never spread raw values.
   return {
-    event: value.event,
+    event: value.endpoint,
+    ...(["function", "custom"].includes(value.type)
+      ? { type: value.type }
+      : {}),
+    ...(typeof value.turnId === "string" &&
+    /^[a-zA-Z0-9_-]{1,256}$/.test(value.turnId)
+      ? { turnId: value.turnId }
+      : {}),
     ...(typeof value.callId === "string" &&
     /^[a-zA-Z0-9_-]{1,256}$/.test(value.callId)
       ? { callId: value.callId }
@@ -21,12 +42,14 @@ function metadataObservation(
     /^[a-zA-Z0-9_.:-]{1,128}$/.test(value.name)
       ? { name: value.name }
       : {}),
-    ...(typeof value.observedAt === "string" &&
-    Number.isFinite(Date.parse(value.observedAt)) &&
-    ["native-row", "native-payload"].includes(value.timestampSource ?? "")
+    ...(typeof value.recordedAt === "string" &&
+    Number.isFinite(Date.parse(value.recordedAt)) &&
+    ["native-row", "native-payload"].includes(
+      value.timestampSource ?? "native-row",
+    )
       ? {
-          observedAt: new Date(value.observedAt).toISOString(),
-          timestampSource: value.timestampSource,
+          observedAt: new Date(value.recordedAt).toISOString(),
+          timestampSource: value.timestampSource ?? "native-row",
         }
       : {}),
     ...(["completed", "failed", "cancelled", "in_progress"].includes(
@@ -34,7 +57,9 @@ function metadataObservation(
     )
       ? { reportedStatus: value.reportedStatus }
       : {}),
-    ...(value.explicitFailure === true ? { explicitFailure: true } : {}),
+    ...(value.explicitFailure === true || value.status === "reported-failed"
+      ? { explicitFailure: true }
+      : {}),
   };
 }
 
@@ -58,7 +83,7 @@ function retainedObservation(
       createHash("sha256").update(text).digest("hex") !== content.originalDigest
     )
       return;
-    return nativeToolObservation(JSON.parse(text));
+    return metadataObservation(nativeToolObservation(JSON.parse(text)));
   } catch {
     return;
   }
@@ -78,11 +103,13 @@ export function summarizeNativeTools(
         record.providerEvent ?? "",
       ) && !record.visible?.contextSnapshot,
   );
+  const identity = (record: InteractionMetadata, callId: string) =>
+    JSON.stringify([record.providerSessionId ?? null, callId]);
   const observed = new Map<string, Observation>();
   let contentReads = 0;
   let unavailableContentReads = 0;
   for (const record of tools) {
-    let observation = metadataObservation(record);
+    let observation = metadataObservation(record.nativeTool);
     if (!observation && includeContent) {
       contentReads++;
       observation = retainedObservation(record);
@@ -115,7 +142,8 @@ export function summarizeNativeTools(
       continue;
     }
     const map = call ? calls : outputs;
-    const previous = map.get(observation.callId);
+    const key = identity(record, observation.callId);
+    const previous = map.get(key);
     if (previous) {
       if (call) duplicateCallRecords++;
       else duplicateOutputRecords++;
@@ -123,8 +151,8 @@ export function summarizeNativeTools(
         !isDeepStrictEqual(previous.observation, observation) ||
         previous.record.visible?.digest !== record.visible?.digest
       )
-        conflicts.add(observation.callId);
-    } else map.set(observation.callId, { record, observation });
+        conflicts.add(key);
+    } else map.set(key, { record, observation });
   }
   // Usage records delimit observed completed-response groups, not all upstream requests.
   const responses = new Set<string>();
@@ -137,7 +165,8 @@ export function summarizeNativeTools(
       !record.visible?.contextSnapshot
     ) {
       const id = observed.get(record.recordId)?.callId;
-      if (id && !roundedCalls.has(id)) pending.add(id);
+      const key = id ? identity(record, id) : undefined;
+      if (key && !roundedCalls.has(key)) pending.add(key);
     }
     if (record.providerEvent !== "codex.native-response-usage") continue;
     const key = record.usage?.deduplicationKey;
@@ -149,52 +178,52 @@ export function summarizeNativeTools(
       pending = new Set();
     }
   }
-  const entries = [...calls.entries()].map(
-    ([callId, { record, observation }]) => {
-      const output = outputs.get(callId);
-      const conflicting = conflicts.has(callId);
-      const start = observation.observedAt
-        ? Date.parse(observation.observedAt)
-        : NaN;
-      const end = output?.observation.observedAt
-        ? Date.parse(output.observation.observedAt)
-        : NaN;
-      const duration = end - start;
-      return {
-        callId,
-        name: observation.name ?? null,
-        callRecordId: record.recordId,
-        outputRecordId: output?.record.recordId ?? null,
-        observedOutput: Boolean(output),
-        conflictingObservations: conflicting,
-        reportedCallStatus: observation.reportedStatus ?? null,
-        reportedOutputStatus: output?.observation.reportedStatus ?? null,
-        explicitFailure: conflicting
-          ? null
-          : observation.explicitFailure ||
-            output?.observation.explicitFailure ||
-            null,
-        callToOutputMs:
-          !conflicting && Number.isFinite(duration) && duration >= 0
-            ? duration
-            : null,
-        timingAvailability: conflicting
-          ? "conflicting-identity"
-          : !Number.isFinite(duration)
-            ? "missing-native-timestamps"
-            : duration < 0
-              ? "invalid-native-timestamp-order"
-              : "available",
-        timingSource:
-          !conflicting && Number.isFinite(duration) && duration >= 0
-            ? [
-                observation.timestampSource!,
-                output!.observation.timestampSource!,
-              ]
-            : null,
-      };
-    },
-  );
+  const entries = [...calls.entries()].map(([key, { record, observation }]) => {
+    const output = outputs.get(key);
+    const conflicting = conflicts.has(key);
+    const start = observation.observedAt
+      ? Date.parse(observation.observedAt)
+      : NaN;
+    const end = output?.observation.observedAt
+      ? Date.parse(output.observation.observedAt)
+      : NaN;
+    const duration = end - start;
+    return {
+      callId: observation.callId!,
+      sessionId: record.providerSessionId ?? null,
+      type: observation.type ?? null,
+      turnId: observation.turnId ?? null,
+      calledAt: observation.observedAt ?? null,
+      outputAt: output?.observation.observedAt ?? null,
+      name: observation.name ?? null,
+      callRecordId: record.recordId,
+      outputRecordId: output?.record.recordId ?? null,
+      observedOutput: Boolean(output),
+      conflictingObservations: conflicting,
+      reportedCallStatus: observation.reportedStatus ?? null,
+      reportedOutputStatus: output?.observation.reportedStatus ?? null,
+      explicitFailure: conflicting
+        ? null
+        : observation.explicitFailure ||
+          output?.observation.explicitFailure ||
+          null,
+      callToOutputMs:
+        !conflicting && Number.isFinite(duration) && duration >= 0
+          ? duration
+          : null,
+      timingAvailability: conflicting
+        ? "conflicting-identity"
+        : !Number.isFinite(duration)
+          ? "missing-native-timestamps"
+          : duration < 0
+            ? "invalid-native-timestamp-order"
+            : "available",
+      timingSource:
+        !conflicting && Number.isFinite(duration) && duration >= 0
+          ? [observation.timestampSource!, output!.observation.timestampSource!]
+          : null,
+    };
+  });
   const completeIdentity =
     unidentifiedCallRecords === 0 &&
     unidentifiedOutputRecords === 0 &&
@@ -204,7 +233,11 @@ export function summarizeNativeTools(
     typeof snapshot?.readBytes === "number" &&
     snapshot.readBytes > 0;
   const available =
-    readableView && snapshot?.status === "available" && completeIdentity;
+    readableView &&
+    snapshot?.status === "available" &&
+    completeIdentity &&
+    [...calls.keys()].every((id) => outputs.has(id)) &&
+    [...outputs.keys()].every((id) => calls.has(id));
   const known = readableView || tools.length > 0;
   const countableCalls = calls.size > 0 || available;
   const names = [...new Set(entries.map((entry) => entry.name))].sort();

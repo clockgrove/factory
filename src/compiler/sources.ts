@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { markdownLines } from "../markdown.js";
 import type { WorkGraph } from "../contracts.js";
 import {
@@ -99,6 +100,58 @@ export function hydrateWorkerInputSources(
   graph.items.forEach((item, index) => {
     item.inputSources = inputs[index]!;
   });
+}
+
+/** Transient model data: refer to exact supplied bytes without changing the canonical graph. */
+export function planningGraphView(graph: WorkGraph, sources: PlanningSource[]) {
+  const choices = compilerCitationChoices(sources);
+  const span = (path: string, content: string, heading?: string) => {
+    const sourceIndex = sources.findIndex(
+      (source) => source.path === path && source.content.includes(content),
+    );
+    if (sourceIndex < 0) return undefined;
+    const source = sources[sourceIndex]!;
+    return {
+      sourceIndex,
+      sourceDigest: createHash("sha256").update(source.content).digest("hex"),
+      start: source.content.indexOf(content),
+      length: content.length,
+      contentDigest: createHash("sha256").update(content).digest("hex"),
+      ...(heading === undefined ? {} : { heading }),
+    };
+  };
+  return {
+    ...graph,
+    items: graph.items.map((item) => ({
+      ...item,
+      ...(item.inputSources && {
+        inputSources: item.inputSources.map((input) => {
+          const matched = choices.some(
+            (choice) =>
+              choice.path === input.path &&
+              choice.heading === (input.heading ?? "") &&
+              choice.content === input.content,
+          );
+          const sourceSpan =
+            matched && span(input.path, input.content, input.heading);
+          if (!sourceSpan) return input;
+          const { content: _content, ...identity } = input;
+          return { ...identity, sourceSpan };
+        }),
+      }),
+    })),
+    ...(graph.requiredPreIntegrationChecks && {
+      requiredPreIntegrationChecks: graph.requiredPreIntegrationChecks.map(
+        (check) => {
+          const sourceSpan = span(check.source.path, check.source.text);
+          if (!sourceSpan || sourceSpan.sourceDigest !== check.source.digest)
+            return check;
+          const { text: _text, ...identity } = check.source;
+          return { ...check, source: { ...identity, sourceSpan } };
+        },
+      ),
+    }),
+  };
 }
 
 export function assertWorkerInputSources(

@@ -1000,6 +1000,7 @@ export function sanitizedWorkerEnvironment(
     "TEMP",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
     "XDG_RUNTIME_DIR",
     "CODEX_HOME",
     "CODEX_SQLITE_HOME",

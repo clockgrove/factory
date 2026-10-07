@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 test("packed Factory installs offline and runs its CLI and bundled scanner", () => {
@@ -97,11 +98,38 @@ test("packed Factory installs offline and runs its CLI and bundled scanner", () 
     const config = join(root, "selected config's", "factory.json");
     const environment = {
       ...process.env,
+      PATH: `${join(prefix, "node_modules", ".bin")}:${process.env.PATH ?? ""}`,
+      CODEX_HOME: root,
       XDG_CONFIG_HOME: join(root, "xdg-config"),
       XDG_STATE_HOME: join(root, "xdg-state"),
     };
     const run = (...args) =>
       execFileSync(cli, args, { encoding: "utf8", env: environment });
+    // Real packed npm launcher beneath the credential root: omit only its
+    // authenticated sole launcher, retaining the controller validation PATH.
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { createCodexHome } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "codex-planning-isolation.js")).href)};
+import { localValidationEnvironment, sanitizedWorkerEnvironment } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "process.js")).href)};
+const bin = ${JSON.stringify(join(prefix, "node_modules", ".bin"))};
+assert.equal(localValidationEnvironment(${JSON.stringify(join(root, "credentials"))}).PATH, process.env.PATH);
+assert.equal(sanitizedWorkerEnvironment(${JSON.stringify(join(root, "credentials"))}).PATH.split(":").includes(bin), false);
+const home = createCodexHome({ config: "", sandbox: { directory: ${JSON.stringify(checkout)}, workspace: "write", network: false } });
+try {
+  assert.equal(home.env.PATH.split(":").includes(bin), false);
+  assert.equal(readFileSync(join(home.env.CODEX_HOME, "config.toml"), "utf8").includes(bin), false);
+} finally { home.dispose(); }
+`,
+      ],
+      { encoding: "utf8", env: environment },
+    );
     assert.match(run("--help"), /setup --config-only/);
     const setup = JSON.parse(
       run(

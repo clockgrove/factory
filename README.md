@@ -68,7 +68,7 @@ sha256sum --check SHA256SUMS
 
 `gh attestation verify` proves the tarball was built by this repository's [release workflow](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) from the tagged source. Do not install a tarball that fails verification. Releases before v0.1.75 predate attestations; their verification is linked in the [historical release record](https://github.com/clockgrove/factory/blob/1ce1758836c6a249540d6c4bbddf1d01236ac0d7/CHANGELOG.md).
 
-Choose an absolute installation directory outside your target repository:
+Choose an absolute installation directory outside your target repository and credential, configuration or state roots (including `CODEX_HOME`):
 
 ```sh
 npm install --offline --prefix /absolute/private/factory-prefix \
@@ -77,7 +77,7 @@ export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
 
-Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory is distributed through GitHub Releases, not the npm registry.
+Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory excludes its authenticated installation bin from worker PATH when it contains only its own launcher; controller discovery and validation commands retain the original PATH. Other protected PATH entries still require correction. Factory is distributed through GitHub Releases, not the npm registry.
 
 Verify the installed CLI package and the enabled plugin both report the release you selected:
 

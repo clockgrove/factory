@@ -3,6 +3,7 @@ import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -12,7 +13,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { type Fault, transient, withFault } from "./fault.js";
 import {
   assertOrigin,
@@ -982,6 +984,37 @@ export function pinnedGitEnvironment(): NodeJS.ProcessEnv {
   return withGitConfig(env, GIT_CONFIG);
 }
 
+/** The current npm installation's sole Factory launcher is controller-only.
+ * Never grant a private bin directory or remove unrelated tools from PATH.
+ */
+export function workerToolchainPath(
+  path: string | undefined,
+): string | undefined {
+  if (path === undefined) return undefined;
+  const launcher = fileURLToPath(new URL("./cli.js", import.meta.url));
+  const bin = resolve(dirname(dirname(launcher)), "..", "..", ".bin");
+  try {
+    return path
+      .split(":")
+      .filter((entry) => {
+        if (!isAbsolute(entry) || !existsSync(entry) || !existsSync(bin))
+          return true;
+        if (realpathSync(entry) !== realpathSync(bin)) return true;
+        const contents = readdirSync(entry);
+        if (contents.length !== 1 || contents[0] !== "factory") return true;
+        const candidate = join(entry, "factory");
+        return (
+          !lstatSync(candidate).isSymbolicLink() ||
+          realpathSync(candidate) !== realpathSync(launcher)
+        );
+      })
+      .join(":");
+  } catch {
+    // Unknown installation identity keeps the original guarded PATH.
+    return path;
+  }
+}
+
 /** Give workers and validators only the ambient variables needed for local work. */
 export function sanitizedWorkerEnvironment(
   credentialDirectory: string,
@@ -1024,6 +1057,7 @@ export function sanitizedWorkerEnvironment(
     GIT_TERMINAL_PROMPT: "0",
     GCM_INTERACTIVE: "Never",
   });
+  if (env.PATH !== undefined) env.PATH = workerToolchainPath(env.PATH)!;
   return env;
 }
 
@@ -1035,7 +1069,10 @@ export function localValidationShellArguments(command: string): string[] {
 export function localValidationEnvironment(
   credentialDirectory: string,
 ): Record<string, string> {
-  return sanitizedWorkerEnvironment(credentialDirectory);
+  const env = sanitizedWorkerEnvironment(credentialDirectory);
+  // Validation uses the exact host toolchain declared by the controller.
+  if (process.env.PATH !== undefined) env.PATH = process.env.PATH;
+  return env;
 }
 
 export function resolveLocalExecutable(

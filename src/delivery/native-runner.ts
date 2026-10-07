@@ -1,3 +1,4 @@
+import { publicationControl } from "./publication.js";
 import { packageManagerUpdate } from "../package-manager-update.js";
 import { deliveryDescription } from "./description.js";
 import { assertIntegrated, laterIntegration } from "./integration.js";
@@ -758,6 +759,7 @@ export async function runNativeGraph(args: {
           "publish",
           async () =>
             delivery.publish({
+              publication: publicationControl(state, item.id, save),
               item,
               baseSha: itemBase,
               treeSha: work.treeSha!,

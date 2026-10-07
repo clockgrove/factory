@@ -49,6 +49,8 @@ Your agent host loads the skills; it does not select Factory's providers. These 
 
 New pull requests lead with the published Work Item goal, link the Work Item and Objective, and list actual file changes and the candidate commit/tree. Passing commands come from controller receipts bound to that tree and the exact command definitions; missing or stale receipts remain unavailable. Both delivery modes use this description without another model call or publishing worker/reviewer logs.
 
+If a PR creation response is lost, Factory retains the exact request before dispatch and stops repeated creation. A later run or retry can only look for a PR matching that request; an empty lookup remains unknown and cannot trigger another branch/LFS push or PR POST. A positive matching observation lets ordinary delivery continue while keeping the original response uncertainty. An unpublished run created before this publication contract cannot infer that nothing was sent and fails closed. Preserve its evidence; do not edit state or use diagnostics to reconstruct an outcome. The retained request history is limited to 64 entries per Work Item and is never cleared to permit another creation. This transport bound grants no extra repair, provider or spending attempts.
+
 Remote execution (`execution.kind: "managed-agent"`) runs Work Items in a provider-hosted session. It is implemented, not yet qualified against live providers; see [managed execution](#managed-execution).
 
 ## Local providers

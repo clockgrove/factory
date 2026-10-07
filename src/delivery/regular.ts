@@ -81,25 +81,21 @@ export class RegularDelivery implements DeliveryStrategy {
     private github: GitHubGateway,
   ) {}
 
-  /** Repeatable from the top: every effect is observed before it is made. */
+  /** Only a fresh owner-bound request may prepare effects; retained intent is read-only. */
   async publish(request: DeliveryRequest): Promise<DeliveryResult> {
+    const publication = request.publication;
+    if (!publication)
+      throw attachFault(
+        new Error("Publication has no durable owner control"),
+        decision(
+          "Publication requires its existing exclusive snapshot owner",
+          "No publication control was supplied",
+        ),
+      );
     const commit = request.changeRef;
     const body = request.body ?? deliveryDescription(this.checkout, request);
     const base = request.baseBranch ?? (await this.github.defaultBranch());
-    // Factory runs no repository hooks, so LFS's pre-push hook does not
-    // upload a worker's LFS objects: push them explicitly before the branch.
-    if (
-      request.lfs ||
-      (await addsLfsPointers(this.checkout, request.baseSha, commit))
-    )
-      await gitAsync(this.checkout, "lfs", "push", "origin", commit);
-    await pushBranch(
-      this.checkout,
-      request.branch,
-      commit,
-      request.earlierHeads,
-    );
-    const pr = await this.github.publish({
+    const pullRequest = {
       branch: request.branch,
       base,
       headSha: commit,
@@ -107,7 +103,37 @@ export class RegularDelivery implements DeliveryStrategy {
       treeSha: request.treeSha,
       title: request.item.title,
       body,
+    };
+    publication.assertRequest(pullRequest);
+    const reconcileOnly = publication.reconcileOnly;
+    if (!reconcileOnly) {
+      // Only initial preparation: an unresolved PR intent forbids even LFS/branch replay.
+      if (
+        request.lfs ||
+        (await addsLfsPointers(this.checkout, request.baseSha, commit))
+      ) {
+        publication.assertRequest(pullRequest);
+        await gitAsync(this.checkout, "lfs", "push", "origin", commit);
+      }
+      publication.assertRequest(pullRequest);
+      await pushBranch(
+        this.checkout,
+        request.branch,
+        commit,
+        request.earlierHeads,
+      );
+    }
+    const pr = await this.github.publish({
+      ...pullRequest,
+      reconcileOnly,
+      ...(publication.expectedPublication
+        ? { expectedPublication: publication.expectedPublication }
+        : {}),
+      ...(reconcileOnly
+        ? {}
+        : { beforeCreate: () => publication.beforeCreate(pullRequest) }),
     });
+    publication.observed(pullRequest, pr);
     return {
       branch: request.branch,
       pullRequest: pr.number,

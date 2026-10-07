@@ -650,6 +650,18 @@ export interface AgentHarness {
   cancelUnrecorded?(identity: string): Promise<void>;
 }
 
+/** Exclusive controller ownership; persisted intent never regenerates a create permit. */
+export interface PublicationControl {
+  readonly reconcileOnly: boolean;
+  readonly expectedPublication?: { titleDigest: string; bodyDigest: string };
+  assertRequest(request: PullRequestPublication): void;
+  beforeCreate(request: PullRequestPublication): void;
+  observed(
+    request: PullRequestPublication,
+    identity: PullRequestIdentity,
+  ): void;
+}
+
 export interface DeliveryRequest {
   item: WorkItem;
   baseSha: string;
@@ -657,6 +669,8 @@ export interface DeliveryRequest {
   changeRef: string;
   branch: string;
   baseBranch?: string;
+  /** Required by ordinary publication; created by the exclusive snapshot owner. */
+  publication?: PublicationControl;
   /** Controller-rendered publication text from public intent and exact candidate facts. */
   body?: string;
   lfs?: boolean;
@@ -851,6 +865,12 @@ export interface ProjectedGraph {
   issueByItemId: Record<string, number>;
 }
 export interface PullRequestPublication {
+  /** Persisted unknown/observed requests allow reads only; absence is also read-only. */
+  reconcileOnly?: boolean;
+  /** One-shot owner callback saves exact intent immediately before the sole POST. */
+  beforeCreate?: () => void;
+  /** Exact recorded observation or submitted request metadata during reconciliation. */
+  expectedPublication?: { titleDigest: string; bodyDigest: string };
   branch: string;
   base: string;
   /** The commit Factory pushed to `branch`. */
@@ -862,6 +882,14 @@ export interface PullRequestPublication {
   body: string;
 }
 export interface PullRequestIdentity {
+  /** Actual authenticated publication context, separate from desired request text. */
+  publication?: {
+    repository: string;
+    baseBranch: string;
+    titleDigest: string;
+    bodyDigest: string;
+    author?: string;
+  };
   baseBranch?: string;
   number: number;
   branch: string;
@@ -919,7 +947,7 @@ export interface GitHubGateway {
     },
   ): Promise<void>;
   projectGraph(request: GraphProjection): Promise<ProjectedGraph>;
-  /** The open PR for the pushed branch, found by its head before it is created. */
+  /** Observe the pushed branch first; create only after its one-shot durable owner callback. */
   publish(request: PullRequestPublication): Promise<PullRequestIdentity>;
   observe(identity: PullRequestIdentity): Promise<PullRequestObservation>;
   merge(

@@ -1,3 +1,4 @@
+import { assertPublicationIntents } from "./delivery/publication.js";
 import {
   assertApprovedPlaybookAdmission,
   assertApprovedPlaybookPin,
@@ -242,6 +243,13 @@ export function setCoordinatorMode(
 }
 
 export interface FactoryState {
+  /** New-run admission only. Absence does not prove historical non-submission. */
+  publicationContract?: "exact-request-v1";
+  /** Retained across WorkState replacement; never reconstructed from diagnostics. */
+  publicationIntents?: Record<
+    string,
+    import("./delivery/publication.js").PublicationIntent[]
+  >;
   finalAcceptance?: import("./completion.js").FinalAcceptance;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
   /** Charged failure events (see repair-policy.ts). */
@@ -507,6 +515,7 @@ export function parseFactoryState(
       "schema version, repository, or Objective identity differs from the installation",
     );
   string(state.runId, "runId");
+  assertPublicationIntents(state as unknown as FactoryState);
   sha(state.configDigest, "configDigest", 64);
   if (Object.hasOwn(state, "approvedPlaybookPin"))
     assertApprovedPlaybookPin(state.approvedPlaybookPin);

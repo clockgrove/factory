@@ -1,3 +1,4 @@
+import { publicationControl, confirmClosedPublication } from "./publication.js";
 import { packageManagerUpdate } from "../package-manager-update.js";
 import { deliveryDescription } from "./description.js";
 import { assertIntegrated, laterIntegration } from "./integration.js";
@@ -190,6 +191,7 @@ export async function runRegularGraph(args: {
       work.closedPullRequest === work.pullRequest &&
       !awaitsOperator(work.wait)
     ) {
+      confirmClosedPublication(state, item.id, work.pullRequest!);
       retireDeliveredHead(work);
       delete work.pullRequest;
       delete work.closedPullRequest;
@@ -207,6 +209,7 @@ export async function runRegularGraph(args: {
         "publish",
         () =>
           delivery.publish({
+            publication: publicationControl(state, item.id, save),
             item,
             baseSha: itemBase,
             treeSha: work.treeSha!,

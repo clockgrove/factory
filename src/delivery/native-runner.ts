@@ -1,4 +1,5 @@
 import { packageManagerUpdate } from "../package-manager-update.js";
+import { deliveryDescription } from "./description.js";
 import { assertIntegrated, laterIntegration } from "./integration.js";
 import { assertCheckSourcesAtIntegration } from "./check-sources.js";
 import { deliveryReadiness, unreportedGates } from "./readiness.js";
@@ -764,6 +765,24 @@ export async function runNativeGraph(args: {
               branch: branchFor(item.id),
               lfs: Boolean(work.selectedAssetSet),
               earlierHeads: deliveryEarlierHeads(work),
+              body: deliveryDescription(
+                config.checkout,
+                {
+                  item,
+                  baseSha: itemBase,
+                  treeSha: work.treeSha!,
+                  changeRef: work.changeRef!,
+                },
+                {
+                  repository: state.repository,
+                  objective,
+                  issue: state.issueByItemId[item.id]!,
+                  validation: work.validation,
+                },
+                config.policy.allowedSecretNames.flatMap((name) =>
+                  process.env[name] ? [process.env[name]!] : [],
+                ),
+              ),
               baseBranch: previous
                 ? branchFor(unit.items[index - 1]!.id)
                 : await github.defaultBranch(),

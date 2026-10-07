@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { transplantIndependentChange } from "../dist/delivery/transplant.js";
+import { deliveryDescription } from "../dist/delivery/description.js";
 
 function git(root, ...args) {
   return execFileSync("git", ["-C", root, ...args], {
@@ -47,6 +48,14 @@ test("independent prepared change is replayed on the observed integration head",
     );
     assert.equal(git(root, "show", `${replayed.changeRef}:left.txt`), "left");
     assert.equal(git(root, "show", `${replayed.changeRef}:right.txt`), "right");
+    const description = deliveryDescription(root, {
+      item: { goal: "Add the independent right-hand note.", validation: [] },
+      baseSha: integrated,
+      ...replayed,
+    });
+    assert.match(description, /Adds <code>right\.txt<\/code>/);
+    assert.doesNotMatch(description, /left\.txt/);
+    assert.match(description, /receipts are unavailable/);
     await assert.rejects(() =>
       transplantIndependentChange(root, integrated, prepared, base),
     );

@@ -657,6 +657,8 @@ export interface DeliveryRequest {
   changeRef: string;
   branch: string;
   baseBranch?: string;
+  /** Controller-rendered publication text from public intent and exact candidate facts. */
+  body?: string;
   lfs?: boolean;
   /** Commits earlier attempts of this Work Item produced for this branch. */
   earlierHeads?: string[];

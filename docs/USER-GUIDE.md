@@ -45,6 +45,8 @@ Choose these at setup. Defaults: `gpt-6.1-sol` for planner, reviewer and worker,
 | `--credential-file NAME=/abs/private/file`                  | With `--background`: bind a provider credential to the service. Repeat per credential.                                                    |
 | `--outside-directory /abs/dir`                              | With `--background`: the directory for the Codex write-refusal check. The default is your home; change it if home is inside the checkout. |
 
+New pull requests lead with the published Work Item goal, link the Work Item and Objective, and list actual file changes and the candidate commit/tree. Passing commands come from controller receipts bound to that tree and the exact command definitions; missing or stale receipts remain unavailable. Both delivery modes use this description without another model call or publishing worker/reviewer logs.
+
 Remote execution (`execution.kind: "managed-agent"`) runs Work Items in a provider-hosted session. It is implemented, not yet qualified against live providers; see [managed execution](#managed-execution).
 
 ## Local providers

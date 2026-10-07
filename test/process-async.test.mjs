@@ -13,6 +13,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runAnalysisCommand } from "../dist/analysis-cli.js";
+import { DiagnosticEmitter } from "../dist/diagnostics.js";
 import { readInteractionContent } from "../dist/capture.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { graphDigest } from "../dist/graph-amendments.js";
@@ -52,6 +54,9 @@ test("trusted child captures roundtrip through the configured private state root
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CaptureWriter } from ${JSON.stringify(new URL("../dist/capture.js", import.meta.url).href)};
+import { DiagnosticEmitter } from ${JSON.stringify(new URL("../dist/diagnostics.js", import.meta.url).href)};
+import { GitHubClient, gitHubTransportOf, withGitHubTransportObserver } from ${JSON.stringify(new URL("../dist/github-client.js", import.meta.url).href)};
+import { withProcessCancellation } from ${JSON.stringify(new URL("../dist/process.js", import.meta.url).href)};
 import { stateRoot } from ${JSON.stringify(new URL("../dist/config.js", import.meta.url).href)};
 import { createCodexHome } from ${JSON.stringify(new URL("../dist/codex-planning-isolation.js", import.meta.url).href)};
 const home = createCodexHome({ config: "", sandbox: { directory: process.cwd(), workspace: "write", network: false } });
@@ -62,6 +67,25 @@ try {
 const privateBin = join(stateRoot(${JSON.stringify(repository)}), "bin");
 mkdirSync(privateBin, { recursive: true });
 assert.throws(() => createCodexHome({ config: "", source: { ...process.env, PATH: privateBin }, sandbox: { directory: process.cwd(), workspace: "write", network: false } }), /Factory's own files/);
+const stop = new AbortController();
+stop.abort(new Error("private original cancellation reason"));
+const diagnostics = new DiagnosticEmitter(${JSON.stringify(repository)}, 1);
+let transport;
+await withGitHubTransportObserver(observation => {
+  transport = observation;
+  diagnostics.emit({ operation: "github-transport", outcome: "failed", transport: observation });
+}, () => withProcessCancellation(stop.signal, async () => {
+  await assert.rejects(new GitHubClient().request("POST", "repos/integration/worker-capture/issues", { body: "private unsent payload" }), error => {
+    assert.equal(gitHubTransportOf(error), transport);
+    assert.equal(error.message.includes("private"), false);
+    return true;
+  });
+}));
+assert.deepEqual(transport, { method: "POST", operation: "mutation", dispatch: "not-sent", outcome: "cancelled", category: "cancelled", status: null, timeout: null, cancellation: true, requestId: null });
+assert.equal(Object.isFrozen(transport), true);
+const retained = readFileSync(join(stateRoot(${JSON.stringify(repository)}), "objectives", "1", "diagnostics.ndjson"), "utf8");
+assert.equal(retained.includes("private"), false);
+assert.deepEqual(JSON.parse(retained.trim()).transport, transport);
 new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, invocationId: "actual-child-capture", providerAttempt: 1, phase: "integration", adapter: "local-process", configured: { provider: "not-invoked", model: "none" } }, { enabled: true, maxBytesPerInvocation: 1024 }, [], metadata => process.stdout.write(JSON.stringify(metadata))).record({ kind: "interaction" }, () => ({ text: "real child process capture" }));`,
       ],
       {
@@ -78,6 +102,25 @@ new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, inv
       ),
       { text: "real child process capture" },
     );
+    new DiagnosticEmitter(repository, 1).emit({
+      operation: "model-capture",
+      outcome: "observed",
+      capture: metadata,
+    });
+    const analysisText = runAnalysisCommand(
+      { repository, checkout: workspace },
+      1,
+      ["--json"],
+    );
+    const analysis = JSON.parse(analysisText);
+    assert.equal(analysis.invocationCount, 1);
+    assert.equal(analysis.nativeTools.calls, null);
+    assert.equal(analysis.nativeTools.coverage, "unavailable");
+    assert.equal(
+      analysis.invocations[0].native.descendants.accountingUnion,
+      null,
+    );
+    assert.equal(analysisText.includes("real child process capture"), false);
     const captures = join(stateRoot(repository), "captures");
     assert.equal(statSync(captures).mode & 0o777, 0o700);
     const [file] = readdirSync(captures);

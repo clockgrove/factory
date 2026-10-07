@@ -34,6 +34,7 @@ import type {
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { faultDetail, type Wait } from "./fault.js";
+import type { GitHubTransportObservation } from "./github-client.js";
 import { graphDigest } from "./graph-amendments.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
 import { objectiveCandidate } from "./qa.js";
@@ -113,6 +114,7 @@ export interface DiagnosticEvent {
   durationMs?: number;
   /** Safe, bounded identities only. A future exporter may copy this field. */
   metadata?: Record<string, string | number | boolean>;
+  transport?: GitHubTransportObservation;
   /** Private local detail. Never send this to a remote exporter by default. */
   detail?: string;
 }

@@ -8,14 +8,73 @@ export type NativeCaptureObserver = (
   content?: () => unknown,
 ) => void;
 
+export interface OwnedRolloutBudget {
+  remainingBytes: number;
+  remainingEvents: number;
+}
+export interface OwnedChild {
+  id: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+const identifier = (value: unknown): string | null =>
+  typeof value === "string" && /^[a-zA-Z0-9_-]{1,256}$/.test(value)
+    ? value
+    : null;
+const label = (value: unknown): string | undefined =>
+  typeof value === "string" && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value)
+    ? value
+    : undefined;
+const threadIdentity = (value: unknown): value is string =>
+  typeof value === "string" && /^[0-9a-f-]{36}$/.test(value);
+const recordedTime = (value: unknown): string | null =>
+  typeof value === "string" &&
+  /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(value) &&
+  Number.isFinite(Date.parse(value))
+    ? value
+    : null;
+const nativeStatus = (
+  value: unknown,
+): NonNullable<CaptureEvent["nativeDescendant"]>["status"] => {
+  const kind =
+    typeof value === "string"
+      ? value
+      : value && typeof value === "object"
+        ? Object.keys(value)[0]
+        : null;
+  return (
+    (
+      {
+        pending_init: "pending-init",
+        running: "running",
+        interrupted: "interrupted",
+        completed: "completed",
+        errored: "errored",
+        shutdown: "shutdown",
+        not_found: "not-found",
+      } as const
+    )[kind as "running"] ?? "unknown"
+  );
+};
+
 /** Called only with a held regular-file descriptor from an owned, settled Codex home. */
 export function captureOwnedRollout(
   fd: number,
   threadId: string,
   observe: NativeCaptureObserver,
-): void {
+  options: {
+    parentThreadId?: string;
+    rootThreadId?: string;
+    budget?: OwnedRolloutBudget;
+    child?: (child: OwnedChild) => void;
+  } = {},
+): "available" | "partial" {
   const stat = fstatSync(fd);
-  const limit = 8 * 1024 * 1024;
+  const budget = options.budget ?? {
+    remainingBytes: 8 * 1024 * 1024,
+    remainingEvents: 4094,
+  };
+  const limit = Math.max(0, budget.remainingBytes);
   const buffer = Buffer.alloc(Math.min(stat.size, limit));
   let bytes = 0;
   while (bytes < buffer.length) {
@@ -23,6 +82,7 @@ export function captureOwnedRollout(
     if (!read) break;
     bytes += read;
   }
+  budget.remainingBytes -= bytes;
   const text = buffer.subarray(0, bytes).toString("utf8");
   const terminated = text.endsWith("\n");
   const lines = text.split("\n");
@@ -30,16 +90,36 @@ export function captureOwnedRollout(
   const header = JSON.parse(lines.shift() ?? "null");
   if (header?.type !== "session_meta" || header.payload?.id !== threadId)
     throw new Error("Owned native history does not match its observed thread");
+  const childSource = header.payload.source?.subagent?.thread_spawn;
+  if (
+    options.parentThreadId &&
+    childSource?.parent_thread_id !== options.parentThreadId
+  )
+    throw new Error("Native descendant lacks authenticated parent ownership");
   let partial = bytes !== stat.size || !terminated;
-  let emitted = 0;
+  const inheritedOrdinal = header.payload.subagent_history_start_ordinal;
+  const inheritedBoundary =
+    Number.isSafeInteger(inheritedOrdinal) && inheritedOrdinal >= 0
+      ? inheritedOrdinal
+      : null;
+  if (options.parentThreadId && inheritedBoundary === null) partial = true;
+  const ownership = options.parentThreadId
+    ? {
+        rootSessionId: options.rootThreadId ?? options.parentThreadId,
+        parentSessionId: options.parentThreadId,
+      }
+    : undefined;
   const emit: NativeCaptureObserver = (event, content) => {
     // Keep metadata bounded too; leave space for coverage and an outer request.
-    if (emitted >= 4094) {
+    if (budget.remainingEvents <= 0) {
       partial = true;
       return;
     }
-    emitted++;
-    observe(event, content);
+    budget.remainingEvents--;
+    observe(
+      { ...event, ...(ownership ? { nativeOwnership: ownership } : {}) },
+      content,
+    );
   };
   let duplicates = 0;
   let conflicts = 0;
@@ -53,13 +133,20 @@ export function captureOwnedRollout(
   let latestThreadUsage: ReturnType<typeof codexTokenUsage> | undefined;
   let latestTokenCountUsage: ReturnType<typeof codexTokenUsage> | undefined;
   let latestTokenCountPayload: Record<string, unknown> | undefined;
+  let rowTime: string | null = null;
+  let turnId: string | null = null;
+  let reportedModel: string | undefined;
+  let reportedReasoningEffort: string | undefined;
+  let modelContextWindow: number | undefined;
+  const children = new Set<string>();
   const visible = (
     payload: Record<string, unknown>,
     role: CaptureEvent["role"],
     contextSnapshot = false,
     event = "codex.native-message",
+    tool?: CaptureEvent["nativeTool"],
   ) => {
-    if (emitted >= 4094) {
+    if (budget.remainingEvents <= 0) {
       partial = true;
       return;
     }
@@ -88,6 +175,7 @@ export function captureOwnedRollout(
         providerSessionId: threadId,
         role,
         coverage: "boundary",
+        ...(tool ? { nativeTool: tool } : {}),
         visible: {
           source: "owned-codex-rollout",
           textBytes,
@@ -119,11 +207,53 @@ export function captureOwnedRollout(
         String(payload.type),
       )
     ) {
-      visible(payload, undefined, snapshot, "codex.native-tool-output");
+      visible(
+        payload,
+        undefined,
+        snapshot,
+        "codex.native-tool-output",
+        snapshot
+          ? undefined
+          : {
+              source: "owned-codex-rollout",
+              endpoint: "output",
+              callId: identifier(payload.call_id),
+              name: null,
+              type:
+                payload.type === "custom_tool_call_output"
+                  ? "custom"
+                  : "function",
+              recordedAt: rowTime,
+              turnId,
+              status:
+                payload.is_error === true ? "reported-failed" : "observed",
+            },
+      );
     } else if (
       ["function_call", "custom_tool_call"].includes(String(payload.type))
     ) {
-      visible(payload, undefined, snapshot, "codex.native-tool-call");
+      visible(
+        payload,
+        undefined,
+        snapshot,
+        "codex.native-tool-call",
+        snapshot
+          ? undefined
+          : {
+              source: "owned-codex-rollout",
+              endpoint: "call",
+              callId: identifier(payload.call_id),
+              name:
+                typeof payload.name === "string" &&
+                /^[a-zA-Z0-9_.:-]{1,128}$/.test(payload.name)
+                  ? payload.name
+                  : null,
+              type: payload.type === "custom_tool_call" ? "custom" : "function",
+              recordedAt: rowTime,
+              turnId,
+              status: "observed",
+            },
+      );
     } else if (
       ["compaction", "context_compaction"].includes(String(payload.type))
     ) {
@@ -148,6 +278,82 @@ export function captureOwnedRollout(
       continue;
     }
     const payload = rawPayload as Record<string, unknown>;
+    rowTime = recordedTime(row.timestamp);
+    // Child context copied from its parent is not new child work.
+    if (
+      options.parentThreadId &&
+      (inheritedBoundary === null ||
+        !Number.isSafeInteger(row.ordinal) ||
+        (row.ordinal as number) < inheritedBoundary)
+    )
+      continue;
+    if (row.type === "turn_context") {
+      turnId = identifier(payload.turn_id);
+      reportedModel = label(payload.model);
+      reportedReasoningEffort = label(payload.effort);
+    }
+    if (row.type === "event_msg" && payload.type === "task_started")
+      turnId = identifier(payload.turn_id);
+    if (row.type === "event_msg" && payload.sender_thread_id === threadId) {
+      if (
+        payload.type === "collab_agent_spawn_end" &&
+        threadIdentity(payload.new_thread_id)
+      ) {
+        childHistory = true;
+        children.add(payload.new_thread_id);
+        const child = {
+          id: payload.new_thread_id,
+          ...(label(payload.model) ? { model: label(payload.model)! } : {}),
+          ...(label(payload.reasoning_effort)
+            ? { reasoningEffort: label(payload.reasoning_effort)! }
+            : {}),
+        };
+        emit({
+          kind: "interaction",
+          providerEvent: "codex.native-descendant",
+          providerSessionId: threadId,
+          coverage: "boundary",
+          nativeDescendant: {
+            parentSessionId: threadId,
+            childSessionId: child.id,
+            relation: "observed-spawn",
+            status: nativeStatus(payload.status),
+            recordedAt: rowTime,
+            ...(child.model ? { model: child.model } : {}),
+            ...(child.reasoningEffort
+              ? { reasoningEffort: child.reasoningEffort }
+              : {}),
+            history: "unavailable",
+            resourceCessation: "unavailable",
+            parentUsageIncludesChild: "unknown",
+          },
+        });
+        options.child?.(child);
+      } else if (
+        payload.type === "collab_waiting_end" &&
+        payload.statuses &&
+        typeof payload.statuses === "object"
+      ) {
+        for (const [id, status] of Object.entries(payload.statuses))
+          if (children.has(id))
+            emit({
+              kind: "interaction",
+              providerEvent: "codex.native-descendant-status",
+              providerSessionId: threadId,
+              coverage: "boundary",
+              nativeDescendant: {
+                parentSessionId: threadId,
+                childSessionId: id,
+                relation: "observed-spawn",
+                status: nativeStatus(status),
+                recordedAt: rowTime,
+                history: "unavailable",
+                resourceCessation: "unavailable",
+                parentUsageIncludesChild: "unknown",
+              },
+            });
+      }
+    }
     if (row.type === "token_usage_record") {
       if (
         payload.thread_id !== threadId ||
@@ -206,6 +412,11 @@ export function captureOwnedRollout(
     } else if (row.type === "event_msg" && payload.type === "token_count") {
       const info = payload.info;
       latestTokenCountPayload = payload;
+      if (info && typeof info === "object" && !Array.isArray(info)) {
+        const context = (info as Record<string, unknown>).model_context_window;
+        if (Number.isSafeInteger(context) && (context as number) > 0)
+          modelContextWindow = context as number;
+      }
       latestTokenCountUsage =
         info && typeof info === "object" && !Array.isArray(info)
           ? codexTokenUsage((info as Record<string, unknown>).total_token_usage)
@@ -251,7 +462,10 @@ export function captureOwnedRollout(
       },
       () => latestTokenCountPayload,
     );
+  const status =
+    partial || inheritedHistory || childHistory ? "partial" : "available";
   observe({
+    ...(ownership ? { nativeOwnership: ownership } : {}),
     kind: "interaction",
     providerEvent: "codex.native-rollout-coverage",
     providerSessionId: threadId,
@@ -261,8 +475,13 @@ export function captureOwnedRollout(
         typeof header.payload.cli_version === "string"
           ? header.payload.cli_version
           : null,
-      status:
-        partial || inheritedHistory || childHistory ? "partial" : "available",
+      status,
+      ...(label(header.payload.model_provider)
+        ? { modelProvider: label(header.payload.model_provider)! }
+        : {}),
+      ...(reportedModel ? { reportedModel } : {}),
+      ...(reportedReasoningEffort ? { reportedReasoningEffort } : {}),
+      ...(modelContextWindow !== undefined ? { modelContextWindow } : {}),
       readBytes: bytes,
       totalBytes: stat.size,
       observedCompletedResponses: responses.size,
@@ -277,4 +496,5 @@ export function captureOwnedRollout(
       latestTokenCountUsage,
     },
   });
+  return status;
 }

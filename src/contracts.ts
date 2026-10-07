@@ -466,7 +466,7 @@ export interface PlanningModel {
     invocation?: ModelInvocationContext;
     /** Why the previous answer was invalid; answer again without the error. */
     previousInvalid?: string;
-    /** A directory holding the exact result tree, for the reviewer to read. */
+    /** Exported exact result-tree files for read-only review; no Git metadata. */
     tree?: string;
   }): Promise<{
     packetId: string;

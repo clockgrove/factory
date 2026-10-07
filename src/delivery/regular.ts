@@ -111,8 +111,11 @@ export class RegularDelivery implements DeliveryStrategy {
       if (
         request.lfs ||
         (await addsLfsPointers(this.checkout, request.baseSha, commit))
-      )
+      ) {
+        publication.assertRequest(pullRequest);
         await gitAsync(this.checkout, "lfs", "push", "origin", commit);
+      }
+      publication.assertRequest(pullRequest);
       await pushBranch(
         this.checkout,
         request.branch,

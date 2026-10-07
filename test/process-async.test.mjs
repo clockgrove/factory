@@ -405,13 +405,24 @@ test("settled validation reuses its exact Git result once and retains the failed
       title: graph.items[0].title,
       body: "Exact controller publication text\n",
     };
-    const stoppedOwner = `import { publicationControl } from ${JSON.stringify(new URL("../dist/delivery/publication.js", import.meta.url).href)};
+    const stoppedOwner = `import assert from "node:assert/strict";
+import { publicationControl } from ${JSON.stringify(new URL("../dist/delivery/publication.js", import.meta.url).href)};
 import { readState, saveState, statePath, acquireObjectiveLock } from ${JSON.stringify(new URL("../dist/state-store.js", import.meta.url).href)};
 const repository = ${JSON.stringify(config.repository)};
 acquireObjectiveLock(repository, 2);
 const state = readState(repository, 2);
-const control = publicationControl(state, "local", () => saveState(statePath(repository, 2), state));
-control.beforeCreate(JSON.parse(process.argv[1]));
+const save = () => saveState(statePath(repository, 2), state);
+const control = publicationControl(state, "local", save);
+// Constructed before the first save: its empty history must never replace it.
+const stale = publicationControl(state, "local", save);
+const request = JSON.parse(process.argv[1]);
+control.beforeCreate(request);
+const retained = JSON.stringify(state.publicationIntents);
+assert.throws(() => stale.assertRequest(request), /control is stale/);
+assert.throws(() => stale.reconcileOnly, /control is stale/);
+assert.throws(() => stale.beforeCreate(request), /control is stale/);
+assert.equal(JSON.stringify(state.publicationIntents), retained);
+assert.equal(JSON.stringify(readState(repository, 2).publicationIntents), retained);
 process.exit(23);`;
     const first = await subprocessAsync(
       process.execPath,

@@ -170,7 +170,44 @@ export function publicationControl(
     work.step !== "deliver"
   )
     throw fenced("Publication lacks exact Work Item attempt/result identity");
-  const history = state.publicationIntents?.[itemId] ?? [];
+  const owner = {
+    repository: state.repository,
+    runId: state.runId,
+    configDigest: state.configDigest,
+    attemptId: work.attempt,
+    headSha: work.changeRef,
+    treeSha: work.treeSha,
+    graphRevisionDigest: work.graphRevisionDigest,
+  };
+  let installedHistory = state.publicationIntents?.[itemId];
+  const history = installedHistory ?? [];
+  let historySnapshot = JSON.stringify(history);
+  const assertCurrent = () => {
+    if (
+      state.publicationContract !== "exact-request-v1" ||
+      state.repository !== owner.repository ||
+      state.runId !== owner.runId ||
+      state.configDigest !== owner.configDigest ||
+      state.work[itemId] !== work ||
+      work.attempt !== owner.attemptId ||
+      work.changeRef !== owner.headSha ||
+      work.treeSha !== owner.treeSha ||
+      work.graphRevisionDigest !== owner.graphRevisionDigest ||
+      work.status !== "running" ||
+      work.step !== "deliver" ||
+      state.publicationIntents?.[itemId] !== installedHistory ||
+      JSON.stringify(state.publicationIntents?.[itemId] ?? []) !==
+        historySnapshot
+    )
+      throw fenced(
+        "Publication control is stale; live owner/work/request history changed",
+      );
+  };
+  const advanceHistory = () => {
+    installedHistory = state.publicationIntents?.[itemId];
+    historySnapshot = JSON.stringify(history);
+  };
+
   const pending = history.find((entry) => !entry.observation);
   const retained =
     pending ??
@@ -198,6 +235,7 @@ export function publicationControl(
     entry.titleDigest === digest(request.title) &&
     entry.bodyDigest === digest(request.body);
   const assertRequest = (request: PullRequestPublication) => {
+    assertCurrent();
     if (
       request.headSha !== work.changeRef ||
       request.treeSha !== work.treeSha ||
@@ -208,7 +246,8 @@ export function publicationControl(
       throw fenced(
         "Publication request differs from the exact reviewed result",
       );
-    if (retained && !matches(retained, request))
+    const bound = retained ?? created;
+    if (bound && !matches(bound, request))
       throw fenced(
         "Unresolved/retained publication request differs from this delivery; no new effects are permitted",
       );
@@ -217,6 +256,7 @@ export function publicationControl(
     request: PullRequestPublication,
     submission: PublicationIntent["submission"],
   ): PublicationIntent => {
+    assertCurrent();
     if (history.length >= MAX_INTENTS)
       throw fenced(
         "Publication request history is full; unknown or observed entries cannot be evicted",
@@ -239,13 +279,16 @@ export function publicationControl(
     state.publicationIntents ??= {};
     state.publicationIntents[itemId] = history;
     history.push(intent);
+    advanceHistory();
     return intent;
   };
   return {
     get reconcileOnly() {
+      assertCurrent();
       return Boolean(retained || created || consumed);
     },
     get expectedPublication() {
+      assertCurrent();
       return retained
         ? {
             titleDigest:
@@ -309,6 +352,7 @@ export function publicationControl(
         observedAt: new Date().toISOString(),
         publication,
       };
+      advanceHistory();
       save(); // Persist positive binding before ordinary published/delivery state.
     },
   };

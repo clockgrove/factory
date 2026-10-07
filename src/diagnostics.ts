@@ -17,6 +17,7 @@ import { replacementRefusal } from "./amendment-admission.js";
 import {
   type CapturePolicy,
   CaptureWriter,
+  readInteractionMetadata,
   type InteractionMetadata,
 } from "./capture.js";
 import { objectiveComplete } from "./completion.js";
@@ -59,7 +60,12 @@ import {
   summarizeStatus,
 } from "./status-summary.js";
 import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
-import { normalizeTokenUsage, tokenCategories } from "./usage.js";
+import {
+  isCodexUsageIdentity,
+  normalizeCodexTokenUsage,
+  normalizeTokenUsage,
+  tokenCategories,
+} from "./usage.js";
 import { savedResultRefusal } from "./work-repair.js";
 
 /** A scope's structured wait and failing step, redacted for status. */
@@ -596,9 +602,19 @@ export function summarizeModelInvocations(
         usageUnavailableCount += 1;
         continue;
       }
+      const metadata = usageEvent.metadata;
+      const usage =
+        isCodexUsageIdentity(metadata?.provider) ||
+        isCodexUsageIdentity(metadata?.adapter)
+          ? normalizeCodexTokenUsage(metadata)
+          : normalizeTokenUsage(metadata);
+      if (!Object.keys(usage).length) {
+        usageUnavailableCount += 1;
+        continue;
+      }
       usageAvailableCount += 1;
-      const inputTokens = usageEvent.metadata?.inputTokens;
-      const cachedInputTokens = usageEvent.metadata?.cachedInputTokens;
+      const inputTokens = usage.inputTokens;
+      const cachedInputTokens = usage.cachedInputTokens;
       if (
         typeof inputTokens === "number" &&
         typeof cachedInputTokens === "number" &&
@@ -626,7 +642,7 @@ export function summarizeModelInvocations(
         "reasoningOutputTokens",
         "totalTokens",
       ] as const) {
-        const value = usageEvent.metadata?.[key];
+        const value = usage[key];
         if (typeof value !== "number") continue;
         totals[key] = (totals[key] ?? 0) + value;
         availability[key] = (availability[key] ?? 0) + 1;
@@ -736,14 +752,24 @@ export function summarizeDiagnosticUsage(events: Record<string, unknown>[]) {
       observation.invocationId,
       observation.providerAttempt,
     ]);
-    const usage = normalizeTokenUsage(observation.usage);
+    const usage =
+      isCodexUsageIdentity(observation.adapter) ||
+      isCodexUsageIdentity(observation.provider)
+        ? normalizeCodexTokenUsage(observation.usage)
+        : normalizeTokenUsage(observation.usage);
     observedAttempts.add(event.attemptId);
     identities.set(key, {
       attemptId: event.attemptId,
       invocationId: observation.invocationId,
       providerAttempt: observation.providerAttempt,
       ...Object.fromEntries(
-        ["profileId", "adapter", "model", "reasoningEffort"].flatMap((key) =>
+        [
+          "profileId",
+          "provider",
+          "adapter",
+          "model",
+          "reasoningEffort",
+        ].flatMap((key) =>
           typeof observation[key] === "string" ? [[key, observation[key]]] : [],
         ),
       ),
@@ -1066,6 +1092,8 @@ function usageEvent(
             "scopeId",
             "observationType",
             "usageAvailable",
+            "provider",
+            "adapter",
             "model",
             "reasoningEffort",
             ...tokenCategories,
@@ -1090,7 +1118,13 @@ function usageEvent(
       invocationId: observation.invocationId,
       providerAttempt: observation.providerAttempt,
       ...Object.fromEntries(
-        ["profileId", "adapter", "model", "reasoningEffort"].flatMap((key) =>
+        [
+          "profileId",
+          "provider",
+          "adapter",
+          "model",
+          "reasoningEffort",
+        ].flatMap((key) =>
           typeof observation[key] === "string" ? [[key, observation[key]]] : [],
         ),
       ),
@@ -1143,6 +1177,25 @@ export function readUsageSummaryEvents(
         if (selected) events.push(selected);
       }
     }
+  // Old worker summaries omitted adapter identity. Use only retained matching
+  // invocation/attempt capture metadata; never infer the provider from a model name.
+  const adapters = new Map<string, Set<string>>();
+  for (const capture of readInteractionMetadata(repository, objective)) {
+    const key = JSON.stringify([capture.invocationId, capture.providerAttempt]);
+    const values = adapters.get(key) ?? new Set<string>();
+    values.add(capture.adapter);
+    adapters.set(key, values);
+  }
+  for (const event of events) {
+    const observation = event.workerUsage as
+      | Record<string, unknown>
+      | undefined;
+    if (!observation || observation.adapter !== undefined) continue;
+    const values = adapters.get(
+      JSON.stringify([observation.invocationId, observation.providerAttempt]),
+    );
+    if (values?.size === 1) observation.adapter = [...values][0];
+  }
   return events.sort((a, b) => String(a.at).localeCompare(String(b.at)));
 }
 

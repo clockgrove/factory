@@ -96,7 +96,8 @@ const label = (value: unknown): string | undefined =>
     ? value
     : undefined;
 const threadIdentity = (value: unknown): value is string =>
-  typeof value === "string" && /^[0-9a-f-]{36}$/.test(value);
+  typeof value === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 const recordedTime = (value: unknown): string | null =>
   typeof value === "string" &&
   /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(value) &&
@@ -232,6 +233,42 @@ export function captureOwnedRollout(
   let reportedReasoningEffort: string | undefined;
   let modelContextWindow: number | undefined;
   const children = new Set<string>();
+  const spawnCalls = new Set<string>();
+  const descendant = (
+    child: OwnedChild,
+    status: NonNullable<CaptureEvent["nativeDescendant"]>["status"],
+    spawned: boolean,
+    toolCallId?: string,
+  ) => {
+    childHistory = true;
+    if (spawned && !children.has(child.id)) {
+      children.add(child.id);
+      options.child?.(child);
+    }
+    emit({
+      kind: "interaction",
+      providerEvent: spawned
+        ? "codex.native-descendant"
+        : "codex.native-descendant-status",
+      providerSessionId: threadId,
+      coverage: "boundary",
+      nativeDescendant: {
+        parentSessionId: threadId,
+        childSessionId: child.id,
+        ...(toolCallId ? { toolCallId } : {}),
+        relation: "observed-spawn",
+        status,
+        recordedAt: rowTime,
+        ...(child.model ? { model: child.model } : {}),
+        ...(child.reasoningEffort
+          ? { reasoningEffort: child.reasoningEffort }
+          : {}),
+        history: "unavailable",
+        resourceCessation: "unavailable",
+        parentUsageIncludesChild: "unknown",
+      },
+    });
+  };
   const visible = (
     payload: Record<string, unknown>,
     role: CaptureEvent["role"],
@@ -322,6 +359,14 @@ export function captureOwnedRollout(
     } else if (
       ["function_call", "custom_tool_call"].includes(String(payload.type))
     ) {
+      const callId = identifier(payload.call_id);
+      if (
+        !snapshot &&
+        payload.type === "function_call" &&
+        payload.name === "spawn_agent" &&
+        callId
+      )
+        spawnCalls.add(callId);
       visible(
         payload,
         undefined,
@@ -381,15 +426,33 @@ export function captureOwnedRollout(
     if (
       row.type === "event_msg" &&
       payload.type === "item_completed" &&
-      payload.thread_id === threadId &&
       item &&
       typeof item === "object" &&
       !Array.isArray(item)
     ) {
       const call = item as Record<string, unknown>;
       const callId = identifier(call.id);
+      // V2 spawn identity is a public activity item; its collab call is private
+      // analytics. Completed activity is child-specific, unlike a generic wait.
+      if (call.type === "SubAgentActivity") {
+        childHistory = true;
+        const id = call.agent_thread_id;
+        if (
+          payload.thread_id !== threadId ||
+          !callId ||
+          !threadIdentity(id) ||
+          id === threadId
+        )
+          partial = true;
+        else if (call.kind === "started" && spawnCalls.has(callId))
+          descendant({ id }, "unknown", true, callId);
+        else if (call.kind === "completed" && children.has(id))
+          descendant({ id }, "completed", false);
+        else partial = true;
+      }
       if (
         call.type === "CollabAgentToolCall" &&
+        payload.thread_id === threadId &&
         call.sender_thread_id === threadId &&
         callId &&
         [
@@ -421,38 +484,16 @@ export function captureOwnedRollout(
               ? { reasoningEffort: label(call.reasoning_effort)! }
               : {}),
           };
-          childHistory = true;
-          if (spawned && !children.has(id)) {
-            children.add(id);
-            options.child?.(child);
-          }
-          emit({
-            kind: "interaction",
-            providerEvent: spawned
-              ? "codex.native-descendant"
-              : "codex.native-descendant-status",
-            providerSessionId: threadId,
-            coverage: "boundary",
-            nativeDescendant: {
-              parentSessionId: threadId,
-              childSessionId: id,
-              toolCallId: callId,
-              relation: "observed-spawn",
-              status: nativeStatus(
-                states && typeof states === "object" && !Array.isArray(states)
-                  ? (states as Record<string, unknown>)[id]
-                  : undefined,
-              ),
-              recordedAt: rowTime,
-              ...(child.model ? { model: child.model } : {}),
-              ...(child.reasoningEffort
-                ? { reasoningEffort: child.reasoningEffort }
-                : {}),
-              history: "unavailable",
-              resourceCessation: "unavailable",
-              parentUsageIncludesChild: "unknown",
-            },
-          });
+          descendant(
+            child,
+            nativeStatus(
+              states && typeof states === "object" && !Array.isArray(states)
+                ? (states as Record<string, unknown>)[id]
+                : undefined,
+            ),
+            spawned,
+            callId,
+          );
         }
       }
     }

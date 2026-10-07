@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { analyzeInteractions } from "./analysis.js";
-import { readInteractionMetadata } from "./capture.js";
+import {
+  type InteractionMetadata,
+  readInteractionMetadata,
+} from "./capture.js";
 import { objectiveComplete } from "./completion.js";
 import {
   privateRecords,
@@ -11,7 +15,12 @@ import {
 } from "./diagnostics.js";
 import { formatDuration, summarizeEfficiency } from "./efficiency.js";
 import { readContinuation } from "./state-store.js";
-import { codexTokenUsage, tokenCategories } from "./usage.js";
+import {
+  codexTokenUsage,
+  normalizeCodexTokenUsage,
+  normalizeTokenUsage,
+  tokenCategories,
+} from "./usage.js";
 
 type Outcome = "accepted" | "failed" | "unfinished";
 type Route = "factory" | "codex-direct";
@@ -116,6 +125,8 @@ export interface ScorecardSelection {
     factoryObjectives?: number[];
     codexSessions?: {
       path: string;
+      /** Optional bounded private metadata from the same owned native thread. */
+      nativeCapturePath?: string;
       sessionId: string;
       /** thread.started also appears on resume; freshness must be verified from launch evidence. */
       freshThread: true;
@@ -239,7 +250,8 @@ export function factoryObjectiveSummary(
   );
   const efficiency = summarizeEfficiency(events, usage, accounting, now);
   const captures = readInteractionMetadata(repository, objective);
-  const identities = analyzeInteractions(captures, [], {}).invocations.map(
+  const analyzed = analyzeInteractions(captures, [], {});
+  const identities = analyzed.invocations.map(
     (invocation) => invocation.identity,
   );
   const prompts = identities.flatMap((identity) =>
@@ -303,6 +315,13 @@ export function factoryObjectiveSummary(
     },
     efficiency,
     accounting,
+    nativeTelemetry: analyzed.invocations.map((invocation) => ({
+      phase: invocation.identity.phase,
+      invocationId: invocation.identity.invocationId,
+      providerAttempt: invocation.identity.providerAttempt,
+      native: invocation.native,
+      promptComponents: invocation.promptComponents,
+    })),
     cacheEffectiveness,
     cacheByRole: {
       worker: cacheOf(
@@ -344,6 +363,225 @@ export function factoryObjectiveSummary(
       }),
     ),
   };
+}
+
+/** Optional analytical capture metadata; never a second source of parent token totals. */
+function directNativeCapture(
+  session: NonNullable<
+    ScorecardSelection["packets"][number]["codexSessions"]
+  >[number],
+) {
+  const path = session.nativeCapturePath!;
+  if (!isAbsolute(path))
+    throw new Error("Native capture metadata path must be absolute");
+  const fd = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const stat = fstatSync(fd);
+    if (
+      !stat.isFile() ||
+      stat.uid !== process.getuid?.() ||
+      stat.nlink !== 1 ||
+      (stat.mode & 0o077) !== 0 ||
+      stat.size > 8 * 1024 * 1024
+    )
+      throw new Error(
+        "Native capture metadata must be a bounded private regular file",
+      );
+    const buffer = Buffer.alloc(stat.size);
+    let bytes = 0;
+    while (bytes < buffer.length) {
+      const read = readSync(fd, buffer, bytes, buffer.length - bytes, bytes);
+      if (!read) break;
+      bytes += read;
+    }
+    const after = fstatSync(fd);
+    const text = buffer.subarray(0, bytes).toString("utf8");
+    if (
+      bytes !== stat.size ||
+      after.size !== stat.size ||
+      after.mtimeMs !== stat.mtimeMs ||
+      !text.endsWith("\n")
+    )
+      throw new Error(
+        "Native capture metadata is incomplete or changed during selection",
+      );
+    const rows = text
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    if (!rows.length || rows.length > 8192)
+      throw new Error("Native capture metadata exceeds its record bound");
+    for (const row of rows) {
+      if (
+        row.schemaVersion !== 1 ||
+        !/^[0-9a-f-]{36}$/.test(String(row.recordId)) ||
+        row.invocationId !== session.sessionId ||
+        row.providerSessionId !== session.sessionId ||
+        row.providerAttempt !== 1 ||
+        !["request", "interaction", "usage"].includes(row.kind) ||
+        !row.content ||
+        typeof row.content !== "object" ||
+        !row.configured ||
+        row.configured.provider !== session.provider ||
+        row.configured.model !== session.model ||
+        row.configured.reasoningEffort !== session.reasoningEffort ||
+        row.configDigest !== session.configDigest ||
+        (row.kind !== "request" &&
+          (typeof row.providerEvent !== "string" ||
+            !row.providerEvent.startsWith("codex.native-")))
+      )
+        throw new Error(
+          "Native capture metadata does not bind to the selected native CLI thread/configuration",
+        );
+      if (
+        row.usage &&
+        (row.usage.scope !== "provider-call" ||
+          !row.usage.normalized ||
+          typeof row.usage.deduplicationKey !== "string" ||
+          !row.usage.deduplicationKey.startsWith(session.sessionId + ":"))
+      )
+        throw new Error("Native capture usage has an invalid response binding");
+      if (
+        row.usage &&
+        (!present(row.providerMessageId) ||
+          row.usage.deduplicationKey !==
+            `${session.sessionId}:${row.providerMessageId}`)
+      )
+        throw new Error(
+          "Native capture usage does not identify its observed response",
+        );
+      if (
+        !Number.isSafeInteger(row.sequence) ||
+        row.sequence < 1 ||
+        !Number.isFinite(Date.parse(row.at)) ||
+        !present(row.repository) ||
+        !Number.isSafeInteger(row.objective) ||
+        row.objective < 1 ||
+        !present(row.adapter) ||
+        row.coverage !== "boundary"
+      )
+        throw new Error(
+          "Native capture metadata has invalid observation identity",
+        );
+      if (
+        row.visible &&
+        (row.visible.source !== "owned-codex-rollout" ||
+          ![row.visible.textBytes, row.visible.serializedBytes].every(
+            (value) => Number.isSafeInteger(value) && value >= 0,
+          ) ||
+          !/^[0-9a-f]{64}$/.test(String(row.visible.digest)) ||
+          typeof row.visible.contextSnapshot !== "boolean")
+      )
+        throw new Error("Native visible-byte metadata is malformed");
+      if (
+        row.nativeRollout &&
+        (!["available", "partial", "unavailable"].includes(
+          row.nativeRollout.status,
+        ) ||
+          ![
+            "readBytes",
+            "totalBytes",
+            "observedCompletedResponses",
+            "duplicateResponseRecords",
+            "conflictingResponseRecords",
+          ].every(
+            (key) =>
+              row.nativeRollout[key] === null ||
+              (Number.isSafeInteger(row.nativeRollout[key]) &&
+                row.nativeRollout[key] >= 0),
+          ) ||
+          row.nativeRollout.completeRequestCount !== "unavailable" ||
+          row.nativeRollout.fullProviderWireAndUpstreamDetails !==
+            "unavailable" ||
+          row.nativeRollout.endpointCompleteness !== "unavailable" ||
+          !["inheritedHistory", "childHistory"].every(
+            (key) =>
+              row.nativeRollout[key] === null ||
+              typeof row.nativeRollout[key] === "boolean",
+          ))
+      )
+        throw new Error("Native rollout coverage metadata is malformed");
+      if (
+        row.nativeRollout &&
+        row.nativeRollout.cliVersion !== null &&
+        row.nativeRollout.cliVersion !== session.cliVersion
+      )
+        throw new Error(
+          "Native rollout CLI version differs from the declared observation",
+        );
+      for (const key of ["latestThreadUsage", "latestTokenCountUsage"]) {
+        if (!row.nativeRollout?.[key]) continue;
+        const parsed = normalizeTokenUsage(row.nativeRollout[key]);
+        if (
+          Object.keys(parsed).length !==
+          Object.keys(row.nativeRollout[key]).length
+        )
+          throw new Error("Native cumulative usage contains invalid counters");
+        row.nativeRollout[key] = normalizeCodexTokenUsage(parsed);
+      }
+      if (row.nativeRollout)
+        row.nativeRollout = Object.fromEntries(
+          [
+            "cliVersion",
+            "status",
+            "readBytes",
+            "totalBytes",
+            "observedCompletedResponses",
+            "duplicateResponseRecords",
+            "conflictingResponseRecords",
+            "inheritedHistory",
+            "childHistory",
+            "completeRequestCount",
+            "fullProviderWireAndUpstreamDetails",
+            "endpointCompleteness",
+            "latestThreadUsage",
+            "latestTokenCountUsage",
+          ].map((key) => [key, row.nativeRollout[key]]),
+        );
+      if (row.promptComponents) {
+        const components = row.promptComponents;
+        if (
+          !Number.isSafeInteger(components.renderedPromptBytes) ||
+          components.renderedPromptBytes < 0 ||
+          components.rolePreambleTaskSplit !== "unavailable" ||
+          !["schemaBytes", "evidenceBytes"].every(
+            (key) =>
+              components[key] === undefined ||
+              (Number.isSafeInteger(components[key]) && components[key] >= 0),
+          )
+        )
+          throw new Error("Native prompt component metadata is malformed");
+        row.promptComponents = {
+          renderedPromptBytes: components.renderedPromptBytes,
+          schemaBytes: components.schemaBytes,
+          evidenceBytes: components.evidenceBytes,
+          rolePreambleTaskSplit: "unavailable",
+        };
+      }
+      if (row.usage) {
+        const parsed = normalizeTokenUsage(row.usage.normalized);
+        if (
+          Object.keys(parsed).length !==
+          Object.keys(row.usage.normalized).length
+        )
+          throw new Error("Native response usage contains invalid counters");
+        row.usage.normalized = normalizeCodexTokenUsage(parsed);
+      }
+    }
+    const analyzed = analyzeInteractions(rows as InteractionMetadata[], [], {});
+    if (analyzed.invocations.length !== 1)
+      throw new Error("Native capture metadata contains unrelated invocations");
+    return {
+      observationDigest: digest(buffer.subarray(0, bytes)),
+      native: analyzed.invocations[0]!.native,
+      promptComponents: analyzed.invocations[0]!.promptComponents,
+    };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Fresh native `codex exec --json`: completed usage is thread-cumulative, not a turn delta. */
@@ -423,6 +661,10 @@ function directSession(
   return {
     ...session,
     path: undefined,
+    nativeCapturePath: undefined,
+    nativeTelemetry: session.nativeCapturePath
+      ? directNativeCapture(session)
+      : null,
     observationDigest: receiptHash.digest("hex"),
     turns: { completed, failed, unfinished: open ? 1 : 0 },
     usageScope: "thread-cumulative" as const,

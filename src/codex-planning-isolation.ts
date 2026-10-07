@@ -19,6 +19,10 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import {
+  captureOwnedRollout,
+  type NativeCaptureObserver,
+} from "./codex-native-capture.js";
 
 /**
  * Factory's own Codex configuration for planning and review: no shell, file,
@@ -310,11 +314,21 @@ export interface CodexHome {
   env: Record<string, string>;
   /** Bounded native event metadata only; no payloads or cessation proof. */
   nativeMetadata(threadId?: string): unknown;
+  /** Read only this owned thread's bounded history after native process settlement. */
+  nativeCapture(
+    threadId: string | undefined,
+    observe: NativeCaptureObserver,
+  ): void;
   /** Removes the scratch home. */
   dispose(): void;
 }
 
-function nativeMetadata(home: string, threadId?: string): unknown {
+function nativeMetadata(
+  home: string,
+  threadId?: string,
+  observe?: NativeCaptureObserver,
+  identity?: { dev: number; ino: number },
+): unknown {
   const unavailable = { source: "codex-rollout", status: "unavailable" };
   if (!threadId || !/^[0-9a-f-]{36}$/.test(threadId)) return unavailable;
   let remaining = 128;
@@ -328,6 +342,7 @@ function nativeMetadata(home: string, threadId?: string): unknown {
       // Hold each directory open while reading its children: a substituted
       // symlink cannot redirect the scan outside this owned native home.
       const anchor = `/proc/self/fd/${fd}`;
+      if (fstatSync(fd).uid !== process.getuid?.()) return undefined;
       const entries = opendirSync(anchor);
       try {
         for (
@@ -353,10 +368,18 @@ function nativeMetadata(home: string, threadId?: string): unknown {
     }
   };
   const readRollout = (path: string): unknown => {
-    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const fd = openSync(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     try {
       const stat = fstatSync(fd);
-      if (!stat.isFile()) return unavailable;
+      if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.nlink !== 1)
+        return unavailable;
+      if (observe) {
+        captureOwnedRollout(fd, threadId, observe);
+        return { source: "codex-rollout", status: "observed" };
+      }
       const head = Buffer.alloc(Math.min(stat.size, 256 * 1024));
       const headBytes = readSync(fd, head, 0, head.length, 0);
       const firstLine = head
@@ -405,10 +428,24 @@ function nativeMetadata(home: string, threadId?: string): unknown {
       closeSync(fd);
     }
   };
+  let rootFd: number | undefined;
   try {
-    return visit(join(home, "sessions"), 3) ?? unavailable;
+    rootFd = openSync(
+      home,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY,
+    );
+    const root = fstatSync(rootFd);
+    if (
+      root.uid !== process.getuid?.() ||
+      (root.mode & 0o077) !== 0 ||
+      (identity && (root.dev !== identity.dev || root.ino !== identity.ino))
+    )
+      return unavailable;
+    return visit(join(`/proc/self/fd/${rootFd}`, "sessions"), 3) ?? unavailable;
   } catch {
     return unavailable;
+  } finally {
+    if (rootFd !== undefined) closeSync(rootFd);
   }
 }
 
@@ -437,6 +474,7 @@ export function createCodexHome(options: {
     const temporary = join(root, "tmp");
     for (const directory of [home, codexHome, temporary])
       mkdirSync(directory, { mode: 0o700 });
+    const codexIdentity = statSync(codexHome);
     writeFileSync(
       join(codexHome, "config.toml"),
       options.sandbox
@@ -464,7 +502,46 @@ export function createCodexHome(options: {
     if (options.sandbox) env.GIT_OPTIONAL_LOCKS = "0";
     return {
       env,
-      nativeMetadata: (threadId) => nativeMetadata(codexHome, threadId),
+      nativeMetadata: (threadId) =>
+        nativeMetadata(codexHome, threadId, undefined, codexIdentity),
+      nativeCapture: (threadId, observe) => {
+        const safely: NativeCaptureObserver = (event, content) => {
+          try {
+            observe(event, content);
+          } catch {
+            /* Capture is observational and cannot affect provider outcomes. */
+          }
+        };
+        const result = nativeMetadata(
+          codexHome,
+          threadId,
+          safely,
+          codexIdentity,
+        ) as {
+          status: string;
+        };
+        if (result.status === "unavailable")
+          safely({
+            kind: "interaction",
+            providerEvent: "codex.native-rollout-coverage",
+            providerSessionId: threadId,
+            coverage: "boundary",
+            nativeRollout: {
+              cliVersion: null,
+              status: "unavailable",
+              readBytes: null,
+              totalBytes: null,
+              observedCompletedResponses: null,
+              duplicateResponseRecords: null,
+              conflictingResponseRecords: null,
+              inheritedHistory: null,
+              childHistory: null,
+              completeRequestCount: "unavailable",
+              fullProviderWireAndUpstreamDetails: "unavailable",
+              endpointCompleteness: "unavailable",
+            },
+          });
+      },
       dispose: () => rmSync(root, { recursive: true, force: true }),
     };
   } catch (error) {

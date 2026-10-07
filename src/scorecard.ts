@@ -496,11 +496,16 @@ function directNativeCapture(
           row.nativeRollout.completeRequestCount !== "unavailable" ||
           row.nativeRollout.fullProviderWireAndUpstreamDetails !==
             "unavailable" ||
-          row.nativeRollout.endpointCompleteness !== "unavailable")
+          row.nativeRollout.endpointCompleteness !== "unavailable" ||
+          !["inheritedHistory", "childHistory"].every(
+            (key) =>
+              row.nativeRollout[key] === null ||
+              typeof row.nativeRollout[key] === "boolean",
+          ))
       )
         throw new Error("Native rollout coverage metadata is malformed");
       if (
-        row.nativeRollout?.cliVersion !== undefined &&
+        row.nativeRollout &&
         row.nativeRollout.cliVersion !== null &&
         row.nativeRollout.cliVersion !== session.cliVersion
       )
@@ -516,6 +521,45 @@ function directNativeCapture(
         )
           throw new Error("Native cumulative usage contains invalid counters");
         row.nativeRollout[key] = normalizeCodexTokenUsage(parsed);
+      }
+      if (row.nativeRollout)
+        row.nativeRollout = Object.fromEntries(
+          [
+            "cliVersion",
+            "status",
+            "readBytes",
+            "totalBytes",
+            "observedCompletedResponses",
+            "duplicateResponseRecords",
+            "conflictingResponseRecords",
+            "inheritedHistory",
+            "childHistory",
+            "completeRequestCount",
+            "fullProviderWireAndUpstreamDetails",
+            "endpointCompleteness",
+            "latestThreadUsage",
+            "latestTokenCountUsage",
+          ].map((key) => [key, row.nativeRollout[key]]),
+        );
+      if (row.promptComponents) {
+        const components = row.promptComponents;
+        if (
+          !Number.isSafeInteger(components.renderedPromptBytes) ||
+          components.renderedPromptBytes < 0 ||
+          components.rolePreambleTaskSplit !== "unavailable" ||
+          !["schemaBytes", "evidenceBytes"].every(
+            (key) =>
+              components[key] === undefined ||
+              (Number.isSafeInteger(components[key]) && components[key] >= 0),
+          )
+        )
+          throw new Error("Native prompt component metadata is malformed");
+        row.promptComponents = {
+          renderedPromptBytes: components.renderedPromptBytes,
+          schemaBytes: components.schemaBytes,
+          evidenceBytes: components.evidenceBytes,
+          rolePreambleTaskSplit: "unavailable",
+        };
       }
       if (row.usage) {
         const parsed = normalizeTokenUsage(row.usage.normalized);

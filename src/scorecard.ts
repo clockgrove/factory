@@ -11,7 +11,11 @@ import {
 } from "./diagnostics.js";
 import { formatDuration, summarizeEfficiency } from "./efficiency.js";
 import { readContinuation } from "./state-store.js";
-import { codexTokenUsage, tokenCategories } from "./usage.js";
+import {
+  codexTokenUsage,
+  normalizeTokenUsage,
+  tokenCategories,
+} from "./usage.js";
 
 type Outcome = "accepted" | "failed" | "unfinished";
 type Route = "factory" | "codex-direct";
@@ -151,13 +155,17 @@ export function factoryObjectiveSummary(
   // Old native/SDK adapters filled absent cache-write counters with zero.
   // Retain their original accounting, but do not treat those zeros as observed.
   if (
-    usage.some(
-      (event) =>
-        event.metadata &&
-        typeof event.metadata === "object" &&
-        "cacheWriteInputTokens" in event.metadata &&
-        event.metadata.cacheWriteInputTokens === 0,
-    )
+    usage.some((event) => {
+      const worker = event.workerUsage;
+      const workerUsage =
+        worker && typeof worker === "object" && "usage" in worker
+          ? normalizeTokenUsage(worker.usage)
+          : {};
+      return (
+        normalizeTokenUsage(event.metadata).cacheWriteInputTokens === 0 ||
+        workerUsage.cacheWriteInputTokens === 0
+      );
+    })
   ) {
     const cacheWrite = tokens.cacheWriteInputTokens;
     cacheWrite.availability = cacheWrite.known ? "partial" : "unavailable";

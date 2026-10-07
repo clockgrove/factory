@@ -23,6 +23,7 @@ import {
   captureOwnedRollout,
   type NativeCaptureObserver,
 } from "./codex-native-capture.js";
+import { workerToolchainPath } from "./process.js";
 
 /**
  * Factory's own Codex configuration for planning and review: no shell, file,
@@ -540,7 +541,11 @@ export function createCodexHome(options: {
   sandbox?: CodexSandbox;
   keep?: readonly string[];
 }): CodexHome {
-  const source = options.source ?? process.env;
+  const ambient = options.source ?? process.env;
+  const source: NodeJS.ProcessEnv = {
+    ...ambient,
+    PATH: workerToolchainPath(ambient.PATH),
+  };
   const root = options.root ?? mkdtempSync(join(tmpdir(), "factory-codex-"));
   if (options.root) mkdirSync(root, { mode: 0o700 });
   try {

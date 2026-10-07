@@ -398,7 +398,11 @@ export interface PlanReviewRequest {
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;
-  amendment?: unknown;
+  amendment?: {
+    previousGraph: WorkGraph;
+    proposal: unknown;
+    work: Record<string, unknown>;
+  };
   reviewPacket?: ReviewPacket;
   objective: string;
   baseSha: string;

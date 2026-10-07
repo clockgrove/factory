@@ -233,13 +233,15 @@ export function summarizeNativeTools(
     snapshot?.status !== "unavailable" &&
     typeof snapshot?.readBytes === "number" &&
     snapshot.readBytes > 0;
+  const currentMetadata = snapshot?.toolMetadata === "available";
   const available =
+    (currentMetadata || tools.length > 0) &&
     readableView &&
     snapshot?.status === "available" &&
     completeIdentity &&
     [...calls.keys()].every((id) => outputs.has(id)) &&
     [...outputs.keys()].every((id) => calls.has(id));
-  const known = readableView || tools.length > 0;
+  const known = currentMetadata || tools.length > 0;
   const countableCalls = calls.size > 0 || available;
   const names = [...new Set(entries.map((entry) => entry.name))].sort();
   const durations = entries.flatMap((entry) =>
@@ -267,7 +269,7 @@ export function summarizeNativeTools(
     ).length,
     uniqueCalls:
       countableCalls && unidentifiedCallRecords === 0 ? calls.size : null,
-    identifiedUniqueCalls: calls.size,
+    identifiedUniqueCalls: countableCalls ? calls.size : null,
     callsWithObservedOutput: calls.size
       ? entries.filter((entry) => entry.observedOutput).length
       : available
@@ -283,21 +285,23 @@ export function summarizeNativeTools(
       : available
         ? 0
         : null,
-    observedExplicitFailureCalls: known
-      ? entries.filter((entry) => entry.explicitFailure === true).length
-      : null,
+    observedExplicitFailureCalls:
+      observed.size > 0 || currentMetadata
+        ? entries.filter((entry) => entry.explicitFailure === true).length
+        : null,
     unidentifiedExplicitFailureRecords: tools.filter(
       (record) =>
         observed.get(record.recordId)?.explicitFailure === true &&
         (!observed.get(record.recordId)?.callId || !record.providerSessionId),
     ).length,
-    unclassifiedOutcomeCalls: known
-      ? entries.filter(
-          (entry) =>
-            entry.explicitFailure === null &&
-            entry.reportedOutputStatus === null,
-        ).length
-      : null,
+    unclassifiedOutcomeCalls:
+      observed.size > 0 || currentMetadata
+        ? entries.filter(
+            (entry) =>
+              entry.explicitFailure === null &&
+              entry.reportedOutputStatus === null,
+          ).length
+        : null,
     actualFailedNestedCommands: null,
     callRounds:
       countableCalls && completeIdentity && pending.size === 0

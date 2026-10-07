@@ -528,6 +528,7 @@ export function captureOwnedRollout(
           ? header.payload.cli_version
           : null,
       status,
+      toolMetadata: status,
       ...(label(header.payload.model_provider)
         ? { modelProvider: label(header.payload.model_provider)! }
         : {}),

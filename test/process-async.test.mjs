@@ -141,6 +141,8 @@ process.stdout.write(JSON.stringify(emitted));`,
     assert.equal(cliAnalysis.invocationCount, 1);
     assert.equal(cliAnalysis.nativeTools.calls, null);
     assert.equal(cliAnalysis.nativeTools.coverage, "unavailable");
+    assert.equal(cliAnalysis.invocations[0].native.tools.calls, null);
+    assert.equal(cliAnalysis.invocations[0].native.tools.observedOutputs, null);
     assert.equal(
       cliAnalysis.invocations[0].native.descendants.accountingUnion,
       null,

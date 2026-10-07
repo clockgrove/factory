@@ -97,6 +97,8 @@ export interface InteractionMetadata {
   };
   nativeRollout?: {
     cliVersion: string | null;
+    /** Absent in legacy captures; history completeness alone cannot establish tool coverage. */
+    toolMetadata?: "available" | "partial";
     modelProvider?: string;
     reportedModel?: string;
     reportedReasoningEffort?: string;

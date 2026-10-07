@@ -796,6 +796,79 @@ function secrets(config: FactoryConfig): string[] {
   ];
 }
 
+/** Dream choices name only episodes and parent lessons supplied to this call. */
+export function dreamSchema(sourceCount: number, previousCount: number) {
+  const nonblank = {
+    type: "string",
+    minLength: 1,
+    description:
+      "Nonempty text containing at least one non-whitespace character.",
+  };
+  const sourceIndex = {
+    type: "integer",
+    enum: Array.from({ length: sourceCount }, (_, index) => index),
+  };
+  const previousIndex = {
+    type: "integer",
+    ...(previousCount
+      ? { enum: Array.from({ length: previousCount }, (_, index) => index) }
+      : { minimum: 0 }),
+  };
+  const entrySchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["text", "sourceIndices"],
+    properties: {
+      text: nonblank,
+      sourceIndices: {
+        type: "array",
+        minItems: 1,
+        description: "Select unique indices from the supplied episodes.",
+        items: sourceIndex,
+      },
+    },
+  };
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["lessons", "summaries", "contradictions", "retired"],
+    properties: {
+      lessons: {
+        type: "array",
+        items: {
+          ...entrySchema,
+          required: ["text", "sourceIndices", "previousLessons"],
+          properties: {
+            ...entrySchema.properties,
+            previousLessons: {
+              type: "array",
+              ...(previousCount ? {} : { maxItems: 0 }),
+              description:
+                "Select existing parent lesson indices; account for each exactly once across lessons and retired.",
+              items: previousIndex,
+            },
+          },
+        },
+      },
+      summaries: { type: "array", items: entrySchema },
+      contradictions: { type: "array", items: entrySchema },
+      retired: {
+        type: "array",
+        ...(previousCount ? {} : { maxItems: 0 }),
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["previousLesson", "reason"],
+          properties: {
+            previousLesson: previousIndex,
+            reason: nonblank,
+          },
+        },
+      },
+    },
+  };
+}
+
 /** One explicit provider pass; all facts and source identities come from local records. */
 async function dream(
   config: FactoryConfig,
@@ -830,54 +903,6 @@ async function dream(
       throw new Error("Dream sources must select supplied episode indices");
     return values;
   };
-  const entrySchema = {
-    type: "object",
-    additionalProperties: false,
-    required: ["text", "sourceIndices"],
-    properties: {
-      text: { type: "string" },
-      sourceIndices: {
-        type: "array",
-        minItems: 1,
-        items: { type: "integer", minimum: 0 },
-      },
-    },
-  };
-  const schema = {
-    type: "object",
-    additionalProperties: false,
-    required: ["lessons", "summaries", "contradictions", "retired"],
-    properties: {
-      lessons: {
-        type: "array",
-        items: {
-          ...entrySchema,
-          required: ["text", "sourceIndices", "previousLessons"],
-          properties: {
-            ...entrySchema.properties,
-            previousLessons: {
-              type: "array",
-              items: { type: "integer", minimum: 0 },
-            },
-          },
-        },
-      },
-      summaries: { type: "array", items: entrySchema },
-      contradictions: { type: "array", items: entrySchema },
-      retired: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["previousLesson", "reason"],
-          properties: {
-            previousLesson: { type: "integer", minimum: 0 },
-            reason: { type: "string" },
-          },
-        },
-      },
-    },
-  };
   const sourcePacket = redactDiagnosticDetail(
     JSON.stringify({ episodes, parent, budgetBytes }),
     secrets(config),
@@ -908,7 +933,7 @@ async function dream(
   };
   try {
     result = await model.generateProposal<typeof result>({
-      schema,
+      schema: dreamSchema(sources.length, parent?.draft.lessons.length ?? 0),
       sourcePacket,
       invocation: {
         invocationId,

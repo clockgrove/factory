@@ -191,6 +191,7 @@ export function activateProjectedObjective(args: {
   );
   return {
     schemaVersion: 7,
+    publicationContract: "exact-request-v1",
     ...(approvedPlaybookAdmission ? { approvedPlaybookAdmission } : {}),
     ...(preparation.approvedPlaybookPin !== undefined
       ? { approvedPlaybookPin: preparation.approvedPlaybookPin }

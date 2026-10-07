@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   GitHubGateway,
   IntakeIssuePage,
@@ -49,8 +50,11 @@ type Pull = {
   state: string;
   merged: boolean;
   closed_at?: string | null;
-  head: { sha: string; ref: string };
-  base: { ref: string };
+  title?: string;
+  body?: string | null;
+  user?: { login?: string } | null;
+  head: { sha: string; ref: string; repo?: { full_name?: string } | null };
+  base: { ref: string; repo?: { full_name?: string } | null };
 };
 
 export function projectedIssueBody(item: WorkItem, objective: number): string {
@@ -82,8 +86,7 @@ const PROBE_GAP = 3;
 
 /**
  * A list that has not caught up yet, where the caller bounds the repeat
- * itself: the closure comment only within the lag window after the close,
- * and a PR create is sent again on the following repeat.
+ * itself: closure-comment visibility only within the lag window after close.
  */
 function listedSoon(message: string): Error {
   return attachFault(new Error(message), transient(message, false));
@@ -113,9 +116,6 @@ function unverifiedCreate(message: string): Error {
 }
 
 export class RealGitHubGateway implements GitHubGateway {
-  /** Branches whose PR create this process sent without seeing its outcome. */
-  private readonly pullCreates = new Set<string>();
-
   constructor(
     readonly repository: string,
     private readonly native: NativeStackDelivery,
@@ -364,11 +364,17 @@ export class RealGitHubGateway implements GitHubGateway {
       throw foreignChange(`Existing PR for ${request.branch} changed base`);
     const key = this.pushedHeadKey(request);
     if (pull.head.sha === request.headSha) {
+      const publication = this.assertPublicationPull(
+        request,
+        pull,
+        Boolean(request.reconcileOnly),
+      );
       settled(key);
       return {
         number: pull.number,
         branch: request.branch,
         headSha: request.headSha,
+        publication,
       };
     }
     if (request.earlierHeads?.includes(pull.head.sha))
@@ -1125,55 +1131,83 @@ export class RealGitHubGateway implements GitHubGateway {
     return { issueByItemId };
   }
 
-  /**
-   * The open PR for Factory's pushed branch: found by its head, else created.
-   * After a create whose outcome is unknown, GitHub's list may not show the
-   * PR for a moment, so the next repeat looks once more before sending it
-   * again; a later "already exists" is read back on the repeat after it.
-   */
+  private assertPublicationPull(
+    request: PullRequestPublication,
+    pull: Pull,
+    exactText: boolean,
+  ): NonNullable<PullRequestIdentity["publication"]> {
+    const digest = (text: string) =>
+      createHash("sha256").update(text).digest("hex");
+    if (
+      !Number.isSafeInteger(pull.number) ||
+      pull.number < 1 ||
+      pull.head?.ref !== request.branch ||
+      pull.head.sha !== request.headSha ||
+      pull.base?.ref !== request.base ||
+      pull.head.repo?.full_name?.toLowerCase() !==
+        this.repository.toLowerCase() ||
+      pull.base.repo?.full_name?.toLowerCase() !==
+        this.repository.toLowerCase() ||
+      typeof pull.title !== "string" ||
+      typeof pull.body !== "string"
+    )
+      throw foreignChange(
+        "PR publication observation differs from exact repository/head/base/context binding",
+      );
+    const publication = {
+      repository: this.repository,
+      baseBranch: pull.base.ref,
+      titleDigest: digest(pull.title),
+      bodyDigest: digest(pull.body),
+      ...(pull.user?.login ? { author: pull.user.login } : {}),
+    };
+    const expected = request.expectedPublication ?? {
+      titleDigest: digest(request.title),
+      bodyDigest: digest(request.body),
+    };
+    if (
+      exactText &&
+      (publication.titleDigest !== expected.titleDigest ||
+        publication.bodyDigest !== expected.bodyDigest)
+    )
+      throw foreignChange(
+        "PR title/body differs from the exact recorded publication request/observation",
+      );
+    return publication;
+  }
+
+  /** Persisted requests only reconcile; only the saved owner's one-shot callback creates. */
   async publish(request: PullRequestPublication): Promise<PullRequestIdentity> {
     const found = await this.pullByHead(request);
-    if (found) {
-      this.pullCreates.delete(request.branch);
-      return found;
-    }
-    if (this.pullCreates.delete(request.branch))
-      throw listedSoon(`GitHub does not list the PR for ${request.branch} yet`);
-    this.pullCreates.add(request.branch);
+    if (found) return found;
+    if (request.reconcileOnly || !request.beforeCreate)
+      throw attachFault(
+        new Error(
+          `PR publication outcome remains unknown for ${request.branch}`,
+        ),
+        decision(
+          "No exact PR is visible. Publication remains unknown; this read does not authorize another POST.",
+          `Unresolved exact request for ${request.branch}; only read-only reconciliation is allowed`,
+        ),
+      );
+    request.beforeCreate();
+    // No retry, negative-read release or in-memory authority: intent already survives restart.
     const detail = await this.api<Pull>("POST", "pulls", {
       head: request.branch,
       base: request.base,
       title: request.title,
       body: request.body,
-    }).catch((error: unknown) => {
-      // GitHub answered: the create did not happen (or "already exists"
-      // names a PR the lookup reads back), so nothing is in flight.
-      if (error instanceof GitHubRequestError)
-        this.pullCreates.delete(request.branch);
-      throw error;
     });
-    if (
-      !Number.isSafeInteger(detail.number) ||
-      !detail.head?.sha ||
-      detail.head.ref !== request.branch
-    )
+    if (!detail || !Number.isSafeInteger(detail.number) || !detail.head?.sha)
       throw unverifiedCreate(
         "Cannot verify created PR identity; outcome unknown",
       );
-    this.pullCreates.delete(request.branch);
-    if (request.earlierHeads?.includes(detail.head.sha))
-      throw stillLagging(
-        this.pushedHeadKey(request),
-        `PR #${detail.number} does not show the pushed head ${request.headSha} yet`,
-      );
-    if (detail.head.sha !== request.headSha)
-      throw foreignChange(
-        `PR #${detail.number} opened on head ${detail.head.sha}, not the pushed ${request.headSha}`,
-      );
+    const publication = this.assertPublicationPull(request, detail, true);
     return {
       number: detail.number,
       branch: request.branch,
       headSha: detail.head.sha,
+      publication,
     };
   }
 

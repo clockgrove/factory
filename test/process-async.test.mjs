@@ -251,6 +251,7 @@ test("settled validation reuses its exact Git result once and retains the failed
     };
     const state = {
       schemaVersion: 7,
+      publicationContract: "exact-request-v1",
       repository: config.repository,
       objective: 1,
       runId: "actual-local-validation",
@@ -359,6 +360,103 @@ test("settled validation reuses its exact Git result once and retains the failed
     assert.equal(evidence.treeSha, treeSha);
     assert.equal(evidence.commands[0].exitCode, 0);
     assert.equal(git("rev-parse", "HEAD"), commit);
+    // A real exclusive owner saves intent then exits before dispatch. The next
+    // process reclaims ownership and loads the atomic snapshot, not diagnostics.
+    const validationHistory = readState(config.repository, 1);
+    const publicationGraph = { ...graph, objective: 2 };
+    const publicationState = {
+      schemaVersion: 7,
+      publicationContract: "exact-request-v1",
+      repository: config.repository,
+      objective: 2,
+      runId: "actual-local-publication",
+      planGraphDigest: graphDigest(publicationGraph),
+      capacity: state.capacity,
+      issueByItemId: { local: 2 },
+      configDigest: state.configDigest,
+      baseSha: commit,
+      graph: publicationGraph,
+      autonomy: state.autonomy,
+      coordinator: {
+        mode: "running",
+        phase: "active",
+        phaseStartedAt: new Date().toISOString(),
+      },
+      work: {
+        local: {
+          status: "running",
+          step: "deliver",
+          attempt: "actual-publication-attempt",
+          baseSha: commit,
+          executionBaseSha: commit,
+          graphRevisionDigest: graphDigest(publicationGraph),
+          changeRef: commit,
+          treeSha,
+          validation: evidence,
+        },
+      },
+    };
+    saveState(statePath(config.repository, 2), publicationState);
+    const publicationRequest = {
+      branch: "factory/objective-2/local",
+      base: "main",
+      headSha: commit,
+      treeSha,
+      title: graph.items[0].title,
+      body: "Exact controller publication text\n",
+    };
+    const stoppedOwner = `import { publicationControl } from ${JSON.stringify(new URL("../dist/delivery/publication.js", import.meta.url).href)};
+import { readState, saveState, statePath, acquireObjectiveLock } from ${JSON.stringify(new URL("../dist/state-store.js", import.meta.url).href)};
+const repository = ${JSON.stringify(config.repository)};
+acquireObjectiveLock(repository, 2);
+const state = readState(repository, 2);
+const control = publicationControl(state, "local", () => saveState(statePath(repository, 2), state));
+control.beforeCreate(JSON.parse(process.argv[1]));
+process.exit(23);`;
+    const first = await subprocessAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        stoppedOwner,
+        JSON.stringify(publicationRequest),
+      ],
+      { cwd: checkout },
+    );
+    assert.equal(first.status, 23, first.stderr.toString());
+    const retained = readState(config.repository, 2);
+    assert.equal(retained.work.local.changeRef, commit);
+    assert.equal(retained.work.local.treeSha, treeSha);
+    const intent = retained.publicationIntents.local[0];
+    assert.equal(intent.submission, "possibly-submitted");
+    assert.equal(intent.observation, undefined);
+    assert.equal(intent.headSha, commit);
+    assert.equal(intent.treeSha, treeSha);
+    assert.equal(
+      intent.bodyDigest,
+      createHash("sha256").update(publicationRequest.body).digest("hex"),
+    );
+    const restarted = await subprocessAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        stoppedOwner,
+        JSON.stringify(publicationRequest),
+      ],
+      { cwd: checkout },
+    );
+    assert.notEqual(restarted.status, 23);
+    assert.match(
+      restarted.stderr.toString(),
+      /permit is unavailable or already consumed/,
+    );
+    assert.deepEqual(
+      readState(config.repository, 2).publicationIntents,
+      retained.publicationIntents,
+    );
+    assert.equal(git("rev-parse", "HEAD"), commit);
+    assert.deepEqual(readState(config.repository, 1), validationHistory);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

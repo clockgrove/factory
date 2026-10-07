@@ -22,6 +22,7 @@ import {
   selectedLfsReviewEvidence,
   configuredResultReviewTextBudget,
   resultTreeInventory,
+  unchangedResultByteEvidence,
   resultChangePacket,
   materializeResultTree,
   assertCommandReceipts,
@@ -71,8 +72,17 @@ export async function reviewAcceptance(args: {
         },
       ]
     : [];
-  const remainingBudget =
-    configuredResultReviewTextBudget() - selectedLfsEvidence.textBytes;
+  const availableBudget = Math.max(
+    0,
+    configuredResultReviewTextBudget() - selectedLfsEvidence.textBytes,
+  );
+  const byteComparisons = unchangedResultByteEvidence(
+    checkout,
+    baseSha,
+    commit,
+    Math.floor(availableBudget / 2),
+  );
+  const remainingBudget = availableBudget - byteComparisons.textBytes;
   const inventory = resultTreeInventory(
     checkout,
     evidence.treeSha,
@@ -87,6 +97,7 @@ export async function reviewAcceptance(args: {
   );
   const suppliedEvidence = [
     inventory,
+    ...byteComparisons.sources,
     ...selectedLfsEvidence.sources,
     ...worktreeEvidence,
     ...(args.evidenceSources ?? []),

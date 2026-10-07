@@ -119,6 +119,7 @@ function summarizeTools(activity: ReturnType<typeof summarizeNativeTools>) {
     calledAt: call.calledAt,
     outputAt: call.outputAt,
     outputObserved: call.observedOutput,
+    conflictingObservations: call.conflictingObservations,
     status:
       call.explicitFailure === true
         ? "reported-failed"
@@ -136,7 +137,10 @@ function summarizeTools(activity: ReturnType<typeof summarizeNativeTools>) {
       .length,
     missingOutputs: calls.filter((call) => !call.outputObserved).length,
     observedRounds:
-      calls.length && calls.every((call) => call.turnId !== null)
+      calls.length &&
+      calls.every(
+        (call) => call.turnId !== null && !call.conflictingObservations,
+      )
         ? new Set(
             calls.map((call) => JSON.stringify([call.sessionId, call.turnId])),
           ).size

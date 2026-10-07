@@ -242,6 +242,11 @@ export async function runCodexWorker(
       if (!turnCompleted && streamError) throw streamError;
       requireCompletedProviderTurn(turnCompleted);
       turn.finish();
+      // Pinned SDK natural EOF awaits the native child exit. This snapshot does
+      // not prove outer harness/group cessation or a sealed native daemon stream.
+      home.nativeCapture(thread.id ?? undefined, (event, content) =>
+        capture.native(event, content),
+      );
       const parsedAssets = readProducedAssets(request);
       observeUsage("completed");
       capture.outcome(
@@ -258,6 +263,10 @@ export async function runCodexWorker(
       return true;
     } catch (caught) {
       const error = caught;
+      // Early SDK return does not await native settlement. Do not read its writer.
+      home.nativeCapture(undefined, (event, content) =>
+        capture.native(event, content),
+      );
       capture.nativeFailure(
         () => home.nativeMetadata(thread.id ?? undefined),
         thread.id ?? undefined,

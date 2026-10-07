@@ -1,7 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
 import type { InteractionMetadata } from "./capture.js";
 import type { DiagnosticEvent } from "./diagnostics.js";
-import { normalizeTokenUsage, tokenCategories } from "./usage.js";
+import {
+  normalizeCodexTokenUsage,
+  normalizeTokenUsage,
+  tokenCategories,
+} from "./usage.js";
 
 export const analysisFields = [
   "repository",
@@ -57,6 +61,203 @@ function value(
   if (field === "provider" || field === "model" || field === "reasoningEffort")
     return record.configured[field];
   return record[field];
+}
+
+/** Native per-response observations are an alternate view of parent invocation totals. */
+function summarizeNative(records: InteractionMetadata[]) {
+  const snapshot = records
+    .filter((record) => record.nativeRollout)
+    .at(-1)?.nativeRollout;
+  const conflicts = new Set(
+    records
+      .filter(
+        (record) => record.providerEvent === "codex.native-usage-conflict",
+      )
+      .map((record) => record.providerMessageId),
+  );
+  const responses = new Map<string, InteractionMetadata>();
+  let missingIdentity = 0;
+  for (const record of records) {
+    if (record.providerEvent !== "codex.native-response-usage") continue;
+    const key = record.usage?.deduplicationKey;
+    if (!key) {
+      missingIdentity++;
+      continue;
+    }
+    const previous = responses.get(key);
+    if (previous && !isDeepStrictEqual(previous.usage, record.usage)) {
+      conflicts.add(record.providerMessageId);
+      continue;
+    }
+    responses.set(key, record);
+  }
+  const selected = [...responses.values()].filter(
+    (record) => !conflicts.has(record.providerMessageId),
+  );
+  const cachePairs = selected
+    .map((record) => normalizeCodexTokenUsage(record.usage?.normalized))
+    .filter(
+      (usage) =>
+        usage.inputTokens !== undefined &&
+        usage.cachedInputTokens !== undefined,
+    );
+  const cacheInput = cachePairs.reduce(
+    (sum, usage) => sum + usage.inputTokens!,
+    0,
+  );
+  const cacheRead = cachePairs.reduce(
+    (sum, usage) => sum + usage.cachedInputTokens!,
+    0,
+  );
+  const cacheExact =
+    Number.isSafeInteger(cacheInput) && Number.isSafeInteger(cacheRead);
+  const outer = records
+    .filter((record) => record.usage?.scope === "invocation-cumulative")
+    .at(-1)?.usage?.normalized;
+  const categories = Object.fromEntries(
+    tokenCategories.map((category) => {
+      const observed = selected
+        .map((record) => normalizeCodexTokenUsage(record.usage?.normalized))
+        .filter((usage) => usage[category] !== undefined);
+      const sum = observed.reduce((sum, usage) => sum + usage[category]!, 0);
+      const exact = Number.isSafeInteger(sum);
+      return [
+        category,
+        {
+          total: observed.length && exact ? sum : null,
+          latestThreadCounter: snapshot?.latestThreadUsage?.[category] ?? null,
+          latestTokenCountCounter:
+            snapshot?.latestTokenCountUsage?.[category] ?? null,
+          outerInvocationCounter: outer?.[category] ?? null,
+          threadVersusTokenCount:
+            snapshot?.latestThreadUsage?.[category] !== undefined &&
+            snapshot?.latestTokenCountUsage?.[category] !== undefined
+              ? snapshot.latestThreadUsage[category] ===
+                snapshot.latestTokenCountUsage[category]
+                ? "matches"
+                : "differs"
+              : "unavailable",
+          threadVersusOuterInvocation:
+            snapshot?.latestThreadUsage?.[category] !== undefined &&
+            outer?.[category] !== undefined
+              ? snapshot.latestThreadUsage[category] === outer[category]
+                ? "matches"
+                : "differs"
+              : "unavailable",
+          cumulativeReconciliation:
+            observed.length &&
+            exact &&
+            observed.length === responses.size &&
+            !conflicts.size &&
+            snapshot?.latestThreadUsage?.[category] !== undefined
+              ? sum === snapshot.latestThreadUsage[category]
+                ? "matches"
+                : "differs"
+              : "unavailable",
+          contributingResponses: observed.length,
+          observedResponses: responses.size,
+          coverage:
+            !observed.length || !exact
+              ? "unavailable"
+              : snapshot?.status === "available" &&
+                  observed.length === responses.size &&
+                  !missingIdentity &&
+                  !conflicts.size &&
+                  sum === snapshot?.latestThreadUsage?.[category] &&
+                  (snapshot.latestTokenCountUsage?.[category] === undefined ||
+                    sum === snapshot.latestTokenCountUsage[category]) &&
+                  (outer?.[category] === undefined || sum === outer[category])
+                ? "available"
+                : "partial",
+        },
+      ];
+    }),
+  );
+  const visible = records.filter(
+    (record) => record.visible?.source === "owned-codex-rollout",
+  );
+  const visibleGroup = (selected: InteractionMetadata[]) => ({
+    records: selected.length,
+    serializedBytes: selected.length
+      ? selected.reduce(
+          (sum, record) => sum + record.visible!.serializedBytes,
+          0,
+        )
+      : null,
+    textBytes: selected.length
+      ? selected.reduce((sum, record) => sum + record.visible!.textBytes, 0)
+      : null,
+    repeatedExactDigests: [
+      ...new Set(selected.map((record) => record.visible!.digest)),
+    ].filter(
+      (digest) =>
+        selected.filter((record) => record.visible!.digest === digest).length >
+        1,
+    ).length,
+  });
+  const authored = visible.filter((record) => !record.visible!.contextSnapshot);
+  return {
+    rollout: snapshot ?? null,
+    observedCompletedResponseRecords:
+      (responses.size || snapshot?.observedCompletedResponses) ?? null,
+    completeRequestAndAttemptCount: null,
+    responseUsage: {
+      scope: "observed-completed-response-subset" as const,
+      categories,
+      conflicts: conflicts.size,
+      missingIdentity,
+      cache: {
+        inputTokens: cachePairs.length && cacheExact ? cacheInput : null,
+        cachedInputTokens: cachePairs.length && cacheExact ? cacheRead : null,
+        reportedInputMinusCachedTokens:
+          cachePairs.length && cacheExact ? cacheInput - cacheRead : null,
+        weightedHitRate:
+          cachePairs.length && cacheExact && cacheInput > 0
+            ? cacheRead / cacheInput
+            : null,
+        contributingResponses: cachePairs.length,
+        observedResponses: responses.size,
+        coverage:
+          !cachePairs.length || !cacheExact
+            ? "unavailable"
+            : snapshot?.status === "available" &&
+                cachePairs.length === responses.size &&
+                !conflicts.size &&
+                !missingIdentity
+              ? "available"
+              : "partial",
+        upstreamCategoryAndBillingCoverage: "unknown" as const,
+      },
+    },
+    visible: {
+      baseInstructions: visibleGroup(
+        authored.filter(
+          (record) => record.providerEvent === "codex.native-base-instructions",
+        ),
+      ),
+      byReportedRole: Object.fromEntries(
+        ["system", "developer", "user", "assistant", "tool"].map((role) => [
+          role,
+          visibleGroup(authored.filter((record) => record.role === role)),
+        ]),
+      ),
+      toolOutputs: visibleGroup(
+        authored.filter(
+          (record) => record.providerEvent === "codex.native-tool-output",
+        ),
+      ),
+      toolCalls: visibleGroup(
+        authored.filter(
+          (record) => record.providerEvent === "codex.native-tool-call",
+        ),
+      ),
+      compactionAndReplacementSnapshots: visibleGroup(
+        visible.filter((record) => record.visible!.contextSnapshot),
+      ),
+      exactBilledRoleTokens: null,
+      fullProviderWire: "unavailable" as const,
+    },
+  };
 }
 
 function summarizeInvocation(records: InteractionMetadata[]) {
@@ -135,6 +336,8 @@ function summarizeInvocation(records: InteractionMetadata[]) {
           })),
       ]),
     ),
+    native: summarizeNative(records),
+    promptComponents: request?.promptComponents ?? null,
     usage: {
       scope: "invocation-cumulative" as const,
       recordId: usageRecord?.recordId ?? null,
@@ -380,6 +583,7 @@ export function analyzeInteractions(
     limitations: [
       "Observed intervals overlap; elapsed time is the observation envelope, not a sum of work durations or proof of current process activity.",
       "Missing counters and outcomes remain unavailable. Category totals cover only contributing invocations; cached/cache-write input and reasoning output overlap their parent categories.",
+      "Native response records are observed completed responses with retained usage, not complete request/attempt counts. They are alternate accounting views, never extra parent tokens. Role/base/tool bytes are visible serialized history, not billed token attribution or the complete provider wire; replacement history is a context snapshot rather than new authored content.",
       "Only the latest invocation-cumulative usage contributes to totals. Provider-call and model breakdown observations are alternate views, not additional usage.",
       "Provider cost estimates are not billed cost or subscription availability. Missing estimates are not zero; currencies remain separate.",
       "Compare scope, retries, model/reasoning, prompt/source/configuration identities and capture coverage before interpreting differences. No causal model-quality claim is made.",

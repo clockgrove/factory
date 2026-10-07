@@ -222,6 +222,15 @@ export class StructuredPlanningModel implements PlanningModel {
       capture: {
         event: {
           kind: "request",
+          promptComponents: {
+            renderedPromptBytes: Buffer.byteLength(args.prompt),
+            schemaBytes: Buffer.byteLength(schema),
+            rolePreambleTaskSplit: "unavailable",
+            evidenceBytes:
+              args.sourcePacket === undefined
+                ? undefined
+                : Buffer.byteLength(args.sourcePacket),
+          },
           promptDigest: digest(args.prompt),
           schemaDigest: digest(schema),
           sourceDigest:

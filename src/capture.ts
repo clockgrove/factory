@@ -43,7 +43,7 @@ export interface InteractionMetadata {
   providerSessionId?: string;
   providerMessageId?: string;
   toolCallId?: string;
-  role?: "system" | "user" | "assistant" | "tool";
+  role?: "system" | "developer" | "user" | "assistant" | "tool";
   tool?: string;
   configDigest?: string;
   sourceDigest?: string;
@@ -51,6 +51,39 @@ export interface InteractionMetadata {
   schemaDigest?: string;
   durationMs?: number;
   coverage: "boundary" | "sdk-exposed";
+  /** Visible serialized native history, never billed tokens or a complete wire request. */
+  visible?: {
+    source: "owned-codex-rollout";
+    textBytes: number;
+    serializedBytes: number;
+    digest: string;
+    contextSnapshot: boolean;
+  };
+  nativeRollout?: {
+    cliVersion: string | null;
+    status: "available" | "partial" | "unavailable";
+    readBytes: number | null;
+    totalBytes: number | null;
+    observedCompletedResponses: number | null;
+    duplicateResponseRecords: number | null;
+    conflictingResponseRecords: number | null;
+    inheritedHistory: boolean | null;
+    childHistory: boolean | null;
+    completeRequestCount: "unavailable";
+    fullProviderWireAndUpstreamDetails: "unavailable";
+    endpointCompleteness: "unavailable";
+    latestThreadUsage?: NonNullable<InteractionMetadata["usage"]>["normalized"];
+    latestTokenCountUsage?: NonNullable<
+      InteractionMetadata["usage"]
+    >["normalized"];
+  };
+  /** Author-owned overlapping components, not a tokenizer or an inferred additive split. */
+  promptComponents?: {
+    renderedPromptBytes: number;
+    schemaBytes?: number;
+    evidenceBytes?: number;
+    rolePreambleTaskSplit: "unavailable";
+  };
   /** Complete provider conversation, implicit prompts and hidden reasoning are not exposed. */
   content: {
     status: "captured" | "capture-disabled" | "not-exposed" | "unavailable";

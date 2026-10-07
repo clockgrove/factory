@@ -312,7 +312,15 @@ export class WorkerInteractionCapture {
   request(prompt: string, instructions?: unknown): void {
     this.safely(() =>
       this.writer!.record(
-        { kind: "request", role: "user", coverage: "boundary" },
+        {
+          kind: "request",
+          role: "user",
+          coverage: "boundary",
+          promptComponents: {
+            renderedPromptBytes: Buffer.byteLength(prompt),
+            rolePreambleTaskSplit: "unavailable",
+          },
+        },
         () => ({ prompt, instructions }),
       ),
     );
@@ -441,6 +449,10 @@ export class WorkerInteractionCapture {
         content,
       ),
     );
+  }
+
+  native(event: CaptureEvent, content?: () => unknown): void {
+    this.safely(() => this.writer!.record(event, content));
   }
 
   claude(message: SDKMessage, observedUsage?: Record<string, unknown>): void {

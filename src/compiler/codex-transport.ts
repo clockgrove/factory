@@ -215,7 +215,15 @@ export class CodexPlanningTransport implements PlanningTransport {
     } finally {
       state.providerThreadId = thread.id;
       turn.finish();
-      if (!retainHome) home.dispose();
+      if (!retainHome) {
+        home.nativeCapture(thread.id, (event, content) =>
+          observeModelInvocation(invocation, {
+            type: "progress",
+            capture: { event, content },
+          }),
+        );
+        home.dispose();
+      }
     }
   }
 }

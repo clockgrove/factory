@@ -497,7 +497,9 @@ export function summarizeScorecard(
     )
       throw new Error("Factory result differs from packet binding");
     const acceptedAt =
-      result?.bindings.sealedAt ?? packet.acceptance.at ?? null;
+      outcome === "accepted"
+        ? (result?.bindings.sealedAt ?? packet.acceptance.at ?? null)
+        : null;
     if (
       outcome === "accepted" &&
       (!acceptedAt ||

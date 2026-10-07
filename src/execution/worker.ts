@@ -1,11 +1,18 @@
-import { WorkerInteractionCapture } from "./interaction-capture.js";
-import { Codex } from "@openai/codex-sdk";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import type { HarnessRequest, WorkerUsageObservation } from "../contracts.js";
-import { codexTokenUsage, codexRawTokenUsage } from "../usage.js";
 import type { ThreadEvent } from "@openai/codex-sdk";
+import { Codex } from "@openai/codex-sdk";
+import { createCodexHome } from "../codex-planning-isolation.js";
+import type { CodexModelSelection } from "../config.js";
+import type { HarnessRequest, WorkerUsageObservation } from "../contracts.js";
+import {
+  closeProviderEventStream,
+  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  ProviderTurnGuard,
+  requireCompletedProviderTurn,
+} from "../provider-turn.js";
+import { codexRawTokenUsage, codexSdkTokenUsage } from "../usage.js";
 import {
   harnessFailure,
   ProviderStreamError,
@@ -15,14 +22,7 @@ import {
   workItemPrompt,
   writeHarnessResult,
 } from "./harness-support.js";
-import type { CodexModelSelection } from "../config.js";
-import { createCodexHome } from "../codex-planning-isolation.js";
-import {
-  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
-  ProviderTurnGuard,
-  closeProviderEventStream,
-  requireCompletedProviderTurn,
-} from "../provider-turn.js";
+import { WorkerInteractionCapture } from "./interaction-capture.js";
 
 interface WorkerInput {
   request: HarnessRequest;
@@ -155,7 +155,7 @@ export async function runCodexWorker(
         provider: "codex",
         model: model.model,
         reasoningEffort: model.reasoningEffort,
-        usage: codexTokenUsage(usage),
+        usage: codexSdkTokenUsage(usage),
       };
       observe({
         eventId: randomUUID(),
@@ -246,7 +246,7 @@ export async function runCodexWorker(
       observeUsage("completed");
       capture.outcome(
         "completed",
-        codexTokenUsage(usage),
+        codexSdkTokenUsage(usage),
         undefined,
         "protocol",
       );
@@ -265,7 +265,7 @@ export async function runCodexWorker(
       observeUsage("failed");
       capture.outcome(
         "failed",
-        codexTokenUsage(usage),
+        codexSdkTokenUsage(usage),
         error,
         providerCompleted ? "protocol" : "provider",
       );

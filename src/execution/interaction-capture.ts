@@ -1,15 +1,16 @@
-import type { ThreadEvent } from "@openai/codex-sdk";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { SessionEvent } from "@github/copilot-sdk";
+import type { ThreadEvent } from "@openai/codex-sdk";
 import {
-  CaptureWriter,
-  type InteractionMetadata,
   type CaptureContext,
   type CaptureEvent,
+  CaptureWriter,
+  type InteractionMetadata,
 } from "../capture.js";
 import type { HarnessRequest, ModelInvocationUsage } from "../contracts.js";
 import {
   codexRawTokenUsage,
+  codexSdkTokenUsage,
   codexTokenUsage,
   normalizeTokenUsage,
 } from "../usage.js";
@@ -131,6 +132,7 @@ export function codexCaptureEvent(
   event: ThreadEvent,
   sessionId?: string,
   secrets: string[] = [],
+  usageSource: "native" | "sdk" = "native",
 ): { event: CaptureEvent; content?: () => unknown } {
   let projected: { event: CaptureEvent; content?: () => unknown } = {
     event: { kind: "interaction" },
@@ -157,7 +159,10 @@ export function codexCaptureEvent(
           ? "available-categories"
           : "unavailable",
         raw,
-        normalized: codexTokenUsage(raw),
+        normalized:
+          usageSource === "sdk"
+            ? codexSdkTokenUsage(raw)
+            : codexTokenUsage(raw),
       },
     });
   } else if (event.type === "turn.failed" || event.type === "error") {
@@ -415,7 +420,12 @@ export class WorkerInteractionCapture {
 
   codex(event: ThreadEvent, sessionId?: string): void {
     this.safely(() => {
-      const projected = codexCaptureEvent(event, sessionId, this.secrets);
+      const projected = codexCaptureEvent(
+        event,
+        sessionId,
+        this.secrets,
+        "sdk",
+      );
       this.writer!.record(projected.event, projected.content);
     });
   }

@@ -1,7 +1,7 @@
-import type { ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
 import { existsSync, writeFileSync } from "node:fs";
-import { join, delimiter } from "node:path";
+import { delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import type { ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
 import { codexRuntimeDirectory } from "./codex-planning-isolation.js";
 import { attachFault } from "./fault.js";
 import { subprocessAsync, UnsettledSubprocessError } from "./process.js";
@@ -53,9 +53,6 @@ export async function runCodexExec(args: {
     if (failed) return;
     try {
       const event = JSON.parse(text) as ThreadEvent;
-      // Match the SDK's cumulative usage projection; other missing categories stay missing.
-      if (event.type === "turn.completed" && event.usage)
-        event.usage.cache_write_input_tokens ??= 0;
       args.event(event);
     } catch (error) {
       failed = true;

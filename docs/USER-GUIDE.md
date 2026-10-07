@@ -366,6 +366,46 @@ factory diagnostics --objective N --analyze --filter runId=RUN_ID --gantt --outp
 
 Summary stage times count overlapping intervals once; operator waits and time outside a stage appear separately. Analysis reads metadata without captured text or provider calls. Grouping defaults to phase; repeat `--group-by` for combined fields. Filters match exactly (`reportedModel=null` selects missing reported models); unknown fields list allowed choices. Diagnosis uses phase `diagnosis`, graph compilation `compile`. Partial totals are marked; cached/reasoning counters are subsets, and concurrent elapsed times must not be summed. Gantt blue bars are model invocations, amber bars controller operations; validation labels are command indices.
 
+For a delivery batch or an early Codex comparison, use `factory diagnostics --scorecard /abs/private/selection.json --json`, optionally with `--output /abs/private/existing-dir/scorecard.json`. This reads retained observations without provider calls or lifecycle changes. The selection is reporting input, outside the target, with a finite window and explicit packets; it is not another execution ledger. For example:
+
+```json
+{
+  "schemaVersion": 1,
+  "window": {
+    "startedAt": "2026-10-07T00:00:00Z",
+    "endedAt": "2026-10-08T00:00:00Z"
+  },
+  "packets": [
+    {
+      "id": "packet-1",
+      "task": "Pinned task identity",
+      "route": "factory",
+      "scope": "adopter",
+      "factoryObjectives": [10, 12],
+      "bindings": {
+        "sourceDigest": "SHA256_OF_PINNED_TASK_INPUTS",
+        "baseCommit": "EXACT_BASE_COMMIT",
+        "acceptanceReference": "LOCAL_ACCEPTANCE_RECEIPT",
+        "environmentReference": "LOCAL_TOOLS_NETWORK_HOST_ASSESSMENT"
+      },
+      "acceptance": { "outcome": "unfinished" }
+    }
+  ]
+}
+```
+
+Group every failed/cancelled predecessor and its replacement into the same packet; list separate failed and unfinished tasks as their own packets. Select whole observations inside the window. Accepted Factory outcomes, run/config/base/result identities and acceptance time come from the continuation snapshot; the selection cannot override them. Capture metadata supplies historical Factory/adapter versions, provider/model/reasoning and source/prompt identities. Missing historical bindings remain unavailable; the current installation does not fill them in.
+
+For the direct route, set `route` to `codex-direct` and replace `factoryObjectives` with `codexSessions`. Each entry selects a new private `0600` newline-terminated output file from the [normal `codex exec --json` workflow](https://developers.openai.com/codex/noninteractive), with `path`, matching `sessionId` from `thread.started`, externally observed `startedAt`, `endedAt`, `outcome` (`completed`, `failed`, `cancelled`, `unfinished`), `role` (`setup`, `authoring`, `implementation`, `review`, `recovery`), `cliVersion`, `provider`, `model`, `reasoningEffort` and `configDigest`. Select an unmodified native CLI stream from one invocation per file; postprocessed SDK streams can synthesize counters and are not direct-route evidence. Usage contributes once per completed turn; failed/unfinished turns without usage make accounting incomplete. Private session-history files and alternate/cumulative usage payloads are not parsed. Receipt digests hash canonical complete JSON records, without retaining raw messages in the report; direct captures with unterminated final records are refused.
+
+Direct acceptance requires an external substantive assessment, `acceptance.at`, and exact `bindings.resultCommit` and `bindings.resultTree`. References identify receipts for independent assessment; their presence alone does not prove quality. Factory packets can also select direct captures for setup, authoring, review or recovery overhead outside Objective execution. Keep Factory-development work separate with `scope: "factory-development"`. Do not omit failed sessions or surrounding harness/human work to improve a result.
+
+Optional packet `workflow: {"startedAt": "ISO_TIMESTAMP", "endedAt": "ISO_TIMESTAMP"}` records externally observed bounds for the whole process, including human setup, authoring, assessment and recovery that have no Codex capture. Bounds must lie inside the selection window and contain all selected receipts and acceptance. Only these bounds produce total `wallMs` and `timeToAcceptedMs`; without them both stay null, including paired total-time deltas. `capturedStartedAt`, `capturedEndedAt` and `capturedWallMs` preserve the receipt envelope separately. The operator must substantiate the external timings; the parser cannot prove that no work occurred outside them. Do not fabricate a Codex setup session to account for human work.
+
+Optional packet `observations` record externally measured `operatorEffortMs`, `interventions`, `scopeRedirections`, `outOfScopeChanges`, `rework` and `postDeliveryCorrections`; correction counts also require `postDeliveryWindowEndedAt`. Absent measurements are null, including operator attention: elapsed operator waits do not measure attention. JSON includes per-Objective stage times, worker attempts/repairs, model calls by phase, repeated exact prompt digests, cache components, category completeness and batch known tokens per accepted packet including selected failed work. Cached input and reasoning output are subset counters, never extra tokens or invented subscription/dollar costs. Historical Codex SDK cache-write zeros may have been synthesized; they do not prove provider-reported zero usage. Batch packet wall/wait sums are named as sums and can overlap during parallel work; use the separate window elapsed time for throughput.
+
+Before calls, precommit equivalent scope, pinned inputs, acceptance/quality checks, models/effort, tools/network/resources, separate workspaces, order/carryover controls, finite attempts/deadline and a practical improvement criterion. Put its reference in optional `comparison.planReference`, alongside `practicalImprovementCriterion` and `limitations`. Give the two packets the same `pairId`, task/source/base and independently assessed `environmentReference`. Matched accepted packets produce per-metric absolute/percentage deltas; incomplete token or attention dimensions remain null. Unmatched batches stay observational. The report does not decide superiority or validate referenced assessments: apply the declared criterion to independently checked evidence and report gain, loss or inconclusive with sample size and limitations.
+
 Analysis `--output` creates a new `0600` file in an existing directory outside the target checkout without symlinked parents. `--gantt` requires output and excludes `--json`. API users can call `readInteractionMetadata`, `readInteractionContent` and `analyzeInteractions` from the package root.
 
 Export is an explicit OTLP/HTTP JSON send to an approved collector, never a background action. Metadata is sensitive too. Preview the exact selection and destination, then authorize its digest:

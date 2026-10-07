@@ -1,0 +1,36 @@
+import type {
+  ModelInvocationContext,
+  ModelInvocationObservation,
+} from "../contracts.js";
+
+export function observeModelInvocation(
+  invocation: ModelInvocationContext | undefined,
+  observation: Omit<
+    ModelInvocationObservation,
+    | "invocationId"
+    | "phase"
+    | "ordinal"
+    | "providerAttempt"
+    | "providerMaxAttempts"
+  >,
+): void {
+  if (!invocation) return;
+  try {
+    invocation.observe?.({
+      invocationId: invocation.invocationId,
+      phase: invocation.phase,
+      ordinal: invocation.ordinal,
+      ...(invocation.providerAttempt === undefined
+        ? {}
+        : { providerAttempt: invocation.providerAttempt }),
+      ...(invocation.providerMaxAttempts === undefined
+        ? {}
+        : { providerMaxAttempts: invocation.providerMaxAttempts }),
+      ...observation,
+    });
+  } catch (error) {
+    process.stderr.write(
+      `Factory model diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}

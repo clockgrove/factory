@@ -45,7 +45,9 @@ export function captureOwnedRollout(
   let conflicts = 0;
   let childHistory = false;
   const inheritedHistory = Boolean(
-    header.payload.parent_thread_id || header.payload.history_base,
+    header.payload.parent_thread_id ||
+      header.payload.history_base ||
+      header.payload.forked_from_id,
   );
   const responses = new Map<string, string>();
   let latestThreadUsage: ReturnType<typeof codexTokenUsage> | undefined;

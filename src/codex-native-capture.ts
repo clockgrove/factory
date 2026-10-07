@@ -119,11 +119,11 @@ export function captureOwnedRollout(
         String(payload.type),
       )
     ) {
-      visible(payload, "tool", snapshot, "codex.native-tool-output");
+      visible(payload, undefined, snapshot, "codex.native-tool-output");
     } else if (
       ["function_call", "custom_tool_call"].includes(String(payload.type))
     ) {
-      visible(payload, "assistant", snapshot, "codex.native-tool-call");
+      visible(payload, undefined, snapshot, "codex.native-tool-call");
     } else if (
       ["compaction", "context_compaction"].includes(String(payload.type))
     ) {

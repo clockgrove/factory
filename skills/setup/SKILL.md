@@ -7,6 +7,8 @@ description: Set up Factory for a target repository, either configuration only o
 
 Set up the installed Factory CLI for a target repository. `factory help` lists the exact options and is the authority over this skill. Never target Factory's own source, rebuild or archive repositories.
 
+Check the CLI package identity and enabled Factory plugin against the selected release using the [installation checks](https://github.com/clockgrove/factory/blob/main/README.md#cli). A host plugin and CLI can come from different releases. Report a mismatch before setup; use the installed CLI's help for supported commands.
+
 ## Choose the outcome
 
 - **Configuration only:** the request says install, configure, or "do not start work". No service.
@@ -21,6 +23,8 @@ Running `setup --background` is the service consent. It grants no provider spend
 - For `--planning claude-agent-sdk`, ask for the planning and review models. It uses the operator's `claude auth login`.
 
 A fresh configuration persists these defaults when no model choices are given: planner `gpt-6.1-sol` with `high` reasoning, reviewer `gpt-6.1-sol` with `high` reasoning, and worker `gpt-6.1-sol` with `medium` reasoning.
+
+The host loading this skill does not select Factory's providers. Claude Code uses the same Codex defaults unless planning or harness choices explicitly select Claude. Verify the configured providers' logins and target toolchain in the controller's non-login shell; configuration-only setup does not establish worker readiness.
 
 Keep configuration, credentials and state outside the target repository. Reuse a matching existing configuration. If the binding conflicts, report it and stop, because deleting state or choosing another root hides the conflict.
 

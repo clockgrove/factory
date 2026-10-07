@@ -6,7 +6,7 @@ Agents operate Factory through the `setup` and `director` skills, and the skills
 
 ## Prerequisites
 
-- Linux x64 (WSL2 works), Node.js 22 or later, Git 2.31 or later, an authenticated `gh`, and a Codex login. Other providers are in [local providers](#local-providers).
+- Linux x64 (WSL2 works), Node.js 22 or later, Git 2.31 or later, an authenticated `gh`, and logins for the selected planning, review and worker providers. Defaults require a Codex login; Claude choices and other providers are in [local providers](#local-providers).
 - A trusted checkout whose `origin` fetch and push URLs resolve to the same GitHub `OWNER/REPO`. Factory refuses local-path origins, mismatched push URLs and its own source repositories.
 - The target's toolchain on the validation `PATH`. Factory installs no package manager or build tool. Validation runs commands with non-login `sh -c`, so shell profiles do not provision it.
 - Requirements and validation instructions committed. Planning reads the pinned Git base, not uncommitted or unpushed edits. The base is the head of the default branch on `origin`, fetched when the run first plans; the Objective keeps that base on every later run.
@@ -32,6 +32,8 @@ Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` and state under 
 ### Models, network and delivery
 
 Choose these at setup. Defaults: `gpt-6.1-sol` for planner, reviewer and worker, with `high` reasoning for planner and reviewer and `medium` for the worker.
+
+Your agent host loads the skills; it does not select Factory's providers. These defaults also apply when you use the plugin in Claude Code. Select Claude planning and/or workers explicitly when that is the intended configuration. Check the [CLI and plugin identities](../README.md#cli) before setup; their releases can differ even when both are installed.
 
 | Option                                                      | Effect                                                                                                                                    |
 | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
@@ -59,7 +61,7 @@ The harness executes Work Items; `--planning` selects the separate planner and r
 | `claude-agent-sdk`   | `--worker-model MODEL --claude-max-turns N`                     | `claude auth login`, or supported Claude credentials | `host`          |
 | `github-copilot-sdk` | `--worker-model MODEL --copilot-timeout-seconds N`; Node 22.12+ | `copilot`, or supported Copilot credentials          | `host`          |
 
-For example, add `--harness claude-agent-sdk --worker-model MODEL --claude-max-turns 12` to setup. A normal npm install includes both optional SDKs; `--omit=optional` leaves Codex and registered adapters. Claude planning also requires `--planning-model` and `--review-model`. It supports the local Claude login, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, without settings files; Bedrock, Vertex and `apiKeyHelper` are unsupported. Factory stores no tokens in its configuration. A missing login stops the attempt; status names the login command and the retry command.
+For example, add `--harness claude-agent-sdk --worker-model MODEL --claude-max-turns 12` to setup. Claude and Copilot SDKs are optional dependencies, outside the bundled Codex path. An offline install needs them in the npm cache and can finish without them; `--omit=optional` leaves Codex and registered adapters. Before selecting an optional provider, check its SDK in the same prefix with `npm list --offline --prefix /absolute/private/factory-prefix @anthropic-ai/claude-agent-sdk --depth=1` or the corresponding `@github/copilot-sdk` command. If absent, install the same verified Factory tarball in that prefix with network access and optional dependencies enabled, then recheck. Claude planning also requires `--planning-model` and `--review-model`. It supports the local Claude login, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, without settings files; Bedrock, Vertex and `apiKeyHelper` are unsupported. Factory stores no tokens in its configuration. A missing login stops the attempt; status names the login command and the retry command.
 
 Claude worker credentials can also use `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE`, `ANTHROPIC_CONFIG_DIR` or `CLAUDE_CONFIG_DIR`. Copilot supports `COPILOT_GITHUB_TOKEN`, `GITHUB_COPILOT_API_TOKEN`, `COPILOT_API_URL` and `COPILOT_PROVIDER_*`. Its local login must work without the system keychain. For a headless Claude service, bind `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` with `--credential-file`.
 
@@ -221,6 +223,8 @@ The section cannot be added retroactively to an accepted plan: its Objective bod
 ```sh
 factory run --objective N [--deadline ISO_TIMESTAMP]
 ```
+
+There is no plan-only CLI command. To inspect an Objective before authorizing execution, ask your agent to read the issue and committed Sources without running Factory. A planning review that needs a human stops; a clean review proceeds to execution without another approval step.
 
 Running is the consent to execute that Objective. `run` plans if needed, saves the plan and its independent review, executes a clean plan, and exits:
 

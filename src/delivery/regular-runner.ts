@@ -1,4 +1,5 @@
 import { packageManagerUpdate } from "../package-manager-update.js";
+import { deliveryDescription } from "./description.js";
 import { assertIntegrated, laterIntegration } from "./integration.js";
 import { cancelledFault } from "../fault.js";
 import { assertCheckSourcesAtIntegration } from "./check-sources.js";
@@ -213,6 +214,24 @@ export async function runRegularGraph(args: {
             branch,
             lfs: Boolean(work.selectedAssetSet),
             earlierHeads: deliveryEarlierHeads(work),
+            body: deliveryDescription(
+              root,
+              {
+                item,
+                baseSha: itemBase,
+                treeSha: work.treeSha!,
+                changeRef: work.changeRef!,
+              },
+              {
+                repository: state.repository,
+                objective,
+                issue: state.issueByItemId[item.id]!,
+                validation: work.validation,
+              },
+              config.policy.allowedSecretNames.flatMap((name) =>
+                process.env[name] ? [process.env[name]!] : [],
+              ),
+            ),
           }),
         {
           operation: "github-publication",

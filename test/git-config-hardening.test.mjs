@@ -11,6 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { gitAsync } from "../dist/process.js";
+import { deliveryDescription } from "../dist/delivery/description.js";
+import { validateTree } from "../dist/validation.js";
 
 function git(root, ...args) {
   return execFileSync("git", ["-C", root, ...args], {
@@ -33,6 +35,7 @@ test("controller Git ignores executable configuration shared by a worker worktre
     "user.email=factory@example.invalid",
   ];
   git(checkout, ...identity, "commit", "-m", "base");
+  const baseSha = git(checkout, "rev-parse", "HEAD");
   const worker = join(root, "worker");
   git(checkout, "worktree", "add", "--detach", worker, "HEAD");
   const marker = join(root, "ran");
@@ -64,4 +67,67 @@ test("controller Git ignores executable configuration shared by a worker worktre
   assert.equal(existsSync(marker), false);
   assert.equal(git(worker, "show", "HEAD:notes.txt"), "changed");
   assert.doesNotMatch(git(worker, "cat-file", "commit", "HEAD"), /gpgsig/);
+  const changeRef = git(worker, "rev-parse", "HEAD");
+  const treeSha = git(worker, "rev-parse", "HEAD^{tree}");
+  const command = `node -e 'if (require("node:fs").readFileSync("notes.txt", "utf8") !== "changed\\n") process.exit(1)'`;
+  const validation = await validateTree(
+    checkout,
+    join(root, "validation"),
+    changeRef,
+    treeSha,
+    [command],
+  );
+  const request = {
+    item: {
+      goal: "Update the published note while keeping repository-provided Git programs disabled. Controller reads and commits must use the hardened Git environment so worker configuration cannot execute code.",
+      validation: [{ command }],
+    },
+    baseSha,
+    changeRef,
+    treeSha,
+  };
+  const context = {
+    repository: "example/notes",
+    objective: 1,
+    issue: 2,
+    validation,
+  };
+  const body = deliveryDescription(checkout, request, context);
+  t.diagnostic(body);
+  assert.match(body, /https:\/\/github\.com\/example\/notes\/issues\/2/);
+  assert.match(body, /https:\/\/github\.com\/example\/notes\/issues\/1/);
+  assert.match(body, /Updates <code>notes\.txt<\/code>/);
+  assert.match(body, /Controller validation passed on this candidate/);
+  assert.ok(body.includes(command));
+  assert.equal(existsSync(marker), false);
+  assert.match(
+    deliveryDescription(checkout, request, {
+      ...context,
+      validation: {
+        ...validation,
+        treeSha: git(checkout, "rev-parse", `${baseSha}^{tree}`),
+      },
+    }),
+    /receipts are unavailable/,
+  );
+  assert.throws(
+    () =>
+      deliveryDescription(checkout, { ...request, treeSha: "0".repeat(40) }),
+    /tree mismatch/,
+  );
+  assert.doesNotMatch(
+    deliveryDescription(
+      checkout,
+      {
+        ...request,
+        item: {
+          ...request.item,
+          goal: "Configured value private-example-value",
+        },
+      },
+      context,
+      ["private-example-value"],
+    ),
+    /private-example-value/,
+  );
 });

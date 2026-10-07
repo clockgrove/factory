@@ -9,6 +9,7 @@ import type {
 import { attachFault, decision, transient } from "../fault.js";
 import { addsLfsPointers } from "../media.js";
 import { gitAsync, pushRejected } from "../process.js";
+import { deliveryDescription } from "./description.js";
 
 /** The commit a remote branch holds, or undefined when it does not exist. */
 export async function remoteHead(
@@ -83,6 +84,7 @@ export class RegularDelivery implements DeliveryStrategy {
   /** Repeatable from the top: every effect is observed before it is made. */
   async publish(request: DeliveryRequest): Promise<DeliveryResult> {
     const commit = request.changeRef;
+    const body = request.body ?? deliveryDescription(this.checkout, request);
     const base = request.baseBranch ?? (await this.github.defaultBranch());
     // Factory runs no repository hooks, so LFS's pre-push hook does not
     // upload a worker's LFS objects: push them explicitly before the branch.
@@ -104,7 +106,7 @@ export class RegularDelivery implements DeliveryStrategy {
       earlierHeads: request.earlierHeads,
       treeSha: request.treeSha,
       title: request.item.title,
-      body: `Implements Work Item ${request.item.id}.\n\nValidated tree: ${request.treeSha}`,
+      body,
     });
     return {
       branch: request.branch,

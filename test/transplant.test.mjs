@@ -17,6 +17,10 @@ import {
 } from "../dist/compiler/sources.js";
 import { coverageObligations } from "../dist/qa.js";
 import {
+  reviewPacket,
+  renderReviewPacketChoices,
+} from "../dist/review-evidence.js";
+import {
   installedControllerCapabilities,
   CONTROLLER_CAPABILITIES_DIGEST,
 } from "../dist/controller-capabilities.js";
@@ -167,7 +171,12 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       controllerCapabilities: installedControllerCapabilities(),
       controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
     });
+    const evidence = reviewPacket(
+      [],
+      sources.map((source) => ({ ...source, origin: "source" })),
+    );
     const review = renderGraphReviewCall({
+      reviewPacket: evidence,
       objective: body,
       baseSha,
       sources,
@@ -191,6 +200,13 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
           1_048_576,
       );
     }
+    assert.deepEqual(
+      wire.data.sources.map((source) =>
+        source.lines.map((line) => line.text).join("\n"),
+      ),
+      sources.map((source) => source.content),
+    );
+    assert.ok(review.prompt.includes(renderReviewPacketChoices(evidence)));
     const view = planningGraphView(currentGraph, sources);
     for (const [index, item] of view.items.entries()) {
       const input = item.inputSources[0];

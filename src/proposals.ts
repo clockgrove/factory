@@ -212,7 +212,8 @@ export function proposalSchema(sourceCount: number) {
               minItems: 1,
               items: {
                 type: "integer",
-                enum: Array.from({ length: sourceCount }, (_, index) => index),
+                minimum: 0,
+                maximum: sourceCount - 1,
               },
             },
             dependencies: { type: "array", items: objectiveIdSchema },

@@ -201,15 +201,19 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
     ],
     additionalProperties: false,
   });
-  const completeIndices = packet.evidence.flatMap((entry, index) =>
-    entry.complete ? [index] : [],
-  );
+  const hasCompleteEvidence = packet.evidence.some((entry) => entry.complete);
   const items = graph
     ? finding()
     : {
         anyOf: [
-          ...(completeIndices.length
-            ? [finding(["pass"], { type: "integer", enum: completeIndices })]
+          ...(hasCompleteEvidence
+            ? [
+                finding(["pass"], {
+                  ...index(packet.evidence.length),
+                  description:
+                    "Select only evidence indices whose packet entries have complete true; incomplete entries cannot support a pass.",
+                }),
+              ]
             : []),
           finding(["needs-human"]),
           finding(["refuse"]),

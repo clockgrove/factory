@@ -806,13 +806,13 @@ export function dreamSchema(sourceCount: number, previousCount: number) {
   };
   const sourceIndex = {
     type: "integer",
-    enum: Array.from({ length: sourceCount }, (_, index) => index),
+    minimum: 0,
+    maximum: sourceCount - 1,
   };
   const previousIndex = {
     type: "integer",
-    ...(previousCount
-      ? { enum: Array.from({ length: previousCount }, (_, index) => index) }
-      : { minimum: 0 }),
+    minimum: 0,
+    maximum: Math.max(0, previousCount - 1),
   };
   const entrySchema = {
     type: "object",

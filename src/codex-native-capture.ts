@@ -107,9 +107,23 @@ const nativeStatus = (
   value: unknown,
 ): NonNullable<CaptureEvent["nativeDescendant"]>["status"] => {
   const kind =
-    typeof value === "string"
+    typeof value === "string" &&
+    [
+      "pending_init",
+      "running",
+      "interrupted",
+      "shutdown",
+      "not_found",
+    ].includes(value)
       ? value
-      : value && typeof value === "object"
+      : value &&
+          typeof value === "object" &&
+          !Array.isArray(value) &&
+          Object.keys(value).length === 1 &&
+          (("completed" in value &&
+            (value.completed === null ||
+              typeof value.completed === "string")) ||
+            ("errored" in value && typeof value.errored === "string"))
         ? Object.keys(value)[0]
         : null;
   return (
@@ -163,7 +177,8 @@ export function captureOwnedRollout(
   const childSource = header.payload.source?.subagent?.thread_spawn;
   if (
     options.parentThreadId &&
-    childSource?.parent_thread_id !== options.parentThreadId
+    (childSource?.parent_thread_id !== options.parentThreadId ||
+      header.payload.parent_thread_id !== options.parentThreadId)
   )
     throw new Error("Native descendant lacks authenticated parent ownership");
   let partial = bytes !== stat.size || !terminated;
@@ -172,7 +187,20 @@ export function captureOwnedRollout(
     Number.isSafeInteger(inheritedOrdinal) && inheritedOrdinal >= 0
       ? inheritedOrdinal
       : null;
-  if (options.parentThreadId && inheritedBoundary === null) partial = true;
+  const inheritedHistory = Boolean(
+    header.payload.history_base ||
+      header.payload.forked_from_id ||
+      header.payload.forked_from_ordinal_exclusive !== undefined,
+  );
+  // The pinned writer omits the inherited boundary for fresh, nonfork children.
+  // Other/missing producer contracts do not establish child-authored context.
+  const freshChild =
+    header.payload.cli_version === "0.160.0" &&
+    header.payload.history_mode === "paginated" &&
+    !inheritedHistory &&
+    inheritedBoundary === null;
+  if (options.parentThreadId && !freshChild && inheritedBoundary === null)
+    partial = true;
   const ownership = options.parentThreadId
     ? {
         rootSessionId: options.rootThreadId ?? options.parentThreadId,
@@ -194,11 +222,6 @@ export function captureOwnedRollout(
   let duplicates = 0;
   let conflicts = 0;
   let childHistory = false;
-  const inheritedHistory = Boolean(
-    header.payload.parent_thread_id ||
-      header.payload.history_base ||
-      header.payload.forked_from_id,
-  );
   const responses = new Map<string, string>();
   let latestThreadUsage: ReturnType<typeof codexTokenUsage> | undefined;
   let latestTokenCountUsage: ReturnType<typeof codexTokenUsage> | undefined;
@@ -331,14 +354,20 @@ export function captureOwnedRollout(
     }
     const payload = rawPayload as Record<string, unknown>;
     rowTime = recordedTime(row.timestamp);
-    // Child context copied from its parent is not new child work.
+    // Exact thread-bound response usage is independent of copied context. Other
+    // child rows require fresh-history provenance or the literal fork boundary.
     if (
       options.parentThreadId &&
+      row.type !== "token_usage_record" &&
+      !freshChild &&
       (inheritedBoundary === null ||
         !Number.isSafeInteger(row.ordinal) ||
         (row.ordinal as number) < inheritedBoundary)
-    )
+    ) {
+      if (inheritedBoundary === null || !Number.isSafeInteger(row.ordinal))
+        partial = true;
       continue;
+    }
     if (row.type === "turn_context") {
       turnId = identifier(payload.turn_id);
       reportedModel = label(payload.model);
@@ -346,69 +375,94 @@ export function captureOwnedRollout(
     }
     if (row.type === "event_msg" && payload.type === "task_started")
       turnId = identifier(payload.turn_id);
-    if (row.type === "event_msg" && payload.sender_thread_id === threadId) {
+    // collab_*_end events are transient. Paginated rollouts persist the typed
+    // completed item; its tool status is distinct from each agent's state.
+    const item = payload.item;
+    if (
+      row.type === "event_msg" &&
+      payload.type === "item_completed" &&
+      payload.thread_id === threadId &&
+      item &&
+      typeof item === "object" &&
+      !Array.isArray(item)
+    ) {
+      const call = item as Record<string, unknown>;
+      const callId = identifier(call.id);
       if (
-        payload.type === "collab_agent_spawn_end" &&
-        threadIdentity(payload.new_thread_id)
+        call.type === "CollabAgentToolCall" &&
+        call.sender_thread_id === threadId &&
+        callId &&
+        [
+          "spawn_agent",
+          "send_input",
+          "resume_agent",
+          "wait",
+          "close_agent",
+          "send_message",
+          "followup_task",
+          "interrupt_agent",
+          "list_agents",
+        ].includes(String(call.tool)) &&
+        ["in_progress", "completed", "failed", "interrupted"].includes(
+          String(call.status),
+        ) &&
+        Array.isArray(call.receiver_thread_ids)
       ) {
-        childHistory = true;
-        children.add(payload.new_thread_id);
-        const child = {
-          id: payload.new_thread_id,
-          ...(label(payload.model) ? { model: label(payload.model)! } : {}),
-          ...(label(payload.reasoning_effort)
-            ? { reasoningEffort: label(payload.reasoning_effort)! }
-            : {}),
-        };
-        emit({
-          kind: "interaction",
-          providerEvent: "codex.native-descendant",
-          providerSessionId: threadId,
-          coverage: "boundary",
-          nativeDescendant: {
-            parentSessionId: threadId,
-            childSessionId: child.id,
-            relation: "observed-spawn",
-            status: nativeStatus(payload.status),
-            recordedAt: rowTime,
-            ...(child.model ? { model: child.model } : {}),
-            ...(child.reasoningEffort
-              ? { reasoningEffort: child.reasoningEffort }
+        const states = call.agents_states;
+        for (const id of call.receiver_thread_ids) {
+          if (!threadIdentity(id) || id === threadId) continue;
+          const spawned =
+            call.tool === "spawn_agent" && call.status !== "in_progress";
+          if (!spawned && !children.has(id)) continue;
+          const child: OwnedChild = {
+            id,
+            ...(label(call.model) ? { model: label(call.model)! } : {}),
+            ...(label(call.reasoning_effort)
+              ? { reasoningEffort: label(call.reasoning_effort)! }
               : {}),
-            history: "unavailable",
-            resourceCessation: "unavailable",
-            parentUsageIncludesChild: "unknown",
-          },
-        });
-        options.child?.(child);
-      } else if (
-        payload.type === "collab_waiting_end" &&
-        payload.statuses &&
-        typeof payload.statuses === "object"
-      ) {
-        for (const [id, status] of Object.entries(payload.statuses))
-          if (children.has(id))
-            emit({
-              kind: "interaction",
-              providerEvent: "codex.native-descendant-status",
-              providerSessionId: threadId,
-              coverage: "boundary",
-              nativeDescendant: {
-                parentSessionId: threadId,
-                childSessionId: id,
-                relation: "observed-spawn",
-                status: nativeStatus(status),
-                recordedAt: rowTime,
-                history: "unavailable",
-                resourceCessation: "unavailable",
-                parentUsageIncludesChild: "unknown",
-              },
-            });
+          };
+          childHistory = true;
+          if (spawned && !children.has(id)) {
+            children.add(id);
+            options.child?.(child);
+          }
+          emit({
+            kind: "interaction",
+            providerEvent: spawned
+              ? "codex.native-descendant"
+              : "codex.native-descendant-status",
+            providerSessionId: threadId,
+            coverage: "boundary",
+            nativeDescendant: {
+              parentSessionId: threadId,
+              childSessionId: id,
+              toolCallId: callId,
+              relation: "observed-spawn",
+              status: nativeStatus(
+                states && typeof states === "object" && !Array.isArray(states)
+                  ? (states as Record<string, unknown>)[id]
+                  : undefined,
+              ),
+              recordedAt: rowTime,
+              ...(child.model ? { model: child.model } : {}),
+              ...(child.reasoningEffort
+                ? { reasoningEffort: child.reasoningEffort }
+                : {}),
+              history: "unavailable",
+              resourceCessation: "unavailable",
+              parentUsageIncludesChild: "unknown",
+            },
+          });
+        }
       }
     }
     if (row.type === "token_usage_record") {
+      // A copied parent's counter never becomes usage of this child.
+      if (options.parentThreadId && payload.thread_id !== threadId) continue;
       if (
         payload.thread_id !== threadId ||
+        (options.parentThreadId &&
+          payload.session_id !== header.payload.session_id) ||
         typeof payload.response_id !== "string" ||
         !/^[a-zA-Z0-9_-]{1,256}$/.test(payload.response_id) ||
         ![payload.turn_id, payload.session_id, payload.root_turn_id].every(

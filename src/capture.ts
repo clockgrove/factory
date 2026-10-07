@@ -78,6 +78,7 @@ export interface InteractionMetadata {
   nativeDescendant?: {
     parentSessionId: string;
     childSessionId: string;
+    toolCallId?: string;
     relation: "observed-spawn" | "authenticated-owned-home";
     status:
       | "pending-init"

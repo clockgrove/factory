@@ -433,14 +433,6 @@ export function summarizeScorecard(
       claim(`codex-file:${session.path}`);
       inside(session.startedAt, session.endedAt);
       const observed = directSession(session);
-      if (
-        factory.some((report) =>
-          report.bindings.providerSessionIds.includes(session.sessionId),
-        )
-      )
-        throw new Error(
-          "Codex observation overlaps a session already accounted by Factory",
-        );
       claim(`codex-receipt:${observed.observationDigest}`);
       return observed;
     });
@@ -610,6 +602,19 @@ export function summarizeScorecard(
       direct,
     };
   });
+  const factorySessionIds = new Set(
+    packets.flatMap((packet) =>
+      packet.factory.flatMap((report) => report.bindings.providerSessionIds),
+    ),
+  );
+  if (
+    packets.some((packet) =>
+      packet.direct.some((session) => factorySessionIds.has(session.sessionId)),
+    )
+  )
+    throw new Error(
+      "Codex observation overlaps a session already accounted by Factory in the selection",
+    );
   const batches = (["adopter", "factory-development"] as const).flatMap(
     (scope) =>
       (["factory", "codex-direct"] as const).flatMap((route) => {

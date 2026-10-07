@@ -144,6 +144,25 @@ export function factoryObjectiveSummary(
   );
   const usage = readUsageSummaryEvents(repository, objective, executing);
   const accounting = summarizeDiagnosticUsage(usage);
+  const tokens = counters(
+    accounting.combinedUsage.tokenTotals,
+    accounting.combinedUsage.coverage.byCategory,
+  );
+  // Old native/SDK adapters filled absent cache-write counters with zero.
+  // Retain their original accounting, but do not treat those zeros as observed.
+  if (
+    usage.some(
+      (event) =>
+        event.metadata &&
+        typeof event.metadata === "object" &&
+        "cacheWriteInputTokens" in event.metadata &&
+        event.metadata.cacheWriteInputTokens === 0,
+    )
+  ) {
+    const cacheWrite = tokens.cacheWriteInputTokens;
+    cacheWrite.availability = cacheWrite.known ? "partial" : "unavailable";
+    if (cacheWrite.known === 0) cacheWrite.known = null;
+  }
   const efficiency = summarizeEfficiency(events, usage, accounting, now);
   const captures = readInteractionMetadata(repository, objective);
   const identities = analyzeInteractions(captures, [], {}).invocations.map(
@@ -220,10 +239,7 @@ export function factoryObjectiveSummary(
       coverage: "recorded-prompt-digests-only",
     },
     operatorEffortMs: null,
-    tokens: counters(
-      accounting.combinedUsage.tokenTotals,
-      accounting.combinedUsage.coverage.byCategory,
-    ),
+    tokens,
     receiptDigest: digest(
       JSON.stringify({
         events,

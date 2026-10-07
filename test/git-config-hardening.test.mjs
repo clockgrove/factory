@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   rmSync,
   writeFileSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,8 @@ import test from "node:test";
 import { gitAsync } from "../dist/process.js";
 import { deliveryDescription } from "../dist/delivery/description.js";
 import { validateTree } from "../dist/validation.js";
+import { unchangedResultByteEvidence } from "../dist/result-evidence.js";
+import { createHash } from "node:crypto";
 
 function git(root, ...args) {
   return execFileSync("git", ["-C", root, ...args], {
@@ -27,6 +30,12 @@ test("controller Git ignores executable configuration shared by a worker worktre
   mkdirSync(checkout);
   git(checkout, "init", "-b", "main");
   writeFileSync(join(checkout, "notes.txt"), "base\n");
+  writeFileSync(join(checkout, "unchanged.txt"), "complete unchanged bytes\n");
+  const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0xff, 0x0a]);
+  writeFileSync(join(checkout, "source.png"), binary);
+  writeFileSync(join(checkout, "empty.txt"), "");
+  writeFileSync(join(checkout, "large.bin"), Buffer.alloc(24_000, 0xff));
+  symlinkSync("notes.txt", join(checkout, "note-link"));
   git(checkout, "add", ".");
   const identity = [
     "-c",
@@ -69,6 +78,75 @@ test("controller Git ignores executable configuration shared by a worker worktre
   assert.doesNotMatch(git(worker, "cat-file", "commit", "HEAD"), /gpgsig/);
   const changeRef = git(worker, "rev-parse", "HEAD");
   const treeSha = git(worker, "rev-parse", "HEAD^{tree}");
+  // The shared review producer reads actual immutable blobs despite hostile
+  // worker Git configuration; current checkout bytes never supply the baseline.
+  const comparisons = unchangedResultByteEvidence(
+    checkout,
+    baseSha,
+    changeRef,
+    16_000,
+  );
+  assert.ok(comparisons.textBytes <= 16_000);
+  assert.ok(comparisons.rawBytes <= 48_000);
+  const comparison = (path) => {
+    const source = comparisons.sources.find(
+      (entry) => JSON.parse(entry.content).path === path,
+    );
+    assert.ok(source);
+    return { source, receipt: JSON.parse(source.content) };
+  };
+  for (const path of ["unchanged.txt", "source.png", "empty.txt"]) {
+    const { source, receipt } = comparison(path);
+    assert.equal(source.complete, true);
+    assert.equal(receipt.byteEqual, true);
+    assert.equal(receipt.comparison, "complete-raw-Git-blob-Buffer.equals");
+    assert.equal(receipt.comparisonBaseCommitSha, baseSha);
+    assert.equal(
+      receipt.comparisonBaseTreeSha,
+      git(checkout, "rev-parse", `${baseSha}^{tree}`),
+    );
+    assert.equal(receipt.resultCommitSha, changeRef);
+    assert.equal(receipt.resultTreeSha, treeSha);
+    assert.equal(receipt.base.blobOid, receipt.result.blobOid);
+    assert.equal(receipt.base.byteCount, receipt.result.byteCount);
+    assert.equal(receipt.base.sha256, receipt.result.sha256);
+  }
+  const image = comparison("source.png").receipt;
+  assert.deepEqual(
+    Buffer.from(image.baselineContent.content, "base64"),
+    binary,
+  );
+  assert.equal(
+    image.base.sha256,
+    createHash("sha256").update(binary).digest("hex"),
+  );
+  assert.equal(image.baselineContent.complete, true);
+  assert.equal(comparison("unchanged.txt").receipt.baselineContent, undefined);
+  for (const path of ["notes.txt", "note-link", "large.bin"]) {
+    const { source, receipt } = comparison(path);
+    assert.equal(source.complete, false);
+    assert.equal(receipt.availability, "unavailable");
+    assert.equal(receipt.byteEqual, undefined);
+  }
+  const bounded = unchangedResultByteEvidence(
+    checkout,
+    baseSha,
+    changeRef,
+    800,
+  );
+  assert.ok(bounded.textBytes <= 800);
+  assert.ok(bounded.sources.length > 0);
+  assert.ok(bounded.sources.every((source) => source.complete === false));
+  assert.match(bounded.sources[0].content, /unavailable/);
+  const missing = unchangedResultByteEvidence(
+    checkout,
+    "0".repeat(40),
+    changeRef,
+    800,
+  );
+  assert.ok(missing.sources.every((source) => source.complete === false));
+  assert.match(missing.sources[0].content, /commit unavailable/);
+  assert.equal(existsSync(marker), false);
   const command = `node -e 'if (require("node:fs").readFileSync("notes.txt", "utf8") !== "changed\\n") process.exit(1)'`;
   const validation = await validateTree(
     checkout,

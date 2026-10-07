@@ -13,7 +13,7 @@ export async function availableIssueType(
     if (!(error instanceof GitHubRequestError) || error.status !== 404)
       throw error;
     // A missing optional endpoint is not evidence that repository access remains.
-    await client.request("GET", `repos/${repository}`);
+    await client.request("GET", `repos/${repository}/`);
     return undefined;
   }
   if (

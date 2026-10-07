@@ -242,7 +242,7 @@ export function factoryObjectiveSummary(
   };
 }
 
-/** Normal `codex exec --json` / SDK ThreadEvent stream: usage is per turn, never a session snapshot. */
+/** Unmodified native `codex exec --json`: usage is per turn, never a session snapshot. */
 function directSession(
   session: NonNullable<
     ScorecardSelection["packets"][number]["codexSessions"]
@@ -251,15 +251,19 @@ function directSession(
   if (!isAbsolute(session.path))
     throw new Error("Codex observation path must be absolute");
   const threads = new Set<unknown>();
+  let threadStarts = 0;
   const receiptHash = createHash("sha256");
   let open = false;
   let completed = 0;
   let failed = 0;
   const turns: Tokens[] = [];
-  for (const row of privateRecords(session.path)) {
+  for (const row of privateRecords(session.path, true)) {
     // Canonical complete-record digest; never retain private messages/tool output.
     receiptHash.update(JSON.stringify(row) + "\n");
-    if (row.type === "thread.started") threads.add(row.thread_id);
+    if (row.type === "thread.started") {
+      threadStarts++;
+      threads.add(row.thread_id);
+    }
     if (row.type === "turn.started") {
       if (open)
         throw new Error(
@@ -289,7 +293,11 @@ function directSession(
       ),
     );
   }
-  if (threads.size !== 1 || !threads.has(session.sessionId))
+  if (
+    threadStarts !== 1 ||
+    threads.size !== 1 ||
+    !threads.has(session.sessionId)
+  )
     throw new Error(
       "Codex observation does not match its selected session identity",
     );
@@ -309,7 +317,7 @@ function directSession(
     tokens: sumTokens(turns),
     wallMs: timestamp(session.endedAt) - timestamp(session.startedAt),
     provenance:
-      "Codex CLI/SDK event receipts; configuration and timing externally observed" as const,
+      "Native Codex CLI event receipts; configuration and timing externally observed" as const,
   };
 }
 
@@ -637,8 +645,9 @@ export function summarizeScorecard(
               (packet) => packet.outcome === "unfinished",
             ).length,
             acceptedPerWindowHour: accepted / ((end - start) / 3_600_000),
-            wallMs: known("wallMs"),
-            operatorWaitMs: known("operatorWaitMs"),
+            windowElapsedMs: end - start,
+            summedPacketWallMs: known("wallMs"),
+            summedPacketOperatorWaitMs: known("operatorWaitMs"),
             operatorEffortMs: {
               known: effort.some((value) => value !== null)
                 ? effort.reduce<number>((sum, value) => sum + (value ?? 0), 0)
@@ -771,6 +780,8 @@ export function summarizeScorecard(
       "Selected observations only; the selection owner must include all failed/cancelled attempts and setup, authoring, review and recovery overhead.",
       "Operator waits are elapsed waits, not attention. External effort, redirection and correction observations are not inferred from silence.",
       "Cached input and reasoning output are subset counters; categories are separate and never summed into token cost.",
+      "Batch packet wall/wait sums describe packet effort envelopes, not elapsed time; parallel packet intervals overlap. Window elapsed is reported separately.",
+      "Historical Codex SDK cache-write zero counters may have been synthesized by the SDK; do not treat them as provider-confirmed comparison evidence.",
       "Source/config identities and acceptance receipts are retained for assessment; their presence alone does not prove equivalent quality or environments.",
       "No acceleration verdict is inferred from a small sample or incomplete dimensions; apply the predeclared criterion to independently assessed evidence.",
     ],

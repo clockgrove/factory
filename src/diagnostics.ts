@@ -963,6 +963,7 @@ export function readAgentTimeline(
 /** Parse every complete record, retaining at most the current record text. */
 export function* privateRecords(
   path: string,
+  requireTerminated = false,
 ): Generator<Record<string, unknown>> {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -988,7 +989,11 @@ export function* privateRecords(
       }
       pending = pending.slice(start);
     }
-    // Like completeLines, ignore the final unterminated record, even if valid.
+    if (requireTerminated && (pending + decoder.end()).length)
+      throw new Error(
+        "Direct observation capture has an unterminated final record",
+      );
+    // Historical readers, like completeLines, ignore the final unterminated record.
   } finally {
     closeSync(fd);
   }

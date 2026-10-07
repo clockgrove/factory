@@ -173,10 +173,25 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
       evidenceIndices: {
         type: "array",
         minItems: 1,
+        description: "Select unique evidence indices from this packet.",
         items: evidenceIndex,
       },
-      detail: { type: "string" },
-      question: { type: "string" },
+      detail: {
+        type: "string",
+        minLength: 1,
+        description:
+          "Nonempty text containing at least one non-whitespace character.",
+      },
+      question: {
+        type: "string",
+        ...(verdicts.length === 1 && verdicts[0] === "needs-human"
+          ? {
+              minLength: 1,
+              description:
+                "A specific question containing at least one non-whitespace character.",
+            }
+          : {}),
+      },
     },
     required: [
       ...(graph ? ["itemIds"] : ["criterionIndex", "verdict"]),
@@ -186,20 +201,24 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
     ],
     additionalProperties: false,
   });
-  const completeIndices = packet.evidence.flatMap((entry, index) =>
-    entry.complete ? [index] : [],
-  );
-  const items =
-    graph || completeIndices.length === packet.evidence.length
-      ? finding()
-      : completeIndices.length
-        ? {
-            anyOf: [
-              finding(["pass"], { type: "integer", enum: completeIndices }),
-              finding(["needs-human", "refuse"]),
-            ],
-          }
-        : finding(["needs-human", "refuse"]);
+  const hasCompleteEvidence = packet.evidence.some((entry) => entry.complete);
+  const items = graph
+    ? finding()
+    : {
+        anyOf: [
+          ...(hasCompleteEvidence
+            ? [
+                finding(["pass"], {
+                  ...index(packet.evidence.length),
+                  description:
+                    "Select only evidence indices whose packet entries have complete true; incomplete entries cannot support a pass.",
+                }),
+              ]
+            : []),
+          finding(["needs-human"]),
+          finding(["refuse"]),
+        ],
+      };
   return {
     type: "object",
     properties: {

@@ -50,6 +50,8 @@ export interface ScorecardSelection {
     route: Route;
     pairId?: string;
     scope: "adopter" | "factory-development";
+    /** Externally observed whole workflow, including human setup/authoring without captures. */
+    workflow?: { startedAt: string; endedAt: string };
     factoryObjectives?: number[];
     codexSessions?: {
       path: string;
@@ -524,6 +526,21 @@ export function summarizeScorecard(
         .at(-1) ?? null;
     if (acceptedAt && first && timestamp(acceptedAt) < timestamp(first))
       throw new Error("Acceptance precedes the selected work");
+    if (packet.workflow) {
+      inside(packet.workflow.startedAt, packet.workflow.endedAt);
+      const workflowStart = timestamp(packet.workflow.startedAt);
+      const workflowEnd = timestamp(packet.workflow.endedAt);
+      if (
+        (first && workflowStart > timestamp(first)) ||
+        (last && workflowEnd < timestamp(last)) ||
+        (acceptedAt &&
+          (workflowStart > timestamp(acceptedAt) ||
+            workflowEnd < timestamp(acceptedAt)))
+      )
+        throw new Error(
+          "Workflow bounds must contain every selected receipt and acceptance",
+        );
+    }
     if (
       packet.observations?.postDeliveryWindowEndedAt &&
       (!acceptedAt ||
@@ -569,11 +586,21 @@ export function summarizeScorecard(
           result?.bindings.resultTree ?? packet.bindings.resultTree ?? null,
       },
       acceptedAt,
-      startedAt: first,
-      endedAt: last,
-      wallMs: first && last ? timestamp(last) - timestamp(first) : null,
+      capturedStartedAt: first,
+      capturedEndedAt: last,
+      capturedWallMs: first && last ? timestamp(last) - timestamp(first) : null,
+      workflow: packet.workflow ?? null,
+      totalTimingProvenance: packet.workflow
+        ? "externally observed whole workflow"
+        : null,
+      wallMs: packet.workflow
+        ? timestamp(packet.workflow.endedAt) -
+          timestamp(packet.workflow.startedAt)
+        : null,
       timeToAcceptedMs:
-        acceptedAt && first ? timestamp(acceptedAt) - timestamp(first) : null,
+        acceptedAt && packet.workflow
+          ? timestamp(acceptedAt) - timestamp(packet.workflow.startedAt)
+          : null,
       filings: packet.route === "factory" ? factory.length : null,
       refiles: packet.route === "factory" ? factory.length - 1 : null,
       implementationAttempts:
@@ -807,6 +834,7 @@ export function summarizeScorecard(
     pairs,
     limitations: [
       "Selected observations only; the selection owner must include all failed/cancelled attempts and setup, authoring, review and recovery overhead.",
+      "Total wall/time-to-acceptance requires externally observed whole-workflow bounds. Captured receipt timing alone omits uncaptured human setup/authoring and cannot prove total acceleration.",
       "Operator waits are elapsed waits, not attention. External effort, redirection and correction observations are not inferred from silence.",
       "Cached input and reasoning output are subset counters; categories are separate and never summed into token cost.",
       "Batch packet wall/wait sums describe packet effort envelopes, not elapsed time; parallel packet intervals overlap. Window elapsed is reported separately.",

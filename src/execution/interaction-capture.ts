@@ -149,20 +149,19 @@ export function codexCaptureEvent(
   if (event.type === "thread.started") base.providerSessionId = event.thread_id;
   if (event.type === "turn.completed") {
     const raw = codexRawTokenUsage(event.usage);
+    const normalized =
+      usageSource === "sdk" ? codexSdkTokenUsage(raw) : codexTokenUsage(raw);
     record({
       ...base,
       kind: "usage",
       usage: {
         scope: "invocation-cumulative",
         terminal: false,
-        completeness: Object.keys(raw).length
+        completeness: Object.keys(normalized).length
           ? "available-categories"
           : "unavailable",
         raw,
-        normalized:
-          usageSource === "sdk"
-            ? codexSdkTokenUsage(raw)
-            : codexTokenUsage(raw),
+        normalized,
       },
     });
   } else if (event.type === "turn.failed" || event.type === "error") {

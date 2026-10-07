@@ -18,7 +18,7 @@ import {
 } from "../codex-planning-isolation.js";
 import { runCodexExec } from "../codex-exec.js";
 import { observeModelInvocation } from "./observation.js";
-import { codexRawTokenUsage } from "../usage.js";
+import { codexRawTokenUsage, codexTokenUsage } from "../usage.js";
 import { codexCaptureEvent } from "../execution/interaction-capture.js";
 import { UnsettledSubprocessError } from "../process.js";
 
@@ -120,6 +120,7 @@ export class CodexPlanningTransport implements PlanningTransport {
           )
             state.response = event.item.text;
           if (event.type === "turn.completed") {
+            const usage = codexTokenUsage(event.usage);
             observeModelInvocation(invocation, {
               type: "progress",
               capture: {
@@ -128,20 +129,10 @@ export class CodexPlanningTransport implements PlanningTransport {
                   usage: {
                     scope: "invocation-cumulative",
                     terminal: true,
-                    completeness: event.usage
+                    completeness: Object.keys(usage).length
                       ? "available-categories"
                       : "unavailable",
-                    normalized: event.usage
-                      ? {
-                          inputTokens: event.usage.input_tokens,
-                          cachedInputTokens: event.usage.cached_input_tokens,
-                          cacheWriteInputTokens:
-                            event.usage.cache_write_input_tokens,
-                          outputTokens: event.usage.output_tokens,
-                          reasoningOutputTokens:
-                            event.usage.reasoning_output_tokens,
-                        }
-                      : {},
+                    normalized: usage,
                     raw: codexRawTokenUsage(event.usage),
                   },
                 },
@@ -159,14 +150,7 @@ export class CodexPlanningTransport implements PlanningTransport {
             });
             turnCompleted = true;
             state.ended = true;
-            if (event.usage)
-              state.usage = {
-                inputTokens: event.usage.input_tokens,
-                cachedInputTokens: event.usage.cached_input_tokens,
-                cacheWriteInputTokens: event.usage.cache_write_input_tokens,
-                outputTokens: event.usage.output_tokens,
-                reasoningOutputTokens: event.usage.reasoning_output_tokens,
-              };
+            state.usage = Object.keys(usage).length ? usage : undefined;
           }
           const tool =
             item?.type === "mcp_tool_call"

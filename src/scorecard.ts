@@ -11,11 +11,7 @@ import {
 } from "./diagnostics.js";
 import { formatDuration, summarizeEfficiency } from "./efficiency.js";
 import { readContinuation } from "./state-store.js";
-import {
-  codexTokenUsage,
-  normalizeTokenUsage,
-  tokenCategories,
-} from "./usage.js";
+import { codexTokenUsage, tokenCategories } from "./usage.js";
 
 type Outcome = "accepted" | "failed" | "unfinished";
 type Route = "factory" | "codex-direct";
@@ -67,10 +63,12 @@ function summarizeInputCache(observations: InputCacheObservation[]) {
   return {
     inputTokens,
     cachedInputTokens,
-    uncachedInputTokens:
+    reportedInputMinusCachedTokens:
       inputTokens !== null && cachedInputTokens !== null
         ? inputTokens - cachedInputTokens
         : null,
+    measurement: "reported-counter-pairs" as const,
+    upstreamCategoryAndBillingCoverage: "unknown" as const,
     weightedHitRate:
       inputTokens && cachedInputTokens !== null
         ? cachedInputTokens / inputTokens
@@ -119,6 +117,9 @@ export interface ScorecardSelection {
     codexSessions?: {
       path: string;
       sessionId: string;
+      /** thread.started also appears on resume; freshness must be verified from launch evidence. */
+      freshThread: true;
+      freshThreadReference: string;
       startedAt: string;
       endedAt: string;
       outcome: "completed" | "failed" | "cancelled" | "unfinished";
@@ -236,25 +237,6 @@ export function factoryObjectiveSummary(
     accounting.combinedUsage.tokenTotals,
     accounting.combinedUsage.coverage.byCategory,
   );
-  // Old native/SDK adapters filled absent cache-write counters with zero.
-  // Retain their original accounting, but do not treat those zeros as observed.
-  if (
-    usage.some((event) => {
-      const worker = event.workerUsage;
-      const workerUsage =
-        worker && typeof worker === "object" && "usage" in worker
-          ? normalizeTokenUsage(worker.usage)
-          : {};
-      return (
-        normalizeTokenUsage(event.metadata).cacheWriteInputTokens === 0 ||
-        workerUsage.cacheWriteInputTokens === 0
-      );
-    })
-  ) {
-    const cacheWrite = tokens.cacheWriteInputTokens;
-    cacheWrite.availability = cacheWrite.known ? "partial" : "unavailable";
-    if (cacheWrite.known === 0) cacheWrite.known = null;
-  }
   const efficiency = summarizeEfficiency(events, usage, accounting, now);
   const captures = readInteractionMetadata(repository, objective);
   const identities = analyzeInteractions(captures, [], {}).invocations.map(
@@ -364,7 +346,7 @@ export function factoryObjectiveSummary(
   };
 }
 
-/** Unmodified native `codex exec --json`: usage is per turn, never a session snapshot. */
+/** Fresh native `codex exec --json`: completed usage is thread-cumulative, not a turn delta. */
 function directSession(
   session: NonNullable<
     ScorecardSelection["packets"][number]["codexSessions"]
@@ -372,14 +354,18 @@ function directSession(
 ) {
   if (!isAbsolute(session.path))
     throw new Error("Codex observation path must be absolute");
+  if (session.freshThread !== true || !present(session.freshThreadReference))
+    throw new Error(
+      "Native Codex accounting requires externally verified fresh-thread launch evidence; resumed or unknown starting counters are unsupported",
+    );
   const threads = new Set<unknown>();
   let threadStarts = 0;
   const receiptHash = createHash("sha256");
   let open = false;
   let completed = 0;
   let failed = 0;
-  const turns: Tokens[] = [];
-  const turnCaches: InputCacheObservation[] = [];
+  let latestUsage: ReturnType<typeof codexTokenUsage> = {};
+  let lastOutcome: "completed" | "failed" | undefined;
   for (const row of privateRecords(session.path, true)) {
     // Canonical complete-record digest; never retain private messages/tool output.
     receiptHash.update(JSON.stringify(row) + "\n");
@@ -402,35 +388,10 @@ function directSession(
     open = false;
     if (row.type === "turn.completed") completed++;
     else failed++;
-    const usage =
-      row.type === "turn.completed" ? codexTokenUsage(row.usage) : {};
-    const paired =
-      usage.inputTokens !== undefined &&
-      usage.cachedInputTokens !== undefined &&
-      Number.isSafeInteger(usage.inputTokens) &&
-      usage.inputTokens >= 0 &&
-      Number.isSafeInteger(usage.cachedInputTokens) &&
-      usage.cachedInputTokens >= 0 &&
-      usage.cachedInputTokens <= usage.inputTokens;
-    turnCaches.push({
-      inputTokens: paired ? usage.inputTokens! : null,
-      cachedInputTokens: paired ? usage.cachedInputTokens! : null,
-      contributingInvocations: paired ? 1 : 0,
-      terminalCounterInvocations: paired ? 1 : 0,
-      eligibleInvocations: 1,
-      unobservedWorkerAttempts: 0,
-    });
-    turns.push(
-      counters(
-        usage,
-        Object.fromEntries(
-          tokenCategories.map((key) => [
-            key,
-            usage[key] === undefined ? "unavailable" : "available",
-          ]),
-        ),
-      ),
-    );
+    lastOutcome = row.type === "turn.completed" ? "completed" : "failed";
+    // The producer reports total_token_usage for the thread. Keep its latest complete
+    // snapshot once, including absent categories; a prior snapshot cannot fill them in.
+    if (row.type === "turn.completed") latestUsage = codexTokenUsage(row.usage);
   }
   if (
     threadStarts !== 1 ||
@@ -447,27 +408,50 @@ function directSession(
     throw new Error(
       "Completed Codex session lacks a matching successful terminal stream",
     );
-  if (open || !turns.length) {
-    turns.push(counters({}, {}));
-    turnCaches.push({
-      inputTokens: null,
-      cachedInputTokens: null,
-      contributingInvocations: 0,
-      terminalCounterInvocations: 0,
-      eligibleInvocations: 1,
-      unobservedWorkerAttempts: 0,
-    });
-  }
+  const incomplete =
+    open ||
+    lastOutcome !== "completed" ||
+    ["unfinished", "cancelled"].includes(session.outcome);
+  const paired =
+    latestUsage.inputTokens !== undefined &&
+    latestUsage.cachedInputTokens !== undefined &&
+    Number.isSafeInteger(latestUsage.inputTokens) &&
+    latestUsage.inputTokens >= 0 &&
+    Number.isSafeInteger(latestUsage.cachedInputTokens) &&
+    latestUsage.cachedInputTokens >= 0 &&
+    latestUsage.cachedInputTokens <= latestUsage.inputTokens;
   return {
     ...session,
     path: undefined,
     observationDigest: receiptHash.digest("hex"),
     turns: { completed, failed, unfinished: open ? 1 : 0 },
-    tokens: sumTokens(turns),
-    cacheEffectiveness: summarizeInputCache(turnCaches),
+    usageScope: "thread-cumulative" as const,
+    tokens: counters(
+      latestUsage,
+      Object.fromEntries(
+        tokenCategories.map((key) => [
+          key,
+          latestUsage[key] === undefined
+            ? "unavailable"
+            : incomplete
+              ? "partial"
+              : "available",
+        ]),
+      ),
+    ),
+    cacheEffectiveness: summarizeInputCache([
+      {
+        inputTokens: paired ? latestUsage.inputTokens! : null,
+        cachedInputTokens: paired ? latestUsage.cachedInputTokens! : null,
+        contributingInvocations: paired ? 1 : 0,
+        terminalCounterInvocations: paired && !incomplete ? 1 : 0,
+        eligibleInvocations: 1,
+        unobservedWorkerAttempts: 0,
+      },
+    ]),
     wallMs: timestamp(session.endedAt) - timestamp(session.startedAt),
     provenance:
-      "Native Codex CLI event receipts; configuration and timing externally observed" as const,
+      "Native Codex CLI cumulative receipts; fresh-thread launch, configuration and timing externally verified" as const,
   };
 }
 
@@ -579,8 +563,9 @@ export function summarizeScorecard(
         throw new Error(
           "Codex selection requires session, configuration, role and outcome",
         );
-      // A captured exec invocation is selected once. A thread resumed in another file is a distinct invocation.
+      // Fresh thread totals are selected once globally; resumed threads are unsupported.
       claim(`codex-file:${session.path}`);
+      claim(`codex-thread:${session.sessionId}`);
       inside(session.startedAt, session.endedAt);
       const observed = directSession(session);
       claim(`codex-receipt:${observed.observationDigest}`);
@@ -1006,7 +991,7 @@ export function summarizeScorecard(
       "Cached input and reasoning output are subset counters; categories are separate and never summed into token cost.",
       "Cache hit rate weights paired input/cache counters from the same invocation snapshot; partial coverage describes the contributing subset, not all input. It does not prove prefix attribution, billed cost or caller/coordinator usage.",
       "Batch packet wall/wait sums describe packet effort envelopes, not elapsed time; parallel packet intervals overlap. Window elapsed is reported separately.",
-      "Historical Codex SDK cache-write zero counters may have been synthesized by the SDK; do not treat them as provider-confirmed comparison evidence.",
+      "Codex cached-input, cache-write and reasoning zero counters can be synthesized upstream; normalized zeros stay unknown. Positive native counts are reported measurements with unknown upstream category and billing coverage. Input-minus-cache is a residual within reported input, not proof of actual uncached work.",
       "Source/config identities and acceptance receipts are retained for assessment; their presence alone does not prove equivalent quality or environments.",
       "No acceleration verdict is inferred from a small sample or incomplete dimensions; apply the predeclared criterion to independently assessed evidence.",
     ],
@@ -1023,7 +1008,7 @@ export function renderScorecard(
     label: string,
     cache: ReturnType<typeof summarizeInputCache>,
   ) =>
-    `  ${label}: ${cache.weightedHitRate === null ? "unavailable" : `${(cache.weightedHitRate * 100).toFixed(1)}%`} cached/input; known uncached ${cache.uncachedInputTokens ?? "unknown"} (${cache.availability}; ${cache.contributingInvocations}/${cache.eligibleInvocations} invocations${cache.unobservedWorkerAttempts ? `, ${cache.unobservedWorkerAttempts} unobserved worker attempts` : ""})`;
+    `  ${label}: ${cache.weightedHitRate === null ? "unavailable" : `${(cache.weightedHitRate * 100).toFixed(1)}%`} cached/input; reported input minus cached ${cache.reportedInputMinusCachedTokens ?? "unknown"} (${cache.availability}; ${cache.contributingInvocations}/${cache.eligibleInvocations} invocations${cache.unobservedWorkerAttempts ? `, ${cache.unobservedWorkerAttempts} unobserved worker attempts` : ""})`;
   for (const batch of report.batches) {
     lines.push(
       `\n${batch.scope} / ${batch.route}: ${batch.accepted} accepted, ${batch.failed} failed, ${batch.unfinished} unfinished (${batch.packets} packets)`,

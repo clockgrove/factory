@@ -36,7 +36,7 @@ export function normalizeTokenUsage(value: unknown): ModelInvocationUsage {
 export function codexTokenUsage(value: unknown): ModelInvocationUsage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const usage = value as Record<string, unknown>;
-  return normalizeTokenUsage({
+  return normalizeCodexTokenUsage({
     inputTokens: usage.input_tokens,
     cachedInputTokens: usage.cached_input_tokens,
     cacheWriteInputTokens: usage.cache_write_input_tokens,
@@ -46,11 +46,33 @@ export function codexTokenUsage(value: unknown): ModelInvocationUsage {
   });
 }
 
-/** The pinned SDK fills an absent cache-write counter with zero. Keep that ambiguous category unknown. */
-export function codexSdkTokenUsage(value: unknown): ModelInvocationUsage {
-  const usage = codexTokenUsage(value);
-  if (usage.cacheWriteInputTokens === 0) delete usage.cacheWriteInputTokens;
+/** Codex drops upstream detail presence and defaults absent optional counters to zero. */
+export function normalizeCodexTokenUsage(value: unknown): ModelInvocationUsage {
+  const usage = normalizeTokenUsage(value);
+  // Native exec also emits wholly zero default usage when no accounting arrived.
+  if (!Object.values(usage).some((counter) => counter > 0)) return {};
+  for (const key of [
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "reasoningOutputTokens",
+  ] as const)
+    if (usage[key] === 0) delete usage[key];
   return usage;
+}
+
+export function isCodexUsageIdentity(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    (value === "codex-sdk" ||
+      value === "openai-codex-sdk" ||
+      value.startsWith("@openai/codex@") ||
+      value.startsWith("@openai/codex-sdk@"))
+  );
+}
+
+/** SDK and native streams share the same upstream zero ambiguity. Raw receipts stay intact. */
+export function codexSdkTokenUsage(value: unknown): ModelInvocationUsage {
+  return codexTokenUsage(value);
 }
 
 /** Safe raw counters only; never retain arbitrary provider usage payloads. */

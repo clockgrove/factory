@@ -223,7 +223,9 @@ function summarizeNative(records: InteractionMetadata[]) {
             : snapshot?.status === "available" &&
                 cachePairs.length === responses.size &&
                 !conflicts.size &&
-                !missingIdentity
+                !missingIdentity &&
+                categories.inputTokens?.coverage === "available" &&
+                categories.cachedInputTokens?.coverage === "available"
               ? "available"
               : "partial",
         upstreamCategoryAndBillingCoverage: "unknown" as const,

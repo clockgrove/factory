@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { replacementRefusal } from "./amendment-admission.js";
 import {
   type CapturePolicy,
   CaptureWriter,
@@ -32,18 +33,17 @@ import type {
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { faultDetail, type Wait } from "./fault.js";
-import { replacementRefusal } from "./amendment-admission.js";
 import { graphDigest } from "./graph-amendments.js";
+import { FACTORY_VERSION } from "./package-metadata.js";
 import { objectiveCandidate } from "./qa.js";
 import {
-  implementationRepairable,
   consumption,
   failureDigest,
+  implementationRepairable,
   remaining,
   repairScopes,
 } from "./repair-policy.js";
 import { itemsConflict } from "./scheduler.js";
-import { savedResultRefusal } from "./work-repair.js";
 import type {
   ContinuationState,
   CoordinatorDisposition,
@@ -60,6 +60,7 @@ import {
 } from "./status-summary.js";
 import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
 import { normalizeTokenUsage, tokenCategories } from "./usage.js";
+import { savedResultRefusal } from "./work-repair.js";
 
 /** A scope's structured wait and failing step, redacted for status. */
 function waitStatus(
@@ -230,6 +231,11 @@ export class DiagnosticEmitter {
       repository: this.repository,
       objective: this.objective,
       ...event,
+      metadata: {
+        ...event.metadata,
+        factoryVersion: FACTORY_VERSION,
+        ...(this.configDigest ? { configDigest: this.configDigest } : {}),
+      },
       detail:
         event.detail === undefined
           ? undefined
@@ -521,6 +527,8 @@ export function summarizeModelInvocations(
     if (
       typeof invocationId !== "string" ||
       ![
+        "propose",
+        "dream",
         "compile",
         "diagnosis",
         "graph-review",

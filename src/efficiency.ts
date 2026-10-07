@@ -159,16 +159,19 @@ export interface RoleUsage {
   outputTokens: number | null;
   reasoningOutputTokens: number | null;
   models: string[];
+  coverage: Record<string, string>;
 }
 
 interface UsageSummaryLike {
   workerUsage: {
     tokenTotals: Partial<Record<string, number>>;
     cacheReadRatio: { value: number } | null;
+    coverage?: { byCategory: Record<string, string> };
   };
   modelUsage: {
     tokenTotals: Partial<Record<string, number>>;
     cacheReadRatio: { value: number } | null;
+    coverage?: { byCategory: Record<string, string> };
   };
   objective: { invocationCount: number; failedCount: number };
 }
@@ -185,6 +188,7 @@ function roleUsage(
     outputTokens: total("outputTokens"),
     reasoningOutputTokens: total("reasoningOutputTokens"),
     models: [...models].sort(),
+    coverage: aggregate.coverage?.byCategory ?? {},
   };
 }
 
@@ -437,7 +441,8 @@ export function renderEfficiency(report: EfficiencyReport): string {
         ? ""
         : ` (${Math.round(role.cachedShare * 100)}% cached)`;
     lines.push(
-      `  ${label.padEnd(22)} in ${formatTokens(role.inputTokens)}${cached}, out ${formatTokens(role.outputTokens)}, reasoning ${formatTokens(role.reasoningOutputTokens)}`,
+      `  ${label.padEnd(22)} in ${formatTokens(role.inputTokens)}, cached ${formatTokens(role.cachedInputTokens)}${cached}, out ${formatTokens(role.outputTokens)}, reasoning ${formatTokens(role.reasoningOutputTokens)}`,
+      `  ${"".padEnd(22)} accounting: input ${role.coverage.inputTokens ?? "unavailable"}, cached ${role.coverage.cachedInputTokens ?? "unavailable"}, output ${role.coverage.outputTokens ?? "unavailable"}, reasoning ${role.coverage.reasoningOutputTokens ?? "unavailable"}`,
       `  ${"".padEnd(22)} models: ${role.models.join(", ") || "unknown"}`,
     );
   }

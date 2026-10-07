@@ -104,7 +104,7 @@ export function summarizeNativeTools(
       ) && !record.visible?.contextSnapshot,
   );
   const identity = (record: InteractionMetadata, callId: string) =>
-    JSON.stringify([record.providerSessionId ?? null, callId]);
+    JSON.stringify([record.providerSessionId, callId]);
   const observed = new Map<string, Observation>();
   let contentReads = 0;
   let unavailableContentReads = 0;
@@ -136,7 +136,7 @@ export function summarizeNativeTools(
   for (const record of tools) {
     const observation = observed.get(record.recordId);
     const call = record.providerEvent === "codex.native-tool-call";
-    if (!observation?.callId) {
+    if (!observation?.callId || !record.providerSessionId) {
       if (call) unidentifiedCallRecords++;
       else unidentifiedOutputRecords++;
       continue;
@@ -165,7 +165,8 @@ export function summarizeNativeTools(
       !record.visible?.contextSnapshot
     ) {
       const id = observed.get(record.recordId)?.callId;
-      const key = id ? identity(record, id) : undefined;
+      const key =
+        id && record.providerSessionId ? identity(record, id) : undefined;
       if (key && !roundedCalls.has(key)) pending.add(key);
     }
     if (record.providerEvent !== "codex.native-response-usage") continue;
@@ -288,7 +289,7 @@ export function summarizeNativeTools(
     unidentifiedExplicitFailureRecords: tools.filter(
       (record) =>
         observed.get(record.recordId)?.explicitFailure === true &&
-        !observed.get(record.recordId)?.callId,
+        (!observed.get(record.recordId)?.callId || !record.providerSessionId),
     ).length,
     unclassifiedOutcomeCalls: known
       ? entries.filter(

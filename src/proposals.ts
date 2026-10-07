@@ -24,6 +24,7 @@ import {
 } from "./config.js";
 import type { ModelInvocationObservation } from "./contracts.js";
 import { sharedGitHubClient } from "./github-client.js";
+import { availableIssueType } from "./issue-type.js";
 import { operatorName } from "./operator.js";
 import { fetchHead } from "./process.js";
 import { configurationCommand, shellWord } from "./status-summary.js";
@@ -435,6 +436,7 @@ async function publish(
     save(path, journal);
   }
   const actor = await sharedGitHubClient.viewer();
+  let featureType: Promise<string | undefined> | undefined;
   for (const objective of approved) {
     const body = issueBody(objective, journal.binding);
     const retained = Object.hasOwn(journal.issues, objective.id)
@@ -458,6 +460,12 @@ async function publish(
         );
       continue;
     }
+    featureType ??= availableIssueType(
+      sharedGitHubClient,
+      config.repository,
+      "Feature",
+    );
+    const type = await featureType;
     journal.pending = { kind: "issue", id: objective.id };
     save(path, journal);
     const issue = await sharedGitHubClient.request<{
@@ -469,6 +477,7 @@ async function publish(
     }>("POST", `repos/${config.repository}/issues`, {
       title: objective.title,
       body,
+      ...(type ? { type } : {}),
     });
     if (
       !Number.isSafeInteger(issue.id) ||

@@ -173,39 +173,56 @@ function objectives(value: unknown, binding: Binding): ObjectiveDraft[] {
   }
   return drafts;
 }
-const schema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["objectives"],
-  properties: {
-    objectives: {
-      type: "array",
-      minItems: 1,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "id",
-          "title",
-          "outcome",
-          "acceptance",
-          "constraints",
-          "citations",
-          "dependencies",
-        ],
-        properties: {
-          id: objectiveIdSchema,
-          title: { type: "string" },
-          outcome: { type: "string" },
-          acceptance: { type: "array", items: { type: "string" } },
-          constraints: { type: "array", items: { type: "string" } },
-          citations: { type: "array", items: { type: "integer" } },
-          dependencies: { type: "array", items: objectiveIdSchema },
+/** Proposal choices are bound to the complete sources supplied by this request. */
+export function proposalSchema(sourceCount: number) {
+  const nonblank = {
+    type: "string",
+    minLength: 1,
+    description:
+      "Nonempty text containing at least one non-whitespace character.",
+  };
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["objectives"],
+    properties: {
+      objectives: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "id",
+            "title",
+            "outcome",
+            "acceptance",
+            "constraints",
+            "citations",
+            "dependencies",
+          ],
+          properties: {
+            id: objectiveIdSchema,
+            title: nonblank,
+            outcome: nonblank,
+            acceptance: { type: "array", minItems: 1, items: nonblank },
+            constraints: { type: "array", minItems: 1, items: nonblank },
+            citations: {
+              type: "array",
+              minItems: 1,
+              items: {
+                type: "integer",
+                minimum: 0,
+                maximum: sourceCount - 1,
+              },
+            },
+            dependencies: { type: "array", items: objectiveIdSchema },
+          },
         },
       },
     },
-  },
-};
+  };
+}
 function coverage(drafts: ObjectiveDraft[], binding: Binding) {
   const rows = binding.sources.map(({ path, heading, purpose }, index) => ({
     index,
@@ -327,7 +344,7 @@ async function generate(
     );
   const sourcePacket = JSON.stringify(binding.sources);
   const result = await model.generateProposal<{ objectives: unknown }>({
-    schema,
+    schema: proposalSchema(binding.sources.length),
     sourcePacket,
     invocation: {
       invocationId: randomUUID(),

@@ -124,7 +124,12 @@ export function compilerWire(
     .digest("hex");
   const itemSchema = strict({
     kind: text,
-    id: text,
+    id: {
+      ...text,
+      minLength: 1,
+      description:
+        "Unique Work Item ID starting with an ASCII letter or digit, followed only by ASCII letters, digits, underscores or hyphens.",
+    },
     title: { ...text, minLength: 1 },
     goal: { ...text, minLength: 1 },
     acceptance: { type: "array", minItems: 1, items: text },
@@ -138,6 +143,7 @@ export function compilerWire(
     dependencies: { type: "array", items: text },
     ownedPaths: {
       type: "array",
+      minItems: 1,
       items: {
         ...text,
         description:
@@ -187,14 +193,14 @@ export function compilerWire(
           type: "string",
           enum: ["repository", "local", "github-attachment"],
         },
-        path: text,
-        role: text,
-        mediaType: text,
+        path: { ...text, minLength: 1 },
+        role: { ...text, minLength: 1 },
+        mediaType: { ...text, minLength: 1 },
         visibility: { type: "string", enum: ["private", "repository"] },
       }),
     },
     expectedOutputRoles: { type: "array", items: text },
-    minimumAssetSets: { type: "integer" },
+    minimumAssetSets: { type: "integer", minimum: 0 },
     requiredLfsRoles: { type: "array", items: text },
   });
   if (request.executionProfiles) {
@@ -306,6 +312,11 @@ export function compilerWire(
           ...Object.entries(modes).map(([kind]) => {
             const item = structuredClone(itemSchema);
             item.properties!.kind = { type: "string", enum: [kind] };
+            item.properties!.children = {
+              type: "array",
+              ...(kind === "aggregate" ? { minItems: 1 } : { maxItems: 0 }),
+              items: text,
+            };
             item.properties!.coverage = coverageSchema(kind);
             item.required!.push("coverage");
             if (kind !== "work") {

@@ -489,6 +489,13 @@ export interface ModelInvocationAggregate {
   usageUnavailableCount: number;
   tokenTotals: Partial<ModelInvocationUsage>;
   tokenAvailability: Partial<Record<keyof ModelInvocationUsage, number>>;
+  /** Paired categories from the same selected invocation snapshot, including observed zeros. */
+  inputCacheUsage: {
+    inputTokens: number | null;
+    cachedInputTokens: number | null;
+    contributingInvocations: number;
+    terminalCounterInvocations: number;
+  };
   cacheReadRatio: {
     numeratorCachedInputTokens: number;
     denominatorInputTokens: number;
@@ -563,6 +570,7 @@ export function summarizeModelInvocations(
     let cacheRatioInputTokens = 0;
     let cacheRatioCachedInputTokens = 0;
     let cacheRatioInvocationCount = 0;
+    let terminalCacheCounterCount = 0;
     let lastProgressAt: string | undefined;
     for (const invocation of selected) {
       const observations = invocation.events.map(
@@ -593,11 +601,22 @@ export function summarizeModelInvocations(
       const cachedInputTokens = usageEvent.metadata?.cachedInputTokens;
       if (
         typeof inputTokens === "number" &&
-        typeof cachedInputTokens === "number"
+        typeof cachedInputTokens === "number" &&
+        Number.isSafeInteger(inputTokens) &&
+        inputTokens >= 0 &&
+        Number.isSafeInteger(cachedInputTokens) &&
+        cachedInputTokens >= 0 &&
+        cachedInputTokens <= inputTokens
       ) {
         cacheRatioInputTokens += inputTokens;
         cacheRatioCachedInputTokens += cachedInputTokens;
         cacheRatioInvocationCount += 1;
+        if (
+          ["completed", "failed", "response-invalid"].includes(
+            String(usageEvent.metadata?.observationType),
+          )
+        )
+          terminalCacheCounterCount++;
       }
       for (const key of [
         "inputTokens",
@@ -622,6 +641,14 @@ export function summarizeModelInvocations(
       usageUnavailableCount,
       tokenTotals: totals,
       tokenAvailability: availability,
+      inputCacheUsage: {
+        inputTokens: cacheRatioInvocationCount ? cacheRatioInputTokens : null,
+        cachedInputTokens: cacheRatioInvocationCount
+          ? cacheRatioCachedInputTokens
+          : null,
+        contributingInvocations: cacheRatioInvocationCount,
+        terminalCounterInvocations: terminalCacheCounterCount,
+      },
       cacheReadRatio:
         cacheRatioInvocationCount > 0 && cacheRatioInputTokens > 0
           ? {
@@ -783,6 +810,26 @@ export function summarizeDiagnosticUsage(events: Record<string, unknown>[]) {
         left.usageUnavailableCount + right.usageUnavailableCount,
       tokenTotals,
       tokenAvailability,
+      inputCacheUsage: {
+        inputTokens:
+          left.inputCacheUsage.inputTokens === null &&
+          right.inputCacheUsage.inputTokens === null
+            ? null
+            : (left.inputCacheUsage.inputTokens ?? 0) +
+              (right.inputCacheUsage.inputTokens ?? 0),
+        cachedInputTokens:
+          left.inputCacheUsage.cachedInputTokens === null &&
+          right.inputCacheUsage.cachedInputTokens === null
+            ? null
+            : (left.inputCacheUsage.cachedInputTokens ?? 0) +
+              (right.inputCacheUsage.cachedInputTokens ?? 0),
+        contributingInvocations:
+          left.inputCacheUsage.contributingInvocations +
+          right.inputCacheUsage.contributingInvocations,
+        terminalCounterInvocations:
+          left.inputCacheUsage.terminalCounterInvocations +
+          right.inputCacheUsage.terminalCounterInvocations,
+      },
       cacheReadRatio:
         denominator > 0
           ? {

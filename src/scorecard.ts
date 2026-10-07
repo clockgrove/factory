@@ -25,6 +25,69 @@ type Counter = {
   availability: "available" | "partial" | "unavailable";
 };
 type Tokens = Record<Category, Counter>;
+type InputCacheObservation = {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  contributingInvocations: number;
+  terminalCounterInvocations: number;
+  eligibleInvocations: number;
+  unobservedWorkerAttempts: number;
+};
+
+/** Weight only matched counters. Dividing unrelated partial totals can invent cache hits. */
+function summarizeInputCache(observations: InputCacheObservation[]) {
+  const contributingInvocations = observations.reduce(
+    (sum, observation) => sum + observation.contributingInvocations,
+    0,
+  );
+  const eligibleInvocations = observations.reduce(
+    (sum, observation) => sum + observation.eligibleInvocations,
+    0,
+  );
+  const terminalCounterInvocations = observations.reduce(
+    (sum, observation) => sum + observation.terminalCounterInvocations,
+    0,
+  );
+  const unobservedWorkerAttempts = observations.reduce(
+    (sum, observation) => sum + observation.unobservedWorkerAttempts,
+    0,
+  );
+  const sum = (key: "inputTokens" | "cachedInputTokens") => {
+    if (!contributingInvocations) return null;
+    const total = observations.reduce(
+      (total, observation) => total + (observation[key] ?? 0),
+      0,
+    );
+    if (!Number.isSafeInteger(total))
+      throw new Error("Cache accounting exceeds safe integer range");
+    return total;
+  };
+  const inputTokens = sum("inputTokens");
+  const cachedInputTokens = sum("cachedInputTokens");
+  return {
+    inputTokens,
+    cachedInputTokens,
+    uncachedInputTokens:
+      inputTokens !== null && cachedInputTokens !== null
+        ? inputTokens - cachedInputTokens
+        : null,
+    weightedHitRate:
+      inputTokens && cachedInputTokens !== null
+        ? cachedInputTokens / inputTokens
+        : null,
+    contributingInvocations,
+    terminalCounterInvocations,
+    eligibleInvocations,
+    unobservedWorkerAttempts,
+    availability:
+      contributingInvocations === 0
+        ? "unavailable"
+        : terminalCounterInvocations === eligibleInvocations &&
+            unobservedWorkerAttempts === 0
+          ? "available"
+          : "partial",
+  };
+}
 const observationFields = [
   "operatorEffortMs",
   "interventions",
@@ -150,6 +213,25 @@ export function factoryObjectiveSummary(
   );
   const usage = readUsageSummaryEvents(repository, objective, executing);
   const accounting = summarizeDiagnosticUsage(usage);
+  const cacheOf = (
+    aggregate:
+      | typeof accounting.modelUsage
+      | typeof accounting.workerUsage
+      | typeof accounting.combinedUsage
+      | NonNullable<typeof accounting.byPhase.compile>,
+    unobservedWorkerAttempts = 0,
+  ) =>
+    summarizeInputCache([
+      {
+        ...aggregate.inputCacheUsage,
+        eligibleInvocations: aggregate.invocationCount,
+        unobservedWorkerAttempts,
+      },
+    ]);
+  const cacheEffectiveness = cacheOf(
+    accounting.combinedUsage,
+    accounting.combinedUsage.coverage.unobservedAttemptCount,
+  );
   const tokens = counters(
     accounting.combinedUsage.tokenTotals,
     accounting.combinedUsage.coverage.byCategory,
@@ -239,6 +321,20 @@ export function factoryObjectiveSummary(
     },
     efficiency,
     accounting,
+    cacheEffectiveness,
+    cacheByRole: {
+      worker: cacheOf(
+        accounting.workerUsage,
+        accounting.workerUsage.coverage.unobservedAttemptCount,
+      ),
+      plannerAndReviewers: cacheOf(accounting.modelUsage),
+    },
+    cacheByPhase: Object.fromEntries(
+      Object.entries(accounting.byPhase).map(([phase, aggregate]) => [
+        phase,
+        cacheOf(aggregate),
+      ]),
+    ),
     failedDelivery,
     contextRepetition: {
       invocationsWithPromptDigest: prompts.length,
@@ -283,6 +379,7 @@ function directSession(
   let completed = 0;
   let failed = 0;
   const turns: Tokens[] = [];
+  const turnCaches: InputCacheObservation[] = [];
   for (const row of privateRecords(session.path, true)) {
     // Canonical complete-record digest; never retain private messages/tool output.
     receiptHash.update(JSON.stringify(row) + "\n");
@@ -307,6 +404,22 @@ function directSession(
     else failed++;
     const usage =
       row.type === "turn.completed" ? codexTokenUsage(row.usage) : {};
+    const paired =
+      usage.inputTokens !== undefined &&
+      usage.cachedInputTokens !== undefined &&
+      Number.isSafeInteger(usage.inputTokens) &&
+      usage.inputTokens >= 0 &&
+      Number.isSafeInteger(usage.cachedInputTokens) &&
+      usage.cachedInputTokens >= 0 &&
+      usage.cachedInputTokens <= usage.inputTokens;
+    turnCaches.push({
+      inputTokens: paired ? usage.inputTokens! : null,
+      cachedInputTokens: paired ? usage.cachedInputTokens! : null,
+      contributingInvocations: paired ? 1 : 0,
+      terminalCounterInvocations: paired ? 1 : 0,
+      eligibleInvocations: 1,
+      unobservedWorkerAttempts: 0,
+    });
     turns.push(
       counters(
         usage,
@@ -334,13 +447,24 @@ function directSession(
     throw new Error(
       "Completed Codex session lacks a matching successful terminal stream",
     );
-  if (open || !turns.length) turns.push(counters({}, {}));
+  if (open || !turns.length) {
+    turns.push(counters({}, {}));
+    turnCaches.push({
+      inputTokens: null,
+      cachedInputTokens: null,
+      contributingInvocations: 0,
+      terminalCounterInvocations: 0,
+      eligibleInvocations: 1,
+      unobservedWorkerAttempts: 0,
+    });
+  }
   return {
     ...session,
     path: undefined,
     observationDigest: receiptHash.digest("hex"),
     turns: { completed, failed, unfinished: open ? 1 : 0 },
     tokens: sumTokens(turns),
+    cacheEffectiveness: summarizeInputCache(turnCaches),
     wallMs: timestamp(session.endedAt) - timestamp(session.startedAt),
     provenance:
       "Native Codex CLI event receipts; configuration and timing externally observed" as const,
@@ -651,6 +775,30 @@ export function summarizeScorecard(
         ...factory.map((report) => report.tokens),
         ...direct.map((session) => session.tokens),
       ]),
+      cacheEffectiveness: summarizeInputCache([
+        ...factory.map((report) => report.cacheEffectiveness),
+        ...direct.map((session) => session.cacheEffectiveness),
+      ]),
+      cacheByRole: Object.fromEntries(
+        [
+          ...new Set([
+            ...factory.flatMap((report) => Object.keys(report.cacheByRole)),
+            ...direct.map((session) => session.role),
+          ]),
+        ].map((role) => [
+          role,
+          summarizeInputCache([
+            ...factory.flatMap((report) =>
+              role in report.cacheByRole
+                ? [report.cacheByRole[role as keyof typeof report.cacheByRole]]
+                : [],
+            ),
+            ...direct
+              .filter((session) => session.role === role)
+              .map((session) => session.cacheEffectiveness),
+          ]),
+        ]),
+      ),
       factory,
       direct,
     };
@@ -741,6 +889,23 @@ export function summarizeScorecard(
               ]),
             ),
             tokens,
+            cacheEffectiveness: summarizeInputCache(
+              selected.map((packet) => packet.cacheEffectiveness),
+            ),
+            cacheByRole: Object.fromEntries(
+              [
+                ...new Set(
+                  selected.flatMap((packet) => Object.keys(packet.cacheByRole)),
+                ),
+              ].map((role) => [
+                role,
+                summarizeInputCache(
+                  selected.flatMap((packet) =>
+                    packet.cacheByRole[role] ? [packet.cacheByRole[role]!] : [],
+                  ),
+                ),
+              ]),
+            ),
             tokensPerAcceptedPacket: Object.fromEntries(
               tokenCategories.map((key) => [
                 key,
@@ -839,6 +1004,7 @@ export function summarizeScorecard(
       "Total wall/time-to-acceptance requires externally observed whole-workflow bounds. Captured receipt timing alone omits uncaptured human setup/authoring and cannot prove total acceleration.",
       "Operator waits are elapsed waits, not attention. External effort, redirection and correction observations are not inferred from silence.",
       "Cached input and reasoning output are subset counters; categories are separate and never summed into token cost.",
+      "Cache hit rate weights paired input/cache counters from the same invocation snapshot; partial coverage describes the contributing subset, not all input. It does not prove prefix attribution, billed cost or caller/coordinator usage.",
       "Batch packet wall/wait sums describe packet effort envelopes, not elapsed time; parallel packet intervals overlap. Window elapsed is reported separately.",
       "Historical Codex SDK cache-write zero counters may have been synthesized by the SDK; do not treat them as provider-confirmed comparison evidence.",
       "Source/config identities and acceptance receipts are retained for assessment; their presence alone does not prove equivalent quality or environments.",
@@ -853,6 +1019,11 @@ export function renderScorecard(
   const lines = [
     `Scorecard: ${report.window.startedAt} to ${report.window.endedAt}`,
   ];
+  const cacheLine = (
+    label: string,
+    cache: ReturnType<typeof summarizeInputCache>,
+  ) =>
+    `  ${label}: ${cache.weightedHitRate === null ? "unavailable" : `${(cache.weightedHitRate * 100).toFixed(1)}%`} cached/input; known uncached ${cache.uncachedInputTokens ?? "unknown"} (${cache.availability}; ${cache.contributingInvocations}/${cache.eligibleInvocations} invocations${cache.unobservedWorkerAttempts ? `, ${cache.unobservedWorkerAttempts} unobserved worker attempts` : ""})`;
   for (const batch of report.batches) {
     lines.push(
       `\n${batch.scope} / ${batch.route}: ${batch.accepted} accepted, ${batch.failed} failed, ${batch.unfinished} unfinished (${batch.packets} packets)`,
@@ -868,6 +1039,9 @@ export function renderScorecard(
         `  ${key}: ${counter.known ?? "unknown"} (${counter.availability})`,
       );
     }
+    lines.push(cacheLine("Weighted cache hit rate", batch.cacheEffectiveness));
+    for (const [role, cache] of Object.entries(batch.cacheByRole))
+      lines.push(cacheLine(role, cache));
   }
   for (const packet of report.packets)
     lines.push(

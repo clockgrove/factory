@@ -354,6 +354,8 @@ Capture includes rendered planning/review prompts and schemas, worker prompts/se
 
 Metadata stays in private Objective diagnostics; content is under the state root’s `captures/`, outside the target checkout, in `0600` files and `0700` directories. Secret redaction is best-effort and does not make private source publishable. Nothing is pruned automatically; you own retention. Removing capture files does not change a run. Capture failures appear in diagnostics and cannot accept, reject or retry work.
 
+Trusted local worker processes retain `XDG_STATE_HOME` so their capture writers use the same state root as the controller’s readers. The isolated native Codex environment does not inherit that variable or gain access to Factory state.
+
 ```sh
 factory diagnostics --objective N --summary              # stage time, waits, attempts and tokens
 factory diagnostics --objective N --summary --json

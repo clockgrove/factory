@@ -26,6 +26,8 @@ A fresh configuration persists these defaults when no model choices are given: p
 
 The host loading this skill does not select Factory's providers. Claude Code uses the same Codex defaults unless planning or harness choices explicitly select Claude. Verify the configured providers' logins and target toolchain in the controller's non-login shell; configuration-only setup does not establish worker readiness.
 
+Use the host's supported ordinary-host execution route for the controller. Codex may inject private runtime aliases into PATH: follow the [controller PATH guidance](https://github.com/clockgrove/factory/blob/main/README.md#controller-path-in-an-agent-host), bind the complete reviewed literal PATH and verified absolute CLI after shell startup, and preserve that environment for subsequent commands. Include all selected project and validation tools; never append inherited `$PATH`, mount credential roots or weaken worker isolation to get past a PATH or socket error.
+
 Keep configuration, credentials and state outside the target repository. Reuse a matching existing configuration. If the binding conflicts, report it and stop, because deleting state or choosing another root hides the conflict.
 
 ## Run

@@ -90,6 +90,17 @@ claude plugin list --json                        # Claude Code host
 
 Use the listing for your host. Check that `factory` on PATH belongs to that installation; an older wrapper or another prefix can select a different CLI. `factory help` lists the installed commands. A successful package check does not establish provider access or worker readiness.
 
+### Controller PATH in an agent host
+
+Codex can prepend temporary runtime aliases under `CODEX_HOME/tmp/arg0` to its tool environment. Factory refuses these protected directories as worker toolchains. For agent execution, construct a complete, reviewed PATH with the selected project tools and system binaries; do not append the inherited `$PATH`. Verify the absolute CLI against the installation above, then apply the literal environment after any shell startup:
+
+```sh
+/usr/bin/env PATH='/absolute/selected-toolchain/bin:/absolute/private/factory-prefix/node_modules/.bin:/usr/local/bin:/usr/bin:/bin' \
+  /absolute/private/factory-prefix/node_modules/.bin/factory status --config /absolute/private/config.json
+```
+
+Replace the example directories with the actual required toolchains, including Node and every declared validation tool. Use that same literal environment for setup, run, status and diagnostics. From a login shell, put the complete `/usr/bin/env ...` command inside the shell invocation so startup files cannot replace it. Run the controller through the host's supported ordinary-host permission route; never mount a credential directory or weaken worker isolation to repair PATH or socket errors.
+
 ## Use the plugin
 
 Open your target repository in Codex or Claude Code after loading the matching plugin, and ask:

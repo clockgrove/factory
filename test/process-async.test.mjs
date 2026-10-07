@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readInteractionContent } from "../dist/capture.js";
+import { analyzeInteractions } from "../dist/analysis.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
@@ -55,14 +56,20 @@ import { CaptureWriter } from ${JSON.stringify(new URL("../dist/capture.js", imp
 import { stateRoot } from ${JSON.stringify(new URL("../dist/config.js", import.meta.url).href)};
 import { createCodexHome } from ${JSON.stringify(new URL("../dist/codex-planning-isolation.js", import.meta.url).href)};
 const home = createCodexHome({ config: "", sandbox: { directory: process.cwd(), workspace: "write", network: false } });
+const nativeEvents = [];
 try {
   assert.equal(home.env.XDG_STATE_HOME, undefined);
   assert.equal(readFileSync(join(home.env.CODEX_HOME, "config.toml"), "utf8").includes(process.env.XDG_STATE_HOME), false);
+  home.nativeCapture("00000000-0000-4000-8000-000000000000", event => nativeEvents.push(event));
 } finally { home.dispose(); }
 const privateBin = join(stateRoot(${JSON.stringify(repository)}), "bin");
 mkdirSync(privateBin, { recursive: true });
 assert.throws(() => createCodexHome({ config: "", source: { ...process.env, PATH: privateBin }, sandbox: { directory: process.cwd(), workspace: "write", network: false } }), /Factory's own files/);
-new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, invocationId: "actual-child-capture", providerAttempt: 1, phase: "integration", adapter: "local-process", configured: { provider: "not-invoked", model: "none" } }, { enabled: true, maxBytesPerInvocation: 1024 }, [], metadata => process.stdout.write(JSON.stringify(metadata))).record({ kind: "interaction" }, () => ({ text: "real child process capture" }));`,
+const emitted = [];
+const writer = new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, invocationId: "actual-child-capture", providerAttempt: 1, phase: "integration", adapter: "local-process", configured: { provider: "not-invoked", model: "none" } }, { enabled: true, maxBytesPerInvocation: 1024 }, [], metadata => emitted.push(metadata));
+writer.record({ kind: "interaction" }, () => ({ text: "real child process capture" }));
+for (const event of nativeEvents) writer.record(event);
+process.stdout.write(JSON.stringify(emitted));`,
       ],
       {
         cwd: workspace,
@@ -70,7 +77,7 @@ new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, inv
       },
     );
     assert.equal(result.status, 0, result.stderr.toString());
-    const metadata = JSON.parse(result.stdout.toString());
+    const [metadata, unavailableNative] = JSON.parse(result.stdout.toString());
     assert.equal(metadata.content.status, "captured");
     assert.deepEqual(
       JSON.parse(
@@ -78,6 +85,24 @@ new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, inv
       ),
       { text: "real child process capture" },
     );
+    // A real private process capture is not a native model tool call. Even the
+    // explicit legacy-tool read must neither expose its text nor invent counts.
+    const analysis = analyzeInteractions([metadata], [], {
+      includeNativeToolContent: true,
+    });
+    assert.equal(analysis.nativeToolActivity.uniqueCalls, null);
+    assert.equal(analysis.invocations[0].nativeToolActivity.contentReads, 0);
+    assert.equal(
+      JSON.stringify(analysis).includes("real child process capture"),
+      false,
+    );
+    // The actual owned-home reader emits unavailable for a missing rollout;
+    // that observation must never turn into a fabricated zero-call history.
+    assert.equal(unavailableNative.nativeRollout.status, "unavailable");
+    const unavailable = analyzeInteractions([unavailableNative]);
+    assert.equal(unavailable.nativeToolActivity.availability, "unavailable");
+    assert.equal(unavailable.nativeToolActivity.uniqueCalls, null);
+    assert.equal(unavailable.nativeToolActivity.callRounds, null);
     const captures = join(stateRoot(repository), "captures");
     assert.equal(statSync(captures).mode & 0o777, 0o700);
     const [file] = readdirSync(captures);

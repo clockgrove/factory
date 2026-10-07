@@ -124,6 +124,24 @@ test("packed Factory installs offline and runs its CLI and bundled scanner", () 
     const installedConfig = JSON.parse(readFileSync(config, "utf8"));
     assert.equal(installedConfig.repository, "example/package-smoke");
     assert.equal(installedConfig.checkout, checkout);
+    const nativeAnalysis = JSON.parse(
+      run(
+        "diagnostics",
+        "--analyze",
+        "--native-tool-content",
+        "--json",
+        "--objective",
+        "1",
+        "--config",
+        config,
+      ),
+    );
+    assert.equal(
+      nativeAnalysis.nativeToolContent,
+      "explicit-private-content-read",
+    );
+    assert.equal(nativeAnalysis.nativeToolActivity.uniqueCalls, null);
+    assert.equal(nativeAnalysis.nativeToolActivity.availability, "unavailable");
     const status = run("status", "--objective", "1", "--config", config);
     assert.equal(
       status.split("\n")[0],

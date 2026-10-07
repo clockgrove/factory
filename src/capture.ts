@@ -45,6 +45,16 @@ export interface InteractionMetadata {
   toolCallId?: string;
   role?: "system" | "developer" | "user" | "assistant" | "tool";
   tool?: string;
+  /** Sanitized native call/output facts; no arguments, paths or error text. */
+  nativeTool?: {
+    event: "call" | "output";
+    callId?: string;
+    name?: string;
+    observedAt?: string;
+    timestampSource?: "native-row" | "native-payload";
+    reportedStatus?: "completed" | "failed" | "cancelled" | "in_progress";
+    explicitFailure?: true;
+  };
   configDigest?: string;
   sourceDigest?: string;
   promptDigest?: string;

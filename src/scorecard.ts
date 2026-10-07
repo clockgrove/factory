@@ -320,6 +320,7 @@ export function factoryObjectiveSummary(
       invocationId: invocation.identity.invocationId,
       providerAttempt: invocation.identity.providerAttempt,
       native: invocation.native,
+      nativeToolActivity: invocation.nativeToolActivity,
       promptComponents: invocation.promptComponents,
     })),
     cacheEffectiveness,
@@ -577,6 +578,7 @@ function directNativeCapture(
     return {
       observationDigest: digest(buffer.subarray(0, bytes)),
       native: analyzed.invocations[0]!.native,
+      nativeToolActivity: analyzed.invocations[0]!.nativeToolActivity,
       promptComponents: analyzed.invocations[0]!.promptComponents,
     };
   } finally {

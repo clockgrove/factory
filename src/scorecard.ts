@@ -482,6 +482,10 @@ function directNativeCapture(
         (!["available", "partial", "unavailable"].includes(
           row.nativeRollout.status,
         ) ||
+          (row.nativeRollout.toolMetadata !== undefined &&
+            !["available", "partial"].includes(
+              row.nativeRollout.toolMetadata,
+            )) ||
           ![
             "readBytes",
             "totalBytes",
@@ -528,6 +532,7 @@ function directNativeCapture(
           [
             "cliVersion",
             "status",
+            "toolMetadata",
             "readBytes",
             "totalBytes",
             "observedCompletedResponses",

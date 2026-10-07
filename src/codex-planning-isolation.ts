@@ -332,6 +332,18 @@ function nativeMetadata(
   const unavailable = { source: "codex-rollout", status: "unavailable" };
   if (!threadId || !/^[0-9a-f-]{36}$/.test(threadId)) return unavailable;
   let remaining = 128;
+  let selectedThread = threadId;
+  let selectedParent: string | undefined;
+  let selectedDepth = 0;
+  const budget = { remainingBytes: 8 * 1024 * 1024, remainingEvents: 4094 };
+  const children: {
+    id: string;
+    parent: string;
+    depth: number;
+    model?: string;
+    reasoningEffort?: string;
+  }[] = [];
+  const seen = new Set([threadId]);
   const visit = (directory: string, depth: number): unknown => {
     if (--remaining < 0) return undefined;
     const fd = openSync(
@@ -352,7 +364,7 @@ function nativeMetadata(
         ) {
           if (--remaining < 0) break;
           const path = join(anchor, entry.name);
-          if (entry.isFile() && entry.name.endsWith(`-${threadId}.jsonl`))
+          if (entry.isFile() && entry.name.endsWith(`-${selectedThread}.jsonl`))
             return readRollout(path);
           if (entry.isDirectory() && depth > 0) {
             const found = visit(path, depth - 1);
@@ -377,8 +389,22 @@ function nativeMetadata(
       if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.nlink !== 1)
         return unavailable;
       if (observe) {
-        captureOwnedRollout(fd, threadId, observe);
-        return { source: "codex-rollout", status: "observed" };
+        const coverage = captureOwnedRollout(fd, selectedThread, observe, {
+          parentThreadId: selectedParent,
+          rootThreadId: threadId,
+          budget,
+          child: (child) => {
+            if (!seen.has(child.id)) {
+              seen.add(child.id);
+              children.push({
+                ...child,
+                parent: selectedThread,
+                depth: selectedDepth + 1,
+              });
+            }
+          },
+        });
+        return { source: "codex-rollout", status: "observed", coverage };
       }
       const head = Buffer.alloc(Math.min(stat.size, 256 * 1024));
       const headBytes = readSync(fd, head, 0, head.length, 0);
@@ -441,7 +467,56 @@ function nativeMetadata(
       (identity && (root.dev !== identity.dev || root.ino !== identity.ino))
     )
       return unavailable;
-    return visit(join(`/proc/self/fd/${rootFd}`, "sessions"), 3) ?? unavailable;
+    const sessions = join(`/proc/self/fd/${rootFd}`, "sessions");
+    const result = visit(sessions, 3) ?? unavailable;
+    if (observe)
+      for (let index = 0; index < children.length && index < 16; index++) {
+        const child = children[index]!;
+        selectedThread = child.id;
+        selectedParent = child.parent;
+        selectedDepth = child.depth;
+        let status: "available" | "partial" | "unavailable" = "unavailable";
+        try {
+          if (
+            child.depth <= 4 &&
+            remaining > 0 &&
+            budget.remainingBytes > 0 &&
+            budget.remainingEvents > 0
+          ) {
+            const childResult = visit(sessions, 3) as
+              | { status?: string; coverage?: "available" | "partial" }
+              | undefined;
+            if (childResult?.status === "observed")
+              status = childResult.coverage ?? "partial";
+          }
+        } catch {
+          /* Missing or unauthenticated descendant data never blocks provider work. */
+        }
+        observe({
+          kind: "interaction",
+          providerEvent: "codex.native-descendant-coverage",
+          providerSessionId: child.parent,
+          coverage: "boundary",
+          nativeDescendant: {
+            parentSessionId: child.parent,
+            childSessionId: child.id,
+            relation:
+              status !== "unavailable"
+                ? "authenticated-owned-home"
+                : "observed-spawn",
+            status: "unknown",
+            recordedAt: null,
+            ...(child.model ? { model: child.model } : {}),
+            ...(child.reasoningEffort
+              ? { reasoningEffort: child.reasoningEffort }
+              : {}),
+            history: status,
+            resourceCessation: "unavailable",
+            parentUsageIncludesChild: "unknown",
+          },
+        });
+      }
+    return result;
   } catch {
     return unavailable;
   } finally {

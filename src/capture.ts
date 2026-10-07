@@ -59,8 +59,45 @@ export interface InteractionMetadata {
     digest: string;
     contextSnapshot: boolean;
   };
+  /** Native identifiers and timestamps, never tool arguments or process-success inference. */
+  nativeTool?: {
+    source: "owned-codex-rollout";
+    endpoint: "call" | "output";
+    callId: string | null;
+    name: string | null;
+    type: "function" | "custom";
+    recordedAt: string | null;
+    turnId: string | null;
+    status: "observed" | "reported-failed";
+  };
+  /** Each descendant remains a separate accounting scope, bound to the invoking parent. */
+  nativeOwnership?: { rootSessionId: string; parentSessionId: string };
+  nativeDescendant?: {
+    parentSessionId: string;
+    childSessionId: string;
+    relation: "observed-spawn" | "authenticated-owned-home";
+    status:
+      | "pending-init"
+      | "running"
+      | "interrupted"
+      | "completed"
+      | "errored"
+      | "shutdown"
+      | "not-found"
+      | "unknown";
+    recordedAt: string | null;
+    model?: string;
+    reasoningEffort?: string;
+    history: "available" | "partial" | "unavailable";
+    resourceCessation: "unavailable";
+    parentUsageIncludesChild: "unknown";
+  };
   nativeRollout?: {
     cliVersion: string | null;
+    modelProvider?: string;
+    reportedModel?: string;
+    reportedReasoningEffort?: string;
+    modelContextWindow?: number;
     status: "available" | "partial" | "unavailable";
     readBytes: number | null;
     totalBytes: number | null;

@@ -13,6 +13,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runAnalysisCommand } from "../dist/analysis-cli.js";
+import { DiagnosticEmitter } from "../dist/diagnostics.js";
 import { readInteractionContent } from "../dist/capture.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { graphDigest } from "../dist/graph-amendments.js";
@@ -100,6 +102,25 @@ new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, inv
       ),
       { text: "real child process capture" },
     );
+    new DiagnosticEmitter(repository, 1).emit({
+      operation: "model-capture",
+      outcome: "observed",
+      capture: metadata,
+    });
+    const analysisText = runAnalysisCommand(
+      { repository, checkout: workspace },
+      1,
+      ["--json"],
+    );
+    const analysis = JSON.parse(analysisText);
+    assert.equal(analysis.invocationCount, 1);
+    assert.equal(analysis.nativeTools.calls, null);
+    assert.equal(analysis.nativeTools.coverage, "unavailable");
+    assert.equal(
+      analysis.invocations[0].native.descendants.accountingUnion,
+      null,
+    );
+    assert.equal(analysisText.includes("real child process capture"), false);
     const captures = join(stateRoot(repository), "captures");
     assert.equal(statSync(captures).mode & 0o777, 0o700);
     const [file] = readdirSync(captures);

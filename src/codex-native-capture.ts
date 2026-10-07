@@ -31,6 +31,16 @@ export function captureOwnedRollout(
   if (header?.type !== "session_meta" || header.payload?.id !== threadId)
     throw new Error("Owned native history does not match its observed thread");
   let partial = bytes !== stat.size || !terminated;
+  let emitted = 0;
+  const emit: NativeCaptureObserver = (event, content) => {
+    // Keep metadata bounded too; leave space for coverage and an outer request.
+    if (emitted >= 4094) {
+      partial = true;
+      return;
+    }
+    emitted++;
+    observe(event, content);
+  };
   let duplicates = 0;
   let conflicts = 0;
   let childHistory = false;
@@ -47,6 +57,10 @@ export function captureOwnedRollout(
     contextSnapshot = false,
     event = "codex.native-message",
   ) => {
+    if (emitted >= 4094) {
+      partial = true;
+      return;
+    }
     const serialized = JSON.stringify(payload);
     const content = payload.content;
     const textBytes = Array.isArray(content)
@@ -65,7 +79,7 @@ export function captureOwnedRollout(
             : typeof payload.input === "string"
               ? Buffer.byteLength(payload.input)
               : 0;
-    observe(
+    emit(
       {
         kind: "interaction",
         providerEvent: event,
@@ -151,7 +165,7 @@ export function captureOwnedRollout(
         if (previous !== canonical) {
           conflicts++;
           partial = true;
-          observe(
+          emit(
             {
               kind: "interaction",
               providerEvent: "codex.native-usage-conflict",
@@ -167,7 +181,7 @@ export function captureOwnedRollout(
       responses.set(payload.response_id, canonical);
       latestThreadUsage = codexTokenUsage(payload.thread_token_usage);
       const normalized = codexTokenUsage(payload.usage);
-      observe(
+      emit(
         {
           kind: "usage",
           providerEvent: "codex.native-response-usage",
@@ -204,11 +218,13 @@ export function captureOwnedRollout(
         true,
         "codex.native-compaction",
       );
-      if (Array.isArray(payload.replacement_history))
-        for (const item of payload.replacement_history) {
+      if (Array.isArray(payload.replacement_history)) {
+        if (payload.replacement_history.length > 4094) partial = true;
+        for (const item of payload.replacement_history.slice(0, 4094)) {
           if (item && typeof item === "object" && !Array.isArray(item))
             message(item, true);
         }
+      }
       // latest_token_usage_record is a copied checkpoint, never a new response.
     } else if (
       [
@@ -224,7 +240,7 @@ export function captureOwnedRollout(
   if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs)
     partial = true;
   if (latestTokenCountPayload)
-    observe(
+    emit(
       {
         kind: "interaction",
         providerEvent: "codex.native-token-count",

@@ -1008,7 +1008,7 @@ export function renderScorecard(
     label: string,
     cache: ReturnType<typeof summarizeInputCache>,
   ) =>
-    `  ${label}: ${cache.weightedHitRate === null ? "unavailable" : `${(cache.weightedHitRate * 100).toFixed(1)}%`} cached/input; reported input minus cached ${cache.reportedInputMinusCachedTokens ?? "unknown"} (${cache.availability}; ${cache.contributingInvocations}/${cache.eligibleInvocations} invocations${cache.unobservedWorkerAttempts ? `, ${cache.unobservedWorkerAttempts} unobserved worker attempts` : ""})`;
+    `  ${label}: ${cache.weightedHitRate === null ? "unavailable" : `${(cache.weightedHitRate * 100).toFixed(1)}%`} reported cached/input; reported input minus cached ${cache.reportedInputMinusCachedTokens ?? "unknown"} (outer receipts ${cache.availability}; ${cache.contributingInvocations}/${cache.eligibleInvocations} invocations${cache.unobservedWorkerAttempts ? `, ${cache.unobservedWorkerAttempts} unobserved worker attempts` : ""}; upstream detail/billing unknown)`;
   for (const batch of report.batches) {
     lines.push(
       `\n${batch.scope} / ${batch.route}: ${batch.accepted} accepted, ${batch.failed} failed, ${batch.unfinished} unfinished (${batch.packets} packets)`,

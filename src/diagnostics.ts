@@ -752,16 +752,24 @@ export function summarizeDiagnosticUsage(events: Record<string, unknown>[]) {
       observation.invocationId,
       observation.providerAttempt,
     ]);
-    const usage = isCodexUsageIdentity(observation.adapter)
-      ? normalizeCodexTokenUsage(observation.usage)
-      : normalizeTokenUsage(observation.usage);
+    const usage =
+      isCodexUsageIdentity(observation.adapter) ||
+      isCodexUsageIdentity(observation.provider)
+        ? normalizeCodexTokenUsage(observation.usage)
+        : normalizeTokenUsage(observation.usage);
     observedAttempts.add(event.attemptId);
     identities.set(key, {
       attemptId: event.attemptId,
       invocationId: observation.invocationId,
       providerAttempt: observation.providerAttempt,
       ...Object.fromEntries(
-        ["profileId", "adapter", "model", "reasoningEffort"].flatMap((key) =>
+        [
+          "profileId",
+          "provider",
+          "adapter",
+          "model",
+          "reasoningEffort",
+        ].flatMap((key) =>
           typeof observation[key] === "string" ? [[key, observation[key]]] : [],
         ),
       ),
@@ -1110,7 +1118,13 @@ function usageEvent(
       invocationId: observation.invocationId,
       providerAttempt: observation.providerAttempt,
       ...Object.fromEntries(
-        ["profileId", "adapter", "model", "reasoningEffort"].flatMap((key) =>
+        [
+          "profileId",
+          "provider",
+          "adapter",
+          "model",
+          "reasoningEffort",
+        ].flatMap((key) =>
           typeof observation[key] === "string" ? [[key, observation[key]]] : [],
         ),
       ),

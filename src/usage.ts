@@ -63,7 +63,8 @@ export function normalizeCodexTokenUsage(value: unknown): ModelInvocationUsage {
 export function isCodexUsageIdentity(value: unknown): boolean {
   return (
     typeof value === "string" &&
-    (value === "codex-sdk" ||
+    (value === "codex" ||
+      value === "codex-sdk" ||
       value === "openai-codex-sdk" ||
       value.startsWith("@openai/codex@") ||
       value.startsWith("@openai/codex-sdk@"))

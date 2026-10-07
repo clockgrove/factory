@@ -215,7 +215,7 @@ export async function runRegularGraph(args: {
             lfs: Boolean(work.selectedAssetSet),
             earlierHeads: deliveryEarlierHeads(work),
             body: deliveryDescription(
-              root,
+              config.checkout,
               {
                 item,
                 baseSha: itemBase,

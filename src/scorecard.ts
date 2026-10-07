@@ -195,6 +195,13 @@ export function factoryObjectiveSummary(
         ]),
       ],
       invocations: identities,
+      providerSessionIds: [
+        ...new Set(
+          captures.flatMap((record) =>
+            record.providerSessionId ? [record.providerSessionId] : [],
+          ),
+        ),
+      ],
       resultCommit: executing?.finalAcceptance?.commit ?? null,
       resultTree: executing?.finalAcceptance?.tree ?? null,
       sealedAt: executing?.finalAcceptance?.sealedAt ?? null,
@@ -418,6 +425,14 @@ export function summarizeScorecard(
       claim(`codex-file:${session.path}`);
       inside(session.startedAt, session.endedAt);
       const observed = directSession(session);
+      if (
+        factory.some((report) =>
+          report.bindings.providerSessionIds.includes(session.sessionId),
+        )
+      )
+        throw new Error(
+          "Codex observation overlaps a session already accounted by Factory",
+        );
       claim(`codex-receipt:${observed.observationDigest}`);
       return observed;
     });

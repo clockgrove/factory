@@ -129,19 +129,46 @@ function summarizeTools(activity: ReturnType<typeof summarizeNativeTools>) {
     commandSuccess: "unknown" as const,
     nestedCommandsAndProcesses: "unknown" as const,
   }));
+  const group = (calls: typeof selected) => ({
+    calls: calls.length,
+    observedOutputs: calls.filter((call) => call.outputObserved).length,
+    reportedFailures: calls.filter((call) => call.status === "reported-failed")
+      .length,
+    missingOutputs: calls.filter((call) => !call.outputObserved).length,
+    observedRounds:
+      calls.length && calls.every((call) => call.turnId !== null)
+        ? new Set(
+            calls.map((call) => JSON.stringify([call.sessionId, call.turnId])),
+          ).size
+        : null,
+    roundMethod: "native-turn-identities" as const,
+    observedDurationMs:
+      calls.length && calls.every((call) => call.durationMs !== null)
+        ? calls.reduce((sum, call) => sum + call.durationMs!, 0)
+        : null,
+    overlappingDurations: true,
+  });
   return {
     source: "model-visible-native-calls" as const,
     calls: activity.uniqueCalls,
     observedOutputs: activity.callsWithObservedOutput,
     reportedFailures: activity.observedExplicitFailureCalls,
     missingOutputs: activity.callsWithoutObservedOutput,
-    observedRounds: activity.callRounds,
-    roundMethod: activity.roundMethod,
-    observedDurationMs: activity.callToOutputTiming.sumObservedIntervalsMs,
+    observedRounds: group(selected).observedRounds,
+    roundMethod: "native-turn-identities" as const,
+    observedResponseBoundaryRounds: activity.callRounds,
+    responseBoundaryRoundMethod: activity.roundMethod,
+    observedDurationMs: group(selected).observedDurationMs,
+    sumObservedIntervalsMs: activity.callToOutputTiming.sumObservedIntervalsMs,
     durationCoverage: activity.callToOutputTiming.availability,
     durationScope: activity.callToOutputTiming.scope,
     overlappingDurations: true,
-    byName: activity.byName,
+    byName: [...new Set(selected.map((call) => call.name))]
+      .sort()
+      .map((name) => ({
+        name,
+        ...group(selected.filter((call) => call.name === name)),
+      })),
     endpointsWithoutCall: activity.outputsWithoutObservedCall,
     missingIdentity:
       activity.unidentifiedCallRecords + activity.unidentifiedOutputRecords,

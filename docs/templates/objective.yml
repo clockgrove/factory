@@ -1,6 +1,7 @@
 name: Objective
 description: A result for Factory to plan, build, validate and deliver
 title: "Objective: "
+type: Feature
 body:
   - type: textarea
     id: outcome

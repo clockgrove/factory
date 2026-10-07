@@ -16,6 +16,7 @@ import * as time from "./clock.js";
 import { notYet, settled } from "./delivery/lag.js";
 import type { NativeStackDelivery } from "./delivery/native-stack.js";
 import { deliveryReadiness } from "./delivery/readiness.js";
+import { availableIssueType } from "./issue-type.js";
 import { attachedFault, attachFault, decision, transient } from "./fault.js";
 import {
   classifiedGitHubCall,
@@ -764,6 +765,7 @@ export class RealGitHubGateway implements GitHubGateway {
       }
       return kept;
     };
+    let taskType: Promise<string | undefined> | undefined;
     for (const item of request.graph.items) {
       const marker = `<!-- factory:objective=${request.objectiveIssue};item=${item.id} -->`;
       const known = request.knownIssues?.[item.id];
@@ -846,11 +848,14 @@ export class RealGitHubGateway implements GitHubGateway {
         continue;
       }
       const body = projectedIssueBody(item, request.objectiveIssue);
+      taskType ??= availableIssueType(this.client, this.repository, "Task");
+      const type = await taskType;
       await request.beforeCreate?.(item.id);
       const created = await this.api<Issue>("POST", "issues", {
         title: item.title,
         body,
         labels: [roles[1]!],
+        ...(type ? { type } : {}),
       });
       if (
         !created ||

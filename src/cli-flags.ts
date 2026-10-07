@@ -51,6 +51,7 @@ const commandFlags: Record<string, string[]> = {
     "objective",
     "follow",
     "summary",
+    "scorecard",
     "analyze",
     "logs",
     "captures",

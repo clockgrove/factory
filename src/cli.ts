@@ -16,12 +16,15 @@ import {
   continuationStatusDocument,
   redactDiagnosticDetail,
 } from "./diagnostics.js";
-import { runDiagnosticsCommand } from "./diagnostics-cli.js";
+import {
+  runDiagnosticsCommand,
+  runDiagnosticsScorecardCommand,
+} from "./diagnostics-cli.js";
 import { compose, composeIntake, composePlanning } from "./index.js";
 import { type IntakeAuthorization, intakeControl } from "./intake.js";
+import { runDreamCommand } from "./learning.js";
 import { operatorName } from "./operator.js";
 import { runProposeCommand } from "./proposals.js";
-import { runDreamCommand } from "./learning.js";
 import { loadServiceLoginCredentials } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
 import {
@@ -100,6 +103,7 @@ function help(): void {
       "  propose-amendment --objective N --proposal FILE",
       "      Submit a graph amendment (or a replacement for a rejected one)",
       "  diagnostics --objective N [--follow | --summary | --analyze | --logs ITEM [--follow] | --captures [--content RECORD_ID]]",
+      "  diagnostics --scorecard FILE [--json] [--output ABSOLUTE_NEW_FILE]",
       "      The one observation command: agent timeline by default. --summary prints the efficiency report (time per stage, operator waits, attempts, tokens per role; --json for tools). --analyze takes [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE]",
       "  export-captures --objective N --endpoint HTTPS_OTLP_BASE_URL --content metadata|retained [--run ID ...] [--invocation ID ...] [--send --authorize PREVIEW_DIGEST]",
       "      Preview, then send, retained captures off this host",
@@ -321,6 +325,8 @@ async function main(): Promise<void> {
   )
     throw new Error(`Unknown command: ${command}; see factory help`);
   const config = readConfig(path);
+  if (command === "diagnostics" && option(args, "scorecard") !== undefined)
+    return runDiagnosticsScorecardCommand(config, args);
   const objective = Number(option(args, "objective"));
   if (!Number.isSafeInteger(objective) || objective <= 0)
     throw new Error(`${command} requires --objective N`);

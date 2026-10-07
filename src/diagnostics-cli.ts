@@ -1,16 +1,19 @@
-import { runAnalysisCommand } from "./analysis-cli.js";
+import { readFileSync } from "node:fs";
+import { runAnalysisCommand, writeAnalysisReport } from "./analysis-cli.js";
 import { readInteractionContent, readInteractionMetadata } from "./capture.js";
 import { option } from "./cli-flags.js";
 import type { FactoryConfig } from "./config.js";
 import {
   readAgentTimeline,
-  readDiagnosticMetadata,
-  readUsageSummaryEvents,
   readWorkerOutput,
   redactDiagnosticDetail,
-  summarizeDiagnosticUsage,
 } from "./diagnostics.js";
-import { renderEfficiency, summarizeEfficiency } from "./efficiency.js";
+import { renderEfficiency } from "./efficiency.js";
+import {
+  factoryObjectiveSummary,
+  renderScorecard,
+  summarizeScorecard,
+} from "./scorecard.js";
 import { readContinuation, readState } from "./state-store.js";
 
 const modes = ["summary", "analyze", "logs", "captures"] as const;
@@ -108,26 +111,23 @@ export async function runDiagnosticsCommand(
     if (follow) await untilInterrupted(show);
     return;
   }
-  const continuation = readContinuation(config.repository, objective);
-  const executing =
-    continuation?.schemaVersion === 7 ? continuation : undefined;
   if (mode === "summary") {
-    const usage = readUsageSummaryEvents(
+    const report = factoryObjectiveSummary(
       config.repository,
       objective,
-      executing,
-    );
-    const tokens = summarizeDiagnosticUsage(usage);
-    const efficiency = summarizeEfficiency(
-      readDiagnosticMetadata(config.repository, objective).filter(
-        (event) => !event.capture,
-      ),
-      usage,
-      tokens,
       Date.now(),
     );
+    const { efficiency, accounting } = report;
     if (flags.has("json"))
-      console.log(JSON.stringify({ ...tokens, efficiency }));
+      console.log(
+        JSON.stringify({
+          ...accounting,
+          efficiency,
+          bindings: report.bindings,
+          outcome: report.outcome,
+          receiptDigest: report.receiptDigest,
+        }),
+      );
     else process.stdout.write(renderEfficiency(efficiency));
     return;
   }
@@ -147,4 +147,29 @@ export async function runDiagnosticsCommand(
   };
   printNew();
   if (follow) await untilInterrupted(printNew);
+}
+
+/** Batch observation does not need an Objective or perform any lifecycle operation. */
+export function runDiagnosticsScorecardCommand(
+  config: FactoryConfig,
+  args: string[],
+): void {
+  for (const flag of args.filter((arg) => arg.startsWith("--")))
+    if (!["--config", "--scorecard", "--json", "--output"].includes(flag))
+      throw new Error(`${flag} does not belong to diagnostics --scorecard`);
+  const path = option(args, "scorecard");
+  if (!path || path.startsWith("--"))
+    throw new Error("diagnostics --scorecard requires a selection JSON file");
+  const report = summarizeScorecard(
+    config.repository,
+    JSON.parse(readFileSync(path, "utf8")),
+  );
+  const result = args.includes("--json")
+    ? `${JSON.stringify(report, null, 2)}\n`
+    : renderScorecard(report);
+  const output = option(args, "output");
+  if (output) {
+    writeAnalysisReport(output, config.checkout, result);
+    console.log(`Saved private scorecard to ${output}`);
+  } else process.stdout.write(result);
 }

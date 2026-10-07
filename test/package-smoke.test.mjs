@@ -133,6 +133,26 @@ test("packed Factory installs offline and runs its CLI and bundled scanner", () 
       status.split("\n")[1],
       `Next: factory run --objective 1 --config '${root}/selected config'"'"'s/factory.json'`,
     );
+    // A freshly installed target has no historical provider accounting. The installed
+    // observation command must keep that absence visible and require no credentials.
+    const summary = JSON.parse(
+      run(
+        "diagnostics",
+        "--objective",
+        "1",
+        "--summary",
+        "--json",
+        "--config",
+        config,
+      ),
+    );
+    assert.equal(summary.outcome, "unfinished");
+    assert.equal(summary.bindings.runId, null);
+    assert.equal(
+      summary.combinedUsage.coverage.byCategory.inputTokens,
+      "unavailable",
+    );
+    assert.equal(summary.efficiency.tokens.worker.inputTokens, null);
 
     const scanner = join(installedRoot, "dist", "execution", "secret-scan.js");
     const descriptor = JSON.stringify({

@@ -79,6 +79,17 @@ factory help
 
 Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory is distributed through GitHub Releases, not the npm registry.
 
+Verify the installed CLI package and the enabled plugin both report the release you selected:
+
+```sh
+command -v factory
+npm list --offline --prefix /absolute/private/factory-prefix @clockgrove/factory --depth=0
+codex plugin list --marketplace clockgrove --json  # Codex host
+claude plugin list --json                        # Claude Code host
+```
+
+Use the listing for your host. Check that `factory` on PATH belongs to that installation; an older wrapper or another prefix can select a different CLI. `factory help` lists the installed commands. A successful package check does not establish provider access or worker readiness.
+
 ## Use the plugin
 
 Open your target repository in Codex or Claude Code after loading the matching plugin, and ask:
@@ -95,13 +106,13 @@ The target must be a trusted GitHub repository with committed requirements and a
 
 Create an Objective issue **in the target repository** with four sections: Outcome, Acceptance, Sources and Constraints. You can copy the [Objective issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml) into that repository. Then ask:
 
-> Use Factory to plan Objective #123. Show me the plan and any unresolved questions before running it.
+> Use Factory to inspect Objective #123 and its committed sources. Explain any missing prerequisites or unclear acceptance. Do not run it yet.
 
-Planning compiles and reviews with the configured planning provider, but does not start workers or create Work Item issues. Inspect the scope, dependencies, and validation commands. Resolve any specific review question, then ask:
+This inspects the issue and repository without starting Factory. The installed CLI has no plan-only command: `factory run` plans and independently reviews, then executes a clean plan. When you authorize execution, ask:
 
-> Use Factory to run the accepted plan for Objective #123.
+> Use Factory to run Objective #123.
 
-The director skill runs the accepted plan through Factory. Execution creates Work Item issues, runs agents, and publishes and integrates accepted changes under your repository's permissions and branch rules. To inspect progress, ask:
+The director skill runs the Objective through Factory. A planning question stops for your decision; otherwise execution creates Work Item issues, runs agents, and publishes and integrates accepted changes under your repository's permissions and branch rules. To inspect progress, ask:
 
 > Use Factory to show the status of Objective #123 and explain anything waiting for my input.
 

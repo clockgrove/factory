@@ -716,7 +716,7 @@ function assertBaseObservedCommands(
         !authorizedCommand(check, graph.baseSha, sources, checkout)
       )
         throw new Error(
-          `Work Item ${item.id} marks \`${check.command}\` base-observed in ${check.source ?? "an unknown source"}, but it does not exist at base ${graph.baseSha}. A command the plan creates is not base-observed: use a source-declared command line from the Objective or a pinned source, or prove the criterion by review.`,
+          `Work Item ${item.id} marks \`${check.command}\` base-observed in ${check.source ?? "an unknown source"}, but it is not authorized at base ${graph.baseSha}. For package.json, use the repository's authorized npm/pnpm invocation by an existing script name, not its JSON script body. Other tracked files require an exact standalone executable command line. A command the plan creates is not base-observed: use a standalone source-declared command line from the Objective or a pinned source, or prove the criterion by review.`,
         );
 }
 

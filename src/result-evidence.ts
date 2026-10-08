@@ -31,6 +31,7 @@ import { assertFailedValidationRecord } from "./failed-validation.js";
 import { deliveredHead } from "./delivery/branch-update.js";
 import {
   type ValidationEvidence,
+  assertRetainedReviewEvidence,
   assertSelectedLfsValidation,
 } from "./validation-evidence.js";
 
@@ -1373,6 +1374,8 @@ function workItemResultEvidence(args: {
   item: WorkItem;
   checkout: string;
   textBudget: ReviewTextBudget;
+  /** Final review already supplies this same exact tree's current Git delta. */
+  includeDelta?: boolean;
 }) {
   const { state, item, checkout, textBudget } = args;
   const current = state.work[item.id];
@@ -1500,7 +1503,7 @@ function workItemResultEvidence(args: {
     checkout,
     current.baseSha,
     current.changeRef,
-    textBudget,
+    args.includeDelta === false ? 0 : textBudget,
   );
   const changePacket = parseResultChangePacket(change);
   const unownedChanges = changePacket.changes
@@ -1543,17 +1546,19 @@ function workItemResultEvidence(args: {
     : null;
   const evidencePath = `Work Item Git delta: ${item.id}`;
   evidence.push(
-    ...workItemDeltaSources({
-      item,
-      state,
-      executionBaseSha: current.executionBaseSha,
-      resultBaseSha: current.baseSha,
-      resultCommitSha: current.changeRef,
-      resultTreeSha: current.treeSha,
-      integratedCommitSha: current.integratedSha ?? null,
-      integratedTreeSha: itemIntegratedTreeSha,
-      change,
-    }),
+    ...(args.includeDelta === false
+      ? []
+      : workItemDeltaSources({
+          item,
+          state,
+          executionBaseSha: current.executionBaseSha,
+          resultBaseSha: current.baseSha,
+          resultCommitSha: current.changeRef,
+          resultTreeSha: current.treeSha,
+          integratedCommitSha: current.integratedSha ?? null,
+          integratedTreeSha: itemIntegratedTreeSha,
+          change,
+        })),
   );
   evidence.push(
     ...workItemMaterializationEvidence({
@@ -1566,6 +1571,8 @@ function workItemResultEvidence(args: {
   const record = {
     id: item.id,
     status: current.status,
+    declaredDependencies: item.dependencies,
+    ownedPaths: item.ownedPaths,
     executionBaseCommitSha: current.executionBaseSha,
     resultBaseCommitSha: current.baseSha,
     resultCommitSha: current.changeRef,
@@ -1589,7 +1596,12 @@ function workItemResultEvidence(args: {
     pullRequest: current.pullRequest,
     integratedCommitSha: current.integratedSha ?? null,
     integratedTreeSha: itemIntegratedTreeSha,
-    evidenceSource: evidencePath,
+    evidenceSource: args.includeDelta === false ? null : evidencePath,
+    ...(args.includeDelta === false && {
+      // Preserve the item's exact raw path/mode/blob delta and ownership scope
+      // while the final packet supplies text for the identical candidate tree.
+      exactResultChanges: changePacket.changes,
+    }),
     harnessDiscovery: retainedHarnessDiscovery(state, item),
     selectedAssetSet: current.selectedAssetSet,
     selectedAsset: current.assets?.find(
@@ -1912,7 +1924,8 @@ export function workItemReviewEvidence(args: {
 }
 /**
  * Build final-review authority from supervisor state and exact Git objects.
- * Previous model verdicts and quotes are intentionally excluded.
+ * Accepted findings are historical context with their original literal evidence;
+ * they never replace independent judgment of the integrated original criteria.
  */
 export function objectiveReviewEvidence(args: {
   state: FactoryState;
@@ -1960,6 +1973,9 @@ export function objectiveReviewEvidence(args: {
       item,
       checkout,
       textBudget,
+      includeDelta:
+        current.treeSha !== candidateTreeSha ||
+        current.baseSha !== state.baseSha,
     });
     if (current.integratedSha) {
       assertAncestor(
@@ -1989,7 +2005,50 @@ export function objectiveReviewEvidence(args: {
         integratedCommitSha: current.integratedSha!,
       });
     evidence.push(...proof.evidence);
-    return proof.record;
+    assertRetainedReviewEvidence(current.validation);
+    const findings = current.validation.criteria ?? [];
+    if (
+      current.validation.reviewEvidence !== undefined &&
+      (findings.length !== item.acceptance.length ||
+        findings.some(
+          (finding, index) =>
+            finding.criterion !== item.acceptance[index] ||
+            !["pass", "human-accept"].includes(finding.verdict),
+        ))
+    )
+      throw new Error(
+        `Work Item ${item.id} retained review differs from acceptance`,
+      );
+    const supplied = new Set<string>();
+    for (const entry of current.validation.reviewEvidence ?? []) {
+      const { id, digest: _digest, ...literal } = entry;
+      const bytes = Buffer.byteLength(JSON.stringify(literal)) + 1;
+      if (bytes > textBudget.remaining) continue;
+      textBudget.remaining -= bytes;
+      evidence.push(literal);
+      supplied.add(id);
+    }
+    return {
+      ...proof.record,
+      acceptedReview: {
+        attemptId: current.attempt,
+        graphRevisionDigest: current.graphRevisionDigest ?? null,
+        resultCommitSha: current.changeRef,
+        resultTreeSha: current.treeSha,
+        candidateTreeSha,
+        sameExactTree: current.treeSha === candidateTreeSha,
+        findings,
+        // Absent legacy or bounded-out bodies are not reconstructed from logs.
+        literalEvidence: (current.validation.reviewEvidence ?? []).map(
+          ({ content: _content, reusableBody: _body, ...reference }) => ({
+            ...reference,
+            supplied: supplied.has(reference.id),
+          }),
+        ),
+        scope:
+          "Historical accepted Work Item review only; independently judge original Objective criteria and current integration. Missing literal bodies and earlier-tree findings prove no missing current fact.",
+      },
+    };
   });
   assertIntegrationBindings(checkout, integrationRecords);
   return {

@@ -272,6 +272,35 @@ export function assertCoverageShape(graph: WorkGraph): void {
       typeof environment.preparedBy !== "string"
     )
       throw new Error("Coverage environment readiness is invalid");
+    const prerequisites =
+      environment.prerequisites === undefined ? [] : environment.prerequisites;
+    if (!Array.isArray(prerequisites))
+      throw new Error(
+        "Environment prerequisites must be an ordered command list",
+      );
+    const probeIndex = item.validation.findIndex(
+      (check) => check.command === environment.probe,
+    );
+    let previousPrerequisite = -1;
+    for (const command of prerequisites) {
+      const selected = item.validation.findIndex(
+        (check) => check.command === command,
+      );
+      if (
+        typeof command !== "string" ||
+        selected < 0 ||
+        selected <= previousPrerequisite ||
+        selected >= probeIndex ||
+        item.validation.filter((check) => check.command === command).length !==
+          1 ||
+        item.validation.filter((check) => check.command === environment.probe)
+          .length !== 1
+      )
+        throw new Error(
+          "Environment prerequisites lack ordered command authority before their probe",
+        );
+      previousPrerequisite = selected;
+    }
     if (environment.readiness === "missing")
       throw new Error(
         `Missing external prerequisite for criterion ${entry.criterionId}; source decision required`,
@@ -478,4 +507,59 @@ export function assertCompletedCoverage(state: FactoryState): void {
         throw new Error("Required named CI proof is missing or stale");
     }
   }
+}
+
+/** Exact declared rows, in source-authorized validation order, in this checkout. */
+export function environmentValidationIndices(
+  graph: WorkGraph,
+  itemId: string,
+): number[] {
+  assertCoverageShape(graph);
+  const item = graph.items.find((candidate) => candidate.id === itemId);
+  if (!item) throw new Error("Environment owner is absent");
+  const selected = new Set(
+    itemCoverage(graph, itemId)
+      .flatMap((entry) => [
+        ...(entry.environment.prerequisites ?? []),
+        entry.environment.probe,
+      ])
+      .filter(Boolean),
+  );
+  return item.validation.flatMap((check, index) =>
+    selected.has(check.command) ? [index] : [],
+  );
+}
+
+/** Preparation authority only; no readiness or acceptance inferred from success. */
+export function objectivePreparationCommands(graph: WorkGraph): string[] {
+  assertCoverageShape(graph);
+  const commands: string[] = [];
+  const ordered: WorkItem[] = [];
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (item: WorkItem) => {
+    if (visited.has(item.id)) return;
+    if (visiting.has(item.id))
+      throw new Error("Preparation dependencies contain a cycle");
+    visiting.add(item.id);
+    for (const id of item.dependencies) {
+      const dependency = graph.items.find((candidate) => candidate.id === id);
+      if (!dependency) throw new Error("Preparation dependency is absent");
+      visit(dependency);
+    }
+    visiting.delete(item.id);
+    visited.add(item.id);
+    ordered.push(item);
+  };
+  for (const item of graph.items) visit(item);
+  for (const item of ordered) {
+    const selected = new Set(
+      itemCoverage(graph, item.id).flatMap(
+        (entry) => entry.environment.prerequisites ?? [],
+      ),
+    );
+    for (const check of item.validation)
+      if (selected.has(check.command)) commands.push(check.command);
+  }
+  return commands;
 }

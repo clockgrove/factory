@@ -15,7 +15,7 @@ export function workerContext(
   diagnostics: DiagnosticEmitter | undefined,
   ids: { runId?: string; itemId: string },
 ): ExecutionContext {
-  return executionContext(
+  const context = executionContext(
     work,
     save,
     cancelled,
@@ -37,6 +37,26 @@ export function workerContext(
         detail: orphan.detail,
       }),
   );
+  context.observeReadiness = (entry) =>
+    diagnostics?.emit({
+      ...ids,
+      attemptId: work.attempt,
+      operation: "environment-readiness-command",
+      outcome: entry.passed ? "completed" : "failed",
+      durationMs: entry.durationMs,
+      metadata: {
+        scope: "actual-worker-fresh-checkout",
+        validationIndex: entry.index,
+        command: entry.command,
+        exitCode: entry.exitCode,
+        baseSha: entry.baseSha,
+        treeSha: entry.treeSha,
+        worktree: entry.worktree,
+        source: entry.source,
+      },
+      detail: entry.output,
+    });
+  return context;
 }
 
 /** Bind asynchronous provider checkpoints to the same owned Work Item attempt. */

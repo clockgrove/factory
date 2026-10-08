@@ -1,14 +1,3 @@
-import { packageManagerUpdate } from "../package-manager-update.js";
-import {
-  attachedFault,
-  cancelledFault,
-  classifyFaults,
-  judgedAsWork,
-  readWorkerJson,
-  StepFault,
-  workFault,
-} from "../fault.js";
-import { executionFault } from "./fault.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -49,12 +38,22 @@ import type {
 } from "../contracts.js";
 import { AuthenticationRequiredError } from "../contracts.js";
 import { assertExecutionBinding } from "../execution-profiles.js";
+import {
+  attachedFault,
+  cancelledFault,
+  classifyFaults,
+  judgedAsWork,
+  readWorkerJson,
+  StepFault,
+  workFault,
+} from "../fault.js";
 import { assertDiscovery } from "../graph-amendments.js";
 import {
   captureAssetSets,
   importSourceAssets,
   parseProducedAssetSets,
 } from "../media.js";
+import { packageManagerUpdate } from "../package-manager-update.js";
 import {
   addWorktree,
   hasUnresolvedSubprocesses,
@@ -63,20 +62,24 @@ import {
   pinnedGitAsync,
   pinnedGitMagicAsync,
   processGroupExists,
-  sanitizedWorkerEnvironment,
   removeWorktree,
+  sanitizedWorkerEnvironment,
   UnsettledSubprocessError,
 } from "../process.js";
 import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
+import { assertPinnedNpmScripts, validateCheckout } from "../validation.js";
+import type { ValidationEvidence } from "../validation-evidence.js";
+import { workspacePackageAdditions } from "../workspace-membership.js";
 import { stoppedFault } from "./attempt.js";
 import { assertDurableValue } from "./checkpoint.js";
+import { executionFault } from "./fault.js";
+import { checkStagedCandidate } from "./staged-candidate.js";
 import {
-  launchWorker,
   killGroup,
+  launchWorker,
   observeWorker,
   stopUnrecordedWorker,
 } from "./worker-process.js";
-import { checkStagedCandidate } from "./staged-candidate.js";
 
 /**
  * A harness that can stop what a start of an identity spawned before its
@@ -99,6 +102,11 @@ type Active = {
   adapterIdentity: string;
   handle: HarnessHandle;
   failure?: string;
+  environmentReadiness?: {
+    commitSha: string;
+    worktree: string;
+    evidence: ValidationEvidence;
+  };
 };
 
 interface WorkerHandleData {
@@ -543,6 +551,7 @@ export async function collectWorktreeResult(
 }
 
 export class LocalExecutionDriver implements ExecutionDriver {
+  readonly freshCheckoutReadiness = true as const;
   private active = new Map<string, Active>();
 
   private require(handle: ExecutionHandle): Active {
@@ -691,6 +700,75 @@ export class LocalExecutionDriver implements ExecutionDriver {
       throw new Error("Execution base does not resolve exactly");
     await addWorktree(this.checkout, worktree, request.baseSha);
     try {
+      let environmentReadiness: ValidationEvidence | undefined;
+      if (request.environmentReadiness) {
+        const readiness = request.environmentReadiness;
+        let previous = -1;
+        const checks = readiness.validationIndices.map((index) => {
+          if (
+            !Number.isSafeInteger(index) ||
+            index <= previous ||
+            !request.item.validation[index]
+          )
+            throw new Error(
+              "Worker readiness requires ordered authorized validation rows",
+            );
+          previous = index;
+          return request.item.validation[index]!;
+        });
+        if (
+          JSON.stringify(readiness.workspacePackageAdditions) !==
+            JSON.stringify(
+              workspacePackageAdditions(request.objectiveBody ?? ""),
+            ) ||
+          readiness.packageManagerUpdate !==
+            packageManagerUpdate(request.objectiveBody ?? "")
+        )
+          throw new Error(
+            "Worker readiness differs from pinned Objective package authority",
+          );
+        assertPinnedNpmScripts(
+          this.checkout,
+          readiness.acceptedBaseSha,
+          request.baseSha,
+          checks.map((check) => check.command),
+          {
+            sourceDeclared: checks
+              .filter((check) => check.provenance === "source-declared")
+              .map((check) => check.command),
+            predecessorSha: request.baseSha,
+            workspacePackageAdditions: readiness.workspacePackageAdditions,
+            packageManagerUpdate: readiness.packageManagerUpdate,
+          },
+        );
+        environmentReadiness = await validateCheckout(
+          worktree,
+          join(this.workRoot, "environment-preflight", identity),
+          request.baseSha,
+          pinnedGit(worktree, "rev-parse", "HEAD^{tree}"),
+          checks.map((check) => check.command),
+          (entry) =>
+            context?.observeReadiness?.({
+              ...entry,
+              index: readiness.validationIndices[entry.index]!,
+              command: checks[entry.index]!.command,
+              baseSha: request.baseSha,
+              treeSha: pinnedGit(worktree, "rev-parse", "HEAD^{tree}"),
+              worktree,
+              source:
+                checks[entry.index]!.source ?? checks[entry.index]!.provenance,
+            }),
+          undefined,
+          readiness.lfsMembers,
+          this.contentStore,
+          readiness.acceptedBaseSha,
+          false,
+        );
+        if (context?.cancelled())
+          throw cancelledFault(
+            "Cancelled after worker environment preparation",
+          );
+      }
       const sourceAssets = await importSourceAssets(
         this.contentStore,
         worktree,
@@ -771,6 +849,13 @@ export class LocalExecutionDriver implements ExecutionDriver {
           sourceAssets,
         }),
         worktree,
+        ...(environmentReadiness && {
+          environmentReadiness: {
+            commitSha: request.baseSha,
+            worktree,
+            evidence: environmentReadiness,
+          },
+        }),
         adapterIdentity:
           request.item.executionBinding?.adapter ?? this.adapterIdentity,
         ...(request.item.executionBinding
@@ -784,7 +869,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
       return started;
     } catch (error) {
       this.active.delete(identity);
-      await removeWorktree(this.checkout, worktree);
+      if (!hasUnresolvedSubprocesses())
+        await removeWorktree(this.checkout, worktree);
       throw error;
     }
   }

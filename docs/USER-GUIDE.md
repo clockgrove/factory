@@ -236,6 +236,8 @@ Running is the consent to execute that Objective. `run` plans if needed, saves t
 | 2    | It needs you. The message names the decision and command. |
 | 1    | It failed or was cancelled. The message says why.         |
 
+Supply exact setup and probe commands, their required order and resources in the Objective’s authoritative sources. Factory selects only declared preimplementation prerequisites before a readiness probe; it does not run all acceptance checks as setup. Every fresh checkout prepares its own ignored runtime resources. A setup receipt or an earlier successful checkout does not prove readiness in the worker or final validator, and does not satisfy implementation acceptance. Unsupported worker-environment preparation stops for a source decision.
+
 Run the same command again to resume from recorded state. A saved plan is reused rather than planned again. The first run also checks host and worker readiness, without a model call, and names any failing check and its fix. Control a live run from another terminal with `factory pause|drain|resume|cancel --objective N`. Pause and drain let an already running try settle, then block new tries and paid calls. They survive restarts, and `resume` continues either. `--deadline` is absolute and a restart cannot extend it. Different Objectives can run at the same time, each from its own terminal with its own configured concurrency; a second live run of the same Objective is refused.
 
 ## Queue and background

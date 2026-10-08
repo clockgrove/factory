@@ -25,6 +25,8 @@ export interface AcceptanceDecision {
 export interface ValidationEvidence {
   treeSha: string;
   commands: ValidationCommandReceipt[];
+  /** Source-authorized setup in this same fresh tree; never criterion evidence. */
+  preparation?: ValidationCommandReceipt[];
   selectedLfs?: SelectedLfsValidation[];
   hydrationReceipt?: HydrationReceipt;
   worktreeObservation?: ValidationWorktreeObservation;

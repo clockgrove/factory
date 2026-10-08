@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   existsSync,
@@ -13,30 +13,41 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runAnalysisCommand } from "../dist/analysis-cli.js";
-import { DiagnosticEmitter } from "../dist/diagnostics.js";
-import { readInteractionContent } from "../dist/capture.js";
+import test from "node:test";
 import { analyzeInteractions } from "../dist/analysis.js";
+import { runAnalysisCommand } from "../dist/analysis-cli.js";
+import { readInteractionContent } from "../dist/capture.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
-import { graphDigest } from "../dist/graph-amendments.js";
-import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
-import { rereviewWorkItem } from "../dist/runner.js";
-import { readState, saveState, statePath } from "../dist/state-store.js";
-import { createHash } from "node:crypto";
-import { validateTree } from "../dist/validation.js";
-import {
-  CandidateValidationFailure,
-  recordWorkFailure,
-} from "../dist/work-repair.js";
+import { DiagnosticEmitter, readDiagnostics } from "../dist/diagnostics.js";
 import { CodexHarness } from "../dist/execution/local.js";
 import { killGroup } from "../dist/execution/worker-process.js";
+import { graphDigest } from "../dist/graph-amendments.js";
 import {
+  addWorktree,
   linuxProcessIdentity,
   processGroupExists,
+  removeWorktree,
   sanitizedWorkerEnvironment,
   subprocessAsync,
   withProcessCancellation,
 } from "../dist/process.js";
+import {
+  environmentValidationIndices,
+  objectivePreparationCommands,
+} from "../dist/qa.js";
+import { preflightItemEnvironment } from "../dist/qa-execution.js";
+import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
+import { rereviewWorkItem } from "../dist/runner.js";
+import { readState, saveState, statePath } from "../dist/state-store.js";
+import {
+  validateCheckout,
+  validateTree,
+  validateWorkItem,
+} from "../dist/validation.js";
+import {
+  CandidateValidationFailure,
+  recordWorkFailure,
+} from "../dist/work-repair.js";
 
 test("trusted child captures roundtrip through the configured private state root", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-worker-capture-"));
@@ -538,6 +549,231 @@ process.exit(23);`;
     );
     assert.equal(git("rev-parse", "HEAD"), commit);
     assert.deepEqual(readState(config.repository, 1), validationHistory);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("source readiness prepares each real fresh checkout before its phase checks", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-readiness-checkouts-"));
+  const checkout = join(root, "target");
+  mkdirSync(checkout);
+  const git = (...args) =>
+    execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8" }).trim();
+  const setup = "npm run hydrate-readiness";
+  const probe = "npm run probe-readiness";
+  const acceptance = "npm test";
+  try {
+    git("init", "-b", "main");
+    writeFileSync(join(checkout, ".gitignore"), ".runtime-ready\n");
+    writeFileSync(
+      join(checkout, "README.md"),
+      `Run this preimplementation prerequisite before its probe in each fresh checkout:\n${setup}\n${probe}\nOnly after implementing result.cjs, run:\n${acceptance}\n`,
+    );
+    writeFileSync(
+      join(checkout, "prepare.cjs"),
+      'const fs=require("node:fs"); if(fs.existsSync(".runtime-ready")) throw Error("not fresh"); fs.writeFileSync(".runtime-ready", "prepared");\n',
+    );
+    writeFileSync(
+      join(checkout, "probe.cjs"),
+      'const fs=require("node:fs"); if(fs.readFileSync(".runtime-ready","utf8")!=="prepared") throw Error("unprepared");\n',
+    );
+    writeFileSync(
+      join(checkout, "accept.cjs"),
+      'require("./probe.cjs"); if(require("./result.cjs")!==42) throw Error("unimplemented");\n',
+    );
+    writeFileSync(
+      join(checkout, "package.json"),
+      JSON.stringify({
+        name: "fresh-readiness-integration",
+        version: "1.0.0",
+        private: true,
+        scripts: {
+          "hydrate-readiness": "node prepare.cjs",
+          "probe-readiness": "node probe.cjs",
+          test: "node accept.cjs",
+        },
+      }),
+    );
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=Integration",
+      "-c",
+      "user.email=integration@example.invalid",
+      "commit",
+      "-m",
+      "source-authorized preparation, probe and late acceptance",
+    );
+    const baseSha = git("rev-parse", "HEAD");
+    const baseTree = git("rev-parse", "HEAD^{tree}");
+    const item = {
+      id: "implementation",
+      kind: "work",
+      title: "Implement result",
+      goal: "Return required result",
+      brief: "Implement result.cjs",
+      acceptance: ["Result is 42"],
+      nonGoals: [],
+      dependencies: [],
+      ownedPaths: ["result.cjs"],
+      citations: [],
+      validation: [setup, probe, acceptance].map((command) => ({
+        command,
+        provenance: "source-declared",
+        source: "README.md",
+      })),
+    };
+    const graph = {
+      objective: 1,
+      baseSha,
+      items: [item],
+      coverage: [
+        {
+          criterionId: createHash("sha256").update(acceptance).digest("hex"),
+          source: {
+            path: "OBJECTIVE",
+            digest: createHash("sha256").update(acceptance).digest("hex"),
+            text: acceptance,
+          },
+          itemId: item.id,
+          proof: { kind: "result-command", validationIndex: 2 },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe,
+            prerequisites: [setup],
+            preparedBy: "",
+          },
+        },
+      ],
+    };
+    assert.deepEqual(environmentValidationIndices(graph, item.id), [0, 1]);
+    assert.deepEqual(objectivePreparationCommands(graph), [setup]);
+    const diagnosticRepository = "integration/fresh-readiness";
+    const diagnostics = new DiagnosticEmitter(diagnosticRepository, 1);
+    await preflightItemEnvironment({
+      config: { checkout },
+      root: join(root, "run"),
+      state: {
+        graph,
+        baseSha,
+        runId: "local-real",
+        work: { [item.id]: { status: "pending" } },
+      },
+      item,
+      baseSha,
+      diagnostics,
+    });
+    const events = readDiagnostics(diagnosticRepository, 1).filter(
+      (event) => event.operation === "environment-readiness-command",
+    );
+    assert.deepEqual(
+      events.map((event) => event.metadata.command),
+      [setup, probe],
+    );
+    assert.ok(events.every((event) => event.outcome === "completed"));
+    assert.equal(
+      existsSync(
+        join(root, "run", "environment-preflight", item.id, "worktree"),
+      ),
+      false,
+    );
+    const worker = join(root, "worker");
+    await addWorktree(checkout, worker, baseSha);
+    try {
+      assert.equal(existsSync(join(worker, ".runtime-ready")), false);
+      const readiness = await validateCheckout(
+        worker,
+        join(root, "worker-receipts"),
+        baseSha,
+        baseTree,
+        [setup, probe],
+      );
+      assert.deepEqual(
+        readiness.commands.map((entry) => entry.command),
+        [setup, probe],
+      );
+      assert.equal(existsSync(join(worker, ".runtime-ready")), true);
+      assert.equal(existsSync(join(worker, "result.cjs")), false);
+    } finally {
+      await removeWorktree(checkout, worker);
+    }
+    await assert.rejects(
+      validateTree(
+        checkout,
+        join(root, "before-implementation"),
+        baseSha,
+        baseTree,
+        [acceptance],
+        undefined,
+        undefined,
+        [],
+        undefined,
+        baseSha,
+        false,
+        { commands: [setup] },
+      ),
+      /result.cjs/,
+    );
+    writeFileSync(join(checkout, "result.cjs"), "module.exports=42;\n");
+    git("add", "result.cjs");
+    git(
+      "-c",
+      "user.name=Integration",
+      "-c",
+      "user.email=integration@example.invalid",
+      "commit",
+      "-m",
+      "implementation",
+    );
+    const commit = git("rev-parse", "HEAD");
+    const tree = git("rev-parse", "HEAD^{tree}");
+    const result = await validateWorkItem(
+      checkout,
+      join(root, "result-validation"),
+      item,
+      commit,
+      tree,
+      baseSha,
+    );
+    assert.deepEqual(
+      result.commands.map((entry) => entry.command),
+      [setup, probe, acceptance],
+    );
+    const final = await validateTree(
+      checkout,
+      join(root, "final-validation"),
+      commit,
+      tree,
+      [acceptance],
+      undefined,
+      undefined,
+      [],
+      undefined,
+      baseSha,
+      true,
+      { commands: objectivePreparationCommands(graph) },
+    );
+    assert.deepEqual(
+      final.commands.map((entry) => entry.command),
+      [acceptance],
+    );
+    assert.deepEqual(
+      final.preparation.map((entry) => entry.command),
+      [setup],
+    );
+    assert.equal(final.commands[0].index, 0);
+    assert.ok(
+      final.preparation.every(
+        (entry) => entry.treeSha === tree && entry.passed,
+      ),
+    );
+    assert.equal(git("status", "--porcelain"), "");
+    assert.equal(
+      git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+      1,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -42,6 +42,8 @@ Pin the Objective, default-branch commit and complete cited source contents. Mod
 
 Commands need exact source or verified base authority. Ownership is literal and enforced. Existing acceptance scripts and package-manager/security metadata retain their fixed constraints unless the Objective explicitly authorizes the supported change. Review cannot invent prerequisites, repair quotes into evidence or approve missing facts.
 
+Readiness coverage selects an exact probe and, when supplied sources require it, ordered prerequisite validation rows before that probe. Preparation is authenticated separately in every fresh preflight, worker and final validator checkout; ignored installs and historical receipts do not transfer. The local worker uses the shared validator executor before its provider starts, and drivers unable to authenticate their actual environment refuse such work. Preparation receipts never replace semantic acceptance.
+
 Validation runs the approved commands against the exact candidate tree and records its identity and outcomes. Acceptance review evaluates that same tree using authenticated receipts, complete required source evidence and declared criteria. Missing, incomplete or invalid evidence stays missing, incomplete or invalid; passing unrelated checks does not replace it.
 
 ## State and recovery

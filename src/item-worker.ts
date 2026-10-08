@@ -11,14 +11,17 @@ import type {
 } from "./contracts.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { workerContext } from "./execution/checkpoint.js";
-import { recordWorkerDiscovery } from "./graph-amendments.js";
 import { cancelledFault } from "./fault.js";
+import { recordWorkerDiscovery } from "./graph-amendments.js";
 import { executeItem } from "./item-steps.js";
-import { selectedInputsForItem } from "./media.js";
-import type { WorkRecovery } from "./repair-policy.js";
+import { selectedInputsForItem, validationLfsMembersForItem } from "./media.js";
+import { packageManagerUpdate } from "./package-manager-update.js";
 import type { PhaseAdmission } from "./phase-admission.js";
+import { environmentValidationIndices } from "./qa.js";
 import { preflightItemEnvironment } from "./qa-execution.js";
+import type { WorkRecovery } from "./repair-policy.js";
 import type { FactoryState } from "./state.js";
+import { workspacePackageAdditions } from "./workspace-membership.js";
 
 interface ItemWorker {
   state: FactoryState;
@@ -67,6 +70,11 @@ export async function runWorker(
 ): Promise<ExecutionResult> {
   const { state, item, phases, baseSha } = args;
   const work = state.work[item.id]!;
+  const readinessIndices = environmentValidationIndices(state.graph, item.id);
+  if (readinessIndices.length && args.driver.freshCheckoutReadiness !== true)
+    throw new Error(
+      "Worker driver cannot authenticate readiness in its actual fresh environment; source decision required",
+    );
   if (!work.execution) {
     await phases.reserve(item.id, "validation");
     await preflightItemEnvironment({
@@ -77,6 +85,7 @@ export async function runWorker(
       item,
       store: args.store,
       baseSha,
+      diagnostics: args.diagnostics,
     });
   }
   // A reattached worker keeps the coding slot it holds while it runs remotely.
@@ -98,6 +107,30 @@ export async function runWorker(
       attemptId,
       objectiveBody: args.objectiveBody,
       selectedAssets: selectedInputsForItem(state, item),
+      ...(readinessIndices.length
+        ? {
+            environmentReadiness: {
+              validationIndices: readinessIndices,
+              acceptedBaseSha: state.baseSha,
+              lfsMembers: validationLfsMembersForItem(
+                state,
+                item,
+                args.config.checkout,
+                baseSha,
+              ),
+              workspacePackageAdditions: workspacePackageAdditions(
+                args.objectiveBody ?? "",
+              ),
+              ...(packageManagerUpdate(args.objectiveBody ?? "")
+                ? {
+                    packageManagerUpdate: packageManagerUpdate(
+                      args.objectiveBody ?? "",
+                    ),
+                  }
+                : {}),
+            },
+          }
+        : {}),
     }),
   });
   phases.release(item.id);

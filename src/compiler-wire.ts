@@ -225,6 +225,7 @@ export function compilerWire(
           kind === "real"
             ? integer()
             : { type: ["integer", "null"], minimum: 0 },
+        prerequisiteValidationIndices: { type: "array", items: integer() },
         preparedBy: text,
       }),
     ),
@@ -707,10 +708,43 @@ export function compilerWire(
           const env = object(entry.environment, "environment");
           keys(
             env,
-            ["kind", "readiness", "probeValidationIndex", "preparedBy"],
+            [
+              "kind",
+              "readiness",
+              "probeValidationIndex",
+              "prerequisiteValidationIndices",
+              "preparedBy",
+            ],
             "environment",
           );
-          const { probeValidationIndex, ...canonicalEnvironment } = env;
+          const {
+            probeValidationIndex,
+            prerequisiteValidationIndices,
+            ...canonicalEnvironment
+          } = env;
+          if (!Array.isArray(prerequisiteValidationIndices))
+            throw new Error(
+              "Readiness prerequisites must be ordered validation indices",
+            );
+          let previousPrerequisite = -1;
+          const prerequisites = prerequisiteValidationIndices.map((value) => {
+            const selected = index(
+              value,
+              owner.validation.length,
+              "prerequisiteValidationIndices",
+            );
+            if (
+              probeValidationIndex === null ||
+              selected <= previousPrerequisite ||
+              typeof probeValidationIndex !== "number" ||
+              selected >= probeValidationIndex
+            )
+              throw new Error(
+                "Readiness prerequisites must be unique, ordered and precede their probe",
+              );
+            previousPrerequisite = selected;
+            return owner.validation[selected]!.command;
+          });
           const probe =
             probeValidationIndex === null
               ? ""
@@ -725,9 +759,11 @@ export function compilerWire(
             ...structuredClone(obligation),
             itemId: owner.id,
             proof: canonicalProof,
-            environment: { ...canonicalEnvironment, probe } as NonNullable<
-              WorkGraph["coverage"]
-            >[number]["environment"],
+            environment: {
+              ...canonicalEnvironment,
+              probe,
+              ...(prerequisites.length ? { prerequisites } : {}),
+            } as NonNullable<WorkGraph["coverage"]>[number]["environment"],
           });
         }
         graph.items.push(owner);

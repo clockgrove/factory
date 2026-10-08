@@ -1,4 +1,3 @@
-import { packageManagerUpdate } from "./package-manager-update.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "./compiler.js";
@@ -10,15 +9,20 @@ import type {
   PlanningModel,
   WorkItem,
 } from "./contracts.js";
+import { assertProofCheckDefined } from "./delivery/check-sources.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
+import { cancelledFault, faultOf } from "./fault.js";
 import { graphDigest } from "./graph-amendments.js";
 import { reviewItem } from "./item-steps.js";
 import { validationLfsMembersForItem } from "./media.js";
+import { packageManagerUpdate } from "./package-manager-update.js";
 import type { PhaseAdmission } from "./phase-admission.js";
-import { cancelledFault, faultOf } from "./fault.js";
-import { assertProofCheckDefined } from "./delivery/check-sources.js";
 import { currentProcessSignal, fetchHead, gitAsync } from "./process.js";
-import { itemCoverage, objectiveCandidate } from "./qa.js";
+import {
+  environmentValidationIndices,
+  itemCoverage,
+  objectiveCandidate,
+} from "./qa.js";
 import type { FactoryState } from "./state.js";
 import { clearWait, StepPaused, setWait, step, waitOf } from "./step.js";
 import {
@@ -37,20 +41,17 @@ export async function preflightItemEnvironment(args: {
   baseSha: string;
   objectiveBody?: string;
   store?: ContentStore;
+  diagnostics?: DiagnosticEmitter;
 }): Promise<void> {
   const entries = itemCoverage(args.state.graph, args.item.id);
-  const probes = new Set(
-    entries.map((entry) => entry.environment.probe).filter(Boolean),
-  );
-  if (!probes.size) return;
+  const indices = environmentValidationIndices(args.state.graph, args.item.id);
+  if (!indices.length) return;
   for (const entry of entries) {
     const preparedBy = entry.environment.preparedBy;
     if (preparedBy && args.state.work[preparedBy]?.status !== "done")
       throw new Error("Required environment preparation is not complete");
   }
-  const commands = args.item.validation.filter((check) =>
-    probes.has(check.command),
-  );
+  const commands = indices.map((index) => args.item.validation[index]!);
   await validateWorkItem(
     args.config.checkout,
     join(args.root, "environment-preflight", args.item.id),
@@ -58,8 +59,46 @@ export async function preflightItemEnvironment(args: {
     args.baseSha,
     await gitAsync(args.config.checkout, "rev-parse", `${args.baseSha}^{tree}`),
     args.state.baseSha,
-    undefined,
-    undefined,
+    (entry) =>
+      args.diagnostics?.emit({
+        runId: args.state.runId,
+        itemId: args.item.id,
+        operation: "environment-readiness-command",
+        outcome: entry.passed ? "completed" : "failed",
+        durationMs: entry.durationMs,
+        metadata: {
+          scope: "preflight-fresh-checkout",
+          baseSha: args.baseSha,
+          validationIndex: indices[entry.index]!,
+          command: commands[entry.index]!.command,
+          source:
+            commands[entry.index]!.source ?? commands[entry.index]!.provenance,
+          purpose: entries.some(
+            (coverage) =>
+              coverage.environment.probe === commands[entry.index]!.command,
+          )
+            ? "probe"
+            : "prerequisite",
+          exitCode: entry.exitCode,
+        },
+        detail: entry.output,
+      }),
+    (entry) =>
+      args.diagnostics?.emitStream(
+        {
+          runId: args.state.runId,
+          itemId: args.item.id,
+          operation: "environment-readiness-output",
+          outcome: "observed",
+          metadata: {
+            scope: "preflight-fresh-checkout",
+            validationIndex: indices[entry.index]!,
+            stream: entry.stream,
+          },
+        },
+        entry.output,
+        entry.final,
+      ),
     args.baseSha,
     validationLfsMembersForItem(
       args.state,

@@ -1,13 +1,13 @@
 export const DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS = 15 * 60 * 1_000;
 
-/** Structured answers may reason longer at the explicitly selected higher effort. */
+/** Native event surfaces may omit ongoing reasoning; higher effort gets a finite quiet window. */
 export function modelResponseTimeoutMs(reasoningEffort?: string): number {
   return (
-    (reasoningEffort === "high"
-      ? 3
-      : ["xhigh", "max", "ultra", "persistent"].includes(reasoningEffort ?? "")
-        ? 5
-        : 2) *
+    (["high", "xhigh", "max", "ultra", "persistent"].includes(
+      reasoningEffort ?? "",
+    )
+      ? 5
+      : 2) *
     60 *
     1_000
   );
@@ -24,7 +24,7 @@ export class ProviderTurnTimeoutError extends Error {
     readonly inactivityMs = timeoutMs,
   ) {
     super(
-      `Provider turn produced no progress for ${inactivityMs} ms (waiting for ${waitingFor}; last observed operation: ${lastOperation}; timeout ${timeoutMs} ms)`,
+      `No provider events were observed for ${inactivityMs} ms (waiting for ${waitingFor}; last observed operation: ${lastOperation}; timeout ${timeoutMs} ms)`,
     );
     this.name = "ProviderTurnTimeoutError";
   }

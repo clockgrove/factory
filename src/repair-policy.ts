@@ -185,6 +185,8 @@ export interface FailureDisposition {
   digest: string;
   /** Optional canonical failed-validation capture; absence never supplies receipts. */
   validationCaptureDigest?: string;
+  /** Exact rejected acceptance evidence, separate from failed-command capture. */
+  semanticRefusal?: import("./semantic-refusal.js").SemanticRefusalRecord;
   /**
    * The failure event a correction charges. Only a wrong result has one; a
    * transient or configuration failure is never charged.

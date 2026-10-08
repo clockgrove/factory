@@ -24,6 +24,10 @@ import {
 } from "./review-evidence.js";
 import type { AcceptancePending } from "./state.js";
 import {
+  SemanticAcceptanceFailure,
+  type SemanticRefusalEvidence,
+} from "./semantic-refusal.js";
+import {
   type AcceptanceDecision,
   assertValidationWorktreeObservation,
   type CriterionEvidence,
@@ -214,12 +218,19 @@ export async function reviewAcceptance(args: {
   const questions = new Map<number, Omit<AcceptancePending, "more">>();
   const invalidIndices: number[] = [];
   let refused: string | undefined;
+  let semanticRefusal: SemanticRefusalEvidence | undefined;
   for (const [index, criterion] of criteria.entries()) {
     const decision = args.decisions?.find(
       (item) =>
         item.criterion === criterion && item.treeSha === evidence.treeSha,
     );
     if (decision?.outcome === "refuse") {
+      semanticRefusal ??= {
+        treeSha: evidence.treeSha,
+        criterion,
+        source: "operator",
+        decision: structuredClone(decision),
+      };
       refused ??= `Acceptance criterion refused by ${decision.actor}: ${criterion}`;
       continue;
     }
@@ -256,6 +267,13 @@ export async function reviewAcceptance(args: {
       continue;
     }
     if (finding.verdict === "refuse") {
+      semanticRefusal ??= {
+        treeSha: evidence.treeSha,
+        criterion,
+        source: "model",
+        finding: structuredClone(finding),
+        evidence: resolveReviewReferences(finding.evidenceIds, packet, false),
+      };
       refused ??= `Acceptance criterion disproved: ${criterion}: ${finding.detail}`;
       continue;
     }
@@ -316,8 +334,7 @@ export async function reviewAcceptance(args: {
   }
 
   // A valid review that refuses a criterion judges the work, not the call.
-  if (refused)
-    throw new StepFault({ kind: "work", evidence: { detail: refused } });
+  if (refused) throw new SemanticAcceptanceFailure(refused, semanticRefusal!);
   // An invalid answer may have been paid for: the review step asks again
   // once with the validation error. An answer still invalid is one the
   // reviewer cannot fix (evidence it may not cite, a source it cannot see

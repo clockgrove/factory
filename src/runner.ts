@@ -40,7 +40,6 @@ import {
   serveControl,
 } from "./coordinator-control.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
-import { objectiveComplete } from "./completion.js";
 import {
   continuationStatusDocument,
   DiagnosticEmitter,

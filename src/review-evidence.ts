@@ -186,10 +186,6 @@ function reviewPacketChoices(packet: ReviewPacket) {
     });
   }
   const choices = {
-    criteria: packet.criteria.map(({ text }, criterionIndex) => ({
-      criterionIndex,
-      text,
-    })),
     evidence: packet.evidence.map(
       ({ id: _id, reusableBody: _range, content, ...entry }, evidenceIndex) => {
         const body = candidates[evidenceIndex]!;
@@ -209,6 +205,10 @@ function reviewPacketChoices(packet: ReviewPacket) {
       },
     ),
     ...(bodies.length ? { bodies } : {}),
+    criteria: packet.criteria.map(({ text }, criterionIndex) => ({
+      criterionIndex,
+      text,
+    })),
   };
   for (const [index, entry] of packet.evidence.entries())
     if (resolveReviewBodyContent(choices, index, packet) !== entry.content)

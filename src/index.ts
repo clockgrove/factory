@@ -18,3 +18,5 @@ export {
 } from "./repair-policy.js";
 
 export * from "./capture-export.js";
+export { summarizeFormalHistory } from "./diagnostics.js";
+export type { DiagnosticEvent } from "./diagnostics.js";

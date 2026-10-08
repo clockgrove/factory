@@ -551,6 +551,7 @@ export interface ExecutionOrphan {
 }
 export interface ExecutionContext {
   observeReadiness?(observation: {
+    workerIdentity: string;
     index: number;
     command: string;
     passed: boolean;

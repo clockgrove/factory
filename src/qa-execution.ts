@@ -43,6 +43,23 @@ export async function preflightItemEnvironment(args: {
   store?: ContentStore;
   diagnostics?: DiagnosticEmitter;
 }): Promise<void> {
+  const task = () => preflightItemEnvironmentObserved(args);
+  if (args.diagnostics)
+    return args.diagnostics.span(
+      {
+        runId: args.state.runId,
+        itemId: args.item.id,
+        operation: "environment-preflight",
+        metadata: { baseSha: args.baseSha },
+      },
+      task,
+    );
+  return task();
+}
+
+async function preflightItemEnvironmentObserved(
+  args: Parameters<typeof preflightItemEnvironment>[0],
+): Promise<void> {
   const entries = itemCoverage(args.state.graph, args.item.id);
   const indices = environmentValidationIndices(args.state.graph, args.item.id);
   if (!indices.length) return;
@@ -65,6 +82,7 @@ export async function preflightItemEnvironment(args: {
         itemId: args.item.id,
         operation: "environment-readiness-command",
         outcome: entry.passed ? "completed" : "failed",
+        ...(!entry.passed && { formalFailure: true as const }),
         durationMs: entry.durationMs,
         metadata: {
           scope: "preflight-fresh-checkout",

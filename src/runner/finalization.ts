@@ -237,6 +237,7 @@ export async function finalizeObjective(args: {
               runId: state.runId,
               operation: "objective-validation-command",
               outcome: entry.passed ? "completed" : "failed",
+              ...(!entry.passed && { formalFailure: true as const }),
               durationMs: entry.durationMs,
               metadata: {
                 commandIndex: entry.index,
@@ -266,6 +267,7 @@ export async function finalizeObjective(args: {
                 runId: state.runId,
                 operation: "environment-preparation-command",
                 outcome: entry.passed ? "completed" : "failed",
+                ...(!entry.passed && { formalFailure: true as const }),
                 durationMs: entry.durationMs,
                 metadata: {
                   scope: "final-fresh-checkout",

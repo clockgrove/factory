@@ -43,9 +43,11 @@ export function workerContext(
       attemptId: work.attempt,
       operation: "environment-readiness-command",
       outcome: entry.passed ? "completed" : "failed",
+      ...(!entry.passed && { formalFailure: true as const }),
       durationMs: entry.durationMs,
       metadata: {
         scope: "actual-worker-fresh-checkout",
+        workerIdentity: entry.workerIdentity,
         validationIndex: entry.index,
         command: entry.command,
         exitCode: entry.exitCode,

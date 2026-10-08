@@ -3,6 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -18,12 +19,19 @@ import { analyzeInteractions } from "../dist/analysis.js";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
-import { DiagnosticEmitter, readDiagnostics } from "../dist/diagnostics.js";
+import {
+  diagnosticPath,
+  DiagnosticEmitter,
+  readDiagnostics,
+  summarizeFormalHistory,
+  withDiagnosticSession,
+} from "../dist/diagnostics.js";
 import { CodexHarness } from "../dist/execution/local.js";
 import { killGroup } from "../dist/execution/worker-process.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
   addWorktree,
+  gitAsync,
   linuxProcessIdentity,
   processGroupExists,
   removeWorktree,
@@ -44,6 +52,7 @@ import {
 } from "../dist/repair-policy.js";
 import { rereviewWorkItem } from "../dist/runner.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
+import { step } from "../dist/step.js";
 import {
   validateCheckout,
   validateTree,
@@ -662,19 +671,98 @@ test("source readiness prepares each real fresh checkout before its phase checks
     assert.deepEqual(objectivePreparationCommands(graph), [setup]);
     const diagnosticRepository = "integration/fresh-readiness";
     const diagnostics = new DiagnosticEmitter(diagnosticRepository, 1);
-    await preflightItemEnvironment({
-      config: { checkout },
-      root: join(root, "run"),
-      state: {
-        graph,
-        baseSha,
-        runId: "local-real",
-        work: { [item.id]: { status: "pending" } },
-      },
-      item,
-      baseSha,
+    const observerConfigDigest = createHash("sha256")
+      .update("real-readiness-check")
+      .digest("hex");
+    await withDiagnosticSession(
       diagnostics,
-    });
+      observerConfigDigest,
+      () =>
+        preflightItemEnvironment({
+          config: { checkout },
+          root: join(root, "run"),
+          state: {
+            graph,
+            baseSha,
+            runId: "local-real",
+            work: { [item.id]: { status: "pending" } },
+          },
+          item,
+          baseSha,
+          diagnostics,
+        }),
+      () => "not-accepted",
+    );
+    const prospective = readDiagnostics(diagnosticRepository, 1);
+    const expectedHistory = {
+      repository: diagnosticRepository,
+      objective: 1,
+      configDigest: observerConfigDigest,
+      observerSourceDigest: prospective[0].metadata.observerSourceDigest,
+      sessionIds: [prospective[0].observerSessionId],
+    };
+    assert.equal(
+      summarizeFormalHistory(prospective, expectedHistory).completeness,
+      "complete",
+    );
+    assert.equal(
+      summarizeFormalHistory(prospective, expectedHistory).hasFailedAttempt,
+      false,
+    );
+    const observedState = {
+      runId: "local-real",
+      work: { [item.id]: { status: "pending" } },
+    };
+    await withDiagnosticSession(
+      diagnostics,
+      observerConfigDigest,
+      async () => {
+        const marker = join(root, "actual-child-finished");
+        const child = spawn(
+          process.execPath,
+          [
+            "-e",
+            `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'done'), 150)`,
+          ],
+          { stdio: "ignore" },
+        );
+        const settled = once(child, "exit");
+        try {
+          await step(
+            observedState,
+            { scope: { item: item.id }, name: "observe-child" },
+            async (ctx) => {
+              if (!existsSync(marker))
+                ctx.pending(undefined, new Date(Date.now() + 10).toISOString());
+              return marker;
+            },
+            { save: () => undefined },
+          );
+          assert.equal((await settled)[0], 0);
+        } finally {
+          if (child.exitCode === null) {
+            child.kill();
+            await settled;
+          }
+        }
+      },
+      () => "not-accepted",
+    );
+    const pendingHistory = readDiagnostics(diagnosticRepository, 1).filter(
+      (event) => event.observerSessionId !== prospective[0].observerSessionId,
+    );
+    assert.ok(
+      pendingHistory.some(
+        (event) => event.formalAttempt?.status === "pending-poll",
+      ),
+    );
+    assert.equal(
+      summarizeFormalHistory(pendingHistory, {
+        ...expectedHistory,
+        sessionIds: [pendingHistory[0].observerSessionId],
+      }).hasFailedAttempt,
+      false,
+    );
     const events = readDiagnostics(diagnosticRepository, 1).filter(
       (event) => event.operation === "environment-readiness-command",
     );
@@ -855,22 +943,45 @@ test("source readiness prepares each real fresh checkout before its phase checks
       await removeWorktree(checkout, worker);
     }
     await assert.rejects(
-      validateTree(
-        checkout,
-        join(root, "before-implementation"),
-        baseSha,
-        baseTree,
-        [acceptance],
-        undefined,
-        undefined,
-        [],
-        undefined,
-        baseSha,
-        false,
-        { commands: [setup] },
+      withDiagnosticSession(
+        diagnostics,
+        observerConfigDigest,
+        () =>
+          step(
+            observedState,
+            { scope: { item: item.id }, name: "validate" },
+            () =>
+              validateTree(
+                checkout,
+                join(root, "before-implementation"),
+                baseSha,
+                baseTree,
+                [acceptance],
+                undefined,
+                undefined,
+                [],
+                undefined,
+                baseSha,
+                false,
+                { commands: [setup] },
+              ),
+            { save: () => undefined },
+          ),
+        () => "not-accepted",
       ),
       /result.cjs/,
     );
+    assert.equal(observedState.repeats, undefined);
+    const failedHistory = readDiagnostics(diagnosticRepository, 1);
+    const failedSession = failedHistory.at(-1).observerSessionId;
+    const failedSummary = summarizeFormalHistory(
+      failedHistory.filter(
+        (event) => event.observerSessionId === failedSession,
+      ),
+      { ...expectedHistory, sessionIds: [failedSession] },
+    );
+    assert.equal(failedSummary.completeness, "complete");
+    assert.equal(failedSummary.hasFailedAttempt, true);
     writeFileSync(join(checkout, "result.cjs"), "module.exports=42;\n");
     git("add", "result.cjs");
     git(
@@ -929,6 +1040,34 @@ test("source readiness prepares each real fresh checkout before its phase checks
       git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
       1,
     );
+    await withDiagnosticSession(
+      diagnostics,
+      observerConfigDigest,
+      async () => {
+        chmodSync(diagnosticPath(diagnosticRepository, 1), 0o644);
+        try {
+          diagnostics.emit({
+            operation: "actual-file-permission-loss",
+            outcome: "observed",
+          });
+        } finally {
+          chmodSync(diagnosticPath(diagnosticRepository, 1), 0o600);
+        }
+        await diagnostics.span({ operation: "inspect-current-tree" }, () =>
+          gitAsync(checkout, "rev-parse", "HEAD^{tree}"),
+        );
+      },
+      () => "not-accepted",
+    );
+    const lossHistory = readDiagnostics(diagnosticRepository, 1);
+    const lossSession = lossHistory.at(-1).observerSessionId;
+    const lossSummary = summarizeFormalHistory(
+      lossHistory.filter((event) => event.observerSessionId === lossSession),
+      { ...expectedHistory, sessionIds: [lossSession] },
+    );
+    assert.equal(lossSummary.completeness, "unknown");
+    assert.equal(lossHistory.at(-1).metadata.writeFailures, 1);
+    assert.ok(lossSummary.reasons.includes("observation-sequence-gap"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

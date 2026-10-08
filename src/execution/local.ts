@@ -750,6 +750,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
           (entry) =>
             context?.observeReadiness?.({
               ...entry,
+              workerIdentity: identity,
               index: readiness.validationIndices[entry.index]!,
               command: checks[entry.index]!.command,
               baseSha: request.baseSha,

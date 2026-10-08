@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
@@ -13,6 +14,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { fileURLToPath } from "node:url";
 import { replacementRefusal } from "./amendment-admission.js";
 import {
   type CapturePolicy,
@@ -33,7 +35,7 @@ import type {
   ModelInvocationUsage,
 } from "./contracts.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
-import { faultDetail, type Wait } from "./fault.js";
+import { faultDetail, faultOf, type Wait } from "./fault.js";
 import type { GitHubTransportObservation } from "./github-client.js";
 import { graphDigest } from "./graph-amendments.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
@@ -60,7 +62,16 @@ import {
   shortPlanDigest,
   summarizeStatus,
 } from "./status-summary.js";
-import { outageOf, type StepScope, type StepState, waitOf } from "./step.js";
+import {
+  currentObservedOperationAttemptId,
+  outageOf,
+  StepPaused,
+  type StepScope,
+  type StepState,
+  waitOf,
+  withObservedOperation,
+  withStepObserver,
+} from "./step.js";
 import {
   isCodexUsageIdentity,
   normalizeCodexTokenUsage,
@@ -103,6 +114,19 @@ export interface DiagnosticEvent {
   workerUsage?: import("./contracts.js").WorkerUsageObservation;
   capture?: InteractionMetadata;
   eventId: string;
+  observerSessionId?: string;
+  observerSequence?: number;
+  operationAttemptId?: string;
+  parentOperationAttemptId?: string;
+  /** A producer-observed formal command/worker failure within its paired parent. */
+  formalFailure?: true;
+  formalAttempt?: {
+    scope: string;
+    phase: string;
+    terminal: boolean;
+    status: "started" | "completed" | "pending-poll" | "failed" | "paused";
+    faultClass?: string;
+  };
   at: string;
   repository: string;
   objective: number;
@@ -117,6 +141,141 @@ export interface DiagnosticEvent {
   transport?: GitHubTransportObservation;
   /** Private local detail. Never send this to a remote exporter by default. */
   detail?: string;
+}
+
+interface ObserverSession {
+  id: string;
+  repository: string;
+  objective: number;
+  configDigest: string;
+  sequence: number;
+  writeFailures: number;
+  lostObservations: number;
+  closed: boolean;
+}
+const observerSessions = new AsyncLocalStorage<ObserverSession>();
+
+/** Actual installed producer bytes; the caller separately authenticates its package. */
+function observerSourceDigest(): string {
+  const hash = createHash("sha256");
+  for (const path of [
+    "diagnostics.js",
+    "step.js",
+    "runner.js",
+    "runner/execution.js",
+    "runner/projection.js",
+    "runner/planning.js",
+    "qa-execution.js",
+    "item-worker.js",
+    "item-steps.js",
+    "execution/checkpoint.js",
+    "execution/local.js",
+    "compiler/observation.js",
+    "compiler/model.js",
+    "result-review.js",
+    "runner/finalization.js",
+    "compiler/planning.js",
+  ]) {
+    const contents = readFileSync(
+      fileURLToPath(new URL(path, import.meta.url)),
+    );
+    hash.update(JSON.stringify([path, contents.length])).update(contents);
+  }
+  return hash.digest("hex");
+}
+
+/** One controller observation scope, not another continuation ledger. */
+export async function withDiagnosticSession<T>(
+  emitter: DiagnosticEmitter,
+  configDigest: string,
+  task: () => Promise<T>,
+  lifecycleOutcome: (result: T) => string | { outcome: string; runId?: string },
+): Promise<T> {
+  const session: ObserverSession = {
+    id: randomUUID(),
+    repository: emitter.repositoryIdentity,
+    objective: emitter.objectiveIdentity,
+    configDigest,
+    sequence: 0,
+    writeFailures: 0,
+    lostObservations: 0,
+    closed: false,
+  };
+  return observerSessions.run(session, () =>
+    withStepObserver(
+      (observation) => {
+        try {
+          const { outcome, terminal, scope, phase, faultClass, ...context } =
+            observation;
+          emitter.emit({
+            ...context,
+            operation: "formal-step-attempt",
+            outcome:
+              outcome === "pending-poll" || outcome === "paused"
+                ? "waiting"
+                : outcome,
+            formalAttempt: {
+              scope,
+              phase,
+              terminal,
+              status: outcome,
+              ...(faultClass && { faultClass }),
+            },
+          });
+        } catch {
+          session.lostObservations++;
+        }
+      },
+      async () => {
+        let sourceDigest: string | undefined;
+        try {
+          sourceDigest = observerSourceDigest();
+        } catch {
+          session.lostObservations++;
+        }
+        emitter.emit({
+          operation: "observer-session",
+          outcome: "started",
+          metadata: {
+            configDigest,
+            ...(sourceDigest && { observerSourceDigest: sourceDigest }),
+          },
+        });
+        let outcome = "failed";
+        let runId: string | undefined;
+        try {
+          const result = await task();
+          try {
+            const disposition = lifecycleOutcome(result);
+            outcome =
+              typeof disposition === "string"
+                ? disposition
+                : disposition.outcome;
+            if (typeof disposition !== "string") runId = disposition.runId;
+          } catch {
+            session.lostObservations++;
+            outcome = "unknown";
+          }
+          return result;
+        } finally {
+          session.closed = true;
+          emitter.emit({
+            operation: "observer-session",
+            outcome: "completed",
+            ...(runId && { runId }),
+            metadata: {
+              configDigest,
+              ...(sourceDigest && { observerSourceDigest: sourceDigest }),
+              lifecycleOutcome: outcome,
+              emittedEvents: session.sequence + 1,
+              writeFailures: session.writeFailures,
+              lostObservations: session.lostObservations,
+            },
+          });
+        }
+      },
+    ),
+  );
 }
 
 export function redactDiagnosticDetail(
@@ -229,9 +388,46 @@ export class DiagnosticEmitter {
     private configDigest?: string,
   ) {}
 
+  get repositoryIdentity(): string {
+    return this.repository;
+  }
+  get objectiveIdentity(): number {
+    return this.objective;
+  }
+
   emit(
     event: Omit<DiagnosticEvent, "eventId" | "at" | "repository" | "objective">,
   ): void {
+    const session = observerSessions.getStore();
+    const matched =
+      session?.repository === this.repository &&
+      session.objective === this.objective;
+    if (session && !matched) session.lostObservations++;
+    if (
+      matched &&
+      this.configDigest !== undefined &&
+      this.configDigest !== session.configDigest
+    )
+      session.lostObservations++;
+    if (matched && session.closed && event.operation !== "observer-session")
+      session.lostObservations++;
+    if (
+      matched &&
+      [
+        event.operationAttemptId,
+        event.parentOperationAttemptId,
+        event.formalAttempt?.scope,
+        event.formalAttempt?.phase,
+        event.formalAttempt?.faultClass,
+      ].some(
+        (value) =>
+          value !== undefined &&
+          (typeof value !== "string" || value.length > 1024),
+      )
+    ) {
+      session.lostObservations++;
+      return;
+    }
     const path = diagnosticPath(this.repository, this.objective);
     const value: DiagnosticEvent = {
       eventId: randomUUID(),
@@ -239,6 +435,17 @@ export class DiagnosticEmitter {
       repository: this.repository,
       objective: this.objective,
       ...event,
+      ...(event.formalFailure && !event.parentOperationAttemptId
+        ? {
+            parentOperationAttemptId: currentObservedOperationAttemptId(),
+          }
+        : {}),
+      ...(matched
+        ? {
+            observerSessionId: session.id,
+            observerSequence: ++session.sequence,
+          }
+        : {}),
       metadata: {
         ...event.metadata,
         factoryVersion: FACTORY_VERSION,
@@ -268,6 +475,7 @@ export class DiagnosticEmitter {
         closeSync(fd);
       }
     } catch (error) {
+      if (matched) session.writeFailures++;
       process.stderr.write(
         `Factory diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
       );
@@ -298,9 +506,12 @@ export class DiagnosticEmitter {
     itemId?: string;
     attemptId?: string;
   }): (observation: ModelInvocationObservation) => void {
-    return (observation) => {
+    return this.guardModelObserver((observation) => {
       const { scopeId, ...diagnosticContext } = context;
       const captureKey = `${observation.invocationId}:${observation.providerAttempt ?? 1}`;
+      const operationAttemptId = `model/${captureKey}`;
+      const parentOperationAttemptId = currentObservedOperationAttemptId();
+      const formal = { scope: scopeId, phase: observation.phase };
       let writer = this.captureWriters.get(captureKey);
       if (!writer) {
         const budget = this.captureBudgets.get(observation.invocationId) ?? {
@@ -338,6 +549,26 @@ export class DiagnosticEmitter {
       }
       if (observation.capture)
         writer.record(observation.capture.event, observation.capture.content);
+      const semantic = observation.capture?.event.outcome;
+      if (semantic?.stage === "semantic" && semantic.status !== "pass")
+        this.emit({
+          ...diagnosticContext,
+          operation: "model-semantic-outcome",
+          operationAttemptId,
+          parentOperationAttemptId,
+          formalAttempt: {
+            ...formal,
+            status: "failed",
+            terminal: false,
+            faultClass: `semantic-${semantic.status}`,
+          },
+          outcome: "failed",
+          metadata: {
+            invocationId: observation.invocationId,
+            providerAttempt: observation.providerAttempt ?? 1,
+            semanticStatus: semantic.status,
+          },
+        });
       // A capture-only evaluation is not another provider progress observation.
       if (
         observation.capture &&
@@ -429,6 +660,30 @@ export class DiagnosticEmitter {
         metadata.detailTruncated = true;
       this.emit({
         ...diagnosticContext,
+        ...(observation.type === "started" ||
+        observation.type === "completed" ||
+        observation.type === "failed" ||
+        observation.type === "response-invalid"
+          ? {
+              operationAttemptId,
+              parentOperationAttemptId,
+              formalAttempt: {
+                ...formal,
+                terminal:
+                  observation.type === "completed" ||
+                  observation.type === "failed" ||
+                  (observation.type === "response-invalid" &&
+                    observation.failureClass === "structured-output-parse"),
+                status:
+                  observation.type === "response-invalid"
+                    ? "failed"
+                    : observation.type,
+                ...(observation.failureClass && {
+                  faultClass: observation.failureClass,
+                }),
+              },
+            }
+          : {}),
         operation: "model-invocation",
         outcome:
           observation.type === "started"
@@ -443,6 +698,25 @@ export class DiagnosticEmitter {
         metadata,
         detail: redactedDetail?.slice(0, detailLimit),
       });
+    });
+  }
+
+  private guardModelObserver(
+    observer: (observation: ModelInvocationObservation) => void,
+  ): (observation: ModelInvocationObservation) => void {
+    return (observation) => {
+      try {
+        observer(observation);
+      } catch (error) {
+        const session = observerSessions.getStore();
+        if (session) session.lostObservations++;
+        process.stderr.write(
+          `Factory model diagnostics unavailable: ${redactDiagnosticDetail(
+            error instanceof Error ? error.message : String(error),
+            this.secrets,
+          ).slice(0, 512)}\n`,
+        );
+      }
     };
   }
 
@@ -458,28 +732,69 @@ export class DiagnosticEmitter {
     errorOutcome?: (error: unknown) => "waiting" | "failed",
   ): Promise<T> {
     const started = Date.now();
-    this.emit({ ...context, outcome: "started" });
+    const operationAttemptId = randomUUID();
+    const parentOperationAttemptId = currentObservedOperationAttemptId();
+    const formalAttempt = {
+      scope: context.itemId ? `item/${context.itemId}` : "objective",
+      phase: context.operation,
+    };
+    this.emit({
+      ...context,
+      operationAttemptId,
+      parentOperationAttemptId,
+      formalAttempt: { ...formalAttempt, terminal: false, status: "started" },
+      outcome: "started",
+    });
     try {
-      const result = await task();
+      const result = await withObservedOperation(operationAttemptId, task);
       let metadata = context.metadata;
       try {
         metadata = { ...metadata, ...completedMetadata?.(result) };
       } catch (error) {
+        const session = observerSessions.getStore();
+        if (session) session.lostObservations++;
         process.stderr.write(
           `Factory diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
         );
       }
       this.emit({
         ...context,
+        operationAttemptId,
+        parentOperationAttemptId,
+        formalAttempt: {
+          ...formalAttempt,
+          terminal: true,
+          status: "completed",
+        },
         outcome: "completed",
         durationMs: Date.now() - started,
         metadata,
       });
       return result;
     } catch (error) {
+      let outcome: "waiting" | "failed" = "failed";
+      try {
+        outcome = errorOutcome?.(error) ?? "failed";
+      } catch {
+        const session = observerSessions.getStore();
+        if (session) session.lostObservations++;
+      }
       this.emit({
         ...context,
-        outcome: errorOutcome?.(error) ?? "failed",
+        operationAttemptId,
+        parentOperationAttemptId,
+        formalAttempt: {
+          ...formalAttempt,
+          terminal: true,
+          status:
+            outcome === "waiting" ||
+            error instanceof StepPaused ||
+            ["decision", "config", "cancelled"].includes(faultOf(error).kind)
+              ? "paused"
+              : "failed",
+          faultClass: faultOf(error).kind,
+        },
+        outcome,
         durationMs: Date.now() - started,
         detail: error instanceof Error ? error.message : String(error),
       });
@@ -941,6 +1256,184 @@ export function readDiagnostics(
   return completeLines(readPrivateFile(path)).map(
     (line) => JSON.parse(line) as DiagnosticEvent,
   );
+}
+
+/** Validate the caller's authenticated, complete session selection; never infer it. */
+export function summarizeFormalHistory(
+  events: DiagnosticEvent[],
+  expected: {
+    repository: string;
+    objective: number;
+    configDigest: string;
+    observerSourceDigest: string;
+    sessionIds: string[];
+  },
+) {
+  const reasons = new Set<string>();
+  const sessions = new Map<string, DiagnosticEvent[]>();
+  const attempts = new Map<string, DiagnosticEvent[]>();
+  const failures = new Set<string>();
+  const required = new Set(expected.sessionIds);
+  if (!required.size || required.size !== expected.sessionIds.length)
+    reasons.add("missing-or-duplicate-expected-sessions");
+  if (
+    !/^[a-f0-9]{64}$/.test(expected.configDigest) ||
+    !/^[a-f0-9]{64}$/.test(expected.observerSourceDigest)
+  )
+    reasons.add("missing-expected-source-or-config-binding");
+  for (const event of events) {
+    if (
+      event.repository !== expected.repository ||
+      event.objective !== expected.objective
+    )
+      reasons.add("unexpected-objective");
+    const id = event.observerSessionId;
+    if (!id || !required.has(id)) {
+      reasons.add("unselected-or-unobserved-session");
+      continue;
+    }
+    const rows = sessions.get(id) ?? [];
+    rows.push(event);
+    sessions.set(id, rows);
+    if (event.formalAttempt) {
+      const formal = event.formalAttempt;
+      if (
+        typeof formal.scope !== "string" ||
+        !formal.scope.length ||
+        formal.scope.length > 1024 ||
+        typeof formal.phase !== "string" ||
+        !formal.phase.length ||
+        formal.phase.length > 1024 ||
+        typeof formal.terminal !== "boolean" ||
+        !["started", "completed", "pending-poll", "failed", "paused"].includes(
+          formal.status,
+        ) ||
+        (["completed", "pending-poll", "paused"].includes(formal.status) &&
+          !formal.terminal)
+      )
+        reasons.add("invalid-formal-observation");
+      if (!event.operationAttemptId) {
+        reasons.add("missing-attempt-identity");
+        continue;
+      }
+      const rows = attempts.get(event.operationAttemptId) ?? [];
+      rows.push(event);
+      attempts.set(event.operationAttemptId, rows);
+      if (event.formalAttempt.status === "failed")
+        failures.add(event.operationAttemptId);
+    }
+    if (event.formalFailure) {
+      if (event.formalFailure !== true || event.outcome !== "failed")
+        reasons.add("invalid-formal-failure");
+      if (!event.parentOperationAttemptId)
+        reasons.add("missing-formal-failure-parent");
+      else failures.add(event.parentOperationAttemptId);
+    }
+  }
+  for (const id of required) {
+    const rows = sessions.get(id) ?? [];
+    const start = rows[0];
+    const close = rows.at(-1);
+    if (
+      !start ||
+      start.operation !== "observer-session" ||
+      start.outcome !== "started" ||
+      !close ||
+      close.operation !== "observer-session" ||
+      close.outcome !== "completed" ||
+      rows.filter((row) => row.operation === "observer-session").length !== 2
+    )
+      reasons.add("missing-or-unclosed-session");
+    for (const [index, row] of rows.entries())
+      if (
+        !Number.isSafeInteger(row.observerSequence) ||
+        row.observerSequence !== index + 1
+      )
+        reasons.add("observation-sequence-gap");
+    for (const row of [start, close])
+      if (
+        row?.metadata?.configDigest !== expected.configDigest ||
+        row?.metadata?.observerSourceDigest !== expected.observerSourceDigest
+      )
+        reasons.add("source-or-config-binding-mismatch");
+    if (
+      close?.metadata?.emittedEvents !== rows.length ||
+      close?.metadata?.writeFailures !== 0 ||
+      close?.metadata?.lostObservations !== 0
+    )
+      reasons.add("lost-or-unproved-observations");
+    if (typeof close?.metadata?.lifecycleOutcome !== "string")
+      reasons.add("missing-lifecycle-outcome");
+  }
+  for (const rows of attempts.values()) {
+    const start = rows.filter((row) => row.formalAttempt?.status === "started");
+    const terminal = rows.filter((row) => row.formalAttempt?.terminal);
+    if (
+      start.length !== 1 ||
+      terminal.length !== 1 ||
+      rows[0] !== start[0] ||
+      start[0]?.formalAttempt?.terminal ||
+      terminal[0]?.formalAttempt?.status === "started"
+    )
+      reasons.add("unmatched-formal-attempt");
+    for (const row of rows) {
+      if (
+        row.observerSessionId !== start[0]?.observerSessionId ||
+        row.formalAttempt?.scope !== start[0]?.formalAttempt?.scope ||
+        row.formalAttempt?.phase !== start[0]?.formalAttempt?.phase ||
+        row.parentOperationAttemptId !== start[0]?.parentOperationAttemptId
+      )
+        reasons.add("attempt-binding-mismatch");
+      if (
+        row.parentOperationAttemptId &&
+        !attempts.has(row.parentOperationAttemptId)
+      )
+        reasons.add("missing-parent-attempt");
+      if (row.parentOperationAttemptId) {
+        const parent = attempts.get(row.parentOperationAttemptId) ?? [];
+        const parentStart = parent.find(
+          (entry) => entry.formalAttempt?.status === "started",
+        );
+        const parentTerminal = parent.find(
+          (entry) => entry.formalAttempt?.terminal,
+        );
+        if (
+          parentStart?.observerSessionId !== row.observerSessionId ||
+          (parentStart?.observerSequence ?? Infinity) >=
+            (start[0]?.observerSequence ?? 0) ||
+          (parentTerminal?.observerSequence ?? 0) <=
+            (row.observerSequence ?? Infinity)
+        )
+          reasons.add("invalid-parent-attempt-order");
+      }
+    }
+  }
+  for (const event of events)
+    if (
+      event.formalFailure &&
+      event.parentOperationAttemptId &&
+      !attempts.has(event.parentOperationAttemptId)
+    )
+      reasons.add("missing-formal-failure-parent");
+  if (!attempts.size) reasons.add("no-formal-attempts-observed");
+  return {
+    scope: "observed-formal-history" as const,
+    completeness: reasons.size ? ("unknown" as const) : ("complete" as const),
+    reasons: [...reasons],
+    sessionIds: [...sessions.keys()],
+    attemptedOperations: attempts.size,
+    failedOperationAttemptIds: [...failures],
+    hasFailedAttempt: failures.size ? true : reasons.size ? null : false,
+    observedPhases: [
+      ...new Set(
+        [...attempts.values()].map((rows) => rows[0]!.formalAttempt!.phase),
+      ),
+    ],
+    lifecycleOutcomes: [...sessions.values()].map(
+      (rows) => rows.at(-1)?.metadata?.lifecycleOutcome ?? null,
+    ),
+    // This does not prove expected DAG coverage, terminal acceptance or billing.
+  };
 }
 
 function completeLines(value: string): string[] {

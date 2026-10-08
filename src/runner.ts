@@ -40,6 +40,7 @@ import {
   serveControl,
 } from "./coordinator-control.js";
 import { linearDeliveryUnits } from "./delivery/plan.js";
+import { objectiveComplete } from "./completion.js";
 import {
   continuationStatusDocument,
   DiagnosticEmitter,
@@ -328,7 +329,7 @@ export async function runObjective(
     (result) => ({
       runId: result.runId,
       outcome:
-        result.schemaVersion === 7 && result.finalAcceptance
+        result.schemaVersion === 7 && objectiveComplete(result)
           ? "accepted"
           : result.cancelledAt
             ? "cancelled"

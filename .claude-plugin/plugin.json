@@ -9,9 +9,5 @@
   "homepage": "https://github.com/clockgrove/factory#readme",
   "repository": "https://github.com/clockgrove/factory",
   "license": "MIT",
-  "keywords": [
-    "development",
-    "github",
-    "objectives"
-  ]
+  "keywords": ["development", "github", "objectives"]
 }

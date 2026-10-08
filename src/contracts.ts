@@ -490,6 +490,12 @@ export interface ExecutionRequest {
   sourceAssets?: { binding: SourceAssetBinding; ref: ContentRef }[];
   objectiveBody?: string;
   selectedAssets?: SelectedAssetInput[];
+  /** Archived failed commit only; never an accepted execution base or proof. */
+  retainedFailedResult?: {
+    attemptId: string;
+    commitSha: string;
+    treeSha: string;
+  };
   /** Trusted graph selection; never commands inferred from the authored brief. */
   environmentReadiness?: {
     validationIndices: number[];
@@ -575,6 +581,8 @@ export interface ExecutionContext {
 export interface ExecutionDriver {
   /** Supports authenticated preparation in its actual fresh worker checkout. */
   readonly freshCheckoutReadiness?: true;
+  /** Can expose an authenticated retained failed Git result in its fresh checkout. */
+  readonly retainedFailedResultContext?: true;
   preflight?(graph: WorkGraph): Promise<void>;
   availableSlots(): Promise<number | "unknown">;
   start(

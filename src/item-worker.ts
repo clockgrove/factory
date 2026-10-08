@@ -19,7 +19,10 @@ import { packageManagerUpdate } from "./package-manager-update.js";
 import type { PhaseAdmission } from "./phase-admission.js";
 import { environmentValidationIndices } from "./qa.js";
 import { preflightItemEnvironment } from "./qa-execution.js";
-import type { WorkRecovery } from "./repair-policy.js";
+import {
+  type WorkRecovery,
+  retainedFailedResultContext,
+} from "./repair-policy.js";
 import type { FactoryState } from "./state.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 
@@ -70,6 +73,9 @@ export async function runWorker(
 ): Promise<ExecutionResult> {
   const { state, item, phases, baseSha } = args;
   const work = state.work[item.id]!;
+  const retained = work.recovery?.correction
+    ? retainedFailedResultContext(work.recovery.history?.at(-1))
+    : undefined;
   const readinessIndices = environmentValidationIndices(state.graph, item.id);
   if (readinessIndices.length && args.driver.freshCheckoutReadiness !== true)
     throw new Error(
@@ -91,6 +97,13 @@ export async function runWorker(
   // A reattached worker keeps the coding slot it holds while it runs remotely.
   if (work.phaseReservation !== "coding")
     await phases.reserve(item.id, "coding");
+  const attemptedItem = attemptItem(item, work.recovery);
+  if (
+    work.recovery?.correction &&
+    (!retained || args.driver.retainedFailedResultContext !== true)
+  )
+    attemptedItem.brief +=
+      "\nRetained failed committed-result context is unavailable for this repair through this execution driver; no prior source availability is implied.";
   const result = await executeItem({
     state,
     item,
@@ -102,7 +115,10 @@ export async function runWorker(
     diagnostics: args.diagnostics,
     request: (attemptId) => ({
       captureContext: { objective: args.objective, runId: state.runId },
-      item: attemptItem(item, work.recovery),
+      item: attemptedItem,
+      ...(retained && args.driver.retainedFailedResultContext === true
+        ? { retainedFailedResult: retained }
+        : {}),
       baseSha,
       attemptId,
       objectiveBody: args.objectiveBody,

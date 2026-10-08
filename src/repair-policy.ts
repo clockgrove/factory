@@ -476,6 +476,30 @@ export function archiveAttempt(work: WorkState): WorkRecovery {
     ],
   };
 }
+/** Only the exact unpublished failed result archived with an admitted repair. */
+export function retainedFailedResultContext(
+  prior: NonNullable<WorkRecovery["history"]>[number] | undefined,
+): { attemptId: string; commitSha: string; treeSha: string } | undefined {
+  const work = prior?.work;
+  if (
+    prior?.failure?.classification !== "implementation" ||
+    prior.correction?.kind !== "implementation" ||
+    work?.status !== "failed" ||
+    work.step !== "validate" ||
+    work.pullRequest ||
+    work.integratedSha ||
+    !work.attempt ||
+    !work.changeRef ||
+    !work.treeSha
+  )
+    return undefined;
+  return {
+    attemptId: work.attempt,
+    commitSha: work.changeRef,
+    treeSha: work.treeSha,
+  };
+}
+
 export function validateCorrection(
   work: WorkState,
   correction: RepairCorrection,

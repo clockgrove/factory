@@ -46,6 +46,8 @@ Readiness coverage selects an exact probe and, when supplied sources require it,
 
 Validation runs the approved commands against the exact candidate tree and records its identity and outcomes. Acceptance review evaluates that same tree using authenticated receipts, complete required source evidence and declared criteria. Missing, incomplete or invalid evidence stays missing, incomplete or invalid; passing unrelated checks does not replace it.
 
+Compilation derives material risks from the Objective's flows and planned architecture and assigns their proof responsibility without adding acceptance requirements or prescribing an implementation. Item review traces those risks in complete current source; final review checks the original criteria on the integrated source, not earlier verdicts. When pending asynchronous work can outlive selection or navigation, trace whether success, error and cleanup completions still belong to the current intent. Distinguish static source proof from runtime ordering/state-transition coverage; passing happy-path checks do not prove unexercised orderings.
+
 ## State and recovery
 
 Each Objective has one atomic local continuation snapshot outside the target repository. An exclusive verified owner controls mutations; resource and configuration identities bind operations to the run. Diagnostics and optional captures observe the run and retain actual available usage, but never reconstruct or control lifecycle state.

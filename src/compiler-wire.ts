@@ -178,7 +178,7 @@ export function compilerWire(
             command: {
               ...text,
               description:
-                "Exact executable command text from the named pinned file, with no Markdown wrapper or surrounding prose.",
+                "For package.json, use the repository's authorized npm/pnpm invocation by an existing script name, not its JSON script body. For other tracked files, use an exact standalone executable command line, without Markdown wrappers or surrounding prose.",
             },
             source: text,
           }),

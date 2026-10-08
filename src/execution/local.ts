@@ -550,8 +550,51 @@ export async function collectWorktreeResult(
   };
 }
 
+/** Render only authenticated local Git context, never an execution base or proof. */
+export function retainedFailedResultBrief(
+  checkout: string,
+  worktree: string,
+  retainedResult: ExecutionRequest["retainedFailedResult"],
+): string {
+  let failedContext = "";
+  if (retainedResult) {
+    const retained = retainedResult;
+    try {
+      if (
+        !/^[a-f0-9]{40}$/.test(retained.commitSha) ||
+        !/^[a-f0-9]{40}$/.test(retained.treeSha) ||
+        pinnedGit(worktree, "rev-parse", `${retained.commitSha}^{commit}`) !==
+          retained.commitSha ||
+        pinnedGit(worktree, "rev-parse", `${retained.commitSha}^{tree}`) !==
+          retained.treeSha ||
+        pinnedGit(
+          worktree,
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-common-dir",
+        ) !==
+          pinnedGit(
+            checkout,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+          )
+      )
+        throw new Error(
+          "Retained failed Git result is not authenticated in this checkout",
+        );
+      failedContext = `\nRetained failed committed result, verified reachable in this checkout: ${JSON.stringify(retained)}. This is unaccepted implementation context, not normative source, an accepted base or acceptance proof. You may inspect currently owned files from this exact Git tree and reuse their implementation in owned edits while making the diagnosed correction. Preserve the checkout's current accepted HEAD; do not checkout, reset or cherry-pick the failed commit. Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
+    } catch {
+      failedContext =
+        "\nRetained failed committed-result context is unavailable or could not be authenticated in this checkout. Do not infer prior source contents; unfinished uncommitted edits remain unavailable.";
+    }
+  }
+  return failedContext;
+}
+
 export class LocalExecutionDriver implements ExecutionDriver {
   readonly freshCheckoutReadiness = true as const;
+  readonly retainedFailedResultContext = true as const;
   private active = new Map<string, Active>();
 
   private require(handle: ExecutionHandle): Active {
@@ -803,6 +846,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
       const environment = request.item.executionProfile
         ? this.profiles?.get(request.item.executionProfile.id)?.environment
         : undefined;
+      const failedContext = retainedFailedResultBrief(
+        this.checkout,
+        worktree,
+        request.retainedFailedResult,
+      );
       const handle = await harness.start({
         ...(request.captureContext &&
           this.captureSettings && {
@@ -831,7 +879,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
             },
           }),
         ...(environment && { environment: structuredClone(environment) }),
-        item: request.item,
+        item: { ...request.item, brief: request.item.brief + failedContext },
         packageManagerUpdate: packageManagerUpdate(request.objectiveBody ?? ""),
         worktree,
         attemptId: identity,

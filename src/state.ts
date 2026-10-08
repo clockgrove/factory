@@ -42,7 +42,12 @@ import {
   objectiveCandidate,
   objectivePreparationCommands,
 } from "./qa.js";
-import { type Autonomy, assertRepairLedger } from "./repair-policy.js";
+import {
+  type Autonomy,
+  type WorkRecovery,
+  assertRepairLedger,
+  retainedFailedResultContext,
+} from "./repair-policy.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
 import {
   assertSelectedLfsValidation,
@@ -1175,6 +1180,17 @@ export function parseFactoryState(
                 : undefined));
         if (!attemptGraph)
           throw new Error(`Work Item ${id} has no authenticated attempt graph`);
+        if (
+          request.retainedFailedResult !== undefined &&
+          !(item.recovery as WorkRecovery | undefined)?.history?.some(
+            (prior) =>
+              JSON.stringify(retainedFailedResultContext(prior)) ===
+              JSON.stringify(request.retainedFailedResult),
+          )
+        )
+          throw new Error(
+            `Work Item ${id} retained failed result differs from its archived repair`,
+          );
         const readiness = request.environmentReadiness;
         const expectedIndices = environmentValidationIndices(attemptGraph, id);
         if (readiness !== undefined) {

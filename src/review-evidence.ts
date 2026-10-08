@@ -419,7 +419,7 @@ export function resolveReviewReferences(
       throw new ReviewProtocolError(
         "A passing review cannot rely on incomplete cited evidence",
       );
-    const { content: _content, ...reference } = entry;
+    const { content: _content, reusableBody: _body, ...reference } = entry;
     return reference;
   });
 }

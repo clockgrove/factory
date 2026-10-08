@@ -1,18 +1,4 @@
-import { assertPublicationIntents } from "./delivery/publication.js";
-import {
-  assertApprovedPlaybookAdmission,
-  assertApprovedPlaybookPin,
-} from "./contracts.js";
-import { objectiveCandidate } from "./qa.js";
-import { assertNativePrerequisites } from "./native-prerequisite-evidence.js";
-import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import { assertFinalAcceptance } from "./completion.js";
-import { assertRepairLedger, type Autonomy } from "./repair-policy.js";
-import { assertRepairReadiness } from "./work-repair.js";
-import {
-  assertFailedValidationRecord,
-  type FailedValidationRecord,
-} from "./failed-validation.js";
 import { type Capacity, validateCapacity } from "./config.js";
 import type {
   AssetSelectionDecision,
@@ -24,12 +10,15 @@ import type {
   WorkGraph,
 } from "./contracts.js";
 import {
-  assertAssetCaptureReceipt,
-  assertHydrationReceipt,
-  assetSelectionDigest,
-  finalValidationLfsMembers,
-} from "./media.js";
-import { assertGraphRevisions } from "./graph-amendments.js";
+  assertApprovedPlaybookAdmission,
+  assertApprovedPlaybookPin,
+} from "./contracts.js";
+import { assertPublicationIntents } from "./delivery/publication.js";
+import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
+import {
+  assertFailedValidationRecord,
+  type FailedValidationRecord,
+} from "./failed-validation.js";
 import {
   assertRepeats,
   assertWait,
@@ -37,13 +26,29 @@ import {
   type RepeatRecord,
   type Wait,
 } from "./fault.js";
-import { assertCompletedCoverage, assertCoverageShape } from "./qa.js";
+import { assertGraphRevisions, graphDigest } from "./graph-amendments.js";
+import {
+  assertAssetCaptureReceipt,
+  assertHydrationReceipt,
+  assetSelectionDigest,
+  finalValidationLfsMembers,
+} from "./media.js";
+import { assertNativePrerequisites } from "./native-prerequisite-evidence.js";
+import {
+  assertCompletedCoverage,
+  assertCoverageShape,
+  environmentValidationIndices,
+  objectiveCandidate,
+  objectivePreparationCommands,
+} from "./qa.js";
+import { type Autonomy, assertRepairLedger } from "./repair-policy.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
 import {
   assertSelectedLfsValidation,
   assertValidationWorktreeObservation,
   validStoppedLeftovers,
 } from "./validation.js";
+import { assertRepairReadiness } from "./work-repair.js";
 
 export type WorkStatus =
   | "pending"
@@ -460,6 +465,21 @@ function validationEvidence(value: unknown, label: string): string[] {
       | import("./validation.js").SelectedLfsValidation[]
       | undefined,
   );
+  if (evidence.preparation !== undefined) {
+    if (!Array.isArray(evidence.preparation))
+      throw new Error(`${label}.preparation must be an array`);
+    if (
+      evidence.preparation.length &&
+      evidence.worktreeObservation === undefined
+    )
+      throw new Error(
+        `${label}.preparation lacks its actual fresh-checkout observation`,
+      );
+    validationEvidence(
+      { treeSha, commands: evidence.preparation },
+      `${label}.preparation`,
+    );
+  }
   if (!Array.isArray(evidence.commands))
     throw new Error(`${label}.commands must be an array`);
   for (const [index, raw] of evidence.commands.entries()) {
@@ -738,6 +758,10 @@ export function parseFactoryState(
         `${id}.acceptanceDecisions`,
       );
     if (item.validation !== undefined) {
+      if (record(item.validation, `${id}.validation`).preparation !== undefined)
+        throw new Error(
+          `Work Item ${id} requires its full ordered command map, not separate preparation receipts`,
+        );
       const receiptCommands = validationEvidence(
         item.validation,
         `${id}.validation`,
@@ -1125,6 +1149,82 @@ export function parseFactoryState(
           throw new Error(
             `Work Item ${id} execution profile differs from accepted graph`,
           );
+        // Coverage may change in a reviewed amendment while this item's
+        // recorded attempt and definition remain unchanged. Authenticate its
+        // historical preparation against that attempt's admitted revision.
+        const attemptGraph =
+          item.graphRevisionDigest === undefined
+            ? (graph as unknown as WorkGraph)
+            : ((state.graphRevisions as FactoryState["graphRevisions"])?.find(
+                (revision) => revision.digest === item.graphRevisionDigest,
+              )?.graph ??
+              (graphDigest(graph as unknown as WorkGraph) ===
+              item.graphRevisionDigest
+                ? (graph as unknown as WorkGraph)
+                : undefined));
+        if (!attemptGraph)
+          throw new Error(`Work Item ${id} has no authenticated attempt graph`);
+        const readiness = request.environmentReadiness;
+        const expectedIndices = environmentValidationIndices(attemptGraph, id);
+        if (readiness !== undefined) {
+          const selected = record(readiness, `work.${id}.execution.readiness`);
+          if (
+            JSON.stringify(selected.validationIndices) !==
+              JSON.stringify(expectedIndices) ||
+            selected.acceptedBaseSha !== state.baseSha ||
+            JSON.stringify(attemptedItem.validation) !==
+              JSON.stringify(acceptedItem.validation)
+          )
+            throw new Error(
+              `Work Item ${id} readiness differs from accepted command authority`,
+            );
+          const readinessReceipt = record(
+            active.environmentReadiness,
+            `work.${id}.execution.readinessReceipt`,
+          );
+          if (
+            readinessReceipt.commitSha !== request.baseSha ||
+            readinessReceipt.worktree !== active.worktree
+          )
+            throw new Error(
+              `Work Item ${id} readiness has a different checkout scope`,
+            );
+          const observedReadiness = record(
+            readinessReceipt.evidence,
+            `${id}.readinessEvidence`,
+          );
+          if (
+            observedReadiness.worktreeObservation === undefined ||
+            observedReadiness.preparation !== undefined
+          )
+            throw new Error(
+              `Work Item ${id} readiness lacks its complete same-checkout command observation`,
+            );
+          const commands = validationEvidence(
+            readinessReceipt.evidence,
+            `work.${id}.execution.readinessEvidence`,
+          );
+          const checks = acceptedItem.validation as { command: string }[];
+          if (
+            JSON.stringify(commands) !==
+            JSON.stringify(
+              expectedIndices.map((index) => checks[index]!.command),
+            )
+          )
+            throw new Error(
+              `Work Item ${id} readiness receipts differ from selected commands`,
+            );
+        } else if (
+          attemptGraph.coverage.some(
+            (entry) =>
+              entry.itemId === id &&
+              (entry.environment.prerequisites?.length ?? 0) > 0,
+          )
+        ) {
+          throw new Error(
+            `Work Item ${id} lacks declared fresh-checkout readiness`,
+          );
+        }
         const handle = record(active.handle, `work.${id}.harness`);
         if (
           typeof active.worktree !== "string" ||
@@ -1190,6 +1290,25 @@ export function parseFactoryState(
     )
       throw new Error(
         "Final validation receipts differ from declared Objective commands",
+      );
+    const declaredPreparation = objectivePreparationCommands(
+      graph as unknown as WorkGraph,
+    );
+    const objectiveCommands = state.objectiveCommands as string[];
+    const expectedPreparation = declaredPreparation.every(
+      (command, index) => objectiveCommands[index] === command,
+    )
+      ? []
+      : declaredPreparation;
+    if (
+      JSON.stringify(
+        (final.preparation as { command: string }[] | undefined)?.map(
+          (entry) => entry.command,
+        ) ?? [],
+      ) !== JSON.stringify(expectedPreparation)
+    )
+      throw new Error(
+        "Final preparation receipts differ from declared fresh-checkout prerequisites",
       );
     const selections = (graph as unknown as WorkGraph).items.flatMap((item) => {
       const itemWork = (work as Record<string, WorkState>)[item.id];

@@ -43,6 +43,7 @@ import { linearDeliveryUnits } from "./delivery/plan.js";
 import {
   continuationStatusDocument,
   DiagnosticEmitter,
+  withDiagnosticSession,
 } from "./diagnostics.js";
 import {
   awaitsOperator,
@@ -307,8 +308,32 @@ export async function runObjective(
     ) => void;
   } = {},
 ): Promise<ContinuationState> {
-  return withGitHubDiagnostics(config, objective, () =>
-    runObjectiveOwned(config, objective, services, options),
+  const digest = factoryConfigDigest(config);
+  const emitter = new DiagnosticEmitter(
+    config.repository,
+    objective,
+    configuredDiagnosticSecrets(config),
+    config.capture,
+    digest,
+  );
+  return withDiagnosticSession(
+    emitter,
+    digest,
+    () =>
+      emitter.span({ operation: "objective-controller" }, () =>
+        withGitHubDiagnostics(config, objective, () =>
+          runObjectiveOwned(config, objective, services, options),
+        ),
+      ),
+    (result) => ({
+      runId: result.runId,
+      outcome:
+        result.schemaVersion === 7 && objectiveComplete(result)
+          ? "accepted"
+          : result.cancelledAt
+            ? "cancelled"
+            : "not-accepted",
+    }),
   );
 }
 

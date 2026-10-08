@@ -1,11 +1,3 @@
-import { refuseUnknownFields } from "../unknown-fields.js";
-import {
-  cancelledFault,
-  classifyFaults,
-  decision,
-  StepFault,
-} from "../fault.js";
-import { executionFault, missingCredential } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -18,14 +10,22 @@ import type {
   ExecutionRequest,
   ExecutionResult,
 } from "../contracts.js";
+import {
+  cancelledFault,
+  classifyFaults,
+  decision,
+  StepFault,
+} from "../fault.js";
 import { hasUnresolvedSubprocesses, removeWorktree } from "../process.js";
+import { refuseUnknownFields } from "../unknown-fields.js";
 import { endAttempt, stoppedFault, transportFailure } from "./attempt.js";
+import { executionFault, missingCredential } from "./fault.js";
 import { readProducedAssets, workItemPrompt } from "./harness-support.js";
 import { collectWorktreeResult } from "./local.js";
 import {
   importOpenAIResult,
-  openAIExportScript,
   OPENAI_OUTPUT_MAX_BYTES,
+  openAIExportScript,
   prepareOpenAIInput,
   sha256,
 } from "./openai-managed-files.js";
@@ -321,6 +321,10 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     input: ExecutionRequest,
     context?: ExecutionContext,
   ): Promise<ExecutionHandle> {
+    if (input.environmentReadiness?.validationIndices.length)
+      throw new Error(
+        "Managed worker readiness in its fresh environment is unsupported; source decision required",
+      );
     if (!context)
       throw new Error(
         "Managed execution requires controller checkpoint authority",

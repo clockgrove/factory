@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -13,30 +14,54 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runAnalysisCommand } from "../dist/analysis-cli.js";
-import { DiagnosticEmitter } from "../dist/diagnostics.js";
-import { readInteractionContent } from "../dist/capture.js";
+import test from "node:test";
 import { analyzeInteractions } from "../dist/analysis.js";
+import { runAnalysisCommand } from "../dist/analysis-cli.js";
+import { readInteractionContent } from "../dist/capture.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
-import { graphDigest } from "../dist/graph-amendments.js";
-import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
-import { rereviewWorkItem } from "../dist/runner.js";
-import { readState, saveState, statePath } from "../dist/state-store.js";
-import { createHash } from "node:crypto";
-import { validateTree } from "../dist/validation.js";
 import {
-  CandidateValidationFailure,
-  recordWorkFailure,
-} from "../dist/work-repair.js";
+  diagnosticPath,
+  DiagnosticEmitter,
+  readDiagnostics,
+  summarizeFormalHistory,
+  withDiagnosticSession,
+} from "../dist/diagnostics.js";
 import { CodexHarness } from "../dist/execution/local.js";
 import { killGroup } from "../dist/execution/worker-process.js";
+import { graphDigest } from "../dist/graph-amendments.js";
 import {
+  addWorktree,
+  gitAsync,
   linuxProcessIdentity,
   processGroupExists,
+  removeWorktree,
   sanitizedWorkerEnvironment,
   subprocessAsync,
   withProcessCancellation,
 } from "../dist/process.js";
+import {
+  environmentValidationIndices,
+  objectivePreparationCommands,
+} from "../dist/qa.js";
+import { preflightItemEnvironment } from "../dist/qa-execution.js";
+import {
+  charge,
+  consumption,
+  objectiveEvent,
+  resolveAutonomy,
+} from "../dist/repair-policy.js";
+import { rereviewWorkItem } from "../dist/runner.js";
+import { readState, saveState, statePath } from "../dist/state-store.js";
+import { step } from "../dist/step.js";
+import {
+  validateCheckout,
+  validateTree,
+  validateWorkItem,
+} from "../dist/validation.js";
+import {
+  CandidateValidationFailure,
+  recordWorkFailure,
+} from "../dist/work-repair.js";
 
 test("trusted child captures roundtrip through the configured private state root", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-worker-capture-"));
@@ -538,6 +563,511 @@ process.exit(23);`;
     );
     assert.equal(git("rev-parse", "HEAD"), commit);
     assert.deepEqual(readState(config.repository, 1), validationHistory);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("source readiness prepares each real fresh checkout before its phase checks", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-readiness-checkouts-"));
+  const checkout = join(root, "target");
+  mkdirSync(checkout);
+  const git = (...args) =>
+    execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8" }).trim();
+  const setup = "npm run hydrate-readiness";
+  const probe = "npm run probe-readiness";
+  const acceptance = "npm test";
+  try {
+    git("init", "-b", "main");
+    writeFileSync(join(checkout, ".gitignore"), ".runtime-ready\n");
+    writeFileSync(
+      join(checkout, "README.md"),
+      `Run this preimplementation prerequisite before its probe in each fresh checkout:\n${setup}\n${probe}\nOnly after implementing result.cjs, run:\n${acceptance}\n`,
+    );
+    writeFileSync(
+      join(checkout, "prepare.cjs"),
+      'const fs=require("node:fs"); if(fs.existsSync(".runtime-ready")) throw Error("not fresh"); fs.writeFileSync(".runtime-ready", "prepared");\n',
+    );
+    writeFileSync(
+      join(checkout, "probe.cjs"),
+      'const fs=require("node:fs"); if(fs.readFileSync(".runtime-ready","utf8")!=="prepared") throw Error("unprepared");\n',
+    );
+    writeFileSync(
+      join(checkout, "accept.cjs"),
+      'require("./probe.cjs"); if(require("./result.cjs")!==42) throw Error("unimplemented");\n',
+    );
+    writeFileSync(
+      join(checkout, "package.json"),
+      JSON.stringify({
+        name: "fresh-readiness-integration",
+        version: "1.0.0",
+        private: true,
+        scripts: {
+          "hydrate-readiness": "node prepare.cjs",
+          "probe-readiness": "node probe.cjs",
+          test: "node accept.cjs",
+        },
+      }),
+    );
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=Integration",
+      "-c",
+      "user.email=integration@example.invalid",
+      "commit",
+      "-m",
+      "source-authorized preparation, probe and late acceptance",
+    );
+    const baseSha = git("rev-parse", "HEAD");
+    const baseTree = git("rev-parse", "HEAD^{tree}");
+    const item = {
+      id: "implementation",
+      kind: "work",
+      title: "Implement result",
+      goal: "Return required result",
+      brief: "Implement result.cjs",
+      acceptance: ["Result is 42"],
+      nonGoals: [],
+      dependencies: [],
+      ownedPaths: ["result.cjs"],
+      resources: [],
+      expectedOutputRoles: [],
+      requiredLfsRoles: [],
+      sourceAssets: [],
+      minimumAssetSets: 0,
+      citations: [],
+      validation: [setup, probe, acceptance].map((command) => ({
+        command,
+        provenance: "source-declared",
+        source: "README.md",
+      })),
+    };
+    const graph = {
+      objective: 1,
+      baseSha,
+      items: [item],
+      coverage: [
+        {
+          criterionId: createHash("sha256").update(acceptance).digest("hex"),
+          source: {
+            path: "OBJECTIVE",
+            digest: createHash("sha256").update(acceptance).digest("hex"),
+            text: acceptance,
+          },
+          itemId: item.id,
+          proof: { kind: "result-command", validationIndex: 2 },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe,
+            prerequisites: [setup],
+            preparedBy: "",
+          },
+        },
+      ],
+    };
+    assert.deepEqual(environmentValidationIndices(graph, item.id), [0, 1]);
+    assert.deepEqual(objectivePreparationCommands(graph), [setup]);
+    const diagnosticRepository = "integration/fresh-readiness";
+    const diagnostics = new DiagnosticEmitter(diagnosticRepository, 1);
+    const observerConfigDigest = createHash("sha256")
+      .update("real-readiness-check")
+      .digest("hex");
+    await withDiagnosticSession(
+      diagnostics,
+      observerConfigDigest,
+      () =>
+        preflightItemEnvironment({
+          config: { checkout },
+          root: join(root, "run"),
+          state: {
+            graph,
+            baseSha,
+            runId: "local-real",
+            work: { [item.id]: { status: "pending" } },
+          },
+          item,
+          baseSha,
+          diagnostics,
+        }),
+      () => "not-accepted",
+    );
+    const prospective = readDiagnostics(diagnosticRepository, 1);
+    const expectedHistory = {
+      repository: diagnosticRepository,
+      objective: 1,
+      configDigest: observerConfigDigest,
+      observerSourceDigest: prospective[0].metadata.observerSourceDigest,
+      sessionIds: [prospective[0].observerSessionId],
+    };
+    assert.equal(
+      summarizeFormalHistory(prospective, expectedHistory).completeness,
+      "complete",
+    );
+    assert.equal(
+      summarizeFormalHistory(prospective, expectedHistory).hasFailedAttempt,
+      false,
+    );
+    const observedState = {
+      runId: "local-real",
+      work: { [item.id]: { status: "pending" } },
+    };
+    await withDiagnosticSession(
+      diagnostics,
+      observerConfigDigest,
+      async () => {
+        const marker = join(root, "actual-child-finished");
+        const child = spawn(
+          process.execPath,
+          [
+            "-e",
+            `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'done'), 150)`,
+          ],
+          { stdio: "ignore" },
+        );
+        const settled = once(child, "exit");
+        try {
+          await step(
+            observedState,
+            { scope: { item: item.id }, name: "observe-child" },
+            async (ctx) => {
+              if (!existsSync(marker))
+                ctx.pending(undefined, new Date(Date.now() + 10).toISOString());
+              return marker;
+            },
+            { save: () => undefined },
+          );
+          assert.equal((await settled)[0], 0);
+        } finally {
+          if (child.exitCode === null) {
+            child.kill();
+            await settled;
+          }
+        }
+      },
+      () => "not-accepted",
+    );
+    const pendingHistory = readDiagnostics(diagnosticRepository, 1).filter(
+      (event) => event.observerSessionId !== prospective[0].observerSessionId,
+    );
+    assert.ok(
+      pendingHistory.some(
+        (event) => event.formalAttempt?.status === "pending-poll",
+      ),
+    );
+    assert.equal(
+      summarizeFormalHistory(pendingHistory, {
+        ...expectedHistory,
+        sessionIds: [pendingHistory[0].observerSessionId],
+      }).hasFailedAttempt,
+      false,
+    );
+    const events = readDiagnostics(diagnosticRepository, 1).filter(
+      (event) => event.operation === "environment-readiness-command",
+    );
+    assert.deepEqual(
+      events.map((event) => event.metadata.command),
+      [setup, probe],
+    );
+    assert.ok(events.every((event) => event.outcome === "completed"));
+    assert.equal(
+      existsSync(
+        join(root, "run", "environment-preflight", item.id, "worktree"),
+      ),
+      false,
+    );
+    const repository = "integration/readiness-amendment";
+    const worker = join(
+      stateRoot(repository),
+      "worktrees",
+      "recorded-checkout",
+    );
+    mkdirSync(join(stateRoot(repository), "worktrees"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await addWorktree(checkout, worker, baseSha);
+    try {
+      assert.equal(existsSync(join(worker, ".runtime-ready")), false);
+      const readiness = await validateCheckout(
+        worker,
+        join(root, "worker-receipts"),
+        baseSha,
+        baseTree,
+        [setup, probe],
+      );
+      assert.deepEqual(
+        readiness.commands.map((entry) => entry.command),
+        [setup, probe],
+      );
+      assert.equal(existsSync(join(worker, ".runtime-ready")), true);
+      assert.equal(existsSync(join(worker, "result.cjs")), false);
+      // A reviewed coverage-only revision leaves this recorded attempt intact.
+      // Its real preparation receipt must not be reinterpreted as a new probe.
+      // This stopped-attempt snapshot exercises the disk/parser contract only;
+      // no harness, provider, model review or external amendment is invoked.
+      const amended = structuredClone(graph);
+      amended.coverage[0].environment.probe = acceptance;
+      amended.coverage[0].environment.prerequisites = [setup, probe];
+      const originalDigest = graphDigest(graph);
+      const amendmentDigest = graphDigest(amended);
+      const state = {
+        schemaVersion: 7,
+        publicationContract: "exact-request-v1",
+        repository,
+        objective: 1,
+        runId: "recorded-readiness-checkout",
+        planGraphDigest: originalDigest,
+        configDigest: factoryConfigDigest({ repository, checkout }),
+        baseSha,
+        capacity: { concurrency: 1 },
+        issueByItemId: { [item.id]: 1 },
+        graph: amended,
+        autonomy: resolveAutonomy({}),
+        graphRevisions: [
+          { graph, digest: originalDigest },
+          {
+            graph: amended,
+            digest: amendmentDigest,
+            parentDigest: originalDigest,
+            proposal: {
+              scope: "in-scope",
+              reason: "Declare final probe preparation",
+              evidence: ["README.md"],
+              ownership: ["result.cjs"],
+              acceptance: ["Result is 42"],
+              dependencies: [],
+              actor: "integration",
+              expectedGraphDigest: originalDigest,
+            },
+            reviewDigest: createHash("sha256")
+              .update(JSON.stringify(amended))
+              .digest("hex"),
+            acceptedAt: new Date().toISOString(),
+          },
+        ],
+        work: {
+          [item.id]: {
+            status: "failed",
+            step: "execute",
+            attempt: "recorded-checkout",
+            baseSha,
+            executionBaseSha: baseSha,
+            graphRevisionDigest: originalDigest,
+            execution: {
+              provider: "local",
+              identity: "recorded-checkout",
+              data: {
+                worktree: worker,
+                adapterIdentity: "local-process-receipt",
+                handle: { identity: "settled-readiness-commands" },
+                request: {
+                  item,
+                  baseSha,
+                  attemptId: "recorded-checkout",
+                  environmentReadiness: {
+                    validationIndices: [0, 1],
+                    acceptedBaseSha: baseSha,
+                    lfsMembers: [],
+                    workspacePackageAdditions: [],
+                  },
+                },
+                environmentReadiness: {
+                  commitSha: baseSha,
+                  worktree: worker,
+                  evidence: readiness,
+                },
+              },
+            },
+          },
+        },
+      };
+      charge(
+        state,
+        objectiveEvent("amend", "integration-coverage-revision"),
+        "planningRevisions",
+        ["$planning"],
+      );
+      saveState(statePath(repository, 1), state);
+      const retained = readState(repository, 1);
+      assert.deepEqual(
+        retained.work[item.id].execution.data.environmentReadiness.evidence,
+        readiness,
+      );
+      assert.equal(retained.work[item.id].graphRevisionDigest, originalDigest);
+      assert.deepEqual(
+        environmentValidationIndices(retained.graph, item.id),
+        [0, 1, 2],
+      );
+      const wrongRevision = structuredClone(state);
+      wrongRevision.work[item.id].graphRevisionDigest = amendmentDigest;
+      // Test malformed current interpretation against the same exact identity:
+      assert.throws(
+        () => saveState(statePath(repository, 1), wrongRevision),
+        /readiness differs from accepted command authority/,
+      );
+      const historical = structuredClone(state);
+      const historicalGraph = structuredClone(graph);
+      historicalGraph.coverage[0].environment = {
+        kind: "local",
+        readiness: "available",
+        probe: "",
+        preparedBy: "",
+      };
+      const historicalDigest = graphDigest(historicalGraph);
+      historical.planGraphDigest = historicalDigest;
+      historical.graphRevisions[0] = {
+        graph: historicalGraph,
+        digest: historicalDigest,
+      };
+      historical.graphRevisions[1].parentDigest = historicalDigest;
+      historical.graphRevisions[1].proposal.expectedGraphDigest =
+        historicalDigest;
+      historical.work[item.id].graphRevisionDigest = historicalDigest;
+      delete historical.work[item.id].execution.data.request
+        .environmentReadiness;
+      delete historical.work[item.id].execution.data.environmentReadiness;
+      saveState(statePath(repository, 1), historical);
+      const old = readState(repository, 1);
+      assert.equal(
+        old.work[item.id].execution.data.request.environmentReadiness,
+        undefined,
+      );
+      assert.equal(
+        old.work[item.id].execution.data.environmentReadiness,
+        undefined,
+      );
+      assert.equal(old.work[item.id].graphRevisionDigest, historicalDigest);
+    } finally {
+      await removeWorktree(checkout, worker);
+    }
+    await assert.rejects(
+      withDiagnosticSession(
+        diagnostics,
+        observerConfigDigest,
+        () =>
+          step(
+            observedState,
+            { scope: { item: item.id }, name: "validate" },
+            () =>
+              validateTree(
+                checkout,
+                join(root, "before-implementation"),
+                baseSha,
+                baseTree,
+                [acceptance],
+                undefined,
+                undefined,
+                [],
+                undefined,
+                baseSha,
+                false,
+                { commands: [setup] },
+              ),
+            { save: () => undefined },
+          ),
+        () => "not-accepted",
+      ),
+      /result.cjs/,
+    );
+    assert.equal(observedState.repeats, undefined);
+    const failedHistory = readDiagnostics(diagnosticRepository, 1);
+    const failedSession = failedHistory.at(-1).observerSessionId;
+    const failedSummary = summarizeFormalHistory(
+      failedHistory.filter(
+        (event) => event.observerSessionId === failedSession,
+      ),
+      { ...expectedHistory, sessionIds: [failedSession] },
+    );
+    assert.equal(failedSummary.completeness, "complete");
+    assert.equal(failedSummary.hasFailedAttempt, true);
+    writeFileSync(join(checkout, "result.cjs"), "module.exports=42;\n");
+    git("add", "result.cjs");
+    git(
+      "-c",
+      "user.name=Integration",
+      "-c",
+      "user.email=integration@example.invalid",
+      "commit",
+      "-m",
+      "implementation",
+    );
+    const commit = git("rev-parse", "HEAD");
+    const tree = git("rev-parse", "HEAD^{tree}");
+    const result = await validateWorkItem(
+      checkout,
+      join(root, "result-validation"),
+      item,
+      commit,
+      tree,
+      baseSha,
+    );
+    assert.deepEqual(
+      result.commands.map((entry) => entry.command),
+      [setup, probe, acceptance],
+    );
+    const final = await validateTree(
+      checkout,
+      join(root, "final-validation"),
+      commit,
+      tree,
+      [acceptance],
+      undefined,
+      undefined,
+      [],
+      undefined,
+      baseSha,
+      true,
+      { commands: objectivePreparationCommands(graph) },
+    );
+    assert.deepEqual(
+      final.commands.map((entry) => entry.command),
+      [acceptance],
+    );
+    assert.deepEqual(
+      final.preparation.map((entry) => entry.command),
+      [setup],
+    );
+    assert.equal(final.commands[0].index, 0);
+    assert.ok(
+      final.preparation.every(
+        (entry) => entry.treeSha === tree && entry.passed,
+      ),
+    );
+    assert.equal(git("status", "--porcelain"), "");
+    assert.equal(
+      git("worktree", "list", "--porcelain").match(/^worktree /gm).length,
+      1,
+    );
+    await withDiagnosticSession(
+      diagnostics,
+      observerConfigDigest,
+      async () => {
+        chmodSync(diagnosticPath(diagnosticRepository, 1), 0o644);
+        try {
+          diagnostics.emit({
+            operation: "actual-file-permission-loss",
+            outcome: "observed",
+          });
+        } finally {
+          chmodSync(diagnosticPath(diagnosticRepository, 1), 0o600);
+        }
+        await diagnostics.span({ operation: "inspect-current-tree" }, () =>
+          gitAsync(checkout, "rev-parse", "HEAD^{tree}"),
+        );
+      },
+      () => "not-accepted",
+    );
+    const lossHistory = readDiagnostics(diagnosticRepository, 1);
+    const lossSession = lossHistory.at(-1).observerSessionId;
+    const lossSummary = summarizeFormalHistory(
+      lossHistory.filter((event) => event.observerSessionId === lossSession),
+      { ...expectedHistory, sessionIds: [lossSession] },
+    );
+    assert.equal(lossSummary.completeness, "unknown");
+    assert.equal(lossHistory.at(-1).metadata.writeFailures, 1);
+    assert.ok(lossSummary.reasons.includes("observation-sequence-gap"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

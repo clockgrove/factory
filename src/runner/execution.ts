@@ -415,7 +415,12 @@ export async function runObjectivePass(
     }
     const graph = state.graph;
     verifyExecutionProfiles(graph, executionProfileChoices(config));
-    await driver.preflight?.(graph);
+    await diagnostics.span(
+      { runId: state.runId, operation: "execution-driver-preflight" },
+      async () => {
+        await driver.preflight?.(graph);
+      },
+    );
     // This controller owns the Objective: none of its validations runs yet.
     // Validation trees live in the Objective's directory, so another
     // Objective's controller keeps its own.

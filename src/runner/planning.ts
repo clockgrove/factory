@@ -20,7 +20,7 @@ import {
 } from "../config.js";
 import type { GitHubGateway, PlanningModel } from "../contracts.js";
 import { attachedFault } from "../fault.js";
-import { DiagnosticEmitter } from "../diagnostics.js";
+import { DiagnosticEmitter, withDiagnosticSession } from "../diagnostics.js";
 import { shortPlanDigest } from "../status-summary.js";
 import { executionProfileChoices } from "../execution-profiles.js";
 import { preflightObjective } from "../local-preflight.js";
@@ -76,6 +76,30 @@ function preparationSourceDigest(
 
 /** A read-only preview: plans and reviews without writing Objective state. */
 export async function planObjective(
+  config: FactoryConfig,
+  objective: number,
+  services: Pick<ApplicationServices, "planningModel" | "github">,
+): Promise<PlanCandidate> {
+  const digest = factoryConfigDigest(config);
+  const emitter = new DiagnosticEmitter(
+    config.repository,
+    objective,
+    configuredDiagnosticSecrets(config),
+    config.capture,
+    digest,
+  );
+  return withDiagnosticSession(
+    emitter,
+    digest,
+    () =>
+      emitter.span({ operation: "planning-preview-controller" }, () =>
+        planObjectiveObserved(config, objective, services),
+      ),
+    (result) => result.review.status,
+  );
+}
+
+async function planObjectiveObserved(
   config: FactoryConfig,
   objective: number,
   services: Pick<ApplicationServices, "planningModel" | "github">,

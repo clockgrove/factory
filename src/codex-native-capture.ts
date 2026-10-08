@@ -293,11 +293,22 @@ export function captureOwnedRollout(
         ? Buffer.byteLength(payload.text)
         : typeof payload.output === "string"
           ? Buffer.byteLength(payload.output)
-          : typeof payload.arguments === "string"
-            ? Buffer.byteLength(payload.arguments)
-            : typeof payload.input === "string"
-              ? Buffer.byteLength(payload.input)
-              : 0;
+          : Array.isArray(payload.output)
+            ? payload.output.reduce(
+                (sum: number, item: { type?: unknown; text?: unknown }) =>
+                  sum +
+                  ((item?.type === "input_text" ||
+                    item?.type === "output_text") &&
+                  typeof item?.text === "string"
+                    ? Buffer.byteLength(item.text)
+                    : 0),
+                0,
+              )
+            : typeof payload.arguments === "string"
+              ? Buffer.byteLength(payload.arguments)
+              : typeof payload.input === "string"
+                ? Buffer.byteLength(payload.input)
+                : 0;
     emit(
       {
         kind: "interaction",

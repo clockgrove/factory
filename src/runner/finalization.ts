@@ -1,6 +1,3 @@
-import { packageManagerUpdate } from "../package-manager-update.js";
-import { workspacePackageAdditions } from "../workspace-membership.js";
-import { amendmentBlocksDispatch, graphDigest } from "../graph-amendments.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -8,26 +5,33 @@ import {
   objectiveCriteria,
   planningSources,
 } from "../compiler.js";
-import { sealFinalAcceptance, closeObjectiveIssue } from "../completion.js";
+import { closeObjectiveIssue, sealFinalAcceptance } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
 import type {
   ContentStore,
   GitHubGateway,
   PlanningModel,
 } from "../contracts.js";
-import { attachFault, decision } from "../fault.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
-import { awaitsOperator } from "../step.js";
+import { attachFault, decision } from "../fault.js";
+import { amendmentBlocksDispatch, graphDigest } from "../graph-amendments.js";
 import { finalValidationLfsMembers, verifyHydratedAssets } from "../media.js";
+import { packageManagerUpdate } from "../package-manager-update.js";
 import { fetchHead, git } from "../process.js";
-import { assertCompletedCoverage, objectiveCandidate } from "../qa.js";
+import {
+  assertCompletedCoverage,
+  objectiveCandidate,
+  objectivePreparationCommands,
+} from "../qa.js";
 import type { FactoryState } from "../state.js";
+import { awaitsOperator } from "../step.js";
 import {
   assertPinnedNpmScripts,
   objectiveReviewEvidence,
   reviewAcceptance,
   validateTree,
 } from "../validation.js";
+import { workspacePackageAdditions } from "../workspace-membership.js";
 import type { ObjectiveStep } from "./ownership.js";
 
 /** Heads others push during final validation that Factory follows before asking. */
@@ -177,6 +181,31 @@ export async function finalizeObjective(args: {
         treeSha: finalTree,
       },
     });
+    const finalCommands =
+      state.objectiveCommands ?? finalObjectiveCommands(issue.body);
+    const declaredPreparation = objectivePreparationCommands(graph);
+    // Only an exact current-phase prefix executes the full declared sequence
+    // before later acceptance. Historical/other-checkout success never dedupes.
+    const preparationCommands = declaredPreparation.every(
+      (command, index) => finalCommands[index] === command,
+    )
+      ? []
+      : declaredPreparation;
+    assertPinnedNpmScripts(
+      config.checkout,
+      state.baseSha,
+      candidateCommitSha,
+      preparationCommands,
+      {
+        sourceDeclared: graph.items.flatMap((item) =>
+          item.validation
+            .filter((check) => check.provenance === "source-declared")
+            .map((check) => check.command),
+        ),
+        workspacePackageAdditions: workspacePackageAdditions(issue.body),
+        packageManagerUpdate: packageManagerUpdate(issue.body),
+      },
+    );
     assertPinnedNpmScripts(
       config.checkout,
       state.baseSha,
@@ -208,6 +237,7 @@ export async function finalizeObjective(args: {
               runId: state.runId,
               operation: "objective-validation-command",
               outcome: entry.passed ? "completed" : "failed",
+              ...(!entry.passed && { formalFailure: true as const }),
               durationMs: entry.durationMs,
               metadata: {
                 commandIndex: entry.index,
@@ -228,6 +258,42 @@ export async function finalizeObjective(args: {
             ),
           finalValidationLfsMembers(state),
           contentStore,
+          state.baseSha,
+          true,
+          {
+            commands: preparationCommands,
+            observe: (entry) =>
+              diagnostics.emit({
+                runId: state.runId,
+                operation: "environment-preparation-command",
+                outcome: entry.passed ? "completed" : "failed",
+                ...(!entry.passed && { formalFailure: true as const }),
+                durationMs: entry.durationMs,
+                metadata: {
+                  scope: "final-fresh-checkout",
+                  treeSha: finalTree,
+                  commandIndex: entry.index,
+                  command: preparationCommands[entry.index]!,
+                  exitCode: entry.exitCode,
+                },
+                detail: entry.output,
+              }),
+            observeOutput: (entry) =>
+              diagnostics.emitStream(
+                {
+                  runId: state.runId,
+                  operation: "environment-preparation-output",
+                  outcome: "observed",
+                  metadata: {
+                    scope: "final-fresh-checkout",
+                    commandIndex: entry.index,
+                    stream: entry.stream,
+                  },
+                },
+                entry.output,
+                entry.final,
+              ),
+          },
         );
         const selectedAssets = graph.items.flatMap((item) => {
           const work = state.work[item.id];

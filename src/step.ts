@@ -59,6 +59,8 @@
  *     }
  *   }, opts);
  */
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import * as time from "./clock.js";
 import {
   attachedFault,
@@ -79,6 +81,52 @@ export type StepState = FactoryState | PreparationState;
 
 /** Whose step this is: a Work Item (across attempts) or the Objective. */
 export type StepScope = { item: string } | "objective";
+
+/** Observational only: never persisted or consulted by repeat/recovery. */
+export interface StepAttemptObservation {
+  operationAttemptId: string;
+  parentOperationAttemptId?: string;
+  scope: string;
+  phase: string;
+  runId?: string;
+  itemId?: string;
+  attemptId?: string;
+  outcome: "started" | "completed" | "pending-poll" | "failed" | "paused";
+  terminal: boolean;
+  faultClass?: string;
+  detail?: string;
+}
+
+const observationScope = new AsyncLocalStorage<{
+  observe: (event: StepAttemptObservation) => void;
+  parentOperationAttemptId?: string;
+}>();
+
+export function withStepObserver<T>(
+  observe: (event: StepAttemptObservation) => void,
+  task: () => T,
+): T {
+  return observationScope.run({ observe }, task);
+}
+
+export function currentObservedOperationAttemptId(): string | undefined {
+  return observationScope.getStore()?.parentOperationAttemptId;
+}
+
+export function withObservedOperation<T>(id: string, task: () => T): T {
+  const inherited = observationScope.getStore();
+  return inherited
+    ? observationScope.run({ ...inherited, parentOperationAttemptId: id }, task)
+    : task();
+}
+
+function observeAttempt(event: StepAttemptObservation): void {
+  try {
+    observationScope.getStore()?.observe(event);
+  } catch {
+    // Observer failure must never affect operational continuation.
+  }
+}
 
 export interface StepSpec {
   scope: StepScope;
@@ -397,6 +445,24 @@ async function repeat<T>(
   // A paid call cut off by a crash counts as one paid fault.
   const entry = record();
   if (entry.inFlight) {
+    const operationAttemptId = randomUUID();
+    const context = {
+      operationAttemptId,
+      parentOperationAttemptId:
+        observationScope.getStore()?.parentOperationAttemptId,
+      scope: key,
+      phase: name,
+      runId: state.runId,
+      ...(spec.scope === "objective" ? {} : { itemId: spec.scope.item }),
+    };
+    observeAttempt({ ...context, outcome: "started", terminal: false });
+    observeAttempt({
+      ...context,
+      outcome: "failed",
+      terminal: true,
+      faultClass: "interrupted-paid-call",
+      detail: "A previously submitted paid call has no recorded settlement",
+    });
     write({ ...entry, inFlight: undefined, paid: (entry.paid ?? 0) + 1 });
     save();
   }
@@ -448,6 +514,25 @@ async function repeat<T>(
       stopWaiting();
     }
 
+    const operationAttemptId = randomUUID();
+    const observation = {
+      operationAttemptId,
+      parentOperationAttemptId:
+        observationScope.getStore()?.parentOperationAttemptId,
+      scope: key,
+      phase: name,
+      runId: state.runId,
+      ...(spec.scope === "objective"
+        ? {}
+        : {
+            itemId: spec.scope.item,
+            attemptId:
+              "work" in state
+                ? state.work[spec.scope.item]?.attempt
+                : undefined,
+          }),
+    };
+    observeAttempt({ ...observation, outcome: "started", terminal: false });
     let done = false;
     const paidFaults = new WeakSet<Fault>();
     /** The service answered: the run of faults is over; the paid count stays. */
@@ -501,6 +586,13 @@ async function repeat<T>(
       if (!spec.paid)
         throw new Error(`Step ${name} is not paid but lost a paid effect`);
       const lost = new StepFault(transient(detail, true));
+      observeAttempt({
+        ...observation,
+        outcome: "failed",
+        terminal: false,
+        faultClass: "lost-worker",
+        detail,
+      });
       paidFaults.add(lost.fault);
       throw lost;
     };
@@ -509,28 +601,63 @@ async function repeat<T>(
     const invalid = (detail: string) => {
       if (!spec.paid)
         throw new Error(`Step ${name} is not paid but had an invalid answer`);
+      observeAttempt({
+        ...observation,
+        outcome: "failed",
+        terminal: false,
+        faultClass: "invalid-answer",
+        detail,
+      });
       write({ ...record(), invalid: detail });
       save();
     };
 
     try {
-      const result = await fn({
-        progress,
-        paid,
-        pending,
-        paidLost,
-        previousInvalid,
-        invalid,
-      });
+      const invoke = () =>
+        fn({
+          progress,
+          paid,
+          pending,
+          paidLost,
+          previousInvalid,
+          invalid,
+        });
+      const inherited = observationScope.getStore();
+      const result = await (inherited
+        ? observationScope.run(
+            { ...inherited, parentOperationAttemptId: operationAttemptId },
+            invoke,
+          )
+        : invoke());
       done = true;
       if (state.repeats?.[key] || owned()) {
         write({});
         own();
         save();
       }
+      observeAttempt({ ...observation, outcome: "completed", terminal: true });
       return result;
     } catch (error) {
       done = true;
+      observeAttempt({
+        ...observation,
+        outcome:
+          error instanceof StepPending
+            ? "pending-poll"
+            : error instanceof StepPaused ||
+                ["decision", "config", "cancelled"].includes(
+                  faultOf(error).kind,
+                )
+              ? "paused"
+              : "failed",
+        terminal: true,
+        ...(error instanceof StepPending || error instanceof StepPaused
+          ? {}
+          : {
+              faultClass: faultOf(error).kind,
+              detail: error instanceof Error ? error.message : String(error),
+            }),
+      });
       if (error instanceof StepPaused) {
         if (signal?.aborted) throw cancelled();
         throw error;

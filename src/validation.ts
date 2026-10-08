@@ -1,21 +1,12 @@
-import {
-  assertPackageManagerUpdate,
-  packageMetadata,
-} from "./package-manager-update.js";
-import {
-  CandidateValidationFailure,
-  CandidateEnvironmentFailure,
-} from "./work-repair.js";
-import { assertWorkspacePackageChange } from "./workspace-membership.js";
 import { createHash } from "node:crypto";
 import {
   closeSync,
-  readdirSync,
   existsSync,
   fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
   rmSync,
@@ -28,7 +19,12 @@ import type {
   ValidationLfsMember,
   WorkItem,
 } from "./contracts.js";
+import type { FailedValidationEvidence } from "./failed-validation.js";
 import { StepFault, transient } from "./fault.js";
+import {
+  assertPackageManagerUpdate,
+  packageMetadata,
+} from "./package-manager-update.js";
 import {
   addWorktree,
   hasUnresolvedSubprocesses,
@@ -40,12 +36,16 @@ import {
   subprocessAsync,
   withWorktreeRegistry,
 } from "./process.js";
-import type { FailedValidationEvidence } from "./failed-validation.js";
 import {
-  type ValidationEvidence,
   type SelectedLfsValidation,
   safeValidationPath,
+  type ValidationEvidence,
 } from "./validation-evidence.js";
+import {
+  CandidateEnvironmentFailure,
+  CandidateValidationFailure,
+} from "./work-repair.js";
+import { assertWorkspacePackageChange } from "./workspace-membership.js";
 
 export interface ValidationObservation {
   index: number;
@@ -303,6 +303,12 @@ function dependencyInputsChanged(
   );
 }
 
+export interface ValidationPreparation {
+  commands: string[];
+  observe?: (entry: ValidationObservation) => void;
+  observeOutput?: (entry: ValidationOutputObservation) => void;
+}
+
 export async function validateTree(
   checkout: string,
   root: string,
@@ -315,6 +321,53 @@ export async function validateTree(
   contentStore?: ContentStore,
   acceptedBaseSha?: string,
   retainFailedValidation = true,
+  preparation: ValidationPreparation = { commands: [] },
+): Promise<ValidationEvidence> {
+  const worktree = join(root, "worktree");
+  try {
+    mkdirSync(root, { recursive: true });
+  } catch (error) {
+    throw new CandidateEnvironmentFailure(
+      `Validation environment unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  await removeValidationWorktree(checkout, worktree);
+  await addWorktree(checkout, worktree, commit);
+  try {
+    return await validateCheckout(
+      worktree,
+      root,
+      commit,
+      expectedTree,
+      commands,
+      observe,
+      observeOutput,
+      lfsMembers,
+      contentStore,
+      acceptedBaseSha,
+      retainFailedValidation,
+      preparation,
+    );
+  } finally {
+    if (!hasUnresolvedSubprocesses()) await removeWorktree(checkout, worktree);
+  }
+}
+
+/** The same exact-tree executor for a newly created validator or worker checkout.
+ * Its caller owns that checkout's lifetime; ignored preparation never transfers. */
+export async function validateCheckout(
+  worktree: string,
+  root: string,
+  commit: string,
+  expectedTree: string,
+  commands: string[],
+  observe?: (entry: ValidationObservation) => void,
+  observeOutput?: (entry: ValidationOutputObservation) => void,
+  lfsMembers: ValidationLfsMember[] = [],
+  contentStore?: ContentStore,
+  acceptedBaseSha?: string,
+  retainFailedValidation = true,
+  preparation: ValidationPreparation = { commands: [] },
 ): Promise<ValidationEvidence> {
   const emptyCredentials = join(root, "empty-gh-config");
   try {
@@ -325,107 +378,116 @@ export async function validateTree(
       `Validation environment unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  // One validation at a time owns `root`: a worktree left by an interrupted
-  // validation is removed before the repeat adds it again.
-  const worktree = join(root, "worktree");
-  await removeValidationWorktree(checkout, worktree);
-  await addWorktree(checkout, worktree, commit);
-  try {
-    const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
-    if (treeSha !== expectedTree)
-      throw new Error(
-        `Validation tree mismatch: expected ${expectedTree}, got ${treeSha}`,
-      );
-    if (pinnedGitRaw(worktree, "status", "--porcelain").length)
-      throw new Error("Validation worktree is not initially clean");
-    const selectedLfs = await hydrateSelectedLfsBytes(
-      worktree,
-      lfsMembers,
-      contentStore,
+  if (pinnedGit(worktree, "rev-parse", "HEAD") !== commit)
+    throw new Error(
+      "Validation checkout commit differs from its exact current scope",
     );
-    const hydratedStatus = pinnedGitRaw(worktree, "status", "--porcelain");
-    const hydratedPaths = pinnedGitRaw(
-      worktree,
-      "status",
-      "--porcelain=v1",
-      "-z",
-      "--untracked-files=all",
+  const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
+  if (treeSha !== expectedTree)
+    throw new Error(
+      `Validation tree mismatch: expected ${expectedTree}, got ${treeSha}`,
     );
-    const evidence: ValidationEvidence = {
-      treeSha,
-      commands: [],
-      ...(selectedLfs.length ? { selectedLfs } : {}),
+  if (pinnedGitRaw(worktree, "status", "--porcelain").length)
+    throw new Error("Validation worktree is not initially clean");
+  const selectedLfs = await hydrateSelectedLfsBytes(
+    worktree,
+    lfsMembers,
+    contentStore,
+  );
+  const hydratedStatus = pinnedGitRaw(worktree, "status", "--porcelain");
+  const hydratedPaths = pinnedGitRaw(
+    worktree,
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+  );
+  const evidence: ValidationEvidence = {
+    treeSha,
+    commands: [],
+    ...(selectedLfs.length ? { selectedLfs } : {}),
+  };
+  const partial: FailedValidationEvidence = {
+    commitSha: pinnedGit(worktree, "rev-parse", "HEAD"),
+    treeSha,
+    declaredCommands: [...commands],
+    commands: [],
+    reason: "command",
+    initialStatus: "clean",
+    postHydrationStatus: {
+      porcelainSha256: createHash("sha256")
+        .update(hydratedStatus)
+        .digest("hex"),
+      empty: hydratedStatus.length === 0,
+    },
+    postCommandStatus: "unchanged",
+    selectedLfsMembers: selectedLfs.length,
+    selectedLfsContentBinding: selectedLfs.length
+      ? "unavailable"
+      : "not-applicable",
+    subprocessOwnership: "settled",
+  };
+  const candidateStatus = () =>
+    pinnedGitRaw(worktree, "status", "--porcelain").equals(hydratedStatus) &&
+    pinnedGit(worktree, "rev-parse", "HEAD") === partial.commitSha &&
+    pinnedGit(worktree, "rev-parse", "HEAD^{tree}") === treeSha
+      ? ("unchanged" as const)
+      : ("modified" as const);
+  if (preparation.commands.length) evidence.preparation = [];
+  const sequence = [...preparation.commands, ...commands];
+  for (const [sequenceIndex, check] of sequence.entries()) {
+    const preparing = sequenceIndex < preparation.commands.length;
+    const index = preparing
+      ? sequenceIndex
+      : sequenceIndex - preparation.commands.length;
+    const commandObserver = preparing ? preparation.observe : observe;
+    const outputObserver = preparing
+      ? preparation.observeOutput
+      : observeOutput;
+    const worktreeStatusBefore = candidateStatus();
+    const started = Date.now();
+    let stdout = "";
+    let stderr = "";
+    const decoders = {
+      stdout: new StringDecoder("utf8"),
+      stderr: new StringDecoder("utf8"),
     };
-    const partial: FailedValidationEvidence = {
-      commitSha: pinnedGit(worktree, "rev-parse", "HEAD"),
-      treeSha,
-      declaredCommands: [...commands],
-      commands: [],
-      reason: "command",
-      initialStatus: "clean",
-      postHydrationStatus: {
-        porcelainSha256: createHash("sha256")
-          .update(hydratedStatus)
-          .digest("hex"),
-        empty: hydratedStatus.length === 0,
+    const result = await subprocessAsync(
+      "sh",
+      localValidationShellArguments(check),
+      {
+        cwd: worktree,
+        env: localValidationEnvironment(emptyCredentials),
       },
-      postCommandStatus: "unchanged",
-      selectedLfsMembers: selectedLfs.length,
-      selectedLfsContentBinding: selectedLfs.length
-        ? "unavailable"
-        : "not-applicable",
-      subprocessOwnership: "settled",
-    };
-    const candidateStatus = () =>
-      pinnedGitRaw(worktree, "status", "--porcelain").equals(hydratedStatus) &&
-      pinnedGit(worktree, "rev-parse", "HEAD") === partial.commitSha &&
-      pinnedGit(worktree, "rev-parse", "HEAD^{tree}") === treeSha
-        ? ("unchanged" as const)
-        : ("modified" as const);
-    for (const [index, check] of commands.entries()) {
-      const worktreeStatusBefore = candidateStatus();
-      const started = Date.now();
-      let stdout = "";
-      let stderr = "";
-      const decoders = {
-        stdout: new StringDecoder("utf8"),
-        stderr: new StringDecoder("utf8"),
-      };
-      const result = await subprocessAsync(
-        "sh",
-        localValidationShellArguments(check),
-        {
-          cwd: worktree,
-          env: localValidationEnvironment(emptyCredentials),
-        },
-        undefined,
-        (stream, chunk) => {
-          const text = decoders[stream].write(chunk);
-          if (stream === "stdout") stdout += text;
-          else stderr += text;
-          if (text)
-            observeOutput?.({ index, stream, output: text, final: false });
-        },
+      undefined,
+      (stream, chunk) => {
+        const text = decoders[stream].write(chunk);
+        if (stream === "stdout") stdout += text;
+        else stderr += text;
+        if (text)
+          outputObserver?.({ index, stream, output: text, final: false });
+      },
+    );
+    for (const stream of ["stdout", "stderr"] as const) {
+      const trailing = decoders[stream].end();
+      if (stream === "stdout") stdout += trailing;
+      else stderr += trailing;
+      outputObserver?.({ index, stream, output: trailing, final: true });
+    }
+    const output = `${stdout}${stderr}`;
+    commandObserver?.({
+      index,
+      passed: result.status === 0,
+      exitCode: result.status ?? -1,
+      durationMs: Date.now() - started,
+      output,
+    });
+    if (hasUnresolvedSubprocesses())
+      throw new Error(
+        "Validation subprocess ownership unresolved; checkout retained",
       );
-      for (const stream of ["stdout", "stderr"] as const) {
-        const trailing = decoders[stream].end();
-        if (stream === "stdout") stdout += trailing;
-        else stderr += trailing;
-        observeOutput?.({ index, stream, output: trailing, final: true });
-      }
-      const output = `${stdout}${stderr}`;
-      observe?.({
-        index,
-        passed: result.status === 0,
-        exitCode: result.status ?? -1,
-        durationMs: Date.now() - started,
-        output,
-      });
-      if (hasUnresolvedSubprocesses())
-        throw new Error(
-          "Validation subprocess ownership unresolved; checkout retained",
-        );
-      partial.postCommandStatus = candidateStatus();
+    partial.postCommandStatus = candidateStatus();
+    if (!preparing)
       partial.commands.push({
         index,
         command: check,
@@ -438,75 +500,72 @@ export async function validateTree(
           stoppedLeftovers: result.stoppedLeftovers,
         }),
       });
-      if (result.status !== 0) {
-        const detail = `Validation command failed (${result.status}): ${check}: ${output}`;
-        // The dependency install is the controller's own bootstrap step. When
-        // the candidate left every manifest and lockfile as at the accepted
-        // base, the same install worked there, so its failure is the
-        // environment's: it repeats and charges no repair (#839). A changed
-        // manifest or lockfile may be what broke it: the candidate's fault.
-        if (
-          check.trim() === PINNED_PNPM_BOOTSTRAP &&
-          !dependencyInputsChanged(worktree, acceptedBaseSha, commit)
-        )
-          throw new StepFault(transient(detail, false));
-        throw new CandidateValidationFailure(
-          detail,
-          retainFailedValidation ? partial : undefined,
-        );
-      }
-      evidence.commands.push({
-        index,
-        command: check,
-        passed: true,
-        exitCode: 0,
-        treeSha,
-        ...(result.stoppedLeftovers && {
-          stoppedLeftovers: result.stoppedLeftovers,
-        }),
-      });
-    }
-    for (const member of lfsMembers) {
-      assertSelectedLfsPointer(worktree, member);
-      assertSelectedLfsBytes(worktree, member);
-    }
-    if (hasUnresolvedSubprocesses())
-      throw new Error(
-        "Validation subprocess ownership unresolved; checkout retained",
-      );
-    if (candidateStatus() !== "unchanged") {
-      partial.reason = "worktree-mutation";
+    if (result.status !== 0) {
+      const detail = `Validation command failed (${result.status}): ${check}: ${output}`;
+      // The dependency install is the controller's own bootstrap step. When
+      // the candidate left every manifest and lockfile as at the accepted
+      // base, the same install worked there, so its failure is the
+      // environment's: it repeats and charges no repair (#839). A changed
+      // manifest or lockfile may be what broke it: the candidate's fault.
+      if (
+        check.trim() === PINNED_PNPM_BOOTSTRAP &&
+        !dependencyInputsChanged(worktree, acceptedBaseSha, commit)
+      )
+        throw new StepFault(transient(detail, false));
       throw new CandidateValidationFailure(
-        `Validation command modified the result tree: ${validationMutationDetail(
-          hydratedPaths,
-          pinnedGitRaw(
-            worktree,
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-          ),
-        )}`,
-        retainFailedValidation ? partial : undefined,
+        detail,
+        retainFailedValidation && !preparing ? partial : undefined,
       );
     }
-    evidence.worktreeObservation = {
+    (preparing ? evidence.preparation! : evidence.commands).push({
+      index,
+      command: check,
+      passed: true,
+      exitCode: 0,
       treeSha,
-      initialStatus: "clean",
-      postHydrationStatus: {
-        porcelainSha256: createHash("sha256")
-          .update(hydratedStatus)
-          .digest("hex"),
-        empty: hydratedStatus.length === 0,
-      },
-      postCommandStatus: "unchanged",
-      selectedLfsMembers: selectedLfs.length,
-      subprocessOwnership: "settled",
-    };
-    return evidence;
-  } finally {
-    if (!hasUnresolvedSubprocesses()) await removeWorktree(checkout, worktree);
+      ...(result.stoppedLeftovers && {
+        stoppedLeftovers: result.stoppedLeftovers,
+      }),
+    });
   }
+  for (const member of lfsMembers) {
+    assertSelectedLfsPointer(worktree, member);
+    assertSelectedLfsBytes(worktree, member);
+  }
+  if (hasUnresolvedSubprocesses())
+    throw new Error(
+      "Validation subprocess ownership unresolved; checkout retained",
+    );
+  if (candidateStatus() !== "unchanged") {
+    partial.reason = "worktree-mutation";
+    throw new CandidateValidationFailure(
+      `Validation command modified the result tree: ${validationMutationDetail(
+        hydratedPaths,
+        pinnedGitRaw(
+          worktree,
+          "status",
+          "--porcelain=v1",
+          "-z",
+          "--untracked-files=all",
+        ),
+      )}`,
+      retainFailedValidation ? partial : undefined,
+    );
+  }
+  evidence.worktreeObservation = {
+    treeSha,
+    initialStatus: "clean",
+    postHydrationStatus: {
+      porcelainSha256: createHash("sha256")
+        .update(hydratedStatus)
+        .digest("hex"),
+      empty: hydratedStatus.length === 0,
+    },
+    postCommandStatus: "unchanged",
+    selectedLfsMembers: selectedLfs.length,
+    subprocessOwnership: "settled",
+  };
+  return evidence;
 }
 
 /**
@@ -923,23 +982,23 @@ export async function validateWorkItem(
   );
 }
 export {
-  CriterionEvidence,
-  AcceptanceDecision,
-  ValidationEvidence,
-  ValidationWorktreeObservation,
-  assertValidationWorktreeObservation,
-  SelectedLfsValidation,
-  assertSelectedLfsValidation,
-} from "./validation-evidence.js";
-export {
-  ReviewDeliveryObservation,
-  workItemReviewObservations,
-  workItemMaterializationEvidence,
+  commandPassEvidence,
   gitChangeEvidence,
   gitChangeEvidenceSources,
-  validStoppedLeftovers,
-  workItemReviewEvidence,
   objectiveReviewEvidence,
-  commandPassEvidence,
+  ReviewDeliveryObservation,
+  validStoppedLeftovers,
+  workItemMaterializationEvidence,
+  workItemReviewEvidence,
+  workItemReviewObservations,
 } from "./result-evidence.js";
-export { reviewAcceptance, ReviewOutcome } from "./result-review.js";
+export { ReviewOutcome, reviewAcceptance } from "./result-review.js";
+export {
+  AcceptanceDecision,
+  assertSelectedLfsValidation,
+  assertValidationWorktreeObservation,
+  CriterionEvidence,
+  SelectedLfsValidation,
+  ValidationEvidence,
+  ValidationWorktreeObservation,
+} from "./validation-evidence.js";

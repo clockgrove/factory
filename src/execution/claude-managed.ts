@@ -1,16 +1,18 @@
-import { packageManagerUpdate } from "../package-manager-update.js";
-import { cancelledFault, classifyFaults } from "../fault.js";
-import { executionFault } from "./fault.js";
 import { randomUUID } from "node:crypto";
 import {
   cpSync,
   mkdirSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { BetaManagedAgentsSessionEvent } from "@anthropic-ai/sdk/resources/beta/sessions/events";
+import type {
+  BetaManagedAgentsSession,
+  SessionCreateParams,
+} from "@anthropic-ai/sdk/resources/beta/sessions/sessions";
 import type {
   ContentStore,
   ExecutionContext,
@@ -21,38 +23,37 @@ import type {
   ExecutionResult,
   ModelInvocationUsage,
 } from "../contracts.js";
+import { cancelledFault, classifyFaults } from "../fault.js";
+import { packageManagerUpdate } from "../package-manager-update.js";
 import {
   addWorktree,
   hasUnresolvedSubprocesses,
   removeWorktree,
 } from "../process.js";
 import { endAttempt, stoppedFault, transportFailure } from "./attempt.js";
-import { collectWorktreeResult } from "./local.js";
-import { readProducedAssets, workItemPrompt } from "./harness-support.js";
+import { verifyClaudeBootstrap } from "./claude-managed-bootstrap.js";
 import {
   ClaudeManagedClient,
+  type ClaudeManagedConfig,
   claudeGone,
   validateClaudeManagedConfig,
-  type ClaudeManagedConfig,
 } from "./claude-managed-client.js";
+import { claudeTurnDisposition } from "./claude-managed-events.js";
 import {
   CLAUDE_BOOTSTRAP_SCRIPT,
-  prepareClaudeInput,
   type ClaudePreparedInput,
+  prepareClaudeInput,
 } from "./claude-managed-input.js";
-import { verifyClaudeBootstrap } from "./claude-managed-bootstrap.js";
-import { claudeTurnDisposition } from "./claude-managed-events.js";
 import {
   CLAUDE_EXPORT_SCRIPT,
   claudeByteDigest,
   materializeClaudeSnapshot,
   parseClaudeResultSnapshot,
 } from "./claude-managed-transfer.js";
-import type {
-  BetaManagedAgentsSession,
-  SessionCreateParams,
-} from "@anthropic-ai/sdk/resources/beta/sessions/sessions";
-import type { BetaManagedAgentsSessionEvent } from "@anthropic-ai/sdk/resources/beta/sessions/events";
+import { executionFault } from "./fault.js";
+import { readProducedAssets, workItemPrompt } from "./harness-support.js";
+import { collectWorktreeResult } from "./local.js";
+
 export { validateClaudeManagedConfig } from "./claude-managed-client.js";
 
 const workspace = "/mnt/session/factory-work";
@@ -351,6 +352,10 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     input: ExecutionRequest,
     context?: ExecutionContext,
   ): Promise<ExecutionHandle> {
+    if (input.environmentReadiness?.validationIndices.length)
+      throw new Error(
+        "Managed worker readiness in its fresh environment is unsupported; source decision required",
+      );
     if (!context)
       throw new Error(
         "Managed execution requires controller checkpoint authority",

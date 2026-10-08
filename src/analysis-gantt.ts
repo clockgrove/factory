@@ -34,6 +34,8 @@ const timedOperations = new Set([
   "media-hydration-verification",
   "objective-acceptance-review",
   "objective-validation",
+  "environment-readiness-command",
+  "environment-preparation-command",
   "validation-command",
   "objective-validation-command",
 ]);

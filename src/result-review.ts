@@ -1,11 +1,22 @@
-import { installedControllerCapabilities } from "./controller-capabilities.js";
 import type {
   ModelInvocationContext,
   PlanningModel,
   ResultReviewEvidenceSource,
 } from "./contracts.js";
-import { StepFault, transient, attachFault } from "./fault.js";
+import { installedControllerCapabilities } from "./controller-capabilities.js";
+import { attachFault, StepFault, transient } from "./fault.js";
 import { pinnedGit } from "./process.js";
+import {
+  assertCommandReceipts,
+  commandPassEvidence,
+  configuredResultReviewTextBudget,
+  gitChangeEvidenceSources,
+  materializeResultTree,
+  resultChangePacket,
+  resultTreeInventory,
+  selectedLfsReviewEvidence,
+  unchangedResultByteEvidence,
+} from "./result-evidence.js";
 import {
   decodeReview,
   resolveReviewReferences,
@@ -13,22 +24,11 @@ import {
 } from "./review-evidence.js";
 import type { AcceptancePending } from "./state.js";
 import {
-  type CriterionEvidence,
   type AcceptanceDecision,
-  type ValidationEvidence,
   assertValidationWorktreeObservation,
+  type CriterionEvidence,
+  type ValidationEvidence,
 } from "./validation-evidence.js";
-import {
-  selectedLfsReviewEvidence,
-  configuredResultReviewTextBudget,
-  resultTreeInventory,
-  unchangedResultByteEvidence,
-  resultChangePacket,
-  materializeResultTree,
-  assertCommandReceipts,
-  gitChangeEvidenceSources,
-  commandPassEvidence,
-} from "./result-evidence.js";
 
 /** A separate read-only review evaluates each criterion on an exact-tree packet. */
 export async function reviewAcceptance(args: {
@@ -57,6 +57,12 @@ export async function reviewAcceptance(args: {
   if (observedTree !== evidence.treeSha)
     throw new Error("Acceptance result tree differs from command evidence");
   assertCommandReceipts(evidence, evidence.treeSha, "Acceptance");
+  if (evidence.preparation)
+    assertCommandReceipts(
+      { ...evidence, commands: evidence.preparation },
+      evidence.treeSha,
+      "Preparation",
+    );
   const selectedLfsEvidence = selectedLfsReviewEvidence(checkout, evidence);
   assertValidationWorktreeObservation(
     evidence.worktreeObservation,
@@ -100,6 +106,19 @@ export async function reviewAcceptance(args: {
     ...byteComparisons.sources,
     ...selectedLfsEvidence.sources,
     ...worktreeEvidence,
+    ...(evidence.preparation?.length
+      ? [
+          {
+            path: "Same-checkout prerequisite preparation",
+            content: JSON.stringify({
+              purpose: "preparation only; no semantic acceptance",
+              treeSha: evidence.treeSha,
+              commands: evidence.preparation,
+            }),
+            complete: true,
+          },
+        ]
+      : []),
     ...(args.evidenceSources ?? []),
   ];
   // Evidence that does not depend on the candidate comes first, so reviews of

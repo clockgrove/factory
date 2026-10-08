@@ -98,6 +98,8 @@ export interface AcceptanceCoverage extends CoverageObligation {
     readiness: "available" | "prepare" | "missing";
     /** Exact source-authorized probe in the owning node's validation commands. */
     probe: string;
+    /** Ordered source-authorized preparation in this same fresh checkout. */
+    prerequisites?: string[];
     /** Existing prerequisite node, never inferred setup authority. */
     preparedBy: string;
   };
@@ -486,6 +488,14 @@ export interface ExecutionRequest {
   sourceAssets?: { binding: SourceAssetBinding; ref: ContentRef }[];
   objectiveBody?: string;
   selectedAssets?: SelectedAssetInput[];
+  /** Trusted graph selection; never commands inferred from the authored brief. */
+  environmentReadiness?: {
+    validationIndices: number[];
+    acceptedBaseSha: string;
+    lfsMembers: ValidationLfsMember[];
+    workspacePackageAdditions: string[];
+    packageManagerUpdate?: string;
+  };
 }
 export interface ExecutionHandle {
   provider: string;
@@ -540,6 +550,19 @@ export interface ExecutionOrphan {
   detail: string;
 }
 export interface ExecutionContext {
+  observeReadiness?(observation: {
+    workerIdentity: string;
+    index: number;
+    command: string;
+    passed: boolean;
+    exitCode: number;
+    durationMs: number;
+    output: string;
+    baseSha: string;
+    treeSha: string;
+    worktree: string;
+    source: string;
+  }): void;
   observeUsage?(observation: WorkerUsageObservation): void;
   /** Diagnostic only: records a possible orphan for operator cleanup. */
   observeOrphan?(orphan: ExecutionOrphan): void;
@@ -548,6 +571,8 @@ export interface ExecutionContext {
 }
 
 export interface ExecutionDriver {
+  /** Supports authenticated preparation in its actual fresh worker checkout. */
+  readonly freshCheckoutReadiness?: true;
   preflight?(graph: WorkGraph): Promise<void>;
   availableSlots(): Promise<number | "unknown">;
   start(

@@ -113,9 +113,27 @@ export async function executeItem(
         work.execution ? structuredClone(work.execution) : undefined;
       let handle = recorded();
       if (handle) {
+        const original = {
+          provider: handle.provider,
+          identity: handle.identity,
+        };
         handle = await driver.find(handle, context());
         ctx.progress();
         if (!handle) {
+          args.diagnostics?.emit({
+            runId: state.runId,
+            itemId: item.id,
+            attemptId: work.attempt,
+            operation: "worker-lost",
+            outcome: "failed",
+            formalFailure: true,
+            metadata: {
+              provider: original.provider,
+              workerIdentity: original.identity,
+              workerOrdinal: work.worker ?? 0,
+              confirmedStopped: true,
+            },
+          });
           // The driver confirmed the recorded worker stopped without a
           // result: the next worker gets the next identity, saved first.
           work.worker = (work.worker ?? 0) + 1;

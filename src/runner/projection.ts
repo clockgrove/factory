@@ -72,35 +72,40 @@ export async function projectPreparedObjective(args: {
     );
   const graph = plan.graph;
   verifyExecutionProfiles(graph, executionProfileChoices(config));
-  await driver.preflight?.(graph);
-  preflightLocalExecutables({
-    checkout: config.checkout,
-    baseSha,
-    graph,
-    finalCommands: plan.finalCommands,
-    objectiveBody: issue.body,
-    privateRoot: root,
-    credentialDirectory: join(root, "empty-gh-config"),
-    secrets: configuredDiagnosticSecrets(config),
-    observe: (entry) =>
-      diagnostics.emit({
-        itemId: entry.itemId,
-        operation: "local-executable-preflight",
-        outcome:
-          entry.status === "missing" || entry.status === "version-mismatch"
-            ? "failed"
-            : "observed",
-        metadata: {
-          origin: entry.origin,
-          source: entry.source,
-          commandIndex: entry.commandIndex,
-          executable: entry.executable,
-          preflightStatus: entry.status,
-          pathContext: entry.pathContext,
-        },
-        detail: entry.detail,
-      }),
-  });
+  await diagnostics.span(
+    { runId: preparation.runId, operation: "execution-readiness-preflight" },
+    async () => {
+      await driver.preflight?.(graph);
+      preflightLocalExecutables({
+        checkout: config.checkout,
+        baseSha,
+        graph,
+        finalCommands: plan.finalCommands,
+        objectiveBody: issue.body,
+        privateRoot: root,
+        credentialDirectory: join(root, "empty-gh-config"),
+        secrets: configuredDiagnosticSecrets(config),
+        observe: (entry) =>
+          diagnostics.emit({
+            itemId: entry.itemId,
+            operation: "local-executable-preflight",
+            outcome:
+              entry.status === "missing" || entry.status === "version-mismatch"
+                ? "failed"
+                : "observed",
+            metadata: {
+              origin: entry.origin,
+              source: entry.source,
+              commandIndex: entry.commandIndex,
+              executable: entry.executable,
+              preflightStatus: entry.status,
+              pathContext: entry.pathContext,
+            },
+            detail: entry.detail,
+          }),
+      });
+    },
+  );
   const waitWhileStopped = async () => {
     while (
       preparation!.coordinator.mode !== "running" &&

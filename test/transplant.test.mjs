@@ -1,31 +1,31 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createHash } from "node:crypto";
 import {
   renderCompilationCall,
   renderGraphReviewCall,
 } from "../dist/compiler/model.js";
 import { renderPlanningInstructions } from "../dist/compiler/planning.js";
 import {
-  planningSources,
   hydrateWorkerInputSources,
   planningGraphView,
+  planningSources,
 } from "../dist/compiler/sources.js";
+import {
+  CONTROLLER_CAPABILITIES_DIGEST,
+  installedControllerCapabilities,
+} from "../dist/controller-capabilities.js";
+import { deliveryDescription } from "../dist/delivery/description.js";
+import { transplantIndependentChange } from "../dist/delivery/transplant.js";
 import { coverageObligations } from "../dist/qa.js";
 import {
-  reviewPacket,
   renderReviewPacketChoices,
+  reviewPacket,
 } from "../dist/review-evidence.js";
-import {
-  installedControllerCapabilities,
-  CONTROLLER_CAPABILITIES_DIGEST,
-} from "../dist/controller-capabilities.js";
-import { transplantIndependentChange } from "../dist/delivery/transplant.js";
-import { deliveryDescription } from "../dist/delivery/description.js";
 
 function git(root, ...args) {
   return execFileSync("git", ["-C", root, ...args], {
@@ -248,6 +248,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
                     kind: "local",
                     readiness: "available",
                     probeValidationIndex: null,
+                    prerequisiteValidationIndices: [],
                     preparedBy: "",
                   },
                 },

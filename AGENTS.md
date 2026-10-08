@@ -7,7 +7,7 @@ These rules govern building Factory. The README and packaged skills govern using
 - Finish one phase at a time. Use concurrent agents within that phase with clear file ownership.
 - Batch related fixes into a complete outcome. Merge with green CI and the maintainer’s read; independently review the completed milestone once. Credentials, isolation and persisted-state changes also need one focused independent review.
 - CI is the routine check. Run an affected local check only when it resolves an actual uncertainty; do not repeat full suites or add per-fix qualification.
-- Issues and pull requests record scope, decisions and results. Comment when a fix merges, an actual blocker appears or the plan changes. No separate status documents, per-PR changelog entries, mandatory issue-heading templates or label taxonomy.
+- Issues and pull requests record scope, decisions and results. Match current issue conventions for native issue type, existing labels, Project status and applicable relationships. Comment when a fix merges, an actual blocker appears or the plan changes. No separate status documents, per-PR changelog entries, mandatory issue-heading templates or label taxonomy.
 - Follow [the release procedure](docs/RELEASING.md) and the release issue’s actual exits. Do not invent additional release gates. GitHub release notes record changes.
 
 ## Product boundaries

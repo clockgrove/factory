@@ -211,7 +211,7 @@ function reviewPacketChoices(packet: ReviewPacket) {
     ...(bodies.length ? { bodies } : {}),
   };
   for (const [index, entry] of packet.evidence.entries())
-    if (resolveReviewBodyContent(choices, index) !== entry.content)
+    if (resolveReviewBodyContent(choices, index, packet) !== entry.content)
       throw new ReviewProtocolError(
         "Review literal binding differs from its source",
       );
@@ -226,10 +226,17 @@ function digest(content: string): string {
 export function resolveReviewBodyContent(
   choices: ReturnType<typeof reviewPacketChoices>,
   evidenceIndex: number,
+  packet: ReviewPacket,
 ): string {
   const entry = choices.evidence[evidenceIndex];
+  const binding = packet.evidence[evidenceIndex];
   if (
     !entry ||
+    !binding ||
+    entry.origin !== binding.origin ||
+    entry.path !== binding.path ||
+    entry.digest !== binding.digest ||
+    entry.complete !== binding.complete ||
     !Number.isSafeInteger(evidenceIndex) ||
     entry.evidenceIndex !== evidenceIndex ||
     typeof entry.complete !== "boolean"
@@ -259,7 +266,7 @@ export function resolveReviewBodyContent(
       );
     content = entry.content.prefix + body.content + entry.content.suffix;
   }
-  if (digest(content) !== entry.digest)
+  if (digest(content) !== entry.digest || content !== binding.content)
     throw new ReviewProtocolError("Review literal binding digest differs");
   return content;
 }
@@ -317,7 +324,7 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
         type: "array",
         minItems: 1,
         description:
-          "Select unique evidence binding indices from this packet, resolving each content body reference literally; body indices are not evidence indices.",
+          "Select unique evidence binding indices, not body indices.",
         items: evidenceIndex,
       },
       detail: {

@@ -1113,20 +1113,27 @@ export function gitChangeEvidenceSources(
     },
     ...packet.patches.map((patch) => {
       const file = packet.changes.find((entry) => entry.path === patch.path);
+      const prefix = `${JSON.stringify({
+        ...identity.metadata,
+        evidenceScope:
+          "This exact file delta only; unchanged file content and sibling deltas are not supplied here.",
+        file,
+        patch: {
+          path: patch.path,
+          lineStats: patch.lineStats,
+          truncated: patch.truncated,
+        },
+      })}\n`;
+      const body = literalGitPatches({ ...packet, patches: [patch] });
       return {
         path: `${identity.path} file ${JSON.stringify(patch.path)}`,
         complete: !patch.truncated,
-        content: `${JSON.stringify({
-          ...identity.metadata,
-          evidenceScope:
-            "This exact file delta only; unchanged file content and sibling deltas are not supplied here.",
-          file,
-          patch: {
-            path: patch.path,
-            lineStats: patch.lineStats,
-            truncated: patch.truncated,
-          },
-        })}\n${literalGitPatches({ ...packet, patches: [patch] })}`,
+        content: prefix + body,
+        reusableBody: {
+          start: prefix.length,
+          length: body.length,
+          digest: createHash("sha256").update(body).digest("hex"),
+        },
       };
     }),
   ];

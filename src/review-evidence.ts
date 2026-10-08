@@ -7,6 +7,8 @@ export interface ReviewEvidenceInput {
   path: string;
   content: string;
   complete?: boolean;
+  /** Producer-approved literal component; offsets count JavaScript string units. */
+  reusableBody?: { start: number; length: number; digest: string };
 }
 export interface ReviewEvidenceReference {
   id: string;
@@ -18,7 +20,8 @@ export interface ReviewEvidenceReference {
 export interface ReviewPacket {
   id: string;
   criteria: { id: string; text: string }[];
-  evidence: (ReviewEvidenceReference & { content: string })[];
+  evidence: (ReviewEvidenceReference &
+    Pick<ReviewEvidenceInput, "content" | "reusableBody">)[];
 }
 export interface ReviewFinding {
   criterionId: string;
@@ -110,16 +113,155 @@ export function assertReviewPacketBinding(
  * identities. This part repeats across calls over the same sources.
  */
 function reviewPacketChoices(packet: ReviewPacket) {
-  return {
+  const candidates = packet.evidence.map((entry) => {
+    if (
+      typeof entry.content !== "string" ||
+      typeof entry.complete !== "boolean" ||
+      !["source", "controller"].includes(entry.origin) ||
+      typeof entry.path !== "string" ||
+      !entry.path ||
+      typeof entry.id !== "string" ||
+      !entry.id ||
+      digest(entry.content) !== entry.digest
+    )
+      throw new ReviewProtocolError("Review evidence content digest differs");
+    const range = entry.reusableBody ?? {
+      start: 0,
+      length: entry.content.length,
+      digest: entry.digest,
+    };
+    if (
+      !Number.isSafeInteger(range.start) ||
+      !Number.isSafeInteger(range.length) ||
+      range.start < 0 ||
+      range.length < 0 ||
+      range.start + range.length > entry.content.length
+    )
+      throw new ReviewProtocolError("Review body selector is invalid");
+    const content = entry.content.slice(
+      range.start,
+      range.start + range.length,
+    );
+    if (
+      digest(content) !== range.digest ||
+      Buffer.from(content, "utf8").toString("utf8") !== content
+    )
+      throw new ReviewProtocolError("Review body bytes/digest differ");
+    return {
+      content,
+      range,
+      key: `${range.digest}:${entry.complete}:${entry.origin}`,
+    };
+  });
+  const counts = new Map<string, number>();
+  for (const { key } of candidates) counts.set(key, (counts.get(key) ?? 0) + 1);
+  const bodies: {
+    bodyIndex: number;
+    encoding: "utf-8";
+    bytes: number;
+    digest: string;
+    complete: boolean;
+    content: string;
+  }[] = [];
+  const indices = new Map<string, number>();
+  // Keep complete normative source bodies inline ahead of dynamic bindings.
+  for (const [index, entry] of packet.evidence.entries()) {
+    const body = candidates[index]!;
+    if (entry.origin !== "controller" || counts.get(body.key)! < 2) continue;
+    const prior = indices.get(body.key);
+    if (prior !== undefined) {
+      if (bodies[prior]!.content !== body.content)
+        throw new ReviewProtocolError("Conflicting review body bytes");
+      continue;
+    }
+    const bodyIndex = bodies.length;
+    indices.set(body.key, bodyIndex);
+    bodies.push({
+      bodyIndex,
+      encoding: "utf-8",
+      bytes: Buffer.byteLength(body.content),
+      digest: body.range.digest,
+      complete: entry.complete,
+      content: body.content,
+    });
+  }
+  const choices = {
     criteria: packet.criteria.map(({ text }, criterionIndex) => ({
       criterionIndex,
       text,
     })),
-    evidence: packet.evidence.map(({ id: _id, ...entry }, evidenceIndex) => ({
-      evidenceIndex,
-      ...entry,
-    })),
+    evidence: packet.evidence.map(
+      ({ id: _id, reusableBody: _range, content, ...entry }, evidenceIndex) => {
+        const body = candidates[evidenceIndex]!;
+        const bodyIndex = indices.get(body.key);
+        return {
+          evidenceIndex,
+          ...entry,
+          content:
+            bodyIndex === undefined
+              ? content
+              : {
+                  prefix: content.slice(0, body.range.start),
+                  bodyIndex,
+                  suffix: content.slice(body.range.start + body.range.length),
+                },
+        };
+      },
+    ),
+    ...(bodies.length ? { bodies } : {}),
   };
+  for (const [index, entry] of packet.evidence.entries())
+    if (resolveReviewBodyContent(choices, index) !== entry.content)
+      throw new ReviewProtocolError(
+        "Review literal binding differs from its source",
+      );
+  return choices;
+}
+
+function digest(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+/** Resolve only exact supplied literal spans; no normalization or label aliases. */
+export function resolveReviewBodyContent(
+  choices: ReturnType<typeof reviewPacketChoices>,
+  evidenceIndex: number,
+): string {
+  const entry = choices.evidence[evidenceIndex];
+  if (
+    !entry ||
+    !Number.isSafeInteger(evidenceIndex) ||
+    entry.evidenceIndex !== evidenceIndex ||
+    typeof entry.complete !== "boolean"
+  )
+    throw new ReviewProtocolError("Review binding index is invalid");
+  let content: string;
+  if (typeof entry.content === "string") content = entry.content;
+  else {
+    if (
+      !entry.content ||
+      typeof entry.content.prefix !== "string" ||
+      typeof entry.content.suffix !== "string" ||
+      !Number.isSafeInteger(entry.content.bodyIndex)
+    )
+      throw new ReviewProtocolError("Review body reference is invalid");
+    const body = choices.bodies?.[entry.content.bodyIndex];
+    if (
+      !body ||
+      body.bodyIndex !== entry.content.bodyIndex ||
+      body.complete !== entry.complete ||
+      body.encoding !== "utf-8" ||
+      body.bytes !== Buffer.byteLength(body.content) ||
+      body.digest !== digest(body.content)
+    )
+      throw new ReviewProtocolError(
+        "Review body reference is unresolved or conflicting",
+      );
+    content = entry.content.prefix + body.content + entry.content.suffix;
+  }
+  if (digest(content) !== entry.digest)
+    throw new ReviewProtocolError("Review literal binding digest differs");
+  return content;
 }
 
 /**
@@ -146,6 +288,7 @@ export function renderReviewPacketId(packet: ReviewPacket): string {
 
 /** Packet-local choices; passing findings can cite only complete evidence. */
 export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
+  reviewPacketChoices(packet);
   const index = (length: number) => ({
     type: "integer",
     minimum: 0,
@@ -173,7 +316,8 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
       evidenceIndices: {
         type: "array",
         minItems: 1,
-        description: "Select unique evidence indices from this packet.",
+        description:
+          "Select unique evidence binding indices from this packet, resolving each content body reference literally; body indices are not evidence indices.",
         items: evidenceIndex,
       },
       detail: {
@@ -315,6 +459,7 @@ export function decodeReview(
   errors: (string | undefined)[];
   packetError?: string;
 } {
+  reviewPacketChoices(packet);
   const rawFindings = reviewResponse(response, packet);
   const grouped = new Map<number, unknown[]>();
   let packetError: string | undefined;
@@ -403,6 +548,7 @@ export function decodeGraphReview(
   packet: ReviewPacket,
   graphItemIds: readonly string[],
 ): ResolvedGraphFinding[] {
+  reviewPacketChoices(packet);
   return reviewResponse(response, packet).map((raw) => {
     const value = object(raw);
     if (

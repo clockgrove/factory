@@ -434,6 +434,8 @@ export interface ValidationCommandReceipt {
 }
 
 export interface ResultReviewEvidenceSource {
+  /** Exact producer-approved literal body within content; no provenance reuse. */
+  reusableBody?: { start: number; length: number; digest: string };
   path: string;
   content: string;
   /** False when this source contains only bounded partial text evidence. */

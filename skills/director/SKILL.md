@@ -34,6 +34,8 @@ The first line of `status` is the phase and a one-line summary. `Next:` is the e
 
 When setup, planning or review needs the operator, gather all retained review findings, the available readiness stages and the requirements in the exact pinned Sources before replying. Read the full retained findings rather than only the first question; mark stages not checked as unknown. Combine duplicates into one concise checklist of missing or unknown prerequisites. For each, state why it is needed, cite the source, give the supported setup step and verification command, and name any choice only the operator can make. Verify external platform facts through permitted official documentation; never invent a command or treat an unchecked account as ready.
 
+Check the exact source-authorized prerequisite commands and their order in the actual fresh phase checkout, including setup before probes or validation. A pinned Git tree transfers tracked inputs, not ignored installations, generated files or runtime resources; verify those prerequisites there within the existing authority and gates.
+
 Present every known blocker together and ask for required choices once. Tell the operator where each secret belongs according to the approved configuration or source instructions; never request secret values in chat or issues. Keep private evidence in its authorized destination. Recheck the actual requirement before recording a decision, and use the live status command for continuation. Checklist text grants no setup, account, spending, deployment or acceptance authority. Continue independent work only when already authorized and admitted by the current gates; do not bypass a blocked Objective, weaken acceptance or create a new state root.
 
 ## Decide
@@ -61,6 +63,8 @@ Search the pinned repository for the canonical text before treating a gap as a h
 ```sh
 factory diagnostics --objective N [--follow | --summary [--json] | --logs ITEM [--follow]]
 ```
+
+For local process/resource observations, use the recorded owners' runtime and process namespace and establish that visibility before claiming cessation. A sandbox-only `/proc` scan cannot establish host closure; keep unproved visibility or resources unknown and follow the existing ownership and permission gates.
 
 `--summary` is the efficiency report (time per stage, operator waits, tokens per role). A quiet timeline means no new provider event, not completion. Diagnostics can hold private source, so review them before pasting. Change the `autonomy` limits only on request. See the [capture guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#diagnostic-capture-and-export) for timing and captures, and [remote execution](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#managed-execution), which is not live-qualified.
 

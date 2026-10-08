@@ -49,6 +49,7 @@ import {
   retainedFailedResultContext,
 } from "./repair-policy.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
+import { assertRetainedReviewEvidence } from "./validation-evidence.js";
 import {
   assertSelectedLfsValidation,
   assertValidationWorktreeObservation,
@@ -463,6 +464,7 @@ function acceptancePending(
 function validationEvidence(value: unknown, label: string): string[] {
   const evidence = record(value, label);
   const treeSha = sha(evidence.treeSha, `${label}.treeSha`);
+  assertRetainedReviewEvidence(evidence as unknown as ValidationEvidence);
   assertSelectedLfsValidation(evidence.selectedLfs, treeSha);
   assertValidationWorktreeObservation(
     evidence.worktreeObservation,

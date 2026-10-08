@@ -19,6 +19,7 @@ import {
 } from "./result-evidence.js";
 import {
   decodeReview,
+  type ReviewEvidenceInput,
   resolveReviewReferences,
   reviewPacket,
 } from "./review-evidence.js";
@@ -29,6 +30,7 @@ import {
 } from "./semantic-refusal.js";
 import {
   type AcceptanceDecision,
+  assertRetainedReviewEvidence,
   assertValidationWorktreeObservation,
   type CriterionEvidence,
   type ValidationEvidence,
@@ -147,13 +149,30 @@ export async function reviewAcceptance(args: {
     },
     ...suppliedEvidence,
   ];
-  const packet = reviewPacket(criteria, [
+  const packetInputs: ReviewEvidenceInput[] = [
     ...sources.map((source) => ({ ...source, origin: "source" as const })),
     ...evidenceSources.map((source) => ({
       ...source,
-      origin: "controller" as const,
+      origin: source.origin ?? ("controller" as const),
     })),
-  ]);
+  ];
+  // Share only identical complete occurrences with the same path/provenance.
+  // Historical bindings stay in their record; no model verdict is reused.
+  const seen = new Set<string>();
+  const packet = reviewPacket(
+    criteria,
+    packetInputs.filter((entry) => {
+      const key = JSON.stringify([
+        entry.origin,
+        entry.path,
+        entry.complete !== false,
+        entry.content,
+      ]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }),
+  );
   const request: Parameters<NonNullable<PlanningModel["reviewResult"]>>[0] = {
     reviewPhase: args.reviewPhase ?? ("result-review" as const),
     criteria,
@@ -299,6 +318,7 @@ export async function reviewAcceptance(args: {
   // Preserve independent valid assessments on existing item evidence; final raw
   // response remains in existing diagnostics rather than a second durable store.
   evidence.criteria = proven;
+  delete evidence.reviewEvidence;
   {
     const protocolInvalid = Boolean(
       decoded.packetError || decoded.errors.some(Boolean),
@@ -361,6 +381,22 @@ export async function reviewAcceptance(args: {
       .sort(([a], [b]) => a - b)
       .map(([, question]) => question);
     return { pending: more.length ? { ...pending!, more } : pending! };
+  }
+  if (args.reviewPhase !== "objective-review") {
+    const cited = new Set(
+      proven.flatMap(
+        (finding) => finding.evidence?.map((entry) => entry.id) ?? [],
+      ),
+    );
+    let remaining = configuredResultReviewTextBudget() - 2;
+    evidence.reviewEvidence = packet.evidence.flatMap((entry) => {
+      if (!cited.has(entry.id)) return [];
+      const bytes = Buffer.byteLength(JSON.stringify(entry)) + 1;
+      if (bytes > remaining) return [];
+      remaining -= bytes;
+      return [structuredClone(entry)];
+    });
+    assertRetainedReviewEvidence(evidence);
   }
   return { evidence: { ...evidence, criteria: proven } };
 }

@@ -434,6 +434,8 @@ export interface ValidationCommandReceipt {
 }
 
 export interface ResultReviewEvidenceSource {
+  /** Retained citations preserve source/controller provenance when forwarded. */
+  origin?: "source" | "controller";
   /** Exact producer-approved literal body within content; no provenance reuse. */
   reusableBody?: { start: number; length: number; digest: string };
   path: string;

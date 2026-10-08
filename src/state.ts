@@ -26,7 +26,7 @@ import {
   type RepeatRecord,
   type Wait,
 } from "./fault.js";
-import { assertGraphRevisions } from "./graph-amendments.js";
+import { assertGraphRevisions, graphDigest } from "./graph-amendments.js";
 import {
   assertAssetCaptureReceipt,
   assertHydrationReceipt,
@@ -1149,11 +1149,23 @@ export function parseFactoryState(
           throw new Error(
             `Work Item ${id} execution profile differs from accepted graph`,
           );
+        // Coverage may change in a reviewed amendment while this item's
+        // recorded attempt and definition remain unchanged. Authenticate its
+        // historical preparation against that attempt's admitted revision.
+        const attemptGraph =
+          item.graphRevisionDigest === undefined
+            ? (graph as unknown as WorkGraph)
+            : ((state.graphRevisions as FactoryState["graphRevisions"])?.find(
+                (revision) => revision.digest === item.graphRevisionDigest,
+              )?.graph ??
+              (graphDigest(graph as unknown as WorkGraph) ===
+              item.graphRevisionDigest
+                ? (graph as unknown as WorkGraph)
+                : undefined));
+        if (!attemptGraph)
+          throw new Error(`Work Item ${id} has no authenticated attempt graph`);
         const readiness = request.environmentReadiness;
-        const expectedIndices = environmentValidationIndices(
-          graph as unknown as WorkGraph,
-          id,
-        );
+        const expectedIndices = environmentValidationIndices(attemptGraph, id);
         if (readiness !== undefined) {
           const selected = record(readiness, `work.${id}.execution.readiness`);
           if (
@@ -1203,7 +1215,7 @@ export function parseFactoryState(
               `Work Item ${id} readiness receipts differ from selected commands`,
             );
         } else if (
-          (graph as unknown as WorkGraph).coverage.some(
+          attemptGraph.coverage.some(
             (entry) =>
               entry.itemId === id &&
               (entry.environment.prerequisites?.length ?? 0) > 0,

@@ -36,7 +36,12 @@ import {
   objectivePreparationCommands,
 } from "../dist/qa.js";
 import { preflightItemEnvironment } from "../dist/qa-execution.js";
-import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
+import {
+  charge,
+  consumption,
+  objectiveEvent,
+  resolveAutonomy,
+} from "../dist/repair-policy.js";
 import { rereviewWorkItem } from "../dist/runner.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
@@ -617,6 +622,11 @@ test("source readiness prepares each real fresh checkout before its phase checks
       nonGoals: [],
       dependencies: [],
       ownedPaths: ["result.cjs"],
+      resources: [],
+      expectedOutputRoles: [],
+      requiredLfsRoles: [],
+      sourceAssets: [],
+      minimumAssetSets: 0,
       citations: [],
       validation: [setup, probe, acceptance].map((command) => ({
         command,
@@ -679,7 +689,16 @@ test("source readiness prepares each real fresh checkout before its phase checks
       ),
       false,
     );
-    const worker = join(root, "worker");
+    const repository = "integration/readiness-amendment";
+    const worker = join(
+      stateRoot(repository),
+      "worktrees",
+      "recorded-checkout",
+    );
+    mkdirSync(join(stateRoot(repository), "worktrees"), {
+      recursive: true,
+      mode: 0o700,
+    });
     await addWorktree(checkout, worker, baseSha);
     try {
       assert.equal(existsSync(join(worker, ".runtime-ready")), false);
@@ -696,6 +715,142 @@ test("source readiness prepares each real fresh checkout before its phase checks
       );
       assert.equal(existsSync(join(worker, ".runtime-ready")), true);
       assert.equal(existsSync(join(worker, "result.cjs")), false);
+      // A reviewed coverage-only revision leaves this recorded attempt intact.
+      // Its real preparation receipt must not be reinterpreted as a new probe.
+      // This stopped-attempt snapshot exercises the disk/parser contract only;
+      // no harness, provider, model review or external amendment is invoked.
+      const amended = structuredClone(graph);
+      amended.coverage[0].environment.probe = acceptance;
+      amended.coverage[0].environment.prerequisites = [setup, probe];
+      const originalDigest = graphDigest(graph);
+      const amendmentDigest = graphDigest(amended);
+      const state = {
+        schemaVersion: 7,
+        publicationContract: "exact-request-v1",
+        repository,
+        objective: 1,
+        runId: "recorded-readiness-checkout",
+        planGraphDigest: originalDigest,
+        configDigest: factoryConfigDigest({ repository, checkout }),
+        baseSha,
+        capacity: { concurrency: 1 },
+        issueByItemId: { [item.id]: 1 },
+        graph: amended,
+        autonomy: resolveAutonomy({}),
+        graphRevisions: [
+          { graph, digest: originalDigest },
+          {
+            graph: amended,
+            digest: amendmentDigest,
+            parentDigest: originalDigest,
+            proposal: {
+              scope: "in-scope",
+              reason: "Declare final probe preparation",
+              evidence: ["README.md"],
+              ownership: ["result.cjs"],
+              acceptance: ["Result is 42"],
+              dependencies: [],
+              actor: "integration",
+              expectedGraphDigest: originalDigest,
+            },
+            reviewDigest: createHash("sha256")
+              .update(JSON.stringify(amended))
+              .digest("hex"),
+            acceptedAt: new Date().toISOString(),
+          },
+        ],
+        work: {
+          [item.id]: {
+            status: "failed",
+            step: "execute",
+            attempt: "recorded-checkout",
+            baseSha,
+            executionBaseSha: baseSha,
+            graphRevisionDigest: originalDigest,
+            execution: {
+              provider: "local",
+              identity: "recorded-checkout",
+              data: {
+                worktree: worker,
+                adapterIdentity: "local-process-receipt",
+                handle: { identity: "settled-readiness-commands" },
+                request: {
+                  item,
+                  baseSha,
+                  attemptId: "recorded-checkout",
+                  environmentReadiness: {
+                    validationIndices: [0, 1],
+                    acceptedBaseSha: baseSha,
+                    lfsMembers: [],
+                    workspacePackageAdditions: [],
+                  },
+                },
+                environmentReadiness: {
+                  commitSha: baseSha,
+                  worktree: worker,
+                  evidence: readiness,
+                },
+              },
+            },
+          },
+        },
+      };
+      charge(
+        state,
+        objectiveEvent("amend", "integration-coverage-revision"),
+        "planningRevisions",
+        ["$planning"],
+      );
+      saveState(statePath(repository, 1), state);
+      const retained = readState(repository, 1);
+      assert.deepEqual(
+        retained.work[item.id].execution.data.environmentReadiness.evidence,
+        readiness,
+      );
+      assert.equal(retained.work[item.id].graphRevisionDigest, originalDigest);
+      assert.deepEqual(
+        environmentValidationIndices(retained.graph, item.id),
+        [0, 1, 2],
+      );
+      const wrongRevision = structuredClone(state);
+      wrongRevision.work[item.id].graphRevisionDigest = amendmentDigest;
+      // Test malformed current interpretation against the same exact identity:
+      assert.throws(
+        () => saveState(statePath(repository, 1), wrongRevision),
+        /readiness differs from accepted command authority/,
+      );
+      const historical = structuredClone(state);
+      const historicalGraph = structuredClone(graph);
+      historicalGraph.coverage[0].environment = {
+        kind: "local",
+        readiness: "available",
+        probe: "",
+        preparedBy: "",
+      };
+      const historicalDigest = graphDigest(historicalGraph);
+      historical.planGraphDigest = historicalDigest;
+      historical.graphRevisions[0] = {
+        graph: historicalGraph,
+        digest: historicalDigest,
+      };
+      historical.graphRevisions[1].parentDigest = historicalDigest;
+      historical.graphRevisions[1].proposal.expectedGraphDigest =
+        historicalDigest;
+      historical.work[item.id].graphRevisionDigest = historicalDigest;
+      delete historical.work[item.id].execution.data.request
+        .environmentReadiness;
+      delete historical.work[item.id].execution.data.environmentReadiness;
+      saveState(statePath(repository, 1), historical);
+      const old = readState(repository, 1);
+      assert.equal(
+        old.work[item.id].execution.data.request.environmentReadiness,
+        undefined,
+      );
+      assert.equal(
+        old.work[item.id].execution.data.environmentReadiness,
+        undefined,
+      );
+      assert.equal(old.work[item.id].graphRevisionDigest, historicalDigest);
     } finally {
       await removeWorktree(checkout, worker);
     }

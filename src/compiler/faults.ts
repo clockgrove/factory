@@ -19,6 +19,17 @@ import {
 
 export class MalformedPlannerOutput extends CompletedModelInvocationError {}
 
+/** A timed-out attempt; only proven native cessation permits another dispatch. */
+export class ProviderResponseTimeoutFailure extends CompletedModelInvocationError {
+  constructor(
+    readonly timeout: ProviderTurnTimeoutError,
+    readonly stopped: boolean,
+  ) {
+    super(timeout);
+    this.name = "ProviderResponseTimeoutFailure";
+  }
+}
+
 export class ProviderCapacityFailure extends CompletedModelInvocationError {
   constructor(cause: unknown) {
     super(cause);

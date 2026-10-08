@@ -13,7 +13,7 @@ import {
   type ResultReviewFinding,
 } from "../contracts.js";
 import { readPinnedPlaybook } from "../learning.js";
-import { attachFault, attachedFault, transient } from "../fault.js";
+import { attachFault, attachedFault, transient, decision } from "../fault.js";
 import type {
   PlanningTransport,
   PlanningModelOptions,
@@ -25,6 +25,7 @@ import * as time from "../clock.js";
 import { randomUUID } from "node:crypto";
 import {
   ProviderCapacityFailure,
+  ProviderResponseTimeoutFailure,
   providerFailureClass,
   modelFault,
   MalformedPlannerOutput,
@@ -45,7 +46,7 @@ import {
   renderReviewPacket,
 } from "../review-evidence.js";
 import type { CodexModelSelection } from "../config.js";
-import { DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS } from "../provider-turn.js";
+import { ProviderTurnTimeoutError } from "../provider-turn.js";
 import { CodexPlanningTransport } from "./codex-transport.js";
 
 /**
@@ -297,26 +298,55 @@ export class StructuredPlanningModel implements PlanningModel {
     const retryDelays = REVIEW_PHASES.has(args.defaultPhase)
       ? this.reviewCapacityRetryDelaysMs
       : [];
-    const maxAttempts = retryDelays.length + 1;
+    // One shared allowance covers capacity and stopped response-timeout retries.
+    // A tighter explicit review retry policy remains a tighter total bound.
+    const maxAttempts = REVIEW_PHASES.has(args.defaultPhase)
+      ? retryDelays.length + 1
+      : 3;
+    let responseTimedOut = false;
     invocation.providerMaxAttempts = maxAttempts;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       invocation.providerAttempt = attempt;
       try {
         return await this.runStructuredAttempt<T>({ ...args, invocation });
       } catch (error) {
-        if (
-          !(error instanceof ProviderCapacityFailure) ||
-          attempt === maxAttempts
-        )
+        const timeout =
+          error instanceof ProviderResponseTimeoutFailure ? error : undefined;
+        if (timeout) responseTimedOut = true;
+        const retryTimeout =
+          timeout?.stopped && timeout.timeout.waitingFor === "model-response";
+        const retryCapacity =
+          error instanceof ProviderCapacityFailure &&
+          attempt <= retryDelays.length;
+        if ((!retryTimeout && !retryCapacity) || attempt === maxAttempts) {
+          if (responseTimedOut && attachedFault(error)?.kind === "transient") {
+            // The enclosing paid step must not restart this exhausted/uncertain loop.
+            const reason =
+              timeout && !timeout.stopped
+                ? "Timed-out model invocation cessation is unproved; no automatic retry is safe."
+                : timeout?.timeout.waitingFor === "active-tool"
+                  ? "Observed active tool exceeded its existing inactivity timeout; no model-response retry was dispatched."
+                  : `Structured model response retry allowance stopped after ${attempt} of ${maxAttempts} attempts.`;
+            throw attachFault(
+              new CompletedModelInvocationError(error),
+              decision(
+                `${reason} ${error instanceof Error ? error.message : String(error)} Inspect the retained failed invocation and provider status before retrying or cancelling.`,
+                error instanceof Error ? error.message : String(error),
+              ),
+            );
+          }
           throw error;
-        const retryDelayMs = retryDelays[attempt - 1]!;
+        }
+        const retryDelayMs = retryTimeout
+          ? attempt * 1_000
+          : retryDelays[attempt - 1]!;
         const selection = this.transport.selection(args.role);
         observeModelInvocation(invocation, {
           type: "retry-scheduled",
           provider: this.transport.provider,
           model: selection.model,
           reasoningEffort: selection.reasoningEffort,
-          failureClass: "provider-capacity",
+          failureClass: retryTimeout ? "provider-timeout" : "provider-capacity",
           retryDelayMs,
         });
         await this.wait(retryDelayMs);
@@ -473,6 +503,11 @@ export class StructuredPlanningModel implements PlanningModel {
         throw attachFault(new MalformedPlannerOutput(error), fault);
       if (error instanceof UnsettledSubprocessError)
         throw attachFault(error, fault);
+      if (error instanceof ProviderTurnTimeoutError)
+        throw attachFault(
+          new ProviderResponseTimeoutFailure(error, turn.stopped === true),
+          fault,
+        );
       if (turn.ended)
         throw attachFault(new CompletedModelInvocationError(error), fault);
       throw attachFault(error, fault);
@@ -642,7 +677,7 @@ export class CodexPlanningModel extends StructuredPlanningModel {
     checkout: string,
     planner: CodexModelSelection,
     reviewer: CodexModelSelection,
-    providerTurnIdleTimeoutMs = DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+    providerTurnIdleTimeoutMs?: number,
     options: CodexPlanningModelOptions = {},
   ) {
     super(

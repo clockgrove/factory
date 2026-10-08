@@ -44,6 +44,7 @@ import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
   closeProviderEventStream,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  modelResponseTimeoutMs,
   ProviderTurnGuard,
   requireCompletedProviderTurn,
 } from "./provider-turn.js";
@@ -412,7 +413,7 @@ class ClaudePlanningTransport implements PlanningTransport {
   constructor(
     private config: ClaudePlanningConfig,
     private query: ClaudePlanningQuery | undefined,
-    private providerTurnIdleTimeoutMs: number,
+    private providerTurnIdleTimeoutMs: number | undefined,
     redactionValues: string[],
   ) {
     this.secrets = [
@@ -452,7 +453,10 @@ class ClaudePlanningTransport implements PlanningTransport {
     const selection = this.selection(args.role);
     const { model, reasoningEffort } = selection;
     const started = Date.now();
-    const guard = new ProviderTurnGuard(this.providerTurnIdleTimeoutMs);
+    const guard = new ProviderTurnGuard(
+      this.providerTurnIdleTimeoutMs ?? modelResponseTimeoutMs(reasoningEffort),
+      this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+    );
     const abortController = new AbortController();
     guard.signal.addEventListener(
       "abort",
@@ -490,7 +494,26 @@ class ClaudePlanningTransport implements PlanningTransport {
         const next = await guard.race(events.next());
         if (next.done) break;
         const message = next.value;
-        guard.progress();
+        guard.progress(message.type);
+        if (message.type === "assistant" || message.type === "user") {
+          const content = message.message.content;
+          if (Array.isArray(content))
+            for (const block of content) {
+              if (
+                block.type === "tool_use" &&
+                TREE_REVIEW_TOOLS.includes(block.name)
+              )
+                guard.progress(`${message.type}:tool_use:${block.name}`, {
+                  id: block.id,
+                  active: true,
+                });
+              else if (block.type === "tool_result")
+                guard.progress(`${message.type}:tool_result`, {
+                  id: block.tool_use_id,
+                  active: false,
+                });
+            }
+        }
         if ("session_id" in message && typeof message.session_id === "string")
           state.providerThreadId ??= message.session_id;
         if (
@@ -675,8 +698,7 @@ export class ClaudePlanningModel extends StructuredPlanningModel {
       new ClaudePlanningTransport(
         config,
         options.query,
-        options.providerTurnIdleTimeoutMs ??
-          DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+        options.providerTurnIdleTimeoutMs,
         options.redactionValues ?? [],
       ),
       options,

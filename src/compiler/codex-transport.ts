@@ -9,6 +9,8 @@ import type { CodexModelSelection } from "../config.js";
 import type { ModelInvocationContext } from "../contracts.js";
 import {
   ProviderTurnGuard,
+  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  modelResponseTimeoutMs,
   requireCompletedProviderTurn,
 } from "../provider-turn.js";
 import {
@@ -35,7 +37,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     private checkout: string,
     private planner: CodexModelSelection,
     private reviewer: CodexModelSelection,
-    private providerTurnIdleTimeoutMs: number,
+    private providerTurnIdleTimeoutMs: number | undefined,
     private redactionValues: string[],
   ) {}
 
@@ -63,7 +65,11 @@ export class CodexPlanningTransport implements PlanningTransport {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
     const started = Date.now();
-    const turn = new ProviderTurnGuard(this.providerTurnIdleTimeoutMs);
+    const turn = new ProviderTurnGuard(
+      this.providerTurnIdleTimeoutMs ??
+        modelResponseTimeoutMs(selection.reasoningEffort),
+      this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+    );
     const thread: { id?: string } = {};
     let retainHome = false;
     let turnCompleted = false;
@@ -99,13 +105,26 @@ export class CodexPlanningTransport implements PlanningTransport {
         signal: turn.signal,
         event: (event) => {
           if (event.type === "thread.started") thread.id = event.thread_id;
-          turn.progress();
           const item =
             event.type === "item.started" ||
             event.type === "item.updated" ||
             event.type === "item.completed"
               ? event.item
               : undefined;
+          const activeTool =
+            item?.type === "command_execution" ||
+            item?.type === "mcp_tool_call";
+          turn.progress(
+            item ? `${event.type}:${item.type}` : event.type,
+            activeTool
+              ? {
+                  id: item.id,
+                  active:
+                    item.status === "in_progress" &&
+                    event.type !== "item.completed",
+                }
+              : undefined,
+          );
           // Codex emits turn.started before it sends the model request, so a
           // connection that fails after it reached no model and is unpaid.
           // Startup warnings do not prove inference; other items or usage do.
@@ -195,10 +214,13 @@ export class CodexPlanningTransport implements PlanningTransport {
           // process-group settlement remain part of this owned invocation.
         },
       });
+      state.stopped = true;
       if (!turnCompleted && streamError) throw streamError;
       requireCompletedProviderTurn(turnCompleted);
     } catch (error) {
       retainHome = error instanceof UnsettledSubprocessError;
+      // runCodexExec throws ordinary failures only after the owned process group settles.
+      state.stopped = !retainHome;
       observeModelInvocation(invocation, {
         type: "progress",
         capture: {

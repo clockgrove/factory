@@ -1,8 +1,31 @@
 export const DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS = 15 * 60 * 1_000;
 
+/** Structured answers may reason longer at the explicitly selected higher effort. */
+export function modelResponseTimeoutMs(reasoningEffort?: string): number {
+  return (
+    (reasoningEffort === "high"
+      ? 3
+      : ["xhigh", "max", "ultra", "persistent"].includes(reasoningEffort ?? "")
+        ? 5
+        : 2) *
+    60 *
+    1_000
+  );
+}
+
 export class ProviderTurnTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`Provider turn produced no progress for ${timeoutMs} ms`);
+  constructor(
+    timeoutMs: number,
+    readonly waitingFor:
+      | "model-response"
+      | "active-tool"
+      | "provider-turn" = "provider-turn",
+    readonly lastOperation = "provider-start",
+    readonly inactivityMs = timeoutMs,
+  ) {
+    super(
+      `Provider turn produced no progress for ${inactivityMs} ms (waiting for ${waitingFor}; last observed operation: ${lastOperation}; timeout ${timeoutMs} ms)`,
+    );
     this.name = "ProviderTurnTimeoutError";
   }
 }
@@ -19,12 +42,22 @@ export class ProviderTurnGuard {
   private timer: NodeJS.Timeout | undefined;
   private ended = false;
   private timeoutError: ProviderTurnTimeoutError | undefined;
+  private readonly activeTools = new Set<string>();
+  private lastOperation = "provider-start";
+  private lastProgressAt = Date.now();
   private readonly timeoutWaiters = new Set<
     (error: ProviderTurnTimeoutError) => void
   >();
 
-  constructor(private readonly idleTimeoutMs: number) {
-    if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs <= 0)
+  constructor(
+    private readonly idleTimeoutMs: number,
+    private readonly toolIdleTimeoutMs?: number,
+  ) {
+    if (
+      [idleTimeoutMs, toolIdleTimeoutMs ?? idleTimeoutMs].some(
+        (timeout) => !Number.isSafeInteger(timeout) || timeout <= 0,
+      )
+    )
       throw new Error("Provider turn idle timeout must be a positive integer");
     this.reset();
   }
@@ -33,8 +66,14 @@ export class ProviderTurnGuard {
     return this.controller.signal;
   }
 
-  progress(): void {
+  progress(operation?: string, tool?: { id: string; active: boolean }): void {
     if (this.ended || this.controller.signal.aborted) return;
+    if (operation) this.lastOperation = operation;
+    if (tool) {
+      if (tool.active) this.activeTools.add(tool.id);
+      else this.activeTools.delete(tool.id);
+    }
+    this.lastProgressAt = Date.now();
     if (this.timer) clearTimeout(this.timer);
     this.reset();
   }
@@ -64,12 +103,26 @@ export class ProviderTurnGuard {
   private reset(): void {
     // Progress reschedules the shared deadline without detaching active waits.
     // Settled waits remove their subscription instead of retaining payloads.
+    const waitingFor =
+      this.toolIdleTimeoutMs === undefined
+        ? "provider-turn"
+        : this.activeTools.size
+          ? "active-tool"
+          : "model-response";
+    const timeoutMs = this.activeTools.size
+      ? (this.toolIdleTimeoutMs ?? this.idleTimeoutMs)
+      : this.idleTimeoutMs;
     this.timer = setTimeout(() => {
-      this.timeoutError = new ProviderTurnTimeoutError(this.idleTimeoutMs);
+      this.timeoutError = new ProviderTurnTimeoutError(
+        timeoutMs,
+        waitingFor,
+        this.lastOperation,
+        Date.now() - this.lastProgressAt,
+      );
       this.controller.abort(this.timeoutError);
       for (const reject of this.timeoutWaiters) reject(this.timeoutError);
       this.timeoutWaiters.clear();
-    }, this.idleTimeoutMs);
+    }, timeoutMs);
   }
 }
 

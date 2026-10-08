@@ -26,6 +26,8 @@ export interface PlanningTurn {
   providerThreadId?: string;
   /** The provider reported a terminal success or failure for this attempt. */
   ended: boolean;
+  /** Native invocation and owned process group have demonstrably ceased. */
+  stopped?: boolean;
   /** Transport-classified failure; otherwise the shared classifier applies. */
   failureClass?: string;
   /** Fault from structured provider facts (billing, a limit's reset time). */

@@ -31,6 +31,10 @@ Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` and state under 
 
 ### Models, network and delivery
 
+Silent structured planning and review calls time out after two minutes through `medium` reasoning, three for `high`, and five for `xhigh` and higher supported efforts. Observed active tools and implementation workers keep their existing limits. Timeout reports identify model waiting versus an observed active tool, the last event and elapsed inactivity; they cannot see inside the provider.
+
+A timed-out Codex model invocation can retry twice, after its owned process group has stopped, with one- and two-second delays. Response and review-capacity retries share one allowance; a tighter explicit allowance still applies. Unproved cessation (including Claude SDK timeout cleanup), active-tool inactivity or exhausted response retries stops without automatic replay; retained faults identify the required decision or correction. Failed calls and available usage stay recorded; missing usage remains unknown.
+
 Choose these at setup. Defaults: `gpt-6.1-sol` for planner, reviewer and worker, with `high` reasoning for planner and reviewer and `medium` for the worker.
 
 Your agent host loads the skills; it does not select Factory's providers. These defaults also apply when you use the plugin in Claude Code. Select Claude planning and/or workers explicitly when that is the intended configuration. Check the [CLI and plugin identities](../README.md#cli) before setup; their releases can differ even when both are installed.

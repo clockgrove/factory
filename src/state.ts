@@ -1,4 +1,5 @@
 import { assertFinalAcceptance } from "./completion.js";
+import { assertSemanticRefusalRecord } from "./semantic-refusal.js";
 import { type Capacity, validateCapacity } from "./config.js";
 import type {
   AssetSelectionDecision,
@@ -821,7 +822,9 @@ export function parseFactoryState(
         prior.failure?.digest === failure?.digest &&
         prior.failure?.event === failure?.event &&
         prior.failure?.validationCaptureDigest ===
-          failure?.validationCaptureDigest,
+          failure?.validationCaptureDigest &&
+        JSON.stringify(prior.failure?.semanticRefusal) ===
+          JSON.stringify(failure?.semanticRefusal),
     );
     assertFailedValidationRecord(
       currentWork.failedValidation,
@@ -832,7 +835,15 @@ export function parseFactoryState(
         ? undefined
         : failure,
     );
+    if (!archivedFailure)
+      assertSemanticRefusalRecord(controllerState, id, currentWork, failure);
     for (const prior of currentWork.recovery?.history ?? []) {
+      assertSemanticRefusalRecord(
+        controllerState,
+        id,
+        prior.work,
+        prior.failure,
+      );
       assertFailedValidationRecord(
         prior.work.failedValidation,
         controllerState,

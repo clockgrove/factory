@@ -32,7 +32,8 @@ import type {
   ExecutionDriver,
   GitHubGateway,
 } from "./contracts.js";
-import { cancelledFault, workFault } from "./fault.js";
+import { cancelledFault } from "./fault.js";
+import { SemanticAcceptanceFailure } from "./semantic-refusal.js";
 import {
   type ControlRequest,
   ForegroundControllerError,
@@ -1360,7 +1361,16 @@ export function decideResult(
       }
       if (input.outcome === "refuse") {
         work.error = `Acceptance refused: ${asked.criterion}`;
-        recordWorkFailure(state, input.item!, workFault(work.error));
+        recordWorkFailure(
+          state,
+          input.item!,
+          new SemanticAcceptanceFailure(work.error, {
+            treeSha: decision.treeSha,
+            criterion: decision.criterion,
+            source: "operator",
+            decision,
+          }),
+        );
       }
     } else {
       state.finalAcceptanceDecisions ??= [];

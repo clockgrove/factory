@@ -46,11 +46,13 @@ import {
 import { preflightItemEnvironment } from "../dist/qa-execution.js";
 import {
   charge,
+  chargeRepair,
   consumption,
   objectiveEvent,
   resolveAutonomy,
+  repairScopes,
 } from "../dist/repair-policy.js";
-import { rereviewWorkItem } from "../dist/runner.js";
+import { decideResult, rereviewWorkItem } from "../dist/runner.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
 import { step } from "../dist/step.js";
 import {
@@ -60,6 +62,10 @@ import {
 } from "../dist/validation.js";
 import {
   CandidateValidationFailure,
+  actionableReadiness,
+  applyWorkCorrection,
+  diagnosisFiles,
+  repairEvidence,
   recordWorkFailure,
 } from "../dist/work-repair.js";
 
@@ -454,6 +460,181 @@ test("settled validation reuses its exact Git result once and retains the failed
     );
     assert.equal(evidence.treeSha, treeSha);
     assert.equal(evidence.commands[0].exitCode, 0);
+    assert.equal(git("rev-parse", "HEAD"), commit);
+    // Passing commands do not prove this source criterion. The supported
+    // exact-tree operator refusal produces semantic evidence, without a model
+    // stub or turning the successful subprocess into a failed receipt.
+    const criterion = "README documents the readiness marker";
+    const semanticGraph = structuredClone(graph);
+    semanticGraph.objective = 3;
+    semanticGraph.items[0].acceptance = [criterion];
+    const semanticState = {
+      ...structuredClone(state),
+      objective: 3,
+      runId: "actual-local-semantic-refusal",
+      graph: semanticGraph,
+      planGraphDigest: graphDigest(semanticGraph),
+      autonomy: resolveAutonomy({ allowances: { implementationRepairs: 1 } }),
+      charges: {},
+      work: {
+        local: {
+          status: "waiting",
+          step: "approve-result",
+          attempt: "semantic-candidate",
+          baseSha: commit,
+          executionBaseSha: commit,
+          graphRevisionDigest: graphDigest(semanticGraph),
+          changeRef: commit,
+          treeSha,
+          validation: structuredClone(evidence),
+          acceptancePending: {
+            criterion,
+            treeSha,
+            detail: "README omits the readiness marker",
+            question: "Does README document the marker?",
+          },
+        },
+      },
+    };
+    saveState(statePath(config.repository, 3), semanticState);
+    decideResult(config, 3, {
+      item: "local",
+      actor: "integration-operator",
+      outcome: "refuse",
+      reason:
+        "The exact README contains only an unchanged-candidate heading, not marker documentation.",
+    });
+    const refusedState = readState(config.repository, 3);
+    const refusedWork = refusedState.work.local;
+    const refusal = refusedWork.recovery.failure;
+    assert.equal(refusal.semanticRefusal.source, "operator");
+    assert.equal(refusal.semanticRefusal.treeSha, treeSha);
+    assert.equal(
+      refusal.semanticRefusal.decision.reason,
+      refusedWork.acceptanceDecisions[0].reason,
+    );
+    assert.equal(refusedWork.failedValidation, undefined);
+    assert.equal(refusedWork.validation.commands[0].exitCode, 0);
+    const item = refusedState.graph.items[0];
+    const supplied = repairEvidence(
+      refusedState,
+      item,
+      diagnosisFiles(refusedState, item, checkout),
+    );
+    const fileIndex = supplied.findIndex(
+      (entry) => entry.kind === "candidate-file" && entry.path === "README.md",
+    );
+    assert.equal(
+      supplied[fileIndex].content,
+      git("show", `${treeSha}:README.md`) + "\n",
+    );
+    // A declared correction exercises the shared admission gate over actual
+    // workflow evidence; it is not a generated or scripted provider response.
+    const declaration = {
+      diagnosis:
+        "The owned README omits the required readiness-marker documentation.",
+      correction:
+        "Document the readiness marker in README.md and rerun unchanged validation and acceptance.",
+      decision: "repair",
+      predecessor: "",
+      path: "README.md",
+      readiness: "actionable",
+      prerequisites: [],
+      question: "",
+      evidenceIndices: [0, 1, fileIndex],
+      commandAssessments: [],
+    };
+    const checkedReadiness = actionableReadiness(
+      refusedState,
+      item,
+      declaration,
+      supplied,
+      checkout,
+    );
+    assert.equal(typeof checkedReadiness, "object");
+    const incomplete = structuredClone(supplied);
+    incomplete[fileIndex].complete = false;
+    assert.equal(
+      typeof actionableReadiness(
+        refusedState,
+        item,
+        declaration,
+        incomplete,
+        checkout,
+      ),
+      "string",
+    );
+    assert.equal(
+      typeof actionableReadiness(
+        refusedState,
+        item,
+        { ...declaration, evidenceIndices: [0, fileIndex] },
+        supplied,
+        checkout,
+      ),
+      "string",
+    );
+    const missingCommands = structuredClone(state);
+    assert.equal(
+      missingCommands.work.local.failedValidation.evidence.commands[0].exitCode,
+      1,
+    );
+    const failedSupplied = repairEvidence(
+      state,
+      graph.items[0],
+      diagnosisFiles(state, graph.items[0], checkout),
+    );
+    delete missingCommands.work.local.failedValidation;
+    // Absence of a command capture must never choose the semantic branch.
+    assert.equal(
+      typeof actionableReadiness(
+        missingCommands,
+        graph.items[0],
+        declaration,
+        failedSupplied,
+        checkout,
+      ),
+      "string",
+    );
+    const changedCommands = structuredClone(refusedState);
+    changedCommands.work.local.validation.commands[0].exitCode = 1;
+    assert.throws(
+      () =>
+        repairEvidence(
+          changedCommands,
+          item,
+          diagnosisFiles(refusedState, item, checkout),
+        ),
+      /Semantic refusal/,
+    );
+    const correction = {
+      kind: "implementation",
+      actor: "factory-controller",
+      failureDigest: refusal.digest,
+      event: refusal.event,
+      diagnosis: declaration.diagnosis,
+      correction: declaration.correction,
+      readiness: checkedReadiness,
+    };
+    chargeRepair(
+      refusedState,
+      refusal.event,
+      "implementation",
+      repairScopes(refusedState, "local"),
+    );
+    refusedWork.recovery.phase = "diagnosing";
+    saveState(statePath(config.repository, 3), refusedState);
+    const restartedRepair = readState(config.repository, 3);
+    applyWorkCorrection(restartedRepair, "local", correction);
+    saveState(statePath(config.repository, 3), restartedRepair);
+    const repaired = readState(config.repository, 3);
+    assert.equal(repaired.work.local.status, "pending");
+    assert.equal(consumption(repaired).implementationRepairs, 1);
+    assert.deepEqual(repaired.work.local.recovery.history[0].failure, refusal);
+    assert.deepEqual(
+      repaired.work.local.recovery.history[0].work.validation,
+      evidence,
+    );
     assert.equal(git("rev-parse", "HEAD"), commit);
     // A real exclusive owner saves intent then exits before dispatch. The next
     // process reclaims ownership and loads the atomic snapshot, not diagnostics.

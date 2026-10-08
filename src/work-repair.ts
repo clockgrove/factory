@@ -1,12 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DiagnosticEmitter } from "./diagnostics.js";
-import {
-  attachFault,
-  faultOf,
-  StepFault,
-  transient,
-  workFault,
-} from "./fault.js";
+import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
 import type { PlanningModel, WorkItem } from "./contracts.js";
 import { blameDecision, cappedDiagnosis } from "./blame-decision.js";
@@ -18,6 +12,11 @@ import {
   CONTROLLER_CAPABILITIES_DIGEST,
 } from "./controller-capabilities.js";
 import type { FactoryState } from "./state.js";
+import {
+  assertSemanticRefusalRecord,
+  SemanticAcceptanceFailure,
+  semanticValidationDigest,
+} from "./semantic-refusal.js";
 import {
   assertFailedValidationEvidence,
   assertFailedValidationRecord,
@@ -171,6 +170,19 @@ export function recordWorkFailure(
     assertFailedValidationRecord(retained, state, id, work, failure);
     work.failedValidation = structuredClone(retained);
   }
+  if (
+    isolated &&
+    work.step === "validate" &&
+    error instanceof SemanticAcceptanceFailure
+  ) {
+    if (!work.validation)
+      throw new Error("Semantic refusal has no retained validation evidence");
+    failure.semanticRefusal = {
+      ...structuredClone(error.semanticRefusal),
+      validationDigest: semanticValidationDigest(work.validation),
+    };
+    assertSemanticRefusalRecord(state, id, work, failure);
+  }
   // A new failure starts a fresh record: an earlier correction belongs to
   // the attempt it corrected, which the history keeps.
   work.recovery = {
@@ -237,7 +249,17 @@ export function recordSavedResultRefusal(
     throw new Error("Saved refusal differs from the exact candidate tree");
   // recordWorkFailure observes the failure now. The original decision and
   // its time/reason stay in acceptanceDecisions; no command receipt is invented.
-  recordWorkFailure(state, id, workFault(refusal.detail));
+  const decision = work.acceptanceDecisions!.at(-1)!;
+  recordWorkFailure(
+    state,
+    id,
+    new SemanticAcceptanceFailure(refusal.detail, {
+      treeSha: decision.treeSha,
+      criterion: decision.criterion,
+      source: "operator",
+      decision,
+    }),
+  );
   return true;
 }
 export function applyWorkCorrection(
@@ -420,6 +442,9 @@ const readinessContext = (
     failureDigest: failure.digest,
     failureEvent: failure.event,
     validationCaptureDigest: failure.validationCaptureDigest ?? null,
+    ...(failure.semanticRefusal
+      ? { semanticRefusal: failure.semanticRefusal }
+      : {}),
     graphDigest: graph,
     inputDigest: correction.readiness?.inputDigest,
     ownedPath: correction.readiness?.ownedPath,
@@ -440,11 +465,15 @@ export function assertRepairReadiness(
     | "baseSha"
     | "executionBaseSha"
     | "graphRevisionDigest"
+    | "validation"
+    | "failedValidation"
+    | "acceptanceDecisions"
   >,
   correction: RepairCorrection,
   failure: FailureDisposition | undefined,
 ): void {
   const ready = correction.readiness;
+  assertSemanticRefusalRecord(state, id, work, failure);
   if (!ready)
     throw new Error(
       "Automatic repair readiness is unavailable; which original failed command or operator prerequisite has been resolved? Supply an operator correction after establishing it",
@@ -484,7 +513,7 @@ export function assertRepairReadiness(
 }
 
 /** Canonical outcomes and actual candidate contents supplied to this diagnosis. */
-function repairEvidence(
+export function repairEvidence(
   state: FactoryState,
   item: WorkItem,
   files: ReturnType<typeof diagnosisFiles>,
@@ -498,19 +527,38 @@ function repairEvidence(
     work,
     failure,
   );
+  assertSemanticRefusalRecord(state, item.id, work, failure);
   return [
-    { kind: "failure", content: failure.detail, complete: true },
+    {
+      kind: "failure",
+      content: failure.detail,
+      complete: true,
+      ...(failure.semanticRefusal
+        ? { semanticRefusal: failure.semanticRefusal }
+        : {}),
+    },
     {
       kind: "validation",
-      availability: work.failedValidation ? "available" : "unavailable",
+      outcome: failure.semanticRefusal
+        ? "passed-before-semantic-refusal"
+        : work.failedValidation
+          ? "failed"
+          : "unavailable",
+      availability:
+        work.failedValidation || failure.semanticRefusal
+          ? "available"
+          : "unavailable",
       record: work.failedValidation ?? null,
+      ...(failure.semanticRefusal
+        ? { passingValidation: work.validation }
+        : {}),
     },
     ...files.map((file) => ({ kind: "candidate-file", ...file })),
   ];
 }
 
 /** Semantic causes are declared; indices, outcomes and ownership are checked facts. */
-function actionableReadiness(
+export function actionableReadiness(
   state: FactoryState,
   item: WorkItem,
   answer: DiagnosisAnswer,
@@ -578,10 +626,29 @@ function actionableReadiness(
       "Which supplied original failure and owned candidate evidence establish the correction? Readiness grounding is unavailable.",
     );
   const capture = work.failedValidation;
-  if (work.step === "validate" && !capture)
+  const semantic = failure.semanticRefusal;
+  if (work.step === "validate" && !capture && !semantic)
     return question(
       "Can the original validation failure be established from retained command outcomes? Those outcomes are unavailable; supply a diagnosed operator correction.",
     );
+  if (semantic) {
+    try {
+      assertSemanticRefusalRecord(state, item.id, work, failure);
+    } catch {
+      return question(
+        "Can the exact rejected review, candidate and passing commands be established? Semantic refusal evidence is unavailable.",
+      );
+    }
+    if (
+      !indices.includes(1) ||
+      !work.validation?.worktreeObservation ||
+      (semantic.source === "model" &&
+        !semantic.evidence.some((entry) => entry.complete))
+    )
+      return question(
+        "Can the rejected review and separate passing command outcomes be grounded completely? Semantic refusal evidence is insufficient.",
+      );
+  }
   const failed =
     capture?.evidence.commands.filter((command) => !command.passed) ?? [];
   const assessments = answer.commandAssessments;
@@ -841,7 +908,7 @@ const EVIDENCE_READ_BYTES = 1_000_000;
  * item's own files come first, so the budget never goes to a predecessor
  * before them.
  */
-function diagnosisFiles(
+export function diagnosisFiles(
   state: FactoryState,
   item: WorkItem,
   checkout: string | undefined,
@@ -1007,7 +1074,7 @@ export async function diagnoseWorkRepair(args: {
           const response = await args.model.generateStructured<DiagnosisAnswer>(
             {
               purpose: "diagnosis",
-              objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: evidence })}`,
+              objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return no commandAssessments when there are no failed commands. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: evidence })}`,
               baseSha: work.executionBaseSha ?? state.baseSha,
               sources: [...(args.sources ?? []), ...files],
               controllerCapabilities: installedControllerCapabilities(),

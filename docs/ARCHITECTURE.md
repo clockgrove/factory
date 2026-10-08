@@ -40,6 +40,8 @@ The target owns requirements, validation commands, permissions, protection rules
 
 Pin the Objective, default-branch commit and complete cited source contents. Models select semantic choices; code derives canonical identities, hashes, command text and relationships. Providers share the same grounding and validation rules.
 
+Work Item repair distinguishes an actual failed-command capture from an explicitly produced semantic acceptance refusal. The existing recovery failure retains the rejected finding or operator decision against its exact tree and criterion, bound to separately retained passing validation receipts. Diagnosis must ground an owned correction in that refusal and complete candidate contents. Missing failed commands do not select the semantic path; unknown evidence remains stopped. Both paths preserve the original attempt and finite repair charge.
+
 Commands need exact source or verified base authority. Ownership is literal and enforced. Existing acceptance scripts and package-manager/security metadata retain their fixed constraints unless the Objective explicitly authorizes the supported change. Review cannot invent prerequisites, repair quotes into evidence or approve missing facts.
 
 Readiness coverage selects an exact probe and, when supplied sources require it, ordered prerequisite validation rows before that probe. Preparation is authenticated separately in every fresh preflight, worker and final validator checkout; ignored installs and historical receipts do not transfer. The local worker uses the shared validator executor before its provider starts, and drivers unable to authenticate their actual environment refuse such work. Preparation receipts never replace semantic acceptance.

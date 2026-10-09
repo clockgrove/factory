@@ -985,7 +985,7 @@ export function unchangedResultByteEvidence(
   };
 }
 
-/** Inventory Git paths, not checkout files, blob contents or submodule contents. */
+/** Inventory exact Git paths and regular blob sizes, never their contents. */
 export function resultTreeInventory(
   checkout: string,
   treeSha: string,
@@ -1034,10 +1034,63 @@ export function resultTreeInventory(
     paths.push(path);
     bytes += size;
   }
+  // Sizes are optional planning facts. Preserve the path inventory when its
+  // remaining budget cannot carry every size; missing sizes remain unknown.
+  const retainedSizes: { path: string; bytes: number }[] = [];
+  const sizes = spawnSync(
+    "git",
+    ["-C", checkout, "ls-tree", "-r", "--long", "-z", treeSha],
+    { env: pinnedGitEnvironment(), maxBuffer: limit },
+  );
+  // The optional bounded sizing read cannot degrade the path inventory's
+  // completeness. Only complete, supported entries from its prefix are used.
+  if (
+    (!sizes.error ||
+      (sizes.error as NodeJS.ErrnoException).code === "ENOBUFS") &&
+    (sizes.status === 0 || sizes.error)
+  ) {
+    const output = (sizes.stdout ?? Buffer.alloc(0)).subarray(0, limit);
+    const end = output.lastIndexOf(0) + 1;
+    let entries: string[] = [];
+    try {
+      entries = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+        .decode(output.subarray(0, end))
+        .split("\0")
+        .slice(0, -1);
+    } catch {
+      // No size facts are inferred from undecodable output.
+    }
+    for (const entry of entries) {
+      const match = entry.match(
+        /^(100644|100755) blob [0-9a-f]{40}\s+(\d+)\t([\s\S]+)$/,
+      );
+      if (!match || !paths.includes(match[3]!)) continue;
+      const size = Number(match[2]);
+      if (!Number.isSafeInteger(size) || size < 0) continue;
+      const candidate = { path: match[3]!, bytes: size };
+      if (
+        Buffer.byteLength(
+          JSON.stringify({
+            treeSha,
+            complete,
+            paths,
+            fileSizes: [...retainedSizes, candidate],
+          }),
+        ) > limit
+      )
+        break;
+      retainedSizes.push(candidate);
+    }
+  }
   return {
     ...source,
     complete,
-    content: JSON.stringify({ treeSha, complete, paths }),
+    content: JSON.stringify({
+      treeSha,
+      complete,
+      paths,
+      ...(retainedSizes.length ? { fileSizes: retainedSizes } : {}),
+    }),
   };
 }
 

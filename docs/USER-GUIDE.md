@@ -35,7 +35,7 @@ Structured planning and review calls time out after two minutes without observed
 
 A timed-out Codex model invocation can retry twice, after its owned process group has stopped, with one- and two-second delays. Response and review-capacity retries share one allowance; a tighter explicit allowance still applies. Unproved cessation (including Claude SDK timeout cleanup), active-tool inactivity or exhausted response retries stops without automatic replay; retained faults identify the required decision or correction. Failed calls and available usage stay recorded; missing usage remains unknown.
 
-Choose these at setup. Defaults: `gpt-6.1-sol` for planner, reviewer and worker, with `high` reasoning for planner and reviewer and `medium` for the worker.
+Choose these at setup. New Codex configurations default to `gpt-6.1-sol` for planner, reviewer and worker, with `high` reasoning for the planner and `medium` for the reviewer and worker. New Claude planning configurations also default review reasoning to `medium`, with `high` for planning; both models must be supplied explicitly. The reviewer setting covers graph, Work Item result and final Objective reviews. Explicit choices and existing configurations remain unchanged.
 
 Your agent host loads the skills; it does not select Factory's providers. These defaults also apply when you use the plugin in Claude Code. Select Claude planning and/or workers explicitly when that is the intended configuration. Check the [CLI and plugin identities](../README.md#cli) before setup; their releases can differ even when both are installed.
 

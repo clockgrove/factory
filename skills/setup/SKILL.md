@@ -22,7 +22,7 @@ Running `setup --background` is the service consent. It grants no provider spend
 - Optional: `--concurrency N` (omit it and Factory sizes workers from the host), `--delivery regular|native-stack`, `--network host|off`, and role models with `--planning-model`, `--review-model`, `--worker-model` plus matching `--*-reasoning`.
 - For `--planning claude-agent-sdk`, ask for the planning and review models. It uses the operator's `claude auth login`.
 
-A fresh configuration persists these defaults when no model choices are given: planner `gpt-6.1-sol` with `high` reasoning, reviewer `gpt-6.1-sol` with `high` reasoning, and worker `gpt-6.1-sol` with `medium` reasoning.
+A fresh Codex configuration persists these defaults when no model choices are given: planner `gpt-6.1-sol` with `high` reasoning, reviewer `gpt-6.1-sol` with `medium` reasoning, and worker `gpt-6.1-sol` with `medium` reasoning. For explicitly selected Claude planning, both models remain required; planner reasoning defaults to `high` and reviewer reasoning to `medium`. The reviewer setting covers graph, Work Item result and final Objective reviews. Preserve explicit choices and matching existing configurations.
 
 The host loading this skill does not select Factory's providers. Claude Code uses the same Codex defaults unless planning or harness choices explicitly select Claude. Verify the configured providers' logins and target toolchain in the controller's non-login shell; configuration-only setup does not establish worker readiness.
 

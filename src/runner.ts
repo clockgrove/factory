@@ -679,17 +679,12 @@ async function runObjectiveOwned(
             if (owner.save) owner.save(state);
             else persist();
           } else persist();
-          if (!alreadyCancelled) {
-            try {
-              new DiagnosticEmitter(config.repository, objective).emit({
-                runId: state.runId,
-                operation: "objective-cancel",
-                outcome: "completed",
-              });
-            } catch {
-              // Even a diagnostic warning failure cannot change cancellation.
-            }
-          }
+          if (!alreadyCancelled)
+            new DiagnosticEmitter(config.repository, objective).emit({
+              runId: state.runId,
+              operation: "objective-cancel",
+              outcome: "completed",
+            });
         }
         throw cancelledFault("Objective cancellation requested");
       }

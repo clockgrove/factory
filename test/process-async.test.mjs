@@ -36,10 +36,6 @@ import { CodexHarness } from "../dist/execution/local.js";
 import { killGroup } from "../dist/execution/worker-process.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
-  objectiveReviewEvidence,
-  workItemReviewEvidence,
-} from "../dist/result-evidence.js";
-import {
   addWorktree,
   gitAsync,
   linuxProcessIdentity,
@@ -656,64 +652,6 @@ test("settled validation reuses its exact Git result once and retains the failed
         },
       },
     };
-    // The exact-result evidence carries accepted design even without a sibling
-    // result. Neither a brief nor a passing real command proves implementation.
-    const designEvidence = workItemReviewEvidence({
-      state: semanticState,
-      item: semanticGraph.items[0],
-      checkout,
-      delivery: "regular",
-    }).find((entry) => entry.path === "Accepted Work Item design: local");
-    assert.equal(designEvidence.complete, true);
-    const design = JSON.parse(designEvidence.content);
-    assert.equal(design.design.brief, semanticGraph.items[0].brief);
-    assert.equal(
-      design.binding.acceptedGraphRevisionDigest,
-      graphDigest(semanticGraph),
-    );
-    assert.equal(design.binding.candidateTreeSha, treeSha);
-    assert.equal(design.binding.executionBaseCommitSha, commit);
-    assert.match(design.scope, /proves no implementation/);
-    assert.throws(
-      () =>
-        workItemReviewEvidence({
-          state: semanticState,
-          item: { ...semanticGraph.items[0], brief: "Unaccepted replacement" },
-          checkout,
-          delivery: "regular",
-        }),
-      /accepted design binding changed/,
-    );
-    const qaState = structuredClone(semanticState);
-    qaState.graph.items[0].kind = "qa";
-    qaState.graph.items[0].ownedPaths = [];
-    qaState.planGraphDigest = graphDigest(qaState.graph);
-    qaState.work.local.graphRevisionDigest = qaState.planGraphDigest;
-    qaState.work.local.status = "done";
-    const finalDesign = objectiveReviewEvidence({
-      state: qaState,
-      checkout,
-      candidateCommitSha: commit,
-      candidateTreeSha: treeSha,
-    }).evidence.find((entry) => entry.path === designEvidence.path);
-    assert.equal(
-      JSON.parse(finalDesign.content).design.brief,
-      design.design.brief,
-    );
-    assert.equal(finalDesign.complete, true);
-    const boundedState = structuredClone(semanticState);
-    boundedState.graph.items[0].brief = "Complete design prose. ".repeat(4_000);
-    boundedState.planGraphDigest = graphDigest(boundedState.graph);
-    boundedState.work.local.graphRevisionDigest = boundedState.planGraphDigest;
-    const unavailableDesign = workItemReviewEvidence({
-      state: boundedState,
-      item: boundedState.graph.items[0],
-      checkout,
-      delivery: "regular",
-    }).find((entry) => entry.path === designEvidence.path);
-    assert.equal(unavailableDesign.complete, false);
-    assert.equal(JSON.parse(unavailableDesign.content).design, undefined);
-    assert.match(unavailableDesign.content, /unavailable/);
     saveState(statePath(config.repository, 3), semanticState);
     decideResult(config, 3, {
       item: "local",

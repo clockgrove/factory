@@ -571,6 +571,8 @@ function directNativeCapture(
     const owned = new Map<string, string>();
     for (const row of rows) {
       const child = row.nativeDescendant;
+      if (child?.childSessionId === session.sessionId)
+        throw new Error("Selected native root cannot be its own descendant");
       if (child?.relation !== "authenticated-owned-home") continue;
       if (
         row.providerEvent !== "codex.native-descendant-coverage" ||
@@ -603,11 +605,27 @@ function directNativeCapture(
         row.nativeOwnership?.rootSessionId === session.sessionId &&
         row.nativeOwnership?.parentSessionId ===
           owned.get(row.providerSessionId);
+      // Owned-home coverage observations name the child's parent, including at
+      // nested depths. The producer emits no child-content ownership on these
+      // relationship-only records; never extend that exemption to usage/content.
+      const ownedRelationship =
+        row.kind === "interaction" &&
+        row.providerEvent === "codex.native-descendant-coverage" &&
+        row.nativeDescendant?.relation === "authenticated-owned-home" &&
+        row.providerSessionId === row.nativeDescendant.parentSessionId &&
+        family.has(row.providerSessionId) &&
+        family.has(row.nativeDescendant.childSessionId) &&
+        owned.get(row.nativeDescendant.childSessionId) ===
+          row.providerSessionId &&
+        row.nativeOwnership === undefined &&
+        row.usage === undefined &&
+        row.visible === undefined &&
+        row.nativeRollout === undefined;
       if (
         row.schemaVersion !== 1 ||
         !/^[0-9a-f-]{36}$/.test(String(row.recordId)) ||
         row.invocationId !== session.sessionId ||
-        (!root && !relatedChild) ||
+        (!root && !relatedChild && !ownedRelationship) ||
         (root && row.nativeOwnership !== undefined) ||
         row.providerAttempt !== 1 ||
         !["request", "interaction", "usage"].includes(row.kind) ||

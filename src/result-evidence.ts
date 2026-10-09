@@ -729,27 +729,31 @@ export function amendmentImplementationEvidence(args: {
       reason: "Current implementation identity exceeds evidence budget",
     });
   }
-  budget.remaining = Math.max(
-    0,
-    budget.remaining - Buffer.byteLength(JSON.stringify(identitySource)),
-  );
+  const identityBytes = Buffer.byteLength(JSON.stringify(identitySource));
+  if (identityBytes > budget.remaining) return [];
+  budget.remaining -= identityBytes;
   const evidence = [identitySource];
   const inventory = resultTreeInventory(
     checkout,
     treeSha,
     Math.floor(budget.remaining / 4),
   );
+  inventory.origin = "controller";
   const inventoryBytes = Buffer.byteLength(JSON.stringify(inventory));
   if (inventoryBytes <= budget.remaining) {
-    inventory.origin = "controller";
     evidence.push(inventory);
     budget.remaining -= inventoryBytes;
   }
   const scopes = proposal.ownership.filter(validOwnershipPath);
-  const entries = pinnedGitRaw(checkout, "ls-tree", "-r", "-l", "-z", treeSha)
-    .toString("utf8")
-    .split("\0")
-    .filter(Boolean);
+  let entries: string[];
+  try {
+    entries = new TextDecoder("utf8", { fatal: true, ignoreBOM: true })
+      .decode(pinnedGitRaw(checkout, "ls-tree", "-r", "-l", "-z", treeSha))
+      .split("\0")
+      .filter(Boolean);
+  } catch {
+    return evidence;
+  }
   for (const entry of entries) {
     const tab = entry.indexOf("\t");
     const path = entry.slice(tab + 1);

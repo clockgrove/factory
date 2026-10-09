@@ -206,8 +206,14 @@ function summarizeNative(
       ...children.keys(),
     ]),
   ];
+  const parentScope = summarizeNativeScope(parent);
+  const childScopes = ids.map((sessionId) => ({
+    sessionId,
+    ...summarizeNativeScope(children.get(sessionId) ?? []),
+  }));
   return {
-    ...summarizeNativeScope(parent),
+    ...parentScope,
+    familyResponseUsage: summarizeNativeFamily([parentScope, ...childScopes]),
     tools: summarizeTools(parentTools),
     descendants: {
       observedChildren: ids.length,
@@ -219,27 +225,105 @@ function summarizeNative(
         records.some((record) => record.nativeRollout?.childHistory)
           ? "partial"
           : "unknown",
-      children: ids.map((sessionId) => ({
-        sessionId,
+      children: childScopes.map((scope) => ({
+        ...scope,
         observations: observations.filter(
-          (child) => child.childSessionId === sessionId,
+          (child) => child.childSessionId === scope.sessionId,
         ),
         latestReportedStatus:
           observations
             .filter(
               (child) =>
-                child.childSessionId === sessionId &&
+                child.childSessionId === scope.sessionId &&
                 child.status !== "unknown",
             )
             .at(-1)?.status ?? "unknown",
-        ...summarizeNativeScope(children.get(sessionId) ?? []),
         tools: summarizeTools(
           summarizeNativeTools(
-            children.get(sessionId) ?? [],
+            children.get(scope.sessionId) ?? [],
             options.includeNativeToolContent,
           ),
         ),
       })),
+    },
+  };
+}
+
+/** An alternate disjoint-response view, never added to SDK/thread cumulative totals. */
+function summarizeNativeFamily(
+  scopes: ReturnType<typeof summarizeNativeScope>[],
+) {
+  const observedResponses = scopes.reduce(
+    (total, scope) =>
+      total +
+      (scope.responseUsage.categories.inputTokens?.observedResponses ?? 0),
+    0,
+  );
+  const categories = Object.fromEntries(
+    tokenCategories.map((category) => {
+      const values = scopes.map(
+        (scope) => scope.responseUsage.categories[category],
+      );
+      const supplied = values.filter(
+        (value) => value?.total !== null && value?.total !== undefined,
+      );
+      const total = supplied.reduce((sum, value) => sum + value!.total!, 0);
+      const exact = Number.isSafeInteger(total);
+      return [
+        category,
+        {
+          total: supplied.length && exact ? total : null,
+          contributingResponses: values.reduce(
+            (sum, value) => sum + (value?.contributingResponses ?? 0),
+            0,
+          ),
+          observedResponses,
+          coverage:
+            !supplied.length || !exact
+              ? "unavailable"
+              : values.every((value) => value?.coverage === "available")
+                ? "available"
+                : "partial",
+        },
+      ];
+    }),
+  );
+  const pairs = scopes.map((scope) => scope.responseUsage.cache);
+  const sum = (key: "inputTokens" | "cachedInputTokens") => {
+    const supplied = pairs.filter((pair) => pair[key] !== null);
+    const total = supplied.reduce((total, pair) => total + pair[key]!, 0);
+    return supplied.length && Number.isSafeInteger(total) ? total : null;
+  };
+  const inputTokens = sum("inputTokens"),
+    cachedInputTokens = sum("cachedInputTokens");
+  return {
+    scope: "observed-parent-and-owned-child-response-subsets" as const,
+    accountingMethod:
+      "Disjoint native session/response identities; cumulative and inherited checkpoints excluded" as const,
+    addedToInvocationTotals: false,
+    parentScopes: 1,
+    observedChildScopes: scopes.length - 1,
+    completeRequestAndAttemptCount: null,
+    categories,
+    cache: {
+      inputTokens,
+      cachedInputTokens,
+      contributingResponses: pairs.reduce(
+        (sum, pair) => sum + pair.contributingResponses,
+        0,
+      ),
+      observedResponses,
+      weightedHitRate:
+        inputTokens && cachedInputTokens !== null
+          ? cachedInputTokens / inputTokens
+          : null,
+      coverage:
+        cachedInputTokens === null
+          ? "unavailable"
+          : pairs.every((pair) => pair.coverage === "available")
+            ? "available"
+            : "partial",
+      upstreamCategoryAndBillingCoverage: "unknown" as const,
     },
   };
 }

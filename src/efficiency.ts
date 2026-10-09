@@ -154,8 +154,9 @@ const length = (intervals: Interval[]) =>
 export interface RoleUsage {
   inputTokens: number | null;
   cachedInputTokens: number | null;
-  /** Cached share of input, 0 to 1, null when input is unknown or zero. */
+  /** Ratio within selected invocation counter pairs; not all role input. */
   cachedShare: number | null;
+  cacheRatioInputTokens: number | null;
   outputTokens: number | null;
   reasoningOutputTokens: number | null;
   models: string[];
@@ -165,12 +166,12 @@ export interface RoleUsage {
 interface UsageSummaryLike {
   workerUsage: {
     tokenTotals: Partial<Record<string, number>>;
-    cacheReadRatio: { value: number } | null;
+    cacheReadRatio: { value: number; denominatorInputTokens: number } | null;
     coverage?: { byCategory: Record<string, string> };
   };
   modelUsage: {
     tokenTotals: Partial<Record<string, number>>;
-    cacheReadRatio: { value: number } | null;
+    cacheReadRatio: { value: number; denominatorInputTokens: number } | null;
     coverage?: { byCategory: Record<string, string> };
   };
   objective: { invocationCount: number; failedCount: number };
@@ -185,6 +186,8 @@ function roleUsage(
     inputTokens: total("inputTokens"),
     cachedInputTokens: total("cachedInputTokens"),
     cachedShare: aggregate.cacheReadRatio?.value ?? null,
+    cacheRatioInputTokens:
+      aggregate.cacheReadRatio?.denominatorInputTokens ?? null,
     outputTokens: total("outputTokens"),
     reasoningOutputTokens: total("reasoningOutputTokens"),
     models: [...models].sort(),
@@ -439,7 +442,7 @@ export function renderEfficiency(report: EfficiencyReport): string {
     const cached =
       role.cachedShare === null
         ? ""
-        : ` (${Math.round(role.cachedShare * 100)}% cached)`;
+        : ` (${Math.round(role.cachedShare * 100)}% of ${formatTokens(role.cacheRatioInputTokens)} paired invocation input; response category coverage not established here)`;
     lines.push(
       `  ${label.padEnd(22)} in ${formatTokens(role.inputTokens)}, cached ${formatTokens(role.cachedInputTokens)}${cached}, out ${formatTokens(role.outputTokens)}, reasoning ${formatTokens(role.reasoningOutputTokens)}`,
       `  ${"".padEnd(22)} accounting: input ${role.coverage.inputTokens ?? "unavailable"}, cached ${role.coverage.cachedInputTokens ?? "unavailable"}, output ${role.coverage.outputTokens ?? "unavailable"}, reasoning ${role.coverage.reasoningOutputTokens ?? "unavailable"}`,

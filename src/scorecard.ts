@@ -30,6 +30,16 @@ type Counter = {
   availability: "available" | "partial" | "unavailable";
 };
 type Tokens = Record<Category, Counter>;
+type NativeInputCacheObservation = {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  observedInputTokens: number | null;
+  contributingResponses: number;
+  observedResponses: number;
+  measuredInvocations: number;
+  completeInputInvocations: number;
+  completeCacheInvocations: number;
+};
 type InputCacheObservation = {
   inputTokens: number | null;
   cachedInputTokens: number | null;
@@ -37,7 +47,130 @@ type InputCacheObservation = {
   terminalCounterInvocations: number;
   eligibleInvocations: number;
   unobservedWorkerAttempts: number;
+  nativeResponseCache?: NativeInputCacheObservation;
 };
+
+function nativeInputCache(
+  scopes: ReturnType<
+    typeof analyzeInteractions
+  >["invocations"][number]["native"][],
+): NativeInputCacheObservation {
+  const measured = scopes.filter(
+    (scope) => scope.responseUsage.categories.inputTokens?.observedResponses,
+  );
+  const sum = (values: (number | null | undefined)[]) =>
+    values.some((value) => value !== null && value !== undefined)
+      ? values.reduce<number>((total, value) => total + (value ?? 0), 0)
+      : null;
+  return {
+    inputTokens: sum(
+      measured.map((scope) => scope.responseUsage.cache.inputTokens),
+    ),
+    cachedInputTokens: sum(
+      measured.map((scope) => scope.responseUsage.cache.cachedInputTokens),
+    ),
+    observedInputTokens: sum(
+      measured.map(
+        (scope) => scope.responseUsage.categories.inputTokens?.total,
+      ),
+    ),
+    contributingResponses: measured.reduce(
+      (total, scope) => total + scope.responseUsage.cache.contributingResponses,
+      0,
+    ),
+    observedResponses: measured.reduce(
+      (total, scope) => total + scope.responseUsage.cache.observedResponses,
+      0,
+    ),
+    measuredInvocations: measured.length,
+    completeInputInvocations: measured.filter(
+      (scope) =>
+        scope.responseUsage.categories.inputTokens?.coverage === "available",
+    ).length,
+    completeCacheInvocations: measured.filter(
+      (scope) => scope.responseUsage.cache.coverage === "available",
+    ).length,
+  };
+}
+
+function summarizeNativeInputCache(observations: InputCacheObservation[]) {
+  const eligibleInvocations = observations.reduce(
+    (total, observation) => total + observation.eligibleInvocations,
+    0,
+  );
+  const scopes = observations.flatMap((observation) =>
+    observation.nativeResponseCache ? [observation.nativeResponseCache] : [],
+  );
+  const counts = (
+    key:
+      | "contributingResponses"
+      | "observedResponses"
+      | "measuredInvocations"
+      | "completeInputInvocations"
+      | "completeCacheInvocations",
+  ) => scopes.reduce((total, scope) => total + scope[key], 0);
+  const sum = (
+    key: "inputTokens" | "cachedInputTokens" | "observedInputTokens",
+  ) => {
+    const supplied = scopes.filter((scope) => scope[key] !== null);
+    const total = supplied.reduce((total, scope) => total + scope[key]!, 0);
+    if (!Number.isSafeInteger(total))
+      throw new Error("Native cache accounting exceeds safe integer range");
+    return supplied.length ? total : null;
+  };
+  const inputTokens = sum("inputTokens");
+  const cachedInputTokens = sum("cachedInputTokens");
+  const observedInputTokens = sum("observedInputTokens");
+  const measuredInvocations = counts("measuredInvocations");
+  const completeInputInvocations = counts("completeInputInvocations");
+  const completeCacheInvocations = counts("completeCacheInvocations");
+  const attemptsObserved = observations.every(
+    (observation) => observation.unobservedWorkerAttempts === 0,
+  );
+  const inputComplete =
+    eligibleInvocations > 0 &&
+    attemptsObserved &&
+    completeInputInvocations === eligibleInvocations;
+  const cacheComplete =
+    inputComplete && completeCacheInvocations === eligibleInvocations;
+  return {
+    source: "native-disjoint-response-counter-pairs" as const,
+    scope: "selected-root-invocation-responses" as const,
+    inputTokens,
+    cachedInputTokens,
+    observedInputTokens,
+    reportedInputMinusCachedTokens:
+      inputTokens !== null && cachedInputTokens !== null
+        ? inputTokens - cachedInputTokens
+        : null,
+    weightedHitRate:
+      inputTokens && cachedInputTokens !== null
+        ? cachedInputTokens / inputTokens
+        : null,
+    contributingResponses: counts("contributingResponses"),
+    observedResponses: counts("observedResponses"),
+    measuredInvocations,
+    eligibleInvocations,
+    completeInputInvocations,
+    completeCacheInvocations,
+    availability:
+      cachedInputTokens === null
+        ? ("unavailable" as const)
+        : cacheComplete
+          ? ("available" as const)
+          : ("partial" as const),
+    wholeObservedCachedInputTokens: cacheComplete ? cachedInputTokens : null,
+    wholeObservedHitRate:
+      cacheComplete && observedInputTokens && cachedInputTokens !== null
+        ? cachedInputTokens / observedInputTokens
+        : null,
+    knownCachedInputLowerBoundShare:
+      inputComplete && observedInputTokens && cachedInputTokens !== null
+        ? cachedInputTokens / observedInputTokens
+        : null,
+    upstreamCategoryAndBillingCoverage: "unknown" as const,
+  };
+}
 
 /** Weight only matched counters. Dividing unrelated partial totals can invent cache hits. */
 function summarizeInputCache(observations: InputCacheObservation[]) {
@@ -78,6 +211,7 @@ function summarizeInputCache(observations: InputCacheObservation[]) {
         : null,
     measurement: "reported-counter-pairs" as const,
     upstreamCategoryAndBillingCoverage: "unknown" as const,
+    nativeResponseCache: summarizeNativeInputCache(observations),
     weightedHitRate:
       inputTokens && cachedInputTokens !== null
         ? cachedInputTokens / inputTokens
@@ -225,6 +359,8 @@ export function factoryObjectiveSummary(
   );
   const usage = readUsageSummaryEvents(repository, objective, executing);
   const accounting = summarizeDiagnosticUsage(usage);
+  const captures = readInteractionMetadata(repository, objective);
+  const analyzed = analyzeInteractions(captures, [], {});
   const cacheOf = (
     aggregate:
       | typeof accounting.modelUsage
@@ -232,12 +368,16 @@ export function factoryObjectiveSummary(
       | typeof accounting.combinedUsage
       | NonNullable<typeof accounting.byPhase.compile>,
     unobservedWorkerAttempts = 0,
+    invocations = analyzed.invocations,
   ) =>
     summarizeInputCache([
       {
         ...aggregate.inputCacheUsage,
         eligibleInvocations: aggregate.invocationCount,
         unobservedWorkerAttempts,
+        nativeResponseCache: nativeInputCache(
+          invocations.map((invocation) => invocation.native),
+        ),
       },
     ]);
   const cacheEffectiveness = cacheOf(
@@ -249,8 +389,6 @@ export function factoryObjectiveSummary(
     accounting.combinedUsage.coverage.byCategory,
   );
   const efficiency = summarizeEfficiency(events, usage, accounting, now);
-  const captures = readInteractionMetadata(repository, objective);
-  const analyzed = analyzeInteractions(captures, [], {});
   const identities = analyzed.invocations.map(
     (invocation) => invocation.identity,
   );
@@ -328,13 +466,28 @@ export function factoryObjectiveSummary(
       worker: cacheOf(
         accounting.workerUsage,
         accounting.workerUsage.coverage.unobservedAttemptCount,
+        analyzed.invocations.filter(
+          (invocation) => invocation.identity.phase === "implementation",
+        ),
       ),
-      plannerAndReviewers: cacheOf(accounting.modelUsage),
+      plannerAndReviewers: cacheOf(
+        accounting.modelUsage,
+        0,
+        analyzed.invocations.filter(
+          (invocation) => invocation.identity.phase !== "implementation",
+        ),
+      ),
     },
     cacheByPhase: Object.fromEntries(
       Object.entries(accounting.byPhase).map(([phase, aggregate]) => [
         phase,
-        cacheOf(aggregate),
+        cacheOf(
+          aggregate,
+          0,
+          analyzed.invocations.filter(
+            (invocation) => invocation.identity.phase === phase,
+          ),
+        ),
       ]),
     ),
     failedDelivery,
@@ -415,12 +568,47 @@ function directNativeCapture(
       .map((line) => JSON.parse(line));
     if (!rows.length || rows.length > 8192)
       throw new Error("Native capture metadata exceeds its record bound");
+    const owned = new Map<string, string>();
     for (const row of rows) {
+      const child = row.nativeDescendant;
+      if (child?.relation !== "authenticated-owned-home") continue;
+      if (
+        row.providerEvent !== "codex.native-descendant-coverage" ||
+        !/^[0-9a-f-]{36}$/.test(String(child.childSessionId)) ||
+        !/^[0-9a-f-]{36}$/.test(String(child.parentSessionId)) ||
+        child.childSessionId === child.parentSessionId ||
+        row.providerSessionId !== child.parentSessionId ||
+        (owned.has(child.childSessionId) &&
+          owned.get(child.childSessionId) !== child.parentSessionId)
+      )
+        throw new Error(
+          "Native child capture has an invalid owned-home relationship",
+        );
+      owned.set(child.childSessionId, child.parentSessionId);
+    }
+    const family = new Set([session.sessionId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [child, parent] of owned)
+        if (family.has(parent) && !family.has(child)) {
+          family.add(child);
+          changed = true;
+        }
+    }
+    for (const row of rows) {
+      const root = row.providerSessionId === session.sessionId;
+      const relatedChild =
+        family.has(row.providerSessionId) &&
+        row.nativeOwnership?.rootSessionId === session.sessionId &&
+        row.nativeOwnership?.parentSessionId ===
+          owned.get(row.providerSessionId);
       if (
         row.schemaVersion !== 1 ||
         !/^[0-9a-f-]{36}$/.test(String(row.recordId)) ||
         row.invocationId !== session.sessionId ||
-        row.providerSessionId !== session.sessionId ||
+        (!root && !relatedChild) ||
+        (root && row.nativeOwnership !== undefined) ||
         row.providerAttempt !== 1 ||
         !["request", "interaction", "usage"].includes(row.kind) ||
         !row.content ||
@@ -442,14 +630,14 @@ function directNativeCapture(
         (row.usage.scope !== "provider-call" ||
           !row.usage.normalized ||
           typeof row.usage.deduplicationKey !== "string" ||
-          !row.usage.deduplicationKey.startsWith(session.sessionId + ":"))
+          !row.usage.deduplicationKey.startsWith(row.providerSessionId + ":"))
       )
         throw new Error("Native capture usage has an invalid response binding");
       if (
         row.usage &&
         (!present(row.providerMessageId) ||
           row.usage.deduplicationKey !==
-            `${session.sessionId}:${row.providerMessageId}`)
+            `${row.providerSessionId}:${row.providerMessageId}`)
       )
         throw new Error(
           "Native capture usage does not identify its observed response",
@@ -665,16 +853,48 @@ function directSession(
     Number.isSafeInteger(latestUsage.cachedInputTokens) &&
     latestUsage.cachedInputTokens >= 0 &&
     latestUsage.cachedInputTokens <= latestUsage.inputTokens;
+  const nativeTelemetry = session.nativeCapturePath
+    ? directNativeCapture(session)
+    : null;
+  const delegationObserved = nativeTelemetry
+    ? nativeTelemetry.native.descendants.children.length > 0 ||
+      nativeTelemetry.native.rollout?.childHistory === true
+    : null;
   return {
     ...session,
     path: undefined,
     nativeCapturePath: undefined,
-    nativeTelemetry: session.nativeCapturePath
-      ? directNativeCapture(session)
-      : null,
+    nativeTelemetry,
     observationDigest: receiptHash.digest("hex"),
     turns: { completed, failed, unfinished: open ? 1 : 0 },
-    usageScope: "thread-cumulative" as const,
+    usageScope: "parent-thread-cumulative" as const,
+    descendantAccounting: {
+      observedChildren:
+        nativeTelemetry?.native.descendants.children.length ?? null,
+      delegationObserved,
+      coverage: nativeTelemetry?.native.descendants.coverage ?? "unavailable",
+      parentUsageIncludesChildren: "unknown" as const,
+      childCountersAddedToParentTotals: false,
+      parentNativeVersusSdkCounter: Object.fromEntries(
+        tokenCategories.map((key) => {
+          const native = nativeTelemetry?.native.responseUsage.categories[key];
+          return [
+            key,
+            {
+              observation:
+                latestUsage[key] !== undefined &&
+                native?.total !== null &&
+                native?.total !== undefined
+                  ? native.total === latestUsage[key]
+                    ? "matches"
+                    : "differs"
+                  : "unavailable",
+              nativeResponseCoverage: native?.coverage ?? "unavailable",
+            },
+          ];
+        }),
+      ),
+    },
     tokens: counters(
       latestUsage,
       Object.fromEntries(
@@ -682,7 +902,7 @@ function directSession(
           key,
           latestUsage[key] === undefined
             ? "unavailable"
-            : incomplete
+            : incomplete || delegationObserved === true
               ? "partial"
               : "available",
         ]),
@@ -696,6 +916,9 @@ function directSession(
         terminalCounterInvocations: paired && !incomplete ? 1 : 0,
         eligibleInvocations: 1,
         unobservedWorkerAttempts: 0,
+        nativeResponseCache: nativeInputCache(
+          nativeTelemetry ? [nativeTelemetry.native] : [],
+        ),
       },
     ]),
     wallMs: timestamp(session.endedAt) - timestamp(session.startedAt),
@@ -1256,8 +1479,15 @@ export function renderScorecard(
   const cacheLine = (
     label: string,
     cache: ReturnType<typeof summarizeInputCache>,
-  ) =>
-    `  ${label}: ${cache.weightedHitRate === null ? "unavailable" : `${(cache.weightedHitRate * 100).toFixed(1)}%`} reported cached/input; reported input minus cached ${cache.reportedInputMinusCachedTokens ?? "unknown"} (outer receipts ${cache.availability}; ${cache.contributingInvocations}/${cache.eligibleInvocations} invocations${cache.unobservedWorkerAttempts ? `, ${cache.unobservedWorkerAttempts} unobserved worker attempts` : ""}; upstream detail/billing unknown)`;
+  ) => {
+    const native = cache.nativeResponseCache;
+    const percentage = (value: number | null) =>
+      value === null ? "unknown" : `${(value * 100).toFixed(1)}%`;
+    return (
+      `  ${label}: ${percentage(cache.weightedHitRate)} reported invocation cached/input (${cache.cachedInputTokens ?? "unknown"}/${cache.inputTokens ?? "unknown"}); reported input minus cached ${cache.reportedInputMinusCachedTokens ?? "unknown"} (outer receipts ${cache.availability}; ${cache.contributingInvocations}/${cache.eligibleInvocations} invocations${cache.unobservedWorkerAttempts ? `, ${cache.unobservedWorkerAttempts} unobserved worker attempts` : ""}; upstream detail/billing unknown)\n` +
+      `    native response counters: ${native.availability}; ${native.contributingResponses}/${native.observedResponses} cache-paired responses, ${percentage(native.weightedHitRate)} paired cached/input (${native.cachedInputTokens ?? "unknown"}/${native.inputTokens ?? "unknown"}); whole observed rate ${percentage(native.wholeObservedHitRate)}, known-cache lower bound ${percentage(native.knownCachedInputLowerBoundShare)}`
+    );
+  };
   for (const batch of report.batches) {
     lines.push(
       `\n${batch.scope} / ${batch.route}: ${batch.accepted} accepted, ${batch.failed} failed, ${batch.unfinished} unfinished (${batch.packets} packets)`,
@@ -1273,7 +1503,7 @@ export function renderScorecard(
         `  ${key}: ${counter.known ?? "unknown"} (${counter.availability})`,
       );
     }
-    lines.push(cacheLine("Weighted cache hit rate", batch.cacheEffectiveness));
+    lines.push(cacheLine("Weighted cache counters", batch.cacheEffectiveness));
     for (const [role, cache] of Object.entries(batch.cacheByRole))
       lines.push(cacheLine(role, cache));
   }

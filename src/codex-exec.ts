@@ -5,6 +5,61 @@ import type { ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
 import { codexRuntimeDirectory } from "./codex-planning-isolation.js";
 import { attachFault } from "./fault.js";
 import { subprocessAsync, UnsettledSubprocessError } from "./process.js";
+import { redactDiagnosticDetail } from "./diagnostics.js";
+
+export interface CodexStderrDiagnostic {
+  text: string;
+  observedBytes: number;
+  retainedBytes: number;
+  retainedTextBytes: number;
+  truncated: boolean;
+  redacted: boolean;
+  completeLinesOnly: true;
+}
+
+/** One bounded observation per native attempt, never provider progress. */
+export function codexStderrCapture(
+  observe: (diagnostic: CodexStderrDiagnostic) => void | Promise<void>,
+  secrets: string[] = [],
+): { chunk: (bytes: Buffer) => void; finish: () => void } {
+  const retained = Buffer.alloc(64 * 1024);
+  let bytes = 0;
+  let observedBytes = 0;
+  let finished = false;
+  return {
+    chunk: (chunk) => {
+      if (finished) return;
+      observedBytes += chunk.length;
+      bytes += chunk.copy(retained, bytes, 0, retained.length - bytes);
+    },
+    finish: () => {
+      if (finished) return;
+      finished = true;
+      // Withhold the whole unterminated suffix, including a cap-cut secret
+      // or UTF-8 code point. Redact complete lines across all stream chunks
+      // before the private writer applies its own UTF-8-aware content budget.
+      const end = retained.subarray(0, bytes).lastIndexOf(10) + 1;
+      const decoder = new StringDecoder("utf8");
+      const original = decoder.write(retained.subarray(0, end)) + decoder.end();
+      const text = redactDiagnosticDetail(original, secrets);
+      try {
+        void Promise.resolve(
+          observe({
+            text,
+            observedBytes,
+            retainedBytes: end,
+            retainedTextBytes: Buffer.byteLength(text),
+            truncated: end < observedBytes,
+            redacted: text !== original,
+            completeLinesOnly: true,
+          }),
+        ).catch(() => undefined);
+      } catch {
+        // A private diagnostic sink never changes native work or its error.
+      }
+    },
+  };
+}
 
 /** The installed SDK's native JSON protocol, with Factory-owned cessation. */
 export async function runCodexExec(args: {
@@ -14,6 +69,8 @@ export async function runCodexExec(args: {
   schema: unknown;
   signal: AbortSignal;
   event: (event: ThreadEvent) => void;
+  stderr?: (diagnostic: CodexStderrDiagnostic) => void | Promise<void>;
+  redactionValues?: string[];
 }): Promise<void> {
   const target =
     process.arch === "arm64"
@@ -49,6 +106,9 @@ export async function runCodexExec(args: {
   let pending = "";
   let failed = false;
   let failure: unknown;
+  const stderr = args.stderr
+    ? codexStderrCapture(args.stderr, args.redactionValues)
+    : undefined;
   const line = (text: string) => {
     if (failed) return;
     try {
@@ -67,6 +127,10 @@ export async function runCodexExec(args: {
       { env, signal },
       args.prompt,
       (stream, chunk) => {
+        if (stream === "stderr") {
+          stderr?.chunk(chunk);
+          return;
+        }
         if (stream !== "stdout" || failed) return;
         pending += decoder.write(chunk);
         for (
@@ -102,5 +166,7 @@ export async function runCodexExec(args: {
     if (failed) throw failure;
     if (args.signal.aborted) throw args.signal.reason;
     throw error;
+  } finally {
+    stderr?.finish();
   }
 }

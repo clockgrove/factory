@@ -18,6 +18,7 @@ import test from "node:test";
 import { analyzeInteractions } from "../dist/analysis.js";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
+import { codexStderrCapture } from "../dist/codex-exec.js";
 import { renderCompilationCall } from "../dist/compiler/model.js";
 import {
   prepareCompilationRequest,
@@ -207,6 +208,94 @@ process.stdout.write(JSON.stringify(emitted));`,
       ),
       false,
     );
+    // The same production collector receives real child stderr split across
+    // UTF-8 and secret boundaries. Its cap cuts a second diagnostic line;
+    // that whole suffix is withheld before the existing private writer.
+    const secret = "private-split-stderr-token";
+    const stderrDiagnostics = new DiagnosticEmitter(repository, 2, [secret], {
+      enabled: true,
+      maxBytesPerInvocation: 1024,
+    });
+    const observeStderr = stderrDiagnostics.modelObserver({
+      scopeId: "actual-local-stderr",
+    });
+    const stderrCapture = codexStderrCapture(
+      (diagnostic) =>
+        observeStderr({
+          invocationId: "actual-child-stderr",
+          providerAttempt: 1,
+          phase: "result-review",
+          ordinal: 0,
+          type: "progress",
+          adapter: "local-process",
+          provider: "not-invoked",
+          model: "none",
+          capture: {
+            event: {
+              kind: "interaction",
+              providerEvent: "local.stderr",
+              coverage: "boundary",
+            },
+            content: () => diagnostic,
+          },
+        }),
+      [secret],
+    );
+    let stderrChunks = 0;
+    const childStderr = await subprocessAsync(
+      process.execPath,
+      [
+        "-e",
+        `const line = Buffer.from(${JSON.stringify("π 雪 " + secret + "\n")});
+process.stderr.write(line.subarray(0, 1));
+setTimeout(() => {
+  process.stderr.write(line.subarray(1, 13));
+  setTimeout(() => {
+    process.stderr.write(line.subarray(13));
+    process.stderr.write('x'.repeat(65536 - line.length - 5) + ${JSON.stringify(secret)} + '\\n');
+  }, 20);
+}, 20);`,
+      ],
+      {},
+      undefined,
+      (stream, chunk) => {
+        if (stream === "stderr") {
+          stderrChunks++;
+          stderrCapture.chunk(chunk);
+        }
+      },
+    );
+    assert.equal(childStderr.status, 0);
+    assert.ok(stderrChunks > 1);
+    assert.equal(readDiagnostics(repository, 2).length, 0);
+    stderrCapture.finish();
+    stderrCapture.finish();
+    const stderrRecords = readDiagnostics(repository, 2);
+    assert.equal(stderrRecords.length, 1);
+    assert.equal(stderrRecords[0].operation, "model-capture");
+    const stderrMetadata = stderrRecords[0].capture;
+    const capturedStderr = JSON.parse(
+      readInteractionContent(repository, stderrMetadata.content.reference),
+    );
+    assert.equal(capturedStderr.text, "π 雪 [REDACTED]\n");
+    assert.equal(capturedStderr.redacted, true);
+    assert.equal(capturedStderr.truncated, true);
+    assert.equal(capturedStderr.completeLinesOnly, true);
+    assert.ok(capturedStderr.observedBytes > 65536);
+    assert.ok(capturedStderr.retainedBytes < 65536);
+    assert.equal(stderrMetadata.usage, undefined);
+    assert.equal(stderrMetadata.nativeTool, undefined);
+    assert.equal(JSON.stringify(stderrRecords).includes(secret), false);
+    assert.equal(
+      readInteractionContent(
+        repository,
+        stderrMetadata.content.reference,
+      ).includes(secret),
+      false,
+    );
+    const stderrAnalysis = analyzeInteractions([stderrMetadata]);
+    assert.equal(stderrAnalysis.nativeToolActivity.uniqueCalls, null);
+    assert.equal(JSON.stringify(stderrAnalysis).includes("[REDACTED]"), false);
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previousStateHome;

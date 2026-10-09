@@ -707,15 +707,14 @@ export class DiagnosticEmitter {
     return (observation) => {
       try {
         observer(observation);
-      } catch (error) {
+      } catch {
         const session = observerSessions.getStore();
         if (session) session.lostObservations++;
-        process.stderr.write(
-          `Factory model diagnostics unavailable: ${redactDiagnosticDetail(
-            error instanceof Error ? error.message : String(error),
-            this.secrets,
-          ).slice(0, 512)}\n`,
-        );
+        try {
+          process.stderr.write("Factory model diagnostics unavailable\n");
+        } catch {
+          // Diagnostic and warning sink failures cannot reject provider work.
+        }
       }
     };
   }

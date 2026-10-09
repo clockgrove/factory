@@ -23,6 +23,8 @@ import { codexRawTokenUsage, codexTokenUsage } from "../usage.js";
 import { codexCaptureEvent } from "../execution/interaction-capture.js";
 import { UnsettledSubprocessError } from "../process.js";
 
+const LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
+
 /**
  * Codex SDK transport: a read-only, never-approving, tool-free thread per
  * attempt, run under Factory's own scratch CODEX_HOME so the operator's
@@ -67,10 +69,18 @@ export class CodexPlanningTransport implements PlanningTransport {
     const started = Date.now();
     // Native exec JSON omits text/reasoning deltas. A healthy structured
     // answer can stay silent until its final agent_message, at any effort.
-    // Use the existing finite provider window rather than treating that
-    // omitted progress as a stalled model; caller deadlines still cancel.
+    // Keep that quiet window for compilation and high effort. Lower-effort
+    // reviews get a finite five-minute outlier bound, above the old 120s
+    // cutoff; a quiet timeout still does not prove provider inactivity.
+    const lowerEffortReview =
+      ["graph-review", "result-review", "objective-review"].includes(
+        invocation.phase,
+      ) && ["minimal", "low", "medium"].includes(selection.reasoningEffort);
     const turn = new ProviderTurnGuard(
-      this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+      this.providerTurnIdleTimeoutMs ??
+        (lowerEffortReview
+          ? LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS
+          : DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS),
       this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
     );
     const thread: { id?: string } = {};
@@ -105,6 +115,20 @@ export class CodexPlanningTransport implements PlanningTransport {
         },
         prompt: args.prompt,
         schema: args.schema,
+        redactionValues: this.redactionValues,
+        stderr: (diagnostic) =>
+          observeModelInvocation(invocation, {
+            type: "progress",
+            capture: {
+              event: {
+                kind: "interaction",
+                providerEvent: "codex.native-stderr",
+                coverage: "boundary",
+                providerSessionId: thread.id,
+              },
+              content: () => diagnostic,
+            },
+          }),
         signal: args.signal
           ? AbortSignal.any([turn.signal, args.signal])
           : turn.signal,

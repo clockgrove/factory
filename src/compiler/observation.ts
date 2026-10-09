@@ -28,9 +28,11 @@ export function observeModelInvocation(
         : { providerMaxAttempts: invocation.providerMaxAttempts }),
       ...observation,
     });
-  } catch (error) {
-    process.stderr.write(
-      `Factory model diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+  } catch {
+    try {
+      process.stderr.write("Factory model diagnostics unavailable\n");
+    } catch {
+      // Warning sinks are observational too; never expose a private error.
+    }
   }
 }

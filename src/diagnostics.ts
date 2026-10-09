@@ -705,9 +705,7 @@ export class DiagnosticEmitter {
     observer: (observation: ModelInvocationObservation) => void,
   ): (observation: ModelInvocationObservation) => void {
     return (observation) => {
-      try {
-        observer(observation);
-      } catch {
+      const unavailable = () => {
         const session = observerSessions.getStore();
         if (session) session.lostObservations++;
         try {
@@ -715,6 +713,11 @@ export class DiagnosticEmitter {
         } catch {
           // Diagnostic and warning sink failures cannot reject provider work.
         }
+      };
+      try {
+        void Promise.resolve(observer(observation)).catch(unavailable);
+      } catch {
+        unavailable();
       }
     };
   }

@@ -700,7 +700,10 @@ export class LocalExecutionDriver implements ExecutionDriver {
 
   @classifyFaults(executionFault)
   async preflight(graph: WorkGraph): Promise<void> {
-    for (const item of graph.items) this.resolveHarness(item);
+    for (const item of graph.items) {
+      if (item.kind !== "qa" && item.kind !== "aggregate")
+        this.resolveHarness(item);
+    }
   }
 
   @classifyFaults(executionFault)

@@ -474,11 +474,13 @@ export class DiagnosticEmitter {
       } finally {
         closeSync(fd);
       }
-    } catch (error) {
+    } catch {
       if (matched) session.writeFailures++;
-      process.stderr.write(
-        `Factory diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
+      try {
+        process.stderr.write("Factory diagnostics unavailable\n");
+      } catch {
+        // A warning sink cannot replace the caller's outcome or private error.
+      }
     }
   }
 

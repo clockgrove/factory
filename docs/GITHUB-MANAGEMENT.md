@@ -2,6 +2,8 @@
 
 This document defines the optional GitHub management surfaces introduced in the #983 milestone. They are disabled by default and use the existing GitHub credentials and atomic continuation. Source implementation and independent review are distinct from installed live qualification; qualification receipts establish which operator journeys have actually been demonstrated.
 
+The preferred interaction is the existing agent conversation, such as Codex. The director surfaces actual retained questions there and records the operator's answer through the supported local CLI. GitHub supplies progress and detailed Objective, Work Item, PR and acceptance records. Section B documents a separate optional experiment, not a requirement to answer questions in GitHub or a demonstrated remote decision-consumption journey. Background persistence alone does not provide proactive notifications into an inactive agent conversation.
+
 ## Baseline and opt-in behavior
 
 Before this milestone, GitHub issue graphs, pull requests and accepted issue closure were tracked, but comments could not authenticate a planning decision. The queue returned when human input was needed. The local CLI remains the complete decision and recovery surface.
@@ -18,7 +20,7 @@ Publication identity and request accounting belong in the existing atomic contin
 
 Initial source hooks are `contracts.ts` / `github.ts` for the narrow gateway operation, `state.ts` / `state-store.ts` for validated continuation fields, and owner-controlled `runner.ts` / `intake.ts` checkpoints. `github-progress.ts` only renders the bounded presentation. Keep projection failures separate from substantive acceptance; they remain visible tracking failures and must not replay delivery or implementation.
 
-## B. Opt-in plan decision intake
+## B. Experimental opt-in plan decision intake
 
 The initial remote action answers one genuinely retained planning question with `outcome: accept`. It is available only before projection, for a `needs-human` plan with exactly one substantive finding, no review failure, verified acceptable structure and `acceptable !== false`. No unresolved external effect may remain. Multiple findings, review failures, structurally unacceptable plans and refusal stay on the local supported path. The summary still groups all known questions when remote action is unavailable. It does not approve a Work Item result or final acceptance, change the Objective, invent a question, supply missing acceptance facts, select assets, retry, repair, cancel, merge, change providers, increase limits or run shell commands. All normal independent review, exact source/command validation and acceptance continue after a plan answer.
 

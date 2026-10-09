@@ -15,22 +15,29 @@ export function observeModelInvocation(
   >,
 ): void {
   if (!invocation) return;
+  const unavailable = () => {
+    try {
+      process.stderr.write("Factory model diagnostics unavailable\n");
+    } catch {
+      // Warning sinks are observational too; never expose a private error.
+    }
+  };
   try {
-    invocation.observe?.({
-      invocationId: invocation.invocationId,
-      phase: invocation.phase,
-      ordinal: invocation.ordinal,
-      ...(invocation.providerAttempt === undefined
-        ? {}
-        : { providerAttempt: invocation.providerAttempt }),
-      ...(invocation.providerMaxAttempts === undefined
-        ? {}
-        : { providerMaxAttempts: invocation.providerMaxAttempts }),
-      ...observation,
-    });
-  } catch (error) {
-    process.stderr.write(
-      `Factory model diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    void Promise.resolve(
+      invocation.observe?.({
+        invocationId: invocation.invocationId,
+        phase: invocation.phase,
+        ordinal: invocation.ordinal,
+        ...(invocation.providerAttempt === undefined
+          ? {}
+          : { providerAttempt: invocation.providerAttempt }),
+        ...(invocation.providerMaxAttempts === undefined
+          ? {}
+          : { providerMaxAttempts: invocation.providerMaxAttempts }),
+        ...observation,
+      }),
+    ).catch(unavailable);
+  } catch {
+    unavailable();
   }
 }

@@ -669,6 +669,7 @@ async function runObjectiveOwned(
         await owner.cancellation;
         await closeCancelledIssues(state, services.github, persist);
         if (!state.coordinator?.cancelError) {
+          const alreadyCancelled = !!state.cancelledAt;
           state.cancelledAt = new Date().toISOString();
           clearAllRepeats(state);
           if (state.schemaVersion === 7) {
@@ -678,6 +679,12 @@ async function runObjectiveOwned(
             if (owner.save) owner.save(state);
             else persist();
           } else persist();
+          if (!alreadyCancelled)
+            new DiagnosticEmitter(config.repository, objective).emit({
+              runId: state.runId,
+              operation: "objective-cancel",
+              outcome: "completed",
+            });
         }
         throw cancelledFault("Objective cancellation requested");
       }

@@ -474,11 +474,13 @@ export class DiagnosticEmitter {
       } finally {
         closeSync(fd);
       }
-    } catch (error) {
+    } catch {
       if (matched) session.writeFailures++;
-      process.stderr.write(
-        `Factory diagnostics unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
+      try {
+        process.stderr.write("Factory diagnostics unavailable\n");
+      } catch {
+        // A warning sink cannot replace the caller's outcome or private error.
+      }
     }
   }
 
@@ -705,17 +707,19 @@ export class DiagnosticEmitter {
     observer: (observation: ModelInvocationObservation) => void,
   ): (observation: ModelInvocationObservation) => void {
     return (observation) => {
-      try {
-        observer(observation);
-      } catch (error) {
+      const unavailable = () => {
         const session = observerSessions.getStore();
         if (session) session.lostObservations++;
-        process.stderr.write(
-          `Factory model diagnostics unavailable: ${redactDiagnosticDetail(
-            error instanceof Error ? error.message : String(error),
-            this.secrets,
-          ).slice(0, 512)}\n`,
-        );
+        try {
+          process.stderr.write("Factory model diagnostics unavailable\n");
+        } catch {
+          // Diagnostic and warning sink failures cannot reject provider work.
+        }
+      };
+      try {
+        void Promise.resolve(observer(observation)).catch(unavailable);
+      } catch {
+        unavailable();
       }
     };
   }

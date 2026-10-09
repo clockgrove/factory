@@ -80,10 +80,20 @@ export function reviewResultDigest(
 export function planningReviewEvidence(
   packet: Pick<
     PlanReviewRequest,
-    "sources" | "prerequisites" | "localExecutables" | "executionBounds"
+    | "sources"
+    | "prerequisites"
+    | "localExecutables"
+    | "executionBounds"
+    | "amendment"
   >,
 ) {
   return [
+    ...(packet.amendment?.currentImplementationEvidence ?? []).map(
+      (source) => ({
+        ...source,
+        origin: "controller" as const,
+      }),
+    ),
     ...packet.sources.map((source) => ({
       ...source,
       origin: "source" as const,

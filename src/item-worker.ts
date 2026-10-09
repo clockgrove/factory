@@ -12,7 +12,12 @@ import type {
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { workerContext } from "./execution/checkpoint.js";
 import { cancelledFault } from "./fault.js";
-import { recordWorkerDiscovery } from "./graph-amendments.js";
+import {
+  assertGraphRevisions,
+  graphDigest,
+  recordWorkerDiscovery,
+} from "./graph-amendments.js";
+import { isDeepStrictEqual } from "node:util";
 import { executeItem } from "./item-steps.js";
 import { selectedInputsForItem, validationLfsMembersForItem } from "./media.js";
 import { packageManagerUpdate } from "./package-manager-update.js";
@@ -51,6 +56,45 @@ function attemptItem(item: WorkItem, recovery?: WorkRecovery): WorkItem {
     ? `\nDiagnosed repair: ${correction.diagnosis}\nRequired correction: ${correction.correction}`
     : "";
   return { ...item, brief: `${item.brief}${previous}${repair}` };
+}
+
+/** The normal worker receives planned peers, not their briefs or result receipts. */
+export function workerAttemptItem(
+  state: FactoryState,
+  item: WorkItem,
+  baseSha: string,
+): WorkItem {
+  assertGraphRevisions(state);
+  if (
+    state.graph.objective !== state.objective ||
+    state.graph.baseSha !== state.baseSha ||
+    !isDeepStrictEqual(
+      state.graph.items.find((candidate) => candidate.id === item.id),
+      item,
+    )
+  )
+    throw new Error("Worker planned peer context differs from accepted graph");
+  const attempted = attemptItem(item, state.work[item.id]?.recovery);
+  const context = {
+    objective: state.objective,
+    acceptedGraphDigest: graphDigest(state.graph),
+    objectiveBaseCommitSha: state.baseSha,
+    workerExecutionBaseCommitSha: baseSha,
+    currentItemId: item.id,
+    peers: state.graph.items
+      .filter((peer) => peer.id !== item.id)
+      .map((peer) => ({
+        id: peer.id,
+        goal: peer.goal,
+        kind: peer.kind ?? "work",
+        dependencies: peer.dependencies,
+        ownedPaths: peer.ownedPaths,
+      })),
+  };
+  return {
+    ...attempted,
+    brief: `${attempted.brief}\nController-bound accepted planned peer context (design only): ${JSON.stringify(context)}\nPeers' planned outputs can be absent from this isolated execution base. Absence here alone does not establish additional work when that output is already assigned to a peer; preserve the component's phase and leave combined proof to its accepted downstream owner. This plan proves no peer implementation, validation, delivery, integration or acceptance and grants no new ownership, dependency, command or permission. Report genuine additional gaps with their observed base and relevant planned owner; do not infer either completion or a defect from the plan alone.`,
+  };
 }
 
 /**
@@ -97,7 +141,7 @@ export async function runWorker(
   // A reattached worker keeps the coding slot it holds while it runs remotely.
   if (work.phaseReservation !== "coding")
     await phases.reserve(item.id, "coding");
-  const attemptedItem = attemptItem(item, work.recovery);
+  const attemptedItem = workerAttemptItem(state, item, baseSha);
   if (
     work.recovery?.correction &&
     (!retained || args.driver.retainedFailedResultContext !== true)

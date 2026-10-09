@@ -9,7 +9,7 @@ import {
   itemEvent,
   repairScopes,
 } from "./repair-policy.js";
-import { ownsPath } from "./ownership.js";
+import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -666,6 +666,145 @@ export function configuredResultReviewTextBudget(): number {
   return Number.isSafeInteger(configured) && configured > 0
     ? configured
     : 48_000;
+}
+
+/** Current immutable implementation observations; never pinned source authority. */
+export function amendmentImplementationEvidence(args: {
+  state: FactoryState;
+  proposal: WorkDiscovery & {
+    worker?: { itemId: string; attempt: string };
+  };
+  checkout: string;
+}): ResultReviewEvidenceSource[] {
+  const { state, proposal, checkout } = args;
+  assertGraphRevisions(state);
+  if (
+    state.graph.objective !== state.objective ||
+    state.graph.baseSha !== state.baseSha
+  )
+    throw new Error("Amendment implementation graph binding changed");
+  const worker = proposal.worker && state.work[proposal.worker.itemId];
+  if (proposal.worker && worker?.attempt !== proposal.worker.attempt)
+    throw new Error("Amendment discovery attempt binding changed");
+  const commitSha = state.integratedSha ?? state.baseSha;
+  const treeSha = pinnedGit(checkout, "rev-parse", `${commitSha}^{tree}`);
+  assertCommitTree(checkout, commitSha, treeSha, "Amendment implementation");
+  assertAncestor(checkout, state.baseSha, commitSha, "Amendment current base");
+  const identity = {
+    objective: state.objective,
+    acceptedGraphDigest: graphDigest(state.graph),
+    objectiveBaseCommitSha: state.baseSha,
+    currentCommitSha: commitSha,
+    currentTreeSha: treeSha,
+    currentBasis: state.integratedSha ? "recorded-integration" : "pinned-base",
+    discoveryWorker: proposal.worker ?? null,
+    discoveryExecutionBaseCommitSha: worker?.executionBaseSha ?? null,
+    discoveryResultCommitSha: worker?.changeRef ?? null,
+    discoveryResultTreeSha: worker?.treeSha ?? null,
+    work: Object.fromEntries(
+      Object.entries(state.work).map(([id, work]) => [
+        id,
+        {
+          status: work.status,
+          resultCommitSha: work.changeRef ?? null,
+          resultTreeSha: work.treeSha ?? null,
+          integratedCommitSha: work.integratedSha ?? null,
+        },
+      ]),
+    ),
+    scope:
+      "Observed current implementation only, not new requirements, command or source-citation authority, permissions or acceptance. The original Objective and pinned sources remain authoritative. Reconcile this exact current tree and accepted planned ownership with the discovery's observed base; identities and declarations alone prove no missing file contents or semantics.",
+  };
+  const budget = newReviewTextBudget();
+  const identitySource: ResultReviewEvidenceSource = {
+    origin: "controller",
+    path: "Current amendment implementation identity",
+    complete: true,
+    content: JSON.stringify(identity),
+  };
+  if (Buffer.byteLength(JSON.stringify(identitySource)) > budget.remaining) {
+    identitySource.complete = false;
+    identitySource.content = JSON.stringify({
+      availability: "unavailable",
+      reason: "Current implementation identity exceeds evidence budget",
+    });
+  }
+  budget.remaining = Math.max(
+    0,
+    budget.remaining - Buffer.byteLength(JSON.stringify(identitySource)),
+  );
+  const evidence = [identitySource];
+  const inventory = resultTreeInventory(
+    checkout,
+    treeSha,
+    Math.floor(budget.remaining / 4),
+  );
+  const inventoryBytes = Buffer.byteLength(JSON.stringify(inventory));
+  if (inventoryBytes <= budget.remaining) {
+    inventory.origin = "controller";
+    evidence.push(inventory);
+    budget.remaining -= inventoryBytes;
+  }
+  const scopes = proposal.ownership.filter(validOwnershipPath);
+  const entries = pinnedGitRaw(checkout, "ls-tree", "-r", "-l", "-z", treeSha)
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean);
+  for (const entry of entries) {
+    const tab = entry.indexOf("\t");
+    const path = entry.slice(tab + 1);
+    if (tab < 0 || !ownsPath(path, scopes)) continue;
+    const [mode, kind, oid, sizeText] = entry.slice(0, tab).trim().split(/\s+/);
+    const bytes = Number(sizeText);
+    let text: string | undefined;
+    if (
+      kind === "blob" &&
+      (mode === "100644" || mode === "100755") &&
+      Number.isSafeInteger(bytes) &&
+      bytes >= 0 &&
+      bytes <= budget.remaining
+    ) {
+      try {
+        text = new TextDecoder("utf8", { fatal: true, ignoreBOM: true }).decode(
+          pinnedGitRaw(checkout, "cat-file", "blob", oid!),
+        );
+      } catch {
+        text = undefined;
+      }
+    }
+    const source: ResultReviewEvidenceSource = {
+      origin: "controller",
+      path: `Current amendment implementation file: ${path}`,
+      complete: text !== undefined,
+      content: JSON.stringify({
+        currentCommitSha: commitSha,
+        currentTreeSha: treeSha,
+        path,
+        mode,
+        kind,
+        oid,
+        bytes: Number.isSafeInteger(bytes) ? bytes : null,
+        ...(text !== undefined
+          ? { text, sha256: createHash("sha256").update(text).digest("hex") }
+          : { availability: "unavailable" }),
+      }),
+    };
+    if (Buffer.byteLength(JSON.stringify(source)) > budget.remaining) {
+      source.complete = false;
+      source.content = JSON.stringify({
+        currentCommitSha: commitSha,
+        currentTreeSha: treeSha,
+        path,
+        availability: "unavailable",
+        reason: "Complete current file exceeds remaining evidence budget",
+      });
+    }
+    const suppliedBytes = Buffer.byteLength(JSON.stringify(source));
+    if (suppliedBytes > budget.remaining) continue;
+    budget.remaining -= suppliedBytes;
+    evidence.push(source);
+  }
+  return evidence;
 }
 
 /**

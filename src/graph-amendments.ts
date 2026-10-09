@@ -63,6 +63,7 @@ import { assertCoverageSources, coverageObligations } from "./qa.js";
 import { decodeGraphReview, reviewPacket } from "./review-evidence.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import type { FactoryState } from "./state.js";
+import { amendmentImplementationEvidence } from "./result-evidence.js";
 
 export interface AmendmentProposal extends WorkDiscovery {
   expectedGraphDigest: string;
@@ -788,6 +789,11 @@ async function advanceAmendment(args: {
                 state.work[id]!.status !== "pending" || state.work[id]!.attempt,
             ),
             reattemptItemId: reattemptedItem(state, pending.proposal),
+            currentImplementationEvidence: amendmentImplementationEvidence({
+              state,
+              proposal: pending.proposal,
+              checkout: config.checkout,
+            }),
           },
           prerequisites,
           localExecutables,
@@ -819,6 +825,11 @@ async function advanceAmendment(args: {
         state.approvedPlaybookPin,
       );
       packet.amendment = {
+        currentImplementationEvidence: amendmentImplementationEvidence({
+          state,
+          proposal: pending.proposal,
+          checkout: config.checkout,
+        }),
         previousGraph: state.graph,
         proposal: pending.proposal,
         work: Object.fromEntries(

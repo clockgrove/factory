@@ -363,6 +363,8 @@ export interface PlanningRequest<T> {
     immutableItemIds?: string[];
     /** The retained item whose failed attempt proposed the amendment; its ownership may widen. */
     reattemptItemId?: string;
+    /** Observed current code; never normative sources or command authority. */
+    currentImplementationEvidence?: ResultReviewEvidenceSource[];
   };
   /** Package scripts the acceptance commands run, as the base defines them; validation keeps them fixed. */
   fixedScripts?: { name: string; body: string }[];
@@ -404,6 +406,7 @@ export interface PlanReviewRequest {
     previousGraph: WorkGraph;
     proposal: unknown;
     work: Record<string, unknown>;
+    currentImplementationEvidence?: ResultReviewEvidenceSource[];
   };
   reviewPacket?: ReviewPacket;
   objective: string;

@@ -1,6 +1,6 @@
 import { objectiveCandidate } from "./qa.js";
 import { nativePrerequisiteReviewEvidence } from "./native-prerequisite-evidence.js";
-import { assertGraphRevisions } from "./graph-amendments.js";
+import { assertGraphRevisions, graphDigest } from "./graph-amendments.js";
 import {
   allowanceKey,
   assertRepairLedger,
@@ -1833,7 +1833,84 @@ function retainedRepairProof(
   };
 }
 
-/** Current materialization and declared dependency ancestry, never unrelated work. */
+/** Accepted design choices are normative context, never implementation receipts. */
+function acceptedWorkItemDesignEvidence(args: {
+  state: FactoryState;
+  item: WorkItem;
+  reviewBaseSha: string;
+  candidateCommitSha: string;
+  candidateTreeSha: string;
+  textBudget: ReviewTextBudget;
+}): ResultReviewEvidenceSource {
+  const { state, item, textBudget } = args;
+  assertGraphRevisions(state);
+  const accepted = state.graph.items.find((entry) => entry.id === item.id);
+  const work = state.work[item.id];
+  if (
+    state.graph.objective !== state.objective ||
+    state.graph.baseSha !== state.baseSha ||
+    !accepted ||
+    !work ||
+    !isDeepStrictEqual(accepted, item)
+  )
+    throw new Error(`Work Item ${item.id} accepted design binding changed`);
+  const binding = {
+    objective: state.objective,
+    objectiveBaseCommitSha: state.baseSha,
+    acceptedPlanGraphDigest: state.planGraphDigest,
+    acceptedGraphRevisionDigest: graphDigest(state.graph),
+    itemId: item.id,
+    acceptedItemDigest: createHash("sha256")
+      .update(JSON.stringify(accepted))
+      .digest("hex"),
+    attemptGraphRevisionDigest: work.graphRevisionDigest ?? null,
+    executionBaseCommitSha: work.executionBaseSha ?? null,
+    itemResultBaseCommitSha: work.baseSha ?? null,
+    itemResultCommitSha: work.changeRef ?? null,
+    itemResultTreeSha: work.treeSha ?? null,
+    reviewedBaseCommitSha: args.reviewBaseSha,
+    candidateCommitSha: args.candidateCommitSha,
+    candidateTreeSha: args.candidateTreeSha,
+  };
+  // Pinned input-source bodies already have their own source provenance in the
+  // packet. Reserve the complete design prose before optional Git patch bodies.
+  const design = {
+    id: accepted.id,
+    kind: accepted.kind ?? "work",
+    title: accepted.title,
+    goal: accepted.goal,
+    brief: accepted.brief,
+    acceptance: accepted.acceptance,
+    nonGoals: accepted.nonGoals,
+    dependencies: accepted.dependencies,
+    ownedPaths: accepted.ownedPaths,
+    citations: accepted.citations,
+  };
+  const scope =
+    "Current accepted compiled design only, subordinate to the original Objective and pinned source constraints. Settles permitted architecture choices; proves no implementation, command execution, sibling output, delivery or integration and grants no permissions, providers, spending or dependency edges. An absent attempt revision or execution identity remains unknown; this entry does not prove what a historical worker received.";
+  const source: ResultReviewEvidenceSource = {
+    origin: "controller",
+    path: `Accepted Work Item design: ${item.id}`,
+    complete: true,
+    content: JSON.stringify({ binding, scope, design }),
+  };
+  if (Buffer.byteLength(JSON.stringify(source)) > textBudget.remaining) {
+    source.complete = false;
+    source.content = JSON.stringify({
+      binding,
+      scope,
+      availability: "unavailable",
+      reason: "Complete accepted design exceeds remaining review text budget",
+    });
+  }
+  textBudget.remaining = Math.max(
+    0,
+    textBudget.remaining - Buffer.byteLength(JSON.stringify(source)),
+  );
+  return source;
+}
+
+/** Current design, materialization and declared dependencies, never sibling results. */
 export function workItemReviewEvidence(args: {
   state: FactoryState;
   item: WorkItem;
@@ -1870,12 +1947,17 @@ export function workItemReviewEvidence(args: {
   };
   for (const id of item.dependencies) visit(id);
   const textBudget = newReviewTextBudget();
-  const evidence = workItemMaterializationEvidence({
-    state,
-    item,
-    checkout,
-    textBudget,
-  });
+  const evidence = [
+    acceptedWorkItemDesignEvidence({
+      state,
+      item,
+      reviewBaseSha: current.baseSha,
+      candidateCommitSha: current.changeRef,
+      candidateTreeSha: current.treeSha,
+      textBudget,
+    }),
+    ...workItemMaterializationEvidence({ state, item, checkout, textBudget }),
+  ];
   evidence.push(
     ...nativePrerequisiteReviewEvidence({
       state,
@@ -2006,6 +2088,18 @@ export function objectiveReviewEvidence(args: {
   const integrationRecords: Parameters<typeof assertIntegrationBindings>[1] =
     [];
   const textBudget = newReviewTextBudget();
+  evidence.push(
+    ...state.graph.items.map((item) =>
+      acceptedWorkItemDesignEvidence({
+        state,
+        item,
+        reviewBaseSha: state.baseSha,
+        candidateCommitSha,
+        candidateTreeSha,
+        textBudget,
+      }),
+    ),
+  );
   const work = state.graph.items.map((item) => {
     const current = state.work[item.id];
     if (

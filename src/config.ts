@@ -35,7 +35,7 @@ export const DEFAULT_PLANNER_MODEL_SELECTION: CodexModelSelection = {
 
 export const DEFAULT_REVIEWER_MODEL_SELECTION: CodexModelSelection = {
   model: "gpt-6.1-sol",
-  reasoningEffort: "high",
+  reasoningEffort: "medium",
 };
 
 export const DEFAULT_WORKER_MODEL_SELECTION: CodexModelSelection = {

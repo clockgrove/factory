@@ -84,7 +84,7 @@ export function writeConfiguration(args: string[], path: string): string {
             },
             reviewer: {
               model: option(args, "review-model"),
-              reasoningEffort: option(args, "review-reasoning") ?? "high",
+              reasoningEffort: option(args, "review-reasoning") ?? "medium",
             },
           }
         : {

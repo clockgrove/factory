@@ -1,5 +1,7 @@
 import {
   type PlanningModel,
+  type PlanningRequest,
+  type ApprovedPlaybookPin,
   type WorkGraph,
   type ModelInvocationContext,
   type ExecutionProfileChoices,
@@ -194,6 +196,64 @@ export async function compileObjective(
   executionBounds?: PlanningExecutionBounds,
   observeDecodedGraph?: (graph: WorkGraph) => void,
 ): Promise<WorkGraph> {
+  const request = prepareCompilationRequest({
+    objective,
+    body,
+    baseSha,
+    checkout,
+    extraSources,
+    corrections,
+    invocation,
+    executionProfiles,
+    amendment,
+    prerequisites,
+    localExecutables,
+    executionBounds,
+    approvedPlaybookPin: model.approvedPlaybookPin,
+  });
+  const graph = await model
+    .generateStructured<WorkGraph>(request)
+    .catch(planningFailure);
+  observeDecodedGraph?.(graph);
+  return validateCompiledGraph({ graph, request, body, checkout });
+}
+
+/** Production compilation input preparation; no provider or lifecycle effects. */
+export function prepareCompilationRequest(args: {
+  objective: number;
+  body: string;
+  baseSha: string;
+  checkout: string;
+  extraSources?: { path: string; content: string }[];
+  corrections?: PlanCorrection[];
+  invocation?: ModelInvocationContext;
+  executionProfiles?: ExecutionProfileChoices;
+  amendment?: {
+    currentGraph: WorkGraph;
+    discovery: unknown;
+    immutableItemIds: string[];
+    reattemptItemId?: string;
+  };
+  prerequisites?: PlanningPrerequisites;
+  localExecutables?: PlanningLocalExecutables;
+  executionBounds?: PlanningExecutionBounds;
+  approvedPlaybookPin?: ApprovedPlaybookPin;
+}): PlanningRequest<WorkGraph> {
+  const {
+    objective,
+    body,
+    baseSha,
+    checkout,
+    extraSources = [],
+    corrections = [],
+    invocation,
+    executionProfiles,
+    amendment,
+    prerequisites,
+    localExecutables,
+    executionBounds,
+    approvedPlaybookPin,
+  } = args;
   if (executionBounds) assertPlanningExecutionBounds(executionBounds);
   assertObjectiveCriteria(body);
   const sources = planningSources(body, baseSha, checkout);
@@ -206,38 +266,49 @@ export async function compileObjective(
   );
   const prompt = `Objective #${objective}\n${body}${instructions}`;
   const scripts = fixedScripts(body, baseSha, checkout);
-  const graph = await model
-    .generateStructured<WorkGraph>({
-      ...(prerequisites ? { prerequisites } : {}),
-      ...(localExecutables ? { localExecutables } : {}),
-      ...(executionBounds ? { executionBounds } : {}),
-      ...(model.approvedPlaybookPin !== undefined
-        ? { approvedPlaybookPin: model.approvedPlaybookPin }
-        : {}),
-      objective: prompt,
-      compileContext: {
-        objectiveNumber: objective,
-        instructions,
-        ...(amendment && {
-          previousGraph: amendment.currentGraph,
-          immutableItemIds: amendment.immutableItemIds,
-          ...(amendment.reattemptItemId && {
-            reattemptItemId: amendment.reattemptItemId,
-          }),
+  return {
+    ...(prerequisites ? { prerequisites } : {}),
+    ...(localExecutables ? { localExecutables } : {}),
+    ...(executionBounds ? { executionBounds } : {}),
+    ...(approvedPlaybookPin !== undefined
+      ? { approvedPlaybookPin: approvedPlaybookPin }
+      : {}),
+    objective: prompt,
+    compileContext: {
+      objectiveNumber: objective,
+      instructions,
+      ...(amendment && {
+        previousGraph: amendment.currentGraph,
+        immutableItemIds: amendment.immutableItemIds,
+        ...(amendment.reattemptItemId && {
+          reattemptItemId: amendment.reattemptItemId,
         }),
-      },
-      ...(scripts.length ? { fixedScripts: scripts } : {}),
-      coverageObligations: coverageObligations(body, objectiveCriteria(body)),
-      checkNames: workflowCheckNames(checkout, baseSha),
-      baseSha,
-      sources,
-      controllerCapabilities: installedControllerCapabilities(),
-      controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-      ...(executionProfiles ? { executionProfiles } : {}),
-      invocation,
-    })
-    .catch(planningFailure);
-  observeDecodedGraph?.(graph);
+      }),
+    },
+    ...(scripts.length ? { fixedScripts: scripts } : {}),
+    coverageObligations: coverageObligations(body, objectiveCriteria(body)),
+    checkNames: workflowCheckNames(checkout, baseSha),
+    baseSha,
+    sources,
+    controllerCapabilities: installedControllerCapabilities(),
+    controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+    ...(executionProfiles ? { executionProfiles } : {}),
+    invocation,
+  };
+}
+
+/** The same grounding and graph acceptance checks used by production compilation. */
+export function validateCompiledGraph(args: {
+  graph: WorkGraph;
+  request: PlanningRequest<WorkGraph>;
+  body: string;
+  checkout: string;
+}): WorkGraph {
+  const { graph, request, body, checkout } = args;
+  const { sources, baseSha, executionProfiles, invocation } = request;
+  const objective = request.compileContext?.objectiveNumber;
+  if (objective === undefined)
+    throw new Error("Compilation requires trusted compile context");
   try {
     hydrateCoverageSources(
       graph,
@@ -250,7 +321,7 @@ export async function compileObjective(
       objective,
       baseSha,
       new Set(sources.map((s) => s.path)),
-      amendment?.currentGraph,
+      request.compileContext?.previousGraph,
     );
     if (graph.coverage === undefined)
       throw new Error(

@@ -59,7 +59,12 @@ import {
 } from "../dist/repair-policy.js";
 import { decideResult, rereviewWorkItem } from "../dist/runner.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
-import { step } from "../dist/step.js";
+import {
+  assertStepAdmission,
+  step,
+  stepCancellationSignal,
+  StepPaused,
+} from "../dist/step.js";
 import {
   validateCheckout,
   validateTree,
@@ -212,23 +217,70 @@ process.stdout.write(JSON.stringify(emitted));`,
 test("cancellation stops an owned shell and its process group", async () => {
   const controller = new AbortController();
   let pid;
-  const result = withProcessCancellation(controller.signal, () =>
-    subprocessAsync(
-      "sh",
-      ["-c", "echo $$; sleep 120 & wait"],
-      {},
-      undefined,
-      (stream, chunk) => {
-        if (stream === "stdout") {
-          pid = Number(chunk.toString().trim());
-          controller.abort();
-        }
-      },
-    ),
+  const result = step(
+    {},
+    { scope: "objective", name: "planning", paid: true },
+    (context) =>
+      context.paid(() =>
+        withProcessCancellation(stepCancellationSignal(), () =>
+          subprocessAsync(
+            "sh",
+            ["-c", "echo $$; sleep 120 & wait"],
+            {},
+            undefined,
+            (stream, chunk) => {
+              if (stream === "stdout") {
+                pid = Number(chunk.toString().trim());
+                controller.abort();
+              }
+            },
+          ),
+        ),
+      ),
+    { save: () => undefined, signal: controller.signal },
   );
-  await assert.rejects(result, /cancelled after verified cessation/);
+  await assert.rejects(result, (error) => error.fault?.kind === "cancelled");
   assert.ok(pid > 0);
   assert.equal(processGroupExists(pid), false);
+
+  // A nested effect receives its owning step's cancel signal. A pause only
+  // blocks the next effect: the already running real shell settles normally.
+  const pause = new AbortController();
+  const cancel = new AbortController();
+  const state = {};
+  let firstSettled = false;
+  let nextStarted = false;
+  await assert.rejects(
+    step(
+      state,
+      { scope: "objective", name: "planning", paid: true },
+      (context) =>
+        context.paid(async () => {
+          assert.equal(stepCancellationSignal(), cancel.signal);
+          const settled = await subprocessAsync(
+            "sh",
+            ["-c", "echo started; sleep 0.1; echo settled"],
+            { signal: stepCancellationSignal() },
+            undefined,
+            (stream) => {
+              if (stream === "stdout") pause.abort();
+            },
+          );
+          firstSettled =
+            settled.status === 0 && settled.stdout.includes("settled");
+          assertStepAdmission();
+          nextStarted = true;
+          await subprocessAsync("sh", ["-c", "echo forbidden"]);
+        }),
+      { save: () => undefined, signal: cancel.signal, pause: pause.signal },
+    ),
+    StepPaused,
+  );
+  assert.equal(firstSettled, true);
+  assert.equal(nextStarted, false);
+  assert.equal(state.repeats, undefined);
+  assert.equal(stepCancellationSignal(), undefined);
+  assert.doesNotThrow(assertStepAdmission);
 });
 
 test("collection settles an exited owned group before removing scratch", async () => {

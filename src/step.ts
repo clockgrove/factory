@@ -102,6 +102,22 @@ const observationScope = new AsyncLocalStorage<{
   parentOperationAttemptId?: string;
 }>();
 
+// Nested provider retries are new effects inside the same step, not new
+// steps or paid fault allowances. Carry the owner's existing admission and
+// cancellation controls without interrupting a running call on pause.
+const admissionScope = new AsyncLocalStorage<{
+  check: () => void;
+  signal?: AbortSignal;
+}>();
+
+export function assertStepAdmission(): void {
+  admissionScope.getStore()?.check();
+}
+
+export function stepCancellationSignal(): AbortSignal | undefined {
+  return admissionScope.getStore()?.signal;
+}
+
 export function withStepObserver<T>(
   observe: (event: StepAttemptObservation) => void,
   task: () => T,
@@ -614,14 +630,16 @@ async function repeat<T>(
 
     try {
       const invoke = () =>
-        fn({
-          progress,
-          paid,
-          pending,
-          paidLost,
-          previousInvalid,
-          invalid,
-        });
+        admissionScope.run({ check: stopWaiting, signal }, () =>
+          fn({
+            progress,
+            paid,
+            pending,
+            paidLost,
+            previousInvalid,
+            invalid,
+          }),
+        );
       const inherited = observationScope.getStore();
       const result = await (inherited
         ? observationScope.run(

@@ -448,6 +448,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
     tree?: string;
+    signal?: AbortSignal;
   }): Promise<void> {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
@@ -463,6 +464,9 @@ class ClaudePlanningTransport implements PlanningTransport {
       () => abortController.abort(guard.signal.reason),
       { once: true },
     );
+    const cancel = () => abortController.abort(args.signal?.reason);
+    if (args.signal?.aborted) cancel();
+    else args.signal?.addEventListener("abort", cancel, { once: true });
     const usage = new ClaudeUsage(this.secrets);
     const facts: SessionFacts = { initialized: false, modelResponded: false };
     let root: string | undefined;
@@ -569,6 +573,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       }
       throw error;
     } finally {
+      args.signal?.removeEventListener("abort", cancel);
       if (events && !closeStarted)
         void closeProviderEventStream(events, guard, false);
       guard.finish();

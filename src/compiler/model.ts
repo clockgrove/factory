@@ -52,6 +52,7 @@ import {
 import type { CodexModelSelection } from "../config.js";
 import { ProviderTurnTimeoutError } from "../provider-turn.js";
 import { CodexPlanningTransport } from "./codex-transport.js";
+import { assertStepAdmission, stepCancellationSignal } from "../step.js";
 
 /**
  * The planning model with its calls made as its step's paid calls (see
@@ -311,6 +312,7 @@ export class StructuredPlanningModel implements PlanningModel {
     let responseTimedOut = false;
     invocation.providerMaxAttempts = maxAttempts;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      assertStepAdmission();
       invocation.providerAttempt = attempt;
       try {
         return await this.runStructuredAttempt<T>({ ...args, invocation });
@@ -345,6 +347,7 @@ export class StructuredPlanningModel implements PlanningModel {
         const retryDelayMs = retryTimeout
           ? attempt * 1_000
           : retryDelays[attempt - 1]!;
+        assertStepAdmission();
         const selection = this.transport.selection(args.role);
         observeModelInvocation(invocation, {
           type: "retry-scheduled",
@@ -425,6 +428,7 @@ export class StructuredPlanningModel implements PlanningModel {
         invocation,
         turn,
         tree: args.tree,
+        signal: stepCancellationSignal(),
       });
       const responseBytes = Buffer.byteLength(turn.response);
       const responseDigest = digest(turn.response);

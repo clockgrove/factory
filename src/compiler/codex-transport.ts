@@ -61,6 +61,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
     tree?: string;
+    signal?: AbortSignal;
   }): Promise<void> {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
@@ -102,7 +103,9 @@ export class CodexPlanningTransport implements PlanningTransport {
         },
         prompt: args.prompt,
         schema: args.schema,
-        signal: turn.signal,
+        signal: args.signal
+          ? AbortSignal.any([turn.signal, args.signal])
+          : turn.signal,
         event: (event) => {
           if (event.type === "thread.started") thread.id = event.thread_id;
           const item =

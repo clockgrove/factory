@@ -60,6 +60,8 @@ export interface PlanningTransport {
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
     tree?: string;
+    /** Optional caller deadline; the transport still proves owned process settlement. */
+    signal?: AbortSignal;
   }): Promise<void>;
 }
 

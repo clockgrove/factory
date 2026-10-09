@@ -4,7 +4,7 @@
 
 Give Factory a human-written Objective, check in from a phone a few times a day, and receive a well-built app with a trustworthy GitHub record of how it was delivered.
 
-Factory should keep making useful progress between check-ins. The operator needs a short account of what finished, what is running, what is blocked and which decisions need attention. GitHub provides the detail: Objectives, dependency-linked Work Items, pull requests, acceptance evidence and Project status.
+Factory should keep making useful progress between check-ins. The operator interacts with the agent in Codex: short progress updates, questions and human-owned decisions belong in that conversation. GitHub provides the drill-down detail: Objectives, dependency-linked Work Items, pull requests, acceptance evidence and Project status.
 
 This is the agreed product direction, not a claim that every part is implemented. The [user guide](USER-GUIDE.md) describes current behavior, and the [architecture](ARCHITECTURE.md) describes the contracts that changes must preserve.
 
@@ -19,7 +19,7 @@ Speed is a guardrail rather than the primary success metric. Extra planning or r
 
 ## The operating experience
 
-The operator approves an Objective and its targets, providers, permissions and finite resource limits. Factory runs the approved work while its configured host and background service are available. A phone check-in should be sufficient to understand progress and handle the human-owned choices supported by the product.
+The operator approves an Objective and its targets, providers, permissions and finite resource limits. Factory runs the approved work while its configured host and background service are available. A phone check-in in Codex should be sufficient to understand progress and answer the human-owned choices supported by the product. The coordinating agent reads the retained questions, asks them in the current conversation and records the actual answers through Factory's supported local decision commands. The user should not need to copy identity digests or JSON into GitHub to continue ordinary work.
 
 Each check-in should answer:
 
@@ -28,7 +28,9 @@ Each check-in should answer:
 - What is blocked, and does Factory need the operator or an external prerequisite?
 - Which decisions require attention, what is the recommendation, and what changes with each answer?
 
-Keep technical details and evidence available through GitHub links. Group known related questions instead of requiring a sequence of small interruptions. A technical failure alone does not establish that a human decision is required: use supported, authorized recovery within the recorded bounds when it exists. Unresolved external effects and exhausted allowances remain visible stops.
+Keep technical details and evidence available through GitHub links. Group known related questions instead of requiring a sequence of small interruptions. Ask once the real retained question exists; advance availability confirmation is not another approval gate. An unanswered question stays durable until the operator returns, within the original deadline. Current background operation does not establish that Factory can proactively wake a Codex conversation; distinguish questions surfaced during a check-in from any future notification capability. A technical failure alone does not establish that a human decision is required: use supported, authorized recovery within the recorded bounds when it exists. Unresolved external effects and exhausted allowances remain visible stops.
+
+GitHub comments and Project status are operational visibility. The separately enabled planning-comment intake introduced in 0.2.30 remains an optional experiment; its live decision-consumption journey has not been qualified. It is not the preferred human-interaction route or a required exit for this direction. Preserve that experiment's actual progress, unconsumed question, usage and restart evidence without calling it a successful remote decision.
 
 Continue independent work only where dependency, ownership and sequencing contracts permit it. The current background queue is sequential and stops when its active Objective needs a human decision. Continuing other admitted work past that stop is an open design question, not an existing capability or permission to bypass the queue.
 
@@ -54,16 +56,16 @@ Extend the existing scorecard for sustained delivery, keeping these dimensions s
 | App quality         | Independent correctness, robustness, usability/design, maintainability and scope assessment on exact generated results                                 |
 | Verification        | Meaningful authored checks, preserved regressions and uncovered requirements; passing counts alone do not prove quality                                |
 | Continuity          | Accepted work preserved, correct next action after a restart or handoff, reconciliation outcomes and duplicate work/effects avoided                    |
-| GitHub tracking     | Accurate issues, dependencies, PRs, acceptance evidence and Project status; visible uncertainty and supported decisions                                |
+| GitHub tracking     | Accurate issues, dependencies, PRs, acceptance evidence and Project status; visible uncertainty and links from Codex check-ins                         |
 | Delivery efficiency | Accepted throughput, full elapsed time, critical path, review/repair overhead, model and tool calls, cached/uncached input and accounting completeness |
 
-The next qualification should use a small admitted development queue over multiple sessions, declared phone-style check-in windows, a controlled restart or handoff, and a human-owned decision. Predeclare equivalent substantive acceptance and independent quality assessment, including any direct-harness comparison. Include setup, review, repair, operator involvement and all selected failures. Preserve unknown usage and sample limits; do not infer benefits from failed or unfinished runs.
+The next qualification should use a small admitted development queue over multiple sessions, recorded phone-style check-ins, a controlled restart or handoff, and a human-owned decision answered in Codex. Availability windows remain unknown when the operator has not supplied them; that does not create another approval gate. Predeclare equivalent substantive acceptance and independent quality assessment, including any direct-harness comparison. Include setup, review, repair, operator involvement and all selected failures. Preserve unknown usage and sample limits; do not infer benefits from failed or unfinished runs.
 
 ## Follow-up work
 
 The [direction issue #982](https://github.com/clockgrove/factory/issues/982) coordinates three linked outcomes:
 
-- [#983: GitHub phone check-ins](https://github.com/clockgrove/factory/issues/983), including fresh progress and a supported human-decision journey.
+- [#983: GitHub detail and Codex decisions](https://github.com/clockgrove/factory/issues/983), including fresh progress and a supported conversational human-decision journey.
 - [#984: Low-touch qualification](https://github.com/clockgrove/factory/issues/984), covering multiple sessions, measured operator involvement and a controlled restart or handoff.
 - [#985: Proportional planning and review](https://github.com/clockgrove/factory/issues/985), preserving independent acceptance while addressing evidenced overhead and qualifying worker selection.
 

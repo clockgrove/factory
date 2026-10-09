@@ -15,6 +15,8 @@ Factory is an open-source plugin for Codex and Claude Code, built for developers
 
 The [product direction](https://github.com/clockgrove/factory/blob/main/docs/PRODUCT-DIRECTION.md) prioritizes low-touch delivery, app quality and continuity, with GitHub tracking and reasonable time and cost.
 
+Ask questions and make human-owned decisions in your agent conversation, such as Codex. Use GitHub to inspect detailed Objective and Work Item progress, pull requests and acceptance evidence.
+
 ## Requirements
 
 - Linux x64, including a Linux environment under WSL2; Node.js 22 or later for the published bundled Codex path.

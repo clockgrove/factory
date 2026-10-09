@@ -95,6 +95,7 @@ test("trusted child captures roundtrip through the configured private state root
         "-e",
         `import assert from "node:assert/strict";
 import { mkdirSync, readFileSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CaptureWriter } from ${JSON.stringify(new URL("../dist/capture.js", import.meta.url).href)};
 import { DiagnosticEmitter } from ${JSON.stringify(new URL("../dist/diagnostics.js", import.meta.url).href)};
@@ -102,6 +103,7 @@ import { GitHubClient, gitHubTransportOf, withGitHubTransportObserver } from ${J
 import { withProcessCancellation } from ${JSON.stringify(new URL("../dist/process.js", import.meta.url).href)};
 import { stateRoot } from ${JSON.stringify(new URL("../dist/config.js", import.meta.url).href)};
 import { createCodexHome } from ${JSON.stringify(new URL("../dist/codex-planning-isolation.js", import.meta.url).href)};
+import { observeModelInvocation } from ${JSON.stringify(new URL("../dist/compiler/observation.js", import.meta.url).href)};
 const home = createCodexHome({ config: "", sandbox: { directory: process.cwd(), workspace: "write", network: false } });
 const nativeEvents = [];
 try {
@@ -111,6 +113,13 @@ try {
 } finally { home.dispose(); }
 const privateBin = join(stateRoot(${JSON.stringify(repository)}), "bin");
 mkdirSync(privateBin, { recursive: true });
+let failedSink;
+observeModelInvocation({ invocationId: "real-filesystem-observer-failure", phase: "compile", ordinal: 0, observe: () => {
+  failedSink = appendFile(privateBin, "private observer content");
+  return failedSink;
+} }, { type: "progress" });
+await failedSink.catch(() => undefined);
+await new Promise(resolve => setImmediate(resolve));
 assert.throws(() => createCodexHome({ config: "", source: { ...process.env, PATH: privateBin }, sandbox: { directory: process.cwd(), workspace: "write", network: false } }), /Factory's own files/);
 const stop = new AbortController();
 stop.abort(new Error("private original cancellation reason"));
@@ -143,6 +152,7 @@ process.stdout.write(JSON.stringify(emitted));`,
       },
     );
     assert.equal(result.status, 0, result.stderr.toString());
+    assert.equal(result.stderr, "Factory model diagnostics unavailable\n");
     const [metadata, unavailableNative] = JSON.parse(result.stdout.toString());
     assert.equal(metadata.content.status, "captured");
     assert.deepEqual(

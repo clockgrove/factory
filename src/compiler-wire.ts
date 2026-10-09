@@ -296,6 +296,8 @@ export function compilerWire(
     items: strict({
       itemId: { ...text, minLength: 1 },
       proof: {
+        description:
+          "Choose a kind allowed for the owner's item kind by proofModesByItemKind in the compiler choices.",
         anyOf: Object.keys(proofForms)
           .filter((form) => !form.endsWith("-ci") || checkNames.length)
           .map((form) =>
@@ -389,6 +391,7 @@ export function compilerWire(
   // provider-cache prefix; the revision-specific parts and the context
   // identity, which hashes them, come last.
   const data = {
+    proofModesByItemKind: structuredClone(modes),
     obligations: obligations.map((entry, obligationIndex) => ({
       obligationIndex,
       text: entry.source.text,
@@ -643,14 +646,16 @@ export function compilerWire(
             "Planner coverage must select one existing unambiguous owner",
           );
         const owner = owners[0]!;
+        const ownerKind = owner.kind ?? "work";
+        const allowedProofModes = modes[ownerKind]!;
         const obligation = obligations[obligationIndex]!;
         const proof = object(entry.proof, "proof");
         if (
           typeof proof.kind !== "string" ||
-          !modes[owner.kind ?? "work"]!.includes(proof.kind)
+          !allowedProofModes.includes(proof.kind)
         )
-          throw new Error(
-            "Planner proof form is not supported by its owning node",
+          throw new PlannerChoiceError(
+            `Planner coverage ${obligationIndex} selects ${JSON.stringify(proof.kind)} for ${owner.id} (${ownerKind}); allowed proof kinds: ${allowedProofModes.join(", ")}`,
           );
         keys(proof, ["kind", ...Object.keys(proofForms[proof.kind]!)], "proof");
         let canonicalProof: CoverageProof;

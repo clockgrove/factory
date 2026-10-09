@@ -92,9 +92,26 @@ export interface NotStartedStatusView extends WaitView {
   objective: number;
   state: "not-started";
   runActive?: boolean | null;
+  githubProjectTracking?: {
+    retainedUpdates: number;
+    unknownUpdate: boolean;
+    lastReturnedOption: string | null;
+    lastObservedOption: string | null;
+    observedAt: string | null;
+    failure: string | null;
+  } | null;
+  githubProgress?: {
+    snapshots: number;
+    lastObservedAt: string | null;
+    lastComment: number | null;
+    failure: string | null;
+    unresolved: boolean;
+  } | null;
 }
 
 export interface PreparingStatusView extends WaitView {
+  githubProjectTracking?: NotStartedStatusView["githubProjectTracking"];
+  githubProgress?: NotStartedStatusView["githubProgress"];
   objective: number;
   state: "preparing";
   /** Whether a controller process owns this installation; null when unknown. */
@@ -157,6 +174,8 @@ export function capacityLine(capacity: CapacityView): string {
 }
 
 export interface ExecutionStatusView extends WaitView {
+  githubProjectTracking?: NotStartedStatusView["githubProjectTracking"];
+  githubProgress?: NotStartedStatusView["githubProgress"];
   objective: number;
   /** Set when the installation configuration differs from the one the Objective started under. */
   configurationChanged?: boolean;
@@ -1183,6 +1202,14 @@ export function renderStatusText(
   const lines = [
     `Objective #${view.objective}: ${phaseLabel(view.phase)} — ${view.summary}`,
   ];
+  if (view.githubProgress)
+    lines.push(
+      `GitHub progress: ${view.githubProgress.failure ?? "projected"}; ${view.githubProgress.snapshots} retained snapshots${view.githubProgress.lastObservedAt ? `; last observed ${view.githubProgress.lastObservedAt}` : ""}${view.githubProgress.lastComment ? `; comment ${view.githubProgress.lastComment}` : ""}${view.githubProgress.unresolved ? "; publication outcome unknown; reconciliation only" : ""}`,
+    );
+  if (view.githubProjectTracking)
+    lines.push(
+      `GitHub Project tracking: ${view.githubProjectTracking.failure ?? "observed"}; ${view.githubProjectTracking.retainedUpdates} retained update requests${view.githubProjectTracking.observedAt ? `; last observed ${view.githubProjectTracking.observedAt}` : ""}${view.githubProjectTracking.unknownUpdate ? "; update outcome unknown; managed field held read-only" : ""}`,
+    );
   if (view.nextAction)
     lines.push(
       `Next: ${view.nextAction.command}`,

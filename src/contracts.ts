@@ -968,6 +968,24 @@ export interface NamedCheckEvidence {
 }
 
 export interface GitHubGateway {
+  projectStatus?(
+    request: import("./github-project-state.js").ProjectStatusRequest,
+  ): Promise<import("./github-project-state.js").ProjectStatusObservation>;
+  /** Actual GitHub human identities/edit facts, never comment-inferred authority. */
+  planDecisionComments?(
+    objective: number,
+    actorIds: number[],
+  ): Promise<import("./github-plan-decisions.js").GitHubDecisionComment[]>;
+  /** Owned Objective progress only; an unresolved prior write permits reads only. */
+  progressComment?(request: {
+    objective: number;
+    runId: string;
+    body: string;
+    snapshotId: string;
+    pending?: import("./github-progress-state.js").ProgressCommentIntent;
+    /** Durable exact intent immediately before the sole POST. */
+    beforeWrite: (actorId: number) => void;
+  }): Promise<import("./github-progress-state.js").ProgressCommentIdentity>;
   /** Strict protection: GitHub merges the base into the PR from exactly `identity.headSha`; returns the verified new head. */
   updateBranch(identity: PullRequestIdentity): Promise<string>;
   intakePage?(page: number, etag?: string): Promise<IntakeIssuePage>;

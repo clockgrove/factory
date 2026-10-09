@@ -1,4 +1,15 @@
-import { bindPlanningPlaybook } from "./compiler.js";
+import {
+  bindPlanningPlaybook,
+  resolvePlan,
+  verifyPlanCandidate,
+} from "./compiler.js";
+import {
+  matchesPlanDecision,
+  phonePlanEligible,
+} from "./github-plan-decisions.js";
+import { progressDigest } from "./github-progress-state.js";
+import { projectGitHubProgress } from "./github-progress-projection.js";
+import { projectGitHubProjectStatus } from "./github-project-projection.js";
 import { hasReadinessWait } from "./delivery/readiness.js";
 import { executionContext } from "./execution/checkpoint.js";
 import {
@@ -661,6 +672,168 @@ async function runObjectiveOwned(
   };
   process.on("SIGTERM", handoff);
   process.on("SIGUSR1", cancel);
+  let progressTask: Promise<void> | undefined;
+  const projectProgress = (): Promise<void> => {
+    if (!config.githubManagement) return Promise.resolve();
+    if (progressTask) return progressTask;
+    progressTask = withProcessCancellation(
+      AbortSignal.timeout(30_000),
+      async () => {
+        await projectGitHubProjectStatus({
+          config,
+          objective,
+          github: services.github,
+          current: () => owner.snapshot,
+          save: persist,
+        });
+        await projectGitHubProgress({
+          config,
+          objective,
+          github: services.github,
+          current: () => owner.snapshot,
+          save: persist,
+          active: true,
+          secrets: configuredDiagnosticSecrets(config),
+        });
+      },
+    )
+      .catch(() => {
+        // A failed snapshot read/validation cannot authorize overwriting
+        // disk from a remembered snapshot. Valid projection failures are
+        // recorded inside the helper; unreadable state remains unreadable.
+        process.stderr.write(
+          `Factory GitHub progress for Objective #${objective} is unavailable; inspect Factory status.\n`,
+        );
+      })
+      .finally(() => {
+        progressTask = undefined;
+      });
+    return progressTask;
+  };
+  // Coalesce state transitions. The helper ignores time-only changes and
+  // publishes from complete validated snapshots under this same owner.
+  const progressTimer = config.githubManagement
+    ? setInterval(() => {
+        void projectProgress();
+      }, 30_000)
+    : undefined;
+  const observePhoneDecision = async (): Promise<boolean> => {
+    const state = owner.snapshot;
+    if (
+      state?.schemaVersion !== 8 ||
+      !phonePlanEligible(config, state) ||
+      !services.github.planDecisionComments ||
+      owner.handoff ||
+      owner.abort.signal.aborted ||
+      owner.pause.signal.aborted
+    )
+      return false;
+    try {
+      return await withProcessCancellation(
+        AbortSignal.any([
+          owner.abort.signal,
+          owner.pause.signal,
+          AbortSignal.timeout(30_000),
+        ]),
+        async () => {
+          const comments = await services.github.planDecisionComments!(
+            objective,
+            config.githubManagement!.decisions!.actorIds,
+          );
+          const selected = comments.find((comment) =>
+            matchesPlanDecision(config, state, comment),
+          );
+          if (!selected) return false;
+          const issue = await services.github.objective(objective);
+          if (issue.state !== "open") return false;
+          const apply = async () => {
+            const current = owner.snapshot;
+            if (
+              current?.schemaVersion !== 8 ||
+              current !== state ||
+              !current.plan ||
+              owner.handoff ||
+              owner.abort.signal.aborted ||
+              owner.pause.signal.aborted
+            )
+              return false;
+            const envelope = matchesPlanDecision(config, current, selected);
+            if (!envelope) return false;
+            verifyPlanCandidate(
+              current.plan,
+              objective,
+              issue.body,
+              current.baseSha,
+              config.checkout,
+              factoryConfigDigest(config),
+              true,
+              current.capacity.concurrency,
+            );
+            const actor = `github:user:${selected.actorId} (${selected.login})`;
+            const accepted = await resolvePlan(
+              current.plan,
+              objective,
+              issue.body,
+              current.baseSha,
+              config.checkout,
+              {
+                actor,
+                outcome: "accept",
+                answer: envelope.answer,
+                reason: envelope.reason,
+              },
+              factoryConfigDigest(config),
+            );
+            // Pause/drain handlers may run during any await even under the same
+            // installation lease. Recheck at the atomic consumption boundary.
+            if (
+              owner.snapshot !== current ||
+              owner.handoff ||
+              owner.abort.signal.aborted ||
+              owner.pause.signal.aborted ||
+              !matchesPlanDecision(config, current, selected)
+            )
+              return false;
+            current.plan = accepted;
+            current.githubPlanDecision = {
+              ...selected,
+              observedAt: accepted.humanDecision!.at,
+              bodyDigest: progressDigest(selected.body),
+              envelope,
+              planGraphDigest: accepted.graphDigest,
+              questionPacket: {
+                reviewDigest: accepted.reviewDigest,
+                finding: accepted.review.findings[0]!,
+              },
+              decision: accepted.humanDecision!,
+            };
+            delete current.coordinator.waitReason;
+            persist();
+            new DiagnosticEmitter(config.repository, objective).emit({
+              runId: current.runId,
+              operation: "github-plan-decision",
+              outcome: "completed",
+              metadata: {
+                comment: selected.id,
+                actorId: selected.actorId,
+                reviewDigest: envelope.planReviewDigest,
+              },
+            });
+            wake();
+            return true;
+          };
+          const result = controlTail.then(apply);
+          controlTail = result.catch(() => undefined);
+          return await result;
+        },
+      );
+    } catch {
+      process.stderr.write(
+        `Factory GitHub planning decision observation for Objective #${objective} is unavailable; no decision was recorded.\n`,
+      );
+      return false;
+    }
+  };
   try {
     for (;;) {
       const state = owner.snapshot;
@@ -701,6 +874,12 @@ async function runObjectiveOwned(
         await wait();
         continue;
       }
+      if (state?.schemaVersion === 8 && phonePlanEligible(config, state)) {
+        await projectProgress();
+        if (await observePhoneDecision()) continue;
+        await wait(30_000);
+        continue;
+      }
       const result = await withProcessCancellation(
         owner.abort.signal,
         () => runObjectivePass(config, objective, services, owner),
@@ -735,6 +914,9 @@ async function runObjectiveOwned(
       owner.snapshot = result;
       // A pass that stopped for the cancel request: the loop records it.
       if (result.cancelRequested && !owner.handoff) continue;
+      if (result.schemaVersion === 8 && phonePlanEligible(config, result)) {
+        continue;
+      }
       // A preparation comes back only when its plan needs a human decision.
       if (
         result.schemaVersion === 8 ||
@@ -789,6 +971,7 @@ async function runObjectiveOwned(
       await wait(result.coordinator?.mode === "running" ? 5_000 : undefined);
     }
   } finally {
+    if (progressTimer) clearInterval(progressTimer);
     if (deadlineTimer) clearTimeout(deadlineTimer);
     process.off("SIGUSR1", cancel);
     process.off("SIGTERM", handoff);
@@ -796,6 +979,8 @@ async function runObjectiveOwned(
     if (server)
       await new Promise<void>((resolve) => server.close(() => resolve()));
     await controlTail;
+    await progressTask;
+    await projectProgress();
     observeRetrospective(config, objective);
     owners.delete(ownerKey(config, objective));
     if (!options.ownerLock) releaseControllerLock(lockPath, lock);

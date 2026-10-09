@@ -1,4 +1,5 @@
 import { objectiveCandidate } from "./qa.js";
+import { acceptedPlanningDecisionContext } from "./planning-decision-context.js";
 import { nativePrerequisiteReviewEvidence } from "./native-prerequisite-evidence.js";
 import { assertGraphRevisions, graphDigest } from "./graph-amendments.js";
 import {
@@ -304,6 +305,7 @@ export function workItemReviewObservations(
     );
   });
   return JSON.stringify({
+    planningDecisionContext: acceptedPlanningDecisionContext(state),
     objectiveBaseCommitSha: state.baseSha,
     currentIntegratedCommitSha: state.integratedSha ?? null,
     candidateBasis: objectiveCandidate(state)?.basis ?? null,
@@ -2243,6 +2245,35 @@ export function objectiveReviewEvidence(args: {
       }),
     ),
   );
+  const retainedLiterals = new Set<string>();
+  const suppliedByItem = new Map<string, Set<string>>();
+  const supplyLiteral = (
+    itemId: string,
+    entry: NonNullable<ValidationEvidence["reviewEvidence"]>[number],
+  ) => {
+    const { id, digest: _digest, ...literal } = entry;
+    const key = JSON.stringify(literal);
+    if (!retainedLiterals.has(key)) {
+      const bytes = Buffer.byteLength(key) + 1;
+      if (bytes > textBudget.remaining) return;
+      textBudget.remaining -= bytes;
+      evidence.push(literal);
+      retainedLiterals.add(key);
+    }
+    const supplied = suppliedByItem.get(itemId) ?? new Set<string>();
+    supplied.add(id);
+    suppliedByItem.set(itemId, supplied);
+  };
+  // Literals from exact-current-tree reviews keep their original provenance;
+  // source entries remain pinned source, and no review verdict is reused.
+  // Reserve their bounded space before older result deltas and historical bodies.
+  for (const item of state.graph.items) {
+    const current = state.work[item.id];
+    if (current?.treeSha !== candidateTreeSha || !current.validation) continue;
+    assertRetainedReviewEvidence(current.validation);
+    for (const entry of current.validation.reviewEvidence ?? [])
+      if (entry.complete) supplyLiteral(item.id, entry);
+  }
   const work = state.graph.items.map((item) => {
     const current = state.work[item.id];
     if (
@@ -2263,9 +2294,7 @@ export function objectiveReviewEvidence(args: {
       item,
       checkout,
       textBudget,
-      includeDelta:
-        current.treeSha !== candidateTreeSha ||
-        current.baseSha !== state.baseSha,
+      includeDelta: current.treeSha !== candidateTreeSha,
     });
     if (current.integratedSha) {
       assertAncestor(
@@ -2309,15 +2338,9 @@ export function objectiveReviewEvidence(args: {
       throw new Error(
         `Work Item ${item.id} retained review differs from acceptance`,
       );
-    const supplied = new Set<string>();
-    for (const entry of current.validation.reviewEvidence ?? []) {
-      const { id, digest: _digest, ...literal } = entry;
-      const bytes = Buffer.byteLength(JSON.stringify(literal)) + 1;
-      if (bytes > textBudget.remaining) continue;
-      textBudget.remaining -= bytes;
-      evidence.push(literal);
-      supplied.add(id);
-    }
+    for (const entry of current.validation.reviewEvidence ?? [])
+      supplyLiteral(item.id, entry);
+    const supplied = suppliedByItem.get(item.id) ?? new Set<string>();
     return {
       ...proof.record,
       acceptedReview: {
@@ -2343,6 +2366,7 @@ export function objectiveReviewEvidence(args: {
   assertIntegrationBindings(checkout, integrationRecords);
   return {
     observations: JSON.stringify({
+      planningDecisionContext: acceptedPlanningDecisionContext(state),
       candidateBasis: candidate.basis,
       candidateCommitSha,
       candidateTreeSha,

@@ -49,6 +49,10 @@ import {
   retainedFailedResultContext,
 } from "./repair-policy.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
+import { assertGitHubProgressProjection } from "./github-progress-state.js";
+import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
+import { assertAcceptedPlanningDecision } from "./planning-decision-context.js";
+import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
 import { assertRetainedReviewEvidence } from "./validation-evidence.js";
 import {
   assertSelectedLfsValidation,
@@ -178,6 +182,9 @@ export interface CoordinatorDisposition {
 
 /** Preparation shares the atomic state path; no executable graph is invented. */
 export interface PreparationState {
+  githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
+  githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
+  githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
   /** Immutable advisory selection; absence is legacy no-input, null is explicit no-input. */
   approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
   sourcePacketDigest?: string;
@@ -255,6 +262,10 @@ export function setCoordinatorMode(
 }
 
 export interface FactoryState {
+  acceptedPlanningDecision?: import("./planning-decision-context.js").AcceptedPlanningDecision;
+  githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
+  githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
+  githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
   /** New-run admission only. Absence does not prove historical non-submission. */
   publicationContract?: "exact-request-v1";
   /** Retained across WorkState replacement; never reconstructed from diagnostics. */
@@ -543,11 +554,35 @@ export function parseFactoryState(
       "schema version, repository, or Objective identity differs from the installation",
     );
   string(state.runId, "runId");
+  assertGitHubProgressProjection(state.githubProgress, {
+    repository,
+    objective,
+    runId: state.runId as string,
+    configDigest: state.configDigest as string,
+  });
+  assertGitHubPlanDecision(state.githubPlanDecision, {
+    repository,
+    objective,
+    runId: state.runId as string,
+    configDigest: state.configDigest as string,
+    planGraphDigest: state.planGraphDigest as string,
+  });
+  assertGitHubProjectStatusProjection(state.githubProjectStatus, {
+    repository,
+    objective,
+    runId: state.runId as string,
+    configDigest: state.configDigest as string,
+  });
   assertPublicationIntents(state as unknown as FactoryState);
   sha(state.configDigest, "configDigest", 64);
   if (Object.hasOwn(state, "approvedPlaybookPin"))
     assertApprovedPlaybookPin(state.approvedPlaybookPin);
   sha(state.planGraphDigest, "planGraphDigest", 64);
+  assertAcceptedPlanningDecision(
+    state.acceptedPlanningDecision,
+    state.planGraphDigest as string,
+    state.githubPlanDecision as FactoryState["githubPlanDecision"],
+  );
   assertApprovedPlaybookAdmission(
     state.approvedPlaybookPin,
     state.approvedPlaybookAdmission,

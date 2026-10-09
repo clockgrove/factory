@@ -40,7 +40,7 @@ Keep normal implementation close to the supported agent harness. Compilation sho
 
 Give each review a distinct responsibility. Work Item review checks its contract against the exact result; integrated review examines original Objective criteria and cross-component behavior. Reuse authenticated source evidence and receipts to avoid reacquiring identical context. Final acceptance still requires independent assessment of the integrated result; earlier verdicts do not become final acceptance.
 
-Use existing model profiles deliberately. Cheaper settings are candidates for narrow, settled work. Complex UI and integration work need qualification before cheaper settings become defaults. Preserve compiled assignments and provider limits; this direction does not authorize runtime fallback or broader recovery.
+Use existing model profiles deliberately. The current cleanup qualification and following direct-Codex comparison use the same supported model throughout, with reasoning effort tuned by phase. Lower reasoning is a candidate for narrow, settled work; UI and integration assignments need their own quality evidence. Compare cheaper models separately after this baseline. Preserve compiled assignments and provider limits; this direction does not authorize runtime fallback or broader recovery.
 
 ## Evidence and measurement
 

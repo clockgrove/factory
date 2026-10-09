@@ -1,7 +1,13 @@
 import { Octokit } from "@octokit/core";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as time from "./clock.js";
-import { attachFault, decision, transient, type Fault } from "./fault.js";
+import {
+  attachedFault,
+  attachFault,
+  decision,
+  transient,
+  type Fault,
+} from "./fault.js";
 import {
   commandAsync,
   currentProcessSignal,
@@ -539,6 +545,47 @@ export class GitHubClient {
     return user.login;
   }
 
+  /** Immutable actor identity for owned progress comments, using the same credentials. */
+  async viewerIdentity(): Promise<{ id: number; login: string }> {
+    let actor: { id?: unknown; login?: unknown };
+    try {
+      actor = await this.dispatch("GET", "user", undefined, undefined, true);
+    } catch (error) {
+      if (
+        !(error instanceof GitHubRequestError) ||
+        ![403, 404].includes(error.status) ||
+        attachedFault(error)?.kind === "transient"
+      )
+        throw error;
+      const response = await this.dispatch<{
+        errors?: unknown[];
+        data?: {
+          viewer?: { databaseId?: unknown; login?: unknown } | null;
+        } | null;
+      }>(
+        "POST",
+        "graphql",
+        { query: "query FactoryProgressActor { viewer { login databaseId } }" },
+        undefined,
+        true,
+      );
+      if (response.errors?.length)
+        throw new Error("GitHub progress actor observation failed");
+      actor = {
+        id: response.data?.viewer?.databaseId,
+        login: response.data?.viewer?.login,
+      };
+    }
+    if (
+      !Number.isSafeInteger(actor.id) ||
+      Number(actor.id) <= 0 ||
+      typeof actor.login !== "string" ||
+      !actor.login
+    )
+      throw new Error("GitHub returned no immutable progress actor identity");
+    return { id: Number(actor.id), login: actor.login };
+  }
+
   /**
    * The bot login of an App installation token, as REST shows it on what the
    * App creates (`slug[bot]`). `GET /user` is 403 for such a token, but
@@ -565,6 +612,97 @@ export class GitHubClient {
       throw new Error("GitHub returned no login for the token's actor");
     // GraphQL names a bot without the suffix REST puts on its objects.
     return login.endsWith("[bot]") ? login : `${login}[bot]`;
+  }
+
+  /** Internal fixed Project adapter transport through the same account/rate gate. */
+  async projectStatusGraphql<T>(
+    query: string,
+    variables: Record<string, unknown>,
+    readOnly: boolean,
+  ): Promise<T> {
+    const response = await this.dispatch<{ errors?: unknown[]; data?: T }>(
+      "POST",
+      "graphql",
+      { query, variables },
+      undefined,
+      readOnly,
+    );
+    if (
+      (response.errors !== undefined &&
+        (!Array.isArray(response.errors) || response.errors.length)) ||
+      !response.data
+    )
+      throw new Error("GitHub Project field observation is unavailable");
+    return response.data;
+  }
+
+  /** Fixed comment observation; no mutation or arbitrary query accepted. */
+  async decisionComment(nodeId: string): Promise<
+    | {
+        id: string;
+        fullDatabaseId: string;
+        body: string;
+        createdAt: string;
+        updatedAt: string;
+        author: {
+          __typename: string;
+          login: string;
+          databaseId?: number;
+        } | null;
+        issue: { number: number; repository: { nameWithOwner: string } };
+        lastEditedAt: string | null;
+        editor: { login: string } | null;
+        includesCreatedEdit: boolean;
+      }
+    | undefined
+  > {
+    if (!nodeId || nodeId.length > 200)
+      throw new Error("Invalid decision comment node identity");
+    const response = await this.dispatch<{
+      errors?: unknown[];
+      data?: {
+        node?: {
+          __typename?: string;
+          id: string;
+          fullDatabaseId: string;
+          body: string;
+          createdAt: string;
+          updatedAt: string;
+          author: {
+            __typename: string;
+            login: string;
+            databaseId?: number;
+          } | null;
+          issue: { number: number; repository: { nameWithOwner: string } };
+          lastEditedAt: string | null;
+          editor: { login: string } | null;
+          includesCreatedEdit: boolean;
+        } | null;
+      };
+    }>(
+      "POST",
+      "graphql",
+      {
+        query: `query FactoryDecisionComment($id: ID!) {
+        node(id: $id) { __typename ... on IssueComment {
+          id fullDatabaseId body createdAt updatedAt lastEditedAt includesCreatedEdit
+          editor { login }
+          author { __typename login ... on User { databaseId } }
+          issue { number repository { nameWithOwner } }
+        } }
+      }`,
+        variables: { id: nodeId },
+      },
+      undefined,
+      true,
+    );
+    if (
+      response.errors !== undefined &&
+      (!Array.isArray(response.errors) || response.errors.length)
+    )
+      throw new Error("GitHub decision comment metadata is unavailable");
+    const node = response.data?.node;
+    return node?.__typename === "IssueComment" ? node : undefined;
   }
 
   /** Fixed repository-scoped observation; callers cannot submit arbitrary GraphQL. */

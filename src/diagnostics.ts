@@ -57,6 +57,7 @@ import type {
 } from "./state.js";
 import { projectionStarted } from "./state.js";
 import type { PreState } from "./state-store.js";
+import type { GitHubProgressProjection } from "./github-progress-state.js";
 import {
   type PendingDecisionView,
   shortPlanDigest,
@@ -1718,6 +1719,46 @@ export function capacityView(capacity: Capacity, hostFacts?: HostFacts) {
   };
 }
 
+function projectTracking(
+  projection:
+    | import("./github-project-state.js").GitHubProjectStatusProjection
+    | undefined,
+) {
+  if (!projection) return null;
+  const last = projection.requests.at(-1);
+  const returned = [...projection.requests]
+    .reverse()
+    .find((request) => request.response);
+  return {
+    retainedUpdates: projection.requests.length,
+    unknownUpdate: Boolean(last && !last.response && !last.notSent),
+    lastReturnedOption: returned?.response?.optionId ?? null,
+    lastObservedOption:
+      last?.laterObservation?.optionId ?? projection.observed?.optionId ?? null,
+    observedAt:
+      last?.laterObservation?.observedAt ??
+      projection.observed?.observedAt ??
+      returned?.response?.observedAt ??
+      null,
+    failure: projection.failure ?? null,
+  };
+}
+
+function progressStatus(projection: GitHubProgressProjection | undefined) {
+  if (!projection) return null;
+  const last = projection.requests.at(-1);
+  const observed = [...projection.requests]
+    .reverse()
+    .find((request) => request.comment);
+  return {
+    snapshots: projection.requests.length,
+    lastObservedAt: observed?.observedAt ?? null,
+    lastComment: observed?.comment?.id ?? null,
+    failure: projection.failure ?? null,
+    unresolved: Boolean(last && !last.comment),
+  };
+}
+
 export function statusDocument(
   state: FactoryState | undefined,
   repository: string,
@@ -1908,6 +1949,8 @@ export function statusDocument(
     repository,
     objective,
     runActive,
+    githubProgress: progressStatus(state.githubProgress),
+    githubProjectTracking: projectTracking(state.githubProjectStatus),
     // The Objective was started under another configuration: the run refuses
     // it (see runObjective), so no retry continues it.
     ...(installationConfigDigest !== undefined &&
@@ -2033,6 +2076,8 @@ export function preparationStatusDocument(
     objective: preparation.objective,
     runId: preparation.runId,
     runActive,
+    githubProgress: progressStatus(preparation.githubProgress),
+    githubProjectTracking: projectTracking(preparation.githubProjectStatus),
     // Planned under another configuration: the run refuses it (see runObjective).
     ...(installationConfigDigest !== undefined &&
     preparation.configDigest !== installationConfigDigest

@@ -1,5 +1,8 @@
 import { assertRepairLedger } from "./repair-policy.js";
 import { randomUUID } from "node:crypto";
+import { assertGitHubProgressProjection } from "./github-progress-state.js";
+import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
+import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
 import {
   closeSync,
   existsSync,
@@ -214,6 +217,9 @@ function parsePreparation(
   repository: string,
   objective: number,
 ): PreparationState {
+  assertGitHubProgressProjection(value.githubProgress, value);
+  assertGitHubPlanDecision(value.githubPlanDecision, value);
+  assertGitHubProjectStatusProjection(value.githubProjectStatus, value);
   if (
     value.kind !== "preparing" ||
     value.repository !== repository ||

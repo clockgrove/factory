@@ -21,6 +21,7 @@ import { isDeepStrictEqual } from "node:util";
 import { executeItem } from "./item-steps.js";
 import { selectedInputsForItem, validationLfsMembersForItem } from "./media.js";
 import { packageManagerUpdate } from "./package-manager-update.js";
+import { acceptedPlanningDecisionContext } from "./planning-decision-context.js";
 import type { PhaseAdmission } from "./phase-admission.js";
 import { environmentValidationIndices } from "./qa.js";
 import { preflightItemEnvironment } from "./qa-execution.js";
@@ -93,7 +94,7 @@ export function workerAttemptItem(
   };
   return {
     ...attempted,
-    brief: `${attempted.brief}\nController-bound accepted planned peer context (design only): ${JSON.stringify(context)}\nPeers' planned outputs can be absent from this isolated execution base. Absence here alone does not establish additional work when that output is already assigned to a peer; preserve the component's phase and leave combined proof to its accepted downstream owner. This plan proves no peer implementation, validation, delivery, integration or acceptance and grants no new ownership, dependency, command or permission. Report genuine additional gaps with their observed base and relevant planned owner; do not infer either completion or a defect from the plan alone.`,
+    brief: `${attempted.brief}\nController-bound accepted planned peer context (design only): ${JSON.stringify(context)}\nPeers' planned outputs can be absent from this isolated execution base. Absence here alone does not establish additional work when that output is already assigned to a peer; preserve the component's phase and leave combined proof to its accepted downstream owner. This plan proves no peer implementation, validation, delivery, integration or acceptance and grants no new ownership, dependency, command or permission. Report genuine additional gaps with their observed base and relevant planned owner; do not infer either completion or a defect from the plan alone.\nController-bound human planning decision context: ${JSON.stringify(acceptedPlanningDecisionContext(state))}`,
   };
 }
 

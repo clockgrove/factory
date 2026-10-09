@@ -59,6 +59,8 @@ export interface IntakeAuthorization {
   objectives: number[];
   watch?: true;
   bodyDigests: Record<string, string>;
+  /** Frozen first-dispatch deadlines; null retains an admission without an elapsed cap. */
+  objectiveDeadlines?: Record<string, string | null>;
   dequeued: number[];
   mode: "running" | "paused" | "draining";
   observation?: {
@@ -149,6 +151,7 @@ export function readIntake(
         "objectives",
         "watch",
         "bodyDigests",
+        "objectiveDeadlines",
         "dequeued",
         "mode",
         "observation",
@@ -169,7 +172,56 @@ export function readIntake(
       invalid(`Objective #${objective} has no issue body binding`);
   if (value.dequeued.some((id) => !value.objectives.includes(id)))
     invalid("a removed Objective is not in the queue");
+  if (value.objectiveDeadlines !== undefined) {
+    if (
+      value.objectiveDeadlines === null ||
+      typeof value.objectiveDeadlines !== "object" ||
+      Array.isArray(value.objectiveDeadlines)
+    )
+      invalid("invalid Objective deadlines");
+    for (const [id, deadline] of Object.entries(value.objectiveDeadlines))
+      if (
+        !/^[1-9]\d*$/.test(id) ||
+        !value.objectives.includes(Number(id)) ||
+        (deadline !== null &&
+          (typeof deadline !== "string" ||
+            !Number.isFinite(Date.parse(deadline))))
+      )
+        invalid(`invalid deadline binding for Objective #${id}`);
+  }
   return value;
+}
+/** Under the installation lock, retain elapsed authority before the first dispatch. */
+function objectiveDeadline(
+  config: FactoryConfig,
+  record: IntakeAuthorization,
+  objective: number,
+  state: ContinuationState | undefined,
+): string | undefined {
+  const recorded = record.objectiveDeadlines?.[objective];
+  const retained = state?.coordinator?.deadlineAt;
+  if (state && recorded !== undefined && recorded !== (retained ?? null))
+    throw new Error(
+      `Objective #${objective} queue deadline differs from its retained continuation`,
+    );
+  let deadline = recorded;
+  if (deadline === undefined) {
+    deadline = state
+      ? (retained ?? null)
+      : config.queue?.objectiveDeadlineSeconds === undefined
+        ? null
+        : new Date(
+            Date.now() + config.queue.objectiveDeadlineSeconds * 1_000,
+          ).toISOString();
+    record.objectiveDeadlines ??= {};
+    record.objectiveDeadlines[objective] = deadline;
+    saveIntake(config, record);
+  }
+  if (!state && deadline !== null && Date.parse(deadline) <= Date.now())
+    throw new Error(
+      `Objective #${objective} queue deadline elapsed before its first start; the recorded deadline cannot be renewed`,
+    );
+  return deadline ?? undefined;
 }
 function validateObjectives(objectives: number[]): void {
   if (
@@ -246,6 +298,9 @@ function queued(
       ...objectives.filter((id) => !previous?.objectives.includes(id)),
     ],
     bodyDigests: { ...previous?.bodyDigests, ...bodyDigests },
+    ...(previous?.objectiveDeadlines
+      ? { objectiveDeadlines: { ...previous.objectiveDeadlines } }
+      : {}),
     dequeued: (previous?.dequeued ?? []).filter(
       (id) => !objectives.includes(id),
     ),
@@ -722,7 +777,14 @@ export async function runIntake(
           }
           if (record.mode !== "running" || handingOff) continue;
           if (!unavailable) {
+            const deadlineAt = objectiveDeadline(
+              config,
+              record,
+              selected,
+              state,
+            );
             const result = await runObjective(config, selected, services, {
+              ...(deadlineAt ? { deadlineAt } : {}),
               ownerLock: lock,
               observeControl: (handler) => {
                 objectiveControl = handler;

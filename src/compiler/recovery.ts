@@ -41,6 +41,7 @@ import {
 } from "./planning.js";
 import { planningSources } from "./sources.js";
 import { randomUUID } from "node:crypto";
+import { COMPILER_READINESS_GUIDANCE } from "../compiler-wire.js";
 import {
   invalidOutput,
   MalformedPlannerOutput,
@@ -455,7 +456,7 @@ export async function compilePlan(
       ...(executionBounds ? { executionBounds } : {}),
       purpose: "diagnosis",
       rejectedGraph: graph ?? null,
-      objective: `Classify this planning failure from the supplied sources. Allowed engineering corrections: planning-output (malformed or invalid generated graph including invented assets), planning-evidence (omitted already supplied source facts), planning-choice (routine engineering choice already delegated by the Objective). Return operator for missing product/security decisions, new authority or unsupported capability. Give a concrete correction; never waive findings.\nObjective:\n${body}\nFailure:\n${failure}`,
+      objective: `Classify this planning failure from the supplied sources. Allowed engineering corrections: planning-output (malformed or invalid generated graph including invented assets), planning-evidence (omitted already supplied source facts), planning-choice (routine engineering choice already delegated by the Objective). ${COMPILER_READINESS_GUIDANCE} Return operator for missing product/security decisions, new authority or unsupported capability. Give a concrete correction within the permitted classes and recorded attempt limits; never waive findings, claim a future probe passed or infer extra retry/spending authority.\nObjective:\n${body}\nFailure:\n${failure}`,
       baseSha,
       sources,
       controllerCapabilities: installedControllerCapabilities(),

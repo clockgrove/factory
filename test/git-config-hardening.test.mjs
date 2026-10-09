@@ -14,7 +14,10 @@ import test from "node:test";
 import { gitAsync } from "../dist/process.js";
 import { deliveryDescription } from "../dist/delivery/description.js";
 import { validateTree } from "../dist/validation.js";
-import { unchangedResultByteEvidence } from "../dist/result-evidence.js";
+import {
+  resultTreeInventory,
+  unchangedResultByteEvidence,
+} from "../dist/result-evidence.js";
 import { createHash } from "node:crypto";
 
 function git(root, ...args) {
@@ -35,6 +38,7 @@ test("controller Git ignores executable configuration shared by a worker worktre
   writeFileSync(join(checkout, "source.png"), binary);
   writeFileSync(join(checkout, "empty.txt"), "");
   writeFileSync(join(checkout, "large.bin"), Buffer.alloc(24_000, 0xff));
+  writeFileSync(join(checkout, "line\nnote.txt"), "literal path\n");
   symlinkSync("notes.txt", join(checkout, "note-link"));
   git(checkout, "add", ".");
   const identity = [
@@ -78,6 +82,39 @@ test("controller Git ignores executable configuration shared by a worker worktre
   assert.doesNotMatch(git(worker, "cat-file", "commit", "HEAD"), /gpgsig/);
   const changeRef = git(worker, "rev-parse", "HEAD");
   const treeSha = git(worker, "rev-parse", "HEAD^{tree}");
+  // Read planning uses exact immutable regular-blob sizes, without invoking
+  // worker configuration, following symlinks or claiming contents from sizes.
+  const inventory = resultTreeInventory(checkout, treeSha, 4_000);
+  const inventoryFacts = JSON.parse(inventory.content);
+  assert.equal(inventory.complete, true);
+  assert.equal(inventoryFacts.treeSha, treeSha);
+  assert.deepEqual(inventoryFacts.paths, [
+    "empty.txt",
+    "large.bin",
+    "line\nnote.txt",
+    "note-link",
+    "notes.txt",
+    "source.png",
+    "unchanged.txt",
+  ]);
+  assert.deepEqual(inventoryFacts.fileSizes, [
+    { path: "empty.txt", bytes: 0 },
+    { path: "large.bin", bytes: 24_000 },
+    { path: "line\nnote.txt", bytes: 13 },
+    { path: "notes.txt", bytes: 8 },
+    { path: "source.png", bytes: binary.length },
+    { path: "unchanged.txt", bytes: 25 },
+  ]);
+  const limitedInventory = resultTreeInventory(checkout, treeSha, 100);
+  assert.equal(limitedInventory.complete, false);
+  assert.ok(Buffer.byteLength(limitedInventory.content) <= 100);
+  const pathOnlyInventory = resultTreeInventory(checkout, treeSha, 256);
+  const pathOnlyFacts = JSON.parse(pathOnlyInventory.content);
+  assert.equal(pathOnlyInventory.complete, true);
+  assert.deepEqual(pathOnlyFacts.paths, inventoryFacts.paths);
+  assert.ok((pathOnlyFacts.fileSizes?.length ?? 0) < 6);
+  assert.ok(Buffer.byteLength(pathOnlyInventory.content) <= 256);
+  assert.equal(existsSync(marker), false);
   // The shared review producer reads actual immutable blobs despite hostile
   // worker Git configuration; current checkout bytes never supply the baseline.
   const comparisons = unchangedResultByteEvidence(

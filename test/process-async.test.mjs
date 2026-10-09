@@ -18,6 +18,11 @@ import test from "node:test";
 import { analyzeInteractions } from "../dist/analysis.js";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
+import { renderCompilationCall } from "../dist/compiler/model.js";
+import {
+  prepareCompilationRequest,
+  validateCompiledGraph,
+} from "../dist/compiler/planning.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import {
   diagnosticPath,
@@ -802,14 +807,14 @@ test("source readiness prepares each real fresh checkout before its phase checks
     );
     const baseSha = git("rev-parse", "HEAD");
     const baseTree = git("rev-parse", "HEAD^{tree}");
-    const item = {
+    let item = {
       id: "implementation",
       kind: "work",
       title: "Implement result",
       goal: "Return required result",
       brief: "Implement result.cjs",
       acceptance: ["Result is 42"],
-      nonGoals: [],
+      nonGoals: ["No package or tooling changes"],
       dependencies: [],
       ownedPaths: ["result.cjs"],
       resources: [],
@@ -824,30 +829,81 @@ test("source readiness prepares each real fresh checkout before its phase checks
         source: "README.md",
       })),
     };
-    const graph = {
+    const body = `## Outcome\nReturn the required result.\n\n## Acceptance\n- Result is 42\n- \`${acceptance}\`\n\n## Sources\n- README.md\n`;
+    const request = prepareCompilationRequest({
       objective: 1,
+      body,
       baseSha,
-      items: [item],
-      coverage: [
+      checkout,
+    });
+    const { wire, call } = renderCompilationCall(request);
+    const source = wire.data.sources.find(
+      (entry) => entry.path === "README.md",
+    );
+    const citation = wire.data.citations.find(
+      (entry) => entry.path === "README.md",
+    );
+    const generated = {
+      contextId: wire.data.contextId,
+      requiredPreIntegrationChecks: [],
+      items: [
         {
-          criterionId: createHash("sha256").update(acceptance).digest("hex"),
-          source: {
-            path: "OBJECTIVE",
-            digest: createHash("sha256").update(acceptance).digest("hex"),
-            text: acceptance,
-          },
-          itemId: item.id,
-          proof: { kind: "result-command", validationIndex: 2 },
-          environment: {
-            kind: "local",
-            readiness: "available",
-            probe,
-            prerequisites: [setup],
-            preparedBy: "",
-          },
+          ...item,
+          children: [],
+          newPackages: [],
+          priority: 0,
+          citations: [{ choiceIndex: citation.choiceIndex }],
+          validation: [setup, probe, acceptance].map((command) => ({
+            kind: "source-line",
+            sourceIndex: source.sourceIndex,
+            lineIndex: source.lines.find((line) => line.text === command)
+              .lineIndex,
+          })),
         },
       ],
+      coverage: request.coverageObligations.map((_, index) => ({
+        itemId: item.id,
+        proof:
+          index === 0
+            ? { kind: "result-semantic", acceptanceIndex: 0 }
+            : { kind: "result-command", validationIndex: 2 },
+        environment: {
+          kind: "real",
+          readiness: "available",
+          probeValidationIndex: 1,
+          prerequisiteValidationIndices: [0],
+          preparedBy: "",
+        },
+      })),
     };
+    assert.ok(call.prompt.includes("Same-owner source-authorized setup"));
+    // The rejected relationship stays rejected; no decoder rewrites it into
+    // available or fabricates a dependency. The authorized sequence is real.
+    const invalid = structuredClone(generated);
+    invalid.coverage[0].environment.readiness = "prepare";
+    assert.throws(() => wire.decode(invalid), /actual preparation dependency/);
+    invalid.coverage[0].environment.preparedBy = "unrelated";
+    assert.throws(() => wire.decode(invalid), /actual preparation dependency/);
+    const duplicated = structuredClone(generated);
+    duplicated.coverage.push(structuredClone(generated.coverage[0]));
+    assert.throws(
+      () => wire.decode(duplicated),
+      /one coverage entry per obligation/,
+    );
+    const graph = validateCompiledGraph({
+      graph: wire.decode(generated),
+      request,
+      body,
+      checkout,
+    });
+    item = graph.items[0];
+    assert.deepEqual(
+      graph.coverage.map((entry) => entry.source.text),
+      ["Result is 42", `\`${acceptance}\``],
+    );
+    assert.ok(
+      graph.coverage.every((entry) => entry.environment.kind === "real"),
+    );
     assert.deepEqual(environmentValidationIndices(graph, item.id), [0, 1]);
     assert.deepEqual(objectivePreparationCommands(graph), [setup]);
     const diagnosticRepository = "integration/fresh-readiness";
@@ -1090,12 +1146,13 @@ test("source readiness prepares each real fresh checkout before its phase checks
       );
       const historical = structuredClone(state);
       const historicalGraph = structuredClone(graph);
-      historicalGraph.coverage[0].environment = {
-        kind: "local",
-        readiness: "available",
-        probe: "",
-        preparedBy: "",
-      };
+      for (const entry of historicalGraph.coverage)
+        entry.environment = {
+          kind: "local",
+          readiness: "available",
+          probe: "",
+          preparedBy: "",
+        };
       const historicalDigest = graphDigest(historicalGraph);
       historical.planGraphDigest = historicalDigest;
       historical.graphRevisions[0] = {

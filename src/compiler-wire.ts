@@ -24,7 +24,7 @@ export interface CompilerCitationChoice {
 
 /**
  * A well-formed response whose choices Factory refuses: an index out of range,
- * or a duplicated or omitted obligation.
+ * or an unavailable owner or preparation dependency.
  * The planner can revise these, unlike a response of the wrong shape.
  */
 export class PlannerChoiceError extends Error {
@@ -66,6 +66,10 @@ const strict = (properties: Record<string, Schema>): Schema => ({
   required: Object.keys(properties),
 });
 const text: Schema = { type: "string" };
+
+/** Shared compilation/diagnosis meaning; no probe result or extra authority. */
+export const COMPILER_READINESS_GUIDANCE =
+  "Same-owner source-authorized setup followed by the unchanged real readiness probe uses available with empty preparedBy and ordered prerequisiteValidationIndices before probeValidationIndex. available describes that sequence for checking in the actual fresh checkout before implementation; it never claims the probe already passed or grants authority. prepare is exclusively preparation supplied by an actual declared dependency named in preparedBy, not a synonym for the owner's setup commands. Unknown runtime readiness alone does not require an operator decision when this authorized sequence can establish it. Correct a generated mismatch as planning-output only within permitted repair classes and recorded attempt limits; do not invent a dependency, waive the probe or claim readiness. Ask the operator for an actual missing source fact, permission, capability or human-owned choice.";
 
 /** A transient model language: choices in, canonical controller facts out. */
 export function compilerWire(
@@ -214,20 +218,36 @@ export function compilerWire(
     itemSchema.required!.push("executionProfile");
   }
   const environment = {
-    anyOf: ["local", "real"].map((kind) =>
-      strict({
-        kind: { type: "string", enum: [kind] },
-        readiness: {
-          type: "string",
-          enum: ["available", "prepare", "missing"],
-        },
-        probeValidationIndex:
-          kind === "real"
-            ? integer()
-            : { type: ["integer", "null"], minimum: 0 },
-        prerequisiteValidationIndices: { type: "array", items: integer() },
-        preparedBy: text,
-      }),
+    anyOf: ["local", "real"].flatMap((kind) =>
+      ["available", "prepare", "missing"].map((readiness) =>
+        strict({
+          kind: { type: "string", enum: [kind] },
+          readiness: {
+            type: "string",
+            enum: [readiness],
+            description:
+              readiness === "available"
+                ? "The owner can run its authorized prerequisites followed by its probe before implementation; this choice does not claim readiness passed."
+                : readiness === "prepare"
+                  ? "An actual declared dependency supplies preparation; same-owner prerequisite commands do not use prepare."
+                  : "A source-required prerequisite is missing; this blocks execution for a source decision.",
+          },
+          probeValidationIndex:
+            kind === "real"
+              ? integer()
+              : { type: ["integer", "null"], minimum: 0 },
+          prerequisiteValidationIndices: { type: "array", items: integer() },
+          preparedBy:
+            readiness === "prepare"
+              ? {
+                  ...text,
+                  minLength: 1,
+                  description:
+                    "ID of an actual preparation item in this owner's dependencies.",
+                }
+              : { type: "string", enum: [""] },
+        }),
+      ),
     ),
   };
   // CI checks are chosen from the names the base and Objective define, so an
@@ -267,22 +287,27 @@ export function compilerWire(
       "final-controller",
     ],
   };
-  const coverageSchema = (kind: string): Schema => ({
+  // Array position selects the controller obligation. The model chooses its
+  // owner once; it cannot repeat or omit an obligation index across items.
+  const coverageSchema: Schema = {
     type: "array",
-    ...(kind === "qa" ? { minItems: 1 } : {}),
+    minItems: obligations.length,
+    maxItems: obligations.length,
     items: strict({
-      obligationIndex: integer(obligations.length),
+      itemId: { ...text, minLength: 1 },
       proof: {
-        anyOf: modes[kind]!.map((form) =>
-          strict({
-            kind: { type: "string", enum: [form] },
-            ...proofForms[form],
-          }),
-        ),
+        anyOf: Object.keys(proofForms)
+          .filter((form) => !form.endsWith("-ci") || checkNames.length)
+          .map((form) =>
+            strict({
+              kind: { type: "string", enum: [form] },
+              ...proofForms[form],
+            }),
+          ),
       },
       environment,
     }),
-  });
+  };
   const readonlyConstants = {
     ownedPaths: [],
     sourceAssets: [],
@@ -318,8 +343,6 @@ export function compilerWire(
               ...(kind === "aggregate" ? { minItems: 1 } : { maxItems: 0 }),
               items: text,
             };
-            item.properties!.coverage = coverageSchema(kind);
-            item.required!.push("coverage");
             if (kind !== "work") {
               for (const field of readonlyFields)
                 delete item.properties![field];
@@ -343,7 +366,6 @@ export function compilerWire(
               strict({
                 kind: { type: "string", enum: ["retained"] },
                 id: { type: "string", enum: ids },
-                coverage: coverageSchema(kind),
                 ...more,
               });
             const kept = ids.filter((id) => id !== reattempt);
@@ -361,6 +383,7 @@ export function compilerWire(
         ],
       },
     },
+    coverage: coverageSchema,
   });
   // Stable content first, so repeated and revised compilations share a
   // provider-cache prefix; the revision-specific parts and the context
@@ -414,13 +437,20 @@ export function compilerWire(
       const wire = object(value, "response");
       keys(
         wire,
-        ["contextId", "items", "requiredPreIntegrationChecks"],
+        ["contextId", "items", "coverage", "requiredPreIntegrationChecks"],
         "response",
       );
       if (wire.contextId !== contextId)
         throw new Error("Planner context identity differs from this request");
       if (!Array.isArray(wire.items) || !wire.items.length)
         throw new Error("Planner requires at least one Work Item");
+      if (
+        !Array.isArray(wire.coverage) ||
+        wire.coverage.length !== obligations.length
+      )
+        throw new PlannerChoiceError(
+          "Planner requires one coverage entry per obligation in supplied order",
+        );
       if (!Array.isArray(wire.requiredPreIntegrationChecks))
         throw new Error("Planner pre-integration checks must be an array");
       const requiredPreIntegrationChecks =
@@ -450,7 +480,6 @@ export function compilerWire(
         coverage: [],
         requiredPreIntegrationChecks,
       };
-      const seen = new Set<number>();
       const referenced = new Set<string>();
       for (const raw of wire.items) {
         let item = structuredClone(object(raw, "item"));
@@ -463,7 +492,7 @@ export function compilerWire(
           const widens = retained !== undefined && retained.id === reattempt;
           keys(
             item,
-            ["kind", "id", "coverage", ...(widens ? ["addedOwnedPaths"] : [])],
+            ["kind", "id", ...(widens ? ["addedOwnedPaths"] : [])],
             "retained item",
           );
           if (!retained || referenced.has(retained.id))
@@ -474,7 +503,7 @@ export function compilerWire(
           const added = widens
             ? strings(item.addedOwnedPaths, "addedOwnedPaths")
             : [];
-          item = { ...structuredClone(retained), coverage: item.coverage };
+          item = structuredClone(retained) as unknown as ObjectValue;
           if (widens)
             item.ownedPaths = [
               ...retained.ownedPaths,
@@ -489,7 +518,7 @@ export function compilerWire(
             );
           if (typeof item.kind !== "string" || !modes[item.kind])
             throw new Error("Planner Work Item kind is invalid");
-          const expected = [...itemSchema.required!, "coverage"].filter(
+          const expected = itemSchema.required!.filter(
             (field) =>
               (item.kind === "work" || !readonlyFields.includes(field)) &&
               (item.kind !== "aggregate" || field !== "acceptance"),
@@ -603,175 +632,188 @@ export function compilerWire(
           if (!item.ownedPaths.includes(manifest))
             item.ownedPaths.push(manifest);
         }
-        if (!Array.isArray(item.coverage))
-          throw new Error("Planner item coverage must be an array");
-        if (item.kind === "qa" && item.coverage.length === 0)
+        graph.items.push(item as unknown as WorkGraph["items"][number]);
+      }
+      for (const [obligationIndex, value] of wire.coverage.entries()) {
+        const entry = object(value, "coverage");
+        keys(entry, ["itemId", "proof", "environment"], "coverage");
+        const owners = graph.items.filter((item) => item.id === entry.itemId);
+        if (owners.length !== 1)
           throw new PlannerChoiceError(
-            "Planner QA node has no acceptance coverage",
+            "Planner coverage must select one existing unambiguous owner",
           );
-        const coverage = item.coverage;
-        delete item.coverage;
-        const owner = item as unknown as WorkGraph["items"][number];
-        for (const value of coverage) {
-          const entry = object(value, "coverage");
-          keys(entry, ["obligationIndex", "proof", "environment"], "coverage");
-          const obligationIndex = index(
-            entry.obligationIndex,
-            obligations.length,
-            "obligationIndex",
+        const owner = owners[0]!;
+        const obligation = obligations[obligationIndex]!;
+        const proof = object(entry.proof, "proof");
+        if (
+          typeof proof.kind !== "string" ||
+          !modes[owner.kind ?? "work"]!.includes(proof.kind)
+        )
+          throw new Error(
+            "Planner proof form is not supported by its owning node",
           );
-          if (seen.has(obligationIndex))
-            throw new PlannerChoiceError(
-              "Planner obligationIndex is duplicated",
-            );
-          seen.add(obligationIndex);
-          const obligation = obligations[obligationIndex]!;
-          const proof = object(entry.proof, "proof");
+        keys(proof, ["kind", ...Object.keys(proofForms[proof.kind]!)], "proof");
+        let canonicalProof: CoverageProof;
+        switch (proof.kind) {
+          case "result-command":
+          case "integrated-command":
+            canonicalProof = {
+              kind: proof.kind,
+              validationIndex: index(
+                proof.validationIndex,
+                owner.validation.length,
+                "validationIndex",
+              ),
+            };
+            break;
+          case "result-semantic":
+          case "integrated-semantic":
+            canonicalProof = {
+              kind: proof.kind,
+              acceptanceIndex: index(
+                proof.acceptanceIndex,
+                owner.acceptance.length,
+                "acceptanceIndex",
+              ),
+            };
+            break;
+          case "final-review":
+            canonicalProof = { kind: "final-review" };
+            break;
+          case "final-controller":
+            canonicalProof = {
+              kind: "final-controller",
+              guaranteeId:
+                guarantees[
+                  index(
+                    proof.guaranteeIndex,
+                    guarantees.length,
+                    "guaranteeIndex",
+                  )
+                ]!.id,
+            };
+            break;
+          case "integrated-ci":
+          case "published-ci": {
+            const checkName =
+              checkNames[
+                index(proof.checkIndex, checkNames.length, "checkIndex")
+              ]!;
+            canonicalProof =
+              proof.kind === "published-ci"
+                ? {
+                    kind: proof.kind,
+                    checkName,
+                    targetItem:
+                      owner.dependencies[
+                        index(
+                          proof.dependencyIndex,
+                          owner.dependencies.length,
+                          "dependencyIndex",
+                        )
+                      ]!,
+                  }
+                : { kind: proof.kind, checkName };
+            break;
+          }
+          default:
+            throw new Error("Planner proof form is invalid");
+        }
+        const env = object(entry.environment, "environment");
+        keys(
+          env,
+          [
+            "kind",
+            "readiness",
+            "probeValidationIndex",
+            "prerequisiteValidationIndices",
+            "preparedBy",
+          ],
+          "environment",
+        );
+        const {
+          probeValidationIndex,
+          prerequisiteValidationIndices,
+          ...canonicalEnvironment
+        } = env;
+        if (
+          !["local", "real"].includes(String(env.kind)) ||
+          !["available", "prepare", "missing"].includes(
+            String(env.readiness),
+          ) ||
+          typeof env.preparedBy !== "string"
+        )
+          throw new Error("Planner environment readiness is invalid");
+        if (
+          env.readiness === "prepare"
+            ? !env.preparedBy ||
+              !owner.dependencies.includes(env.preparedBy) ||
+              !graph.items.some((item) => item.id === env.preparedBy)
+            : env.preparedBy !== ""
+        )
+          throw new PlannerChoiceError(
+            "Planner prepare requires an actual preparation dependency; same-owner setup uses available with ordered prerequisites and its probe",
+          );
+        if (env.kind === "real" && probeValidationIndex === null)
+          throw new PlannerChoiceError(
+            "Planner real environment requires an exact authorized readiness probe",
+          );
+        if (!Array.isArray(prerequisiteValidationIndices))
+          throw new Error(
+            "Readiness prerequisites must be ordered validation indices",
+          );
+        let previousPrerequisite = -1;
+        const prerequisites = prerequisiteValidationIndices.map((value) => {
+          const selected = index(
+            value,
+            owner.validation.length,
+            "prerequisiteValidationIndices",
+          );
           if (
-            typeof proof.kind !== "string" ||
-            !modes[owner.kind ?? "work"]!.includes(proof.kind)
+            probeValidationIndex === null ||
+            selected <= previousPrerequisite ||
+            typeof probeValidationIndex !== "number" ||
+            selected >= probeValidationIndex
           )
             throw new Error(
-              "Planner proof form is not supported by its owning node",
+              "Readiness prerequisites must be unique, ordered and precede their probe",
             );
-          keys(
-            proof,
-            ["kind", ...Object.keys(proofForms[proof.kind]!)],
-            "proof",
-          );
-          let canonicalProof: CoverageProof;
-          switch (proof.kind) {
-            case "result-command":
-            case "integrated-command":
-              canonicalProof = {
-                kind: proof.kind,
-                validationIndex: index(
-                  proof.validationIndex,
+          previousPrerequisite = selected;
+          return owner.validation[selected]!.command;
+        });
+        const probe =
+          probeValidationIndex === null
+            ? ""
+            : owner.validation[
+                index(
+                  probeValidationIndex,
                   owner.validation.length,
-                  "validationIndex",
-                ),
-              };
-              break;
-            case "result-semantic":
-            case "integrated-semantic":
-              canonicalProof = {
-                kind: proof.kind,
-                acceptanceIndex: index(
-                  proof.acceptanceIndex,
-                  owner.acceptance.length,
-                  "acceptanceIndex",
-                ),
-              };
-              break;
-            case "final-review":
-              canonicalProof = { kind: "final-review" };
-              break;
-            case "final-controller":
-              canonicalProof = {
-                kind: "final-controller",
-                guaranteeId:
-                  guarantees[
-                    index(
-                      proof.guaranteeIndex,
-                      guarantees.length,
-                      "guaranteeIndex",
-                    )
-                  ]!.id,
-              };
-              break;
-            case "integrated-ci":
-            case "published-ci": {
-              const checkName =
-                checkNames[
-                  index(proof.checkIndex, checkNames.length, "checkIndex")
-                ]!;
-              canonicalProof =
-                proof.kind === "published-ci"
-                  ? {
-                      kind: proof.kind,
-                      checkName,
-                      targetItem:
-                        owner.dependencies[
-                          index(
-                            proof.dependencyIndex,
-                            owner.dependencies.length,
-                            "dependencyIndex",
-                          )
-                        ]!,
-                    }
-                  : { kind: proof.kind, checkName };
-              break;
-            }
-            default:
-              throw new Error("Planner proof form is invalid");
-          }
-          const env = object(entry.environment, "environment");
-          keys(
-            env,
-            [
-              "kind",
-              "readiness",
-              "probeValidationIndex",
-              "prerequisiteValidationIndices",
-              "preparedBy",
-            ],
-            "environment",
-          );
-          const {
-            probeValidationIndex,
-            prerequisiteValidationIndices,
-            ...canonicalEnvironment
-          } = env;
-          if (!Array.isArray(prerequisiteValidationIndices))
-            throw new Error(
-              "Readiness prerequisites must be ordered validation indices",
-            );
-          let previousPrerequisite = -1;
-          const prerequisites = prerequisiteValidationIndices.map((value) => {
-            const selected = index(
-              value,
-              owner.validation.length,
-              "prerequisiteValidationIndices",
-            );
-            if (
-              probeValidationIndex === null ||
-              selected <= previousPrerequisite ||
-              typeof probeValidationIndex !== "number" ||
-              selected >= probeValidationIndex
-            )
-              throw new Error(
-                "Readiness prerequisites must be unique, ordered and precede their probe",
-              );
-            previousPrerequisite = selected;
-            return owner.validation[selected]!.command;
-          });
-          const probe =
-            probeValidationIndex === null
-              ? ""
-              : owner.validation[
-                  index(
-                    probeValidationIndex,
-                    owner.validation.length,
-                    "probeValidationIndex",
-                  )
-                ]!.command;
-          graph.coverage!.push({
-            ...structuredClone(obligation),
-            itemId: owner.id,
-            proof: canonicalProof,
-            environment: {
-              ...canonicalEnvironment,
-              probe,
-              ...(prerequisites.length ? { prerequisites } : {}),
-            } as NonNullable<WorkGraph["coverage"]>[number]["environment"],
-          });
-        }
-        graph.items.push(owner);
+                  "probeValidationIndex",
+                )
+              ]!.command;
+        graph.coverage!.push({
+          ...structuredClone(obligation),
+          itemId: owner.id,
+          proof: canonicalProof,
+          environment: {
+            ...canonicalEnvironment,
+            probe,
+            ...(prerequisites.length ? { prerequisites } : {}),
+          } as NonNullable<WorkGraph["coverage"]>[number]["environment"],
+        });
       }
       if (referenced.size !== retainedItems.size)
         throw new PlannerChoiceError("Planner omitted retained Work Items");
-      if (seen.size !== obligations.length)
-        throw new PlannerChoiceError("Planner omitted Objective coverage");
+      if (
+        graph.items.some(
+          (item) =>
+            item.kind === "qa" &&
+            !graph.coverage!.some((entry) => entry.itemId === item.id),
+        )
+      )
+        throw new PlannerChoiceError(
+          "Planner QA node has no acceptance coverage",
+        );
       return graph;
     },
   };

@@ -238,24 +238,21 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       items: currentGraph.items.map((item, index) => ({
         kind: "retained",
         id: item.id,
-        coverage:
-          index === 0
-            ? [
-                {
-                  obligationIndex: 0,
-                  proof: { kind: "result-semantic", acceptanceIndex: 0 },
-                  environment: {
-                    kind: "local",
-                    readiness: "available",
-                    probeValidationIndex: null,
-                    prerequisiteValidationIndices: [],
-                    preparedBy: "",
-                  },
-                },
-              ]
-            : [],
         ...(index === 0 ? { addedOwnedPaths: ["additional.ts"] } : {}),
       })),
+      coverage: [
+        {
+          itemId: currentGraph.items[0].id,
+          proof: { kind: "result-semantic", acceptanceIndex: 0 },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probeValidationIndex: null,
+            prerequisiteValidationIndices: [],
+            preparedBy: "",
+          },
+        },
+      ],
     });
     assert.deepEqual(decoded.items[0], {
       ...currentGraph.items[0],

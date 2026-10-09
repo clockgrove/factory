@@ -10,7 +10,6 @@ import type { ModelInvocationContext } from "../contracts.js";
 import {
   ProviderTurnGuard,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
-  modelResponseTimeoutMs,
   requireCompletedProviderTurn,
 } from "../provider-turn.js";
 import {
@@ -66,9 +65,12 @@ export class CodexPlanningTransport implements PlanningTransport {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
     const started = Date.now();
+    // Native exec JSON omits text/reasoning deltas. A healthy structured
+    // answer can stay silent until its final agent_message, at any effort.
+    // Use the existing finite provider window rather than treating that
+    // omitted progress as a stalled model; caller deadlines still cancel.
     const turn = new ProviderTurnGuard(
-      this.providerTurnIdleTimeoutMs ??
-        modelResponseTimeoutMs(selection.reasoningEffort),
+      this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
       this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
     );
     const thread: { id?: string } = {};

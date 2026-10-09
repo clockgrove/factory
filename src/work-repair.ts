@@ -897,7 +897,6 @@ function blamedPredecessor(
   };
 }
 
-const EVIDENCE_FILE_BYTES = 16_000;
 const EVIDENCE_TOTAL_BYTES = 64_000;
 /** A larger blob is not read at all: it is not source a diagnosis can use. */
 const EVIDENCE_READ_BYTES = 1_000_000;
@@ -941,29 +940,29 @@ export function diagnosisFiles(
     for (const { path, size, owner } of owned) {
       // The budget is spent: nothing more is read.
       if (total >= EVIDENCE_TOTAL_BYTES) break;
-      // Check the size before reading the blob. A character takes at most
-      // three bytes, so this bounds what is read from below.
-      if (
-        size > EVIDENCE_READ_BYTES ||
-        total + Math.min(Math.ceil(size / 3), EVIDENCE_FILE_BYTES) >
-          EVIDENCE_TOTAL_BYTES
-      )
-        continue;
+      // Exact Git blob sizes are bytes. Prefer whole files within the existing
+      // total budget rather than prefixes that cannot establish readiness.
       let content: string;
-      try {
-        content = new TextDecoder("utf-8", { fatal: true }).decode(
-          pinnedGitRaw(checkout, "show", `${treeSha}:${path}`),
-        );
-      } catch {
-        continue;
+      let complete = false;
+      if (size > EVIDENCE_READ_BYTES || total + size > EVIDENCE_TOTAL_BYTES) {
+        content =
+          "[unavailable: complete candidate exceeds diagnosis evidence budget]";
+      } else {
+        try {
+          content = new TextDecoder("utf-8", {
+            fatal: true,
+            ignoreBOM: true,
+          }).decode(pinnedGitRaw(checkout, "show", `${treeSha}:${path}`));
+          complete = true;
+        } catch {
+          content = "[unavailable: candidate is unreadable or not valid UTF-8]";
+        }
       }
-      const complete = content.length <= EVIDENCE_FILE_BYTES;
-      if (!complete)
-        content = `${content.slice(0, EVIDENCE_FILE_BYTES)}\n[truncated]`;
       // One file too large for what is left does not hide the smaller
       // ones after it.
-      if (total + content.length > EVIDENCE_TOTAL_BYTES) continue;
-      total += content.length;
+      const bytes = Buffer.byteLength(content, "utf8");
+      if (total + bytes > EVIDENCE_TOTAL_BYTES) continue;
+      total += bytes;
       files.push({
         path,
         heading: owner

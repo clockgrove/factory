@@ -20,6 +20,7 @@ import {
 import { preflightLocalExecutables } from "../local-preflight.js";
 import type { FactoryState, PreparationState } from "../state.js";
 import { saveState } from "../state-store.js";
+import { retainAcceptedPlanningDecision } from "../planning-decision-context.js";
 import {
   type LocalOwner,
   type ObjectiveStep,
@@ -196,6 +197,18 @@ export function activateProjectedObjective(args: {
   );
   return {
     schemaVersion: 7,
+    ...(plan.humanDecision
+      ? { acceptedPlanningDecision: retainAcceptedPlanningDecision(plan) }
+      : {}),
+    ...(preparation.githubProjectStatus
+      ? { githubProjectStatus: preparation.githubProjectStatus }
+      : {}),
+    ...(preparation.githubPlanDecision
+      ? { githubPlanDecision: preparation.githubPlanDecision }
+      : {}),
+    ...(preparation.githubProgress
+      ? { githubProgress: preparation.githubProgress }
+      : {}),
     publicationContract: "exact-request-v1",
     ...(approvedPlaybookAdmission ? { approvedPlaybookAdmission } : {}),
     ...(preparation.approvedPlaybookPin !== undefined

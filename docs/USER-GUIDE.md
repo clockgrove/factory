@@ -495,3 +495,56 @@ factory dream --show --config /private/factory.json
 Use the actual path and next commands printed by Dream; drafts default to the repository's private state `learning/proposals/` directory. Review consolidated entries, source links, dated summaries and contradictions before approval. Merge or retire redundant guidance to fit the budget while preserving original episodes and sources. After editing, recompute the file digest; approval or rejection applies only to those exact bytes. `--show` reads the current approved playbook without a model call.
 
 Only an approved compact version enters subsequent Objective planning and review inputs. Each Objective pins its version: later approval cannot change an active run. Learning is advisory, never command authority, permission or acceptance evidence, and it cannot override pinned Sources or limits. Episodes and drafts stay private locally and may be sent only to the already configured provider when Dream is authorized; review source-derived private text before sharing it.
+
+## GitHub progress check-ins
+
+Operational summaries are disabled by default. Before starting an Objective, explicitly enable the target's progress disclosure in its existing private configuration:
+
+```json
+{
+  "githubManagement": {
+    "progress": {
+      "enabled": true,
+      "repository": "OWNER/REPOSITORY",
+      "includeQuestions": false
+    }
+  }
+}
+```
+
+Add this field to the existing configuration; it is not a complete configuration file. The repository must match the configured target. This authorizes a bounded stream of public status snapshots on that target's admitted Objective issues. Set `includeQuestions: true` only when the actual planning/acceptance question text and its binding metadata are cleared for that issue's disclosure scope. Logs, prompts, source bodies and arbitrary exception text are excluded. Configuration changes remain subject to existing active-Objective binding rules.
+
+Snapshots show accepted deliveries and PR links, active work, the next action, blockers and enabled human questions. Long run/configuration/decision identities are expandable. Read the snapshot observation time and GitHub publication timestamp: an old comment is an old observation, not proof the controller is still running. The controller coalesces transitions, with a final checkpoint before releasing ownership; it does not post heartbeats. Up to 64 exact snapshot requests remain in the same atomic continuation, including unresolved requests. Unknown publication is reconciled read-only and never recreated from an empty lookup. Existing comments are never edited or overwritten.
+
+`factory status --objective N` reports retained snapshot count, last observed publication and tracking failures such as `publication-unknown`, `projection-unavailable` or `history-exhausted`. These do not change substantive app acceptance or replay implementation/delivery. When tracking is degraded, inspect the exact local status before relying on stale GitHub presentation.
+
+To enable a narrow phone answer as well, set `progress.includeQuestions: true` and add `"decisions": { "enabled": true, "actorIds": [YOUR_IMMUTABLE_NUMERIC_GITHUB_USER_ID] }` beside `progress`. This separately authorizes only one genuine, structurally acceptable pending planning question before issue projection. The Objective needs a finite whole-run deadline. Copy the filled JSON template from the progress details into a new comment on that Objective and replace only `answer` and `reason`. Factory authenticates the allowlisted human ID and exact unedited comment, rechecks the plan/control/deadline, and retains the answer and original question packet atomically. It does not accept Work Item results or final delivery, refuse a plan, retry work, cancel, merge or increase limits. Multiple questions, failures, stale or edited comments, unknown effects and intentional pauses stay on the local supported path. Never treat an agent-authored comment as human approval.
+
+An enabled eligible phone hold retains the current controller without provider calls while waiting. To use local plan acceptance/refusal instead, stop the owner and verify `factory status` shows no active owner. For a foreground runner, use its supported SIGTERM handoff, then `factory resume --objective N`, local `factory decide`, and restart the same run. For a background service, use `factory supervisor stop` and keep it stopped while running `factory queue resume`, then local `factory decide`; finally use `factory supervisor start`. Queue resume restores both the queue and its admitted coordinators; Objective resume alone leaves the stopped queue draining. These resume commands start no work while the owner/service remains stopped. A Factory pause retains ownership. Use the same configuration throughout. See the exact authentication, disclosure and persistence contract in [GitHub management](GITHUB-MANAGEMENT.md).
+
+For background intake, an optional `"queue": { "pollSeconds": 30, "objectiveDeadlineSeconds": 1500 }` records an absolute whole-Objective deadline at first dispatch. Human waiting and host downtime count toward it. Restart or configuration changes never renew a saved deadline; configuration changes affect fresh Objectives only, and an already started uncapped Objective remains uncapped. A phone hold requires a finite deadline.
+
+An optional `githubManagement.projectStatus` can update the Objective's existing Project card independently of comments:
+
+```json
+{
+  "githubManagement": {
+    "projectStatus": {
+      "repository": "OWNER/REPOSITORY",
+      "projectId": "EXISTING_PROJECT_NODE_ID",
+      "fieldId": "EXISTING_STATUS_FIELD_ID",
+      "factoryManagedField": true,
+      "options": {
+        "planning": "PLANNING_OPTION_ID",
+        "running": "RUNNING_OPTION_ID",
+        "review": "REVIEW_OPTION_ID",
+        "needs-human": "NEEDS_HUMAN_OPTION_ID",
+        "stopped": "STOPPED_OPTION_ID",
+        "accepted": "ACCEPTED_OPTION_ID"
+      }
+    }
+  }
+}
+```
+
+The Project must belong to the target repository owner, its field must be named Status and be single-select, and every option must exist. The accepted option must differ from all others. The Objective must already have one nonarchived Project card; Factory never adds/deletes cards or touches other fields. The explicit opt-in makes this field Factory-managed, so concurrent human edits may be overwritten. Unknown update outcomes hold only this field permanently; one later read remains an observation, not mutation confirmation or permission to retry. `factory status` reports Project tracking failures separately from app acceptance. Accepted Project status follows actual accepted Objective closure.

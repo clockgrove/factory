@@ -1,4 +1,11 @@
 import { createHash } from "node:crypto";
+import { projectStatusOnGitHub } from "./github-project.js";
+import type { GitHubDecisionComment } from "./github-plan-decisions.js";
+import { parsePlanDecision } from "./github-plan-decisions.js";
+import {
+  progressDigest,
+  type ProgressCommentIdentity,
+} from "./github-progress-state.js";
 import type {
   GitHubGateway,
   IntakeIssuePage,
@@ -123,6 +130,195 @@ export class RealGitHubGateway implements GitHubGateway {
   ) {}
 
   private login?: string;
+
+  projectStatus(
+    request: Parameters<NonNullable<GitHubGateway["projectStatus"]>>[0],
+  ) {
+    return projectStatusOnGitHub(
+      this.repository,
+      request,
+      <T>(
+        query: string,
+        variables: Record<string, unknown>,
+        readOnly: boolean,
+      ) =>
+        classifiedGitHubCall(
+          this.client,
+          this.repository,
+          { method: "POST", path: "graphql" },
+          () => this.client.projectStatusGraphql<T>(query, variables, readOnly),
+        ),
+    );
+  }
+
+  async planDecisionComments(
+    objective: number,
+    actorIds: number[],
+  ): Promise<GitHubDecisionComment[]> {
+    if (
+      !Number.isSafeInteger(objective) ||
+      objective <= 0 ||
+      !actorIds.length ||
+      actorIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+    )
+      throw new Error("Invalid GitHub decision observation scope");
+    type Comment = {
+      id: number;
+      node_id?: string;
+      body?: string;
+      issue_url?: string;
+      created_at?: string;
+      updated_at?: string;
+      user?: { id?: number; type?: string };
+    };
+    const candidates = (
+      await this.pages<Comment>(`issues/${objective}/comments`)
+    ).filter(
+      (comment) =>
+        comment.user?.type === "User" &&
+        actorIds.includes(comment.user.id ?? 0) &&
+        typeof comment.body === "string" &&
+        parsePlanDecision(comment.body),
+    );
+    if (candidates.length > 32)
+      throw new Error(
+        "GitHub decision candidate count exceeds its observation bound",
+      );
+    const observed: GitHubDecisionComment[] = [];
+    for (const candidate of candidates) {
+      if (
+        !Number.isSafeInteger(candidate.id) ||
+        candidate.id <= 0 ||
+        !candidate.node_id ||
+        candidate.issue_url !==
+          `https://api.github.com/repos/${this.repository}/issues/${objective}` ||
+        candidate.created_at !== candidate.updated_at
+      )
+        continue;
+      const node = await classifiedGitHubCall(
+        this.client,
+        this.repository,
+        { method: "POST", path: "graphql" },
+        () => this.client.decisionComment(candidate.node_id!),
+      );
+      if (
+        !node ||
+        node.id !== candidate.node_id ||
+        typeof node.fullDatabaseId !== "string" ||
+        !/^[1-9][0-9]*$/.test(node.fullDatabaseId) ||
+        !Number.isSafeInteger(Number(node.fullDatabaseId)) ||
+        Number(node.fullDatabaseId) !== candidate.id ||
+        node.body !== candidate.body ||
+        node.author?.__typename !== "User" ||
+        node.author.databaseId !== candidate.user?.id ||
+        !actorIds.includes(node.author.databaseId ?? 0) ||
+        !node.author.login ||
+        node.author.login.endsWith("[bot]") ||
+        node.issue?.number !== objective ||
+        node.issue.repository?.nameWithOwner !== this.repository ||
+        node.createdAt !== candidate.created_at ||
+        node.updatedAt !== candidate.updated_at ||
+        node.lastEditedAt !== null ||
+        node.editor !== null ||
+        node.includesCreatedEdit !== false
+      )
+        continue;
+      observed.push({
+        id: candidate.id,
+        nodeId: node.id,
+        actorId: node.author.databaseId!,
+        login: node.author.login,
+        body: node.body,
+        createdAt: node.createdAt,
+        updatedAt: node.updatedAt,
+        lastEditedAt: null,
+        editor: null,
+        includesCreatedEdit: false,
+      });
+    }
+    return observed;
+  }
+
+  async progressComment(
+    request: Parameters<NonNullable<GitHubGateway["progressComment"]>>[0],
+  ): Promise<ProgressCommentIdentity> {
+    const marker = `<!-- factory:progress;objective=${request.objective};run=${request.runId};snapshot=${request.snapshotId} -->`;
+    if (
+      !Number.isSafeInteger(request.objective) ||
+      request.objective <= 0 ||
+      !/^[a-zA-Z0-9-]{1,128}$/.test(request.runId) ||
+      !/^[a-f0-9-]{36}$/.test(request.snapshotId) ||
+      !request.body.startsWith(`${marker}\n`) ||
+      Buffer.byteLength(request.body) > 24_000
+    )
+      throw new Error("Invalid GitHub progress request identity");
+    type Comment = {
+      id: number;
+      created_at?: string;
+      body?: string;
+      issue_url?: string;
+      user?: { id?: number };
+    };
+    const matches = (comment: Comment, actorId: number): boolean =>
+      Number.isSafeInteger(comment.id) &&
+      comment.id > 0 &&
+      comment.user?.id === actorId &&
+      comment.body === request.body &&
+      typeof comment.created_at === "string" &&
+      Number.isFinite(Date.parse(comment.created_at)) &&
+      comment.issue_url ===
+        `https://api.github.com/repos/${this.repository}/issues/${request.objective}`;
+    const identity = (
+      comment: Comment,
+      actorId: number,
+    ): ProgressCommentIdentity => ({
+      id: comment.id,
+      actorId,
+      bodyDigest: progressDigest(request.body),
+      createdAt: comment.created_at!,
+    });
+    if (request.pending) {
+      const pending = request.pending;
+      if (
+        pending.snapshotId !== request.snapshotId ||
+        pending.body !== request.body ||
+        pending.bodyDigest !== progressDigest(request.body) ||
+        pending.comment
+      )
+        throw new Error(
+          "Retained progress request differs from unresolved exact intent",
+        );
+      const comments = await this.pages<Comment>(
+        `issues/${request.objective}/comments`,
+      );
+      const exact = comments.filter((comment) =>
+        matches(comment, pending.actorId),
+      );
+      if (exact.length === 1) return identity(exact[0]!, pending.actorId);
+      throw new Error(
+        "GitHub progress publication remains unknown; reconciliation does not authorize another POST",
+      );
+    }
+    const actor = await this.client.viewerIdentity();
+    const comments = await this.pages<Comment>(
+      `issues/${request.objective}/comments`,
+    );
+    if (comments.some((comment) => comment.body?.startsWith(marker)))
+      throw new Error(
+        "GitHub progress marker exists without a retained publication identity",
+      );
+    request.beforeWrite(actor.id);
+    const comment = await this.api<Comment>(
+      "POST",
+      `issues/${request.objective}/comments`,
+      { body: request.body },
+    );
+    if (!matches(comment, actor.id))
+      throw new Error(
+        "GitHub progress create returned no exact authenticated observation",
+      );
+    return identity(comment, actor.id);
+  }
 
   /**
    * The token's login, when GitHub tells it. Only consulted until Factory

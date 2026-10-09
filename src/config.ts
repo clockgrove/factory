@@ -1,4 +1,8 @@
 import { refuseUnknownFields } from "./unknown-fields.js";
+import {
+  assertGitHubProjectStatusConfig,
+  type GitHubProjectStatusConfig,
+} from "./github-project-state.js";
 import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
 import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
@@ -213,13 +217,23 @@ export function hostSchedulingDefaults(host: HostFacts): {
 }
 
 export interface FactoryConfig {
+  /** Explicit disclosure opt-in; omission publishes no operational summary. */
+  githubManagement?: {
+    decisions?: { enabled: true; actorIds: number[] };
+    projectStatus?: GitHubProjectStatusConfig;
+    progress?: {
+      enabled: true;
+      repository: string;
+      includeQuestions: boolean;
+    };
+  };
   scheduling?: SchedulingConfig;
   /** Limits on unattended repair and amendment; omitted fields use bounded defaults. */
   autonomy?: AutonomyConfig;
   /** Explicit local sensitive-content opt-in; absent remains disabled. */
   capture?: { enabled: boolean; maxBytesPerInvocation: number };
-  /** How the background service polls GitHub for queued work; omitted uses 30 seconds. */
-  queue?: { pollSeconds: number };
+  /** Polling and an optional elapsed limit frozen before each fresh Objective starts. */
+  queue?: { pollSeconds: number; objectiveDeadlineSeconds?: number };
   schemaVersion: 1;
   repository: string;
   checkout: string;
@@ -563,10 +577,78 @@ export function validateConfig(value: unknown): FactoryConfig {
       "delivery",
       "policy",
       "queue",
+      "githubManagement",
     ],
     "configuration",
   );
   validateTarget(value.repository, value.checkout);
+  if (value.githubManagement !== undefined) {
+    assertObject(value.githubManagement, "githubManagement");
+    assertOnlyKeys(
+      value.githubManagement,
+      ["progress", "decisions", "projectStatus"],
+      "githubManagement",
+    );
+    if (
+      !value.githubManagement.progress &&
+      !value.githubManagement.projectStatus
+    )
+      throw new Error(
+        "GitHub management requires an explicit progress or Project opt-in",
+      );
+    if (value.githubManagement.projectStatus !== undefined)
+      assertGitHubProjectStatusConfig(
+        value.githubManagement.projectStatus,
+        value.repository,
+      );
+    if (value.githubManagement.progress !== undefined) {
+      assertObject(
+        value.githubManagement.progress,
+        "githubManagement.progress",
+      );
+      assertOnlyKeys(
+        value.githubManagement.progress,
+        ["enabled", "repository", "includeQuestions"],
+        "githubManagement.progress",
+      );
+      if (
+        value.githubManagement.progress.enabled !== true ||
+        value.githubManagement.progress.repository !== value.repository ||
+        typeof value.githubManagement.progress.includeQuestions !== "boolean"
+      )
+        throw new Error(
+          "GitHub progress requires explicit target and question disclosure choices",
+        );
+    }
+    if (value.githubManagement.decisions !== undefined) {
+      assertObject(
+        value.githubManagement.decisions,
+        "githubManagement.decisions",
+      );
+      assertOnlyKeys(
+        value.githubManagement.decisions,
+        ["enabled", "actorIds"],
+        "githubManagement.decisions",
+      );
+      const actors = value.githubManagement.decisions.actorIds;
+      if (
+        value.githubManagement.decisions.enabled !== true ||
+        (
+          value.githubManagement.progress as
+            | { includeQuestions?: unknown }
+            | undefined
+        )?.includeQuestions !== true ||
+        !Array.isArray(actors) ||
+        !actors.length ||
+        actors.length > 16 ||
+        new Set(actors).size !== actors.length ||
+        actors.some((id) => !Number.isSafeInteger(id) || id <= 0)
+      )
+        throw new Error(
+          "GitHub plan decisions require explicit human account IDs and question disclosure",
+        );
+    }
+  }
   validatePlanning(value.planning);
   if (value.scheduling !== undefined) validateScheduling(value.scheduling);
   assertObject(value.execution, "execution");
@@ -748,13 +830,26 @@ export function validateConfig(value: unknown): FactoryConfig {
   }
   if (value.queue !== undefined) {
     assertObject(value.queue, "queue");
-    assertOnlyKeys(value.queue, ["pollSeconds"], "queue");
+    assertOnlyKeys(
+      value.queue,
+      ["pollSeconds", "objectiveDeadlineSeconds"],
+      "queue",
+    );
     if (
       typeof value.queue.pollSeconds !== "number" ||
       !Number.isFinite(value.queue.pollSeconds) ||
       value.queue.pollSeconds <= 0
     )
       throw new Error("queue.pollSeconds must be a positive number");
+    if (
+      value.queue.objectiveDeadlineSeconds !== undefined &&
+      (!Number.isSafeInteger(value.queue.objectiveDeadlineSeconds) ||
+        (value.queue.objectiveDeadlineSeconds as number) <= 0 ||
+        (value.queue.objectiveDeadlineSeconds as number) > 2_147_483_647)
+    )
+      throw new Error(
+        "queue.objectiveDeadlineSeconds must be a positive integer no greater than 2147483647",
+      );
   }
   if (value.autonomy !== undefined)
     resolveAutonomy(value.autonomy as AutonomyConfig);
@@ -897,7 +992,8 @@ export function validateCapacity(value: Capacity): Capacity {
  * Digest of every declared installation choice, including adapter config; an omitted
  * concurrency stays omitted, so the digest does not follow the host. Autonomy limits are
  * excluded: each Objective snapshots them, and its capacity, when it starts. The queue's
- * polling interval is excluded too: it changes how often the service looks, not what runs.
+ * settings are excluded too: polling is observational, and each Objective's elapsed
+ * deadline is frozen in its queue admission before dispatch rather than renewed by config.
  */
 export function factoryConfigDigest(config: FactoryConfig): string {
   const { autonomy: _autonomy, queue: _queue, ...bound } = config;

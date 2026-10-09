@@ -140,7 +140,7 @@ export function buildPlanCandidate(
   };
 }
 
-function completeAcceptedDecision(
+export function completeAcceptedDecision(
   decision: PlanCandidate["humanDecision"],
 ): decision is NonNullable<PlanCandidate["humanDecision"]> {
   return Boolean(

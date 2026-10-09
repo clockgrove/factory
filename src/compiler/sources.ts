@@ -14,6 +14,7 @@ import { normalizedCommand } from "../qa.js";
 import {
   PINNED_PNPM_BOOTSTRAP,
   packageScriptInvocation,
+  packageManagerVersionProbe,
   assertPinnedNpmScripts,
   fixedPackageScripts,
 } from "../validation.js";
@@ -186,7 +187,7 @@ export function validateCommandProvenance(
     for (const check of item.validation) {
       if (!authorizedCommand(check, graph.baseSha, sources, checkout)) {
         throw new Error(
-          `Work Item ${item.id} has no exact ${check.provenance} command authority in ${check.source ?? "unknown source"}: ${check.command}`,
+          `Work Item ${item.id} has no exact ${check.provenance} command authority in ${check.source ?? "unknown source"}: ${check.command}. Use one complete standalone command from the pinned source. For base-observed package.json, invoke an existing script by name, not its JSON body; commands this plan creates are not base-observed. Package scripts must use a supported root npm/pnpm invocation with fixed script bodies, hooks and configuration; a tool-version probe must use --version without extra package-manager options or script execution. Do not invent a replacement command or weaken acceptance.`,
         );
       }
     }
@@ -421,6 +422,7 @@ function authorizedCommand(
   if (!check.command.trim() || !check.source) return false;
   const packageCommand = /\b(?:npm|pnpm)\b/.test(check.command);
   const bootstrap = check.command.trim() === PINNED_PNPM_BOOTSTRAP;
+  const versionProbe = packageManagerVersionProbe(check.command);
   const invocation =
     packageCommand && !bootstrap
       ? packageScriptInvocation(check.command)
@@ -428,7 +430,7 @@ function authorizedCommand(
   if (packageCommand) {
     if (bootstrap) {
       if (check.provenance !== "source-declared") return false;
-    } else {
+    } else if (!versionProbe) {
       if (!invocation) return false;
       if (check.provenance === "base-observed") {
         try {
@@ -699,27 +701,6 @@ export function fixedScripts(
   );
 }
 
-/**
- * A base-observed command exists at the base: a package script or a line of a
- * tracked file at baseSha. A command the plan itself creates does not, so the
- * planner is told to revise it before review rather than stopping on it.
- */
-function assertBaseObservedCommands(
-  graph: WorkGraph,
-  sources: PlanningSource[],
-  checkout: string,
-): void {
-  for (const item of graph.items)
-    for (const check of item.validation)
-      if (
-        check.provenance === "base-observed" &&
-        !authorizedCommand(check, graph.baseSha, sources, checkout)
-      )
-        throw new Error(
-          `Work Item ${item.id} marks \`${check.command}\` base-observed in ${check.source ?? "an unknown source"}, but it is not authorized at base ${graph.baseSha}. For package.json, use the repository's authorized npm/pnpm invocation by an existing script name, not its JSON script body. Other tracked files require an exact standalone executable command line. A command the plan creates is not base-observed: use a standalone source-declared command line from the Objective or a pinned source, or prove the criterion by review.`,
-        );
-}
-
 export function validateGraphSources(
   graph: WorkGraph,
   sources: PlanningSource[],
@@ -731,8 +712,7 @@ export function validateGraphSources(
   assertKnownCheckNames(graph, workflowCheckNames(checkout, baseSha));
   validateCitations(graph, sources);
   assertWorkerInputSources(graph, sources);
-  validateWorkspacePackagePlan(graph, body, checkout);
-  assertBaseObservedCommands(graph, sources, checkout);
+  validateCommandProvenance(graph, sources, checkout);
   for (const item of graph.items) {
     if (
       new Set(item.expectedOutputRoles ?? []).size !==

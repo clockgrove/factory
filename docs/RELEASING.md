@@ -22,7 +22,7 @@ A version with a suffix, such as `0.2.0-rc.1`, is published as a GitHub prerelea
    node scripts/version.mjs set X.Y.Z
    ```
 
-   This updates `package.json`, `package-lock.json`, the Codex and Claude Code plugin manifests and both marketplace refs. If production dependencies changed, run `npm run notices`. GitHub Release notes are generated from the merged pull requests; Git history retains the changes.
+   This updates `package.json`, `package-lock.json`, the Codex and Claude Code plugin manifests and both marketplace refs. Format the changed JSON manifests with the repository formatter before review; the version helper can expand arrays that the formatter keeps inline. If production dependencies changed, run `npm run notices`. GitHub Release notes are generated from the merged pull requests; Git history retains the changes.
 
 2. **Review the batch.** Merge the phase's diagnosed fixes through the normal protected pull request path with green Quality checks. Retain focused independent review for changes to credentials, isolation or persisted state. Refresh the release branch after the batch is complete, and independently review its exact candidate.
 

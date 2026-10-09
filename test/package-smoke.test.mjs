@@ -30,11 +30,26 @@ test("packed Factory installs offline and runs its CLI and bundled scanner", () 
       "origin",
       "https://github.com/example/package-smoke.git",
     );
+    const npmVersion = execFileSync("npm", ["--version"], {
+      encoding: "utf8",
+    }).trim();
+    const versionProbe = `npm --version && test "$(npm --version)" = "${npmVersion}"`;
     writeFileSync(
       join(checkout, "README.md"),
-      "# Local package smoke target\n",
+      `# Local package smoke target\n\n${versionProbe}\n\nnpm test\n\n${versionProbe} && npm test\n\nnpm --version"=false" run test\n`,
     );
-    git("add", "README.md");
+    writeFileSync(
+      join(checkout, "package.json"),
+      `${JSON.stringify({
+        name: "package-smoke-target",
+        private: true,
+        packageManager: `npm@${npmVersion}`,
+        scripts: { test: "node --check app.mjs" },
+      })}\n`,
+    );
+    writeFileSync(join(checkout, "app.mjs"), "export const ready = true;\n");
+    writeFileSync(join(checkout, ".npmrc"), "fund=false\n");
+    git("add", "README.md", "package.json", "app.mjs", ".npmrc");
     git(
       "-c",
       "user.name=Factory Integration",
@@ -126,6 +141,57 @@ try {
   assert.equal(home.env.PATH.split(":").includes(bin), false);
   assert.equal(readFileSync(join(home.env.CODEX_HOME, "config.toml"), "utf8").includes(bin), false);
 } finally { home.dispose(); }
+`,
+      ],
+      { encoding: "utf8", env: environment },
+    );
+    // Exercise the installed compiler's source gate and actual fresh-tree
+    // validation using the same pinned commands. A version assertion is not
+    // a package script; combining it with a script still cannot evade pinning.
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { planningSources, hydrateWorkerInputSources, validateGraphSources } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "compiler.js")).href)};
+import { assertPinnedNpmScripts, validateWorkItem } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "validation.js")).href)};
+const checkout = ${JSON.stringify(checkout)};
+const probe = ${JSON.stringify(versionProbe)};
+const git = (...args) => execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8" }).trim();
+const baseSha = git("rev-parse", "HEAD");
+const body = "## Outcome\\nQualify the pinned tooling.\\n\\n## Acceptance\\n- \u0060" + probe + "\u0060\\n- \u0060npm test\u0060\\n\\n## Sources\\n- README.md\\n\\n## Constraints\\nKeep package configuration fixed.\\n";
+const sources = planningSources(body, baseSha, checkout);
+const item = { id: "tooling", kind: "qa", title: "Verify tooling", acceptance: [], citations: [{ path: "README.md", heading: "" }], dependencies: [], ownedPaths: [], validation: [{ command: probe, provenance: "source-declared", source: "README.md" }, { command: "npm test", provenance: "base-observed", source: "package.json" }], brief: "Run the pinned tooling checks.", minimumAssetSets: 0 };
+const graph = { objective: 1, baseSha, items: [item], coverage: [] };
+hydrateWorkerInputSources(graph, sources);
+validateGraphSources(graph, sources, checkout, body, baseSha);
+const evidence = await validateWorkItem(checkout, ${JSON.stringify(join(root, "command-validation"))}, item, baseSha, git("rev-parse", "HEAD^{tree}"), baseSha);
+assert.equal(evidence.commands.length, 2);
+assert.ok(evidence.commands.every(command => command.passed && command.exitCode === 0));
+assert.equal(evidence.worktreeObservation.subprocessOwnership, "settled");
+item.validation = [{ command: probe + " && npm test", provenance: "source-declared", source: "README.md" }];
+assert.throws(() => validateGraphSources(graph, sources, checkout, body, baseSha), /Work Item tooling has no exact source-declared command authority/);
+item.validation[0].command = 'npm --version"=false" run test';
+assert.throws(() => validateGraphSources(graph, sources, checkout, body, baseSha), /Work Item tooling has no exact source-declared command authority/);
+const packagePath = join(checkout, "package.json");
+const originalPackage = readFileSync(packagePath, "utf8");
+const changed = JSON.parse(originalPackage);
+changed.scripts.test = "node --check missing.mjs";
+writeFileSync(packagePath, JSON.stringify(changed) + "\\n");
+const commit = (message) => { git("add", "package.json", ".npmrc"); git("-c", "user.name=Factory Integration", "-c", "user.email=factory-integration@example.com", "commit", "-m", message); return git("rev-parse", "HEAD"); };
+const changedScript = commit("Change pinned acceptance script");
+assert.throws(() => assertPinnedNpmScripts(checkout, baseSha, changedScript, ["npm test"]), /script test differs from the accepted base/);
+writeFileSync(packagePath, originalPackage);
+writeFileSync(join(checkout, ".npmrc"), "fund=true\\n");
+const changedConfig = commit("Change pinned package configuration");
+assert.throws(() => assertPinnedNpmScripts(checkout, baseSha, changedConfig, [probe], { sourceDeclared: [probe] }), /\\.npmrc differs from the accepted base/);
+writeFileSync(join(checkout, ".npmrc"), "fund=false\\n");
+commit("Restore pinned package configuration");
 `,
       ],
       { encoding: "utf8", env: environment },

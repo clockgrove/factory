@@ -34,6 +34,9 @@ import { workerToolchainPath } from "./process.js";
 export const CODEX_PLANNING_CONFIG = `web_search = "disabled"
 project_doc_max_bytes = 0
 
+[skills]
+include_instructions = false
+
 [features]
 shell_tool = false
 unified_exec = false

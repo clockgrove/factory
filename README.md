@@ -13,6 +13,8 @@ Factory is an open-source plugin for Codex and Claude Code, built for developers
 
 **Status:** Factory is early, pre-1.0 software. Start with a disposable repository and supervise initial Objectives, and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. See [release notes](https://github.com/clockgrove/factory/releases) for what each version contains.
 
+The [product direction](https://github.com/clockgrove/factory/blob/main/docs/PRODUCT-DIRECTION.md) prioritizes low-touch delivery, app quality and continuity, with GitHub tracking and reasonable time and cost.
+
 ## Requirements
 
 - Linux x64, including a Linux environment under WSL2; Node.js 22 or later for the published bundled Codex path.

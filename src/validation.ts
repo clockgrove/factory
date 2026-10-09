@@ -671,8 +671,25 @@ export interface PackageScriptAuthority {
 export function packageScriptCommands(commands: readonly string[]): string[] {
   return commands.filter(
     (check) =>
-      /\b(?:npm|pnpm)\b/.test(check) && check.trim() !== PINNED_PNPM_BOOTSTRAP,
+      /\b(?:npm|pnpm)\b/.test(check) &&
+      check.trim() !== PINNED_PNPM_BOOTSTRAP &&
+      !packageManagerVersionProbe(check),
   );
+}
+
+/**
+ * A version-only invocation may be followed by a source-declared shell
+ * assertion. Every package-manager token must belong to that exact probe;
+ * extra options, subcommands or script invocations remain subject to the
+ * script gate. This classification supplies no command or executable authority.
+ */
+export function packageManagerVersionProbe(command: string): boolean {
+  if (!/\b(?:npm|pnpm)\b/.test(command)) return false;
+  const withoutProbes = command.replace(
+    /\b(?:npm|pnpm) --version(?=\s*(?:[;&|)\n]|$))/g,
+    "",
+  );
+  return !/\b(?:npm|pnpm)\b/.test(withoutProbes);
 }
 
 /** Names of the package scripts (and their pre/post hooks) validation keeps identical to the base. */
@@ -794,7 +811,10 @@ export function assertPinnedNpmScripts(
   if (
     bootstrap &&
     commands.findIndex((check) => check.trim() === PINNED_PNPM_BOOTSTRAP) >
-      commands.findIndex((check) => managerToken.test(check))
+      commands.findIndex(
+        (check) =>
+          managerToken.test(check) && !packageManagerVersionProbe(check),
+      )
   )
     throw new Error(
       "Package script validation blocked: script-disabled bootstrap must run first",
@@ -806,11 +826,21 @@ export function assertPinnedNpmScripts(
       "Package script validation blocked: only root npm/pnpm test, pnpm check, or npm/pnpm run NAME can be pinned",
     );
 
-  if (!original && selected.some((command) => !declared.has(command)))
+  if (
+    !original &&
+    selected.some(
+      (command) =>
+        !packageManagerVersionProbe(command) && !declared.has(command),
+    )
+  )
     throw new Error(
       "Package script validation blocked: a new package.json needs exact source-declared command authority",
     );
-  if (!after && !authority.preview)
+  if (
+    !after &&
+    !authority.preview &&
+    (original || bootstrap || scriptCommands.length)
+  )
     throw new Error(
       "Package script validation blocked: package.json is absent from the result tree",
     );
@@ -827,8 +857,7 @@ export function assertPinnedNpmScripts(
   const predecessorScripts =
     requests.length && predecessor?.scripts ? scripts(predecessor) : {};
   const afterScripts = requests.length && after?.scripts ? scripts(after) : {};
-  const usesPnpm =
-    bootstrap || requests.some((request) => request!.manager === "pnpm");
+  const usesPnpm = selected.some((command) => /\bpnpm\b/.test(command));
   for (let index = 0; index < requests.length; index++) {
     const request = requests[index]!;
     const command = scriptCommands[index]!;

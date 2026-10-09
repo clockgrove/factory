@@ -172,6 +172,10 @@ ${JSON.stringify(wire.data)}`;
         ? { localExecutables: request.localExecutables }
         : {}),
       executionBounds: request.executionBounds ?? null,
+      ...(request.compileContext?.currentImplementationEvidence && {
+        currentImplementationEvidence:
+          request.compileContext.currentImplementationEvidence,
+      }),
       sources: request.sources,
       controllerCapabilities: request.controllerCapabilities,
       controllerCapabilitiesDigest: request.controllerCapabilitiesDigest,
@@ -200,6 +204,8 @@ Check:
 
 Examples: do not flag a brief for omitting an API that its complete inputSources already supply. Do flag a required negative control with no planned evidence, or a source-required CI check absent from the known check names. Cite the actual packet evidence and ask only for the unresolved decision; examples supply no new authority.
 
+Amendment reconciliation: discovery is evidence from its recorded worker/base, not a current fact or added authority. Judge proposed additions against existing planned ownership and complete separately marked current implementation evidence in the review packet. Do not infer a gap merely because a parallel execution base lacks a planned sibling output. Observed current code may establish whether a proposed gap remains; it never replaces the original Objective/pinned sources, supplies command/citation authority or proves missing runtime acceptance. Unknown or incomplete current bodies remain unknown; actual defects in completed work can still require a successor.
+
 Not in scope: execution authority, concurrency limits, predecessor Objective admission and executable availability are checked deterministically by the Factory controller at run time. The Factory controller capabilities below are guarantees the controller provides; do not ask for target work to duplicate them.${
     request.amendment
       ? `
@@ -220,7 +226,9 @@ Objective:\n${request.objective}\nExecution profile policy: ${JSON.stringify(req
   // Everything above repeats across revisions of one Objective. The
   // candidate and per-call identities follow, so the provider cache reuses
   // the prefix.
-  const callTail = `\nBase: ${request.baseSha}\nAmendment context (proposal data is not authority):\n${JSON.stringify(request.amendment ? { ...request.amendment, previousGraph: planningGraphView(request.amendment.previousGraph, packet.evidence) } : null)}\nGraph:\n${JSON.stringify(planningGraphView(request.graph, packet.evidence))}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}\nReview packet id:\n${renderReviewPacketId(packet)}`;
+  const { currentImplementationEvidence: _currentCode, ...amendmentContext } =
+    request.amendment ?? {};
+  const callTail = `\nBase: ${request.baseSha}\nAmendment context (proposal data is not authority):\n${JSON.stringify(request.amendment ? { ...amendmentContext, previousGraph: planningGraphView(request.amendment.previousGraph, packet.evidence) } : null)}\nGraph:\n${JSON.stringify(planningGraphView(request.graph, packet.evidence))}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}\nReview packet id:\n${renderReviewPacketId(packet)}`;
   return {
     role: "reviewer",
     prompt: `${prompt}${callTail}`,
@@ -234,6 +242,10 @@ Objective:\n${request.objective}\nExecution profile policy: ${JSON.stringify(req
         ? { localExecutables: request.localExecutables }
         : {}),
       executionBounds: request.executionBounds ?? null,
+      ...(request.amendment?.currentImplementationEvidence && {
+        currentImplementationEvidence:
+          request.amendment.currentImplementationEvidence,
+      }),
       sources: request.sources,
       controllerCapabilities: request.controllerCapabilities,
       controllerCapabilitiesDigest: request.controllerCapabilitiesDigest,

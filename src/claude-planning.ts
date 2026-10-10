@@ -330,12 +330,29 @@ export async function probeClaudeLogin(
 /** Fail closed when the session exposes anything beyond structured output. */
 function assertPlanningInitialization(
   message: SDKSystemMessage,
-  model: string,
+  selection: ClaudeModelSelection,
+  cwd: string,
   tree: boolean,
 ): void {
-  if (message.model !== model)
+  if (resolve(message.cwd) !== resolve(cwd))
     throw new Error(
-      `Claude SDK selected model ${message.model}, expected ${model}`,
+      "Claude SDK initialized outside the supplied planning tree",
+    );
+  if (message.model !== selection.model)
+    throw new Error(
+      `Claude SDK selected model ${message.model}, expected ${selection.model}`,
+    );
+  if (message.permissionMode !== "dontAsk")
+    throw new Error(
+      `Claude SDK selected permission mode ${message.permissionMode}, expected dontAsk`,
+    );
+  // The pinned SDK may omit effort; only a reported value can authenticate it.
+  if (
+    message.effort !== undefined &&
+    message.effort !== selection.reasoningEffort
+  )
+    throw new Error(
+      `Claude SDK selected reasoning effort ${String(message.effort)}, expected ${selection.reasoningEffort}`,
     );
   const allowed = new Set([
     STRUCTURED_OUTPUT_TOOL,
@@ -743,7 +760,12 @@ class ClaudePlanningTransport implements PlanningTransport {
             }),
           });
         if (message.type === "system" && message.subtype === "init") {
-          assertPlanningInitialization(message, model, Boolean(args.tree));
+          assertPlanningInitialization(
+            message,
+            selection,
+            cwd,
+            Boolean(args.tree),
+          );
           if (owned && message.session_id !== owned.data.nativeSessionId)
             throw new Error(
               "Claude planning initialized a different native conversation",

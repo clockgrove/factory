@@ -307,6 +307,29 @@ export async function controlObjective(
   }
 }
 
+/** Observe supported ownership handoff without changing its thrown control result. */
+export function observeObjectiveController<T>(
+  emitter: DiagnosticEmitter,
+  configDigest: string,
+  task: () => Promise<T>,
+  lifecycleOutcome: (result: T) => string | { outcome: string; runId?: string },
+): Promise<T> {
+  return withDiagnosticSession(
+    emitter,
+    configDigest,
+    () =>
+      emitter.span(
+        { operation: "objective-controller" },
+        task,
+        undefined,
+        (error) =>
+          error instanceof CoordinatorHandoff ? "handed-off" : "failed",
+      ),
+    lifecycleOutcome,
+    (error) => (error instanceof CoordinatorHandoff ? "handed-off" : "failed"),
+  );
+}
+
 /**
  * Plan if needed, then run within the configured autonomy until the Objective completes or
  * needs a human decision. A rerun resumes from state and never plans an existing plan again.
@@ -331,14 +354,12 @@ export async function runObjective(
     config.capture,
     digest,
   );
-  return withDiagnosticSession(
+  return observeObjectiveController(
     emitter,
     digest,
     () =>
-      emitter.span({ operation: "objective-controller" }, () =>
-        withGitHubDiagnostics(config, objective, () =>
-          runObjectiveOwned(config, objective, services, options),
-        ),
+      withGitHubDiagnostics(config, objective, () =>
+        runObjectiveOwned(config, objective, services, options),
       ),
     (result) => ({
       runId: result.runId,

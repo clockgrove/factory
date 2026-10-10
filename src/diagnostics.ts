@@ -191,6 +191,7 @@ export async function withDiagnosticSession<T>(
   configDigest: string,
   task: () => Promise<T>,
   lifecycleOutcome: (result: T) => string | { outcome: string; runId?: string },
+  errorLifecycleOutcome?: (error: unknown) => string,
 ): Promise<T> {
   const session: ObserverSession = {
     id: randomUUID(),
@@ -258,6 +259,14 @@ export async function withDiagnosticSession<T>(
             outcome = "unknown";
           }
           return result;
+        } catch (error) {
+          try {
+            outcome = errorLifecycleOutcome?.(error) ?? "failed";
+          } catch {
+            session.lostObservations++;
+            outcome = "unknown";
+          }
+          throw error;
         } finally {
           session.closed = true;
           emitter.emit({
@@ -739,7 +748,7 @@ export class DiagnosticEmitter {
     completedMetadata?: (
       result: T,
     ) => Record<string, string | number | boolean>,
-    errorOutcome?: (error: unknown) => "waiting" | "failed",
+    errorOutcome?: (error: unknown) => "waiting" | "failed" | "handed-off",
   ): Promise<T> {
     const started = Date.now();
     const operationAttemptId = randomUUID();
@@ -782,13 +791,14 @@ export class DiagnosticEmitter {
       });
       return result;
     } catch (error) {
-      let outcome: "waiting" | "failed" = "failed";
+      let disposition: "waiting" | "failed" | "handed-off" = "failed";
       try {
-        outcome = errorOutcome?.(error) ?? "failed";
+        disposition = errorOutcome?.(error) ?? "failed";
       } catch {
         const session = observerSessions.getStore();
         if (session) session.lostObservations++;
       }
+      const outcome = disposition === "handed-off" ? "waiting" : disposition;
       this.emit({
         ...context,
         operationAttemptId,
@@ -802,10 +812,15 @@ export class DiagnosticEmitter {
             ["decision", "config", "cancelled"].includes(faultOf(error).kind)
               ? "paused"
               : "failed",
-          faultClass: faultOf(error).kind,
+          ...(disposition !== "handed-off" && {
+            faultClass: faultOf(error).kind,
+          }),
         },
         outcome,
         durationMs: Date.now() - started,
+        ...(disposition === "handed-off" && {
+          metadata: { ...context.metadata, controllerDisposition: disposition },
+        }),
         detail: error instanceof Error ? error.message : String(error),
       });
       throw error;

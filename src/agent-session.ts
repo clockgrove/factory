@@ -362,7 +362,14 @@ export function agentSessionContinuation(
         prior.adapter === ref.adapter &&
         prior.executionIdentity === ref.executionIdentity &&
         prior.turn === ref.turn;
-      if (state.cancelRequested && (!sameTurn || ref.status === "in-flight"))
+      // Local closure can settle the owned resources without establishing a
+      // native outcome. Preserve that in-flight uncertainty during cancellation.
+      if (
+        state.cancelRequested &&
+        (!sameTurn ||
+          (ref.status === "in-flight" &&
+            ref.currentTurn?.resources !== "settled"))
+      )
         throw new Error(
           "Cancelling Objective permits only owned turn settlement",
         );

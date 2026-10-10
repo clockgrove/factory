@@ -907,11 +907,65 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       () => {},
     );
     oldGraphDisposal.checkpoint({ ...terminal, status: "released" });
-    activated.cancelRequested = true;
-    const settled = {
+    const nextSubmitted = {
       ...nextIntent,
-      status: "unavailable",
-      currentTurn: { ...nextIntent.currentTurn, resources: "settled" },
+      data: { nativeThread: "retained-opaque-thread" },
+      currentTurn: {
+        ...nextIntent.currentTurn,
+        dispatch: "submitted",
+        resources: "active",
+      },
+    };
+    continuedPlanner.checkpoint(nextSubmitted);
+    activated.cancelRequested = true;
+    assert.throws(
+      () => continuedPlanner.checkpoint(nextSubmitted),
+      /Cancelling/,
+    );
+    assert.throws(
+      () =>
+        continuedPlanner.checkpoint({
+          ...nextSubmitted,
+          currentTurn: { ...nextSubmitted.currentTurn, resources: "unknown" },
+        }),
+      /Cancelling/,
+    );
+    const unknownSettled = {
+      ...nextSubmitted,
+      currentTurn: { ...nextSubmitted.currentTurn, resources: "settled" },
+    };
+    continuedPlanner.checkpoint(unknownSettled);
+    const unknownSnapshot = readFileSync(activationPath, "utf8");
+    competingPlanner.checkpoint(unknownSettled);
+    assert.equal(readFileSync(activationPath, "utf8"), unknownSnapshot);
+    const persistedUnknown = Object.values(
+      parseFactoryState(
+        JSON.parse(unknownSnapshot),
+        activated.repository,
+        activated.objective,
+      ).agentSessions,
+    )[0];
+    assert.deepEqual(persistedUnknown, unknownSettled);
+    assert.equal(persistedUnknown.status, "in-flight");
+    assert.equal(persistedUnknown.currentTurn.terminal, undefined);
+    assert.throws(
+      () => continuedPlanner.checkpoint({ ...unknownSettled, turn: 3 }),
+      /Cancelling/,
+    );
+    assert.throws(
+      () =>
+        continuedPlanner.checkpoint({
+          ...unknownSettled,
+          currentTurn: {
+            ...unknownSettled.currentTurn,
+            requestDigest: "f".repeat(64),
+          },
+        }),
+      /binding/,
+    );
+    const settled = {
+      ...unknownSettled,
+      status: "released",
     };
     continuedPlanner.checkpoint(settled);
     const settledSnapshot = readFileSync(activationPath, "utf8");

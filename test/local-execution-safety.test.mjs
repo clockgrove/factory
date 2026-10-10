@@ -24,10 +24,15 @@ import {
 } from "../dist/objective-knowledge.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
 import { parseFactoryState } from "../dist/state.js";
-import { saveState } from "../dist/state-store.js";
+import { readContinuation, saveState, statePath } from "../dist/state-store.js";
 import { workerAttemptItem } from "../dist/item-worker.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
-import { agentSessionContinuation } from "../dist/agent-session.js";
+import {
+  agentSessionContinuation,
+  assertAgentSessionCapabilities,
+  assertAgentSessions,
+  planningSessionInputDigest,
+} from "../dist/agent-session.js";
 import { StructuredPlanningModel } from "../dist/compiler/model.js";
 import {
   ProviderTurnGuard,
@@ -648,6 +653,252 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       stoppedReceipt,
     );
     delete loaded.cancelRequested;
+    // The same real Git-backed evidence and atomic store authenticate a planner
+    // before a graph exists and after execution activates. These are controller
+    // receipt checks, not provider completion or acceptance claims.
+    assertAgentSessionCapabilities({
+      resumeRoles: ["planning", "implementation"],
+    });
+    assert.throws(
+      () =>
+        assertAgentSessionCapabilities({
+          resumeRoles: ["planning", "planning"],
+        }),
+      /capabilities/,
+    );
+    assert.throws(
+      () => assertAgentSessionCapabilities({ resumeRoles: ["graph-review"] }),
+      /capabilities/,
+    );
+    const pinnedBody = git(checkout, "show", `${loaded.baseSha}:README.md`);
+    const preparation = {
+      schemaVersion: 8,
+      kind: "preparing",
+      repository: loaded.repository,
+      objective: loaded.objective,
+      runId: loaded.runId,
+      configDigest: loaded.configDigest,
+      baseSha: loaded.baseSha,
+      objectiveBodyDigest: createHash("sha256")
+        .update(pinnedBody)
+        .digest("hex"),
+      sourcePacketDigest: createHash("sha256")
+        .update(JSON.stringify([{ path: "README.md", content: pinnedBody }]))
+        .digest("hex"),
+      autonomy: loaded.autonomy,
+      capacity: loaded.capacity,
+      issueByItemId: {},
+      coordinator: {
+        mode: "running",
+        phase: "planning",
+        phaseStartedAt: new Date().toISOString(),
+      },
+    };
+    const preparationPath = statePath(
+      preparation.repository,
+      preparation.objective,
+    );
+    const savePreparation = () => saveState(preparationPath, preparation);
+    savePreparation();
+    assert.throws(
+      () =>
+        agentSessionContinuation(
+          preparation,
+          "implementation",
+          "api",
+          savePreparation,
+        ),
+      /Preparation/,
+    );
+    assert.throws(
+      () =>
+        planningSessionInputDigest({
+          ...preparation,
+          sourcePacketDigest: undefined,
+        }),
+      /unavailable/,
+    );
+    const planner = agentSessionContinuation(
+      preparation,
+      "planning",
+      undefined,
+      savePreparation,
+    );
+    const intent = {
+      scope: planner.scope,
+      adapter: "local-integration-controller",
+      identity: planner.identity,
+      turn: 1,
+      status: "in-flight",
+      currentTurn: {
+        invocationId: randomUUID(),
+        requestDigest: createHash("sha256").update(pinnedBody).digest("hex"),
+        dispatch: "intent",
+        resources: "unknown",
+      },
+    };
+    planner.checkpoint(intent);
+    assert.deepEqual(
+      Object.values(
+        readContinuation(preparation.repository, preparation.objective)
+          .agentSessions,
+      )[0],
+      intent,
+    );
+    assert.throws(
+      () => planner.checkpoint({ ...intent, turn: 2 }),
+      /Unsettled/,
+    );
+    assert.throws(
+      () => planner.checkpoint({ ...intent, status: "ready" }),
+      /settled terminal/,
+    );
+    assert.throws(
+      () => planner.checkpoint({ ...intent, status: "unavailable" }),
+      /resource settlement/,
+    );
+    const submitted = {
+      ...intent,
+      currentTurn: {
+        ...intent.currentTurn,
+        dispatch: "submitted",
+        resources: "active",
+      },
+    };
+    planner.checkpoint(submitted);
+    assert.throws(() => planner.checkpoint(intent), /regressed/);
+    const terminal = {
+      ...submitted,
+      status: "ready",
+      currentTurn: {
+        ...submitted.currentTurn,
+        terminal: "completed",
+        resources: "settled",
+      },
+    };
+    planner.checkpoint(terminal);
+    const resumedPreparation = readContinuation(
+      preparation.repository,
+      preparation.objective,
+    );
+    const activated = {
+      ...structuredClone(loaded),
+      objectiveBodyDigest: preparation.objectiveBodyDigest,
+      sourcePacketDigest: preparation.sourcePacketDigest,
+      agentSessions: resumedPreparation.agentSessions,
+      agentSessionHistory: resumedPreparation.agentSessionHistory,
+    };
+    const activationPath = join(root, "activated-planner.json");
+    const saveActivation = () => saveState(activationPath, activated);
+    saveActivation();
+    const reloadedActivation = parseFactoryState(
+      JSON.parse(readFileSync(activationPath, "utf8")),
+      activated.repository,
+      activated.objective,
+    );
+    assert.equal(
+      planningSessionInputDigest(preparation),
+      planningSessionInputDigest(reloadedActivation),
+    );
+    const continuedPlanner = agentSessionContinuation(
+      activated,
+      "planning",
+      undefined,
+      saveActivation,
+    );
+    assert.equal(continuedPlanner.identity, planner.identity);
+    assert.deepEqual(continuedPlanner.retained, terminal);
+    const nextIntent = {
+      ...terminal,
+      turn: 2,
+      status: "in-flight",
+      currentTurn: {
+        ...intent.currentTurn,
+        invocationId: randomUUID(),
+        graphDigest: graphDigest(activated.graph),
+      },
+    };
+    assert.throws(
+      () =>
+        continuedPlanner.checkpoint({
+          ...nextIntent,
+          currentTurn: {
+            ...nextIntent.currentTurn,
+            graphDigest: "f".repeat(64),
+          },
+        }),
+      /admitted graph/,
+    );
+    continuedPlanner.checkpoint(nextIntent);
+    const competingPlanner = agentSessionContinuation(
+      activated,
+      "planning",
+      undefined,
+      saveActivation,
+    );
+    assert.throws(
+      () => competingPlanner.checkpoint({ ...nextIntent, turn: 3 }),
+      /Unsettled/,
+    );
+    assert.throws(
+      () =>
+        continuedPlanner.checkpoint({
+          ...nextIntent,
+          currentTurn: {
+            ...nextIntent.currentTurn,
+            requestDigest: "f".repeat(64),
+          },
+        }),
+      /binding/,
+    );
+    assert.throws(
+      () =>
+        continuedPlanner.checkpoint({
+          ...nextIntent,
+          adapter: "foreign-adapter",
+        }),
+      /adapter or owner/,
+    );
+    const changedSource = {
+      ...reloadedActivation,
+      sourcePacketDigest: "f".repeat(64),
+    };
+    assert.throws(
+      () => saveState(join(root, "changed-planner-inputs.json"), changedSource),
+      /Agent session/,
+    );
+    // A retained old planner request binds historical graph bytes; changing a
+    // graph cannot silently mutate that request or rotate planner identity.
+    const historical = structuredClone(reloadedActivation);
+    historical.graph.items[0].brief += " changed graph";
+    assertAgentSessions(historical);
+    assert.equal(
+      agentSessionContinuation(historical, "planning", undefined, () => {})
+        .identity,
+      planner.identity,
+    );
+    const oldGraphDisposal = agentSessionContinuation(
+      historical,
+      "planning",
+      undefined,
+      () => {},
+    );
+    oldGraphDisposal.checkpoint({ ...terminal, status: "released" });
+    activated.cancelRequested = true;
+    const settled = {
+      ...nextIntent,
+      status: "unavailable",
+      currentTurn: { ...nextIntent.currentTurn, resources: "settled" },
+    };
+    continuedPlanner.checkpoint(settled);
+    const settledSnapshot = readFileSync(activationPath, "utf8");
+    competingPlanner.checkpoint(settled);
+    assert.equal(readFileSync(activationPath, "utf8"), settledSnapshot);
+    activated.cancelledAt = new Date().toISOString();
+    assert.throws(
+      () => continuedPlanner.checkpoint({ ...settled, status: "released" }),
+      /Terminal/,
+    );
     const reviewTree = materializeResultTree(checkout, result.treeSha);
     try {
       const reviewHomes = join(root, "private-review-homes");

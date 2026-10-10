@@ -65,7 +65,12 @@ export function planningSessionInputDigest(inputs: {
         inputs.sourcePacketDigest,
         inputs.approvedPlaybookPin === undefined
           ? "absent"
-          : inputs.approvedPlaybookPin,
+          : inputs.approvedPlaybookPin === null
+            ? null
+            : {
+                version: inputs.approvedPlaybookPin.version,
+                digest: inputs.approvedPlaybookPin.digest,
+              },
       ]),
     )
     .digest("hex");

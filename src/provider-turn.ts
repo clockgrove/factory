@@ -50,6 +50,16 @@ export class ProviderTurnElapsedTimeoutError extends ProviderTurnTimeoutError {
   }
 }
 
+/** Check the wall clock at a dispatch boundary even before a due timer runs. */
+export function assertProviderTurnDeadline(deadlineAt?: string): void {
+  if (deadlineAt === undefined) return;
+  const deadline = Date.parse(deadlineAt);
+  if (!Number.isFinite(deadline))
+    throw new Error("Provider turn elapsed deadline must be a valid date");
+  if (Date.now() >= deadline)
+    throw new ProviderTurnElapsedTimeoutError(deadlineAt);
+}
+
 export class ProviderTurnGuard {
   private readonly controller = new AbortController();
   private timer: NodeJS.Timeout | undefined;

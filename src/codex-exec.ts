@@ -12,6 +12,8 @@ import {
   codexJsonBoundaries,
 } from "./codex-boundary-telemetry.js";
 
+import { assertProviderTurnDeadline } from "./provider-turn.js";
+
 export interface CodexStderrDiagnostic {
   text: string;
   observedBytes: number;
@@ -74,6 +76,7 @@ export async function runCodexExec(args: {
   schema: unknown;
   threadId?: string;
   signal: AbortSignal;
+  deadlineAt?: string;
   event: (event: ThreadEvent) => void;
   stderr?: (diagnostic: CodexStderrDiagnostic) => void | Promise<void>;
   redactionValues?: string[];
@@ -162,6 +165,7 @@ export async function runCodexExec(args: {
     }
   };
   try {
+    assertProviderTurnDeadline(args.deadlineAt);
     const result = await subprocessAsync(
       file,
       command,

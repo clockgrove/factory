@@ -63,6 +63,7 @@ import { claudeCaptureEvents } from "./execution/interaction-capture.js";
 import { type Fault, transient } from "./fault.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
+  assertProviderTurnDeadline,
   closeProviderEventStream,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   modelResponseTimeoutMs,
@@ -660,6 +661,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       continuation.checkpoint(owned.ref);
     };
     try {
+      assertProviderTurnDeadline(args.deadlineAt);
       abortController.signal.throwIfAborted();
       root = mkdtempSync(join(tmpdir(), "factory-claude-planning-"));
       const query = this.query ?? (await guard.race(loadClaudeQuery()));
@@ -696,6 +698,7 @@ class ClaudePlanningTransport implements PlanningTransport {
           }
         });
         options.spawnClaudeCodeProcess = (options) => {
+          assertProviderTurnDeadline(args.deadlineAt);
           abortController.signal.throwIfAborted();
           nativeSpawnAttempted = true;
           return spawnNative(options);
@@ -705,6 +708,7 @@ class ClaudePlanningTransport implements PlanningTransport {
         Object.assign(options, claudeResumeOptions(owned));
         options.env = claudeSessionEnvironment(owned, options.env ?? {});
       }
+      assertProviderTurnDeadline(args.deadlineAt);
       abortController.signal.throwIfAborted();
       events = query({ prompt: args.prompt, options })[Symbol.asyncIterator]();
       for (;;) {

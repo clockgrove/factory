@@ -579,6 +579,7 @@ export class CodexPlanningTransport implements PlanningTransport {
             },
           }),
         signal,
+        deadlineAt: args.deadlineAt,
         event: (event) => {
           if (event.type === "thread.started") {
             if (thread.id && event.thread_id !== thread.id)

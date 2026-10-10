@@ -13,12 +13,19 @@ import {
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import {
+  assertAgentSessionRef,
+  assertAgentSessionScope,
+} from "../agent-session.js";
+import { releaseCodexHome } from "../codex-planning-isolation.js";
 import type {
   CodexModelSelection,
   ExecutionProfileEnvironment,
 } from "../config.js";
 import type {
   AgentHarness,
+  AgentSessionRef,
   CapturedAssetSet,
   ContentRef,
   ContentStore,
@@ -61,6 +68,7 @@ import {
   pinnedGit,
   pinnedGitAsync,
   pinnedGitMagicAsync,
+  pinnedGitRaw,
   processGroupExists,
   removeWorktree,
   sanitizedWorkerEnvironment,
@@ -73,7 +81,11 @@ import { workspacePackageAdditions } from "../workspace-membership.js";
 import { stoppedFault } from "./attempt.js";
 import { assertDurableValue } from "./checkpoint.js";
 import { executionFault } from "./fault.js";
-import { checkStagedCandidate } from "./staged-candidate.js";
+import {
+  checkStagedCandidate,
+  scanPrivateStaging,
+} from "./staged-candidate.js";
+import { readWorkHandoff } from "./harness-support.js";
 import {
   killGroup,
   launchWorker,
@@ -117,7 +129,39 @@ interface WorkerHandleData {
   logPath: string;
 }
 
+interface CodexSessionData {
+  selectionDigest: string;
+  threadId?: string;
+  worker?: WorkerHandleData;
+  pendingWorkerIdentity?: string;
+  profileId?: string;
+  nativeEof?: true;
+  /** Added only by the adapter after its exact owned process group ceased. */
+  workerSettled?: true;
+}
+
+interface CodexWorkerSession {
+  ref: AgentSessionRef;
+  root: string;
+  owner: string;
+  resumeThreadId?: string;
+}
+
+function codexSessionOwner(session: AgentSessionRef): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        scope: session.scope,
+        adapter: session.adapter,
+        identity: session.identity,
+      }),
+    )
+    .digest("hex");
+}
+
 export class CodexHarness implements AgentHarness {
+  readonly sessionContinuation = true as const;
+  readonly sessionAdapter = "codex";
   readonly capabilities = {
     protocolVersion: 1,
     worktree: "factory-owned-read-write",
@@ -161,12 +205,105 @@ export class CodexHarness implements AgentHarness {
     return join(dirname(this.credentialDirectory), "harness");
   }
 
+  private sessionRoot(identity: string): string {
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(identity))
+      throw new Error("Invalid Codex session identity");
+    return join(this.harnessRoot, "sessions", identity);
+  }
+
+  private selectionDigest(request: HarnessRequest): string {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          model: this.model,
+          network: this.network,
+          allowedSecretNames: [...this.allowedSecretNames].sort(),
+          executionBinding: request.item.executionBinding,
+        }),
+      )
+      .digest("hex");
+  }
+
+  private async workerSession(
+    request: HarnessRequest,
+  ): Promise<CodexWorkerSession | undefined> {
+    if (!request.session) return undefined;
+    const { scope, identity, retained } = request.session;
+    assertAgentSessionScope(scope);
+    if (scope.role !== "implementation" || scope.itemId !== request.item.id)
+      throw new Error(
+        "Codex implementation session belongs to another role or Work Item",
+      );
+    const selectionDigest = this.selectionDigest(request);
+    const root = this.sessionRoot(identity);
+    let resumeThreadId: string | undefined;
+    if (retained) {
+      assertAgentSessionRef(retained, scope);
+      if (
+        retained.adapter !== this.sessionAdapter ||
+        retained.identity !== identity ||
+        !isDeepStrictEqual(retained.scope, scope)
+      )
+        throw new Error(
+          "Codex continuation does not match the current session scope",
+        );
+      const data = retained.data as Partial<CodexSessionData> | undefined;
+      if (!data || data.selectionDigest !== selectionDigest)
+        throw new Error(
+          "Codex continuation model or permission selection changed",
+        );
+      if (
+        retained.status !== "ready" ||
+        typeof data.threadId !== "string" ||
+        !data.threadId ||
+        data.nativeEof !== true ||
+        data.workerSettled !== true ||
+        !data.worker
+      )
+        throw new Error("Codex continuation has no confirmed completed turn");
+      // The adapter's ready receipt already establishes predecessor group
+      // cessation. Its historical PID may now belong to another process;
+      // current attempts remain fenced by their own durable worker handles.
+      resumeThreadId = data.threadId;
+    } else if (existsSync(root)) {
+      // A start lost before its handle was saved can have created this home.
+      // Its owner and submitted native turn remain unknown; never reuse it.
+      throw new Error(
+        "Codex session home already exists without a settled continuation",
+      );
+    }
+    mkdirSync(dirname(root), { recursive: true, mode: 0o700 });
+    const ref: AgentSessionRef = {
+      scope: structuredClone(scope),
+      adapter: this.sessionAdapter,
+      identity,
+      turn: (retained?.turn ?? 0) + 1,
+      status: "in-flight",
+      executionIdentity: request.attemptId,
+      data: {
+        selectionDigest,
+        ...(request.item.executionBinding && {
+          profileId: request.item.executionBinding.id,
+        }),
+        ...(resumeThreadId && { threadId: resumeThreadId }),
+      },
+    };
+    return {
+      ref,
+      root,
+      owner: codexSessionOwner(ref),
+      ...(resumeThreadId && { resumeThreadId }),
+    };
+  }
+
   /**
    * Start a fresh worker for the attempt identity. Whatever an earlier
    * unrecorded start of it spawned is stopped first (#585).
    */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
     const identity = request.attemptId ?? randomUUID();
+    const boundRequest = { ...request, attemptId: identity };
+    const session = await this.workerSession(boundRequest);
     return {
       identity,
       data: await launchWorker({
@@ -175,11 +312,12 @@ export class CodexHarness implements AgentHarness {
         label: "Codex harness",
         script: fileURLToPath(new URL("./worker.js", import.meta.url)),
         input: codexWorkerInput(
-          request,
+          boundRequest,
           this.network,
           this.allowedSecretNames,
           this.model,
           this.providerTurnIdleTimeoutMs,
+          session,
         ),
         env: sanitizedWorkerEnvironment(
           this.credentialDirectory,
@@ -195,7 +333,52 @@ export class CodexHarness implements AgentHarness {
   }
 
   async observe(handle: HarnessHandle): Promise<HarnessObservation> {
-    return observeWorker(this.require(handle), "Codex harness");
+    const data = this.require(handle);
+    const observed = observeWorker(data, "Codex harness");
+    if (observed.state === "running" || !existsSync(data.resultPath))
+      return observed;
+    const result = readWorkerJson(data.resultPath) as Record<string, unknown>;
+    if (result.session === undefined) return observed;
+    await this.cancel(handle);
+    const session = this.sessionReceipt(data, result.session);
+    return { ...observed, session };
+  }
+
+  private sessionReceipt(
+    data: WorkerHandleData,
+    supplied: unknown,
+  ): AgentSessionRef {
+    assertAgentSessionRef(supplied);
+    const input = readWorkerJson(data.requestPath) as {
+      request?: HarnessRequest;
+      session?: CodexWorkerSession;
+    };
+    const native = supplied.data as CodexSessionData | undefined;
+    if (
+      !input.session ||
+      supplied.status !== "ready" ||
+      supplied.adapter !== this.sessionAdapter ||
+      supplied.identity !== input.session.ref.identity ||
+      supplied.turn !== input.session.ref.turn ||
+      supplied.executionIdentity !== input.session.ref.executionIdentity ||
+      !isDeepStrictEqual(supplied.scope, input.session.ref.scope) ||
+      native?.selectionDigest !==
+        (input.session.ref.data as CodexSessionData).selectionDigest ||
+      native?.profileId !==
+        (input.session.ref.data as CodexSessionData).profileId ||
+      native?.nativeEof !== true ||
+      typeof native.threadId !== "string" ||
+      !native.threadId ||
+      (input.session.resumeThreadId &&
+        native.threadId !== input.session.resumeThreadId)
+    )
+      throw workFault("Codex completion has an invalid session receipt");
+    const session = {
+      ...supplied,
+      data: { ...native, worker: data, workerSettled: true as const },
+    };
+    assertDurableValue(session, "Codex session receipt");
+    return session;
   }
 
   async cancel(handle: HarnessHandle): Promise<void> {
@@ -252,8 +435,31 @@ export class CodexHarness implements AgentHarness {
         value.assets === undefined
           ? undefined
           : parseProducedAssetSets(value.assets);
-      return { evidence: value.evidence, assets };
+      let session: AgentSessionRef | undefined;
+      if (value.session !== undefined) {
+        session = this.sessionReceipt(data, value.session);
+      }
+      return { evidence: value.evidence, assets, ...(session && { session }) };
     }
+  }
+
+  async releaseSession(session: AgentSessionRef): Promise<void> {
+    assertAgentSessionRef(session);
+    if (session.adapter !== this.sessionAdapter)
+      throw new Error("Cannot release another adapter's conversation");
+    const data = session.data as Partial<CodexSessionData> | undefined;
+    if (data?.pendingWorkerIdentity) {
+      if (!/^[a-zA-Z0-9_-]{1,160}$/.test(data.pendingWorkerIdentity))
+        throw new Error("Invalid pending Codex session worker identity");
+      await this.cancelUnrecorded(data.pendingWorkerIdentity);
+    }
+    if (data?.worker && data.workerSettled !== true)
+      await this.cancel({ identity: session.identity, data: data.worker });
+    const root = this.sessionRoot(session.identity);
+    if (!existsSync(root)) return;
+    // The isolation helper authenticates the retained home before removal;
+    // never allow an opaque provider reference to choose a deletion path.
+    releaseCodexHome(root, codexSessionOwner(session));
   }
 }
 
@@ -263,12 +469,14 @@ export function codexWorkerInput(
   allowedSecretNames: string[],
   model: CodexModelSelection,
   providerTurnIdleTimeoutMs = DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  session?: CodexWorkerSession,
 ): {
   request: HarnessRequest;
   network: "host" | "off";
   allowedSecretNames: string[];
   model: CodexModelSelection;
   providerTurnIdleTimeoutMs: number;
+  session?: CodexWorkerSession;
 } {
   return {
     request,
@@ -279,6 +487,7 @@ export function codexWorkerInput(
       reasoningEffort: model.reasoningEffort,
     },
     providerTurnIdleTimeoutMs,
+    ...(session && { session }),
   };
 }
 
@@ -343,6 +552,7 @@ async function preserveControllerAssetDestinations(
 /** Controller-owned staging that collection reads but never commits. */
 const PRIVATE_STAGING = [
   ".factory-discovery.json",
+  ".factory-handoff.json",
   ".factory-inputs",
   ".factory-assets.json",
 ];
@@ -405,6 +615,16 @@ export async function collectWorktreeResult(
   store: ContentStore,
   result: HarnessResult,
 ): Promise<ExecutionResult> {
+  const handoffPath = join(worktree, ".factory-handoff.json");
+  const handoffNotes = judgedAsWork(() => readWorkHandoff(worktree));
+  if (handoffNotes) {
+    if (
+      pinnedGit(worktree, "ls-tree", "HEAD", "--", ".factory-handoff.json") ||
+      pinnedGit(worktree, "ls-files", "--stage", "--", ".factory-handoff.json")
+    )
+      throw workFault("Handoff manifest must be untracked private staging");
+    await scanPrivateStaging(worktree, checkout, ".factory-handoff.json");
+  }
   const discoveryPath = join(worktree, ".factory-discovery.json");
   let discovery: import("../contracts.js").WorkDiscovery | undefined;
   if (existsSync(discoveryPath)) {
@@ -491,7 +711,21 @@ export async function collectWorktreeResult(
       "-A",
       "--",
       ".",
-      ...PRIVATE_STAGING.map((name) => `:(exclude,literal)${name}`),
+      // Git rejects an explicit ignored path even when it is an exclusion.
+      // Already ignored untracked staging cannot be added by the root pathspec.
+      ...PRIVATE_STAGING.filter(
+        (name) =>
+          pinnedGitRaw(
+            worktree,
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            name,
+          ).length > 0,
+      ).map((name) => `:(exclude,literal)${name}`),
     );
   } catch (error) {
     // Git cannot index what the worker left unreadable; any other failure
@@ -537,7 +771,34 @@ export async function collectWorktreeResult(
     );
   const commit = pinnedGit(worktree, "rev-parse", "HEAD");
   const treeSha = pinnedGit(worktree, "rev-parse", "HEAD^{tree}");
+  const handoffSources: NonNullable<ExecutionResult["handoff"]>["sources"] = [];
+  for (const path of new Set(
+    handoffNotes?.flatMap((note) => note.paths) ?? [],
+  )) {
+    const entry = pinnedGitRaw(
+      worktree,
+      "ls-tree",
+      "-z",
+      treeSha,
+      "--",
+      path,
+    ).toString("utf8");
+    const blob = /^(100644|100755) blob ([a-f0-9]{40,64})\t/.exec(entry)?.[2];
+    if (!blob) continue; // A missing or nonregular source never authenticates bytes.
+    const bytes = pinnedGitRaw(worktree, "cat-file", "blob", blob);
+    const ref = await store.put(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
+      { mediaType: "application/octet-stream" },
+    );
+    handoffSources.push({ path, ref });
+  }
   if (discovery) rmSync(discoveryPath);
+  if (handoffNotes) rmSync(handoffPath);
   rmSync(join(worktree, ".factory-inputs"), { recursive: true, force: true });
   rmSync(join(worktree, ".factory-assets.json"), { force: true });
   return {
@@ -545,6 +806,9 @@ export async function collectWorktreeResult(
     treeSha,
     evidence: result.evidence,
     ...(discovery ? { discovery } : {}),
+    ...(handoffNotes
+      ? { handoff: { notes: handoffNotes, sources: handoffSources } }
+      : {}),
     collection: { acceptedIgnoredLinks },
     assets,
   };
@@ -593,6 +857,7 @@ export function retainedFailedResultBrief(
 }
 
 export class LocalExecutionDriver implements ExecutionDriver {
+  readonly sessionContinuation = true as const;
   readonly freshCheckoutReadiness = true as const;
   readonly retainedFailedResultContext = true as const;
   private active = new Map<string, Active>();
@@ -696,6 +961,13 @@ export class LocalExecutionDriver implements ExecutionDriver {
       throw new Error(
         `Harness adapter ${adapterIdentity} does not satisfy the local AgentHarness capability contract`,
       );
+    if (
+      harness.sessionContinuation &&
+      (!harness.sessionAdapter || !harness.releaseSession)
+    )
+      throw new Error(
+        `Harness adapter ${adapterIdentity} declares incomplete session continuation`,
+      );
   }
 
   @classifyFaults(executionFault)
@@ -726,6 +998,13 @@ export class LocalExecutionDriver implements ExecutionDriver {
   ): Promise<ExecutionHandle> {
     const harness = this.resolveHarness(request.item);
     const identity = request.attemptId ?? randomUUID();
+    const session = request.session
+      ? structuredClone(request.session)
+      : undefined;
+    if (session && !context?.checkpointSession)
+      throw new Error(
+        "Local session execution requires a durable session checkpoint callback",
+      );
     const running = this.active.get(identity);
     if (running) return { provider: "local", identity, data: running };
     const worktree = join(this.workRoot, identity);
@@ -854,7 +1133,48 @@ export class LocalExecutionDriver implements ExecutionDriver {
         worktree,
         request.retainedFailedResult,
       );
+      if (session) {
+        assertAgentSessionScope(session.scope);
+        if (
+          session.scope.role !== "implementation" ||
+          session.scope.itemId !== request.item.id
+        )
+          throw new Error(
+            "Local execution session belongs to another Work Item",
+          );
+        if (session.retained)
+          assertAgentSessionRef(session.retained, session.scope);
+        context?.checkpointSession?.({
+          scope: structuredClone(session.scope),
+          adapter:
+            harness.sessionAdapter ??
+            request.item.executionBinding?.adapter ??
+            this.adapterIdentity,
+          identity: session.identity,
+          turn: (session.retained?.turn ?? 0) + 1,
+          status: harness.sessionContinuation ? "in-flight" : "unavailable",
+          executionIdentity: identity,
+          data: harness.sessionContinuation
+            ? {
+                ...(session.retained?.data as
+                  | Record<string, unknown>
+                  | undefined),
+                pendingWorkerIdentity: identity,
+                ...(request.item.executionBinding && {
+                  profileId: request.item.executionBinding.id,
+                }),
+              }
+            : {
+                reason:
+                  "The selected harness does not support native conversation continuation",
+                ...(request.item.executionBinding && {
+                  profileId: request.item.executionBinding.id,
+                }),
+              },
+        });
+      }
       const handle = await harness.start({
+        ...(session && harness.sessionContinuation && { session }),
         ...(request.captureContext &&
           this.captureSettings && {
             capture: {
@@ -974,12 +1294,62 @@ export class LocalExecutionDriver implements ExecutionDriver {
    * result is still in its worktree are continued.
    */
   @classifyFaults(executionFault)
-  async find(handle: ExecutionHandle): Promise<ExecutionHandle | undefined> {
+  async find(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<ExecutionHandle | undefined> {
     const data = handle.data as Partial<Settled> | undefined;
     if (data?.result) return handle;
-    if (data?.stopped !== undefined) return undefined;
+    if (data?.stopped !== undefined) {
+      this.unavailableSession(handle, context);
+      return undefined;
+    }
     if (this.active.has(handle.identity)) return handle;
-    return existsSync(this.require(handle).worktree) ? handle : undefined;
+    const active = this.require(handle);
+    if (existsSync(active.worktree)) return handle;
+    const harness = this.resolveHarness(
+      active.request.item,
+      active.executionBinding,
+    );
+    // A vanished checkout does not establish that its native process stopped.
+    // Retain a live owner; a replacement is admitted only after cancellation
+    // proves cessation through the existing process-group contract.
+    if ((await harness.observe(active.handle)).state === "running")
+      return handle;
+    await harness.cancel(active.handle);
+    this.unavailableSession(handle, context);
+    return undefined;
+  }
+
+  private unavailableSession(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): void {
+    const active = handle.data as Active | undefined;
+    const session = active?.request?.session;
+    if (!session || !active) return;
+    const harness = this.resolveHarness(
+      active.request.item,
+      active.executionBinding,
+    );
+    if (!harness.sessionContinuation) return;
+    context?.checkpointSession?.({
+      scope: structuredClone(session.scope),
+      adapter: harness.sessionAdapter ?? active.adapterIdentity,
+      identity: session.identity,
+      turn: (session.retained?.turn ?? 0) + 1,
+      status: "unavailable",
+      executionIdentity: handle.identity,
+      data: {
+        ...(session.retained?.data as Record<string, unknown> | undefined),
+        pendingWorkerIdentity: handle.identity,
+        ...(active.executionBinding && {
+          profileId: active.executionBinding.id,
+        }),
+        reason:
+          "The owned worker ceased without a retained completed-turn receipt",
+      },
+    });
   }
 
   @classifyFaults(executionFault)
@@ -996,15 +1366,22 @@ export class LocalExecutionDriver implements ExecutionDriver {
   }
 
   @classifyFaults(executionFault)
-  async cancel(handle: ExecutionHandle): Promise<void> {
+  async cancel(
+    handle: ExecutionHandle,
+    context?: ExecutionContext,
+  ): Promise<void> {
     const settled = handle.data as Partial<Settled> | undefined;
     // An attempt that ended has nothing left to stop.
-    if (settled?.result || settled?.stopped !== undefined) return;
+    if (settled?.result || settled?.stopped !== undefined) {
+      if (context?.cancelled()) this.unavailableSession(handle, context);
+      return;
+    }
     const active = this.require(handle);
     await this.resolveHarness(
       active.request.item,
       active.executionBinding,
     ).cancel(active.handle);
+    if (context?.cancelled()) this.unavailableSession(handle, context);
   }
 
   /**
@@ -1028,11 +1405,32 @@ export class LocalExecutionDriver implements ExecutionDriver {
     const active = this.require(handle);
     let collected: ExecutionResult | undefined;
     let collectionError: unknown;
+    let sessionCheckpointed = false;
     try {
       const result = await this.resolveHarness(
         active.request.item,
         active.executionBinding,
       ).collect(active.handle);
+      if (result.session) {
+        if (!active.request.session)
+          throw new Error(
+            "Harness returned an unsolicited conversation receipt",
+          );
+        assertAgentSessionRef(result.session, active.request.session.scope);
+        if (
+          result.session.identity !== active.request.session.identity ||
+          result.session.status !== "ready"
+        )
+          throw new Error(
+            "Harness conversation receipt differs from its admitted turn",
+          );
+        // Harness collection has settled the owned group. Persist native
+        // continuity even if subsequent source/ownership collection rejects
+        // the candidate: this receipt proves no implementation acceptance.
+        if (context?.cancelled()) this.unavailableSession(handle, context);
+        else context?.checkpointSession?.(structuredClone(result.session));
+        sessionCheckpointed = true;
+      }
       collected = await collectWorktreeResult(
         this.checkout,
         active.worktree,
@@ -1040,6 +1438,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
         this.contentStore,
         result,
       );
+      if (result.session) collected.session = structuredClone(result.session);
     } catch (error) {
       collectionError = error;
     }
@@ -1057,6 +1456,31 @@ export class LocalExecutionDriver implements ExecutionDriver {
       throw new Error(
         "Collection subprocess ownership unresolved; checkout retained",
       );
+    if (observed.session && !sessionCheckpointed) {
+      if (!active.request.session)
+        throw new Error(
+          "Harness returned an unsolicited failed-result session receipt",
+        );
+      assertAgentSessionRef(observed.session, active.request.session.scope);
+      if (
+        observed.session.identity !== active.request.session.identity ||
+        observed.session.status !== "ready"
+      )
+        throw new Error(
+          "Failed-result conversation differs from its admitted turn",
+        );
+      if (context?.cancelled()) this.unavailableSession(handle, context);
+      else context?.checkpointSession?.(structuredClone(observed.session));
+    } else if (!observed.session && !sessionCheckpointed) {
+      // This attempt has demonstrably ceased but never supplied a completed
+      // native turn. Preserve its historical conversation for disposal and
+      // allow the controller to allocate a fresh identity within its limits.
+      await this.resolveHarness(
+        active.request.item,
+        active.executionBinding,
+      ).cancel(active.handle);
+      this.unavailableSession(handle, context);
+    }
     const interrupted = !collected && observed.interrupted === true;
     // Only a wrong result ends the attempt here. A transient, config or
     // defect fault from collecting a finished worker's result is not the
@@ -1106,6 +1530,55 @@ export class LocalExecutionDriver implements ExecutionDriver {
       );
     }
     return collected;
+  }
+
+  async releaseSession(session: AgentSessionRef): Promise<void> {
+    assertAgentSessionRef(session);
+    if (session.scope.role !== "implementation" || !session.scope.itemId)
+      throw new Error("Local execution cannot dispose a reviewer conversation");
+    const active = [...this.active.values()].find(
+      (entry) => entry.request.item.id === session.scope.itemId,
+    );
+    if (active) {
+      const harness = this.resolveHarness(
+        active.request.item,
+        active.executionBinding,
+      );
+      if ((await harness.observe(active.handle)).state === "running")
+        throw new Error(
+          "Cannot dispose a conversation while its Work Item worker is active",
+        );
+      await harness.cancel(active.handle);
+    }
+    let harnesses: RecoverableHarness[];
+    if (this.profiles) {
+      const profileId = (session.data as CodexSessionData | undefined)
+        ?.profileId;
+      const registration = profileId ? this.profiles.get(profileId) : undefined;
+      if (!registration)
+        throw new Error(
+          "The retained session execution profile is unavailable for cleanup",
+        );
+      let harness = this.profileHarnesses.get(profileId!);
+      if (!harness) {
+        harness = registration.createHarness();
+        this.assertCapabilities(harness, registration.binding.adapter);
+        this.profileHarnesses.set(profileId!, harness);
+      }
+      harnesses = [harness];
+    } else {
+      harnesses = [this.harness as RecoverableHarness];
+    }
+    harnesses = harnesses.filter(
+      (harness) => harness.sessionAdapter === session.adapter,
+    );
+    if (!harnesses.length) {
+      if (session.status === "unavailable") return;
+      throw new Error(
+        "The retained session adapter is unavailable for cleanup",
+      );
+    }
+    for (const harness of harnesses) await harness.releaseSession?.(session);
   }
 }
 

@@ -5,6 +5,8 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  lstatSync,
+  unlinkSync,
   symlinkSync,
   writeFileSync,
   existsSync,
@@ -12,6 +14,7 @@ import {
   closeSync,
   constants,
   fstatSync,
+  ftruncateSync,
   openSync,
   opendirSync,
   readSync,
@@ -22,6 +25,8 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
   captureOwnedRollout,
   type NativeCaptureObserver,
+  type NativeCaptureBoundary,
+  ownedRolloutBoundary,
 } from "./codex-native-capture.js";
 import { workerToolchainPath } from "./process.js";
 
@@ -314,6 +319,9 @@ enabled = ${sandbox.network}
 }
 
 export interface CodexHome {
+  root: string;
+  /** Authenticate settled native history before resuming; unavailable throws. */
+  nativeCaptureBoundary(threadId: string): NativeCaptureBoundary;
   /** Environment for the Codex process; it replaces `process.env`. */
   env: Record<string, string>;
   /** Bounded native event metadata only; no payloads or cessation proof. */
@@ -322,6 +330,7 @@ export interface CodexHome {
   nativeCapture(
     threadId: string | undefined,
     observe: NativeCaptureObserver,
+    boundary?: NativeCaptureBoundary,
   ): void;
   /** Removes the scratch home. */
   dispose(): void;
@@ -332,6 +341,8 @@ function nativeMetadata(
   threadId?: string,
   observe?: NativeCaptureObserver,
   identity?: { dev: number; ino: number },
+  boundary?: NativeCaptureBoundary,
+  snapshot = false,
 ): unknown {
   const unavailable = { source: "codex-rollout", status: "unavailable" };
   if (!threadId || !/^[0-9a-f-]{36}$/.test(threadId)) return unavailable;
@@ -392,11 +403,13 @@ function nativeMetadata(
       const stat = fstatSync(fd);
       if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.nlink !== 1)
         return unavailable;
+      if (snapshot) return ownedRolloutBoundary(fd, selectedThread);
       if (observe) {
         const coverage = captureOwnedRollout(fd, selectedThread, observe, {
           parentThreadId: selectedParent,
           rootThreadId: threadId,
           budget,
+          boundary: selectedParent ? undefined : boundary,
           child: (child) => {
             if (!seen.has(child.id)) {
               seen.add(child.id);
@@ -528,47 +541,171 @@ function nativeMetadata(
   }
 }
 
+const ownerFile = "factory-owner.json";
+
+function privateDirectory(path: string): { dev: number; ino: number } {
+  const stat = lstatSync(path);
+  if (
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    stat.uid !== process.getuid?.() ||
+    (stat.mode & 0o077) !== 0 ||
+    realpathSync(path) !== resolve(path)
+  )
+    throw new Error(
+      "Codex native home is not a private owned physical directory",
+    );
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function ownedFile(path: string): number {
+  const fd = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  const stat = fstatSync(fd);
+  if (
+    !stat.isFile() ||
+    stat.uid !== process.getuid?.() ||
+    stat.nlink !== 1 ||
+    (stat.mode & 0o077) !== 0
+  ) {
+    closeSync(fd);
+    throw new Error("Codex native home contains an unauthenticated file");
+  }
+  return fd;
+}
+
+function authenticateHome(root: string, owner: string) {
+  const identity = privateDirectory(root);
+  const fd = ownedFile(join(root, ownerFile));
+  let marker;
+  try {
+    marker = JSON.parse(readFileSync(fd, "utf8"));
+  } finally {
+    closeSync(fd);
+  }
+  if (
+    marker.version !== 1 ||
+    marker.owner !== owner ||
+    marker.root?.dev !== identity.dev ||
+    marker.root?.ino !== identity.ino
+  )
+    throw new Error("Codex native home does not match its recorded owner");
+  for (const directory of ["home", "codex-home", "tmp"]) {
+    const actual = privateDirectory(join(root, directory));
+    if (
+      marker[directory]?.dev !== actual.dev ||
+      marker[directory]?.ino !== actual.ino
+    )
+      throw new Error("Codex native home directory identity changed");
+  }
+  const config = ownedFile(join(root, "codex-home", "config.toml"));
+  closeSync(config);
+  return identity;
+}
+
+/** Remove only an authenticated, settled retained adapter home. */
+export function releaseCodexHome(root: string, owner: string): void {
+  authenticateHome(root, owner);
+  rmSync(root, { recursive: true });
+}
+
 /**
- * A scratch CODEX_HOME, HOME and TMPDIR for one Codex thread. It holds
- * Factory's config and a link to the operator's login (`auth.json`, linked
- * so a token refresh reaches the operator), and nothing else: not the
- * operator's `config.toml`, `AGENTS.md`, skills, profiles or MCP servers.
- * With a `sandbox`, the config also confines every shell command to it.
- * `keep` names further variables to pass through, such as declared secrets.
+ * Factory-owned CODEX_HOME, HOME and TMPDIR. Resume authenticates the retained
+ * owner and directories, then rebinds only approved config, current permissions
+ * and the existing operator-login route. Operator config is never imported.
  */
 export function createCodexHome(options: {
-  /** A harness-owned path, removed only after its process group is settled. */
   root?: string;
+  /** Stable adapter digest bound to Objective scope, session and selection. */
+  owner?: string;
+  resume?: boolean;
   source?: NodeJS.ProcessEnv;
   config: string;
   sandbox?: CodexSandbox;
   keep?: readonly string[];
 }): CodexHome {
+  if (options.owner !== undefined && !/^[a-f0-9]{64}$/.test(options.owner))
+    throw new Error("Codex native home owner must be a stable adapter digest");
+  if (options.resume && (!options.root || !options.owner))
+    throw new Error("Resuming Codex requires an explicitly owned native home");
   const ambient = options.source ?? process.env;
   const source: NodeJS.ProcessEnv = {
     ...ambient,
     PATH: workerToolchainPath(ambient.PATH),
   };
-  const root = options.root ?? mkdtempSync(join(tmpdir(), "factory-codex-"));
-  if (options.root) mkdirSync(root, { mode: 0o700 });
+  const root = options.root
+    ? resolve(options.root)
+    : mkdtempSync(join(tmpdir(), "factory-codex-"));
+  if (options.sandbox && within(root, real(options.sandbox.directory))) {
+    if (!options.root) rmSync(root, { recursive: true, force: true });
+    throw new Error("Codex native homes must stay outside target workspaces");
+  }
+  if (options.resume) authenticateHome(root, options.owner!);
+  else if (options.root) mkdirSync(root, { mode: 0o700 });
+  const retained = Boolean(options.owner);
   try {
     const home = join(root, "home");
     const codexHome = join(root, "codex-home");
     const temporary = join(root, "tmp");
-    for (const directory of [home, codexHome, temporary])
-      mkdirSync(directory, { mode: 0o700 });
-    const codexIdentity = statSync(codexHome);
-    writeFileSync(
-      join(codexHome, "config.toml"),
-      options.sandbox
-        ? `default_permissions = "factory"\n${options.config}\n${permissionProfile(options.sandbox, source, home, temporary)}`
-        : options.config,
+    if (!options.resume) {
+      for (const directory of [home, codexHome, temporary])
+        mkdirSync(directory, { mode: 0o700 });
+      if (options.owner) {
+        const marker = {
+          version: 1,
+          owner: options.owner,
+          root: privateDirectory(root),
+          home: privateDirectory(home),
+          "codex-home": privateDirectory(codexHome),
+          tmp: privateDirectory(temporary),
+        };
+        writeFileSync(join(root, ownerFile), JSON.stringify(marker), {
+          mode: 0o600,
+          flag: "wx",
+        });
+      }
+    }
+    const codexIdentity = privateDirectory(codexHome);
+    const config = options.sandbox
+      ? `default_permissions = "factory"\n${options.config}\n${permissionProfile(options.sandbox, source, home, temporary)}`
+      : options.config;
+    const configPath = join(codexHome, "config.toml");
+    const configFd = openSync(
+      configPath,
+      constants.O_WRONLY |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK |
+        (options.resume ? 0 : constants.O_CREAT | constants.O_EXCL),
+      0o600,
     );
+    try {
+      const file = fstatSync(configFd);
+      if (
+        !file.isFile() ||
+        file.uid !== process.getuid?.() ||
+        file.nlink !== 1 ||
+        (file.mode & 0o077) !== 0
+      )
+        throw new Error("Codex native home contains an unauthenticated config");
+      if (options.resume) ftruncateSync(configFd, 0);
+      writeFileSync(configFd, config);
+    } finally {
+      closeSync(configFd);
+    }
     const login = join(
       source.CODEX_HOME || join(source.HOME || homedir(), ".codex"),
       "auth.json",
     );
-    if (existsSync(login)) symlinkSync(login, join(codexHome, "auth.json"));
+    const authPath = join(codexHome, "auth.json");
+    if (options.resume) {
+      const auth = lstatSync(authPath, { throwIfNoEntry: false });
+      if (auth && (!auth.isSymbolicLink() || auth.uid !== process.getuid?.()))
+        throw new Error("Retained Codex authentication route changed");
+      if (auth) unlinkSync(authPath);
+    }
+    if (existsSync(login)) symlinkSync(login, authPath);
     const env: Record<string, string> = {};
     for (const [name, value] of Object.entries(source))
       if (
@@ -580,19 +717,33 @@ export function createCodexHome(options: {
     env.HOME = home;
     env.CODEX_HOME = codexHome;
     env.TMPDIR = temporary;
-    // Git metadata is read-only in the sandbox: `git status` must not try to
-    // refresh the index.
     if (options.sandbox) env.GIT_OPTIONAL_LOCKS = "0";
     return {
+      root,
       env,
+      nativeCaptureBoundary: (threadId) => {
+        const result = nativeMetadata(
+          codexHome,
+          threadId,
+          undefined,
+          codexIdentity,
+          undefined,
+          true,
+        );
+        if (!result || typeof result !== "object" || !("digest" in result))
+          throw new Error(
+            "Owned native history has no authenticated turn boundary",
+          );
+        return result as NativeCaptureBoundary;
+      },
       nativeMetadata: (threadId) =>
         nativeMetadata(codexHome, threadId, undefined, codexIdentity),
-      nativeCapture: (threadId, observe) => {
+      nativeCapture: (threadId, observe, boundary) => {
         const safely: NativeCaptureObserver = (event, content) => {
           try {
             observe(event, content);
           } catch {
-            /* Capture is observational and cannot affect provider outcomes. */
+            /* Observations cannot affect provider outcomes. */
           }
         };
         const result = nativeMetadata(
@@ -600,9 +751,8 @@ export function createCodexHome(options: {
           threadId,
           safely,
           codexIdentity,
-        ) as {
-          status: string;
-        };
+          boundary,
+        ) as { status: string };
         if (result.status === "unavailable")
           safely({
             kind: "interaction",
@@ -625,10 +775,14 @@ export function createCodexHome(options: {
             },
           });
       },
-      dispose: () => rmSync(root, { recursive: true, force: true }),
+      dispose: () => {
+        if (!retained) rmSync(root, { recursive: true, force: true });
+      },
     };
   } catch (error) {
-    rmSync(root, { recursive: true, force: true });
+    // Retained evidence survives setup/rebinding failure for supported cleanup.
+    if (!options.resume && !retained)
+      rmSync(root, { recursive: true, force: true });
     throw error;
   }
 }

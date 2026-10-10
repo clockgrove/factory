@@ -67,6 +67,7 @@ export async function runCodexExec(args: {
   options: ThreadOptions;
   prompt: string;
   schema: unknown;
+  threadId?: string;
   signal: AbortSignal;
   event: (event: ThreadEvent) => void;
   stderr?: (diagnostic: CodexStderrDiagnostic) => void | Promise<void>;
@@ -100,6 +101,7 @@ export async function runCodexExec(args: {
       `model_reasoning_effort=${JSON.stringify(options.modelReasoningEffort)}`,
     );
   command.push("--config", 'approval_policy="never"');
+  if (args.threadId) command.push("resume", args.threadId);
   const stop = new AbortController();
   const signal = AbortSignal.any([args.signal, stop.signal]);
   const decoder = new StringDecoder("utf8");

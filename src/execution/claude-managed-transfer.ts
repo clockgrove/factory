@@ -134,6 +134,7 @@ const files=[];
 const declared=[];
 try{if(!lstatSync('.factory-inputs').isDirectory())throw new Error('Unsafe input directory');for(const name of readdirSync('.factory-inputs')){if(!/^(selected|source)-[0-9]+$/.test(name))throw new Error('Unexpected private input');declared.push('.factory-inputs/'+name);}}catch(e){if(e.code!=='ENOENT')throw e;}
 try{const sets=JSON.parse(readFileSync('.factory-assets.json','utf8')).sets;if(!Array.isArray(sets))throw new Error('Invalid AssetSet declaration');for(const set of sets)for(const member of set.members)declared.push(member.path);declared.push('.factory-assets.json');}catch(e){if(e.code!=='ENOENT')throw e;}
+try{if(lstatSync('.factory-handoff.json').isFile())declared.push('.factory-handoff.json');else throw new Error('Unsafe handoff manifest');}catch(e){if(e.code!=='ENOENT')throw e;}
 const paths=[...new Set([...declared,...execFileSync('git',['ls-files','--cached','--others','--exclude-standard','-z'],{encoding:'utf8'}).split('\0').filter(Boolean)])];
 for(const path of paths){
  if(typeof path!=='string'||!path||path.includes('\\')||path.includes('\0')||path.split('/').some(p=>!p||p==='.'||p==='..'||p.toLowerCase()==='.git'))throw new Error('Unsafe output path');

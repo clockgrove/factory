@@ -6,7 +6,15 @@ import {
   type PlanningTurn,
 } from "./transport.js";
 import type { CodexModelSelection } from "../config.js";
-import type { ModelInvocationContext } from "../contracts.js";
+import type {
+  ModelInvocationContext,
+  AgentSessionContinuation,
+  AgentSessionRef,
+} from "../contracts.js";
+import { lstatSync, mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { createHash } from "node:crypto";
 import {
   ProviderTurnGuard,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
@@ -16,19 +24,20 @@ import {
   createCodexHome,
   CODEX_TREE_REVIEW_CONFIG,
   CODEX_PLANNING_CONFIG,
+  releaseCodexHome,
 } from "../codex-planning-isolation.js";
 import { runCodexExec } from "../codex-exec.js";
 import { observeModelInvocation } from "./observation.js";
-import { codexRawTokenUsage, codexTokenUsage } from "../usage.js";
+import { codexRawTokenUsage, codexInvocationUsage } from "../usage.js";
 import { codexCaptureEvent } from "../execution/interaction-capture.js";
 import { UnsettledSubprocessError } from "../process.js";
 
 const LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
 
 /**
- * Codex SDK transport: a read-only, never-approving, tool-free thread per
- * attempt, run under Factory's own scratch CODEX_HOME so the operator's
- * config.toml and AGENTS.md never apply.
+ * Codex native transport with isolated review continuations. Compilation and
+ * graph review remain fresh, tool-free turns; result reviews keep their own
+ * conversation while reading only each invocation's exact candidate tree.
  */
 export class CodexPlanningTransport implements PlanningTransport {
   readonly provider = CODEX_PLANNING_PROVIDER;
@@ -40,7 +49,71 @@ export class CodexPlanningTransport implements PlanningTransport {
     private reviewer: CodexModelSelection,
     private providerTurnIdleTimeoutMs: number | undefined,
     private redactionValues: string[],
+    private sessionRoot?: string,
   ) {}
+
+  get sessionContinuation(): true | undefined {
+    return this.sessionRoot ? true : undefined;
+  }
+
+  private sessionOwner(session: AgentSessionRef): string {
+    return createHash("sha256")
+      .update(
+        JSON.stringify([
+          session.scope,
+          session.identity,
+          session.adapter,
+          (session.data as { selectionDigest?: string } | undefined)
+            ?.selectionDigest,
+        ]),
+      )
+      .digest("hex");
+  }
+
+  private sessionData(session: AgentSessionRef): {
+    sessionRoot: string;
+    threadId?: string;
+    selectionDigest: string;
+  } {
+    const data = session.data as
+      | {
+          sessionRoot?: unknown;
+          threadId?: unknown;
+          selectionDigest?: unknown;
+        }
+      | undefined;
+    if (
+      !this.sessionRoot ||
+      session.adapter !== this.adapter ||
+      !/^[a-f0-9-]{36}$/.test(session.identity) ||
+      data?.sessionRoot !== join(resolve(this.sessionRoot), session.identity) ||
+      typeof data.selectionDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(data.selectionDigest) ||
+      (data.threadId !== undefined &&
+        (typeof data.threadId !== "string" ||
+          !/^[a-f0-9-]{36}$/.test(data.threadId)))
+    )
+      throw new Error(
+        "Reviewer continuation differs from its private adapter binding",
+      );
+    return data as {
+      sessionRoot: string;
+      threadId?: string;
+      selectionDigest: string;
+    };
+  }
+
+  async releaseSession(session: AgentSessionRef): Promise<void> {
+    if (session.status === "in-flight")
+      throw new Error(
+        "Cannot release reviewer session with unproved process settlement",
+      );
+    const data = this.sessionData(session);
+    // A settled session may have been disposed before its atomic state
+    // checkpoint. Its exact adapter-owned path remains the disposal identity.
+    if (!lstatSync(data.sessionRoot, { throwIfNoEntry: false })) return;
+    releaseCodexHome(data.sessionRoot, this.sessionOwner(session));
+  }
 
   selection(role: PlanningRole): CodexModelSelection {
     return role === "planner" ? this.planner : this.reviewer;
@@ -62,10 +135,55 @@ export class CodexPlanningTransport implements PlanningTransport {
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
     tree?: string;
+    session?: AgentSessionContinuation;
     signal?: AbortSignal;
   }): Promise<void> {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
+    const continuation =
+      this.sessionRoot && args.tree && args.session ? args.session : undefined;
+    let session: AgentSessionRef | undefined;
+    let sessionData:
+      | ReturnType<CodexPlanningTransport["sessionData"]>
+      | undefined;
+    if (continuation) {
+      if (
+        args.role !== "reviewer" ||
+        !["result-review", "objective-review"].includes(continuation.scope.role)
+      )
+        throw new Error("Reviewer continuation has a different role");
+      const selectionDigest = createHash("sha256")
+        .update(JSON.stringify(selection))
+        .digest("hex");
+      if (continuation.retained) {
+        const retained = continuation.retained;
+        sessionData = this.sessionData(retained);
+        if (
+          retained.status !== "ready" ||
+          !sessionData.threadId ||
+          retained.identity !== continuation.identity ||
+          !isDeepStrictEqual(retained.scope, continuation.scope) ||
+          sessionData.selectionDigest !== selectionDigest
+        )
+          throw new Error(
+            "Reviewer session cannot continue without settled matching ownership",
+          );
+      } else {
+        mkdirSync(this.sessionRoot!, { recursive: true, mode: 0o700 });
+        sessionData = {
+          sessionRoot: join(resolve(this.sessionRoot!), continuation.identity),
+          selectionDigest,
+        };
+      }
+      session = {
+        scope: structuredClone(continuation.scope),
+        adapter: this.adapter,
+        identity: continuation.identity,
+        data: sessionData,
+        turn: (continuation.retained?.turn ?? 0) + 1,
+        status: "in-flight",
+      };
+    }
     const started = Date.now();
     // Native exec JSON omits text/reasoning deltas. A healthy structured
     // answer can stay silent until its final agent_message, at any effort.
@@ -76,22 +194,25 @@ export class CodexPlanningTransport implements PlanningTransport {
       ["graph-review", "result-review", "objective-review"].includes(
         invocation.phase,
       ) && ["minimal", "low", "medium"].includes(selection.reasoningEffort);
-    const turn = new ProviderTurnGuard(
-      this.providerTurnIdleTimeoutMs ??
-        (lowerEffortReview
-          ? LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS
-          : DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS),
-      this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
-    );
-    const thread: { id?: string } = {};
+    const thread: { id?: string } = { id: sessionData?.threadId };
     let retainHome = false;
     let turnCompleted = false;
+    let nativeCompleted = false;
+    let nativeAttempted = false;
+    let initialCheckpointed = false;
     let streamError: Error | undefined;
     // A tree review's shell reads the tree alone, offline.
     const home = createCodexHome(
       args.tree
         ? {
             config: CODEX_TREE_REVIEW_CONFIG,
+            ...(session && sessionData
+              ? {
+                  root: sessionData.sessionRoot,
+                  resume: Boolean(continuation?.retained),
+                  owner: this.sessionOwner(session),
+                }
+              : {}),
             sandbox: {
               directory: args.tree,
               workspace: "read",
@@ -100,7 +221,49 @@ export class CodexPlanningTransport implements PlanningTransport {
           }
         : { config: CODEX_PLANNING_CONFIG },
     );
+    const captureBoundary =
+      continuation?.retained && thread.id
+        ? home.nativeCaptureBoundary(thread.id)
+        : undefined;
+    const sessionTurn = session
+      ? {
+          mode: captureBoundary ? ("resumed" as const) : ("fresh" as const),
+          ordinal: session.turn,
+          sessionIdentity: session.identity,
+          ...(captureBoundary ? { boundaryBytes: captureBoundary.bytes } : {}),
+        }
+      : undefined;
+    const turn = new ProviderTurnGuard(
+      this.providerTurnIdleTimeoutMs ??
+        (lowerEffortReview
+          ? LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS
+          : DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS),
+      this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+    );
+    const checkpointSession = (status: AgentSessionRef["status"]) => {
+      if (!session || !sessionData || !continuation) return;
+      if (thread.id === undefined) delete sessionData.threadId;
+      else sessionData.threadId = thread.id;
+      session = { ...session, data: { ...sessionData }, status };
+      continuation.checkpoint(session);
+    };
     try {
+      checkpointSession("in-flight");
+      initialCheckpointed = true;
+      if (sessionTurn)
+        observeModelInvocation(invocation, {
+          type: "progress",
+          capture: {
+            event: {
+              kind: "interaction",
+              providerEvent: "factory.review-session",
+              providerSessionId: thread.id,
+              sessionTurn,
+              coverage: "boundary",
+            },
+          },
+        });
+      nativeAttempted = true;
       await runCodexExec({
         env: home.env,
         options: {
@@ -115,6 +278,7 @@ export class CodexPlanningTransport implements PlanningTransport {
         },
         prompt: args.prompt,
         schema: args.schema,
+        threadId: sessionData?.threadId,
         redactionValues: this.redactionValues,
         stderr: (diagnostic) =>
           observeModelInvocation(invocation, {
@@ -133,7 +297,14 @@ export class CodexPlanningTransport implements PlanningTransport {
           ? AbortSignal.any([turn.signal, args.signal])
           : turn.signal,
         event: (event) => {
-          if (event.type === "thread.started") thread.id = event.thread_id;
+          if (event.type === "thread.started") {
+            if (thread.id && event.thread_id !== thread.id)
+              throw new Error(
+                "Reviewer native continuation changed its thread identity",
+              );
+            thread.id = event.thread_id;
+            checkpointSession("in-flight");
+          }
           const item =
             event.type === "item.started" ||
             event.type === "item.updated" ||
@@ -168,7 +339,10 @@ export class CodexPlanningTransport implements PlanningTransport {
           )
             state.response = event.item.text;
           if (event.type === "turn.completed") {
-            const usage = codexTokenUsage(event.usage);
+            const usage = codexInvocationUsage(
+              event.usage,
+              captureBoundary?.usage,
+            );
             observeModelInvocation(invocation, {
               type: "progress",
               capture: {
@@ -182,6 +356,7 @@ export class CodexPlanningTransport implements PlanningTransport {
                       : "unavailable",
                     normalized: usage,
                     raw: codexRawTokenUsage(event.usage),
+                    rawScope: "thread-cumulative",
                   },
                 },
               },
@@ -208,13 +383,17 @@ export class CodexPlanningTransport implements PlanningTransport {
                 : item?.type === "file_change"
                   ? "apply_patch"
                   : undefined;
+          const captured = codexCaptureEvent(
+            event,
+            thread.id ?? undefined,
+            this.redactionValues,
+            "native",
+            captureBoundary?.usage,
+          );
+          if (sessionTurn) captured.event.sessionTurn = sessionTurn;
           observeModelInvocation(invocation, {
             type: "progress",
-            capture: codexCaptureEvent(
-              event,
-              thread.id ?? undefined,
-              this.redactionValues,
-            ),
+            capture: captured,
             provider: this.provider,
             model: selection.model,
             reasoningEffort: selection.reasoningEffort,
@@ -243,6 +422,7 @@ export class CodexPlanningTransport implements PlanningTransport {
           // process-group settlement remain part of this owned invocation.
         },
       });
+      nativeCompleted = true;
       state.stopped = true;
       if (!turnCompleted && streamError) throw streamError;
       requireCompletedProviderTurn(turnCompleted);
@@ -255,7 +435,9 @@ export class CodexPlanningTransport implements PlanningTransport {
         capture: {
           event: {
             kind: "interaction",
-            providerEvent: "codex.native-failure",
+            providerEvent: nativeAttempted
+              ? "codex.native-failure"
+              : "codex.native-startup-failure",
             providerSessionId: thread?.id ?? undefined,
             coverage: "boundary",
           },
@@ -266,14 +448,35 @@ export class CodexPlanningTransport implements PlanningTransport {
     } finally {
       state.providerThreadId = thread.id;
       turn.finish();
-      if (!retainHome) {
-        home.nativeCapture(thread.id, (event, content) =>
-          observeModelInvocation(invocation, {
-            type: "progress",
-            capture: { event, content },
-          }),
+      if (!nativeAttempted && !initialCheckpointed) {
+        // Rejected startup ownership precedes all native work. Dispose only
+        // this freshly created authenticated home; an earlier conversation
+        // and a superseding controller's receipt remain untouched.
+        if (session && !captureBoundary)
+          releaseCodexHome(home.root, this.sessionOwner(session));
+        else if (!session) home.dispose();
+      } else if (!retainHome) {
+        home.nativeCapture(
+          thread.id,
+          (event, content) =>
+            observeModelInvocation(invocation, {
+              type: "progress",
+              capture: { event: { ...event, sessionTurn }, content },
+            }),
+          captureBoundary,
         );
-        home.dispose();
+        if (session && !thread.id) {
+          checkpointSession("unavailable");
+          releaseCodexHome(home.root, this.sessionOwner(session));
+          checkpointSession("released");
+        } else {
+          checkpointSession(
+            thread.id && turnCompleted && nativeCompleted
+              ? "ready"
+              : "unavailable",
+          );
+          if (!session) home.dispose();
+        }
       }
     }
   }

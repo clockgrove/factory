@@ -19,6 +19,7 @@ import { analyzeInteractions } from "../dist/analysis.js";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
 import { codexStderrCapture } from "../dist/codex-exec.js";
+import { createCodexHome } from "../dist/codex-planning-isolation.js";
 import { renderCompilationCall } from "../dist/compiler/model.js";
 import {
   prepareCompilationRequest,
@@ -94,7 +95,7 @@ test("trusted child captures roundtrip through the configured private state root
         "--input-type=module",
         "-e",
         `import assert from "node:assert/strict";
-import { mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CaptureWriter } from ${JSON.stringify(new URL("../dist/capture.js", import.meta.url).href)};
@@ -102,7 +103,7 @@ import { DiagnosticEmitter } from ${JSON.stringify(new URL("../dist/diagnostics.
 import { GitHubClient, gitHubTransportOf, withGitHubTransportObserver } from ${JSON.stringify(new URL("../dist/github-client.js", import.meta.url).href)};
 import { withProcessCancellation } from ${JSON.stringify(new URL("../dist/process.js", import.meta.url).href)};
 import { stateRoot } from ${JSON.stringify(new URL("../dist/config.js", import.meta.url).href)};
-import { createCodexHome } from ${JSON.stringify(new URL("../dist/codex-planning-isolation.js", import.meta.url).href)};
+import { createCodexHome, releaseCodexHome } from ${JSON.stringify(new URL("../dist/codex-planning-isolation.js", import.meta.url).href)};
 import { observeModelInvocation } from ${JSON.stringify(new URL("../dist/compiler/observation.js", import.meta.url).href)};
 const home = createCodexHome({ config: "", sandbox: { directory: process.cwd(), workspace: "write", network: false } });
 const nativeEvents = [];
@@ -113,6 +114,41 @@ try {
 } finally { home.dispose(); }
 const privateBin = join(stateRoot(${JSON.stringify(repository)}), "bin");
 mkdirSync(privateBin, { recursive: true });
+const retainedRoot = join(privateBin, "retained-native");
+const owner = "a".repeat(64);
+const isolatedSource = { HOME: join(privateBin, "operator"), PATH: process.env.PATH };
+mkdirSync(isolatedSource.HOME);
+writeFileSync(join(isolatedSource.HOME, "config.toml"), "unapproved operator config");
+const retainedHome = createCodexHome({ root: retainedRoot, owner, source: isolatedSource, config: "approved = true" });
+const retainedConfig = join(retainedHome.env.CODEX_HOME, "config.toml");
+assert.equal(readFileSync(retainedConfig, "utf8"), "approved = true");
+retainedHome.dispose();
+assert.equal(existsSync(retainedRoot), true);
+assert.throws(() => createCodexHome({ root: retainedRoot, owner: "b".repeat(64), resume: true, source: isolatedSource, config: "unexpected" }), /recorded owner/);
+assert.equal(readFileSync(retainedConfig, "utf8"), "approved = true");
+assert.throws(() => createCodexHome({ root: retainedRoot, owner, source: isolatedSource, config: "unexpected" }));
+assert.equal(existsSync(retainedRoot), true);
+chmodSync(retainedHome.env.HOME, 0o755);
+assert.throws(() => createCodexHome({ root: retainedRoot, owner, resume: true, source: isolatedSource, config: "unexpected" }), /private owned/);
+chmodSync(retainedHome.env.HOME, 0o700);
+const rebound = createCodexHome({ root: retainedRoot, owner, resume: true, source: isolatedSource, config: "updated = true", sandbox: { directory: process.cwd(), workspace: "read", network: false } });
+assert.equal(rebound.env.CODEX_HOME, retainedHome.env.CODEX_HOME);
+assert.equal(readFileSync(retainedConfig, "utf8").includes('updated = true'), true);
+assert.equal(readFileSync(retainedConfig, "utf8").includes('"." = "read"'), true);
+assert.equal(readFileSync(retainedConfig, "utf8").includes('unapproved operator config'), false);
+assert.throws(() => rebound.nativeCaptureBoundary("00000000-0000-4000-8000-000000000000"), /authenticated turn boundary/);
+const savedConfig = retainedConfig + ".saved";
+renameSync(retainedConfig, savedConfig);
+symlinkSync(join(isolatedSource.HOME, "config.toml"), retainedConfig);
+assert.throws(() => createCodexHome({ root: retainedRoot, owner, resume: true, source: isolatedSource, config: "unexpected" }));
+assert.equal(readFileSync(join(isolatedSource.HOME, "config.toml"), "utf8"), "unapproved operator config");
+assert.equal(existsSync(retainedRoot), true);
+unlinkSync(retainedConfig);
+renameSync(savedConfig, retainedConfig);
+rebound.dispose();
+assert.equal(existsSync(retainedRoot), true);
+releaseCodexHome(retainedRoot, owner);
+assert.equal(existsSync(retainedRoot), false);
 let failedSink;
 observeModelInvocation({ invocationId: "real-filesystem-observer-failure", phase: "compile", ordinal: 0, observe: () => {
   failedSink = appendFile(privateBin, "private observer content");
@@ -389,6 +425,34 @@ test("collection settles an exited owned group before removing scratch", async (
   const requestPath = join(harnessRoot, "exited.request.json");
   const scratch = `${requestPath}.codex-home`;
   mkdirSync(scratch);
+  const scope = {
+    repository: "integration/owned-session",
+    objective: 1,
+    runId: "owned-exit",
+    configDigest: "a".repeat(64),
+    graphDigest: "b".repeat(64),
+    role: "implementation",
+    itemId: "local",
+  };
+  const session = {
+    scope,
+    adapter: "codex",
+    identity: "retained-owned-exit",
+    turn: 1,
+    status: "in-flight",
+  };
+  const sessionRoot = join(harnessRoot, "sessions", session.identity);
+  mkdirSync(join(harnessRoot, "sessions"));
+  const owner = createHash("sha256")
+    .update(
+      JSON.stringify({
+        scope,
+        adapter: session.adapter,
+        identity: session.identity,
+      }),
+    )
+    .digest("hex");
+  createCodexHome({ root: sessionRoot, owner, config: "" });
   // A real shell exits with no result, leaving a child that ignores SIGTERM.
   // No provider, SDK or scripted harness response is involved.
   const child = spawn(
@@ -423,6 +487,57 @@ test("collection settles an exited owned group before removing scratch", async (
     );
     assert.equal(processGroupExists(child.pid), false);
     assert.equal(existsSync(scratch), false);
+    assert.equal(existsSync(sessionRoot), true);
+    const retainedSession = {
+      ...session,
+      data: {
+        workerSettled: true,
+        worker: {
+          pid: child.pid,
+          startTime: identity.startTime,
+          requestPath,
+          resultPath: join(harnessRoot, "exited.result.json"),
+          logPath: join(harnessRoot, "exited.log"),
+        },
+      },
+    };
+    await assert.rejects(
+      harness.releaseSession({
+        ...retainedSession,
+        scope: { ...scope, runId: "other-run" },
+      }),
+      /recorded owner/,
+    );
+    assert.equal(existsSync(sessionRoot), true);
+    const pendingRequest = join(harnessRoot, "continuation.request.json");
+    writeFileSync(pendingRequest, "{}\n");
+    const pending = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)", pendingRequest],
+      {
+        detached: true,
+        stdio: "ignore",
+      },
+    );
+    try {
+      assert.ok(linuxProcessIdentity(pending.pid));
+      writeFileSync(join(harnessRoot, "continuation.pid"), `${pending.pid}\n`);
+      const exited = once(pending, "exit");
+      await harness.releaseSession({
+        ...retainedSession,
+        data: {
+          ...retainedSession.data,
+          pendingWorkerIdentity: "continuation",
+        },
+      });
+      await exited;
+      assert.equal(processGroupExists(pending.pid), false);
+    } finally {
+      if (processGroupExists(pending.pid))
+        await killGroup(pending.pid, "integration continuation");
+    }
+    assert.equal(existsSync(sessionRoot), false);
+    await harness.releaseSession(retainedSession);
   } finally {
     if (processGroupExists(child.pid))
       await killGroup(child.pid, "integration shell");

@@ -10,6 +10,7 @@ import {
 import type { HarnessRequest, ModelInvocationUsage } from "../contracts.js";
 import {
   codexRawTokenUsage,
+  codexInvocationUsage,
   codexSdkTokenUsage,
   codexTokenUsage,
   normalizeTokenUsage,
@@ -133,6 +134,7 @@ export function codexCaptureEvent(
   sessionId?: string,
   secrets: string[] = [],
   usageSource: "native" | "sdk" = "native",
+  usageBaseline?: ModelInvocationUsage,
 ): { event: CaptureEvent; content?: () => unknown } {
   let projected: { event: CaptureEvent; content?: () => unknown } = {
     event: { kind: "interaction" },
@@ -150,7 +152,11 @@ export function codexCaptureEvent(
   if (event.type === "turn.completed") {
     const raw = codexRawTokenUsage(event.usage);
     const normalized =
-      usageSource === "sdk" ? codexSdkTokenUsage(raw) : codexTokenUsage(raw);
+      usageBaseline !== undefined
+        ? codexInvocationUsage(raw, usageBaseline)
+        : usageSource === "sdk"
+          ? codexSdkTokenUsage(raw)
+          : codexTokenUsage(raw);
     record({
       ...base,
       kind: "usage",
@@ -161,6 +167,7 @@ export function codexCaptureEvent(
           ? "available-categories"
           : "unavailable",
         raw,
+        rawScope: "thread-cumulative",
         normalized,
       },
     });
@@ -425,13 +432,18 @@ export class WorkerInteractionCapture {
     return safePartialText(text, this.secrets);
   }
 
-  codex(event: ThreadEvent, sessionId?: string): void {
+  codex(
+    event: ThreadEvent,
+    sessionId?: string,
+    usageBaseline?: ModelInvocationUsage,
+  ): void {
     this.safely(() => {
       const projected = codexCaptureEvent(
         event,
         sessionId,
         this.secrets,
         "sdk",
+        usageBaseline,
       );
       this.writer!.record(projected.event, projected.content);
     });

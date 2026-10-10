@@ -30,7 +30,7 @@ os.chdir(root)
 with open('/workspace/factory-binding.json') as f: binding=json.load(f)
 if subprocess.check_output(['git','rev-parse','HEAD']).decode().strip() != binding['baseSha']: raise RuntimeError('Worker changed HEAD')
 paths=set(p.decode() for p in subprocess.check_output(['git','ls-files','-co','--exclude-standard','-z']).split(b'\\0') if p)
-for name in ['.factory-inputs','.factory-media','.factory-assets.json','.factory-discovery.json']:
+for name in ['.factory-inputs','.factory-media','.factory-assets.json','.factory-discovery.json','.factory-handoff.json']:
  if os.path.isdir(name):
   for directory,dirs,files in os.walk(name):
    paths.update(os.path.join(directory,f) for f in files)

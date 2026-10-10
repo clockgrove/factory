@@ -1,4 +1,5 @@
 import { serviceLoginSecrets } from "../provider-credentials.js";
+import { agentSessionContinuation } from "../agent-session.js";
 import { isReadinessWait } from "../delivery/readiness.js";
 import { executionContext } from "../execution/checkpoint.js";
 import { workerIdentity } from "../item-steps.js";
@@ -192,31 +193,41 @@ export async function cancelKnownWork(
   const errors: string[] = [];
   const tasks: (() => Promise<void>)[] = [];
   if (state.schemaVersion === 7)
-    for (const work of Object.values(state.work)) {
+    for (const [itemId, work] of Object.entries(state.work)) {
       if (
         work.step !== "execute" ||
         work.status === "done" ||
         work.status === "cancelled"
       )
         continue;
-      // An attempt saved before its start was recorded: the driver stops
-      // whatever it started under the attempt's identity, if anything.
-      if (!work.execution) {
-        if (work.attempt)
-          tasks.push(() =>
-            driver.cancelUnrecorded(
-              workerIdentity(work),
-              executionContext(work, save),
-            ),
-          );
-        continue;
-      }
-      tasks.push(() =>
-        driver.cancel(
-          structuredClone(work.execution!),
-          executionContext(work, save),
-        ),
-      );
+      if (!work.execution && !work.attempt) continue;
+      tasks.push(async () => {
+        const session =
+          driver.sessionContinuation === true
+            ? agentSessionContinuation(state, "implementation", itemId, save)
+            : undefined;
+        const context = executionContext(work, save, () =>
+          Boolean(state.cancelRequested),
+        );
+        if (session)
+          context.checkpointSession = (ref) => session.checkpoint(ref);
+        const stoppedIdentity =
+          work.execution?.identity ?? workerIdentity(work);
+        if (work.execution)
+          await driver.cancel(structuredClone(work.execution), context);
+        else {
+          // An attempt saved before its start was recorded: stop whatever
+          // it started under its recorded identity before settling its session.
+          await driver.cancelUnrecorded(workerIdentity(work), context);
+        }
+        // Cessation is authenticated by the driver's cancellation contract.
+        // Never promote an interrupted turn into a ready conversation.
+        if (
+          session?.retained?.status === "in-flight" &&
+          session.retained.executionIdentity === stoppedIdentity
+        )
+          session.checkpoint({ ...session.retained, status: "unavailable" });
+      });
     }
   tasks.push(() => cancelRecordedSubprocesses(state));
   for (const result of await Promise.allSettled(tasks.map((task) => task())))

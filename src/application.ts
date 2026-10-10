@@ -181,7 +181,13 @@ export function createApplication(
     runObjective: (objective, options) =>
       runObjective(config, objective, services, options),
     cancelObjective: (objective) =>
-      cancelObjective(config, objective, services.driver, services.github),
+      cancelObjective(
+        config,
+        objective,
+        services.driver,
+        services.github,
+        services.planningModel,
+      ),
     repairWorkItem: (objective, input) =>
       repairWorkItem(config, objective, input),
     retryWorkItem: (objective, itemId) =>
@@ -235,7 +241,10 @@ export function composePlanningModel(config: FactoryConfig): PlanningModel {
     config.planning.planner,
     config.planning.reviewer,
     undefined,
-    { redactionValues },
+    {
+      redactionValues,
+      sessionRoot: join(stateRoot(config.repository), "review-sessions"),
+    },
   );
 }
 

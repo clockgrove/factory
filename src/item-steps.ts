@@ -9,12 +9,17 @@ import type {
   ExecutionRequest,
   ExecutionResult,
   WorkItem,
+  AgentSessionContinuation,
+  AgentSessionRef,
 } from "./contracts.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
+import { isDeepStrictEqual } from "node:util";
 import { workerContext } from "./execution/checkpoint.js";
 import { cancelledFault, faultOf } from "./fault.js";
 import { repeatKey, StepPaused, step } from "./step.js";
 import type { FactoryState } from "./state.js";
+import { agentSessionContinuation } from "./agent-session.js";
+import { reviewObjectiveKnowledge } from "./objective-knowledge.js";
 import {
   type ReviewOutcome,
   reviewAcceptance,
@@ -89,15 +94,38 @@ export async function executeItem(
     request: (attemptId: string) => ExecutionRequest;
     cancelled: () => boolean;
     diagnostics?: DiagnosticEmitter;
+    session?: AgentSessionContinuation;
   },
 ): Promise<ExecutionResult> {
   const { state, item, driver, save } = args;
   const work = state.work[item.id]!;
-  const context = () =>
-    workerContext(work, save, args.cancelled, args.diagnostics, {
+  const context = () => ({
+    ...workerContext(work, save, args.cancelled, args.diagnostics, {
       runId: state.runId,
       itemId: item.id,
-    });
+    }),
+    ...(args.session ? { checkpointSession: args.session.checkpoint } : {}),
+  });
+  const ownsSession = (
+    ref: AgentSessionRef | undefined,
+    executionIdentity: string,
+  ): ref is AgentSessionRef =>
+    Boolean(
+      ref &&
+        ref.identity === args.session?.identity &&
+        ref.executionIdentity === executionIdentity &&
+        isDeepStrictEqual(ref.scope, args.session?.scope) &&
+        ref.scope.role === "implementation" &&
+        ref.scope.itemId === item.id,
+    );
+  const settleSession = (executionIdentity: string): void => {
+    const retained = args.session?.retained;
+    if (
+      retained?.status === "in-flight" &&
+      ownsSession(retained, executionIdentity)
+    )
+      args.session!.checkpoint({ ...retained, status: "unavailable" });
+  };
   // A start cut off by a crash is counted once by `step` on entry; the
   // worker it may have left is that same lost effect, not a second one.
   let crashedStart = Boolean(
@@ -151,11 +179,33 @@ export async function executeItem(
         // of the attempt it replaces stopped (cancel is idempotent).
         const replaced = work.recovery?.history?.at(-1)?.work.execution;
         if (!work.worker && replaced) {
+          const ownsReplacedSession = ownsSession(
+            args.session?.retained,
+            replaced.identity,
+          );
           await driver.cancel(structuredClone(replaced), {
             cancelled: args.cancelled,
             checkpoint: () => undefined,
+            ...(ownsReplacedSession
+              ? { checkpointSession: args.session!.checkpoint }
+              : {}),
           });
           ctx.progress();
+          if (ownsReplacedSession) settleSession(replaced.identity);
+        }
+        const unrecorded = args.session?.retained;
+        if (unrecorded?.status === "in-flight") {
+          const identity = workerIdentity(work);
+          if (!ownsSession(unrecorded, identity))
+            throw new Error(
+              "Unrecorded worker session lacks this exact execution identity",
+            );
+          // The original paid start remains charged by its step. Only the
+          // driver's supported cessation proof admits a fresh conversation;
+          // a lost handle alone proves neither completion nor stopped work.
+          await driver.cancelUnrecorded(identity, context());
+          ctx.progress();
+          settleSession(identity);
         }
         if (stopped(args)) throw cancelledFault();
         handle = await ctx.paid(() =>
@@ -223,14 +273,30 @@ export function reviewItem(
       if (stopped(args)) throw cancelledFault();
       const previousInvalid = ctx.previousInvalid();
       const ask = () =>
-        ctx.paid(() =>
-          reviewAcceptance(
-            args.review({
-              ...(previousInvalid ? { previousInvalid } : {}),
-              onInvalid: (detail) => ctx.invalid(detail),
-            }),
-          ),
-        );
+        ctx.paid(() => {
+          const request = args.review({
+            ...(previousInvalid ? { previousInvalid } : {}),
+            onInvalid: (detail) => ctx.invalid(detail),
+          });
+          return reviewAcceptance({
+            ...request,
+            evidenceSources: [
+              ...(request.evidenceSources ?? []),
+              ...reviewObjectiveKnowledge(
+                args.state,
+                args.item.id,
+                request.checkout,
+                request.commit,
+              ),
+            ],
+            session: agentSessionContinuation(
+              args.state,
+              "result-review",
+              args.item.id,
+              args.save,
+            ),
+          });
+        });
       return args.diagnostics
         ? args.diagnostics.span(
             {

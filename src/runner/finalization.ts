@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { agentSessionContinuation } from "../agent-session.js";
+import { reviewObjectiveKnowledge } from "../objective-knowledge.js";
 import { join } from "node:path";
 import {
   finalObjectiveCommands,
@@ -350,6 +352,12 @@ export async function finalizeObjective(args: {
               beforeSubmit: stopIfCancelled,
               model: planningModel,
               reviewPhase: "objective-review",
+              session: agentSessionContinuation(
+                state,
+                "objective-review",
+                undefined,
+                () => save(state),
+              ),
               checkout: config.checkout,
               baseSha: state.baseSha,
               commit: candidateCommitSha,
@@ -362,6 +370,12 @@ export async function finalizeObjective(args: {
               ),
               evidenceSources: [
                 ...objectiveEvidence.evidence,
+                ...reviewObjectiveKnowledge(
+                  state,
+                  undefined,
+                  config.checkout,
+                  candidateCommitSha,
+                ),
                 ...(hydrationReceipt
                   ? [
                       {

@@ -31,6 +31,11 @@ import {
 } from "./repair-policy.js";
 import type { FactoryState } from "./state.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
+import { agentSessionContinuation } from "./agent-session.js";
+import {
+  objectiveKnowledgeView,
+  publishObjectiveKnowledge,
+} from "./objective-knowledge.js";
 
 interface ItemWorker {
   state: FactoryState;
@@ -64,6 +69,7 @@ export function workerAttemptItem(
   state: FactoryState,
   item: WorkItem,
   baseSha: string,
+  knowledge?: object,
 ): WorkItem {
   assertGraphRevisions(state);
   if (
@@ -94,7 +100,7 @@ export function workerAttemptItem(
   };
   return {
     ...attempted,
-    brief: `${attempted.brief}\nController-bound accepted planned peer context (design only): ${JSON.stringify(context)}\nPeers' planned outputs can be absent from this isolated execution base. Absence here alone does not establish additional work when that output is already assigned to a peer; preserve the component's phase and leave combined proof to its accepted downstream owner. This plan proves no peer implementation, validation, delivery, integration or acceptance and grants no new ownership, dependency, command or permission. Report genuine additional gaps with their observed base and relevant planned owner; do not infer either completion or a defect from the plan alone.\nController-bound human planning decision context: ${JSON.stringify(acceptedPlanningDecisionContext(state))}`,
+    brief: `${attempted.brief}\nController-bound accepted planned peer context (design only): ${JSON.stringify(context)}\nPeers' planned outputs can be absent from this isolated execution base. Absence here alone does not establish additional work when that output is already assigned to a peer; preserve the component's phase and leave combined proof to its accepted downstream owner. This plan proves no peer implementation, validation, delivery, integration or acceptance and grants no new ownership, dependency, command or permission. Report genuine additional gaps with their observed base and relevant planned owner; do not infer either completion or a defect from the plan alone.\nController-bound human planning decision context: ${JSON.stringify(acceptedPlanningDecisionContext(state))}${knowledge ? `\nController-bound Objective knowledge view: ${JSON.stringify(knowledge)}` : ""}`,
   };
 }
 
@@ -142,7 +148,16 @@ export async function runWorker(
   // A reattached worker keeps the coding slot it holds while it runs remotely.
   if (work.phaseReservation !== "coding")
     await phases.reserve(item.id, "coding");
-  const attemptedItem = workerAttemptItem(state, item, baseSha);
+  const attemptedItem = workerAttemptItem(
+    state,
+    item,
+    baseSha,
+    objectiveKnowledgeView(state, item, args.config.checkout, baseSha),
+  );
+  const session =
+    args.driver.sessionContinuation === true
+      ? agentSessionContinuation(state, "implementation", item.id, args.save)
+      : undefined;
   if (
     work.recovery?.correction &&
     (!retained || args.driver.retainedFailedResultContext !== true)
@@ -158,7 +173,17 @@ export async function runWorker(
     pause: args.pause,
     cancelled: args.cancelled,
     diagnostics: args.diagnostics,
+    ...(session ? { session } : {}),
     request: (attemptId) => ({
+      ...(session
+        ? {
+            session: {
+              scope: session.scope,
+              identity: session.identity,
+              ...(session.retained ? { retained: session.retained } : {}),
+            },
+          }
+        : {}),
       captureContext: { objective: args.objective, runId: state.runId },
       item: attemptedItem,
       ...(retained && args.driver.retainedFailedResultContext === true
@@ -215,6 +240,8 @@ export async function runWorker(
   recordWorkerDiscovery(state, item.id, result.discovery);
   work.changeRef = result.changeRef;
   work.treeSha = result.treeSha;
+  await publishObjectiveKnowledge(state, item, result, args.store);
+  args.save();
   return result;
 }
 
@@ -224,13 +251,30 @@ export async function stopWorker(args: ItemWorker): Promise<void> {
   const work = state.work[item.id]!;
   if (!work.execution) return;
   try {
-    await args.driver.cancel(
-      structuredClone(work.execution),
-      workerContext(work, args.save, args.cancelled, args.diagnostics, {
+    const session =
+      args.driver.sessionContinuation === true
+        ? agentSessionContinuation(state, "implementation", item.id, args.save)
+        : undefined;
+    const context = workerContext(
+      work,
+      args.save,
+      args.cancelled,
+      args.diagnostics,
+      {
         runId: state.runId,
         itemId: item.id,
-      }),
+      },
     );
+    if (session) context.checkpointSession = (ref) => session.checkpoint(ref);
+    const stoppedIdentity = work.execution.identity;
+    await args.driver.cancel(structuredClone(work.execution), context);
+    // Successful cancellation proves owned cessation, but an unfinished turn
+    // supplies no resumable conversation. Preserve any ready receipt the driver settled.
+    if (
+      session?.retained?.status === "in-flight" &&
+      session.retained.executionIdentity === stoppedIdentity
+    )
+      session.checkpoint({ ...session.retained, status: "unavailable" });
     delete work.execution;
   } catch {
     // Left recorded: the next attempt starts only once the driver confirmed

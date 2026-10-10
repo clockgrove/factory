@@ -187,13 +187,11 @@ export function prepareClaudeSession(
       throw new Error(
         "Claude continuation has no matching settled native history",
       );
-    data = {
-      ...prior.data,
-      settled: undefined,
-      nativeTerminal: undefined,
-      process: undefined,
-      worker: undefined,
-    };
+    data = { ...prior.data };
+    delete data.settled;
+    delete data.nativeTerminal;
+    delete data.process;
+    delete data.worker;
   } else {
     mkdirSync(resolve(storage), { recursive: true, mode: 0o700 });
     privateDirectory(resolve(storage));

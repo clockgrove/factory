@@ -1,6 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type {
   AccountInfo,
   Options,
@@ -25,6 +27,9 @@ import {
 } from "./config.js";
 import {
   AuthenticationRequiredError,
+  type AgentSessionContinuation,
+  type AgentSessionRef,
+  type AgentSessionReconciliation,
   type ModelInvocationContext,
 } from "./contracts.js";
 import {
@@ -33,10 +38,25 @@ import {
 } from "./execution/claude.js";
 import {
   ClaudeUsage,
-  claudeCost,
   claudeModelUsage,
   claudeRawTokenUsage,
 } from "./execution/claude-usage.js";
+import {
+  claudeDigest,
+  claudeHistoryDigest,
+  claudeOwnedSpawn,
+  claudePrivateWrite,
+  readClaudePrivate,
+  claudeProcessDisposition,
+  claudeResumeOptions,
+  claudeSessionEnvironment,
+  prepareClaudeSession,
+  releaseClaudeStorage,
+  requireClaudeSession,
+  settleClaudeProcess,
+  type ClaudeNativeProcess,
+  type ClaudeOwnedSession,
+} from "./execution/claude-session.js";
 import { authenticationFailure, redact } from "./execution/harness-support.js";
 import { claudeCaptureEvents } from "./execution/interaction-capture.js";
 import { type Fault, transient } from "./fault.js";
@@ -88,6 +108,8 @@ export type ClaudePlanningQuery = (params: {
 }) => AsyncIterable<SDKMessage>;
 
 export interface ClaudePlanningModelOptions extends PlanningModelOptions {
+  /** Installation-owned private conversation storage; absent means fresh calls. */
+  sessionRoot?: string;
   /** Defaults to the pinned Agent SDK `query`. */
   query?: ClaudePlanningQuery;
   providerTurnIdleTimeoutMs?: number;
@@ -409,12 +431,86 @@ class ClaudePlanningTransport implements PlanningTransport {
   readonly provider = CLAUDE_PLANNING_PROVIDER;
   readonly adapter = CLAUDE_PLANNING_ADAPTER;
   private readonly secrets: string[];
+  get sessionCapabilities() {
+    return this.sessionRoot
+      ? {
+          resumeRoles: [
+            "planning",
+            "result-review",
+            "objective-review",
+          ] as const,
+        }
+      : undefined;
+  }
+
+  async releaseSession(ref: AgentSessionRef): Promise<void> {
+    if (!this.sessionRoot)
+      throw new Error("Claude retained storage is unavailable");
+    const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
+    if (session.data.settled !== true && session.data.process)
+      await settleClaudeProcess(session.data.process);
+    if (ref.status === "in-flight")
+      throw new Error(
+        "Claude submitted turn requires reconciliation before disposal",
+      );
+    releaseClaudeStorage(this.sessionRoot, ref, this.adapter);
+  }
+
+  async reconcileSession(
+    ref: AgentSessionRef,
+  ): Promise<AgentSessionReconciliation> {
+    if (!this.sessionRoot) return { disposition: "unknown" };
+    const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
+    const disposition = claudeProcessDisposition(session.data.process);
+    if (disposition !== "settled") return { disposition };
+    let completed: {
+      session: AgentSessionRef;
+      response?: string;
+      usage?: PlanningTurn["usage"];
+    };
+    try {
+      completed = readClaudePrivate(join(session.data.root, "completed.json"));
+    } catch {
+      return { disposition: "unknown" };
+    }
+    if (
+      completed.session.identity !== ref.identity ||
+      completed.session.turn !== ref.turn ||
+      !isDeepStrictEqual(completed.session.scope, ref.scope) ||
+      completed.session.currentTurn?.invocationId !==
+        ref.currentTurn?.invocationId ||
+      completed.session.currentTurn?.requestDigest !==
+        ref.currentTurn?.requestDigest
+    )
+      return { disposition: "unknown" };
+    const native = requireClaudeSession(
+      this.sessionRoot,
+      completed.session,
+      this.adapter,
+    );
+    const historyDigest = claudeHistoryDigest(native);
+    const ready: AgentSessionRef = {
+      ...completed.session,
+      status: "ready",
+      data: { ...native.data, settled: true, historyDigest },
+      currentTurn: { ...completed.session.currentTurn!, resources: "settled" },
+    };
+    return {
+      disposition: "settled",
+      session: ready,
+      ...(completed.response === undefined
+        ? {}
+        : { response: completed.response }),
+      ...(completed.usage === undefined ? {} : { usage: completed.usage }),
+    };
+  }
 
   constructor(
     private config: ClaudePlanningConfig,
     private query: ClaudePlanningQuery | undefined,
     private providerTurnIdleTimeoutMs: number | undefined,
     redactionValues: string[],
+    private sessionRoot?: string,
   ) {
     this.secrets = [
       ...new Set([
@@ -448,12 +544,57 @@ class ClaudePlanningTransport implements PlanningTransport {
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
     tree?: string;
+    session?: AgentSessionContinuation & { currentGraphDigest?: string };
+    sourcePacket?: string;
     signal?: AbortSignal;
   }): Promise<void> {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
     const { model, reasoningEffort } = selection;
     const started = Date.now();
+    const continuation = this.sessionRoot ? args.session : undefined;
+    let owned: ClaudeOwnedSession | undefined;
+    if (continuation) {
+      if (
+        this.query ||
+        (args.role === "planner"
+          ? continuation.scope.role !== "planning"
+          : !["result-review", "objective-review"].includes(
+              continuation.scope.role,
+            ))
+      )
+        throw new Error(
+          "Claude continuation has a different native transport or role",
+        );
+      owned = prepareClaudeSession(
+        this.sessionRoot!,
+        continuation,
+        this.adapter,
+        claudeDigest([selection, this.config, Boolean(args.tree)]),
+      );
+      owned.ref.currentTurn = {
+        invocationId: invocation.invocationId,
+        requestDigest: claudeDigest([args.prompt, args.schema]),
+        schemaDigest: claudeDigest(args.schema),
+        dispatch: "intent",
+        resources: "unknown",
+        ...(args.sourcePacket && {
+          evidenceDigest: createHash("sha256")
+            .update(args.sourcePacket)
+            .digest("hex"),
+        }),
+        ...((continuation.scope.role === "planning"
+          ? continuation.currentGraphDigest
+          : continuation.scope.graphDigest) && {
+          graphDigest:
+            continuation.scope.role === "planning"
+              ? continuation.currentGraphDigest
+              : continuation.scope.graphDigest,
+        }),
+      };
+      continuation.checkpoint(owned.ref);
+      claudePrivateWrite(join(owned.data.root, "pending.json"), owned.ref);
+    }
     const guard = new ProviderTurnGuard(
       this.providerTurnIdleTimeoutMs ?? modelResponseTimeoutMs(reasoningEffort),
       this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
@@ -467,12 +608,23 @@ class ClaudePlanningTransport implements PlanningTransport {
     const cancel = () => abortController.abort(args.signal?.reason);
     if (args.signal?.aborted) cancel();
     else args.signal?.addEventListener("abort", cancel, { once: true });
-    const usage = new ClaudeUsage(this.secrets);
+    const usage = new ClaudeUsage(
+      this.secrets,
+      owned?.data.baseline,
+      owned?.resume,
+    );
     const facts: SessionFacts = { initialized: false, modelResponded: false };
     let root: string | undefined;
     let events: AsyncIterator<SDKMessage> | undefined;
     let closeStarted = false;
     let result: SDKResultMessage | undefined;
+    let nativeProcess: ClaudeNativeProcess | undefined;
+    let streamClosed = false;
+    const checkpoint = (status: AgentSessionRef["status"]) => {
+      if (!owned || !continuation) return;
+      owned.ref = { ...owned.ref, status, data: { ...owned.data } };
+      continuation.checkpoint(owned.ref);
+    };
     try {
       root = mkdtempSync(join(tmpdir(), "factory-claude-planning-"));
       const query = this.query ?? (await guard.race(loadClaudeQuery()));
@@ -482,18 +634,37 @@ class ClaudePlanningTransport implements PlanningTransport {
       const credentialDirectory = join(root, "empty-gh-config");
       if (!args.tree) mkdirSync(cwd, { mode: 0o700 });
       mkdirSync(credentialDirectory, { mode: 0o700 });
-      events = query({
-        prompt: args.prompt,
-        options: claudePlanningOptions({
-          config: this.config,
-          selection,
-          schema: args.schema,
-          cwd,
-          credentialDirectory,
-          abortController,
-          tree: Boolean(args.tree),
-        }),
-      })[Symbol.asyncIterator]();
+      const options = claudePlanningOptions({
+        config: this.config,
+        selection,
+        schema: args.schema,
+        cwd,
+        credentialDirectory,
+        abortController,
+        tree: Boolean(args.tree),
+      });
+      if (!this.query)
+        options.spawnClaudeCodeProcess = claudeOwnedSpawn((owner) => {
+          nativeProcess = owner;
+          if (owned) {
+            owned.data.process = owner;
+            owned.ref.currentTurn = {
+              ...owned.ref.currentTurn!,
+              dispatch: "submitted",
+              resources: "active",
+            };
+            checkpoint("in-flight");
+            claudePrivateWrite(
+              join(owned.data.root, "pending.json"),
+              owned.ref,
+            );
+          }
+        });
+      if (owned) {
+        Object.assign(options, claudeResumeOptions(owned));
+        options.env = claudeSessionEnvironment(owned, options.env ?? {});
+      }
+      events = query({ prompt: args.prompt, options })[Symbol.asyncIterator]();
       for (;;) {
         const next = await guard.race(events.next());
         if (next.done) break;
@@ -553,6 +724,10 @@ class ClaudePlanningTransport implements PlanningTransport {
           });
         if (message.type === "system" && message.subtype === "init") {
           assertPlanningInitialization(message, model, Boolean(args.tree));
+          if (owned && message.session_id !== owned.data.nativeSessionId)
+            throw new Error(
+              "Claude planning initialized a different native conversation",
+            );
           facts.initialized = true;
         }
         if (message.type === "result") {
@@ -562,11 +737,19 @@ class ClaudePlanningTransport implements PlanningTransport {
       }
       closeStarted = true;
       await closeProviderEventStream(events, guard, true);
+      streamClosed = true;
+      requireCompletedProviderTurn(result !== undefined);
+      if (owned && result!.session_id !== owned.data.nativeSessionId)
+        throw new Error(
+          "Claude planning result belongs to another native conversation",
+        );
+      this.settle(result!, { state, invocation, usage, started, facts });
     } catch (error) {
       if (events && !closeStarted && !guard.signal.aborted) {
         closeStarted = true;
         try {
           await closeProviderEventStream(events, guard, true);
+          streamClosed = true;
         } catch {
           // Preserve the provider failure that required cleanup.
         }
@@ -577,10 +760,61 @@ class ClaudePlanningTransport implements PlanningTransport {
       if (events && !closeStarted)
         void closeProviderEventStream(events, guard, false);
       guard.finish();
+      const completed = Boolean(
+        streamClosed &&
+          facts.initialized &&
+          result &&
+          result.subtype !== "error_during_execution" &&
+          (!owned || result.session_id === owned.data.nativeSessionId),
+      );
+      if (owned && completed) {
+        owned.data.nativeTerminal = true;
+        owned.data.baseline = usage.boundary();
+        owned.ref.currentTurn = {
+          ...owned.ref.currentTurn!,
+          terminal: state.ended && !state.failureClass ? "completed" : "failed",
+          resources: "unknown",
+        };
+        claudePrivateWrite(join(owned.data.root, "completed.json"), {
+          session: { ...owned.ref, data: { ...owned.data } },
+          ...(state.response ? { response: state.response } : {}),
+          ...(state.usage && { usage: state.usage }),
+        });
+      }
+      if (nativeProcess) {
+        await settleClaudeProcess(nativeProcess);
+        state.stopped = true;
+      }
+      if (owned) {
+        if (completed) {
+          owned.data.nativeTerminal = true;
+          owned.data.settled = true;
+          owned.data.baseline = usage.boundary();
+          owned.data.historyDigest = claudeHistoryDigest(owned);
+          owned.ref.currentTurn = {
+            ...owned.ref.currentTurn!,
+            terminal:
+              state.ended && !state.failureClass ? "completed" : "failed",
+            resources: "settled",
+          };
+          checkpoint("ready");
+          claudePrivateWrite(join(owned.data.root, "completed.json"), {
+            session: owned.ref,
+            ...(state.response ? { response: state.response } : {}),
+            ...(state.usage && { usage: state.usage }),
+          });
+        } else if (state.stopped) {
+          owned.data.settled = true;
+          owned.ref.currentTurn = {
+            ...owned.ref.currentTurn!,
+            terminal: "interrupted",
+            resources: "settled",
+          };
+          checkpoint("unavailable");
+        }
+      }
       if (root) rmSync(root, { recursive: true, force: true });
     }
-    requireCompletedProviderTurn(result !== undefined);
-    this.settle(result!, { state, invocation, usage, started, facts });
   }
 
   /** Record terminal usage and outcome, then accept only structured output. */
@@ -616,7 +850,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     const totals = context.usage.totals();
     state.usage = Object.keys(totals).length ? totals : undefined;
     const models = Object.keys(result.modelUsage ?? {});
-    const cost = claudeCost(result.total_cost_usd);
+    const cost = context.usage.cost();
     observeModelInvocation(invocation, {
       type: "progress",
       capture: {
@@ -627,6 +861,7 @@ class ClaudePlanningTransport implements PlanningTransport {
           }),
           usage: {
             scope: "invocation-cumulative",
+            rawScope: "thread-cumulative",
             terminal: true,
             completeness: state.usage ? "available-categories" : "unavailable",
             normalized: totals,
@@ -705,6 +940,7 @@ export class ClaudePlanningModel extends StructuredPlanningModel {
         options.query,
         options.providerTurnIdleTimeoutMs,
         options.redactionValues ?? [],
+        options.sessionRoot,
       ),
       options,
     );

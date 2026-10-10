@@ -3,6 +3,10 @@ import {
   factoryMcpToolAllowed,
   type PreparedClaudeEnvironment,
 } from "./claude-environment.js";
+import {
+  claudeResumeOptions,
+  claudeSessionEnvironment,
+} from "./claude-session.js";
 import { isAbsolute } from "node:path";
 import type { HookJSONOutput, Options } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudeWorkerInput } from "./claude.js";
@@ -172,7 +176,12 @@ export function claudeQueryOptions(
       claudeMdExcludes: ["**"],
     },
     maxTurns: config.maxTurns,
-    env: { ...environment, DISABLE_TELEMETRY: "1" },
+    env: {
+      ...(input.session
+        ? claudeSessionEnvironment(input.session, environment)
+        : environment),
+      DISABLE_TELEMETRY: "1",
+    },
     mcpServers: prepared ? { [factoryMcpServerName]: prepared.server } : {},
     strictMcpConfig: true,
     agents: {},
@@ -181,6 +190,8 @@ export function claudeQueryOptions(
     systemPrompt,
     verbatimPrompts: true,
     thinking: { type: "adaptive" },
-    persistSession: false,
+    ...(input.session
+      ? claudeResumeOptions(input.session)
+      : { persistSession: false }),
   };
 }

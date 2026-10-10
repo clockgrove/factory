@@ -25,6 +25,7 @@ import {
   codexJsonBoundaries,
 } from "../dist/codex-boundary-telemetry.js";
 import {
+  ProviderTurnElapsedTimeoutError,
   ProviderTurnGuard,
   ProviderTurnTimeoutError,
 } from "../dist/provider-turn.js";
@@ -672,67 +673,135 @@ setTimeout(() => {
     const firstEcho = new Promise((resolve) => {
       receivedFirst = resolve;
     });
-    const interactive = await withProcessCancellation(
+    const completedDeadline = Date.now() + 1_500;
+    const completedTurn = new ProviderTurnGuard(
+      1_000,
       undefined,
-      () =>
-        subprocessAsync(
-          "/usr/bin/cat",
-          [],
-          {},
-          {
-            run: async (channel) => {
-              await channel.write("first π\n");
-              await firstEcho;
-              await channel.write("second\n");
-              channel.end();
-            },
-          },
-          (stream, chunk) => {
-            if (stream === "stdout") {
-              echoed += chunk;
-              if (echoed.includes("first π\n")) receivedFirst();
-            }
-          },
-          undefined,
-          { stdout: false, stderr: false },
-        ),
-      observeInteractiveOwner,
+      new Date(completedDeadline).toISOString(),
     );
-    assert.equal(interactive.status, 0);
-    assert.equal(interactive.stdout, "");
-    assert.equal(echoed, "first π\nsecond\n");
-
-    const interactiveAbort = new AbortController();
-    let inputChannel;
-    let interruptionRequested = false;
-    await assert.rejects(
+    const interactive = await completedTurn.race(
       withProcessCancellation(
         undefined,
         () =>
           subprocessAsync(
             "/usr/bin/cat",
             [],
-            { signal: interactiveAbort.signal },
+            { signal: completedTurn.signal },
             {
-              cancellationGraceMs: 250,
-              cancel: () => {
-                interruptionRequested = true;
-                inputChannel.end();
-              },
               run: async (channel) => {
-                inputChannel = channel;
-                await channel.write("interrupt after echo\n");
-                await channel.closed;
+                await channel.write("first π\n");
+                await firstEcho;
+                await channel.write("second\n");
+                channel.end();
               },
             },
-            (stream) => {
-              if (stream === "stdout") interactiveAbort.abort();
+            (stream, chunk) => {
+              if (stream === "stdout") {
+                completedTurn.progress("cat-echo");
+                echoed += chunk;
+                if (echoed.includes("first π\n")) receivedFirst();
+              }
             },
+            undefined,
+            { stdout: false, stderr: false },
           ),
         observeInteractiveOwner,
       ),
+    );
+    completedTurn.finish();
+    assert.equal(interactive.status, 0);
+    assert.equal(interactive.stdout, "");
+    assert.equal(echoed, "first π\nsecond\n");
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.max(0, completedDeadline - Date.now()) + 100),
+    );
+    assert.equal(completedTurn.signal.aborted, false);
+    assert.equal(
+      await completedTurn.race(Promise.resolve(interactive)),
+      interactive,
+    );
+
+    // Actual echo traffic keeps the inactivity window open but cannot move the
+    // separately admitted deadline. No native provider or scripted answer runs.
+    const idleWindow = 1_000;
+    const activeStarted = Date.now();
+    const activeDeadline = new Date(activeStarted + 3_000).toISOString();
+    const activeTurn = new ProviderTurnGuard(
+      idleWindow,
+      undefined,
+      activeDeadline,
+    );
+    let inputChannel;
+    let interruptionRequested = false;
+    let alivePastIdleWindow = false;
+    let echoReceipts = 0;
+    const activeInteractive = withProcessCancellation(
+      undefined,
+      () =>
+        subprocessAsync(
+          "/usr/bin/cat",
+          [],
+          { signal: activeTurn.signal },
+          {
+            cancellationGraceMs: 250,
+            cancel: () => {
+              interruptionRequested = true;
+              inputChannel.end();
+            },
+            run: async (channel) => {
+              inputChannel = channel;
+              for (
+                let writes = 0;
+                writes < 80 && !activeTurn.signal.aborted;
+                writes++
+              ) {
+                await channel.write("active echo\n");
+                await Promise.race([
+                  channel.closed,
+                  new Promise((resolve) => setTimeout(resolve, 50)),
+                ]);
+              }
+              await channel.closed;
+            },
+          },
+          (stream) => {
+            if (stream !== "stdout") return;
+            echoReceipts++;
+            activeTurn.progress("cat-echo");
+            if (Date.now() - activeStarted > idleWindow) {
+              assert.equal(activeTurn.signal.aborted, false);
+              const owner = interactiveOwners.findLast(
+                (entry) => !entry.settled,
+              );
+              assert.ok(owner);
+              assert.equal(processGroupExists(owner.pid), true);
+              alivePastIdleWindow = true;
+            }
+          },
+        ),
+      observeInteractiveOwner,
+    );
+    const elapsedTimeout = assert.rejects(
+      activeTurn.race(activeInteractive),
+      (error) => {
+        assert.ok(error instanceof ProviderTurnElapsedTimeoutError);
+        assert.ok(error instanceof ProviderTurnTimeoutError);
+        assert.equal(error.deadlineAt, activeDeadline);
+        assert.equal(error.lastOperation, "cat-echo");
+        assert.ok(error.inactivityMs < idleWindow);
+        return true;
+      },
+    );
+    // Attach the owned-process rejection handler before either timer can fire.
+    const activeClosed = assert.rejects(
+      activeInteractive,
       /cancelled after verified cessation/,
     );
+    await elapsedTimeout;
+    await activeClosed;
+    activeTurn.finish();
+    assert.equal(alivePastIdleWindow, true);
+    assert.ok(echoReceipts > 1);
     assert.equal(interruptionRequested, true);
     assert.equal(interactiveOwners.filter((owner) => !owner.settled).length, 2);
     assert.equal(interactiveOwners.filter((owner) => owner.settled).length, 2);

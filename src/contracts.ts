@@ -520,6 +520,8 @@ export type AgentSessionScope = AgentObjectiveScope &
 export interface AgentSessionTurn {
   invocationId: string;
   requestDigest: string;
+  /** Admitted elapsed ceiling, immutable for this turn; absent on older receipts. */
+  deadlineAt?: string;
   graphDigest?: string;
   candidateDigest?: string;
   evidenceDigest?: string;
@@ -553,6 +555,8 @@ export interface AgentSessionRequest {
 
 /** Controller callback only; never serialized into a worker or model prompt. */
 export interface AgentSessionContinuation extends AgentSessionRequest {
+  /** Current controller-owned Objective ceiling; never a native session setting. */
+  objectiveDeadlineAt?: string;
   checkpoint(ref: AgentSessionRef): void;
 }
 

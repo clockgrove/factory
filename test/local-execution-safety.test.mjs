@@ -1148,7 +1148,57 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         }),
       /admitted graph/,
     );
+    // Older same-turn receipts cannot silently acquire an elapsed admission.
+    assert.throws(
+      () =>
+        continuedPlanner.checkpoint({
+          ...terminal,
+          currentTurn: {
+            ...terminal.currentTurn,
+            deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        }),
+      /binding/,
+    );
+    nextIntent.currentTurn.deadlineAt = new Date(
+      Date.now() + 60_000,
+    ).toISOString();
     continuedPlanner.checkpoint(nextIntent);
+    const deadlineReload = parseFactoryState(
+      JSON.parse(readFileSync(activationPath, "utf8")),
+      activated.repository,
+      activated.objective,
+    );
+    assert.equal(
+      Object.values(deadlineReload.agentSessions).find(
+        (ref) => ref.identity === continuedPlanner.identity,
+      ).currentTurn.deadlineAt,
+      nextIntent.currentTurn.deadlineAt,
+    );
+    assert.throws(
+      () =>
+        continuedPlanner.checkpoint({
+          ...nextIntent,
+          currentTurn: {
+            ...nextIntent.currentTurn,
+            deadlineAt: new Date(Date.now() + 120_000).toISOString(),
+          },
+        }),
+      /binding/,
+    );
+    const malformedDeadline = structuredClone(deadlineReload);
+    Object.values(malformedDeadline.agentSessions).find(
+      (ref) => ref.identity === continuedPlanner.identity,
+    ).currentTurn.deadlineAt = "invalid";
+    assert.throws(
+      () =>
+        parseFactoryState(
+          malformedDeadline,
+          activated.repository,
+          activated.objective,
+        ),
+      /elapsed deadline/,
+    );
     const competingPlanner = agentSessionContinuation(
       activated,
       "planning",
@@ -1288,6 +1338,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         "Review stopped before native process startup",
       );
       const stoppedSignal = AbortSignal.abort(abortReason);
+      const expiredDeadline = new Date(Date.now() - 1).toISOString();
       const checkpoints = [];
       const reviewSession = agentSessionContinuation(
         loaded,
@@ -1312,8 +1363,8 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       );
       const reviewIdentity = reviewSession.identity;
       const reviewTurn = { response: "", ended: false };
-      // The real transport receives an already-aborted signal. subprocessAsync
-      // throws this exact reason before spawning any native executable/model.
+      // The real transport constructs an already-expired elapsed guard; its
+      // synchronous abort wins before native submission and is durably retained.
       await assert.rejects(
         () =>
           transport.run({
@@ -1329,8 +1380,13 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
             tree: reviewTree.directory,
             session: reviewSession,
             signal: stoppedSignal,
+            deadlineAt: expiredDeadline,
           }),
-        (error) => error === abortReason,
+        (error) => {
+          assert.equal(error.name, "ProviderTurnElapsedTimeoutError");
+          assert.equal(error.deadlineAt, expiredDeadline);
+          return true;
+        },
       );
       assert.deepEqual(checkpoints, [
         { status: "in-flight", homeExists: true, threadIdPresent: false },
@@ -1349,8 +1405,63 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         (ref) => ref.identity === reviewIdentity,
       );
       assert.equal(disposedReview.status, "released");
+      assert.equal(disposedReview.currentTurn.deadlineAt, expiredDeadline);
+      assert.equal(disposedReview.currentTurn.dispatch, "intent");
+      assert.equal(disposedReview.currentTurn.terminal, undefined);
       assert.equal(existsSync(disposedReview.data.sessionRoot), false);
       await transport.releaseSession(disposedReview);
+
+      // The real shared planning entry refuses an already expired Objective
+      // ceiling without spawning a native process or recording unknown usage as zero.
+      const elapsedEvents = [];
+      const elapsedProcesses = [];
+      const elapsedSnapshot = readFileSync(snapshot, "utf8");
+      await assert.rejects(
+        () =>
+          withProcessCancellation(
+            undefined,
+            () =>
+              new StructuredPlanningModel(transport).generateStructured({
+                purpose: "diagnosis",
+                objective:
+                  "Inspect the retained failure within its original deadline.",
+                baseSha: result.baseSha,
+                sources: [],
+                schema: { type: "object" },
+                session: {
+                  ...reviewSession,
+                  retained: undefined,
+                  objectiveDeadlineAt: new Date(Date.now() - 1).toISOString(),
+                },
+                invocation: {
+                  invocationId: randomUUID(),
+                  phase: "diagnosis",
+                  ordinal: 0,
+                  observe: (event) => elapsedEvents.push(event),
+                },
+              }),
+            (owned) => elapsedProcesses.push(owned),
+          ),
+        (error) => {
+          assert.equal(attachedFault(error)?.kind, "decision");
+          assert.equal(
+            error.cause.timeout.name,
+            "ProviderTurnElapsedTimeoutError",
+          );
+          assert.equal(error.cause.stopped, true);
+          return true;
+        },
+      );
+      assert.deepEqual(elapsedProcesses, []);
+      assert.equal(
+        elapsedEvents.find((event) => event.type === "failed").usageAvailable,
+        false,
+      );
+      assert.equal(
+        elapsedEvents.some((event) => event.type === "retry-scheduled"),
+        false,
+      );
+      assert.equal(readFileSync(snapshot, "utf8"), elapsedSnapshot);
 
       // Exercise the real adapter with a controller timeout already settled
       // before dispatch: no native child/provider is started, and the planner

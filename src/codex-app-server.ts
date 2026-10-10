@@ -14,6 +14,8 @@ import {
   type SubprocessInputChannel,
 } from "./process.js";
 
+import { assertProviderTurnDeadline } from "./provider-turn.js";
+
 /** Codex-private protocol facts; callers keep native identities in adapter data. */
 export interface CodexAppServerCheckpoint {
   threadId?: string;
@@ -40,6 +42,8 @@ export interface CodexAppServerOptions {
   env: Record<string, string>;
   options: ThreadOptions;
   signal: AbortSignal;
+  /** Generation admission only; read-only reconciliation has its own bound. */
+  deadlineAt?: string;
   stderr?: (diagnostic: CodexStderrDiagnostic) => void | Promise<void>;
   redactionValues?: string[];
   /** Optional observation; exceptions never alter protocol work. */
@@ -204,7 +208,10 @@ class AppServerClient {
 
   async send(message: ObjectValue): Promise<void> {
     if (!this.channel) throw new Error("Codex app-server input is not ready");
-    await this.channel.write(`${JSON.stringify(message)}\n`);
+    const frame = `${JSON.stringify(message)}\n`;
+    if (message.method === "turn/start")
+      assertProviderTurnDeadline(this.args.deadlineAt);
+    await this.channel.write(frame);
   }
 
   async request(method: string, params: ObjectValue): Promise<unknown> {
@@ -460,6 +467,7 @@ function verifySettings(
 export async function runCodexAppServer(
   args: CodexAppServerTurnOptions,
 ): Promise<void> {
+  assertProviderTurnDeadline(args.deadlineAt);
   args.signal.throwIfAborted();
   const settings = requestedSettings(args.options);
   const client = new AppServerClient(args);
@@ -655,6 +663,7 @@ export async function runCodexAppServer(
       args.event({ type: "thread.started", thread_id: id });
       for (const event of earlyNotifications.splice(0))
         client.notification(event.method, event.params);
+      assertProviderTurnDeadline(args.deadlineAt);
       channel.signal?.throwIfAborted();
       const status = object(thread.status);
       if (status.type === "active")

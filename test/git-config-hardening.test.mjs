@@ -20,6 +20,8 @@ import { validateTree } from "../dist/validation.js";
 import {
   configuredResultReviewRawBudget,
   materializeResultTree,
+  reviewNavigationEvidence,
+  resultChangePacket,
   resultTreeInventory,
   unchangedResultByteEvidence,
 } from "../dist/result-evidence.js";
@@ -226,6 +228,19 @@ test("controller Git ignores executable configuration shared by a worker worktre
     { encoding: "utf8" },
   );
   assert.equal(pinnedCode, baselineCode);
+  const historicalBody = "retained implementation context\n".repeat(500);
+  const historicalPrefix = "Historical result, not current acceptance:\n";
+  const historicalSuffix = "\nOriginal result tree only.";
+  const retainedRecord = (prefix) => ({
+    origin: "controller",
+    path: prefix,
+    content: prefix + historicalBody + historicalSuffix,
+    reusableBody: {
+      start: prefix.length,
+      length: historicalBody.length,
+      digest: createHash("sha256").update(historicalBody).digest("hex"),
+    },
+  });
   const packet = reviewPacket(
     ["Preserve the complete pinned baseline and current note."],
     [
@@ -247,6 +262,14 @@ test("controller Git ignores executable configuration shared by a worker worktre
         content: "unknown",
         complete: false,
       },
+      retainedRecord(historicalPrefix),
+      retainedRecord("Earlier sibling finding:\n"),
+      {
+        origin: "controller",
+        path: "Unavailable bounded historical evidence",
+        content: "Required bytes remain unavailable.\n".repeat(200),
+        complete: false,
+      },
     ],
   );
   const canonical = JSON.stringify(packet);
@@ -254,6 +277,7 @@ test("controller Git ignores executable configuration shared by a worker worktre
   try {
     assert.deepEqual(readdirSync(tree.directory).sort(), [
       "candidate",
+      "evidence",
       "pinned",
     ]);
     assert.equal(
@@ -273,12 +297,28 @@ test("controller Git ignores executable configuration shared by a worker worktre
     );
     assert.deepEqual(
       tree.reviewFiles.map(({ evidenceIndex }) => evidenceIndex),
-      [2],
+      [1, 2, 5, 6, 7],
     );
     const rendered = renderReviewPacket(packet, tree.reviewFiles);
     const choices = JSON.parse(rendered);
     assert.equal(choices.evidence[2].content.file, "pinned/2.txt");
-    assert.equal(choices.evidence[1].content, packet.evidence[1].content);
+    assert.equal(choices.evidence[1].content.file, "pinned/1.txt");
+    assert.equal(choices.evidence[5].content.file, "evidence/5.txt");
+    assert.equal(choices.evidence[6].content.file, "evidence/6.txt");
+    assert.equal(choices.evidence[7].content.file, "evidence/7.txt");
+    assert.equal(choices.evidence[7].complete, false);
+    assert.equal(choices.bodies, undefined);
+    assert.equal(rendered.includes(historicalBody), false);
+    for (const file of tree.reviewFiles) {
+      assert.equal(
+        readFileSync(join(tree.directory, file.path), "utf8"),
+        packet.evidence[file.evidenceIndex].content,
+      );
+      assert.equal(
+        resolveReviewBodyContent(choices, file.evidenceIndex, packet),
+        packet.evidence[file.evidenceIndex].content,
+      );
+    }
     assert.equal(resolveReviewBodyContent(choices, 2, packet), baselineCode);
     assert.equal(
       readFileSync(join(tree.directory, "pinned", "2.txt"), "utf8"),
@@ -303,7 +343,11 @@ test("controller Git ignores executable configuration shared by a worker worktre
     });
     assert.ok(call.prompt.includes("candidate/"));
     assert.ok(call.prompt.includes("pinned/"));
+    assert.ok(call.prompt.includes("evidence/"));
+    assert.equal(call.prompt.includes("complete mandatory read set"), false);
+    assert.equal(call.prompt.includes(historicalBody), false);
     assert.equal(call.tree, tree.directory);
+    assert.deepEqual(call.reviewPacket, packet);
     const reboundRequest = {
       reviewPhase: "result-review",
       criteria: [packet.criteria[0].text],
@@ -386,7 +430,7 @@ test("controller Git ignores executable configuration shared by a worker worktre
       () => decodeReview({ ...answer, packetId: successor.id }, packet),
       /exact packetId/,
     );
-    for (const evidenceIndices of [[999], [2, 2], [4]]) {
+    for (const evidenceIndices of [[999], [2, 2], [4], [7]]) {
       const invalid = decodeReview(
         { ...answer, findings: [{ ...answer.findings[0], evidenceIndices }] },
         packet,
@@ -408,12 +452,12 @@ test("controller Git ignores executable configuration shared by a worker worktre
     writeFileSync(file, "changed artifact bytes");
     assert.throws(
       () => renderReviewPacket(packet, tree.reviewFiles),
-      /differs from its complete source/,
+      /differs from its canonical evidence/,
     );
     rmSync(file);
     assert.throws(
       () => renderReviewPacket(packet, tree.reviewFiles),
-      /differs from its complete source/,
+      /differs from its canonical evidence/,
     );
   } finally {
     tree.remove();
@@ -426,7 +470,7 @@ test("controller Git ignores executable configuration shared by a worker worktre
   );
   assert.throws(
     () => renderReviewPacket(packet, tree.reviewFiles),
-    /differs from its complete source/,
+    /differs from its canonical evidence/,
   );
   const command = `node -e 'if (require("node:fs").readFileSync("notes.txt", "utf8") !== "changed\\n") process.exit(1)'`;
   const validation = await validateTree(
@@ -435,6 +479,31 @@ test("controller Git ignores executable configuration shared by a worker worktre
     changeRef,
     treeSha,
     [command],
+  );
+  const currentChange = resultChangePacket(checkout, baseSha, changeRef);
+  const navigation = reviewNavigationEvidence({
+    change: currentChange.change,
+    baseCommitSha: baseSha,
+    resultCommitSha: changeRef,
+    resultTreeSha: treeSha,
+    commands: validation.commands,
+  });
+  const navigationFacts = JSON.parse(navigation.content);
+  assert.equal(navigation.complete, true);
+  assert.ok(Buffer.byteLength(navigation.content) <= 2_048);
+  assert.equal(navigationFacts.resultTreeSha, treeSha);
+  assert.equal(navigationFacts.baseCommitSha, baseSha);
+  assert.deepEqual(navigationFacts.changedPaths, ["notes.txt", "source.ts"]);
+  assert.equal(navigationFacts.changedPathCount, 2);
+  assert.equal(navigationFacts.changedPathsComplete, true);
+  assert.equal(navigationFacts.commandCount, validation.commands.length);
+  assert.equal(navigationFacts.commandsComplete, true);
+  assert.equal(navigationFacts.commands[0].receiptIndex, 0);
+  assert.equal(navigationFacts.commands[0].treeSha, treeSha);
+  assert.equal(navigationFacts.commands[0].exitCode, 0);
+  assert.equal(
+    navigationFacts.commands[0].commandPreview,
+    validation.commands[0].command.slice(0, 120),
   );
   const request = {
     item: {

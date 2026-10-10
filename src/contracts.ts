@@ -580,6 +580,8 @@ export interface PlanningModel {
   reconcileSession?(
     session: AgentSessionRef,
   ): Promise<AgentSessionReconciliation>;
+  /** Decode authenticated recovered bytes with the ordinary request decoder; no provider call. */
+  decodeSessionResponse?<T>(request: PlanningRequest<T>, response: string): T;
   releaseSession?(session: AgentSessionRef): Promise<void>;
   approvedPlaybook?: ApprovedPlaybook;
   approvedPlaybookPin?: ApprovedPlaybookPin;

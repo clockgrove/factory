@@ -2,6 +2,9 @@
  * The Work Item worker lifecycle both delivery runners share (#600): run the
  * item's worker to a collected result, and stop it after a failed attempt.
  */
+
+import { isDeepStrictEqual } from "node:util";
+import { agentSessionContinuation } from "./agent-session.js";
 import type { FactoryConfig } from "./config.js";
 import type {
   ContentStore,
@@ -17,25 +20,23 @@ import {
   graphDigest,
   recordWorkerDiscovery,
 } from "./graph-amendments.js";
-import { isDeepStrictEqual } from "node:util";
 import { executeItem } from "./item-steps.js";
 import { selectedInputsForItem, validationLfsMembersForItem } from "./media.js";
-import { packageManagerUpdate } from "./package-manager-update.js";
-import { acceptedPlanningDecisionContext } from "./planning-decision-context.js";
-import type { PhaseAdmission } from "./phase-admission.js";
-import { environmentValidationIndices } from "./qa.js";
-import { preflightItemEnvironment } from "./qa-execution.js";
-import {
-  type WorkRecovery,
-  retainedFailedResultContext,
-} from "./repair-policy.js";
-import type { FactoryState } from "./state.js";
-import { workspacePackageAdditions } from "./workspace-membership.js";
-import { agentSessionContinuation } from "./agent-session.js";
 import {
   objectiveKnowledgeView,
   publishObjectiveKnowledge,
 } from "./objective-knowledge.js";
+import { packageManagerUpdate } from "./package-manager-update.js";
+import type { PhaseAdmission } from "./phase-admission.js";
+import { acceptedPlanningDecisionContext } from "./planning-decision-context.js";
+import { environmentValidationIndices } from "./qa.js";
+import { preflightItemEnvironment } from "./qa-execution.js";
+import {
+  retainedFailedResultContext,
+  type WorkRecovery,
+} from "./repair-policy.js";
+import type { FactoryState } from "./state.js";
+import { workspacePackageAdditions } from "./workspace-membership.js";
 
 interface ItemWorker {
   state: FactoryState;
@@ -154,10 +155,11 @@ export async function runWorker(
     baseSha,
     objectiveKnowledgeView(state, item, args.config.checkout, baseSha),
   );
-  const session =
-    args.driver.sessionContinuation === true
-      ? agentSessionContinuation(state, "implementation", item.id, args.save)
-      : undefined;
+  const session = args.driver.sessionCapabilities?.resumeRoles.includes(
+    "implementation",
+  )
+    ? agentSessionContinuation(state, "implementation", item.id, args.save)
+    : undefined;
   if (
     work.recovery?.correction &&
     (!retained || args.driver.retainedFailedResultContext !== true)
@@ -251,10 +253,11 @@ export async function stopWorker(args: ItemWorker): Promise<void> {
   const work = state.work[item.id]!;
   if (!work.execution) return;
   try {
-    const session =
-      args.driver.sessionContinuation === true
-        ? agentSessionContinuation(state, "implementation", item.id, args.save)
-        : undefined;
+    const session = args.driver.sessionCapabilities?.resumeRoles.includes(
+      "implementation",
+    )
+      ? agentSessionContinuation(state, "implementation", item.id, args.save)
+      : undefined;
     const context = workerContext(
       work,
       args.save,

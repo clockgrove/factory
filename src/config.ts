@@ -1,21 +1,21 @@
-import { refuseUnknownFields } from "./unknown-fields.js";
-import {
-  assertGitHubProjectStatusConfig,
-  type GitHubProjectStatusConfig,
-} from "./github-project-state.js";
-import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
-import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
+import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
+import {
+  assertGitHubProjectStatusConfig,
+  type GitHubProjectStatusConfig,
+} from "./github-project-state.js";
 import {
   bindOrigin,
   originRepositories,
   validateLfsRouting,
 } from "./origin-binding.js";
 import { type AutonomyConfig, resolveAutonomy } from "./repair-policy.js";
+import { refuseUnknownFields } from "./unknown-fields.js";
 
 export type CodexReasoningEffort =
   | "minimal"
@@ -149,6 +149,8 @@ export interface ClaudeModelSelection {
 export type PlanningConfig =
   | {
       kind: "codex-sdk";
+      /** Tool-free compile/graph-review/diagnosis transport; tree reviews always use exec. */
+      codex?: { transport?: "exec" | "app-server" };
       planner: CodexModelSelection;
       reviewer: CodexModelSelection;
     }
@@ -379,7 +381,17 @@ export function validatePlanning(
 ): asserts value is FactoryConfig["planning"] {
   assertObject(value, "planning");
   if (value.kind === "codex-sdk") {
-    assertOnlyKeys(value, ["kind", "planner", "reviewer"], "planning");
+    assertOnlyKeys(value, ["kind", "codex", "planner", "reviewer"], "planning");
+    if (value.codex !== undefined) {
+      assertObject(value.codex, "planning.codex");
+      assertOnlyKeys(value.codex, ["transport"], "planning.codex");
+      if (
+        value.codex.transport !== undefined &&
+        value.codex.transport !== "exec" &&
+        value.codex.transport !== "app-server"
+      )
+        throw new Error("planning.codex.transport must be exec or app-server");
+    }
     assertCodexModelSelection(value.planner, "planning.planner");
     assertCodexModelSelection(value.reviewer, "planning.reviewer");
     return;

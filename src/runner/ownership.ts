@@ -1,8 +1,4 @@
-import { serviceLoginSecrets } from "../provider-credentials.js";
 import { agentSessionContinuation } from "../agent-session.js";
-import { isReadinessWait } from "../delivery/readiness.js";
-import { executionContext } from "../execution/checkpoint.js";
-import { workerIdentity } from "../item-steps.js";
 import { closeCancelledWorkItems } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
 import type {
@@ -12,8 +8,11 @@ import type {
   GitHubGateway,
   PlanningModel,
 } from "../contracts.js";
-import { awaitsOperator, type StepContext } from "../step.js";
+import { isReadinessWait } from "../delivery/readiness.js";
+import { executionContext } from "../execution/checkpoint.js";
+import { workerIdentity } from "../item-steps.js";
 import { linuxProcessIdentity, processGroupExists } from "../process.js";
+import { serviceLoginSecrets } from "../provider-credentials.js";
 import type { ContinuationState, FactoryState } from "../state.js";
 import {
   acquireObjectiveLock,
@@ -23,6 +22,7 @@ import {
   readState,
   releaseControllerLock,
 } from "../state-store.js";
+import { awaitsOperator, type StepContext } from "../step.js";
 
 export interface ApplicationServices {
   planningModel: PlanningModel;
@@ -51,8 +51,31 @@ export class CoordinatorHandoff extends Error {
 export function canHandoff(state: ContinuationState): boolean {
   if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
     return false;
-  // Preparation resumes by repeating its current step, so any point is safe.
-  if (state.schemaVersion === 8) return true;
+  if (
+    [
+      ...Object.values(state.agentSessions ?? {}),
+      ...(state.agentSessionHistory ?? []),
+    ].some(
+      (session) =>
+        session.status === "in-flight" ||
+        (session.currentTurn && session.currentTurn.resources !== "settled"),
+    )
+  )
+    return false;
+  if (state.schemaVersion === 8)
+    return state.planningRecovery?.phase !== "submitted";
+  if (
+    Object.values(state.work).some(
+      (work) =>
+        work.recovery?.diagnosisInvocation?.submitted &&
+        work.recovery.diagnosisInvocation.response === undefined,
+    ) ||
+    (state.pendingAmendment?.planningInvocation &&
+      state.pendingAmendment.planningInvocation.response === undefined) ||
+    (state.pendingAmendment?.reviewInvocation &&
+      state.pendingAmendment.reviewInvocation.response === undefined)
+  )
+    return false;
   return !Object.entries(state.work).some(
     ([id, work]) =>
       // An item waiting in place for the operator holds no effect in flight.
@@ -202,10 +225,11 @@ export async function cancelKnownWork(
         continue;
       if (!work.execution && !work.attempt) continue;
       tasks.push(async () => {
-        const session =
-          driver.sessionContinuation === true
-            ? agentSessionContinuation(state, "implementation", itemId, save)
-            : undefined;
+        const session = driver.sessionCapabilities?.resumeRoles.includes(
+          "implementation",
+        )
+          ? agentSessionContinuation(state, "implementation", itemId, save)
+          : undefined;
         const context = executionContext(work, save, () =>
           Boolean(state.cancelRequested),
         );

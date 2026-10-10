@@ -7,10 +7,14 @@ import {
   consumption,
   failureDigest,
   objectiveEvent,
-  releaseCharge,
   type RepairCorrection,
+  releaseCharge,
 } from "./repair-policy.js";
+
 export { replacementRefusal } from "./amendment-admission.js";
+
+import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   intakeRefusal,
   NOT_REPLACEABLE,
@@ -18,19 +22,19 @@ import {
   rejectionRefusal,
 } from "./amendment-admission.js";
 import { refreshBlameDecisions } from "./blame-decision.js";
-import { preflightObjective } from "./local-preflight.js";
-import { planningPrerequisites } from "./objective-prerequisites.js";
-import { createHash, randomUUID } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
+import {
+  generatePlannerStructured,
+  withPlannerAdmission,
+} from "./compiler/planning.js";
 import {
   commandAuthority,
   compileObjective,
-  paidModel,
   finalObjectiveCommands,
   hydrateWorkerInputSources,
   objectiveCriteria,
-  planningSources,
+  paidModel,
   planningReviewEvidence,
+  planningSources,
   planReviewPacket,
   validateCommandProvenance,
   validateGraph,
@@ -44,6 +48,13 @@ import type {
   WorkGraph,
   WorkItem,
 } from "./contracts.js";
+import { linearDeliveryUnits } from "./delivery/plan.js";
+import type { DiagnosticEmitter } from "./diagnostics.js";
+import {
+  executionProfileChoices,
+  normalizeExecutionProfiles,
+  verifyExecutionProfiles,
+} from "./execution-profiles.js";
 import {
   attachedFault,
   attachFault,
@@ -52,18 +63,17 @@ import {
   StepFault,
   transient,
 } from "./fault.js";
-import { clearRepeats, step, type StepOptions } from "./step.js";
-import { linearDeliveryUnits } from "./delivery/plan.js";
-import {
-  executionProfileChoices,
-  normalizeExecutionProfiles,
-  verifyExecutionProfiles,
-} from "./execution-profiles.js";
+import { preflightObjective } from "./local-preflight.js";
+import { planningPrerequisites } from "./objective-prerequisites.js";
 import { assertCoverageSources, coverageObligations } from "./qa.js";
-import { decodeGraphReview, reviewPacket } from "./review-evidence.js";
-import type { DiagnosticEmitter } from "./diagnostics.js";
-import type { FactoryState } from "./state.js";
 import { amendmentImplementationEvidence } from "./result-evidence.js";
+import {
+  assertReviewPacketBinding,
+  decodeGraphReview,
+  reviewPacket,
+} from "./review-evidence.js";
+import type { FactoryState } from "./state.js";
+import { clearRepeats, type StepOptions, step } from "./step.js";
 
 export interface AmendmentProposal extends WorkDiscovery {
   expectedGraphDigest: string;
@@ -86,6 +96,18 @@ export interface PendingAmendment {
     | "rejected"
     | "backlog";
   graph?: WorkGraph;
+  planningInvocation?: {
+    id: string;
+    requestDigest?: string;
+    response?: WorkGraph;
+  };
+  reviewInvocation?: {
+    id: string;
+    requestDigest: string;
+    packet: import("./review-evidence.js").ReviewPacket;
+    response?: Awaited<ReturnType<PlanningModel["reviewGraph"]>>;
+  };
+  reviewRejectedResponses?: Awaited<ReturnType<PlanningModel["reviewGraph"]>>[];
   reviewDigest?: string;
   issueByItemId: Record<string, number>;
   error?: string;
@@ -229,6 +251,16 @@ export function assertGraphRevisions(state: FactoryState): void {
       pending.proposal.expectedGraphDigest !== graphDigest(state.graph)
     )
       throw new Error("Pending amendment has stale graph identity");
+    if (
+      (pending.planningInvocation &&
+        (typeof pending.planningInvocation.id !== "string" ||
+          !pending.planningInvocation.id)) ||
+      (pending.reviewInvocation &&
+        (typeof pending.reviewInvocation.id !== "string" ||
+          !pending.reviewInvocation.id ||
+          !/^[a-f0-9]{64}$/.test(pending.reviewInvocation.requestDigest)))
+    )
+      throw new Error("Pending amendment has an invalid retained invocation");
     const known = pending.issueByItemId;
     if (
       !known ||
@@ -590,35 +622,58 @@ export function applyPendingAmendment(
     { scope: "objective", name: "amend", paid: true },
     (context) => {
       const paid = paidModel(args.model, context);
-      return advanceAmendment({
-        ...rest,
-        model: {
-          ...paid,
-          // An answer that does not decode is a lost answer, not a refusal:
-          // it is decoded inside the paid call, so the step asks again and
-          // then the operator. Only findings that decode refuse.
-          reviewGraph: (request) =>
-            context.paid(async () => {
-              const response = await args.model.reviewGraph(request);
-              try {
-                if (request.reviewPacket)
-                  decodeGraphReview(
-                    response,
-                    request.reviewPacket,
-                    request.graph.items.map((item) => item.id),
-                  );
-              } catch (error) {
-                throw new StepFault(
-                  transient(
-                    `Model output was invalid: ${error instanceof Error ? error.message : String(error)}`,
-                    true,
-                  ),
-                );
-              }
-              return response;
-            }),
-        },
-      });
+      return withPlannerAdmission(
+        args.state,
+        () =>
+          args.cancelled() ||
+          Boolean(
+            args.state.coordinator && args.state.coordinator.mode !== "running",
+          ),
+        () =>
+          advanceAmendment({
+            ...rest,
+            model: {
+              ...paid,
+              // An answer that does not decode is a lost answer, not a refusal:
+              // it is decoded inside the paid call, so the step asks again and
+              // then the operator. Only findings that decode refuse.
+              reviewGraph: (request) =>
+                context.paid(async () => {
+                  const response = await args.model.reviewGraph(request);
+                  if (args.state.pendingAmendment?.reviewInvocation) {
+                    args.state.pendingAmendment.reviewInvocation.response =
+                      structuredClone(response);
+                    args.save();
+                  }
+                  try {
+                    if (request.reviewPacket)
+                      decodeGraphReview(
+                        response,
+                        request.reviewPacket,
+                        request.graph.items.map((item) => item.id),
+                      );
+                  } catch (error) {
+                    const pending = args.state.pendingAmendment;
+                    if (pending) {
+                      pending.reviewRejectedResponses ??= [];
+                      pending.reviewRejectedResponses.push(
+                        structuredClone(response),
+                      );
+                      delete pending.reviewInvocation;
+                      args.save();
+                    }
+                    throw new StepFault(
+                      transient(
+                        `Model output was invalid: ${error instanceof Error ? error.message : String(error)}`,
+                        true,
+                      ),
+                    );
+                  }
+                  return response;
+                }),
+            },
+          }),
+      );
     },
     { save: args.save, signal, pause, clock },
   );
@@ -754,25 +809,74 @@ async function advanceAmendment(args: {
         normalizeExecutionProfiles(pending.graph, choices);
       } else {
         calling = "compile";
+        const recovering = pending.planningInvocation !== undefined;
+        pending.planningInvocation ??= { id: randomUUID() };
+        save();
         pending.graph = await compileObjective(
           state.objective,
           args.body,
           state.baseSha,
           config.checkout,
           {
+            ...(args.model.sessionCapabilities
+              ? { sessionCapabilities: args.model.sessionCapabilities }
+              : {}),
+            ...(args.model.releaseSession
+              ? { releaseSession: args.model.releaseSession.bind(args.model) }
+              : {}),
+            ...(args.model.reconcileSession
+              ? {
+                  reconcileSession: args.model.reconcileSession.bind(
+                    args.model,
+                  ),
+                }
+              : {}),
+            ...(args.model.decodeSessionResponse
+              ? {
+                  decodeSessionResponse: args.model.decodeSessionResponse.bind(
+                    args.model,
+                  ),
+                }
+              : {}),
             approvedPlaybook: args.model.approvedPlaybook,
             approvedPlaybookPin: args.model.approvedPlaybookPin,
             generateStructured: async (request) => {
-              const response = await args.model.generateStructured(request);
+              const requestDigest = createHash("sha256")
+                .update(JSON.stringify(request))
+                .digest("hex");
+              if (
+                recovering &&
+                pending.planningInvocation!.requestDigest !== requestDigest
+              )
+                throw new StepFault(
+                  decision(
+                    "The retained amendment compilation request changed; preserve the submitted owner before any continuation",
+                  ),
+                );
+              pending.planningInvocation!.requestDigest = requestDigest;
+              save();
+              const response =
+                pending.planningInvocation!.response ??
+                (await generatePlannerStructured(
+                  args.model,
+                  state,
+                  save,
+                  request,
+                  recovering,
+                ));
+              pending.planningInvocation!.response = structuredClone(
+                response as WorkGraph,
+              );
+              save();
               compilationResponseObserved = true;
-              return response;
+              return response as never;
             },
             reviewGraph: (request) => args.model.reviewGraph(request),
           },
           [],
           [],
           {
-            invocationId: randomUUID(),
+            invocationId: pending.planningInvocation.id,
             phase: "compile",
             ordinal,
             observe: args.diagnostics?.modelObserver({
@@ -846,21 +950,55 @@ async function advanceAmendment(args: {
           ]),
         ),
       };
-      const evidence = reviewPacket([], planningReviewEvidence(packet));
+      const requestDigest = createHash("sha256")
+        .update(JSON.stringify(packet))
+        .digest("hex");
+      if (
+        pending.reviewInvocation &&
+        pending.reviewInvocation.requestDigest !== requestDigest
+      )
+        throw new StepFault(
+          decision(
+            "Amendment review inputs changed after submission; preserve the exact submitted review",
+          ),
+        );
+      const evidence =
+        pending.reviewInvocation?.packet ??
+        reviewPacket([], planningReviewEvidence(packet));
+      assertReviewPacketBinding(evidence, [], planningReviewEvidence(packet));
       calling = "review";
-      const response = await args.model.reviewGraph({
-        ...packet,
-        reviewPacket: evidence,
-        invocation: {
-          invocationId: randomUUID(),
-          phase: "graph-review",
-          ordinal,
-          observe: args.diagnostics?.modelObserver({
-            scopeId: pending.id,
-            runId: state.runId,
-          }),
-        },
-      });
+      if (
+        pending.reviewInvocation &&
+        pending.reviewInvocation.response === undefined
+      )
+        throw new StepFault(
+          decision(
+            "Amendment independent review remains submitted without an authenticated response; no automatic replay is allowed",
+          ),
+        );
+      pending.reviewInvocation ??= {
+        id: randomUUID(),
+        requestDigest,
+        packet: evidence,
+      };
+      save();
+      const response =
+        pending.reviewInvocation.response ??
+        (await args.model.reviewGraph({
+          ...packet,
+          reviewPacket: evidence,
+          invocation: {
+            invocationId: pending.reviewInvocation.id,
+            phase: "graph-review",
+            ordinal,
+            observe: args.diagnostics?.modelObserver({
+              scopeId: pending.id,
+              runId: state.runId,
+            }),
+          },
+        }));
+      pending.reviewInvocation.response = structuredClone(response);
+      save();
       calling = undefined;
       // The answer decoded inside the paid call (applyPendingAmendment).
       const findings = decodeGraphReview(

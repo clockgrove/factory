@@ -15,6 +15,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import {
+  assertAgentSessionCapabilities,
   assertAgentSessionRef,
   assertAgentSessionScope,
 } from "../agent-session.js";
@@ -81,11 +82,11 @@ import { workspacePackageAdditions } from "../workspace-membership.js";
 import { stoppedFault } from "./attempt.js";
 import { assertDurableValue } from "./checkpoint.js";
 import { executionFault } from "./fault.js";
+import { readWorkHandoff } from "./harness-support.js";
 import {
   checkStagedCandidate,
   scanPrivateStaging,
 } from "./staged-candidate.js";
-import { readWorkHandoff } from "./harness-support.js";
 import {
   killGroup,
   launchWorker,
@@ -160,7 +161,7 @@ function codexSessionOwner(session: AgentSessionRef): string {
 }
 
 export class CodexHarness implements AgentHarness {
-  readonly sessionContinuation = true as const;
+  readonly sessionCapabilities = { resumeRoles: ["implementation"] } as const;
   readonly sessionAdapter = "codex";
   readonly capabilities = {
     protocolVersion: 1,
@@ -857,7 +858,7 @@ export function retainedFailedResultBrief(
 }
 
 export class LocalExecutionDriver implements ExecutionDriver {
-  readonly sessionContinuation = true as const;
+  readonly sessionCapabilities = { resumeRoles: ["implementation"] } as const;
   readonly freshCheckoutReadiness = true as const;
   readonly retainedFailedResultContext = true as const;
   private active = new Map<string, Active>();
@@ -961,13 +962,28 @@ export class LocalExecutionDriver implements ExecutionDriver {
       throw new Error(
         `Harness adapter ${adapterIdentity} does not satisfy the local AgentHarness capability contract`,
       );
-    if (
-      harness.sessionContinuation &&
-      (!harness.sessionAdapter || !harness.releaseSession)
-    )
+    if ("sessionContinuation" in harness)
       throw new Error(
-        `Harness adapter ${adapterIdentity} declares incomplete session continuation`,
+        `Harness adapter ${adapterIdentity} uses the removed sessionContinuation declaration; declare sessionCapabilities.resumeRoles instead`,
       );
+    if (harness.sessionCapabilities !== undefined) {
+      assertAgentSessionCapabilities(harness.sessionCapabilities);
+      if (
+        harness.sessionCapabilities.resumeRoles.some(
+          (role) => role !== "implementation",
+        )
+      )
+        throw new Error(
+          `Harness adapter ${adapterIdentity} can declare only implementation session resume`,
+        );
+      if (
+        harness.sessionCapabilities.resumeRoles.length &&
+        (!harness.sessionAdapter || !harness.releaseSession)
+      )
+        throw new Error(
+          `Harness adapter ${adapterIdentity} declares incomplete session continuation`,
+        );
+    }
   }
 
   @classifyFaults(executionFault)
@@ -1152,9 +1168,15 @@ export class LocalExecutionDriver implements ExecutionDriver {
             this.adapterIdentity,
           identity: session.identity,
           turn: (session.retained?.turn ?? 0) + 1,
-          status: harness.sessionContinuation ? "in-flight" : "unavailable",
+          status: harness.sessionCapabilities?.resumeRoles.includes(
+            "implementation",
+          )
+            ? "in-flight"
+            : "unavailable",
           executionIdentity: identity,
-          data: harness.sessionContinuation
+          data: harness.sessionCapabilities?.resumeRoles.includes(
+            "implementation",
+          )
             ? {
                 ...(session.retained?.data as
                   | Record<string, unknown>
@@ -1174,7 +1196,10 @@ export class LocalExecutionDriver implements ExecutionDriver {
         });
       }
       const handle = await harness.start({
-        ...(session && harness.sessionContinuation && { session }),
+        ...(session &&
+          harness.sessionCapabilities?.resumeRoles.includes(
+            "implementation",
+          ) && { session }),
         ...(request.captureContext &&
           this.captureSettings && {
             capture: {
@@ -1332,7 +1357,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
       active.request.item,
       active.executionBinding,
     );
-    if (!harness.sessionContinuation) return;
+    if (!harness.sessionCapabilities?.resumeRoles.includes("implementation"))
+      return;
     context?.checkpointSession?.({
       scope: structuredClone(session.scope),
       adapter: harness.sessionAdapter ?? active.adapterIdentity,

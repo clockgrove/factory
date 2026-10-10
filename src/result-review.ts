@@ -1,8 +1,8 @@
 import type {
+  AgentSessionContinuation,
   ModelInvocationContext,
   PlanningModel,
   ResultReviewEvidenceSource,
-  AgentSessionContinuation,
 } from "./contracts.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { attachFault, StepFault, transient } from "./fault.js";
@@ -24,11 +24,11 @@ import {
   resolveReviewReferences,
   reviewPacket,
 } from "./review-evidence.js";
-import type { AcceptancePending } from "./state.js";
 import {
   SemanticAcceptanceFailure,
   type SemanticRefusalEvidence,
 } from "./semantic-refusal.js";
+import type { AcceptancePending } from "./state.js";
 import {
   type AcceptanceDecision,
   assertRetainedReviewEvidence,
@@ -187,7 +187,9 @@ export async function reviewAcceptance(args: {
     evidence: suppliedEvidence,
     observations: args.observations,
     invocation: args.invocation,
-    ...(model.sessionContinuation && args.session
+    ...(model.sessionCapabilities?.resumeRoles.includes(
+      args.reviewPhase ?? "result-review",
+    ) && args.session
       ? { session: args.session }
       : {}),
     ...(args.previousInvalid ? { previousInvalid: args.previousInvalid } : {}),

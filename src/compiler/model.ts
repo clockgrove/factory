@@ -1,61 +1,63 @@
+import { randomUUID } from "node:crypto";
+import * as time from "../clock.js";
 import {
-  type PlanningModel,
+  COMPILER_READINESS_GUIDANCE,
+  compilerWire,
+  PlannerChoiceError,
+} from "../compiler-wire.js";
+import type { CodexModelSelection } from "../config.js";
+import {
+  type AgentSessionContinuation,
+  type AgentSessionReconciliation,
+  type AgentSessionRef,
+  type ApprovedPlaybook,
   type ApprovedPlaybookPin,
   assertApprovedPlaybookPin,
-  type ApprovedPlaybook,
-  type ModelInvocationPhase,
-  type ModelInvocationContext,
   CompletedModelInvocationError,
+  type ModelInvocationContext,
+  type ModelInvocationPhase,
+  type PlanningModel,
   type PlanningRequest,
   type PlanReviewRequest,
-  type ValidationCommandReceipt,
   type ResultReviewEvidenceSource,
   type ResultReviewFinding,
-  type AgentSessionContinuation,
-  type AgentSessionRef,
+  type ValidationCommandReceipt,
 } from "../contracts.js";
+import { attachedFault, attachFault, decision, transient } from "../fault.js";
 import { readPinnedPlaybook } from "../learning.js";
-import { attachFault, attachedFault, transient, decision } from "../fault.js";
-import type {
-  PlanningTransport,
-  PlanningModelOptions,
-  StructuredCall,
-  PlanningTurn,
-  CodexPlanningModelOptions,
-} from "./transport.js";
-import * as time from "../clock.js";
-import { randomUUID } from "node:crypto";
+import { UnsettledSubprocessError } from "../process.js";
+import { ProviderTurnTimeoutError } from "../provider-turn.js";
 import {
+  type ReviewBodyFile,
+  type ReviewPacket,
+  renderReviewPacket,
+  renderReviewPacketChoices,
+  renderReviewPacketId,
+  reviewPacket,
+  reviewSchema,
+} from "../review-evidence.js";
+import { assertStepAdmission, stepCancellationSignal } from "../step.js";
+import { CodexPlanningTransport } from "./codex-transport.js";
+import {
+  invalidOutput,
+  MalformedPlannerOutput,
+  modelFault,
+  PlanValidationError,
   ProviderCapacityFailure,
   ProviderResponseTimeoutFailure,
   providerFailureClass,
-  modelFault,
-  MalformedPlannerOutput,
-  PlanValidationError,
-  invalidOutput,
 } from "./faults.js";
 import { observeModelInvocation } from "./observation.js";
 import { digest, planningReviewEvidence } from "./packets.js";
-import { UnsettledSubprocessError } from "../process.js";
-import {
-  compilerWire,
-  COMPILER_READINESS_GUIDANCE,
-  PlannerChoiceError,
-} from "../compiler-wire.js";
 import { compilerCitationChoices, planningGraphView } from "./sources.js";
-import {
-  reviewPacket,
-  renderReviewPacketChoices,
-  renderReviewPacketId,
-  reviewSchema,
-  type ReviewPacket,
-  type ReviewBodyFile,
-  renderReviewPacket,
-} from "../review-evidence.js";
-import type { CodexModelSelection } from "../config.js";
-import { ProviderTurnTimeoutError } from "../provider-turn.js";
-import { CodexPlanningTransport } from "./codex-transport.js";
-import { assertStepAdmission, stepCancellationSignal } from "../step.js";
+import type {
+  CodexPlanningModelOptions,
+  PlanningModelOptions,
+  PlanningTransport,
+  PlanningTurn,
+  StructuredCall,
+} from "./transport.js";
+import { structuredRequestDigest } from "./transport.js";
 
 /**
  * The planning model with its calls made as its step's paid calls (see
@@ -100,8 +102,14 @@ export function bindPlanningPlaybook(
     approvedPlaybookPin: pin,
     generateStructured: model.generateStructured.bind(model),
     reviewGraph: model.reviewGraph.bind(model),
-    ...(model.sessionContinuation
-      ? { sessionContinuation: true as const }
+    ...(model.sessionCapabilities
+      ? { sessionCapabilities: model.sessionCapabilities }
+      : {}),
+    ...(model.reconcileSession
+      ? { reconcileSession: model.reconcileSession.bind(model) }
+      : {}),
+    ...(model.decodeSessionResponse
+      ? { decodeSessionResponse: model.decodeSessionResponse.bind(model) }
       : {}),
     ...(model.releaseSession
       ? { releaseSession: model.releaseSession.bind(model) }
@@ -180,6 +188,7 @@ export function renderDiagnosisCall(
     schema: request.schema,
     invocation: request.invocation,
     defaultPhase: "diagnosis",
+    session: request.session,
     sourcePacket: JSON.stringify({
       ...(request.prerequisites
         ? { prerequisites: request.prerequisites }
@@ -238,6 +247,7 @@ ${JSON.stringify(wire.data)}`;
     schema: wire.schema,
     invocation: request.invocation,
     defaultPhase: "compile",
+    session: request.session,
     sourcePacket: JSON.stringify({
       ...(request.prerequisites
         ? { prerequisites: request.prerequisites }
@@ -334,8 +344,16 @@ export class StructuredPlanningModel implements PlanningModel {
   private readonly reviewCapacityRetryDelaysMs: readonly number[];
   private readonly wait: (milliseconds: number) => Promise<void>;
 
-  get sessionContinuation(): true | undefined {
-    return this.transport.sessionContinuation;
+  get sessionCapabilities() {
+    return this.transport.sessionCapabilities;
+  }
+
+  async reconcileSession(
+    session: AgentSessionRef,
+  ): Promise<AgentSessionReconciliation> {
+    return (
+      this.transport.reconcileSession?.(session) ?? { disposition: "unknown" }
+    );
   }
 
   async releaseSession(session: AgentSessionRef): Promise<void> {
@@ -366,7 +384,7 @@ export class StructuredPlanningModel implements PlanningModel {
     this.wait = options.wait ?? ((milliseconds) => time.sleep(milliseconds));
   }
 
-  private async runStructured<T>(args: StructuredCall): Promise<T> {
+  private authoritativeCall(args: StructuredCall): StructuredCall {
     const playbook = this.approvedPlaybook;
     const pin = this.approvedPlaybookPin;
     if (pin !== undefined) assertApprovedPlaybookPin(pin);
@@ -389,6 +407,11 @@ export class StructuredPlanningModel implements PlanningModel {
           approvedAdvisory: playbook,
         }),
       };
+    return args;
+  }
+
+  private async runStructured<T>(args: StructuredCall): Promise<T> {
+    args = this.authoritativeCall(args);
     const invocation = args.invocation ?? {
       invocationId: randomUUID(),
       phase: args.defaultPhase,
@@ -506,6 +529,8 @@ export class StructuredPlanningModel implements PlanningModel {
         role: args.role,
         prompt: args.prompt,
         schema: args.schema,
+        sourcePacket: args.sourcePacket,
+        candidateDigest: args.candidateDigest,
         invocation,
         turn,
         tree: args.tree,
@@ -561,13 +586,25 @@ export class StructuredPlanningModel implements PlanningModel {
       const failureClass = invalidStructuredOutput
         ? "structured-output-parse"
         : (turn.failureClass ?? providerFailureClass(error));
-      const fault = modelFault(error, {
+      const classified = modelFault(error, {
         provider,
         ended: turn.ended,
         started: turn.started,
         failureClass,
         fault: turn.fault ?? attachedFault(error),
       });
+      // Native startup may include paid setup or generation before projected
+      // items arrive. Missing terminal/usage receipts cannot justify replay.
+      const fault =
+        turn.nativeInvocationStarted &&
+        !turn.ended &&
+        !(error instanceof ProviderTurnTimeoutError) &&
+        classified.kind !== "cancelled"
+          ? decision(
+              "Native model invocation ended without an authenticated terminal outcome. Its outcome and unavailable usage remain unknown; inspect the retained invocation before retrying or cancelling.",
+              error instanceof Error ? error.message : String(error),
+            )
+          : classified;
       if (!invalidStructuredOutput) {
         observeModelInvocation(invocation, {
           type: "failed",
@@ -599,7 +636,10 @@ export class StructuredPlanningModel implements PlanningModel {
           new ProviderResponseTimeoutFailure(error, turn.stopped === true),
           fault,
         );
-      if (turn.ended)
+      if (
+        turn.ended ||
+        (turn.nativeInvocationStarted && fault.kind === "decision")
+      )
         throw attachFault(new CompletedModelInvocationError(error), fault);
       throw attachFault(error, fault);
     }
@@ -646,6 +686,14 @@ export class StructuredPlanningModel implements PlanningModel {
     }
     const { wire, call } = renderCompilationCall(request);
     const result = await this.runStructured<unknown>(call);
+    return this.decodeCompilationResult<T>(request, wire, result);
+  }
+
+  private decodeCompilationResult<T>(
+    request: PlanningRequest<T>,
+    wire: ReturnType<typeof compilerWire>,
+    result: unknown,
+  ): T {
     try {
       return wire.decode(result) as T;
     } catch (error) {
@@ -666,6 +714,54 @@ export class StructuredPlanningModel implements PlanningModel {
         );
       throw invalidOutput(error);
     }
+  }
+
+  /** Recover exact retained bytes through the ordinary schema/choice decoder. */
+  decodeSessionResponse<T>(request: PlanningRequest<T>, response: string): T {
+    if (
+      request.purpose !== "diagnosis" &&
+      JSON.stringify(request.approvedPlaybookPin) !==
+        JSON.stringify(this.approvedPlaybookPin)
+    )
+      throw new Error(
+        "Recovered compiler request differs from the pinned planning advisory",
+      );
+    const rendered =
+      request.purpose === "diagnosis"
+        ? { call: renderDiagnosisCall(request), wire: undefined }
+        : renderCompilationCall(request);
+    const call = this.authoritativeCall(rendered.call);
+    const session = request.session?.retained;
+    const binding = session?.currentTurn;
+    if (
+      !session ||
+      session.scope.role !== "planning" ||
+      session.adapter !== this.transport.adapter ||
+      session.status !== "ready" ||
+      binding?.terminal !== "completed" ||
+      binding.resources !== "settled" ||
+      binding.requestDigest !==
+        structuredRequestDigest(call.prompt, call.schema) ||
+      binding.schemaDigest !== digest(JSON.stringify(call.schema)) ||
+      binding.evidenceDigest !==
+        (call.sourcePacket === undefined
+          ? undefined
+          : digest(call.sourcePacket)) ||
+      binding.graphDigest !== request.session?.currentGraphDigest ||
+      binding.invocationId !== request.invocation?.invocationId
+    )
+      throw new Error(
+        "Recovered planner response differs from its exact admitted request",
+      );
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(response);
+    } catch (error) {
+      throw invalidOutput(error);
+    }
+    return rendered.wire
+      ? this.decodeCompilationResult<T>(request, rendered.wire, parsed)
+      : (parsed as T);
   }
 
   async reviewGraph(request: PlanReviewRequest): Promise<{
@@ -775,6 +871,7 @@ export function renderResultReviewCall(
     sourcePacket: renderReviewPacket(request.reviewPacket, request.reviewFiles),
     schema: reviewSchema(request.reviewPacket),
     tree: request.tree,
+    candidateDigest: digest(request.treeSha),
     session: request.session,
   };
 }
@@ -796,6 +893,7 @@ export class CodexPlanningModel extends StructuredPlanningModel {
         providerTurnIdleTimeoutMs,
         [...(options.redactionValues ?? [])],
         options.sessionRoot,
+        options.transport,
       ),
       options,
     );

@@ -458,13 +458,13 @@ class ClaudePlanningTransport implements PlanningTransport {
       );
     // A crash after confirmed removal but before the controller checkpoint is safe to repeat.
     if (!existsSync(supplied.root)) return;
-    const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
-    if (session.data.settled !== true && session.data.process)
-      await settleClaudeProcess(session.data.process);
     if (ref.status === "in-flight")
       throw new Error(
         "Claude submitted turn requires reconciliation before disposal",
       );
+    const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
+    if (session.data.settled !== true && session.data.process)
+      await settleClaudeProcess(session.data.process);
     releaseClaudeStorage(this.sessionRoot, ref, this.adapter);
   }
 

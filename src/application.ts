@@ -294,6 +294,7 @@ export function composePlanningModel(config: FactoryConfig): PlanningModel {
       {
         redactionValues,
         transport: config.planning.codex?.transport ?? "exec",
+        sourceArtifacts: config.planning.codex?.sourceArtifacts === true,
         sessionRoot: join(stateRoot(config.repository), "review-sessions"),
       },
     ),

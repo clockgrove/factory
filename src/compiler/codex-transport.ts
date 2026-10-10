@@ -22,6 +22,7 @@ import type {
   AgentSessionRef,
   ModelInvocationContext,
   ModelInvocationUsage,
+  PlanningRequest,
 } from "../contracts.js";
 import { codexCaptureEvent } from "../execution/interaction-capture.js";
 import { currentProcessSignal, UnsettledSubprocessError } from "../process.js";
@@ -41,6 +42,15 @@ import {
   type PlanningTurn,
   structuredRequestDigest,
 } from "./transport.js";
+import {
+  assertDeliveredPlanningSources,
+  assertPlanningSourceDelivery,
+  deliveredPlanningSources,
+  type DeliveredPlanningSources,
+  materializePlanningSources,
+  planningSourceDirectory,
+  type PlanningSourceDelivery,
+} from "./source-delivery.js";
 
 const LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
 
@@ -65,7 +75,11 @@ export class CodexPlanningTransport implements PlanningTransport {
     private redactionValues: string[],
     private sessionRoot?: string,
     private transport: "exec" | "app-server" = "exec",
-  ) {}
+    private sourceArtifacts = false,
+  ) {
+    if (sourceArtifacts && transport !== "exec")
+      throw new Error("Planning source artifacts require the exec transport");
+  }
 
   get sessionCapabilities(): AgentSessionCapabilities | undefined {
     return this.sessionRoot
@@ -96,6 +110,10 @@ export class CodexPlanningTransport implements PlanningTransport {
     response?: string;
     responseDigest?: string;
     usage?: ModelInvocationUsage;
+    sourceReadProfile?: "pinned-source-read-v1";
+    deliveredSources?: DeliveredPlanningSources;
+    sourceDelivery?: PlanningSourceDelivery | null;
+    sourceRequestDigest?: string;
   } {
     const data = session.data as
       | {
@@ -107,6 +125,10 @@ export class CodexPlanningTransport implements PlanningTransport {
           response?: string;
           responseDigest?: string;
           usage?: ModelInvocationUsage;
+          sourceReadProfile?: "pinned-source-read-v1";
+          deliveredSources?: DeliveredPlanningSources;
+          sourceDelivery?: PlanningSourceDelivery | null;
+          sourceRequestDigest?: string;
         }
       | undefined;
     if (
@@ -122,11 +144,17 @@ export class CodexPlanningTransport implements PlanningTransport {
       (data.turnId !== undefined && typeof data.turnId !== "string") ||
       (data.threadId !== undefined &&
         (typeof data.threadId !== "string" ||
-          !/^[a-f0-9-]{36}$/.test(data.threadId)))
+          !/^[a-f0-9-]{36}$/.test(data.threadId))) ||
+      (data.sourceReadProfile !== undefined &&
+        (data.sourceReadProfile !== "pinned-source-read-v1" ||
+          session.scope.role !== "planning" ||
+          data.transport !== "exec"))
     )
       throw new Error(
         "Reviewer continuation differs from its private adapter binding",
       );
+    if (data.deliveredSources !== undefined)
+      assertDeliveredPlanningSources(data.deliveredSources);
     return data as {
       sessionRoot: string;
       threadId?: string;
@@ -136,10 +164,18 @@ export class CodexPlanningTransport implements PlanningTransport {
       response?: string;
       responseDigest?: string;
       usage?: ModelInvocationUsage;
+      sourceReadProfile?: "pinned-source-read-v1";
+      deliveredSources?: DeliveredPlanningSources;
+      sourceDelivery?: PlanningSourceDelivery | null;
+      sourceRequestDigest?: string;
     };
   }
 
-  private selectionDigest(role: PlanningRole, tree: boolean): string {
+  private selectionDigest(
+    role: PlanningRole,
+    tree: boolean,
+    sourceRead = false,
+  ): string {
     return createHash("sha256")
       .update(
         JSON.stringify([
@@ -148,10 +184,83 @@ export class CodexPlanningTransport implements PlanningTransport {
           role,
           "read-only",
           "never",
-          tree ? CODEX_TREE_REVIEW_CONFIG : CODEX_PLANNING_CONFIG,
+          tree || sourceRead ? CODEX_TREE_REVIEW_CONFIG : CODEX_PLANNING_CONFIG,
+          ...(sourceRead ? ["pinned-source-read-v1"] : []),
         ]),
       )
       .digest("hex");
+  }
+
+  sourceDelivery(
+    request: PlanningRequest<unknown>,
+    recover = false,
+  ): PlanningSourceDelivery | undefined {
+    const continuation = request.session;
+    const retained = continuation?.retained;
+    if (
+      !retained ||
+      !continuation ||
+      !this.sessionRoot ||
+      this.transport !== "exec"
+    )
+      return undefined;
+    const data = this.sessionData(retained);
+    // Existing ready conversations retain exactly their original tool-free profile.
+    if (data.sourceReadProfile === undefined) return undefined;
+    if (
+      !this.sourceArtifacts ||
+      continuation.scope.role !== "planning" ||
+      retained.status !== "ready" ||
+      retained.currentTurn?.resources !== "settled" ||
+      retained.identity !== continuation.identity ||
+      !isDeepStrictEqual(retained.scope, continuation.scope) ||
+      data.selectionDigest !== this.selectionDigest("planner", false, true)
+    )
+      throw new Error(
+        "Planning source reads require a settled authenticated profile",
+      );
+    assertOwnedCodexHome(data.sessionRoot, this.sessionOwner(retained));
+    if (recover) {
+      if (
+        data.sourceRequestDigest !==
+        createHash("sha256")
+          .update(JSON.stringify([request.baseSha, request.sources]))
+          .digest("hex")
+      )
+        throw new Error(
+          "Recovered source delivery differs from its admitted request",
+        );
+      if (data.sourceDelivery === null) return undefined;
+      if (!data.sourceDelivery)
+        throw new Error("Recovered source delivery receipt is missing");
+      if (
+        data.sourceDelivery.root !==
+        planningSourceDirectory(
+          data.sessionRoot,
+          request.baseSha,
+          request.sources,
+        )
+      )
+        throw new Error(
+          "Recovered source root differs from its authenticated home",
+        );
+      assertPlanningSourceDelivery(
+        data.sourceDelivery,
+        request.baseSha,
+        request.sources,
+      );
+      return structuredClone(data.sourceDelivery);
+    }
+    return materializePlanningSources(
+      planningSourceDirectory(
+        data.sessionRoot,
+        request.baseSha,
+        request.sources,
+      ),
+      request.baseSha,
+      request.sources,
+      data.deliveredSources,
+    );
   }
 
   async reconcileSession(
@@ -161,7 +270,11 @@ export class CodexPlanningTransport implements PlanningTransport {
     const planning = session.scope.role === "planning";
     if (
       data.selectionDigest !==
-      this.selectionDigest(planning ? "planner" : "reviewer", !planning)
+      this.selectionDigest(
+        planning ? "planner" : "reviewer",
+        !planning,
+        data.sourceReadProfile === "pinned-source-read-v1",
+      )
     )
       throw new Error(
         "Codex reconciliation differs from its retained model and policy",
@@ -280,6 +393,7 @@ export class CodexPlanningTransport implements PlanningTransport {
       sandboxMode: "read-only",
       approvalPolicy: "never",
       ...(tree && { shell: "read-only tree" }),
+      ...(role === "planner" && { sourceArtifacts: this.sourceArtifacts }),
       ...this.selection(role),
     };
   }
@@ -289,6 +403,12 @@ export class CodexPlanningTransport implements PlanningTransport {
     prompt: string;
     schema: unknown;
     sourcePacket?: string;
+    planningSources?: {
+      baseSha: string;
+      sources: PlanningRequest<unknown>["sources"];
+      suppliedSourceIndices: number[];
+      delivery?: PlanningSourceDelivery;
+    };
     candidateDigest?: string;
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
@@ -302,6 +422,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     const selectedTransport = args.tree ? "exec" : this.transport;
     const continuation =
       this.sessionRoot && args.session ? args.session : undefined;
+    let sourceRead = false;
     let session: AgentSessionRef | undefined;
     let sessionData:
       | ReturnType<CodexPlanningTransport["sessionData"]>
@@ -316,30 +437,41 @@ export class CodexPlanningTransport implements PlanningTransport {
             )
       )
         throw new Error("Reviewer continuation has a different role");
-      const selectionDigest = this.selectionDigest(
-        args.role,
-        Boolean(args.tree),
-      );
       if (continuation.retained) {
         const retained = continuation.retained;
         sessionData = this.sessionData(retained);
+        sourceRead = sessionData.sourceReadProfile === "pinned-source-read-v1";
+        if (sourceRead && (!this.sourceArtifacts || !args.planningSources))
+          throw new Error(
+            "Source-reading planner requires its explicit policy and canonical inputs",
+          );
         if (
           retained.status !== "ready" ||
           (retained.currentTurn?.dispatch === "submitted" &&
             !sessionData.threadId) ||
           retained.identity !== continuation.identity ||
           !isDeepStrictEqual(retained.scope, continuation.scope) ||
-          sessionData.selectionDigest !== selectionDigest
+          sessionData.selectionDigest !==
+            this.selectionDigest(args.role, Boolean(args.tree), sourceRead)
         )
           throw new Error(
             "Reviewer session cannot continue without settled matching ownership",
           );
       } else {
+        sourceRead =
+          this.sourceArtifacts &&
+          args.role === "planner" &&
+          Boolean(args.planningSources);
         mkdirSync(this.sessionRoot!, { recursive: true, mode: 0o700 });
         sessionData = {
           sessionRoot: join(resolve(this.sessionRoot!), continuation.identity),
-          selectionDigest,
+          selectionDigest: this.selectionDigest(
+            args.role,
+            Boolean(args.tree),
+            sourceRead,
+          ),
           transport: selectedTransport,
+          ...(sourceRead && { sourceReadProfile: "pinned-source-read-v1" }),
         };
       }
       sessionData = { ...sessionData };
@@ -347,6 +479,17 @@ export class CodexPlanningTransport implements PlanningTransport {
       delete sessionData.responseDigest;
       delete sessionData.usage;
       delete sessionData.turnId;
+      if (sourceRead && args.planningSources) {
+        sessionData.sourceDelivery = args.planningSources.delivery ?? null;
+        sessionData.sourceRequestDigest = createHash("sha256")
+          .update(
+            JSON.stringify([
+              args.planningSources.baseSha,
+              args.planningSources.sources,
+            ]),
+          )
+          .digest("hex");
+      }
       session = {
         scope: structuredClone(continuation.scope),
         adapter: this.adapter,
@@ -381,6 +524,25 @@ export class CodexPlanningTransport implements PlanningTransport {
         status: "in-flight",
       };
     }
+    if (args.planningSources?.delivery && !sourceRead)
+      throw new Error(
+        "Planning source references require the authenticated read profile",
+      );
+    const sourceDirectory = sourceRead
+      ? planningSourceDirectory(
+          sessionData!.sessionRoot,
+          args.planningSources!.baseSha,
+          args.planningSources!.sources,
+        )
+      : undefined;
+    const suppliedSources = sourceRead
+      ? deliveredPlanningSources(
+          args.planningSources!.baseSha,
+          args.planningSources!.sources,
+          args.planningSources!.suppliedSourceIndices,
+          sessionData!.deliveredSources,
+        )
+      : undefined;
     const started = Date.now();
     // Native exec JSON omits text/reasoning deltas. A healthy structured
     // answer can stay silent until its final agent_message, at any effort.
@@ -399,7 +561,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     let streamError: Error | undefined;
     // A tree review's shell reads the tree alone, offline.
     const home = createCodexHome(
-      args.tree
+      args.tree || sourceRead
         ? {
             config: CODEX_TREE_REVIEW_CONFIG,
             ...(session && sessionData
@@ -410,7 +572,7 @@ export class CodexPlanningTransport implements PlanningTransport {
                 }
               : {}),
             sandbox: {
-              directory: args.tree,
+              directory: args.tree ?? sourceDirectory!,
               workspace: "read",
               network: false,
             },
@@ -426,6 +588,32 @@ export class CodexPlanningTransport implements PlanningTransport {
               : {}),
           },
     );
+    if (sourceRead) {
+      try {
+        const canonical = args.planningSources!;
+        const root = sourceDirectory!;
+        if (canonical.delivery) {
+          if (canonical.delivery.root !== root)
+            throw new Error(
+              "Planning artifact root differs from its authenticated home",
+            );
+          assertPlanningSourceDelivery(
+            canonical.delivery,
+            canonical.baseSha,
+            canonical.sources,
+          );
+        } else
+          materializePlanningSources(
+            root,
+            canonical.baseSha,
+            canonical.sources,
+          );
+      } catch (error) {
+        if (!continuation?.retained)
+          releaseCodexHome(home.root, this.sessionOwner(session!));
+        throw error;
+      }
+    }
     const captureBoundary =
       continuation?.retained && thread.id
         ? home.nativeCaptureBoundary(thread.id)
@@ -435,6 +623,9 @@ export class CodexPlanningTransport implements PlanningTransport {
           mode: captureBoundary ? ("resumed" as const) : ("fresh" as const),
           ordinal: session.turn,
           sessionIdentity: session.identity,
+          ...(args.role === "planner" && {
+            sourceReadProfile: sourceRead ? "pinned-source-read-v1" : "none",
+          }),
           ...(captureBoundary
             ? {
                 boundaryBytes: captureBoundary.bytes,
@@ -552,9 +743,10 @@ export class CodexPlanningTransport implements PlanningTransport {
             }),
         }),
         options: {
-          workingDirectory: args.tree ?? this.checkout,
+          workingDirectory:
+            args.tree ?? (sourceRead ? sourceDirectory! : this.checkout),
           // The tree's read-only permission profile is Factory's config.
-          ...(args.tree
+          ...(args.tree || sourceRead
             ? { skipGitRepoCheck: true }
             : { sandboxMode: "read-only" as const }),
           approvalPolicy: "never",
@@ -755,6 +947,8 @@ export class CodexPlanningTransport implements PlanningTransport {
         if (session?.currentTurn && sessionData) {
           session.currentTurn.resources = "settled";
           if (session.currentTurn.terminal === "completed" && turnCompleted) {
+            if (sourceRead && args.planningSources)
+              sessionData.deliveredSources = suppliedSources;
             sessionData.response = state.response;
             sessionData.responseDigest = createHash("sha256")
               .update(state.response)

@@ -7,8 +7,10 @@ import type {
   ModelInvocationContext,
   ModelInvocationPhase,
   ModelInvocationUsage,
+  PlanningRequest,
 } from "../contracts.js";
 import type { Fault } from "../fault.js";
+import type { PlanningSourceDelivery } from "./source-delivery.js";
 
 export interface PlanningModelOptions {
   /** Nonrenewable elapsed budget for one admitted planning invocation, including capacity backoff. */
@@ -24,6 +26,8 @@ export interface CodexPlanningModelOptions extends PlanningModelOptions {
   sessionRoot?: string;
   /** Explicit planning transport; no runtime fallback. */
   transport?: "exec" | "app-server";
+  /** Explicitly enable canonical-source-only file reads for new exec planners. */
+  sourceArtifacts?: boolean;
 }
 
 /** Which configured model selection a planning call uses. */
@@ -63,19 +67,31 @@ export interface PlanningTransport {
     session: AgentSessionRef,
   ): Promise<AgentSessionReconciliation>;
   releaseSession?(session: AgentSessionRef): Promise<void>;
+  /** Authenticated immutable source reads; absence retains full inline context. */
+  sourceDelivery?(
+    request: PlanningRequest<unknown>,
+    recover?: boolean,
+  ): PlanningSourceDelivery | undefined;
   selection(role: PlanningRole): { model: string; reasoningEffort?: string };
   /** Provider settings recorded with opt-in request capture content. */
   settings(role: PlanningRole, tree?: string): Record<string, unknown>;
   /**
    * Run one attempt, filling `turn`; progress observations are optional. With
-   * `tree`, the session may read that directory with read-only tools; without
-   * it the session has no tools, files or network.
+   * `tree`, the session may read that directory with read-only tools. An
+   * explicitly configured retained planner may instead read only its current
+   * canonical source artifacts, offline; other planning calls are tool-free.
    */
   run(args: {
     role: PlanningRole;
     prompt: string;
     schema: unknown;
     sourcePacket?: string;
+    planningSources?: {
+      baseSha: string;
+      sources: PlanningRequest<unknown>["sources"];
+      suppliedSourceIndices: number[];
+      delivery?: PlanningSourceDelivery;
+    };
     candidateDigest?: string;
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
@@ -95,6 +111,12 @@ export interface StructuredCall {
   invocation: ModelInvocationContext | undefined;
   defaultPhase: ModelInvocationPhase;
   sourcePacket?: string;
+  planningSources?: {
+    baseSha: string;
+    sources: PlanningRequest<unknown>["sources"];
+    suppliedSourceIndices: number[];
+    delivery?: PlanningSourceDelivery;
+  };
   candidateDigest?: string;
   /** A directory holding the exact tree under review, readable read-only. */
   tree?: string;

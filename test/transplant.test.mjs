@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +18,11 @@ import {
   renderGraphReviewCall,
 } from "../dist/compiler/model.js";
 import { renderPlanningInstructions } from "../dist/compiler/planning.js";
+import {
+  deliveredPlanningSources,
+  materializePlanningSources,
+  planningSourceDirectory,
+} from "../dist/compiler/source-delivery.js";
 import {
   hydrateWorkerInputSources,
   planningGraphView,
@@ -238,6 +250,52 @@ test("independent prepared change is replayed on the observed integration head",
       "omitted",
     );
     const call = renderDiagnosisCall(request);
+    assert.deepEqual(call.planningSources.suppliedSourceIndices, [0]);
+    const deliveredByFocusedDiagnosis = deliveredPlanningSources(
+      request.baseSha,
+      request.sources,
+      call.planningSources.suppliedSourceIndices,
+    );
+    assert.deepEqual(
+      deliveredByFocusedDiagnosis.sources.map((source) => source.path),
+      [request.sources[0].path],
+    );
+    const focusedArtifacts = mkdtempSync(
+      join(tmpdir(), "factory-focused-source-artifacts-"),
+    );
+    try {
+      const catalog = materializePlanningSources(
+        planningSourceDirectory(
+          focusedArtifacts,
+          request.baseSha,
+          request.sources,
+        ),
+        request.baseSha,
+        request.sources,
+        deliveredPlanningSources(request.baseSha, request.sources),
+      );
+      const referenced = renderDiagnosisCall(request, catalog);
+      const sourceView = JSON.parse(
+        referenced.prompt
+          .split("Pinned sources:\n")[1]
+          .split("\nWork Item diagnosis delivery:")[0],
+      );
+      assert.equal(sourceView[0].contentDelivery, "complete");
+      assert.equal(sourceView[0].content, undefined);
+      assert.equal(sourceView[0].contentFile.complete, true);
+      assert.equal(sourceView[1].contentDelivery, "omitted");
+      assert.equal(sourceView[1].content, undefined);
+      assert.equal(sourceView[1].contentFile, undefined);
+      assert.equal(referenced.sourcePacket, call.sourcePacket);
+      assert.ok(referenced.prompt.includes('"content":"right\\n"'));
+      assert.ok(
+        referenced.prompt.includes(
+          "Only delivered complete evidence may ground actionable output",
+        ),
+      );
+    } finally {
+      rmSync(focusedArtifacts, { recursive: true, force: true });
+    }
     assert.ok(call.prompt.includes('"contentDelivery":"omitted"'));
     assert.ok(call.prompt.includes('"content":"right\\n"'));
     assert.ok(!call.prompt.includes("JavaScript string start/length"));
@@ -325,6 +383,9 @@ test("independent prepared change is replayed on the observed integration head",
 
 test("retained graph amendments render exact pinned inputs once and keep canonical definitions", () => {
   const root = mkdtempSync(join(tmpdir(), "factory-amendment-input-"));
+  const privateSources = mkdtempSync(
+    join(tmpdir(), "factory-planner-source-read-"),
+  );
   try {
     git(root, "init", "-b", "main");
     git(root, "config", "user.name", "Fixture");
@@ -336,6 +397,11 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       join(root, "contract.md"),
       content + "\n# Appendix\n\nKeep this separate source section.\n",
     );
+    writeFileSync(
+      join(root, "additional.txt"),
+      'Literal "quotes" and Unicode λ.\n\n',
+    );
+    writeFileSync(join(root, "empty.txt"), "");
     git(root, "add", ".");
     git(root, "commit", "-m", "pin complete public API source");
     const baseSha = git(root, "rev-parse", "HEAD");
@@ -402,7 +468,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       [],
       amendment,
     );
-    const { wire, call } = renderCompilationCall({
+    const request = {
       objective: body,
       baseSha,
       sources,
@@ -416,7 +482,150 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       coverageObligations: obligations,
       controllerCapabilities: installedControllerCapabilities(),
       controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-    });
+    };
+    const { wire, call } = renderCompilationCall(request);
+    const sourceRoot = planningSourceDirectory(
+      privateSources,
+      baseSha,
+      sources,
+    );
+    const sourceFiles = materializePlanningSources(
+      sourceRoot,
+      baseSha,
+      sources,
+      deliveredPlanningSources(baseSha, sources),
+    );
+    const resumed = renderCompilationCall(request, sourceFiles);
+    const resumedChoices = JSON.parse(
+      resumed.call.prompt.split("Compiler choices (JSON data):\n")[1],
+    );
+    assert.deepEqual(
+      resumedChoices.sources.map((source) => source.contentFile.sourceIndex),
+      sources.map((_, index) => index),
+    );
+    assert.equal(
+      resumedChoices.sources.some((source) => Object.hasOwn(source, "lines")),
+      false,
+    );
+    assert.deepEqual(resumed.wire.schema, wire.schema);
+    assert.equal(resumed.wire.data.contextId, wire.data.contextId);
+    assert.equal(resumed.call.sourcePacket, call.sourcePacket);
+    assert.ok(
+      Buffer.byteLength(resumed.call.prompt) <
+        Buffer.byteLength(call.prompt) - 10_000,
+    );
+    for (const [index, source] of sources.entries()) {
+      const file = sourceFiles.files[index];
+      const restored = readFileSync(join(sourceRoot, file.file), "utf8");
+      assert.equal(restored, source.content);
+      assert.equal(file.bytes, Buffer.byteLength(source.content));
+      assert.equal(file.lineCount, source.content.split("\n").length);
+      assert.equal(
+        file.digest,
+        createHash("sha256").update(restored).digest("hex"),
+      );
+    }
+    // Native compaction needs no transcript rewrite: missing artifact bytes hydrate
+    // from the original pinned sources, while an altered existing file is refused.
+    const missing = join(sourceRoot, sourceFiles.files[1].file);
+    rmSync(missing);
+    assert.equal(
+      renderCompilationCall(request, sourceFiles).call.prompt,
+      resumed.call.prompt,
+    );
+    rmSync(missing);
+    const outsideSource = join(privateSources, "outside-source.txt");
+    writeFileSync(outsideSource, sources[1].content);
+    symlinkSync(outsideSource, missing);
+    assert.throws(
+      () => renderCompilationCall(request, sourceFiles),
+      /Immutable planning source/,
+    );
+    rmSync(missing);
+    const extra = join(sourceRoot, "pinned", "outside.txt");
+    writeFileSync(extra, "noncanonical data");
+    assert.throws(
+      () => renderCompilationCall(request, sourceFiles),
+      /noncanonical data/,
+    );
+    rmSync(extra);
+    assert.equal(
+      renderCompilationCall(request, sourceFiles).call.prompt,
+      resumed.call.prompt,
+    );
+    assert.equal(readFileSync(missing, "utf8"), sources[1].content);
+    chmodSync(missing, 0o600);
+    writeFileSync(missing, "altered source bytes");
+    assert.throws(
+      () => renderCompilationCall(request, sourceFiles),
+      /Immutable planning source/,
+    );
+    rmSync(missing);
+    assert.equal(
+      renderCompilationCall(request, sourceFiles).call.prompt,
+      resumed.call.prompt,
+    );
+    assert.throws(
+      () =>
+        renderCompilationCall(request, {
+          ...sourceFiles,
+          baseSha: "f".repeat(40),
+        }),
+      /differs from complete pinned sources/,
+    );
+    const additional = ["additional.txt", "empty.txt"].map((path) => ({
+      path,
+      content: execFileSync("git", ["-C", root, "show", `${baseSha}:${path}`], {
+        encoding: "utf8",
+      }),
+    }));
+    const expanded = [...sources, ...additional];
+    const expandedFiles = materializePlanningSources(
+      planningSourceDirectory(privateSources, baseSha, expanded),
+      baseSha,
+      expanded,
+      deliveredPlanningSources(baseSha, sources),
+    );
+    assert.deepEqual(
+      expandedFiles.reusedSourceIndices,
+      sourceFiles.reusedSourceIndices,
+    );
+    const expandedCall = renderCompilationCall(
+      { ...request, sources: expanded },
+      expandedFiles,
+    );
+    const expandedChoices = JSON.parse(
+      expandedCall.call.prompt.split("Compiler choices (JSON data):\n")[1],
+    );
+    assert.equal(
+      expandedChoices.sources
+        .at(-2)
+        .lines.map((line) => line.text)
+        .join("\n"),
+      additional[0].content,
+    );
+    assert.equal(
+      expandedChoices.sources
+        .at(-1)
+        .lines.map((line) => line.text)
+        .join("\n"),
+      "",
+    );
+    assert.equal(expandedFiles.files.at(-1).bytes, 0);
+    assert.equal(expandedFiles.files.at(-1).lineCount, 1);
+    const diagnosis = renderDiagnosisCall(
+      { ...request, purpose: "diagnosis", schema: { type: "object" } },
+      sourceFiles,
+    );
+    assert.ok(diagnosis.prompt.includes('"contentFile"'));
+    assert.equal(
+      diagnosis.sourcePacket,
+      renderDiagnosisCall({
+        ...request,
+        purpose: "diagnosis",
+        schema: { type: "object" },
+      }).sourcePacket,
+    );
     const evidence = reviewPacket(
       [],
       sources.map((source) => ({ ...source, origin: "source" })),
@@ -480,7 +689,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       );
     }
     assert.deepEqual(view.coverage, currentGraph.coverage);
-    const decoded = wire.decode({
+    const choices = {
       contextId: wire.data.contextId,
       requiredPreIntegrationChecks: [],
       items: currentGraph.items.map((item, index) => ({
@@ -501,7 +710,9 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
           },
         },
       ],
-    });
+    };
+    const decoded = wire.decode(choices);
+    assert.deepEqual(resumed.wire.decode(choices), decoded);
     assert.deepEqual(decoded.items[0], {
       ...currentGraph.items[0],
       ownedPaths: ["part-0.ts", "additional.ts"],
@@ -522,7 +733,42 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       planningGraphView(unmatched, sources).items[0].inputSources,
       unmatched.items[0].inputSources,
     );
+    writeFileSync(
+      join(root, "contract.md"),
+      content + "\nChanged pinned requirement.\n",
+    );
+    git(root, "add", "contract.md");
+    git(root, "commit", "-m", "change the pinned source baseline");
+    const changedBase = git(root, "rev-parse", "HEAD");
+    const changedSources = planningSources(body, changedBase, root);
+    const changedFiles = materializePlanningSources(
+      planningSourceDirectory(privateSources, changedBase, changedSources),
+      changedBase,
+      changedSources,
+      deliveredPlanningSources(baseSha, sources),
+    );
+    assert.deepEqual(changedFiles.reusedSourceIndices, []);
+    const changedRequest = {
+      ...request,
+      baseSha: changedBase,
+      sources: changedSources,
+      compileContext: {
+        objectiveNumber: 1,
+        instructions: "Plan the changed baseline.",
+      },
+    };
+    const changedCall = renderCompilationCall(changedRequest, changedFiles);
+    const changedChoices = JSON.parse(
+      changedCall.call.prompt.split("Compiler choices (JSON data):\n")[1],
+    );
+    assert.deepEqual(
+      changedChoices.sources.map((source) =>
+        source.lines.map((line) => line.text).join("\n"),
+      ),
+      changedSources.map((source) => source.content),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(privateSources, { recursive: true, force: true });
   }
 });

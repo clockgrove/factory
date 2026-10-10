@@ -149,8 +149,12 @@ export interface ClaudeModelSelection {
 export type PlanningConfig =
   | {
       kind: "codex-sdk";
-      /** Tool-free compile/graph-review/diagnosis transport; tree reviews always use exec. */
-      codex?: { transport?: "exec" | "app-server" };
+      /** Planning transport; tool-free by default. Tree reviews always use exec. */
+      codex?: {
+        transport?: "exec" | "app-server";
+        /** Opt-in source-only read profile; disabled unless explicitly true. */
+        sourceArtifacts?: boolean;
+      };
       planner: CodexModelSelection;
       reviewer: CodexModelSelection;
     }
@@ -384,13 +388,27 @@ export function validatePlanning(
     assertOnlyKeys(value, ["kind", "codex", "planner", "reviewer"], "planning");
     if (value.codex !== undefined) {
       assertObject(value.codex, "planning.codex");
-      assertOnlyKeys(value.codex, ["transport"], "planning.codex");
+      assertOnlyKeys(
+        value.codex,
+        ["transport", "sourceArtifacts"],
+        "planning.codex",
+      );
       if (
         value.codex.transport !== undefined &&
         value.codex.transport !== "exec" &&
         value.codex.transport !== "app-server"
       )
         throw new Error("planning.codex.transport must be exec or app-server");
+      if (
+        value.codex.sourceArtifacts !== undefined &&
+        typeof value.codex.sourceArtifacts !== "boolean"
+      )
+        throw new Error("planning.codex.sourceArtifacts must be boolean");
+      if (
+        value.codex.sourceArtifacts === true &&
+        value.codex.transport === "app-server"
+      )
+        throw new Error("Planning source artifacts require the exec transport");
     }
     assertCodexModelSelection(value.planner, "planning.planner");
     assertCodexModelSelection(value.reviewer, "planning.reviewer");

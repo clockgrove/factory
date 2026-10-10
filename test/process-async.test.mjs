@@ -21,6 +21,7 @@ import { readInteractionContent } from "../dist/capture.js";
 import { codexStderrCapture } from "../dist/codex-exec.js";
 import { createCodexHome } from "../dist/codex-planning-isolation.js";
 import {
+  CodexPlanningModel,
   renderCompilationCall,
   renderDiagnosisCall,
 } from "../dist/compiler/model.js";
@@ -40,7 +41,13 @@ import {
   summarizeFormalHistory,
   withDiagnosticSession,
 } from "../dist/diagnostics.js";
-import { CodexHarness } from "../dist/execution/local.js";
+import { CodexHarness, LocalExecutionDriver } from "../dist/execution/local.js";
+import { LocalContentStore } from "../dist/content/local.js";
+import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
+import { RegularDelivery } from "../dist/delivery/regular.js";
+import { RealGitHubGateway } from "../dist/github.js";
+import { withGitHubTransportObserver } from "../dist/github-client.js";
+import { runObjectivePass } from "../dist/runner/execution.js";
 import { killGroup } from "../dist/execution/worker-process.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
@@ -425,6 +432,172 @@ test("cancellation stops an owned shell and its process group", async () => {
   assert.equal(state.repeats, undefined);
   assert.equal(stepCancellationSignal(), undefined);
   assert.doesNotThrow(assertStepAdmission);
+
+  // Cancellation closure belongs to the owner after the aborted pass has
+  // unwound. Calling the real gateway from this pass's aborted process scope
+  // would refuse its closure GET before dispatch and retain a cancelError.
+  const root = mkdtempSync(join(tmpdir(), "factory-cancel-pass-"));
+  const previousStateHome = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const checkout = join(root, "target");
+    mkdirSync(checkout);
+    const git = (...args) =>
+      execFileSync("git", ["-C", checkout, ...args], {
+        encoding: "utf8",
+      }).trim();
+    git("init", "-b", "main");
+    writeFileSync(join(checkout, "README.md"), "# Cancelled local target\n");
+    git(
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/integration/cancel-pass",
+    );
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=Integration",
+      "-c",
+      "user.email=integration@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    );
+    const config = {
+      repository: "integration/cancel-pass",
+      checkout,
+      execution: { kind: "local" },
+      policy: { allowedSecretNames: [] },
+    };
+    const baseSha = git("rev-parse", "HEAD");
+    const graph = {
+      objective: 1,
+      baseSha,
+      items: [
+        {
+          id: "local",
+          kind: "work",
+          title: "Local work",
+          goal: "Preserve the target",
+          brief: "Retain local work",
+          acceptance: ["Preserve README"],
+          nonGoals: [],
+          dependencies: [],
+          ownedPaths: ["README.md"],
+          resources: [],
+          expectedOutputRoles: [],
+          requiredLfsRoles: [],
+          sourceAssets: [],
+          minimumAssetSets: 0,
+          citations: [{ path: "README.md", heading: "" }],
+          validation: [],
+        },
+      ],
+      coverage: [
+        {
+          criterionId: createHash("sha256")
+            .update("Preserve README")
+            .digest("hex"),
+          itemId: "local",
+          source: {
+            path: "README.md",
+            digest: createHash("sha256")
+              .update("# Cancelled local target\n")
+              .digest("hex"),
+            text: "# Cancelled local target",
+          },
+          proof: { kind: "result-semantic", acceptanceIndex: 0 },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe: "",
+            preparedBy: "",
+          },
+        },
+      ],
+    };
+    const snapshot = {
+      schemaVersion: 7,
+      repository: config.repository,
+      objective: 1,
+      runId: "cancelled-real-pass",
+      configDigest: factoryConfigDigest(config),
+      baseSha,
+      planGraphDigest: graphDigest(graph),
+      graph,
+      issueByItemId: { local: 2 },
+      work: { local: { status: "failed" } },
+      autonomy: resolveAutonomy({ allowances: { implementationRepairs: 0 } }),
+      capacity: { concurrency: 1 },
+      coordinator: {
+        mode: "running",
+        phase: "waiting",
+        phaseStartedAt: new Date().toISOString(),
+        processes: [],
+      },
+      cancelRequested: true,
+    };
+    saveState(statePath(config.repository, 1), snapshot);
+    const contentStore = new LocalContentStore(join(root, "content"));
+    const selection = { model: "gpt-6.1-sol", reasoningEffort: "medium" };
+    const github = new RealGitHubGateway(
+      config.repository,
+      new NativeStackDelivery(config.repository),
+    );
+    const services = {
+      github,
+      contentStore,
+      driver: new LocalExecutionDriver(
+        checkout,
+        join(root, "worktrees"),
+        new CodexHarness(join(root, "credentials"), "off", selection),
+        1,
+        contentStore,
+        "codex",
+      ),
+      planningModel: new CodexPlanningModel(checkout, selection, selection),
+      delivery: new RegularDelivery(checkout, github),
+    };
+    const aborted = new AbortController();
+    aborted.abort(new Error("Objective cancellation requested"));
+    const owner = {
+      snapshot,
+      abort: aborted,
+      pause: new AbortController(),
+      changed: false,
+      cancellation: Promise.resolve(),
+    };
+    const observations = [];
+    await withGitHubTransportObserver(
+      (observation) => observations.push(observation),
+      () =>
+        withProcessCancellation(aborted.signal, () =>
+          assert.rejects(runObjectivePass(config, 1, services, owner)),
+        ),
+    );
+    assert.deepEqual(observations, []);
+    const loaded = readState(config.repository, 1);
+    assert.equal(loaded.cancelRequested, true);
+    assert.equal(loaded.coordinator.cancelError, undefined);
+    assert.equal(loaded.cancelledAt, undefined);
+    assert.equal(loaded.work.local.status, "failed");
+    loaded.coordinator.cancelError = "Retained unresolved owned cancellation";
+    saveState(statePath(config.repository, 1), loaded);
+    owner.snapshot = loaded;
+    await withProcessCancellation(aborted.signal, () =>
+      assert.rejects(runObjectivePass(config, 1, services, owner)),
+    );
+    assert.equal(
+      readState(config.repository, 1).coordinator.cancelError,
+      "Retained unresolved owned cancellation",
+    );
+    assert.equal(readState(config.repository, 1).cancelledAt, undefined);
+  } finally {
+    if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previousStateHome;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("collection settles an exited owned group before removing scratch", async () => {

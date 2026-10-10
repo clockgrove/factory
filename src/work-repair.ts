@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
-import type { PlanningModel, WorkItem } from "./contracts.js";
+import type { PlanningModel, PlanningRequest, WorkItem } from "./contracts.js";
+import { planningGraphView } from "./compiler/sources.js";
 import { blameDecision, cappedDiagnosis } from "./blame-decision.js";
 import { graphDigest, recordWorkerDiscovery } from "./graph-amendments.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
@@ -978,6 +979,31 @@ export function diagnosisFiles(
   return files;
 }
 
+/** Transient diagnosis inputs; canonical graph and indexed repair evidence remain unchanged. */
+export function workRepairDiagnosisRequest(args: {
+  state: FactoryState;
+  item: WorkItem;
+  evidence: ReturnType<typeof repairEvidence>;
+  sources: PlanningRequest<DiagnosisAnswer>["sources"];
+  rejected?: string;
+  invocation?: PlanningRequest<DiagnosisAnswer>["invocation"];
+}): PlanningRequest<DiagnosisAnswer> {
+  const { state, item, evidence, sources, rejected, invocation } = args;
+  const work = state.work[item.id]!;
+  const failure = work.recovery!.failure!;
+  const predecessors = mergedPredecessors(state, item);
+  return {
+    purpose: "diagnosis",
+    objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return no commandAssessments when there are no failed commands. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item: planningGraphView({ ...state.graph, items: [item] }, sources).items[0], failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: evidence })}`,
+    baseSha: work.executionBaseSha ?? state.baseSha,
+    sources,
+    controllerCapabilities: installedControllerCapabilities(),
+    controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+    schema: diagnosisSchema,
+    invocation,
+  };
+}
+
 export async function diagnoseWorkRepair(args: {
   state: FactoryState;
   item: WorkItem;
@@ -1058,7 +1084,6 @@ export async function diagnoseWorkRepair(args: {
   if (args.stopped()) return false;
   // A paid step: a lost answer is asked again, an invalid one again with
   // its validation error, until the paid bound makes it a decision.
-  const predecessors = mergedPredecessors(state, item);
   const files = diagnosisFiles(state, item, args.checkout);
   const evidence = repairEvidence(state, item, files);
   let answer: RepairCorrection | string | { blame: Blame; diagnosis: string };
@@ -1071,14 +1096,12 @@ export async function diagnoseWorkRepair(args: {
         const rejected = context.previousInvalid();
         return context.paid(async () => {
           const response = await args.model.generateStructured<DiagnosisAnswer>(
-            {
-              purpose: "diagnosis",
-              objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return no commandAssessments when there are no failed commands. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: evidence })}`,
-              baseSha: work.executionBaseSha ?? state.baseSha,
-              sources: [...(args.sources ?? []), ...files],
-              controllerCapabilities: installedControllerCapabilities(),
-              controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-              schema: diagnosisSchema,
+            workRepairDiagnosisRequest({
+              state,
+              item,
+              evidence,
+              sources: args.sources ?? [],
+              rejected,
               invocation: {
                 invocationId: randomUUID(),
                 phase: "diagnosis",
@@ -1090,7 +1113,7 @@ export async function diagnoseWorkRepair(args: {
                   attemptId: work.attempt,
                 }),
               },
-            },
+            }),
           );
           if (
             !response ||

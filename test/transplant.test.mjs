@@ -93,12 +93,15 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     const content =
       "# API\n\n" +
       readFileSync(new URL("../src/contracts.ts", import.meta.url), "utf8");
-    writeFileSync(join(root, "contract.md"), content);
+    writeFileSync(
+      join(root, "contract.md"),
+      content + "\n# Appendix\n\nKeep this separate source section.\n",
+    );
     git(root, "add", ".");
     git(root, "commit", "-m", "pin complete public API source");
     const baseSha = git(root, "rev-parse", "HEAD");
     const body =
-      "## Acceptance\n- Preserve every required interface.\n\n## Sources\n- contract.md#API\n";
+      "## Acceptance\n- Preserve every required interface.\n\n## Sources\n- contract.md\n";
     const sources = planningSources(body, baseSha, root);
     const obligations = coverageObligations(body, [
       "Preserve every required interface.",
@@ -136,7 +139,11 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
           checkName: "quality",
           source: {
             path: "contract.md",
-            digest: createHash("sha256").update(content).digest("hex"),
+            digest: createHash("sha256")
+              .update(
+                sources.find((source) => source.path === "contract.md").content,
+              )
+              .digest("hex"),
             text: content,
           },
         },
@@ -216,6 +223,8 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
         span.start + span.length,
       );
       assert.equal(selected, currentGraph.items[index].inputSources[0].content);
+      assert.equal(input.heading, "API");
+      assert.ok(span.length < sources[span.sourceIndex].content.length);
       assert.equal(
         createHash("sha256").update(selected).digest("hex"),
         span.contentDigest,
@@ -260,6 +269,13 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     });
     assert.deepEqual(decoded.items.slice(1), currentGraph.items.slice(1));
     assert.equal(JSON.stringify(currentGraph), before);
+    const wrongHeading = structuredClone(currentGraph);
+    wrongHeading.items[0].inputSources[0].heading = "Appendix";
+    // A body substring alone never proves the retained citation's scope.
+    assert.deepEqual(
+      planningGraphView(wrongHeading, sources).items[0].inputSources,
+      wrongHeading.items[0].inputSources,
+    );
     const unmatched = structuredClone(currentGraph);
     unmatched.items[0].inputSources[0].content +=
       "not supplied by the pinned source";

@@ -20,7 +20,14 @@ import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
 import { codexStderrCapture } from "../dist/codex-exec.js";
 import { createCodexHome } from "../dist/codex-planning-isolation.js";
-import { renderCompilationCall } from "../dist/compiler/model.js";
+import {
+  renderCompilationCall,
+  renderDiagnosisCall,
+} from "../dist/compiler/model.js";
+import {
+  hydrateWorkerInputSources,
+  planningSources,
+} from "../dist/compiler/sources.js";
 import {
   prepareCompilationRequest,
   validateCompiledGraph,
@@ -80,6 +87,7 @@ import {
   diagnosisFiles,
   repairEvidence,
   recordWorkFailure,
+  workRepairDiagnosisRequest,
 } from "../dist/work-repair.js";
 
 test("trusted child captures roundtrip through the configured private state root", async () => {
@@ -555,6 +563,10 @@ test("settled validation reuses its exact Git result once and retains the failed
   try {
     git("init", "-b", "main");
     writeFileSync(join(checkout, "README.md"), "# Unchanged candidate\n");
+    writeFileSync(
+      join(checkout, "contract.md"),
+      "# Context\n\nRésumé 🧭.\n\n# Documentation\n\nDocument the readiness marker.\n\n# Other\n\nRetain other requirements.\n",
+    );
     git("add", ".");
     git(
       "-c",
@@ -567,6 +579,11 @@ test("settled validation reuses its exact Git result once and retains the failed
     );
     const commit = git("rev-parse", "HEAD");
     const treeSha = git("rev-parse", "HEAD^{tree}");
+    const pinnedSources = planningSources(
+      "## Sources\n- README.md\n- contract.md\n",
+      commit,
+      checkout,
+    );
     const ready = join(root, "ready");
     const command = `${process.execPath} -e 'process.exit(require("node:fs").existsSync(${JSON.stringify(ready)}) ? 0 : 1)'`;
     const config = { repository: "integration/validation-rereview", checkout };
@@ -589,7 +606,10 @@ test("settled validation reuses its exact Git result once and retains the failed
           requiredLfsRoles: [],
           sourceAssets: [],
           minimumAssetSets: 0,
-          citations: [],
+          citations: [
+            { path: "README.md", heading: "" },
+            { path: "contract.md", heading: "Documentation" },
+          ],
           validation: [{ command, provenance: "source-declared" }],
         },
       ],
@@ -612,6 +632,7 @@ test("settled validation reuses its exact Git result once and retains the failed
         },
       ],
     };
+    hydrateWorkerInputSources(graph, pinnedSources);
     const work = {
       status: "failed",
       step: "validate",
@@ -800,6 +821,92 @@ test("settled validation reuses its exact Git result once and retains the failed
       supplied[fileIndex].content,
       git("show", `${treeSha}:README.md`) + "\n",
     );
+    // Inspect the actual producer and shared renderer over the retained Git
+    // refusal, without generating a provider response or changing admission.
+    const beforeDiagnosis = JSON.stringify(refusedState);
+    const diagnosisRequest = workRepairDiagnosisRequest({
+      state: refusedState,
+      item,
+      evidence: supplied,
+      sources: pinnedSources,
+    });
+    const diagnosis = JSON.parse(
+      diagnosisRequest.objective.slice(
+        diagnosisRequest.objective.lastIndexOf("\n{") + 1,
+      ),
+    );
+    assert.deepEqual(diagnosis.repairEvidence, supplied);
+    assert.deepEqual(diagnosis.failure, refusal);
+    assert.deepEqual(diagnosisRequest.sources, pinnedSources);
+    assert.ok(
+      diagnosisRequest.sources.every((source) => !("complete" in source)),
+    );
+    for (const [index, input] of diagnosis.item.inputSources.entries()) {
+      assert.equal(input.content, undefined);
+      const span = input.sourceSpan;
+      const source = diagnosisRequest.sources[span.sourceIndex];
+      const selected = source.content.slice(
+        span.start,
+        span.start + span.length,
+      );
+      assert.equal(source.path, input.path);
+      assert.equal(selected, item.inputSources[index].content);
+      assert.equal(
+        createHash("sha256").update(source.content).digest("hex"),
+        span.sourceDigest,
+      );
+      assert.equal(
+        createHash("sha256").update(selected).digest("hex"),
+        span.contentDigest,
+      );
+    }
+    const section = diagnosis.item.inputSources.find(
+      (input) => input.heading === "Documentation",
+    );
+    assert.ok(section.sourceSpan.start > 0);
+    assert.ok(
+      section.sourceSpan.length <
+        pinnedSources[section.sourceSpan.sourceIndex].content.length,
+    );
+    assert.deepEqual(
+      { ...diagnosis.item, inputSources: item.inputSources },
+      item,
+    );
+    const renderedDiagnosis = renderDiagnosisCall(diagnosisRequest);
+    assert.equal(renderedDiagnosis.schema, diagnosisRequest.schema);
+    assert.ok(renderedDiagnosis.prompt.includes(JSON.stringify(supplied)));
+    assert.ok(
+      renderedDiagnosis.prompt.includes(
+        `Pinned sources:\n${JSON.stringify(pinnedSources)}`,
+      ),
+    );
+    assert.ok(
+      renderedDiagnosis.prompt.includes(
+        "Candidate-file contents and their ownership/completeness are supplied in repairEvidence, not pinned command authority.",
+      ),
+    );
+    assert.deepEqual(
+      JSON.parse(renderedDiagnosis.sourcePacket).sources,
+      pinnedSources,
+    );
+    const unmatchedItem = structuredClone(item);
+    unmatchedItem.inputSources[1].content += "An additional unavailable fact.";
+    const unmatchedRequest = workRepairDiagnosisRequest({
+      state: refusedState,
+      item: unmatchedItem,
+      evidence: supplied,
+      sources: pinnedSources,
+    });
+    const unmatchedDiagnosis = JSON.parse(
+      unmatchedRequest.objective.slice(
+        unmatchedRequest.objective.lastIndexOf("\n{") + 1,
+      ),
+    );
+    assert.deepEqual(
+      unmatchedDiagnosis.item.inputSources[1],
+      unmatchedItem.inputSources[1],
+    );
+    assert.equal(JSON.stringify(refusedState), beforeDiagnosis);
     // A declared correction exercises the shared admission gate over actual
     // workflow evidence; it is not a generated or scripted provider response.
     const declaration = {
@@ -824,6 +931,10 @@ test("settled validation reuses its exact Git result once and retains the failed
       checkout,
     );
     assert.equal(typeof checkedReadiness, "object");
+    assert.equal(
+      checkedReadiness.inputDigest,
+      createHash("sha256").update(JSON.stringify(supplied)).digest("hex"),
+    );
     const incomplete = structuredClone(supplied);
     incomplete[fileIndex].complete = false;
     assert.equal(

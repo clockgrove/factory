@@ -223,7 +223,10 @@ export async function runCodexWorker(
             mode: session.resumeThreadId ? "resumed" : "fresh",
             ordinal: session.ref.turn,
             sessionIdentity: session.ref.identity,
-            ...(captureBoundary && { boundaryBytes: captureBoundary.bytes }),
+            ...(captureBoundary && {
+              boundaryBytes: captureBoundary.bytes,
+              usageBaseline: captureBoundary.usage,
+            }),
           },
         });
       capture.request(prompt, {

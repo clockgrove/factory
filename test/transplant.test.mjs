@@ -406,12 +406,16 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       join(root, "additional.txt"),
       'Literal "quotes" and Unicode λ.\n\n',
     );
+    writeFileSync(
+      join(root, "duplicate.txt"),
+      readFileSync(join(root, "contract.md")),
+    );
     writeFileSync(join(root, "empty.txt"), "");
     git(root, "add", ".");
     git(root, "commit", "-m", "pin complete public API source");
     const baseSha = git(root, "rev-parse", "HEAD");
     const body =
-      "## Acceptance\n- Preserve every required interface.\n\n## Sources\n- contract.md\n";
+      "## Acceptance\n- Preserve every required interface.\n\n## Sources\n- contract.md\n- duplicate.txt\n";
     const sources = planningSources(body, baseSha, root);
     const obligations = coverageObligations(body, [
       "Preserve every required interface.",
@@ -504,6 +508,10 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       sources,
       deliveredPlanningSources(baseSha, sources),
     );
+    assert.ok(
+      new Set(sourceFiles.files.map((file) => file.file)).size <
+        sourceFiles.files.length,
+    );
     const resumed = renderCompilationCall(request, sourceFiles);
     assert.equal(
       validPromptSections(
@@ -514,8 +522,8 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     );
     assert.equal(
       resumed.call.exportedEvidenceFileBytes,
-      sources.reduce(
-        (sum, source) => sum + Buffer.byteLength(source.content),
+      [...new Set(sourceFiles.files.map((file) => file.file))].reduce(
+        (sum, file) => sum + readFileSync(join(sourceRoot, file)).byteLength,
         0,
       ),
     );

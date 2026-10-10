@@ -156,6 +156,13 @@ const HUMAN_PREREQUISITE_GUIDANCE = humanPrerequisiteGuidance(
   "existing finding detail and question",
 );
 
+/** Source entries can share one digest-named physical export. */
+function exportedPlanningFileBytes(delivery: PlanningSourceDelivery): number {
+  return [
+    ...new Map(delivery.files.map((file) => [file.file, file.bytes])).values(),
+  ].reduce((sum, bytes) => sum + bytes, 0);
+}
+
 /** The shared production diagnosis rendering, available for offline exact-input preflight. */
 export function renderDiagnosisCall(
   request: PlanningRequest<unknown>,
@@ -245,10 +252,7 @@ export function renderDiagnosisCall(
     prompt: rendered.prompt,
     promptSections: rendered.sections,
     ...(sourceDelivery && {
-      exportedEvidenceFileBytes: sourceDelivery.files.reduce(
-        (sum, file) => sum + file.bytes,
-        0,
-      ),
+      exportedEvidenceFileBytes: exportedPlanningFileBytes(sourceDelivery),
     }),
     schema: request.schema,
     invocation: request.invocation,
@@ -362,10 +366,7 @@ Examples (illustrations, not command or source authority):
     prompt: rendered.prompt,
     promptSections: rendered.sections,
     ...(sourceDelivery && {
-      exportedEvidenceFileBytes: sourceDelivery.files.reduce(
-        (sum, file) => sum + file.bytes,
-        0,
-      ),
+      exportedEvidenceFileBytes: exportedPlanningFileBytes(sourceDelivery),
     }),
     schema: wire.schema,
     invocation: request.invocation,

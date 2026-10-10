@@ -5,10 +5,10 @@ type CleanableCopilotClient = StoppableCopilotClient &
   Pick<CopilotClient, "deleteSession">;
 type DisconnectableCopilotSession = Pick<
   CopilotSession,
-  "disconnect" | "sessionId"
+  "disconnect" | "sessionId" | "abort"
 >;
 
-async function bounded<T>(
+export async function bounded<T>(
   operation: Promise<T>,
   timeoutMs: number,
   message: string,
@@ -67,9 +67,21 @@ export async function cleanupCopilotClient(
   client: CleanableCopilotClient,
   session: DisconnectableCopilotSession | undefined,
   timeoutMs = 2_000,
+  retain = false,
+  abort = false,
 ): Promise<void> {
   const failures: unknown[] = [];
   if (session) {
+    if (abort)
+      try {
+        await bounded(
+          session.abort(),
+          timeoutMs,
+          "Copilot session abort timed out",
+        );
+      } catch (error) {
+        failures.push(error);
+      }
     try {
       await bounded(
         session.disconnect(),
@@ -79,15 +91,16 @@ export async function cleanupCopilotClient(
     } catch (error) {
       failures.push(error);
     }
-    try {
-      await bounded(
-        client.deleteSession(session.sessionId),
-        timeoutMs,
-        "Copilot session deletion timed out",
-      );
-    } catch (error) {
-      failures.push(error);
-    }
+    if (!retain)
+      try {
+        await bounded(
+          client.deleteSession(session.sessionId),
+          timeoutMs,
+          "Copilot session deletion timed out",
+        );
+      } catch (error) {
+        failures.push(error);
+      }
   }
   try {
     await stopCopilotClient(client, timeoutMs);

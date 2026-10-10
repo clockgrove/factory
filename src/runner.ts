@@ -93,6 +93,7 @@ import {
 import {
   type ApplicationServices,
   type LocalOwner,
+  synchronizeWorkItemPause,
   CoordinatorHandoff,
   canHandoff,
   owners,
@@ -415,6 +416,7 @@ async function runObjectiveOwned(
     lock,
     abort: new AbortController(),
     pause: new AbortController(),
+    workPause: new AbortController(),
     waitForWake: async () => undefined,
     woken: () => {
       if (!woke) {
@@ -431,6 +433,7 @@ async function runObjectiveOwned(
   };
   if (snapshot?.coordinator?.mode !== "running" && snapshot?.coordinator)
     owner.pause.abort(new Error(`Coordinator ${snapshot.coordinator.mode}`));
+  synchronizeWorkItemPause(owner);
   owners.set(ownerKey(config, objective), owner);
   const waiters = new Set<() => void>();
   const wake = () => {
@@ -468,6 +471,7 @@ async function runObjectiveOwned(
   };
   owner.waitForWake = wait;
   const persist = () => {
+    synchronizeWorkItemPause(owner);
     if (owner.snapshot)
       saveState(statePath(config.repository, objective), owner.snapshot);
   };

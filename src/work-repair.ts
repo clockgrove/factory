@@ -1,44 +1,48 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { DiagnosticEmitter } from "./diagnostics.js";
-import { attachFault, faultOf, StepFault, transient } from "./fault.js";
-import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
-import type { PlanningModel, PlanningRequest, WorkItem } from "./contracts.js";
-import { planningGraphView } from "./compiler/sources.js";
 import { blameDecision, cappedDiagnosis } from "./blame-decision.js";
+import {
+  generatePlannerStructured,
+  withPlannerAdmission,
+} from "./compiler/planning.js";
+import { planningGraphView } from "./compiler/sources.js";
+import type { PlanningModel, PlanningRequest, WorkItem } from "./contracts.js";
+import {
+  CONTROLLER_CAPABILITIES_DIGEST,
+  installedControllerCapabilities,
+} from "./controller-capabilities.js";
+import type { DiagnosticEmitter } from "./diagnostics.js";
+import {
+  assertFailedValidationEvidence,
+  assertFailedValidationRecord,
+  type FailedValidationEvidence,
+  type FailedValidationRecord,
+  failedValidationDigest,
+} from "./failed-validation.js";
+import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { graphDigest, recordWorkerDiscovery } from "./graph-amendments.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { pinnedGitRaw } from "./process.js";
 import {
-  installedControllerCapabilities,
-  CONTROLLER_CAPABILITIES_DIGEST,
-} from "./controller-capabilities.js";
-import type { FactoryState } from "./state.js";
+  archiveAttempt,
+  chargeRepair,
+  consumption,
+  type FailureClass,
+  type FailureDisposition,
+  failureDigest,
+  implementationRepairable,
+  itemEvent,
+  type RepairCorrection,
+  releaseCharge,
+  repairScopes,
+  validateCorrection,
+} from "./repair-policy.js";
 import {
   assertSemanticRefusalRecord,
   SemanticAcceptanceFailure,
   semanticValidationDigest,
 } from "./semantic-refusal.js";
-import {
-  assertFailedValidationEvidence,
-  assertFailedValidationRecord,
-  failedValidationDigest,
-  type FailedValidationEvidence,
-  type FailedValidationRecord,
-} from "./failed-validation.js";
-import {
-  archiveAttempt,
-  chargeRepair,
-  consumption,
-  failureDigest,
-  implementationRepairable,
-  itemEvent,
-  releaseCharge,
-  repairScopes,
-  validateCorrection,
-  type FailureClass,
-  type FailureDisposition,
-  type RepairCorrection,
-} from "./repair-policy.js";
+import type { FactoryState } from "./state.js";
+import { clearRepeats, type StepClock, StepPaused, step } from "./step.js";
 
 /** The exact collected candidate exists, but settled local validation failed: a wrong result. */
 export class CandidateValidationFailure extends Error {
@@ -1286,8 +1290,6 @@ export async function diagnoseWorkRepair(args: {
   if (args.stopped()) return false;
   // A paid step: a lost answer is asked again, an invalid one again with
   // its validation error, until the paid bound makes it a decision.
-  const files = diagnosisFiles(state, item, args.checkout);
-  const evidence = repairEvidence(state, item, files);
   let answer: RepairCorrection | string | { blame: Blame; diagnosis: string };
   try {
     answer = await step(
@@ -1296,84 +1298,148 @@ export async function diagnoseWorkRepair(args: {
       (context) => {
         // The last answer's error, kept in the step's record across a restart.
         const rejected = context.previousInvalid();
-        return context.paid(async () => {
-          const request = workRepairDiagnosisRequest({
-            state,
-            item,
-            evidence,
-            sources: args.sources ?? [],
-            checkout: args.checkout,
-            rejected,
-            invocation: {
-              invocationId: randomUUID(),
-              phase: "diagnosis",
-              ordinal: consumption(state).implementationRepairs,
-              observe: args.diagnostics?.modelObserver({
-                scopeId: work.attempt!,
-                runId: state.runId,
-                itemId: item.id,
-                attemptId: work.attempt,
-              }),
-            },
-          });
-          const response =
-            await args.model.generateStructured<DiagnosisAnswer>(request);
-          if (
-            !response ||
-            typeof response !== "object" ||
-            Array.isArray(response)
-          )
-            return "What concrete correction or operator prerequisite makes the original failure ready to proceed? The diagnosis is unavailable.";
-          if (response.decision === "predecessor") {
-            try {
-              return {
-                blame: blamedPredecessor(state, item, response, args.checkout),
-                diagnosis: response.diagnosis,
+        return context.paid(() =>
+          withPlannerAdmission(state, args.stopped, async () => {
+            if (
+              state.work[item.id] !== work ||
+              work.status !== "failed" ||
+              work.recovery?.failure !== failure
+            )
+              throw new StepFault({
+                kind: "decision",
+                evidence: [],
+                question:
+                  "Work Item failure changed while waiting for the planner; revalidate the current failure before diagnosis",
+              });
+            const evidence = repairEvidence(
+              state,
+              item,
+              diagnosisFiles(state, item, args.checkout),
+            );
+            const recovering =
+              work.recovery!.diagnosisInvocation?.submitted === true;
+            work.recovery!.diagnosisInvocation ??= {
+              id: randomUUID(),
+              submitted: false,
+            };
+            const invocation = work.recovery!.diagnosisInvocation;
+            invocation.submitted = true;
+            save();
+            const invalidDiagnosis = (
+              detail: string,
+              response: unknown,
+            ): never => {
+              work.recovery!.diagnosisInvocation = {
+                id: randomUUID(),
+                submitted: false,
+                rejected: [
+                  ...(invocation.rejected ?? []),
+                  { id: invocation.id, response: structuredClone(response) },
+                ],
               };
-            } catch (error) {
-              const detail =
-                error instanceof Error ? error.message : String(error);
+              save();
               context.invalid(detail);
               throw new StepFault(
                 transient(`Diagnosis was invalid: ${detail}`, true),
               );
+            };
+            const request = workRepairDiagnosisRequest({
+              state,
+              item,
+              evidence,
+              sources: args.sources ?? [],
+              checkout: args.checkout,
+              rejected,
+              invocation: {
+                invocationId: invocation.id,
+                phase: "diagnosis",
+                ordinal: consumption(state).implementationRepairs,
+                observe: args.diagnostics?.modelObserver({
+                  scopeId: work.attempt!,
+                  runId: state.runId,
+                  itemId: item.id,
+                  attemptId: work.attempt,
+                }),
+              },
+            });
+            const requestDigest = createHash("sha256")
+              .update(JSON.stringify(request))
+              .digest("hex");
+            if (recovering && invocation.requestDigest !== requestDigest)
+              throw new StepFault({
+                kind: "decision",
+                evidence: [],
+                question:
+                  "The retained diagnosis request differs from current evidence; preserve the original submission rather than replaying it",
+              });
+            invocation.requestDigest = requestDigest;
+            save();
+            const response = (invocation.response ??
+              (await generatePlannerStructured<DiagnosisAnswer>(
+                args.model,
+                state,
+                save,
+                request,
+                recovering,
+              ))) as DiagnosisAnswer;
+            invocation.response = structuredClone(response);
+            save();
+            if (
+              !response ||
+              typeof response !== "object" ||
+              Array.isArray(response)
+            )
+              return "What concrete correction or operator prerequisite makes the original failure ready to proceed? The diagnosis is unavailable.";
+            if (response.decision === "predecessor") {
+              try {
+                return {
+                  blame: blamedPredecessor(
+                    state,
+                    item,
+                    response,
+                    args.checkout,
+                  ),
+                  diagnosis: response.diagnosis,
+                };
+              } catch (error) {
+                const detail =
+                  error instanceof Error ? error.message : String(error);
+                invalidDiagnosis(detail, response);
+              }
             }
-          }
-          if (response.decision !== "repair")
-            return (
-              response.question?.trim() ||
-              "What concrete operator decision resolves the original failure?"
+            if (response.decision !== "repair")
+              return (
+                response.question?.trim() ||
+                "What concrete operator decision resolves the original failure?"
+              );
+            const readiness = actionableReadiness(
+              state,
+              item,
+              response,
+              evidence,
+              args.checkout,
+              request.workRepairDiagnosis?.evidenceIndices,
             );
-          const readiness = actionableReadiness(
-            state,
-            item,
-            response,
-            evidence,
-            args.checkout,
-            request.workRepairDiagnosis?.evidenceIndices,
-          );
-          if (typeof readiness === "string") return readiness;
-          const proposed: RepairCorrection = {
-            kind: "implementation",
-            failureDigest: failure.digest,
-            event: failure.event,
-            diagnosis: response.diagnosis,
-            correction: response.correction,
-            actor: "factory-controller",
-            readiness,
-          };
-          try {
-            validateCorrection(work, proposed);
-          } catch (error) {
-            const detail =
-              error instanceof Error ? error.message : String(error);
-            context.invalid(detail);
-            throw new StepFault(
-              transient(`Diagnosis was invalid: ${detail}`, true),
-            );
-          }
-          return proposed;
-        });
+            if (typeof readiness === "string") return readiness;
+            const proposed: RepairCorrection = {
+              kind: "implementation",
+              failureDigest: failure.digest,
+              event: failure.event,
+              diagnosis: response.diagnosis,
+              correction: response.correction,
+              actor: "factory-controller",
+              readiness,
+            };
+            try {
+              validateCorrection(work, proposed);
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              invalidDiagnosis(detail, response);
+            }
+            return proposed;
+          }),
+        );
       },
       {
         save,

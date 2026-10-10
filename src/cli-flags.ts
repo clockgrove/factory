@@ -8,6 +8,7 @@ export const installFlags = [
   "delivery",
   "network",
   "planning",
+  "planning-transport",
   "planning-model",
   "planning-reasoning",
   "review-model",

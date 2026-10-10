@@ -1,23 +1,40 @@
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import type {
+  SDKMessage,
+  SDKResultMessage,
+  SDKSystemMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
-import { WorkerInteractionCapture } from "./interaction-capture.js";
+import type { AgentSessionRef, WorkerUsageObservation } from "../contracts.js";
+import {
+  closeProviderEventStream,
+  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  ProviderTurnGuard,
+} from "../provider-turn.js";
+import {
+  type ClaudeWorkerInput,
+  claudeAuthenticationValues,
+} from "./claude.js";
 import {
   createFactoryWorktreeMcp,
   factoryMcpServerName,
   factoryMcpToolName,
   type PreparedClaudeEnvironment,
 } from "./claude-environment.js";
-import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import type {
-  SDKMessage,
-  SDKResultMessage,
-  SDKSystemMessage,
-} from "@anthropic-ai/claude-agent-sdk";
+import { claudeQueryOptions } from "./claude-options.js";
 import {
-  claudeAuthenticationValues,
-  type ClaudeWorkerInput,
-} from "./claude.js";
+  type ClaudeSessionData,
+  claudeHistoryDigest,
+  claudePrivateWrite,
+} from "./claude-session.js";
+import {
+  ClaudeUsage,
+  claudeCost,
+  claudeModelUsage,
+  claudeRawTokenUsage,
+} from "./claude-usage.js";
 import {
   harnessFailure,
   privateProgress,
@@ -26,20 +43,7 @@ import {
   workItemPrompt,
   writeHarnessResult,
 } from "./harness-support.js";
-import { claudeQueryOptions } from "./claude-options.js";
-import type { WorkerUsageObservation } from "../contracts.js";
-import {
-  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
-  ProviderTurnGuard,
-  closeProviderEventStream,
-} from "../provider-turn.js";
-
-import {
-  ClaudeUsage,
-  claudeCost,
-  claudeRawTokenUsage,
-  claudeModelUsage,
-} from "./claude-usage.js";
+import { WorkerInteractionCapture } from "./interaction-capture.js";
 
 function progressEvent(
   message: SDKMessage,
@@ -162,7 +166,11 @@ async function main(): Promise<void> {
   let events: AsyncIterator<SDKMessage> | undefined;
   let closeStarted = false;
   let progressLost = false;
-  const usage = new ClaudeUsage(redactionValues);
+  const usage = new ClaudeUsage(
+    redactionValues,
+    input.session?.data.baseline,
+    input.session?.resume,
+  );
   const observeUsage = (type: WorkerUsageObservation["type"]): void => {
     if (progressLost) return;
     const workerUsage: WorkerUsageObservation = {
@@ -227,6 +235,17 @@ async function main(): Promise<void> {
       allowedTools: options.allowedTools,
       permissionMode: options.permissionMode,
     });
+    if (input.session) {
+      input.session.ref.currentTurn = {
+        ...input.session.ref.currentTurn!,
+        dispatch: "submitted",
+        resources: "active",
+      };
+      claudePrivateWrite(
+        join(input.session.data.root, "pending.json"),
+        input.session.ref,
+      );
+    }
     const stream = query({ prompt, options });
     let result: SDKResultMessage | undefined;
     let initialization: SDKSystemMessage | undefined;
@@ -238,7 +257,13 @@ async function main(): Promise<void> {
       turn.progress();
       if (message.type === "result") result = message;
       const observedUsage = usage.observe(message);
-      capture.claude(message, observedUsage);
+      capture.claude(
+        message,
+        observedUsage,
+        message.type === "result"
+          ? { costUsd: usage.cost() ?? null }
+          : undefined,
+      );
       if (!progressLost)
         try {
           privateProgress(progressPath, {
@@ -259,6 +284,13 @@ async function main(): Promise<void> {
         assertInitialization(message, input);
         if (prepared)
           prepared.markReady(await turn.race(stream.mcpServerStatus()));
+        if (
+          input.session &&
+          message.session_id !== input.session.data.nativeSessionId
+        )
+          throw new Error(
+            "Claude worker initialized a different native conversation",
+          );
         initialization = message;
       }
       if (message.type === "result") break;
@@ -274,10 +306,39 @@ async function main(): Promise<void> {
     turn.finish();
     providerCompleted = true;
     capture.providerCompleted();
+    if (
+      input.session &&
+      result.session_id !== input.session.data.nativeSessionId
+    )
+      throw new Error(
+        "Claude worker result belongs to a different conversation",
+      );
+    let session: AgentSessionRef | undefined;
+    if (input.session) {
+      const data: ClaudeSessionData = {
+        ...input.session.data,
+        nativeTerminal: true,
+        baseline: usage.boundary(),
+        historyDigest: claudeHistoryDigest(input.session),
+      };
+      session = {
+        ...input.session.ref,
+        status: "in-flight",
+        data,
+        currentTurn: {
+          ...input.session.ref.currentTurn!,
+          terminal: "completed",
+          resources: "unknown",
+        },
+      };
+    }
     const assets = readProducedAssets(input.request);
+    observeUsage("completed");
+    capture.outcome("completed", usage.totals(), undefined, "protocol");
     writeHarnessResult(resultPath, {
       state: "complete",
       assets,
+      ...(session && { session }),
       evidence: {
         harness: "claude-agent-sdk",
         ...(prepared && { environment: prepared.evidence() }),
@@ -296,11 +357,10 @@ async function main(): Promise<void> {
         finalResponse: result.subtype === "success" ? result.result : "",
         usage: claudeRawTokenUsage(result.usage),
         modelUsage: claudeModelUsage(result.modelUsage, redactionValues),
-        totalCostUsd: claudeCost(result.total_cost_usd),
+        totalCostUsd: usage.cost(),
+        cumulativeCostUsd: claudeCost(result.total_cost_usd),
       },
     });
-    observeUsage("completed");
-    capture.outcome("completed", usage.totals(), undefined, "protocol");
   } catch (error) {
     if (events && !closeStarted && !turn.signal.aborted) {
       closeStarted = true;

@@ -66,6 +66,7 @@ import {
   type LocalOwner,
   configuredDiagnosticSecrets,
   canHandoff,
+  synchronizeWorkItemPause,
   CoordinatorHandoff,
   cancelRecordedSubprocesses,
 } from "./ownership.js";
@@ -75,6 +76,16 @@ import {
   activateProjectedObjective,
 } from "./projection.js";
 import { finalizeObjective } from "./finalization.js";
+
+/** Draining finishes admitted work; a plain pause still stops its next step. */
+export function workItemPauseSignal(
+  owner: Pick<LocalOwner, "snapshot" | "pause" | "workPause">,
+): AbortSignal {
+  return owner.snapshot?.coordinator?.mode === "draining" &&
+    canHandoff(owner.snapshot)
+    ? owner.pause.signal
+    : owner.workPause.signal;
+}
 
 export async function runObjectivePass(
   config: FactoryConfig,
@@ -101,6 +112,7 @@ export async function runObjectivePass(
   let stateDiagnostics: StateDiagnostics | undefined;
   const save = (state: FactoryState) => {
     owner.snapshot = state;
+    synchronizeWorkItemPause(owner);
     if (state.coordinator) {
       const phases = [
         ...new Set(
@@ -477,7 +489,7 @@ export async function runObjectivePass(
         signal: owner.abort.signal,
         // Read at each step: resume replaces the controller.
         get pause() {
-          return owner.pause.signal;
+          return workItemPauseSignal(owner);
         },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
@@ -504,7 +516,7 @@ export async function runObjectivePass(
         signal: owner.abort.signal,
         // Read at each step: resume replaces the controller.
         get pause() {
-          return owner.pause.signal;
+          return workItemPauseSignal(owner);
         },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),

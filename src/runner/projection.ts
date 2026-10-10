@@ -2,29 +2,30 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   finalObjectiveCommands,
-  verifyPlanCandidate,
   type PlanCandidate,
+  verifyPlanCandidate,
 } from "../compiler.js";
 import type { FactoryConfig } from "../config.js";
-import { assertApprovedPlaybookAdmission } from "../contracts.js";
 import type {
   ApprovedPlaybookAdmission,
   ExecutionDriver,
   GitHubGateway,
 } from "../contracts.js";
+import { assertApprovedPlaybookAdmission } from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
 import {
   executionProfileChoices,
   verifyExecutionProfiles,
 } from "../execution-profiles.js";
 import { preflightLocalExecutables } from "../local-preflight.js";
+import { retainAcceptedPlanningDecision } from "../planning-decision-context.js";
 import type { FactoryState, PreparationState } from "../state.js";
 import { saveState } from "../state-store.js";
-import { retainAcceptedPlanningDecision } from "../planning-decision-context.js";
 import {
+  canHandoff,
+  configuredDiagnosticSecrets,
   type LocalOwner,
   type ObjectiveStep,
-  configuredDiagnosticSecrets,
 } from "./ownership.js";
 
 export async function projectPreparedObjective(args: {
@@ -59,6 +60,10 @@ export async function projectPreparedObjective(args: {
     cancellationRequested,
     stopIfCancelled,
   } = args;
+  if (!canHandoff(preparation))
+    throw new Error(
+      "Planning must authenticate settlement before GitHub projection",
+    );
   const baseSha = preparation.baseSha;
   preparation.coordinator.phase = "projection";
   preparation.coordinator.phaseStartedAt = new Date().toISOString();
@@ -165,6 +170,10 @@ export function activateProjectedObjective(args: {
     plan,
     projected,
   } = args;
+  if (!canHandoff(preparation))
+    throw new Error(
+      "Planning must authenticate settlement before execution activation",
+    );
   const { baseSha, capacity } = preparation;
   const graph = plan.graph;
   verifyPlanCandidate(
@@ -197,6 +206,17 @@ export function activateProjectedObjective(args: {
   );
   return {
     schemaVersion: 7,
+    ...(preparation.sourcePacketDigest
+      ? { sourcePacketDigest: preparation.sourcePacketDigest }
+      : {}),
+    ...(preparation.agentSessions
+      ? { agentSessions: structuredClone(preparation.agentSessions) }
+      : {}),
+    ...(preparation.agentSessionHistory
+      ? {
+          agentSessionHistory: structuredClone(preparation.agentSessionHistory),
+        }
+      : {}),
     ...(plan.humanDecision
       ? { acceptedPlanningDecision: retainAcceptedPlanningDecision(plan) }
       : {}),

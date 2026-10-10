@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { readWorkerJson, workFault } from "../fault.js";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 import type {
   AgentHarness,
+  AgentSessionRef,
   HarnessHandle,
   HarnessObservation,
   HarnessRequest,
@@ -24,6 +26,19 @@ import {
   observeWorker,
   stopUnrecordedWorker,
 } from "./worker-process.js";
+import { assertAgentSessionRef } from "../agent-session.js";
+import {
+  claudeDigest,
+  claudeHistoryDigest,
+  prepareClaudeSession,
+  requireClaudeSession,
+  releaseClaudeStorage,
+  claudePrivateWrite,
+  readClaudePrivate,
+  type ClaudeOwnedSession,
+  type ClaudeSessionData,
+} from "./claude-session.js";
+import { workItemPrompt } from "./harness-support.js";
 import { serviceLoginEnvironment } from "../provider-credentials.js";
 
 interface ClaudeWorkerHandleData {
@@ -38,6 +53,7 @@ export interface ClaudeWorkerInput {
   request: HarnessRequest;
   config: ClaudeAgentSdkConfig;
   providerTurnIdleTimeoutMs?: number;
+  session?: ClaudeOwnedSession;
 }
 
 const claudeLocalAuthenticationEnvironment = [
@@ -92,6 +108,139 @@ export function claudeWorkerEnvironment(
 }
 
 export class ClaudeAgentSdkHarness implements AgentHarness {
+  readonly sessionAdapter = "claude-agent-sdk";
+  get sessionCapabilities() {
+    // Isolating session storage must not silently discard explicitly requested user settings.
+    return this.config.settingSources.includes("user")
+      ? undefined
+      : { resumeRoles: ["implementation"] as const };
+  }
+  private get sessionStorage(): string {
+    return join(this.root, "sessions");
+  }
+
+  private workerSession(
+    request: HarnessRequest,
+  ): ClaudeOwnedSession | undefined {
+    if (!request.session) return undefined;
+    if (
+      !this.sessionCapabilities ||
+      request.session.scope.role !== "implementation" ||
+      request.session.scope.itemId !== request.item.id
+    )
+      throw new Error(
+        "Claude implementation continuation is unavailable for this configured scope",
+      );
+    const session = prepareClaudeSession(
+      this.sessionStorage,
+      request.session,
+      this.sessionAdapter,
+      claudeDigest([
+        this.config,
+        request.item.executionBinding,
+        request.environment,
+      ]),
+      request.attemptId,
+      request.item.executionBinding?.id,
+    );
+    session.data.pendingWorkerIdentity = request.attemptId;
+    session.ref.currentTurn = {
+      invocationId: request.attemptId!,
+      requestDigest: claudeDigest(workItemPrompt(request)),
+      dispatch: "intent",
+      resources: "unknown",
+    };
+    claudePrivateWrite(join(session.data.root, "pending.json"), session.ref);
+    return session;
+  }
+
+  private sessionReceipt(
+    data: ClaudeWorkerHandleData,
+    supplied: unknown,
+  ): AgentSessionRef {
+    assertAgentSessionRef(supplied);
+    const input = readWorkerJson(data.requestPath) as ClaudeWorkerInput;
+    const admitted = input.session;
+    const native = supplied.data as ClaudeSessionData | undefined;
+    if (
+      !admitted ||
+      supplied.status !== "in-flight" ||
+      supplied.adapter !== this.sessionAdapter ||
+      supplied.identity !== admitted.ref.identity ||
+      supplied.turn !== admitted.ref.turn ||
+      supplied.executionIdentity !== admitted.ref.executionIdentity ||
+      !isDeepStrictEqual(supplied.scope, admitted.ref.scope) ||
+      native?.selectionDigest !== admitted.data.selectionDigest ||
+      native.root !== admitted.data.root ||
+      native.nativeSessionId !== admitted.data.nativeSessionId ||
+      native.profileId !== admitted.data.profileId ||
+      native.nativeTerminal !== true ||
+      native.historyDigest !==
+        claudeHistoryDigest(
+          requireClaudeSession(
+            this.sessionStorage,
+            supplied,
+            this.sessionAdapter,
+          ),
+        )
+    )
+      throw workFault("Claude completion has an invalid conversation receipt");
+    const ref: AgentSessionRef = {
+      ...supplied,
+      status: "ready",
+      data: { ...native, settled: true, worker: data },
+      ...(supplied.currentTurn && {
+        currentTurn: { ...supplied.currentTurn, resources: "settled" },
+      }),
+    };
+    claudePrivateWrite(join(native.root, "settled.json"), ref);
+    return ref;
+  }
+
+  async releaseSession(ref: AgentSessionRef): Promise<void> {
+    assertAgentSessionRef(ref);
+    const root = join(this.sessionStorage, ref.identity);
+    if (!existsSync(root)) return;
+    const pending = readClaudePrivate<AgentSessionRef>(
+      join(root, "pending.json"),
+    );
+    if (
+      pending.identity !== ref.identity ||
+      pending.adapter !== this.sessionAdapter ||
+      !isDeepStrictEqual(pending.scope, ref.scope)
+    )
+      throw new Error("Claude disposal differs from the owned submitted scope");
+    const owned = requireClaudeSession(
+      this.sessionStorage,
+      pending,
+      this.sessionAdapter,
+    );
+    const supplied = ref.data as ClaudeSessionData | undefined;
+    if (ref.status === "in-flight")
+      throw new Error("Cannot release an unsettled Claude worker conversation");
+    // LocalExecutionDriver disposes only after its exact owned group is settled.
+    // Historical ready groups are not rescanned: their PIDs may since have been reused.
+    if (supplied?.worker && supplied.settled !== true)
+      await this.cancel({ identity: ref.identity, data: supplied.worker });
+    if (ref.status !== "ready" && owned.data.pendingWorkerIdentity) {
+      if (!/^[a-zA-Z0-9_-]{1,160}$/.test(owned.data.pendingWorkerIdentity))
+        throw new Error("Invalid pending Claude worker identity");
+      await this.cancelUnrecorded(owned.data.pendingWorkerIdentity);
+    }
+    releaseClaudeStorage(
+      this.sessionStorage,
+      {
+        ...pending,
+        status: "unavailable",
+        ...(pending.currentTurn && {
+          currentTurn: { ...pending.currentTurn, resources: "settled" },
+        }),
+        data: { ...owned.data, settled: true },
+      },
+      this.sessionAdapter,
+    );
+  }
+
   readonly capabilities = {
     protocolVersion: 1,
     worktree: "factory-owned-read-write",
@@ -138,6 +287,8 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
    */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
     const identity = request.attemptId ?? randomUUID();
+    const boundRequest = { ...request, attemptId: identity };
+    const session = this.workerSession(boundRequest);
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
     const credentialDirectory = join(this.root, "empty-gh-config");
     mkdirSync(credentialDirectory, { recursive: true, mode: 0o700 });
@@ -148,7 +299,10 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
         identity,
         label: "Claude harness",
         script: fileURLToPath(new URL("./claude-worker.js", import.meta.url)),
-        input: claudeWorkerInput(request, this.config),
+        input: {
+          ...claudeWorkerInput(boundRequest, this.config),
+          ...(session && { session }),
+        },
         env: claudeWorkerEnvironment(credentialDirectory),
       }),
     };
@@ -160,7 +314,14 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   }
 
   async observe(handle: HarnessHandle): Promise<HarnessObservation> {
-    return observeWorker(this.require(handle), "Claude harness");
+    const data = this.require(handle);
+    const observed = observeWorker(data, "Claude harness");
+    if (observed.state === "running" || !existsSync(data.resultPath))
+      return observed;
+    const result = readWorkerJson(data.resultPath) as Record<string, unknown>;
+    if (result.session === undefined) return observed;
+    await this.cancel(handle);
+    return { ...observed, session: this.sessionReceipt(data, result.session) };
   }
 
   async cancel(handle: HarnessHandle): Promise<void> {
@@ -207,6 +368,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
         );
         continue;
       }
+      await this.cancel(handle);
       if (observed.state !== "complete") {
         if (observed.authentication)
           throw new AuthenticationRequiredError(
@@ -230,7 +392,11 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
         value.assets === undefined
           ? undefined
           : parseProducedAssetSets(value.assets);
-      return { evidence: value.evidence, assets };
+      const session =
+        value.session === undefined
+          ? undefined
+          : this.sessionReceipt(data, value.session);
+      return { evidence: value.evidence, assets, ...(session && { session }) };
     }
   }
 }

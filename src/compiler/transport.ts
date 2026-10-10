@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import type {
-  ModelInvocationUsage,
+  AgentSessionCapabilities,
+  AgentSessionContinuation,
+  AgentSessionReconciliation,
+  AgentSessionRef,
   ModelInvocationContext,
   ModelInvocationPhase,
-  AgentSessionContinuation,
-  AgentSessionRef,
+  ModelInvocationUsage,
 } from "../contracts.js";
 import type { Fault } from "../fault.js";
 
@@ -17,6 +20,8 @@ export interface CodexPlanningModelOptions extends PlanningModelOptions {
   redactionValues?: string[];
   /** Installation-owned private reviewer session storage; absence uses fresh turns. */
   sessionRoot?: string;
+  /** Explicit planning transport; no runtime fallback. */
+  transport?: "exec" | "app-server";
 }
 
 /** Which configured model selection a planning call uses. */
@@ -36,7 +41,9 @@ export interface PlanningTurn {
   failureClass?: string;
   /** Fault from structured provider facts (billing, a limit's reset time). */
   fault?: Fault;
-  /** The model was reached (a Codex item or usage event, a Claude model message). */
+  /** Native invocation was admitted; provider dispatch may have happened. */
+  nativeInvocationStarted?: boolean;
+  /** Observed model activity; absence never proves an unpaid native invocation. */
   started?: boolean;
 }
 
@@ -49,7 +56,10 @@ export interface PlanningTransport {
   readonly provider: string;
   /** Pinned adapter identity recorded with opt-in captures. */
   readonly adapter: string;
-  readonly sessionContinuation?: true;
+  readonly sessionCapabilities?: AgentSessionCapabilities;
+  reconcileSession?(
+    session: AgentSessionRef,
+  ): Promise<AgentSessionReconciliation>;
   releaseSession?(session: AgentSessionRef): Promise<void>;
   selection(role: PlanningRole): { model: string; reasoningEffort?: string };
   /** Provider settings recorded with opt-in request capture content. */
@@ -63,6 +73,8 @@ export interface PlanningTransport {
     role: PlanningRole;
     prompt: string;
     schema: unknown;
+    sourcePacket?: string;
+    candidateDigest?: string;
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
     tree?: string;
@@ -79,6 +91,7 @@ export interface StructuredCall {
   invocation: ModelInvocationContext | undefined;
   defaultPhase: ModelInvocationPhase;
   sourcePacket?: string;
+  candidateDigest?: string;
   /** A directory holding the exact tree under review, readable read-only. */
   tree?: string;
   session?: AgentSessionContinuation;
@@ -86,4 +99,14 @@ export interface StructuredCall {
 
 export const CODEX_PLANNING_PROVIDER = "openai-codex-sdk";
 
-export const CODEX_PLANNING_ADAPTER = "@openai/codex@0.160.0/native-owned";
+export const CODEX_PLANNING_ADAPTER = "@openai/codex@0.160.0/exec-session-v2";
+
+/** Exact rendered turn input, shared with authenticated recovery decoding. */
+export function structuredRequestDigest(
+  prompt: string,
+  schema: unknown,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([prompt, schema]))
+    .digest("hex");
+}

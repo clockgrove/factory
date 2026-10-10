@@ -121,7 +121,12 @@ export function claudeCaptureEvents(
             ? "unavailable"
             : "available-categories",
         normalized: {},
-        raw: claudeRawTokenUsage(message.usage),
+        raw: {
+          ...claudeRawTokenUsage(message.usage),
+          ...(claudeCost(message.total_cost_usd) === undefined
+            ? {}
+            : { total_cost_usd: message.total_cost_usd }),
+        },
         modelBreakdown: claudeModelUsage(message.modelUsage, secrets),
       },
     });
@@ -502,10 +507,20 @@ export class WorkerInteractionCapture {
     this.safely(() => this.writer!.record(event, content));
   }
 
-  claude(message: SDKMessage, observedUsage?: Record<string, unknown>): void {
+  claude(
+    message: SDKMessage,
+    observedUsage?: Record<string, unknown>,
+    accounting?: { costUsd: number | null },
+  ): void {
     this.safely(() => {
       if (message.type === "result") {
-        const cost = claudeCost(message.total_cost_usd);
+        // Supplied null is an unavailable current-turn delta, never a fallback
+        // to lifetime transcript cost. Omitted accounting retains fresh callers.
+        const cost = claudeCost(
+          accounting === undefined
+            ? message.total_cost_usd
+            : accounting.costUsd,
+        );
         this.terminalCost =
           cost === undefined || message.subtype === "error_during_execution"
             ? undefined
@@ -517,7 +532,10 @@ export class WorkerInteractionCapture {
                   message.subtype === "success" && !message.is_error
                     ? "available"
                     : "partial",
-                provenance: "Claude SDK total_cost_usd",
+                provenance:
+                  accounting === undefined
+                    ? "Claude SDK total_cost_usd"
+                    : "Claude SDK current-turn total_cost_usd delta",
               };
       }
       for (const { event, content } of claudeCaptureEvents(
@@ -639,13 +657,8 @@ export class WorkerInteractionCapture {
               ? "available-categories"
               : "unavailable",
             raw,
-            normalized: normalizeTokenUsage({
-              inputTokens: raw.inputTokens,
-              outputTokens: raw.outputTokens,
-              cachedInputTokens: raw.cacheReadTokens,
-              cacheWriteInputTokens: raw.cacheWriteTokens,
-              reasoningOutputTokens: raw.reasoningTokens,
-            }),
+            inputSemantics: "provider-reported-inclusion-unknown",
+            normalized: normalizeTokenUsage(observedUsage.normalizedUsage),
           },
         });
       } else this.writer!.record(base);

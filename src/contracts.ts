@@ -361,6 +361,8 @@ export function assertApprovedPlaybookPin(
 }
 
 export interface PlanningRequest<T> {
+  /** Controller-owned planner continuation; never model-authored or persisted in a graph. */
+  session?: AgentSessionContinuation;
   approvedPlaybookPin?: ApprovedPlaybookPin;
   /** Trusted transient compile input; not part of canonical or persisted graphs. */
   compileContext?: {
@@ -473,15 +475,58 @@ export interface ResultReviewCandidate {
 
 export type ResultReviewFinding = ReviewChoiceFinding;
 
-/** Factory-owned scope; native session identifiers remain inside adapters. */
-export interface AgentSessionScope {
+export type AgentSessionRole =
+  | "planning"
+  | "implementation"
+  | "result-review"
+  | "objective-review";
+
+/** Resume support is role-specific; it promises no active-turn reattachment. */
+export interface AgentSessionCapabilities {
+  resumeRoles: readonly AgentSessionRole[];
+}
+
+interface AgentObjectiveScope {
   repository: string;
   objective: number;
   runId: string;
   configDigest: string;
-  graphDigest: string;
-  role: "implementation" | "result-review" | "objective-review";
-  itemId?: string;
+}
+
+/** Factory-owned scope; native session identifiers remain inside adapters. */
+export type AgentSessionScope = AgentObjectiveScope &
+  (
+    | {
+        role: "planning";
+        planningInputDigest: string;
+        graphDigest?: never;
+        itemId?: never;
+      }
+    | {
+        role: "implementation" | "result-review";
+        graphDigest: string;
+        itemId: string;
+        planningInputDigest?: never;
+      }
+    | {
+        role: "objective-review";
+        graphDigest: string;
+        itemId?: never;
+        planningInputDigest?: never;
+      }
+  );
+
+/** The current admitted turn, not native history, acceptance or telemetry. */
+export interface AgentSessionTurn {
+  invocationId: string;
+  requestDigest: string;
+  graphDigest?: string;
+  candidateDigest?: string;
+  evidenceDigest?: string;
+  schemaDigest?: string;
+  dispatch: "intent" | "submitted";
+  terminal?: "completed" | "failed" | "interrupted";
+  resources: "active" | "settled" | "unknown";
 }
 
 /** Durable adapter receipt, separate from a paid attempt or acceptance verdict. */
@@ -493,11 +538,14 @@ export interface AgentSessionRef {
   identity: string;
   data?: unknown;
   turn: number;
+  currentTurn?: AgentSessionTurn;
   status: "ready" | "in-flight" | "unavailable" | "released";
 }
 
 export interface AgentSessionRequest {
   scope: AgentSessionScope;
+  /** Transient current graph binding; planning lifetime identity excludes it. */
+  currentGraphDigest?: string;
   /** Controller-allocated logical identity; distinct from native thread IDs. */
   identity: string;
   retained?: AgentSessionRef;
@@ -516,8 +564,24 @@ export interface WorkHandoffNote {
   consumers: string[];
 }
 
+/** Authenticated adapter recovery; observational captures never supply this. */
+export type AgentSessionReconciliation =
+  | { disposition: "active" | "unknown" }
+  | {
+      disposition: "settled";
+      session: AgentSessionRef;
+      /** Exact retained final bytes; normal shared decoding/grounding still applies. */
+      response?: string;
+      usage?: ModelInvocationUsage;
+    };
+
 export interface PlanningModel {
-  readonly sessionContinuation?: true;
+  readonly sessionCapabilities?: AgentSessionCapabilities;
+  reconcileSession?(
+    session: AgentSessionRef,
+  ): Promise<AgentSessionReconciliation>;
+  /** Decode authenticated recovered bytes with the ordinary request decoder; no provider call. */
+  decodeSessionResponse?<T>(request: PlanningRequest<T>, response: string): T;
   releaseSession?(session: AgentSessionRef): Promise<void>;
   approvedPlaybook?: ApprovedPlaybook;
   approvedPlaybookPin?: ApprovedPlaybookPin;
@@ -654,7 +718,7 @@ export interface ExecutionContext {
 }
 
 export interface ExecutionDriver {
-  readonly sessionContinuation?: true;
+  readonly sessionCapabilities?: AgentSessionCapabilities;
   releaseSession?(session: AgentSessionRef): Promise<void>;
   /** Supports authenticated preparation in its actual fresh worker checkout. */
   readonly freshCheckoutReadiness?: true;
@@ -750,7 +814,7 @@ export interface AgentHarnessCapabilities {
   authentication: "local-environment" | "adapter-owned" | "none";
 }
 export interface AgentHarness {
-  readonly sessionContinuation?: true;
+  readonly sessionCapabilities?: AgentSessionCapabilities;
   readonly sessionAdapter?: string;
   releaseSession?(session: AgentSessionRef): Promise<void>;
   /** Declared before composition; Factory rejects incompatible semantics. */

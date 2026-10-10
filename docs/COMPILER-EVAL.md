@@ -94,6 +94,13 @@ model, effort and isolated tool-free configuration. This measures wrapper/guard/
 observation differences over the same inference core; it is not a comparison of
 independent model engines or ordinary interactive Codex.
 
+These cells start fresh compiler conversations. They do not exercise the persistent
+Objective planner, retained follow-ups or the opt-in app-server transport. Sharing
+the production renderer and validator does not establish lifecycle equivalence.
+Qualifying continuity requires the actual bounded follow-up and restart path,
+authenticated native turn identities, settlement and unchanged acceptance checks,
+within the approved provider and resource limits.
+
 ## Inspecting results
 
 Each numbered case retains its dispatch identity, raw observed events, exact
@@ -111,8 +118,13 @@ latency and available usage categories. All-attempt and compiler-valid latency
 are separate; the validity denominator includes attempted failures. Output
 bytes, work-item count and brief bytes help explain output-volume changes, but
 are not independent measures of plan quality. Cache fractions are calculated on
-aligned observations and include accounting coverage. Unknown usage is null,
-not zero. Optional native counters defaulted to zero do not prove zero usage.
+aligned observations and include accounting coverage. Their denominator contains
+only observations with both input and cached-input counters. When comparing with
+Factory's whole-family analysis, keep that paired fraction separate from known
+cached input divided by all observed input, including input whose cache category
+is unknown. Neither establishes complete provider accounting or billed savings.
+Unknown usage is null, not zero. Optional native counters defaulted to zero do not
+prove zero usage.
 Reasoning tokens are a subset of output and are never added again. Configured
 model/effort are separate from native-reported selections; absence stays unknown.
 

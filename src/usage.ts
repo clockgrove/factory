@@ -106,6 +106,76 @@ export function codexRawTokenUsage(value: unknown): Record<string, number> {
   ]);
 }
 
+/** Comparable authenticated cumulative categories only; missing/reset counters stay absent. */
+export function cumulativeTokenUsageDelta(
+  cumulative: ModelInvocationUsage,
+  baseline: ModelInvocationUsage,
+): ModelInvocationUsage {
+  const current = normalizeTokenUsage(cumulative);
+  const before = normalizeTokenUsage(baseline);
+  const delta: ModelInvocationUsage = {};
+  for (const category of tokenCategories) {
+    const previous = before[category];
+    const after = current[category];
+    if (previous !== undefined && after !== undefined && after >= previous)
+      delta[category] = after - previous;
+  }
+  return delta;
+}
+
+/** Counts all observed input; a paired cache cohort remains a separate denominator. */
+export function summarizeInputCaching(values: readonly ModelInvocationUsage[]) {
+  const normalized = values.map(normalizeTokenUsage);
+  const inputs = normalized.filter((usage) => usage.inputTokens !== undefined);
+  const pairs = inputs.filter((usage) => usage.cachedInputTokens !== undefined);
+  const sum = (
+    selected: ModelInvocationUsage[],
+    key: "inputTokens" | "cachedInputTokens",
+  ) => {
+    const total = selected.reduce((sum, usage) => sum + usage[key]!, 0);
+    return selected.length && Number.isSafeInteger(total) ? total : null;
+  };
+  const allInputTokens = sum(inputs, "inputTokens");
+  const pairedInputTokens = sum(pairs, "inputTokens");
+  const knownCachedInputTokens = sum(pairs, "cachedInputTokens");
+  return {
+    allInputTokens,
+    pairedInputTokens,
+    knownCachedInputTokens,
+    knownFreshInputTokens:
+      pairedInputTokens !== null && knownCachedInputTokens !== null
+        ? pairedInputTokens - knownCachedInputTokens
+        : null,
+    inputWithUnknownCachedCategory:
+      allInputTokens !== null && pairedInputTokens !== null
+        ? allInputTokens - pairedInputTokens
+        : allInputTokens,
+    knownCachedFractionOfAllObservedInput:
+      allInputTokens && knownCachedInputTokens !== null
+        ? knownCachedInputTokens / allInputTokens
+        : null,
+    pairedCacheFraction:
+      pairedInputTokens && knownCachedInputTokens !== null
+        ? knownCachedInputTokens / pairedInputTokens
+        : null,
+    inputContributors: inputs.length,
+    cacheContributors: pairs.length,
+    eligibleObservations: values.length,
+    inputCoverage:
+      !inputs.length || allInputTokens === null
+        ? ("unavailable" as const)
+        : inputs.length === values.length
+          ? ("available" as const)
+          : ("partial" as const),
+    cacheCoverage:
+      !pairs.length || knownCachedInputTokens === null
+        ? ("unavailable" as const)
+        : pairs.length === values.length
+          ? ("available" as const)
+          : ("partial" as const),
+  };
+}
+
 /** Pinned Codex exec emits thread totals, including earlier resumed turns. */
 export function codexInvocationUsage(
   cumulative: unknown,
@@ -113,12 +183,5 @@ export function codexInvocationUsage(
 ): ModelInvocationUsage {
   const current = codexSdkTokenUsage(cumulative);
   if (baseline === undefined) return current;
-  const delta: ModelInvocationUsage = {};
-  for (const category of tokenCategories) {
-    const before = baseline[category];
-    const after = current[category];
-    if (before !== undefined && after !== undefined && after >= before)
-      delta[category] = after - before;
-  }
-  return normalizeCodexTokenUsage(delta);
+  return normalizeCodexTokenUsage(cumulativeTokenUsageDelta(current, baseline));
 }

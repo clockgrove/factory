@@ -1,8 +1,4 @@
-import { assertRepairLedger } from "./repair-policy.js";
 import { randomUUID } from "node:crypto";
-import { assertGitHubProgressProjection } from "./github-progress-state.js";
-import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
-import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
 import {
   closeSync,
   existsSync,
@@ -17,23 +13,28 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { assertAgentSessions } from "./agent-session.js";
 import { stateRoot, validateCapacity } from "./config.js";
 import {
-  linuxProcessIdentity,
-  processAlive,
-  releaseGuard,
-  takeGuard,
-} from "./process.js";
+  assertApprovedPlaybookPin,
+  assertPlanningExecutionBounds,
+} from "./contracts.js";
 import {
   assertRepeats,
   assertWait,
   type RepeatRecord,
   type Wait,
 } from "./fault.js";
+import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
+import { assertGitHubProgressProjection } from "./github-progress-state.js";
+import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
 import {
-  assertApprovedPlaybookPin,
-  assertPlanningExecutionBounds,
-} from "./contracts.js";
+  linuxProcessIdentity,
+  processAlive,
+  releaseGuard,
+  takeGuard,
+} from "./process.js";
+import { assertRepairLedger } from "./repair-policy.js";
 import {
   assertCoordinator,
   type ContinuationState,
@@ -287,6 +288,7 @@ function parsePreparation(
   if (value.plan?.executionBounds !== undefined)
     assertPlanningExecutionBounds(value.plan.executionBounds);
   assertCoordinator(value.coordinator);
+  assertAgentSessions(value);
   validateCapacity(value.capacity);
   assertRepairLedger(value);
   assertRepeats(value.repeats, "repeats");

@@ -55,7 +55,15 @@ import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import { withGitHubTransportObserver } from "../dist/github-client.js";
-import { runObjectivePass } from "../dist/runner/execution.js";
+import {
+  runObjectivePass,
+  workItemPauseSignal,
+} from "../dist/runner/execution.js";
+import {
+  canHandoff,
+  synchronizeWorkItemPause,
+} from "../dist/runner/ownership.js";
+import { validateItem } from "../dist/item-steps.js";
 import { killGroup } from "../dist/execution/worker-process.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
@@ -84,6 +92,7 @@ import {
 } from "../dist/repair-policy.js";
 import { decideResult, rereviewWorkItem } from "../dist/runner.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
+import { setCoordinatorMode } from "../dist/state.js";
 import {
   assertStepAdmission,
   step,
@@ -202,7 +211,8 @@ assert.equal(retained.includes("private"), false);
 assert.deepEqual(JSON.parse(retained.trim()).transport, transport);
 const emitted = [];
 const writer = new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, invocationId: "actual-child-capture", providerAttempt: 1, phase: "integration", adapter: "local-process", configured: { provider: "not-invoked", model: "none" } }, { enabled: true, maxBytesPerInvocation: 1024 }, [], metadata => emitted.push(metadata));
-writer.record({ kind: "interaction" }, () => ({ text: "real child process capture" }));
+const prompt = "real child process capture π";
+writer.record({ kind: "request", promptComponents: { renderedPromptBytes: Buffer.byteLength(prompt), rolePreambleTaskSplit: "unavailable" } }, () => ({ text: "real child process capture" }));
 for (const event of nativeEvents) writer.record(event);
 process.stdout.write(JSON.stringify(emitted));`,
       ],
@@ -226,6 +236,32 @@ process.stdout.write(JSON.stringify(emitted));`,
     const analysis = analyzeInteractions([metadata], [], {
       includeNativeToolContent: true,
     });
+    assert.equal(
+      analysis.requestBytes.renderedPromptBytes.total,
+      Buffer.byteLength("real child process capture π"),
+    );
+    assert.equal(analysis.requestBytes.evidenceBytes.total, null);
+    assert.equal(analysis.requestBytes.exactBilledRoleTokens, null);
+    assert.equal(analysis.invocations[0].sessionTurnCoverage, "unavailable");
+    assert.equal(
+      analysis.sessionModes.find((mode) => mode.mode === "unknown")
+        .invocationCount,
+      1,
+    );
+    assert.equal(
+      analysis.nativeFamilyResponseUsage.cache.allObservedInputTokens,
+      null,
+    );
+    assert.equal(
+      analysis.nativeFamilyResponseUsage.cache
+        .knownCachedFractionOfAllObservedInput,
+      null,
+    );
+    assert.equal(
+      analysis.nativeFamilyResponseUsage.completeFamilyCoverage,
+      "unknown",
+    );
+    assert.equal(analysis.nativeFamilyResponseUsage.paidOwnedChildSessions, 0);
     assert.equal(analysis.nativeToolActivity.uniqueCalls, null);
     assert.equal(analysis.invocations[0].nativeToolActivity.contentReads, 0);
     assert.equal(
@@ -619,6 +655,84 @@ setTimeout(() => {
     assert.equal(noRawStderr.stdout, "drained");
     assert.equal(noRawStderr.stderr, "");
     assert.equal(drainedStderrBytes, 128 * 1024);
+
+    // Real bidirectional stdin: the second write waits for observed stdout.
+    // Protocol input and output stay transient, with ordinary owned closure.
+    const interactiveOwners = [];
+    const observeInteractiveOwner = (owner, settled) => {
+      interactiveOwners.push({ ...owner, settled });
+    };
+    let echoed = "";
+    let receivedFirst;
+    const firstEcho = new Promise((resolve) => {
+      receivedFirst = resolve;
+    });
+    const interactive = await withProcessCancellation(
+      undefined,
+      () =>
+        subprocessAsync(
+          "/usr/bin/cat",
+          [],
+          {},
+          {
+            run: async (channel) => {
+              await channel.write("first π\n");
+              await firstEcho;
+              await channel.write("second\n");
+              channel.end();
+            },
+          },
+          (stream, chunk) => {
+            if (stream === "stdout") {
+              echoed += chunk;
+              if (echoed.includes("first π\n")) receivedFirst();
+            }
+          },
+          undefined,
+          { stdout: false, stderr: false },
+        ),
+      observeInteractiveOwner,
+    );
+    assert.equal(interactive.status, 0);
+    assert.equal(interactive.stdout, "");
+    assert.equal(echoed, "first π\nsecond\n");
+
+    const interactiveAbort = new AbortController();
+    let inputChannel;
+    let interruptionRequested = false;
+    await assert.rejects(
+      withProcessCancellation(
+        undefined,
+        () =>
+          subprocessAsync(
+            "/usr/bin/cat",
+            [],
+            { signal: interactiveAbort.signal },
+            {
+              cancellationGraceMs: 250,
+              cancel: () => {
+                interruptionRequested = true;
+                inputChannel.end();
+              },
+              run: async (channel) => {
+                inputChannel = channel;
+                await channel.write("interrupt after echo\n");
+                await channel.closed;
+              },
+            },
+            (stream) => {
+              if (stream === "stdout") interactiveAbort.abort();
+            },
+          ),
+        observeInteractiveOwner,
+      ),
+      /cancelled after verified cessation/,
+    );
+    assert.equal(interruptionRequested, true);
+    assert.equal(interactiveOwners.filter((owner) => !owner.settled).length, 2);
+    assert.equal(interactiveOwners.filter((owner) => owner.settled).length, 2);
+    for (const owner of interactiveOwners.filter((owner) => owner.settled))
+      assert.equal(processGroupExists(owner.pid), false);
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previousStateHome;
@@ -826,6 +940,7 @@ test("cancellation stops an owned shell and its process group", async () => {
       snapshot,
       abort: aborted,
       pause: new AbortController(),
+      workPause: new AbortController(),
       changed: false,
       cancellation: Promise.resolve(),
     };
@@ -1068,7 +1183,7 @@ test("settled validation reuses its exact Git result once and retains the failed
     };
     hydrateWorkerInputSources(graph, pinnedSources);
     const work = {
-      status: "failed",
+      status: "running",
       step: "validate",
       attempt: "one-implementation",
       baseSha: commit,
@@ -1092,27 +1207,145 @@ test("settled validation reuses its exact Git result once and retains the failed
       work: { local: work },
       autonomy: resolveAutonomy({ allowances: { implementationRepairs: 0 } }),
     };
+    const pause = new AbortController();
+    pause.abort(new Error("Coordinator paused"));
+    const owner = {
+      snapshot: state,
+      pause,
+      workPause: new AbortController(),
+    };
+    state.coordinator = {
+      mode: "paused",
+      phase: "validate",
+      phaseStartedAt: new Date().toISOString(),
+      processes: [],
+    };
+    const validate = () =>
+      validateTree(
+        checkout,
+        join(root, "validation"),
+        commit,
+        treeSha,
+        [command],
+        undefined,
+        undefined,
+        [],
+        undefined,
+        commit,
+      );
+    const validationStep = () =>
+      validateItem({
+        state,
+        item: graph.items[0],
+        save: () => undefined,
+        pause: workItemPauseSignal(owner),
+        validate,
+      });
+    // A plain pause refuses the next command. Draining must reach a real
+    // failure/operator or publication boundary before that pause applies.
+    synchronizeWorkItemPause(owner);
+    assert.equal(canHandoff(state), false);
+    assert.equal(workItemPauseSignal(owner), owner.workPause.signal);
+    await assert.rejects(validationStep, StepPaused);
+    assert.equal(existsSync(join(root, "validation")), false);
+    setCoordinatorMode(state, "draining");
+    synchronizeWorkItemPause(owner);
+    assert.equal(owner.workPause.signal.aborted, false);
+    assert.equal(workItemPauseSignal(owner), owner.workPause.signal);
+    let settledTry = false;
+    let nextPaidStarted = false;
     await assert.rejects(
-      () =>
-        validateTree(
-          checkout,
-          join(root, "validation"),
-          commit,
-          treeSha,
-          [command],
-          undefined,
-          undefined,
-          [],
-          undefined,
-          commit,
-        ),
-      (error) => {
-        assert.ok(error instanceof CandidateValidationFailure);
-        assert.equal(error.failedValidation.commands[0].exitCode, 1);
-        recordWorkFailure(state, "local", error);
-        return true;
-      },
+      step(
+        state,
+        { scope: { item: "local" }, name: "acceptance-review", paid: true },
+        async (context) => {
+          await context.paid(async () => {
+            const result = await subprocessAsync(
+              "sh",
+              ["-c", "echo started; sleep 0.05; echo settled"],
+              {},
+              undefined,
+              (stream) => {
+                if (stream !== "stdout") return;
+                setCoordinatorMode(state, "paused");
+                synchronizeWorkItemPause(owner);
+              },
+            );
+            settledTry =
+              result.status === 0 && result.stdout.includes("settled");
+          });
+          await context.paid(async () => {
+            nextPaidStarted = true;
+            await subprocessAsync("sh", ["-c", "echo forbidden"]);
+          });
+        },
+        { save: () => undefined, pause: workItemPauseSignal(owner) },
+      ),
+      StepPaused,
     );
+    assert.equal(settledTry, true);
+    assert.equal(nextPaidStarted, false);
+    setCoordinatorMode(state, "running");
+    synchronizeWorkItemPause(owner);
+    assert.equal(owner.workPause.signal.aborted, true);
+    owner.pause = new AbortController();
+    synchronizeWorkItemPause(owner);
+    assert.equal(owner.workPause.signal.aborted, false);
+    owner.pause.abort(new Error("Coordinator draining"));
+    setCoordinatorMode(state, "draining");
+    synchronizeWorkItemPause(owner);
+    let pollCount = 0;
+    let pauseTimer;
+    const waitingAt = Date.now();
+    try {
+      await assert.rejects(
+        step(
+          state,
+          { scope: "objective", name: "observe" },
+          async (context) => {
+            pollCount++;
+            await subprocessAsync("sh", ["-c", "echo observed"]);
+            pauseTimer = setTimeout(() => {
+              setCoordinatorMode(state, "paused");
+              synchronizeWorkItemPause(owner);
+            }, 30);
+            context.pending(
+              undefined,
+              new Date(Date.now() + 60_000).toISOString(),
+            );
+          },
+          {
+            save: () => undefined,
+            pause: workItemPauseSignal(owner),
+            signal: AbortSignal.timeout(1_000),
+          },
+        ),
+        StepPaused,
+      );
+    } finally {
+      clearTimeout(pauseTimer);
+    }
+    assert.equal(pollCount, 1);
+    assert.ok(Date.now() - waitingAt < 1_000);
+    // Handoff from plain pause receives a live admitted-work signal; the
+    // already-aborted coordinator signal still blocks new item admission.
+    owner.handoff = true;
+    setCoordinatorMode(state, "draining");
+    synchronizeWorkItemPause(owner);
+    assert.equal(owner.workPause.signal.aborted, false);
+    assert.equal(owner.pause.signal.aborted, true);
+    await assert.rejects(validationStep, (error) => {
+      assert.ok(error instanceof CandidateValidationFailure);
+      assert.equal(error.failedValidation.commands[0].exitCode, 1);
+      // The delivery runner fails the admitted item after this real
+      // validation command rejects, retaining its exact failed capture.
+      work.status = "failed";
+      recordWorkFailure(state, "local", error);
+      return true;
+    });
+    assert.equal(work.status, "failed");
+    assert.equal(canHandoff(state), true);
+    assert.equal(workItemPauseSignal(owner), owner.pause.signal);
     const original = structuredClone(work.failedValidation);
     const originalFailure = structuredClone(work.recovery.failure);
     const request = { item: "local", actor: "integration-operator" };

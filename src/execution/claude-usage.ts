@@ -79,18 +79,84 @@ export function claudeTokenUsage(value: unknown): ModelInvocationUsage {
   return usage;
 }
 
+export interface ClaudeUsageBaseline {
+  models: Record<string, Record<string, number>>;
+  costUsd?: number;
+}
+
+/** Compare only authenticated categories; transcript resets never become negative or free usage. */
+export function claudeUsageDelta(
+  current: ClaudeUsageBaseline,
+  baseline?: ClaudeUsageBaseline,
+  resumed = false,
+): ClaudeUsageBaseline {
+  const droppedModels =
+    resumed &&
+    baseline &&
+    Object.keys(baseline.models).some((name) => !(name in current.models));
+  const models = Object.fromEntries(
+    Object.entries(current.models).map(([name, counters]) => {
+      const previous = baseline?.models[name];
+      const result: Record<string, number> = {};
+      for (const [field, value] of Object.entries(counters)) {
+        const prior = droppedModels
+          ? undefined
+          : resumed
+            ? baseline
+              ? previous
+                ? previous[field]
+                : 0
+              : undefined
+            : 0;
+        if (prior !== undefined && value >= prior)
+          result[field] = value - prior;
+      }
+      return [name, result];
+    }),
+  );
+  const priorCost = resumed ? baseline?.costUsd : 0;
+  const costUsd =
+    current.costUsd !== undefined &&
+    priorCost !== undefined &&
+    current.costUsd >= priorCost
+      ? current.costUsd - priorCost
+      : undefined;
+  return { models, ...(costUsd === undefined ? {} : { costUsd }) };
+}
+
 export class ClaudeUsage {
   private seen = new Set<string>();
   private usage: ModelInvocationUsage = {};
-  constructor(private secrets: string[]) {}
+  private snapshot: ClaudeUsageBaseline | undefined;
+  private newCost: number | undefined;
+  constructor(
+    private secrets: string[],
+    private baseline?: ClaudeUsageBaseline,
+    private resumed = false,
+  ) {}
 
   observe(message: SDKMessage): Record<string, unknown> | undefined {
     if (message.type === "result") {
       // This subtype can contain SDK-reset zeroes after a process crash.
-      this.usage =
-        message.subtype === "error_during_execution"
-          ? {}
-          : claudeTokenUsage(message.modelUsage);
+      if (message.subtype === "error_during_execution") {
+        this.usage = {};
+        this.snapshot = undefined;
+        this.newCost = undefined;
+      } else {
+        this.snapshot = {
+          models: claudeModelUsage(message.modelUsage, []),
+          ...(claudeCost(message.total_cost_usd) === undefined
+            ? {}
+            : { costUsd: message.total_cost_usd }),
+        };
+        const delta = claudeUsageDelta(
+          this.snapshot,
+          this.baseline,
+          this.resumed,
+        );
+        this.usage = claudeTokenUsage(delta.models);
+        this.newCost = delta.costUsd;
+      }
       return;
     }
     if (message.type !== "assistant") return;
@@ -106,5 +172,13 @@ export class ClaudeUsage {
 
   totals(): ModelInvocationUsage {
     return { ...this.usage };
+  }
+
+  cost(): number | undefined {
+    return this.newCost;
+  }
+
+  boundary(): ClaudeUsageBaseline | undefined {
+    return this.snapshot && structuredClone(this.snapshot);
   }
 }

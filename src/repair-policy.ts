@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { refuseUnknownFields } from "./unknown-fields.js";
 import type { FactoryConfig } from "./config.js";
 import type { AllowanceConsumption } from "./graph-amendments.js";
 import type { FactoryState, WorkState } from "./state.js";
+import { refuseUnknownFields } from "./unknown-fields.js";
 
 export const repairClasses = [
   "implementation",
@@ -234,12 +234,20 @@ export interface RepairCorrection {
   };
 }
 export interface WorkRecovery {
+  diagnosisInvocation?: {
+    id: string;
+    submitted: boolean;
+    requestDigest?: string;
+    response?: unknown;
+    rejected?: { id: string; response: unknown }[];
+  };
   failure?: FailureDisposition;
   correction?: RepairCorrection;
   phase?: "diagnosing" | "ready" | "stopped";
   scopes?: string[];
   history?: {
     at: string;
+    diagnosisInvocation?: WorkRecovery["diagnosisInvocation"];
     work: Omit<WorkState, "recovery">;
     failure?: FailureDisposition;
     correction?: RepairCorrection;
@@ -465,6 +473,13 @@ export function archiveAttempt(work: WorkState): WorkRecovery {
       ...(recovery.history ?? []),
       {
         at: new Date().toISOString(),
+        ...(recovery.diagnosisInvocation
+          ? {
+              diagnosisInvocation: structuredClone(
+                recovery.diagnosisInvocation,
+              ),
+            }
+          : {}),
         work: structuredClone(attempt),
         ...(recovery.failure
           ? { failure: structuredClone(recovery.failure) }
@@ -675,6 +690,25 @@ export function assertRepairLedger(
   for (const work of Object.values(state.work ?? {})) {
     const recovery = work.recovery;
     if (!recovery) continue;
+    const diagnosis = recovery.diagnosisInvocation;
+    if (
+      diagnosis &&
+      (typeof diagnosis.id !== "string" ||
+        !diagnosis.id ||
+        typeof diagnosis.submitted !== "boolean" ||
+        (diagnosis.requestDigest !== undefined &&
+          !/^[a-f0-9]{64}$/.test(diagnosis.requestDigest)) ||
+        (diagnosis.rejected !== undefined &&
+          (!Array.isArray(diagnosis.rejected) ||
+            diagnosis.rejected.some(
+              (entry) =>
+                !entry ||
+                typeof entry.id !== "string" ||
+                !entry.id ||
+                entry.response === undefined,
+            ))))
+    )
+      throw new Error("Invalid retained diagnosis invocation");
     if (
       recovery.phase &&
       !["diagnosing", "ready", "stopped"].includes(recovery.phase)

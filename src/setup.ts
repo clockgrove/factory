@@ -25,9 +25,9 @@ import {
   readIntake,
   watchIntake,
 } from "./intake.js";
+import { requiredProviderCredentials } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
 import { configurationCommand } from "./status-summary.js";
-import { requiredProviderCredentials } from "./provider-credentials.js";
 import { supervise, supervisorHost } from "./supervision.js";
 
 const cli = () =>
@@ -166,6 +166,10 @@ export async function setupTarget(
       delivery: config.delivery.kind,
       network: config.policy.network,
       planning: config.planning.kind,
+      "planning-transport":
+        config.planning.kind === "codex-sdk"
+          ? (config.planning.codex?.transport ?? "exec")
+          : undefined,
       "planning-model": config.planning.planner.model,
       "planning-reasoning": config.planning.planner.reasoningEffort,
       "review-model": config.planning.reviewer.model,

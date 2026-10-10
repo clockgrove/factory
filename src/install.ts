@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { option, options } from "./cli-flags.js";
 import {
   DEFAULT_PLANNER_MODEL_SELECTION,
   DEFAULT_REVIEWER_MODEL_SELECTION,
@@ -7,7 +8,6 @@ import {
   stateRoot,
   validateConfig,
 } from "./config.js";
-import { option, options } from "./cli-flags.js";
 
 /**
  * Write a new configuration from the installation options (`factory setup`). It refuses to
@@ -50,6 +50,13 @@ export function writeConfiguration(args: string[], path: string): string {
   const planning = option(args, "planning") ?? "codex-sdk";
   if (planning !== "codex-sdk" && planning !== "claude-agent-sdk")
     throw new Error("--planning must be codex-sdk or claude-agent-sdk");
+  const planningTransport = option(args, "planning-transport");
+  if (planningTransport !== undefined) {
+    if (planning !== "codex-sdk")
+      throw new Error("--planning-transport requires --planning codex-sdk");
+    if (planningTransport !== "exec" && planningTransport !== "app-server")
+      throw new Error("--planning-transport must be exec or app-server");
+  }
   if (
     planning === "claude-agent-sdk" &&
     (!option(args, "planning-model") || !option(args, "review-model"))
@@ -89,6 +96,9 @@ export function writeConfiguration(args: string[], path: string): string {
           }
         : {
             kind: "codex-sdk",
+            ...(planningTransport === undefined
+              ? {}
+              : { codex: { transport: planningTransport } }),
             planner: {
               model:
                 option(args, "planning-model") ??

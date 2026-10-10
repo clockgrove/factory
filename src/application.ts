@@ -1,32 +1,16 @@
-import {
-  executionCredential,
-  resolveProviderCredential,
-} from "./provider-credentials.js";
-import {
-  ClaudeManagedExecutionDriver,
-  validateClaudeManagedConfig,
-} from "./execution/claude-managed.js";
-import {
-  OpenAIManagedExecutionDriver,
-  validateOpenAIManagedConfig,
-} from "./execution/openai-managed.js";
-import {
-  enqueueIntake,
-  runIntake,
-  type IntakeAuthorization,
-} from "./intake.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { assertAgentSessionCapabilities } from "./agent-session.js";
 import { ClaudePlanningModel } from "./claude-planning.js";
 import { CodexPlanningModel, type PlanCandidate } from "./compiler.js";
 import type { FactoryConfig, JsonValue, LocalHarnessConfig } from "./config.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   factoryConfigDigest,
+  GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
   harnessAdapterIdentity,
   resolveCapacity,
-  GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
   stateRoot,
   validateConfig,
   validateTarget,
@@ -34,6 +18,9 @@ import {
 import { LocalContentStore } from "./content/local.js";
 import type {
   AgentHarness,
+  AgentSessionCapabilities,
+  AgentSessionRef,
+  AgentSessionRole,
   GitHubGateway,
   PlanningModel,
 } from "./contracts.js";
@@ -41,13 +28,30 @@ import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { RegularDelivery } from "./delivery/regular.js";
 import { ClaudeAgentSdkHarness } from "./execution/claude.js";
 import {
+  ClaudeManagedExecutionDriver,
+  validateClaudeManagedConfig,
+} from "./execution/claude-managed.js";
+import {
   GitHubCopilotSdkHarness,
   requireCopilotRuntime,
 } from "./execution/github-copilot.js";
 import type { LocalProfileRegistration } from "./execution/local.js";
 import { CodexHarness, LocalExecutionDriver } from "./execution/local.js";
+import {
+  OpenAIManagedExecutionDriver,
+  validateOpenAIManagedConfig,
+} from "./execution/openai-managed.js";
 import { profileBinding } from "./execution-profiles.js";
 import { RealGitHubGateway } from "./github.js";
+import {
+  enqueueIntake,
+  type IntakeAuthorization,
+  runIntake,
+} from "./intake.js";
+import {
+  executionCredential,
+  resolveProviderCredential,
+} from "./provider-credentials.js";
 import {
   type ApplicationServices,
   cancelObjective,
@@ -57,9 +61,9 @@ import {
   decideResult,
   exportAssetSetsForReview,
   planObjective,
+  repairWorkItem,
   rereviewWorkItem,
   retryWorkItem,
-  repairWorkItem,
   runObjective,
   selectAssetSet,
 } from "./runner.js";
@@ -159,10 +163,47 @@ function requireOptionalHarness(packageName: string, identity: string): void {
   }
 }
 
+function assertSessionComposition(
+  adapter: {
+    readonly sessionCapabilities?: AgentSessionCapabilities;
+    releaseSession?(session: AgentSessionRef): Promise<void>;
+  },
+  name: string,
+  allowedRoles: readonly AgentSessionRole[],
+): void {
+  if ("sessionContinuation" in adapter)
+    throw new Error(
+      `${name} uses the removed sessionContinuation declaration; declare sessionCapabilities.resumeRoles instead`,
+    );
+  if (adapter.sessionCapabilities === undefined) return;
+  assertAgentSessionCapabilities(adapter.sessionCapabilities);
+  if (
+    adapter.sessionCapabilities.resumeRoles.some(
+      (role) => !allowedRoles.includes(role),
+    )
+  )
+    throw new Error(`${name} declares a session role outside its contract`);
+  if (adapter.sessionCapabilities.resumeRoles.length && !adapter.releaseSession)
+    throw new Error(`${name} declares session resume without releaseSession`);
+}
+
+function composedPlanningModel(model: PlanningModel): PlanningModel {
+  assertSessionComposition(model, "Planning model", [
+    "planning",
+    "result-review",
+    "objective-review",
+  ]);
+  return model;
+}
+
 export function createApplication(
   config: FactoryConfig,
   services: ApplicationServices,
 ): FactoryApplication {
+  composedPlanningModel(services.planningModel);
+  assertSessionComposition(services.driver, "Execution driver", [
+    "implementation",
+  ]);
   return {
     enqueueIntake: (objectives) =>
       enqueueIntake(config, services.github, objectives),
@@ -235,16 +276,27 @@ export function composePlanningModel(config: FactoryConfig): PlanningModel {
     process.env[name] ? [process.env[name]!] : [],
   );
   if (config.planning.kind === "claude-agent-sdk")
-    return new ClaudePlanningModel(config.planning, { redactionValues });
-  return new CodexPlanningModel(
-    config.checkout,
-    config.planning.planner,
-    config.planning.reviewer,
-    undefined,
-    {
-      redactionValues,
-      sessionRoot: join(stateRoot(config.repository), "review-sessions"),
-    },
+    return composedPlanningModel(
+      new ClaudePlanningModel(config.planning, {
+        redactionValues,
+        sessionRoot: join(
+          stateRoot(config.repository),
+          "claude-planning-sessions",
+        ),
+      }),
+    );
+  return composedPlanningModel(
+    new CodexPlanningModel(
+      config.checkout,
+      config.planning.planner,
+      config.planning.reviewer,
+      undefined,
+      {
+        redactionValues,
+        transport: config.planning.codex?.transport ?? "exec",
+        sessionRoot: join(stateRoot(config.repository), "review-sessions"),
+      },
+    ),
   );
 }
 
@@ -255,7 +307,9 @@ export function composePlanning(
 ): Pick<FactoryApplication, "planObjective" | "decidePlan" | "decide"> {
   validateTarget(config.repository, config.checkout);
   const services = {
-    planningModel: options.planningModel ?? composePlanningModel(config),
+    planningModel: composedPlanningModel(
+      options.planningModel ?? composePlanningModel(config),
+    ),
     github:
       options.github ??
       new RealGitHubGateway(

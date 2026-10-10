@@ -1,57 +1,221 @@
+import { createHash } from "node:crypto";
 import {
-  type PlanningModel,
-  type PlanningRequest,
+  agentSessionContinuation,
+  planningSessionInputDigest,
+} from "../agent-session.js";
+import { workflowCheckNames } from "../check-names.js";
+import {
+  type AgentSessionContinuation,
   type ApprovedPlaybookPin,
-  type WorkGraph,
-  type ModelInvocationContext,
-  type ExecutionProfileChoices,
-  type PlanningPrerequisites,
-  type PlanningLocalExecutables,
-  type PlanningExecutionBounds,
   assertPlanningExecutionBounds,
+  type ExecutionProfileChoices,
+  type ModelInvocationContext,
+  type PlanningExecutionBounds,
+  type PlanningLocalExecutables,
+  type PlanningModel,
+  type PlanningPrerequisites,
+  type PlanningRequest,
   type PlanReviewRequest,
   type ResultReviewEvidenceSource,
+  type WorkGraph,
 } from "../contracts.js";
-import type { StepContext } from "../step.js";
 import {
-  decodeGraphReview,
-  reviewPacket,
-  type ResolvedGraphFinding,
-} from "../review-evidence.js";
-import { planningReviewEvidence, planReviewDigest } from "./packets.js";
-import { invalidOutput, PlanValidationError } from "./faults.js";
+  CONTROLLER_CAPABILITIES_DIGEST,
+  installedControllerCapabilities,
+} from "../controller-capabilities.js";
 import { assertPreIntegrationCheckShape } from "../delivery/readiness.js";
-import { validateAndOrderGraph } from "../scheduler.js";
-import {
-  assertAggregateAcceptance,
-  coverageObligations,
-  hydrateCoverageSources,
-  assertCoverageSources,
-} from "../qa.js";
-import {
-  assertObjectiveCriteria,
-  planningSources,
-  fixedScripts,
-  objectiveCriteria,
-  hydrateWorkerInputSources,
-  finalObjectiveCommands,
-  commandAuthority,
-  validateGraphSources,
-  planningGraphView,
-} from "./sources.js";
+import { normalizeExecutionProfiles } from "../execution-profiles.js";
+import { attachedFault, decision, StepFault } from "../fault.js";
+import { graphDigest } from "../graph-amendments.js";
 import {
   packageManagerInstructions,
   packageManagerUpdate,
 } from "../package-manager-update.js";
-import { workflowCheckNames } from "../check-names.js";
-import {
-  installedControllerCapabilities,
-  CONTROLLER_CAPABILITIES_DIGEST,
-} from "../controller-capabilities.js";
-import { normalizeExecutionProfiles } from "../execution-profiles.js";
-import { observeModelInvocation } from "./observation.js";
 import { UnsettledSubprocessError } from "../process.js";
-import { attachedFault } from "../fault.js";
+import {
+  assertAggregateAcceptance,
+  assertCoverageSources,
+  coverageObligations,
+  hydrateCoverageSources,
+} from "../qa.js";
+import {
+  decodeGraphReview,
+  type ResolvedGraphFinding,
+  reviewPacket,
+} from "../review-evidence.js";
+import { validateAndOrderGraph } from "../scheduler.js";
+import type { ContinuationState } from "../state.js";
+import type { StepContext } from "../step.js";
+import { assertStepAdmission, StepPaused } from "../step.js";
+import { invalidOutput, PlanValidationError } from "./faults.js";
+import { observeModelInvocation } from "./observation.js";
+import { planningReviewEvidence, planReviewDigest } from "./packets.js";
+import {
+  assertObjectiveCriteria,
+  commandAuthority,
+  finalObjectiveCommands,
+  fixedScripts,
+  hydrateWorkerInputSources,
+  objectiveCriteria,
+  planningGraphView,
+  planningSources,
+  validateGraphSources,
+} from "./sources.js";
+
+/** The Objective mutation lock owns the snapshot; this queue owns its planner. */
+const plannerAdmissions = new WeakMap<ContinuationState, Promise<void>>();
+
+export async function withPlannerAdmission<T>(
+  state: ContinuationState,
+  stopped: () => boolean,
+  task: () => Promise<T>,
+): Promise<T> {
+  const input = planningSessionInputDigest(state);
+  const graph =
+    state.schemaVersion === 7 ? graphDigest(state.graph) : undefined;
+  const predecessor = plannerAdmissions.get(state) ?? Promise.resolve();
+  let release!: () => void;
+  const owned = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = predecessor.then(() => owned);
+  plannerAdmissions.set(state, tail);
+  try {
+    await predecessor;
+    assertStepAdmission();
+    if (stopped()) throw new StepPaused("planner");
+    if (
+      state.cancelRequested ||
+      state.cancelledAt ||
+      (state.schemaVersion === 7 &&
+        (state.finalAcceptance || state.objectiveClosure === "complete"))
+    )
+      throw new StepFault(
+        decision("Planner admission is paused, cancelling or terminal"),
+      );
+    if (
+      planningSessionInputDigest(state) !== input ||
+      (state.schemaVersion === 7 ? graphDigest(state.graph) : undefined) !==
+        graph
+    )
+      throw new StepFault(
+        decision(
+          "Planner inputs changed while waiting for its owner; revalidate the current evidence before dispatch",
+        ),
+      );
+    return await task();
+  } finally {
+    release();
+    if (plannerAdmissions.get(state) === tail) plannerAdmissions.delete(state);
+  }
+}
+
+/** Fresh-only adapters may not silently replace a previously unsettled owner. */
+export function plannerSession(
+  model: PlanningModel,
+  state: ContinuationState,
+  save: () => void,
+): AgentSessionContinuation | undefined {
+  const continuation = agentSessionContinuation(
+    state,
+    "planning",
+    undefined,
+    save,
+  );
+  if (model.sessionCapabilities?.resumeRoles.includes("planning"))
+    return continuation;
+  if (continuation.retained?.status === "in-flight")
+    throw new StepFault(
+      decision(
+        "The retained planner turn is unsettled and the selected adapter cannot reconcile it; preserve its owner before any fresh call",
+      ),
+    );
+  return undefined;
+}
+
+/** Recovered native bytes use the selected model's ordinary shared decoder. */
+export async function generatePlannerStructured<T>(
+  model: PlanningModel,
+  state: ContinuationState,
+  save: () => void,
+  request: PlanningRequest<T>,
+  recover = false,
+): Promise<T> {
+  const session = plannerSession(model, state, save);
+  const retained = session?.retained;
+  if (recover || retained?.status === "in-flight") {
+    if (
+      !session ||
+      !retained ||
+      retained.currentTurn?.invocationId !== request.invocation?.invocationId
+    )
+      throw new StepFault(
+        decision(
+          "Submitted planner invocation has no matching authenticated session receipt; no fresh replay is allowed",
+        ),
+      );
+    if (!model.reconcileSession || !model.decodeSessionResponse)
+      throw new StepFault(
+        decision(
+          "Submitted planner turn lacks authenticated reconciliation and decoding; no automatic replay is allowed",
+        ),
+      );
+    if (state.coordinator?.processes?.length)
+      throw new StepFault(
+        decision(
+          "Retained planner process ownership is unsettled; authenticate physical cessation before native reconciliation",
+        ),
+      );
+    const result = await model.reconcileSession(structuredClone(retained));
+    if (result.disposition !== "settled")
+      throw new StepFault(
+        decision(
+          `Retained planner turn is ${result.disposition}; no new dispatch is admitted`,
+        ),
+      );
+    if (
+      result.session.identity !== retained.identity ||
+      result.session.adapter !== retained.adapter ||
+      result.session.turn !== retained.turn ||
+      result.session.currentTurn?.invocationId !==
+        retained.currentTurn?.invocationId
+    )
+      throw new Error(
+        "Reconciled planner response differs from its admitted owner",
+      );
+    session.checkpoint(result.session);
+    if (
+      result.response === undefined ||
+      result.session.currentTurn?.terminal !== "completed"
+    )
+      throw new StepFault(
+        decision(
+          "Planner turn settled without an authenticated completed response; preserve spent usage and obtain the existing recovery decision",
+        ),
+      );
+    observeModelInvocation(request.invocation, {
+      type: "completed",
+      adapter: result.session.adapter,
+      responseBytes: Buffer.byteLength(result.response),
+      responseDigest: createHash("sha256")
+        .update(result.response)
+        .digest("hex"),
+      usage: result.usage,
+      usageAvailable: Boolean(result.usage),
+    });
+    return model.decodeSessionResponse(
+      {
+        ...request,
+        session: { ...session, retained: structuredClone(result.session) },
+      },
+      result.response,
+    );
+  }
+  return model.generateStructured({
+    ...request,
+    ...(session ? { session } : {}),
+  });
+}
 
 export function paidModel(
   model: PlanningModel,
@@ -59,6 +223,18 @@ export function paidModel(
 ): PlanningModel {
   const reviewResult = model.reviewResult?.bind(model);
   return {
+    ...(model.sessionCapabilities
+      ? { sessionCapabilities: model.sessionCapabilities }
+      : {}),
+    ...(model.releaseSession
+      ? { releaseSession: model.releaseSession.bind(model) }
+      : {}),
+    ...(model.reconcileSession
+      ? { reconcileSession: model.reconcileSession.bind(model) }
+      : {}),
+    ...(model.decodeSessionResponse
+      ? { decodeSessionResponse: model.decodeSessionResponse.bind(model) }
+      : {}),
     approvedPlaybook: model.approvedPlaybook,
     approvedPlaybookPin: model.approvedPlaybookPin,
     generateStructured: (request) =>
@@ -198,6 +374,7 @@ export async function compileObjective(
   localExecutables?: PlanningLocalExecutables,
   executionBounds?: PlanningExecutionBounds,
   observeDecodedGraph?: (graph: WorkGraph) => void,
+  session?: AgentSessionContinuation,
 ): Promise<WorkGraph> {
   const request = prepareCompilationRequest({
     objective,
@@ -213,6 +390,7 @@ export async function compileObjective(
     localExecutables,
     executionBounds,
     approvedPlaybookPin: model.approvedPlaybookPin,
+    session,
   });
   const graph = await model
     .generateStructured<WorkGraph>(request)
@@ -242,6 +420,7 @@ export function prepareCompilationRequest(args: {
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;
   approvedPlaybookPin?: ApprovedPlaybookPin;
+  session?: AgentSessionContinuation;
 }): PlanningRequest<WorkGraph> {
   const {
     objective,
@@ -277,6 +456,7 @@ export function prepareCompilationRequest(args: {
     ...(approvedPlaybookPin !== undefined
       ? { approvedPlaybookPin: approvedPlaybookPin }
       : {}),
+    ...(args.session ? { session: args.session } : {}),
     objective: prompt,
     compileContext: {
       objectiveNumber: objective,

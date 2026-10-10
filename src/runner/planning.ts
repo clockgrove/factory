@@ -1,13 +1,11 @@
-import { approvedPlaybook } from "../learning.js";
-import { checkRequiredEnvironment, resolveAutonomy } from "../repair-policy.js";
-import { planningPrerequisites } from "../objective-prerequisites.js";
 import { createHash, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
+import { releaseAgentSessions } from "../agent-session.js";
 import {
   bindPlanningPlaybook,
   compilePlan,
-  paidPlanningModel,
   type PlanCandidate,
+  paidPlanningModel,
   planningSources,
   resolvePlan,
   verifyPlanCandidate,
@@ -19,12 +17,14 @@ import {
   validateTarget,
 } from "../config.js";
 import type { GitHubGateway, PlanningModel } from "../contracts.js";
-import { attachedFault } from "../fault.js";
 import { DiagnosticEmitter, withDiagnosticSession } from "../diagnostics.js";
-import { shortPlanDigest } from "../status-summary.js";
 import { executionProfileChoices } from "../execution-profiles.js";
+import { attachedFault } from "../fault.js";
+import { approvedPlaybook } from "../learning.js";
 import { preflightObjective } from "../local-preflight.js";
+import { planningPrerequisites } from "../objective-prerequisites.js";
 import { fetchHead, git } from "../process.js";
+import { checkRequiredEnvironment, resolveAutonomy } from "../repair-policy.js";
 import type { PreparationState } from "../state.js";
 import { projectionStarted } from "../state.js";
 import {
@@ -33,15 +33,16 @@ import {
   saveState,
   statePath,
 } from "../state-store.js";
+import { shortPlanDigest } from "../status-summary.js";
 import {
   type ApplicationServices,
-  type LocalOwner,
-  type ObjectiveStep,
-  configuredDiagnosticSecrets,
+  CoordinatorHandoff,
   cancelRecordedSubprocesses,
   canHandoff,
-  CoordinatorHandoff,
+  configuredDiagnosticSecrets,
+  type LocalOwner,
   mutationLock,
+  type ObjectiveStep,
   releaseMutationLock,
 } from "./ownership.js";
 
@@ -181,7 +182,8 @@ async function planObjectiveObserved(
 export async function decidePlan(
   config: FactoryConfig,
   objective: number,
-  services: Pick<ApplicationServices, "github">,
+  services: Pick<ApplicationServices, "github"> &
+    Partial<Pick<ApplicationServices, "planningModel">>,
   input: {
     actor: string;
     outcome: "accept" | "refuse";
@@ -213,6 +215,35 @@ export async function decidePlan(
       if (projectionStarted(preparation))
         throw new Error(
           "Work Item projection has started; cancel the Objective instead",
+        );
+      if (!canHandoff(preparation))
+        throw new Error(
+          "Planning owns an unsettled invocation or resource; use supported cancellation before refusing the preparation",
+        );
+      if (
+        [
+          ...Object.values(preparation.agentSessions ?? {}),
+          ...(preparation.agentSessionHistory ?? []),
+        ].some((ref) => ref.status !== "released") &&
+        !services.planningModel?.releaseSession
+      )
+        throw new Error(
+          "Retained planner disposal requires its authenticated planning adapter",
+        );
+      await releaseAgentSessions(
+        preparation,
+        undefined,
+        services.planningModel,
+        () => saveState(path, preparation),
+      );
+      if (
+        [
+          ...Object.values(preparation.agentSessions ?? {}),
+          ...(preparation.agentSessionHistory ?? []),
+        ].some((ref) => ref.status !== "released")
+      )
+        throw new Error(
+          "Planner disposal did not authenticate every retained receipt; preparation is preserved",
         );
       rmSync(path);
     } else {
@@ -419,6 +450,7 @@ export async function prepareObjective(args: {
                 executionProfileChoices(config),
                 {
                   state: preparation!,
+                  sessionState: preparation!,
                   save: () => saveState(path, preparation!),
                   stopped: () =>
                     cancellationRequested() ||

@@ -104,6 +104,8 @@ export interface InteractionMetadata {
     sessionIdentity: string;
     /** Authenticated native append cutoff for resumed Codex turns. */
     boundaryBytes?: number;
+    /** Category counters at the authenticated pre-dispatch append boundary. */
+    usageBaseline?: import("./contracts.js").ModelInvocationUsage;
   };
   toolCallId?: string;
   role?: "system" | "developer" | "user" | "assistant" | "tool";
@@ -211,6 +213,8 @@ export interface InteractionMetadata {
   };
   usage?: {
     scope: "invocation-cumulative" | "provider-call" | "model-breakdown";
+    /** Raw input was reported without a verified cached-category inclusion contract. */
+    inputSemantics?: "provider-reported-inclusion-unknown";
     /** Stable observation identity where provided; missing means dedup unknown. */
     deduplicationKey?: string;
     terminal: boolean;

@@ -1,6 +1,10 @@
 import type { SessionEvent } from "@github/copilot-sdk";
 import type { ModelInvocationUsage } from "../contracts.js";
-import { pickTokenCounters } from "../usage.js";
+import {
+  normalizeTokenUsage,
+  pickTokenCounters,
+  tokenCategories,
+} from "../usage.js";
 import { redact } from "./harness-support.js";
 
 const tokenFields = [
@@ -10,78 +14,96 @@ const tokenFields = [
   "cacheWriteTokens",
   "reasoningTokens",
 ] as const;
+const valid = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
-function tokenCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+/** Raw SDK input counters lack a pinned inclusive-input contract. Do not manufacture a denominator. */
+export function copilotTokenUsage(
+  raw: Record<string, number>,
+): ModelInvocationUsage {
+  return normalizeTokenUsage({
+    outputTokens: raw.outputTokens,
+    cachedInputTokens: raw.cacheReadTokens,
+    cacheWriteInputTokens: raw.cacheWriteTokens,
+    reasoningOutputTokens: raw.reasoningTokens,
+  });
 }
 
-/** Per-call SDK metrics, accumulated only for this worker invocation. */
+/** Current invocation only; history is excluded before dispatch, identities deduplicate concrete calls. */
 export class CopilotUsage {
-  private events = new Set<string>();
-  private calls = new Set<string>();
-  private count = 0;
-  private input: number | undefined = 0;
-  private output: number | undefined = 0;
-
+  private previous = new Set<string>();
+  private identities = new Map<
+    string,
+    { fingerprint: string; usage: ModelInvocationUsage }
+  >();
+  private records: ModelInvocationUsage[] = [];
+  private uncertain = false;
   constructor(private secrets: string[]) {}
 
+  private keys(event: SessionEvent, sessionId: string | undefined): string[] {
+    if (event.type !== "assistant.usage") return [];
+    return [
+      ["event", event.id],
+      ["api", event.data.apiCallId],
+      ["provider", event.data.providerCallId],
+    ].flatMap(([kind, id]) =>
+      typeof id === "string" && id
+        ? [JSON.stringify([sessionId, kind, id])]
+        : [],
+    );
+  }
+  excludeHistory(events: readonly SessionEvent[], sessionId: string): void {
+    for (const event of events)
+      for (const key of this.keys(event, sessionId)) this.previous.add(key);
+  }
   observe(
     event: SessionEvent,
     sessionId: string | undefined,
   ): Record<string, unknown> | undefined {
     if (event.type !== "assistant.usage") return;
-    const { data } = event;
-    const eventId =
-      typeof event.id === "string" && event.id ? event.id : undefined;
-    const apiCallId =
-      typeof data.apiCallId === "string" && data.apiCallId
-        ? data.apiCallId
-        : undefined;
-    const providerCallId =
-      typeof data.providerCallId === "string" && data.providerCallId
-        ? data.providerCallId
-        : undefined;
-    const callKeys = [
-      ...(apiCallId ? [JSON.stringify([sessionId, "api", apiCallId])] : []),
-      ...(providerCallId
-        ? [JSON.stringify([sessionId, "provider", providerCallId])]
-        : []),
-    ];
-    if (
-      (eventId && this.events.has(eventId)) ||
-      callKeys.some((key) => this.calls.has(key))
-    )
+    const keys = this.keys(event, sessionId);
+    if (keys.some((key) => this.previous.has(key))) return;
+    const raw = pickTokenCounters(event.data, tokenFields);
+    const normalizedUsage = copilotTokenUsage(raw);
+    const fingerprint = JSON.stringify(raw);
+    const matched = keys.flatMap((key) =>
+      this.identities.has(key) ? [this.identities.get(key)!] : [],
+    );
+    if (matched.length) {
+      if (
+        matched.some((record) => record.fingerprint !== fingerprint) ||
+        new Set(matched).size !== 1
+      )
+        this.uncertain = true;
+      for (const key of keys) this.identities.set(key, matched[0]!);
       return;
-    if (eventId) this.events.add(eventId);
-    for (const key of callKeys) this.calls.add(key);
-    this.count += 1;
-    const tokens = pickTokenCounters(data, tokenFields);
-    // Without a stable event/call identity, deduplication cannot be established.
-    const identified = Boolean(eventId || callKeys.length);
-    const add = (total: number | undefined, value: unknown) => {
-      if (!identified || total === undefined || !tokenCount(value)) return;
-      const sum = total + value;
-      return tokenCount(sum) ? sum : undefined;
-    };
-    this.input = add(this.input, data.inputTokens);
-    this.output = add(this.output, data.outputTokens);
+    }
+    if (!keys.length || !sessionId) this.uncertain = true;
+    const record = { fingerprint, usage: normalizedUsage };
+    for (const key of keys) this.identities.set(key, record);
+    this.records.push(normalizedUsage);
     const safe = (value: string | undefined) =>
       value === undefined ? undefined : redact(value, this.secrets);
     return {
-      providerEventId: safe(eventId),
+      providerEventId: safe(event.id),
       providerSessionId: safe(sessionId),
-      apiCallId: safe(apiCallId),
-      providerCallId: safe(providerCallId),
-      usage: tokens,
+      apiCallId: safe(event.data.apiCallId),
+      providerCallId: safe(event.data.providerCallId),
+      usage: raw,
+      normalizedUsage,
+      inputSemantics: "provider-reported-inclusion-unknown",
     };
   }
-
-  /** Publish once at termination; a later missing field cannot expose a partial sum. */
   totals(): ModelInvocationUsage {
-    if (!this.count) return {};
-    return {
-      ...(this.input === undefined ? {} : { inputTokens: this.input }),
-      ...(this.output === undefined ? {} : { outputTokens: this.output }),
-    };
+    if (!this.records.length || this.uncertain) return {};
+    const result: ModelInvocationUsage = {};
+    for (const key of tokenCategories) {
+      const values = this.records.map((record) => record[key]);
+      if (values.every(valid)) {
+        const total = values.reduce((sum, value) => sum + value, 0);
+        if (valid(total)) result[key] = total;
+      }
+    }
+    return result;
   }
 }

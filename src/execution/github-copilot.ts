@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readWorkerJson, workFault } from "../fault.js";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { assertAgentSessionRef } from "../agent-session.js";
@@ -275,23 +275,31 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
     assertAgentSessionRef(session);
     if (session.adapter !== this.sessionAdapter)
       throw new Error("Cannot release another adapter's conversation");
+    if (
+      session.scope.role !== "implementation" ||
+      session.status === "in-flight" ||
+      (session.currentTurn && session.currentTurn.resources !== "settled")
+    )
+      throw new Error(
+        "Copilot disposal requires a stopped implementation conversation",
+      );
     const root = copilotSessionRoot(this.root, session.identity);
     const data = session.data as Partial<CopilotSessionData> | undefined;
-    if (data?.pendingWorkerIdentity) {
-      if (!/^[a-zA-Z0-9_-]{1,160}$/.test(data.pendingWorkerIdentity))
-        throw new Error("Invalid pending Copilot worker identity");
-      // Keep the request receipt while authenticating and stopping its owner.
-      const requestPath = resolve(
-        this.root,
-        `${data.pendingWorkerIdentity}.request.json`,
+    if (
+      session.status === "ready" &&
+      (data?.nativeSettled !== true ||
+        data.workerSettled !== true ||
+        !data.worker)
+    )
+      throw new Error(
+        "Copilot disposal lacks its authenticated ready settlement receipt",
       );
-      if (!existsSync(requestPath)) {
-        await this.cancelUnrecorded(data.pendingWorkerIdentity);
-        if (existsSync(root))
-          throw new Error("Copilot release lacks its owned request receipt");
-        return;
-      }
-    }
+    if (
+      session.status !== "ready" &&
+      session.status !== "unavailable" &&
+      session.status !== "released"
+    )
+      throw new Error("Copilot conversation is not eligible for disposal");
     if (!existsSync(root)) return;
     const identity = data?.pendingWorkerIdentity ?? session.executionIdentity;
     if (!identity || !/^[a-zA-Z0-9_-]{1,160}$/.test(identity))
@@ -309,10 +317,47 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
         "Copilot release request belongs to another conversation",
       );
     requireCopilotHome(input.session);
-    if (data?.worker && data.worker.requestPath !== requestPath)
-      throw new Error("Copilot release worker belongs to another execution");
-    if (data?.worker) await this.cancel({ identity, data: data.worker });
-    else await this.cancelUnrecorded(identity);
+    if (session.status === "ready") {
+      // Historical ready PIDs may have been reused. The authenticated adapter
+      // receipt establishes their prior cessation; never signal them here.
+      if (
+        data?.worker?.requestPath !== requestPath ||
+        input.session.ref.turn !== session.turn ||
+        data.nativeSessionId !== input.session.nativeSessionId ||
+        data.selectionDigest !==
+          (input.session.ref.data as CopilotSessionData).selectionDigest
+      )
+        throw new Error(
+          "Copilot disposal receipt differs from its completed owner",
+        );
+      this.require({ identity, data: data.worker });
+    } else {
+      // The controller's unavailable receipt follows supported cancellation.
+      // Authenticate the current pending attempt, not a prior ready worker
+      // carried in retained data, and require it to be already stopped.
+      const pid = Number(
+        readFileSync(resolve(this.root, `${identity}.pid`), "utf8").trim(),
+      );
+      if (!Number.isSafeInteger(pid) || pid <= 1)
+        throw new Error(
+          "Copilot disposal has no recorded stopped worker owner",
+        );
+      const current = linuxProcessIdentity(pid);
+      if (!current && processGroupExists(pid))
+        throw new Error("Copilot disposal still has an owned process group");
+      if (current) {
+        const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+        if (
+          argv.includes(requestPath) &&
+          (current.state !== "Z" || processGroupExists(pid))
+        )
+          throw new Error(
+            "Copilot disposal cannot stop an active implementation worker",
+          );
+        // An unrelated process reusing this PID establishes that the former
+        // group ID was released. It is never signalled by disposal.
+      }
+    }
     const releaseIdentity = `release-${session.identity}`;
     const handle = {
       identity: releaseIdentity,

@@ -34,6 +34,7 @@ import type { WorkerUsageObservation } from "../contracts.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnGuard,
+  ProviderTurnIncompleteError,
 } from "../provider-turn.js";
 
 function progressEvent(
@@ -52,6 +53,8 @@ function progressEvent(
     observation.tool = event.data.toolName;
     observation.model = event.data.model;
   }
+  if (event.type === "session.idle" && event.data.aborted !== undefined)
+    observation.aborted = event.data.aborted;
   if (event.type === "session.error")
     observation.detail = redact(event.data.message, secrets);
   if (event.type === "session.shutdown") {
@@ -171,6 +174,7 @@ async function main(): Promise<void> {
     input.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   );
   let terminal = false;
+  let nativeAborted = false;
   let dispatched = false;
   let cancelled = false;
   let rejectCancellation: (error: Error) => void = () => undefined;
@@ -276,7 +280,10 @@ async function main(): Promise<void> {
     const sessionOptions = githubCopilotSessionOptions(input);
     const onEvent = (event: SessionEvent) => {
       turn.progress(event.type);
-      if (dispatched && event.type === "session.idle") terminal = true;
+      if (dispatched && event.type === "session.idle") {
+        terminal = true;
+        if (event.data.aborted === true) nativeAborted = true;
+      }
       if (event.type === "session.error") providerFailure = event.data.message;
       if (event.type === "session.start" || event.type === "session.resume")
         sessionStart = event.data;
@@ -396,6 +403,11 @@ async function main(): Promise<void> {
     if (cancelled) throw new Error("Copilot worker was cancelled");
     if (!terminal)
       throw new Error("GitHub Copilot SDK ended without session.idle");
+    if (nativeAborted) {
+      const interrupted = new ProviderTurnIncompleteError();
+      interrupted.message = "Copilot native turn reported aborted session.idle";
+      throw interrupted;
+    }
     const settled = await race(session.rpc.metadata.activity());
     const processingAtEnd = await race(session.rpc.metadata.isProcessing());
     if (

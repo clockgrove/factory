@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
+import { assertAgentSessionRef } from "./agent-session.js";
 import { isDeepStrictEqual } from "node:util";
 import type {
   AccountInfo,
@@ -446,6 +447,17 @@ class ClaudePlanningTransport implements PlanningTransport {
   async releaseSession(ref: AgentSessionRef): Promise<void> {
     if (!this.sessionRoot)
       throw new Error("Claude retained storage is unavailable");
+    assertAgentSessionRef(ref);
+    const supplied = ref.data as { root?: string } | undefined;
+    if (
+      ref.adapter !== this.adapter ||
+      supplied?.root !== join(resolve(this.sessionRoot), ref.identity)
+    )
+      throw new Error(
+        "Claude disposal differs from its private adapter binding",
+      );
+    // A crash after confirmed removal but before the controller checkpoint is safe to repeat.
+    if (!existsSync(supplied.root)) return;
     const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
     if (session.data.settled !== true && session.data.process)
       await settleClaudeProcess(session.data.process);
@@ -460,6 +472,8 @@ class ClaudePlanningTransport implements PlanningTransport {
     ref: AgentSessionRef,
   ): Promise<AgentSessionReconciliation> {
     if (!this.sessionRoot) return { disposition: "unknown" };
+    if (!existsSync(join(resolve(this.sessionRoot), ref.identity)))
+      return { disposition: "unknown" };
     const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
     const disposition = claudeProcessDisposition(session.data.process);
     if (disposition !== "settled") return { disposition };

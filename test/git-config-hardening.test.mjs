@@ -27,6 +27,8 @@ import { createHash } from "node:crypto";
 import {
   createCodexHome,
   CODEX_TREE_REVIEW_CONFIG,
+  CODEX_SOURCE_READ_CONFIG,
+  CODEX_PLANNING_CONFIG,
 } from "../dist/codex-planning-isolation.js";
 import { renderResultReviewCall } from "../dist/compiler/model.js";
 import {
@@ -323,7 +325,12 @@ test("controller Git ignores executable configuration shared by a worker worktre
     );
     const home = createCodexHome({
       config: CODEX_TREE_REVIEW_CONFIG,
-      source: { HOME: root, PATH: process.env.PATH },
+      source: {
+        HOME: root,
+        PATH: process.env.PATH,
+        OPENAI_API_KEY: "factory-noncredential-canary",
+        HTTPS_PROXY: "http://127.0.0.1:9",
+      },
       sandbox: { directory: call.tree, workspace: "read", network: false },
     });
     try {
@@ -337,6 +344,21 @@ test("controller Git ignores executable configuration shared by a worker worktre
       assert.ok(profile.includes('"." = "read"'));
       assert.ok(profile.includes("enabled = false"));
       assert.equal(profile.includes(checkout), false);
+      assert.equal(home.env.OPENAI_API_KEY, "factory-noncredential-canary");
+      assert.equal(home.env.HTTPS_PROXY, "http://127.0.0.1:9");
+      assert.ok(profile.includes("allow_login_shell = false"));
+      assert.ok(profile.includes("ignore_default_excludes = false"));
+      assert.ok(profile.includes('"PATH" = "include"'));
+      assert.ok(profile.includes('"LC_*" = "include"'));
+      assert.equal(CODEX_TREE_REVIEW_CONFIG, CODEX_SOURCE_READ_CONFIG);
+      assert.equal(
+        createHash("sha256").update(CODEX_SOURCE_READ_CONFIG).digest("hex"),
+        "c55ca9a5b35dba5da4f2ce16293c0d9ce127a6e47f7041284ee62761142f49be",
+      );
+      assert.equal(
+        createHash("sha256").update(CODEX_PLANNING_CONFIG).digest("hex"),
+        "a6809a714dae357ee257a90a4381c2651d9e9e3c37725d66bb0a156adbf40c80",
+      );
     } finally {
       home.dispose();
     }

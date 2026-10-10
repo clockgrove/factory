@@ -69,6 +69,10 @@ import { attachedFault } from "../dist/fault.js";
 import { CodexPlanningTransport } from "../dist/compiler/codex-transport.js";
 import { materializeResultTree } from "../dist/result-evidence.js";
 import {
+  createCodexHome,
+  CODEX_PLANNING_CONFIG,
+} from "../dist/codex-planning-isolation.js";
+import {
   CLAUDE_EXPORT_SCRIPT,
   materializeClaudeSnapshot,
   parseClaudeResultSnapshot,
@@ -1410,6 +1414,102 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       assert.equal(disposedReview.currentTurn.terminal, undefined);
       assert.equal(existsSync(disposedReview.data.sessionRoot), false);
       await transport.releaseSession(disposedReview);
+
+      // An actual pre-admission receipt supplies the binding shape; no native
+      // READY/terminal response is fabricated. Recreate only an owned old-policy
+      // home to prove refusal before reconfiguration and original-owner disposal.
+      const legacyConfig = CODEX_PLANNING_CONFIG.replace(
+        "shell_tool = false",
+        "shell_tool = true",
+      ).replace("code_mode_host = false", "code_mode_host = true");
+      const legacyReview = structuredClone(disposedReview);
+      legacyReview.data.selectionDigest = createHash("sha256")
+        .update(
+          JSON.stringify([
+            selection,
+            transport.adapter,
+            "reviewer",
+            "read-only",
+            "never",
+            legacyConfig,
+          ]),
+        )
+        .digest("hex");
+      const legacyOwner = createHash("sha256")
+        .update(
+          JSON.stringify([
+            legacyReview.scope,
+            legacyReview.identity,
+            legacyReview.adapter,
+            legacyReview.data.selectionDigest,
+          ]),
+        )
+        .digest("hex");
+      const legacyHome = createCodexHome({
+        root: legacyReview.data.sessionRoot,
+        owner: legacyOwner,
+        config: legacyConfig,
+        sandbox: {
+          directory: reviewTree.directory,
+          workspace: "read",
+          network: false,
+        },
+      });
+      const legacyConfigPath = join(legacyHome.env.CODEX_HOME, "config.toml");
+      const legacyBytes = readFileSync(legacyConfigPath);
+      await assert.rejects(
+        () => transport.reconcileSession(legacyReview),
+        /policy changed.*unknown turn.*supported session disposal/,
+      );
+      await assert.rejects(
+        () =>
+          transport.run({
+            role: "reviewer",
+            prompt: "Inspect the exact candidate",
+            schema: { type: "object" },
+            invocation: {
+              invocationId: randomUUID(),
+              phase: "result-review",
+              ordinal: 0,
+            },
+            turn: { response: "", ended: false },
+            tree: reviewTree.directory,
+            session: {
+              ...reviewSession,
+              retained: legacyReview,
+              checkpoint: () => assert.fail("Old-policy admission checkpoint"),
+            },
+          }),
+        /policy changed.*Do not resume or replay/,
+      );
+      assert.deepEqual(readFileSync(legacyConfigPath), legacyBytes);
+      await assert.rejects(
+        () =>
+          transport.releaseSession({
+            ...legacyReview,
+            currentTurn: {
+              ...legacyReview.currentTurn,
+              resources: "unknown",
+            },
+          }),
+        /unproved process settlement/,
+      );
+      assert.equal(existsSync(legacyHome.root), true);
+      await assert.rejects(
+        () =>
+          transport.releaseSession({
+            ...legacyReview,
+            data: {
+              ...legacyReview.data,
+              selectionDigest: "0".repeat(64),
+            },
+          }),
+        /owner/,
+      );
+      assert.equal(existsSync(legacyHome.root), true);
+      await transport.releaseSession(legacyReview);
+      assert.equal(existsSync(legacyHome.root), false);
+      await transport.releaseSession(legacyReview);
 
       // The real shared planning entry refuses an already expired Objective
       // ceiling without spawning a native process or recording unknown usage as zero.

@@ -282,7 +282,7 @@ export class CodexPlanningTransport implements PlanningTransport {
       )
     )
       throw new Error(
-        "Codex reconciliation differs from its retained model and policy",
+        "Codex session model or tool policy changed. Reconciliation cannot rewrite the retained policy or prove an unknown turn settled. After authenticated resource settlement, use supported session disposal before a fresh review within its existing allowance.",
       );
     if (session.status === "in-flight" && data.transport === "app-server") {
       if (
@@ -451,13 +451,18 @@ export class CodexPlanningTransport implements PlanningTransport {
             "Source-reading planner requires its explicit policy and canonical inputs",
           );
         if (
+          sessionData.selectionDigest !==
+          this.selectionDigest(args.role, Boolean(args.tree), sourceRead)
+        )
+          throw new Error(
+            "Codex session model or tool policy changed. Do not resume or replay the old turn. After authenticated resource settlement, use supported session disposal before a fresh review within its existing allowance.",
+          );
+        if (
           retained.status !== "ready" ||
           (retained.currentTurn?.dispatch === "submitted" &&
             !sessionData.threadId) ||
           retained.identity !== continuation.identity ||
-          !isDeepStrictEqual(retained.scope, continuation.scope) ||
-          sessionData.selectionDigest !==
-            this.selectionDigest(args.role, Boolean(args.tree), sourceRead)
+          !isDeepStrictEqual(retained.scope, continuation.scope)
         )
           throw new Error(
             "Reviewer session cannot continue without settled matching ownership",

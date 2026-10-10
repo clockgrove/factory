@@ -66,14 +66,14 @@ hooks = false
  * permission profile `createCodexHome` adds. Codex runs shell calls through
  * its code-mode host, so the shell needs that host too.
  */
-export const CODEX_TREE_REVIEW_CONFIG = CODEX_PLANNING_CONFIG.replace(
+const READ_SHELL_CONFIG = CODEX_PLANNING_CONFIG.replace(
   "shell_tool = false",
   "shell_tool = true",
 ).replace("code_mode_host = false", "code_mode_host = true");
 
-/** Source reads retain provider authentication in the parent, never in tools. */
-export const CODEX_SOURCE_READ_CONFIG = `allow_login_shell = false
-${CODEX_TREE_REVIEW_CONFIG}
+/** Read tools retain provider authentication in the parent, never in tools. */
+export const CODEX_TREE_REVIEW_CONFIG = `allow_login_shell = false
+${READ_SHELL_CONFIG}
 [shell_environment_policy]
 inherit = "all"
 ignore_default_excludes = false
@@ -88,6 +88,9 @@ experimental_use_profile = false
 "TZ" = "include"
 "GIT_OPTIONAL_LOCKS" = "include"
 `;
+
+/** Pinned source reads use the same safe shell policy without changing its bytes. */
+export const CODEX_SOURCE_READ_CONFIG = CODEX_TREE_REVIEW_CONFIG;
 
 /** Ambient variables a Factory Codex process keeps; everything else is dropped. */
 const ENVIRONMENT = [

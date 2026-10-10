@@ -95,6 +95,8 @@ export interface LocalOwner {
    * Replaced by a fresh controller on resume.
    */
   pause: AbortController;
+  /** Plain pause stops admitted Work Item retries; draining leaves them live. */
+  workPause: AbortController;
   snapshot?: ContinuationState;
   lock: ControllerLock;
   abort: AbortController;
@@ -110,6 +112,20 @@ export interface LocalOwner {
   /** The pass's observing save: emits each item's state change, terminal ones included. */
   save?: (state: FactoryState) => void;
 }
+/** Update the admitted-work signal from the coordinator's guarded mode. */
+export function synchronizeWorkItemPause(
+  owner: Pick<LocalOwner, "snapshot" | "pause" | "workPause" | "handoff">,
+): void {
+  const mode = owner.snapshot?.coordinator?.mode;
+  if (mode === "paused") owner.workPause.abort(new Error("Coordinator paused"));
+  else if (
+    owner.workPause.signal.aborted &&
+    (mode === "draining" ||
+      (mode === "running" && !owner.handoff && !owner.pause.signal.aborted))
+  )
+    owner.workPause = new AbortController();
+}
+
 export const owners = new Map<string, LocalOwner>();
 export const ownerKey = (config: FactoryConfig, objective: number) =>
   `${config.repository}#${objective}`;

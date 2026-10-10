@@ -59,7 +59,10 @@ import {
   runObjectivePass,
   workItemPauseSignal,
 } from "../dist/runner/execution.js";
-import { canHandoff } from "../dist/runner/ownership.js";
+import {
+  canHandoff,
+  synchronizeWorkItemPause,
+} from "../dist/runner/ownership.js";
 import { validateItem } from "../dist/item-steps.js";
 import { killGroup } from "../dist/execution/worker-process.js";
 import { graphDigest } from "../dist/graph-amendments.js";
@@ -89,6 +92,7 @@ import {
 } from "../dist/repair-policy.js";
 import { decideResult, rereviewWorkItem } from "../dist/runner.js";
 import { readState, saveState, statePath } from "../dist/state-store.js";
+import { setCoordinatorMode } from "../dist/state.js";
 import {
   assertStepAdmission,
   step,
@@ -936,6 +940,7 @@ test("cancellation stops an owned shell and its process group", async () => {
       snapshot,
       abort: aborted,
       pause: new AbortController(),
+      workPause: new AbortController(),
       changed: false,
       cancellation: Promise.resolve(),
     };
@@ -1204,7 +1209,11 @@ test("settled validation reuses its exact Git result once and retains the failed
     };
     const pause = new AbortController();
     pause.abort(new Error("Coordinator paused"));
-    const owner = { snapshot: state, pause };
+    const owner = {
+      snapshot: state,
+      pause,
+      workPause: new AbortController(),
+    };
     state.coordinator = {
       mode: "paused",
       phase: "validate",
@@ -1234,12 +1243,97 @@ test("settled validation reuses its exact Git result once and retains the failed
       });
     // A plain pause refuses the next command. Draining must reach a real
     // failure/operator or publication boundary before that pause applies.
+    synchronizeWorkItemPause(owner);
     assert.equal(canHandoff(state), false);
-    assert.equal(workItemPauseSignal(owner), pause.signal);
+    assert.equal(workItemPauseSignal(owner), owner.workPause.signal);
     await assert.rejects(validationStep, StepPaused);
     assert.equal(existsSync(join(root, "validation")), false);
-    state.coordinator.mode = "draining";
-    assert.equal(workItemPauseSignal(owner), undefined);
+    setCoordinatorMode(state, "draining");
+    synchronizeWorkItemPause(owner);
+    assert.equal(owner.workPause.signal.aborted, false);
+    assert.equal(workItemPauseSignal(owner), owner.workPause.signal);
+    let settledTry = false;
+    let nextPaidStarted = false;
+    await assert.rejects(
+      step(
+        state,
+        { scope: { item: "local" }, name: "acceptance-review", paid: true },
+        async (context) => {
+          await context.paid(async () => {
+            const result = await subprocessAsync(
+              "sh",
+              ["-c", "echo started; sleep 0.05; echo settled"],
+              {},
+              undefined,
+              (stream) => {
+                if (stream !== "stdout") return;
+                setCoordinatorMode(state, "paused");
+                synchronizeWorkItemPause(owner);
+              },
+            );
+            settledTry =
+              result.status === 0 && result.stdout.includes("settled");
+          });
+          await context.paid(async () => {
+            nextPaidStarted = true;
+            await subprocessAsync("sh", ["-c", "echo forbidden"]);
+          });
+        },
+        { save: () => undefined, pause: workItemPauseSignal(owner) },
+      ),
+      StepPaused,
+    );
+    assert.equal(settledTry, true);
+    assert.equal(nextPaidStarted, false);
+    setCoordinatorMode(state, "running");
+    synchronizeWorkItemPause(owner);
+    assert.equal(owner.workPause.signal.aborted, true);
+    owner.pause = new AbortController();
+    synchronizeWorkItemPause(owner);
+    assert.equal(owner.workPause.signal.aborted, false);
+    owner.pause.abort(new Error("Coordinator draining"));
+    setCoordinatorMode(state, "draining");
+    synchronizeWorkItemPause(owner);
+    let pollCount = 0;
+    let pauseTimer;
+    const waitingAt = Date.now();
+    try {
+      await assert.rejects(
+        step(
+          state,
+          { scope: "objective", name: "observe" },
+          async (context) => {
+            pollCount++;
+            await subprocessAsync("sh", ["-c", "echo observed"]);
+            pauseTimer = setTimeout(() => {
+              setCoordinatorMode(state, "paused");
+              synchronizeWorkItemPause(owner);
+            }, 30);
+            context.pending(
+              undefined,
+              new Date(Date.now() + 60_000).toISOString(),
+            );
+          },
+          {
+            save: () => undefined,
+            pause: workItemPauseSignal(owner),
+            signal: AbortSignal.timeout(1_000),
+          },
+        ),
+        StepPaused,
+      );
+    } finally {
+      clearTimeout(pauseTimer);
+    }
+    assert.equal(pollCount, 1);
+    assert.ok(Date.now() - waitingAt < 1_000);
+    // Handoff from plain pause receives a live admitted-work signal; the
+    // already-aborted coordinator signal still blocks new item admission.
+    owner.handoff = true;
+    setCoordinatorMode(state, "draining");
+    synchronizeWorkItemPause(owner);
+    assert.equal(owner.workPause.signal.aborted, false);
+    assert.equal(owner.pause.signal.aborted, true);
     await assert.rejects(validationStep, (error) => {
       assert.ok(error instanceof CandidateValidationFailure);
       assert.equal(error.failedValidation.commands[0].exitCode, 1);
@@ -1251,7 +1345,7 @@ test("settled validation reuses its exact Git result once and retains the failed
     });
     assert.equal(work.status, "failed");
     assert.equal(canHandoff(state), true);
-    assert.equal(workItemPauseSignal(owner), pause.signal);
+    assert.equal(workItemPauseSignal(owner), owner.pause.signal);
     const original = structuredClone(work.failedValidation);
     const originalFailure = structuredClone(work.recovery.failure);
     const request = { item: "local", actor: "integration-operator" };

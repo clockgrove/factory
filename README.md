@@ -26,6 +26,8 @@ Ask questions and make human-owned decisions in your agent conversation, such as
 
 Planning, review, and workers consume your provider's usage. Different Objectives can run in parallel, each from its own foreground run, while the background service queue stays sequential. Factory runs with a configured local harness or compile-time assigned local execution profiles. [Remote execution](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#managed-execution) (Claude and OpenAI managed agents) is not yet live-qualified. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#local-providers) for optional-provider requirements and boundaries.
 
+Supported local adapters retain separate planning, implementation and review conversations across eligible follow-ups. Factory keeps each turn bound to current evidence, permissions and attempt limits; the native harness manages its working context. See [retained conversations](docs/USER-GUIDE.md#retained-conversations) for provider differences and recovery limits.
+
 ## Install
 
 Factory has two parts, and both come from one release:

@@ -1,11 +1,3 @@
-import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
-import { WorkerInteractionCapture } from "./interaction-capture.js";
-import {
-  createFactoryWorktreeMcp,
-  factoryMcpServerName,
-  factoryMcpToolName,
-  type PreparedClaudeEnvironment,
-} from "./claude-environment.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -14,10 +6,35 @@ import type {
   SDKResultMessage,
   SDKSystemMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
+import type { AgentSessionRef, WorkerUsageObservation } from "../contracts.js";
 import {
-  claudeAuthenticationValues,
+  closeProviderEventStream,
+  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  ProviderTurnGuard,
+} from "../provider-turn.js";
+import {
   type ClaudeWorkerInput,
+  claudeAuthenticationValues,
 } from "./claude.js";
+import {
+  createFactoryWorktreeMcp,
+  factoryMcpServerName,
+  factoryMcpToolName,
+  type PreparedClaudeEnvironment,
+} from "./claude-environment.js";
+import { claudeQueryOptions } from "./claude-options.js";
+import {
+  type ClaudeSessionData,
+  claudeHistoryDigest,
+  claudePrivateWrite,
+} from "./claude-session.js";
+import {
+  ClaudeUsage,
+  claudeCost,
+  claudeModelUsage,
+  claudeRawTokenUsage,
+} from "./claude-usage.js";
 import {
   harnessFailure,
   privateProgress,
@@ -26,25 +43,7 @@ import {
   workItemPrompt,
   writeHarnessResult,
 } from "./harness-support.js";
-import { claudeQueryOptions } from "./claude-options.js";
-import {
-  claudeHistoryDigest,
-  claudePrivateWrite,
-  type ClaudeSessionData,
-} from "./claude-session.js";
-import type { AgentSessionRef, WorkerUsageObservation } from "../contracts.js";
-import {
-  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
-  ProviderTurnGuard,
-  closeProviderEventStream,
-} from "../provider-turn.js";
-
-import {
-  ClaudeUsage,
-  claudeCost,
-  claudeRawTokenUsage,
-  claudeModelUsage,
-} from "./claude-usage.js";
+import { WorkerInteractionCapture } from "./interaction-capture.js";
 
 function progressEvent(
   message: SDKMessage,
@@ -258,7 +257,13 @@ async function main(): Promise<void> {
       turn.progress();
       if (message.type === "result") result = message;
       const observedUsage = usage.observe(message);
-      capture.claude(message, observedUsage);
+      capture.claude(
+        message,
+        observedUsage,
+        message.type === "result"
+          ? { costUsd: usage.cost() ?? null }
+          : undefined,
+      );
       if (!progressLost)
         try {
           privateProgress(progressPath, {

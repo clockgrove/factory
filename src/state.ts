@@ -1,7 +1,5 @@
-import { assertFinalAcceptance } from "./completion.js";
 import { assertAgentSessions } from "./agent-session.js";
-import { assertObjectiveKnowledge } from "./objective-knowledge.js";
-import { assertSemanticRefusalRecord } from "./semantic-refusal.js";
+import { assertFinalAcceptance } from "./completion.js";
 import { type Capacity, validateCapacity } from "./config.js";
 import type {
   AssetSelectionDecision,
@@ -29,6 +27,9 @@ import {
   type RepeatRecord,
   type Wait,
 } from "./fault.js";
+import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
+import { assertGitHubProgressProjection } from "./github-progress-state.js";
+import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
 import { assertGraphRevisions, graphDigest } from "./graph-amendments.js";
 import {
   assertAssetCaptureReceipt,
@@ -37,6 +38,8 @@ import {
   finalValidationLfsMembers,
 } from "./media.js";
 import { assertNativePrerequisites } from "./native-prerequisite-evidence.js";
+import { assertObjectiveKnowledge } from "./objective-knowledge.js";
+import { assertAcceptedPlanningDecision } from "./planning-decision-context.js";
 import {
   assertCompletedCoverage,
   assertCoverageShape,
@@ -46,21 +49,18 @@ import {
 } from "./qa.js";
 import {
   type Autonomy,
-  type WorkRecovery,
   assertRepairLedger,
   retainedFailedResultContext,
+  type WorkRecovery,
 } from "./repair-policy.js";
+import { assertSemanticRefusalRecord } from "./semantic-refusal.js";
 import type { AcceptanceDecision, ValidationEvidence } from "./validation.js";
-import { assertGitHubProgressProjection } from "./github-progress-state.js";
-import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
-import { assertAcceptedPlanningDecision } from "./planning-decision-context.js";
-import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
-import { assertRetainedReviewEvidence } from "./validation-evidence.js";
 import {
   assertSelectedLfsValidation,
   assertValidationWorktreeObservation,
   validStoppedLeftovers,
 } from "./validation.js";
+import { assertRetainedReviewEvidence } from "./validation-evidence.js";
 import { assertRepairReadiness } from "./work-repair.js";
 
 export type WorkStatus =
@@ -185,6 +185,8 @@ export interface CoordinatorDisposition {
 
 /** Preparation shares the atomic state path; no executable graph is invented. */
 export interface PreparationState {
+  agentSessions?: Record<string, import("./contracts.js").AgentSessionRef>;
+  agentSessionHistory?: import("./contracts.js").AgentSessionRef[];
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
   githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
   githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
@@ -265,6 +267,8 @@ export function setCoordinatorMode(
 }
 
 export interface FactoryState {
+  /** Frozen original preparation inputs; required for a retained planner. */
+  sourcePacketDigest?: string;
   agentSessions?: Record<string, import("./contracts.js").AgentSessionRef>;
   agentSessionHistory?: import("./contracts.js").AgentSessionRef[];
   acceptedPlanningDecision?: import("./planning-decision-context.js").AcceptedPlanningDecision;
@@ -580,6 +584,8 @@ export function parseFactoryState(
   });
   assertPublicationIntents(state as unknown as FactoryState);
   sha(state.configDigest, "configDigest", 64);
+  if (state.sourcePacketDigest !== undefined)
+    sha(state.sourcePacketDigest, "sourcePacketDigest", 64);
   if (Object.hasOwn(state, "approvedPlaybookPin"))
     assertApprovedPlaybookPin(state.approvedPlaybookPin);
   sha(state.planGraphDigest, "planGraphDigest", 64);

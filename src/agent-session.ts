@@ -343,6 +343,7 @@ export function agentSessionContinuation(
       assertAgentSessionRef(ref, scope);
       if (
         scope.role === "planning" &&
+        ref.turn !== retained?.turn &&
         ref.currentTurn?.graphDigest !== admittedGraphDigest
       )
         throw new Error("Planner current turn differs from its admitted graph");
@@ -385,7 +386,17 @@ export function agentSessionContinuation(
         (ref.turn < prior.turn || ref.turn > prior.turn + 1)
       )
         throw new Error("Agent session checkpoint changed its turn accounting");
+      if ((!prior || prior.identity !== ref.identity) && ref.turn !== 1)
+        throw new Error("Fresh agent session must start at turn one");
       if (prior && prior.identity === ref.identity) {
+        if (
+          prior.adapter !== ref.adapter ||
+          (ref.turn === prior.turn &&
+            prior.executionIdentity !== ref.executionIdentity)
+        )
+          throw new Error(
+            "Agent session changed its admitted adapter or owner",
+          );
         if (ref.turn > prior.turn && prior.status !== "ready")
           throw new Error("Unsettled session cannot dispatch another turn");
         if (ref.turn === prior.turn && prior.currentTurn) {

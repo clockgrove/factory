@@ -67,13 +67,26 @@ export function assertAgentSessionRef(
   if (
     Object.keys(ref).some(
       (key) =>
-        !["scope", "adapter", "identity", "data", "turn", "status"].includes(
-          key,
-        ),
+        ![
+          "scope",
+          "executionIdentity",
+          "adapter",
+          "identity",
+          "data",
+          "turn",
+          "status",
+        ].includes(key),
     )
   )
     throw new Error("Agent session receipt has unknown fields");
   assertAgentSessionScope(ref.scope);
+  if (
+    ref.executionIdentity !== undefined &&
+    (ref.scope.role !== "implementation" ||
+      typeof ref.executionIdentity !== "string" ||
+      !/^[A-Za-z0-9_-]{1,160}$/.test(ref.executionIdentity))
+  )
+    throw new Error("Agent session execution owner is invalid");
   if (expected && !isDeepStrictEqual(ref.scope, expected))
     throw new Error("Agent session receipt differs from the current scope");
   if (
@@ -176,6 +189,7 @@ export function agentSessionContinuation(
         prior &&
         prior.identity === ref.identity &&
         prior.adapter === ref.adapter &&
+        prior.executionIdentity === ref.executionIdentity &&
         prior.turn === ref.turn;
       if (state.cancelRequested && (!sameTurn || ref.status === "in-flight"))
         throw new Error(

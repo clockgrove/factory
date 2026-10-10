@@ -251,13 +251,30 @@ export async function stopWorker(args: ItemWorker): Promise<void> {
   const work = state.work[item.id]!;
   if (!work.execution) return;
   try {
-    await args.driver.cancel(
-      structuredClone(work.execution),
-      workerContext(work, args.save, args.cancelled, args.diagnostics, {
+    const session =
+      args.driver.sessionContinuation === true
+        ? agentSessionContinuation(state, "implementation", item.id, args.save)
+        : undefined;
+    const context = workerContext(
+      work,
+      args.save,
+      args.cancelled,
+      args.diagnostics,
+      {
         runId: state.runId,
         itemId: item.id,
-      }),
+      },
     );
+    if (session) context.checkpointSession = (ref) => session.checkpoint(ref);
+    const stoppedIdentity = work.execution.identity;
+    await args.driver.cancel(structuredClone(work.execution), context);
+    // Successful cancellation proves owned cessation, but an unfinished turn
+    // supplies no resumable conversation. Preserve any ready receipt the driver settled.
+    if (
+      session?.retained?.status === "in-flight" &&
+      session.retained.executionIdentity === stoppedIdentity
+    )
+      session.checkpoint({ ...session.retained, status: "unavailable" });
     delete work.execution;
   } catch {
     // Left recorded: the next attempt starts only once the driver confirmed

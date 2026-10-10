@@ -279,6 +279,7 @@ export class CodexHarness implements AgentHarness {
       identity,
       turn: (retained?.turn ?? 0) + 1,
       status: "in-flight",
+      executionIdentity: request.attemptId,
       data: {
         selectionDigest,
         ...(request.item.executionBinding && {
@@ -301,7 +302,8 @@ export class CodexHarness implements AgentHarness {
    */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
     const identity = request.attemptId ?? randomUUID();
-    const session = await this.workerSession(request);
+    const boundRequest = { ...request, attemptId: identity };
+    const session = await this.workerSession(boundRequest);
     return {
       identity,
       data: await launchWorker({
@@ -310,7 +312,7 @@ export class CodexHarness implements AgentHarness {
         label: "Codex harness",
         script: fileURLToPath(new URL("./worker.js", import.meta.url)),
         input: codexWorkerInput(
-          request,
+          boundRequest,
           this.network,
           this.allowedSecretNames,
           this.model,
@@ -358,6 +360,7 @@ export class CodexHarness implements AgentHarness {
       supplied.adapter !== this.sessionAdapter ||
       supplied.identity !== input.session.ref.identity ||
       supplied.turn !== input.session.ref.turn ||
+      supplied.executionIdentity !== input.session.ref.executionIdentity ||
       !isDeepStrictEqual(supplied.scope, input.session.ref.scope) ||
       native?.selectionDigest !==
         (input.session.ref.data as CodexSessionData).selectionDigest ||
@@ -1150,6 +1153,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
           identity: session.identity,
           turn: (session.retained?.turn ?? 0) + 1,
           status: harness.sessionContinuation ? "in-flight" : "unavailable",
+          executionIdentity: identity,
           data: harness.sessionContinuation
             ? {
                 ...(session.retained?.data as
@@ -1335,6 +1339,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       identity: session.identity,
       turn: (session.retained?.turn ?? 0) + 1,
       status: "unavailable",
+      executionIdentity: handle.identity,
       data: {
         ...(session.retained?.data as Record<string, unknown> | undefined),
         pendingWorkerIdentity: handle.identity,

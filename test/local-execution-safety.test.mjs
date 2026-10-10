@@ -503,7 +503,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
 
     const settling = agentSessionContinuation(
       loaded,
-      "result-review",
+      "implementation",
       "ui",
       save,
     );
@@ -511,6 +511,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       scope: settling.scope,
       adapter: "local-integration-controller",
       identity: settling.identity,
+      executionIdentity: "ui-attempt",
       turn: 1,
       status: "in-flight",
     };
@@ -523,6 +524,11 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       { ...settlingReceipt, status: "ready", turn: 2 },
       { ...settlingReceipt, status: "ready", identity: replacement.identity },
       { ...settlingReceipt, status: "ready", adapter: "foreign-adapter" },
+      {
+        ...settlingReceipt,
+        status: "ready",
+        executionIdentity: "foreign-attempt",
+      },
     ])
       assert.throws(() => settling.checkpoint(forbidden), /Cancelling/);
     const unadmitted = agentSessionContinuation(

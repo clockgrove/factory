@@ -472,6 +472,8 @@ export interface AgentSessionScope {
 /** Durable adapter receipt, separate from a paid attempt or acceptance verdict. */
 export interface AgentSessionRef {
   scope: AgentSessionScope;
+  /** Durable execution owner; absent for reviews or when ownership is unknown. */
+  executionIdentity?: string;
   adapter: string;
   identity: string;
   data?: unknown;

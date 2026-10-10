@@ -777,6 +777,18 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       },
     };
     planner.checkpoint(terminal);
+    assert.throws(
+      () =>
+        planner.checkpoint({
+          ...terminal,
+          currentTurn: { ...terminal.currentTurn, terminal: "failed" },
+        }),
+      /regressed/,
+    );
+    assert.throws(
+      () => planner.checkpoint({ ...terminal, status: "in-flight" }),
+      /active again/,
+    );
     const resumedPreparation = readContinuation(
       preparation.repository,
       preparation.objective,

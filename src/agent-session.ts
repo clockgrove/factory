@@ -407,6 +407,12 @@ export function agentSessionContinuation(
           );
         if (ref.turn > prior.turn && prior.status !== "ready")
           throw new Error("Unsettled session cannot dispatch another turn");
+        if (
+          ref.turn === prior.turn &&
+          prior.status !== "in-flight" &&
+          ref.status === "in-flight"
+        )
+          throw new Error("Settled agent turn cannot become active again");
         if (ref.turn === prior.turn && prior.currentTurn) {
           if (!ref.currentTurn)
             throw new Error("Agent session lost its turn binding");
@@ -432,8 +438,6 @@ export function agentSessionContinuation(
             (before.resources === "settled" && after.resources !== "settled")
           )
             throw new Error("Agent session turn disposition regressed");
-          if (prior.status !== "in-flight" && ref.status === "in-flight")
-            throw new Error("Settled agent turn cannot become active again");
         }
       }
       if (prior && prior.identity !== ref.identity) {

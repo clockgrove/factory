@@ -318,7 +318,7 @@ async function main(): Promise<void> {
       };
       session = {
         ...input.session.ref,
-        status: "ready",
+        status: "in-flight",
         data,
         currentTurn: {
           ...input.session.ref.currentTurn!,

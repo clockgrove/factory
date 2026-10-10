@@ -164,7 +164,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     const native = supplied.data as ClaudeSessionData | undefined;
     if (
       !admitted ||
-      supplied.status !== "ready" ||
+      supplied.status !== "in-flight" ||
       supplied.adapter !== this.sessionAdapter ||
       supplied.identity !== admitted.ref.identity ||
       supplied.turn !== admitted.ref.turn ||
@@ -187,6 +187,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       throw workFault("Claude completion has an invalid conversation receipt");
     const ref: AgentSessionRef = {
       ...supplied,
+      status: "ready",
       data: { ...native, settled: true, worker: data },
       ...(supplied.currentTurn && {
         currentTurn: { ...supplied.currentTurn, resources: "settled" },
@@ -231,6 +232,9 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       {
         ...pending,
         status: "unavailable",
+        ...(pending.currentTurn && {
+          currentTurn: { ...pending.currentTurn, resources: "settled" },
+        }),
         data: { ...owned.data, settled: true },
       },
       this.sessionAdapter,

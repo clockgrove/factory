@@ -619,6 +619,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     let closeStarted = false;
     let result: SDKResultMessage | undefined;
     let nativeProcess: ClaudeNativeProcess | undefined;
+    let nativeSpawnAttempted = false;
     let streamClosed = false;
     const checkpoint = (status: AgentSessionRef["status"]) => {
       if (!owned || !continuation) return;
@@ -643,8 +644,8 @@ class ClaudePlanningTransport implements PlanningTransport {
         abortController,
         tree: Boolean(args.tree),
       });
-      if (!this.query)
-        options.spawnClaudeCodeProcess = claudeOwnedSpawn((owner) => {
+      if (!this.query) {
+        const spawnNative = claudeOwnedSpawn((owner) => {
           nativeProcess = owner;
           if (owned) {
             owned.data.process = owner;
@@ -660,6 +661,11 @@ class ClaudePlanningTransport implements PlanningTransport {
             );
           }
         });
+        options.spawnClaudeCodeProcess = (options) => {
+          nativeSpawnAttempted = true;
+          return spawnNative(options);
+        };
+      }
       if (owned) {
         Object.assign(options, claudeResumeOptions(owned));
         options.env = claudeSessionEnvironment(owned, options.env ?? {});
@@ -784,6 +790,9 @@ class ClaudePlanningTransport implements PlanningTransport {
       if (nativeProcess) {
         await settleClaudeProcess(nativeProcess);
         state.stopped = true;
+      } else if (!nativeSpawnAttempted && !this.query) {
+        // Validation/import failed before the pinned SDK's sole process launch surface.
+        state.stopped = true;
       }
       if (owned) {
         if (completed) {
@@ -807,7 +816,9 @@ class ClaudePlanningTransport implements PlanningTransport {
           owned.data.settled = true;
           owned.ref.currentTurn = {
             ...owned.ref.currentTurn!,
-            terminal: "interrupted",
+            ...(owned.ref.currentTurn?.dispatch === "submitted"
+              ? { terminal: "interrupted" as const }
+              : {}),
             resources: "settled",
           };
           checkpoint("unavailable");

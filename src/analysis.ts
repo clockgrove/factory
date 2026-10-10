@@ -612,6 +612,13 @@ function summarizeInvocation(
     ),
     native: summarizeNative(records, options, nativeToolActivity),
     nativeToolActivity,
+    boundaryObservations: records
+      .filter((record) => record.boundary)
+      .map((record) => ({
+        recordId: record.recordId,
+        at: record.at,
+        ...record.boundary!,
+      })),
     promptComponents: request?.promptComponents ?? null,
     usage: {
       scope: "invocation-cumulative" as const,
@@ -1019,6 +1026,16 @@ export function renderAnalysis(
         )
         .join(" / ")}`,
     );
+  }
+  lines.push(
+    "\nClient boundaries (observations; submission and server time unsupported):",
+  );
+  for (const invocation of report.invocations) {
+    for (const boundary of invocation.boundaryObservations) {
+      lines.push(
+        `  ${invocation.identity.invocationId}/${invocation.identity.providerAttempt}: ${boundary.source} ${boundary.event} at +${Math.round(boundary.elapsedMs)} ms${boundary.durationMs === undefined ? "" : `; reported duration ${boundary.durationMs} ms`}${boundary.status ? `; ${boundary.status}` : ""}`,
+      );
+    }
   }
   lines.push(
     `\nController observations: ${report.controllerObservations.length} (separate validation/delivery evidence in JSON)`,

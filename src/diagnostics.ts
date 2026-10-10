@@ -508,7 +508,7 @@ export class DiagnosticEmitter {
     runId?: string;
     itemId?: string;
     attemptId?: string;
-  }): (observation: ModelInvocationObservation) => void {
+  }): import("./contracts.js").ModelInvocationObserver {
     return this.guardModelObserver((observation) => {
       const { scopeId, ...diagnosticContext } = context;
       const captureKey = `${observation.invocationId}:${observation.providerAttempt ?? 1}`;
@@ -706,8 +706,10 @@ export class DiagnosticEmitter {
 
   private guardModelObserver(
     observer: (observation: ModelInvocationObservation) => void,
-  ): (observation: ModelInvocationObservation) => void {
-    return (observation) => {
+  ): import("./contracts.js").ModelInvocationObserver {
+    const guarded: import("./contracts.js").ModelInvocationObserver = (
+      observation,
+    ) => {
       const unavailable = () => {
         const session = observerSessions.getStore();
         if (session) session.lostObservations++;
@@ -723,6 +725,9 @@ export class DiagnosticEmitter {
         unavailable();
       }
     };
+    guarded.nativeBoundaryTelemetry =
+      this.capturePolicy?.nativeBoundaryTelemetry === true;
+    return guarded;
   }
 
   async span<T>(

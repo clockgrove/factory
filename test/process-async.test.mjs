@@ -19,8 +19,24 @@ import { analyzeInteractions } from "../dist/analysis.js";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
 import { codexStderrCapture } from "../dist/codex-exec.js";
+import {
+  codexBoundaryTelemetry,
+  codexJsonBoundaries,
+} from "../dist/codex-boundary-telemetry.js";
+import {
+  ProviderTurnGuard,
+  ProviderTurnTimeoutError,
+} from "../dist/provider-turn.js";
 import { createCodexHome } from "../dist/codex-planning-isolation.js";
-import { renderCompilationCall } from "../dist/compiler/model.js";
+import {
+  CodexPlanningModel,
+  renderCompilationCall,
+  renderDiagnosisCall,
+} from "../dist/compiler/model.js";
+import {
+  hydrateWorkerInputSources,
+  planningSources,
+} from "../dist/compiler/sources.js";
 import {
   prepareCompilationRequest,
   validateCompiledGraph,
@@ -33,7 +49,13 @@ import {
   summarizeFormalHistory,
   withDiagnosticSession,
 } from "../dist/diagnostics.js";
-import { CodexHarness } from "../dist/execution/local.js";
+import { CodexHarness, LocalExecutionDriver } from "../dist/execution/local.js";
+import { LocalContentStore } from "../dist/content/local.js";
+import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
+import { RegularDelivery } from "../dist/delivery/regular.js";
+import { RealGitHubGateway } from "../dist/github.js";
+import { withGitHubTransportObserver } from "../dist/github-client.js";
+import { runObjectivePass } from "../dist/runner/execution.js";
 import { killGroup } from "../dist/execution/worker-process.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
@@ -47,6 +69,7 @@ import {
   withProcessCancellation,
 } from "../dist/process.js";
 import {
+  assertCompletedCoverage,
   environmentValidationIndices,
   objectivePreparationCommands,
 } from "../dist/qa.js";
@@ -79,6 +102,7 @@ import {
   diagnosisFiles,
   repairEvidence,
   recordWorkFailure,
+  workRepairDiagnosisRequest,
 } from "../dist/work-repair.js";
 
 test("trusted child captures roundtrip through the configured private state root", async () => {
@@ -342,6 +366,259 @@ setTimeout(() => {
     const stderrAnalysis = analyzeInteractions([stderrMetadata]);
     assert.equal(stderrAnalysis.nativeToolActivity.uniqueCalls, null);
     assert.equal(JSON.stringify(stderrAnalysis).includes("[REDACTED]"), false);
+
+    // Real child stdin/stderr and the production metadata writer: native-shaped
+    // diagnostic records are test data, never a provider or an accepted answer.
+    // The safe target's omitted fields must not reach either metadata or content.
+    const boundaryDiagnostics = new DiagnosticEmitter(repository, 3, [secret], {
+      enabled: false,
+      maxBytesPerInvocation: 1024,
+      nativeBoundaryTelemetry: true,
+    });
+    const boundaryObserver = boundaryDiagnostics.modelObserver({
+      scopeId: "actual-client-boundaries",
+    });
+    assert.equal(boundaryObserver.nativeBoundaryTelemetry, true);
+    assert.equal(
+      new DiagnosticEmitter(repository, 4).modelObserver({
+        scopeId: "disabled",
+      }).nativeBoundaryTelemetry,
+      false,
+    );
+    const boundaryStarted = performance.now();
+    let firstBoundary;
+    const sawLiveBoundary = new Promise((resolve) => {
+      firstBoundary = resolve;
+    });
+    const observeBoundary = (source, boundary) => {
+      boundaryObserver({
+        invocationId: "actual-client-boundaries",
+        providerAttempt: 1,
+        phase: "result-review",
+        ordinal: 0,
+        type: "progress",
+        adapter: "local-process",
+        provider: "not-invoked",
+        model: "none",
+        capture: {
+          event: {
+            kind: "interaction",
+            coverage: "boundary",
+            boundary: {
+              ...boundary,
+              source,
+              elapsedMs: performance.now() - boundaryStarted,
+            },
+          },
+        },
+      });
+      if (boundary.event === "first-output") firstBoundary();
+    };
+    let filteredDiagnostic;
+    const ordinaryCapture = codexStderrCapture(
+      (diagnostic) => {
+        filteredDiagnostic = diagnostic;
+        return boundaryObserver({
+          invocationId: "actual-client-boundaries",
+          providerAttempt: 1,
+          phase: "result-review",
+          ordinal: 0,
+          type: "progress",
+          capture: {
+            event: { kind: "interaction", coverage: "boundary" },
+            content: () => diagnostic,
+          },
+        });
+      },
+      [secret],
+    );
+    const boundaryParser = codexBoundaryTelemetry(
+      (event) => observeBoundary("codex-trace-safe", event),
+      ordinaryCapture.chunk,
+    );
+    const jsonBoundaries = codexJsonBoundaries((event) =>
+      observeBoundary("codex-exec-json", event),
+    );
+    let unsupportedJsonSeen = false;
+    const nativeDiagnosticLines = [
+      '2026-10-10T05:59:46.827332Z INFO codex_otel.trace_safe: event.name="codex.websocket_request" duration_ms=3 success="true" auth.header_name="authorization" auth.account_id="excluded-account"',
+      '2026-10-10T05:59:51.510209Z INFO codex_otel.trace_safe: event.name="codex.turn_ttft" duration_ms=5842',
+      '2026-10-10T05:59:46.612150Z INFO codex_otel.trace_safe: event.name="codex.sse_event" event.kind=response.completed input_token_count=7660 output_token_count=0 cached_token_count=0 cache_write_token_count=0 reasoning_token_count=0 tool_token_count=7660 ttft_ms=37',
+      '2026-10-10T05:59:52.510209Z TRACE codex_otel.trace_safe: event.name="codex.retry" retry.attempt=0 retry.delay_ms=200 retry.layer="http" retry.operation="request"',
+      `2026-10-10T05:59:52.510209Z INFO codex_otel.trace_safe: event.name="unknown" error.message=${JSON.stringify(secret + ' event.name="codex.turn_ttft" duration_ms=9999')} auth.account_id="excluded-account"`,
+      '2026-10-10T05:59:52.510209Z INFO codex_otel.trace_safe: event.name="codex.turn_ttft" duration_ms=unsafe',
+    ];
+    const quiet = new ProviderTurnGuard(320);
+    let childClosed = false;
+    const telemetryChild = subprocessAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+      setTimeout(() => process.stdin.resume(), 25);
+      const lines = ${JSON.stringify(nativeDiagnosticLines)};
+      process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', id: 'legacy-shaped-item' } }) + '\\n');
+      const ordinary = Buffer.from(${JSON.stringify("ordinary π " + secret + "\n")});
+      process.stderr.write(ordinary.subarray(0, 10));
+      setTimeout(() => {
+        process.stderr.write(ordinary.subarray(10));
+        for (const line of lines) process.stderr.write(line + '\\n');
+        process.stderr.write('private multiline continuation excluded-account\\n');
+      }, 15);
+      setTimeout(() => process.stderr.write('INFO codex_otel.trace_safe: event.name="unknown" error.message="' + 'x'.repeat(70000) + '"\\n'), 60);
+      setInterval(() => process.stderr.write(lines[1] + '\\n'), 25);
+    `,
+      ],
+      { signal: quiet.signal },
+      "x".repeat(256 * 1024),
+      (stream, chunk) => {
+        if (stream === "stderr") boundaryParser.chunk(chunk);
+        if (stream === "stdout") {
+          jsonBoundaries(JSON.parse(chunk.toString()));
+          unsupportedJsonSeen = true;
+        }
+      },
+      (boundary) => observeBoundary("factory-process", boundary),
+      { stderr: false },
+    );
+    const settledTelemetry = telemetryChild.finally(() => {
+      childClosed = true;
+    });
+    // Install rejection handlers before waiting for a live receipt.
+    const boundedTelemetry = assert.rejects(
+      quiet.race(settledTelemetry),
+      ProviderTurnTimeoutError,
+    );
+    const closedTelemetry = assert.rejects(
+      settledTelemetry,
+      /cancelled after verified cessation/,
+    );
+    await sawLiveBoundary;
+    assert.equal(childClosed, false);
+    const liveRecords = readDiagnostics(repository, 3).filter(
+      (event) => event.capture?.boundary,
+    );
+    assert.ok(
+      liveRecords.some(
+        (event) => event.capture.boundary.event === "first-output",
+      ),
+    );
+    await boundedTelemetry;
+    await closedTelemetry;
+    assert.equal(unsupportedJsonSeen, true);
+    quiet.finish();
+    boundaryParser.finish();
+    ordinaryCapture.finish();
+    const boundaryRecords = readDiagnostics(repository, 3)
+      .filter((event) => event.capture)
+      .map((event) => event.capture);
+    const boundaryView =
+      analyzeInteractions(boundaryRecords).invocations[0].boundaryObservations;
+    assert.ok(
+      boundaryView.some(
+        (event) =>
+          event.event === "stdin-finished" &&
+          event.observedBytes === 256 * 1024,
+      ),
+    );
+    assert.ok(
+      boundaryView.some(
+        (event) => event.event === "cessation" && event.status === "verified",
+      ),
+    );
+    assert.ok(
+      boundaryView.some(
+        (event) =>
+          event.event === "transport-completed" && event.durationMs === 3,
+      ),
+    );
+    assert.ok(
+      boundaryView.some(
+        (event) =>
+          event.event === "retry" &&
+          event.nativeAttempt === 0 &&
+          event.retryLayer === "http",
+      ),
+    );
+    assert.ok(
+      boundaryView.some(
+        (event) =>
+          event.event === "response-completed" &&
+          event.responseCounters.inputTokens === 7660 &&
+          event.responseCounters.ttftMs === 37,
+      ),
+    );
+    const coverage = boundaryView.find(
+      (event) =>
+        event.event === "telemetry-coverage" &&
+        event.source === "codex-trace-safe",
+    );
+    assert.equal(coverage.status, "incomplete");
+    assert.ok(coverage.unparsedRecords >= 2);
+    assert.ok(coverage.truncatedRecords > 0);
+    assert.ok(coverage.quarantinedRecords > 0);
+    assert.equal(coverage.submission, "unsupported");
+    assert.equal(
+      boundaryView.some((event) => event.durationMs === 9999),
+      false,
+    );
+    assert.equal(JSON.stringify(boundaryRecords).includes(secret), false);
+    assert.equal(
+      JSON.stringify(boundaryRecords).includes("excluded-account"),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(boundaryRecords).includes("error.message"),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(boundaryRecords).includes("authorization"),
+      false,
+    );
+    assert.equal(
+      boundaryRecords.every((record) => !record.content.reference),
+      true,
+    );
+    assert.ok(filteredDiagnostic.text.includes("ordinary π "));
+    assert.ok(filteredDiagnostic.text.includes("[REDACTED]"));
+    assert.equal(
+      filteredDiagnostic.text.includes("codex_otel.trace_safe"),
+      false,
+    );
+    assert.equal(filteredDiagnostic.text.includes("excluded-account"), false);
+    assert.equal(filteredDiagnostic.text.includes(secret), false);
+    assert.equal(filteredDiagnostic.text.includes("error.message"), false);
+    assert.equal(
+      filteredDiagnostic.text.includes("private multiline continuation"),
+      false,
+    );
+    assert.equal(
+      analyzeInteractions(boundaryRecords).usage.inputTokens.total,
+      null,
+    );
+    let drainedStderrBytes = 0;
+    const noRawStderr = await subprocessAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        "process.stderr.write('x'.repeat(128 * 1024)); process.stdout.write('drained');",
+      ],
+      {},
+      undefined,
+      (stream, chunk) => {
+        if (stream === "stderr") drainedStderrBytes += chunk.length;
+      },
+      () => {
+        throw new Error("local observer rejected");
+      },
+      { stderr: false },
+    );
+    assert.equal(noRawStderr.status, 0);
+    assert.equal(noRawStderr.stdout, "drained");
+    assert.equal(noRawStderr.stderr, "");
+    assert.equal(drainedStderrBytes, 128 * 1024);
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previousStateHome;
@@ -416,6 +693,172 @@ test("cancellation stops an owned shell and its process group", async () => {
   assert.equal(state.repeats, undefined);
   assert.equal(stepCancellationSignal(), undefined);
   assert.doesNotThrow(assertStepAdmission);
+
+  // Cancellation closure belongs to the owner after the aborted pass has
+  // unwound. Calling the real gateway from this pass's aborted process scope
+  // would refuse its closure GET before dispatch and retain a cancelError.
+  const root = mkdtempSync(join(tmpdir(), "factory-cancel-pass-"));
+  const previousStateHome = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = join(root, "state");
+  try {
+    const checkout = join(root, "target");
+    mkdirSync(checkout);
+    const git = (...args) =>
+      execFileSync("git", ["-C", checkout, ...args], {
+        encoding: "utf8",
+      }).trim();
+    git("init", "-b", "main");
+    writeFileSync(join(checkout, "README.md"), "# Cancelled local target\n");
+    git(
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/integration/cancel-pass",
+    );
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=Integration",
+      "-c",
+      "user.email=integration@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    );
+    const config = {
+      repository: "integration/cancel-pass",
+      checkout,
+      execution: { kind: "local" },
+      policy: { allowedSecretNames: [] },
+    };
+    const baseSha = git("rev-parse", "HEAD");
+    const graph = {
+      objective: 1,
+      baseSha,
+      items: [
+        {
+          id: "local",
+          kind: "work",
+          title: "Local work",
+          goal: "Preserve the target",
+          brief: "Retain local work",
+          acceptance: ["Preserve README"],
+          nonGoals: [],
+          dependencies: [],
+          ownedPaths: ["README.md"],
+          resources: [],
+          expectedOutputRoles: [],
+          requiredLfsRoles: [],
+          sourceAssets: [],
+          minimumAssetSets: 0,
+          citations: [{ path: "README.md", heading: "" }],
+          validation: [],
+        },
+      ],
+      coverage: [
+        {
+          criterionId: createHash("sha256")
+            .update("Preserve README")
+            .digest("hex"),
+          itemId: "local",
+          source: {
+            path: "README.md",
+            digest: createHash("sha256")
+              .update("# Cancelled local target\n")
+              .digest("hex"),
+            text: "# Cancelled local target",
+          },
+          proof: { kind: "result-semantic", acceptanceIndex: 0 },
+          environment: {
+            kind: "local",
+            readiness: "available",
+            probe: "",
+            preparedBy: "",
+          },
+        },
+      ],
+    };
+    const snapshot = {
+      schemaVersion: 7,
+      repository: config.repository,
+      objective: 1,
+      runId: "cancelled-real-pass",
+      configDigest: factoryConfigDigest(config),
+      baseSha,
+      planGraphDigest: graphDigest(graph),
+      graph,
+      issueByItemId: { local: 2 },
+      work: { local: { status: "failed" } },
+      autonomy: resolveAutonomy({ allowances: { implementationRepairs: 0 } }),
+      capacity: { concurrency: 1 },
+      coordinator: {
+        mode: "running",
+        phase: "waiting",
+        phaseStartedAt: new Date().toISOString(),
+        processes: [],
+      },
+      cancelRequested: true,
+    };
+    saveState(statePath(config.repository, 1), snapshot);
+    const contentStore = new LocalContentStore(join(root, "content"));
+    const selection = { model: "gpt-6.1-sol", reasoningEffort: "medium" };
+    const github = new RealGitHubGateway(
+      config.repository,
+      new NativeStackDelivery(config.repository),
+    );
+    const services = {
+      github,
+      contentStore,
+      driver: new LocalExecutionDriver(
+        checkout,
+        join(root, "worktrees"),
+        new CodexHarness(join(root, "credentials"), "off", selection),
+        1,
+        contentStore,
+        "codex",
+      ),
+      planningModel: new CodexPlanningModel(checkout, selection, selection),
+      delivery: new RegularDelivery(checkout, github),
+    };
+    const aborted = new AbortController();
+    aborted.abort(new Error("Objective cancellation requested"));
+    const owner = {
+      snapshot,
+      abort: aborted,
+      pause: new AbortController(),
+      changed: false,
+      cancellation: Promise.resolve(),
+    };
+    const observations = [];
+    await withGitHubTransportObserver(
+      (observation) => observations.push(observation),
+      () =>
+        withProcessCancellation(aborted.signal, () =>
+          assert.rejects(runObjectivePass(config, 1, services, owner)),
+        ),
+    );
+    assert.deepEqual(observations, []);
+    const loaded = readState(config.repository, 1);
+    assert.equal(loaded.cancelRequested, true);
+    assert.equal(loaded.coordinator.cancelError, undefined);
+    assert.equal(loaded.cancelledAt, undefined);
+    assert.equal(loaded.work.local.status, "failed");
+    loaded.coordinator.cancelError = "Retained unresolved owned cancellation";
+    saveState(statePath(config.repository, 1), loaded);
+    owner.snapshot = loaded;
+    await withProcessCancellation(aborted.signal, () =>
+      assert.rejects(runObjectivePass(config, 1, services, owner)),
+    );
+    assert.equal(
+      readState(config.repository, 1).coordinator.cancelError,
+      "Retained unresolved owned cancellation",
+    );
+    assert.equal(readState(config.repository, 1).cancelledAt, undefined);
+  } finally {
+    if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = previousStateHome;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("collection settles an exited owned group before removing scratch", async () => {
@@ -554,6 +997,10 @@ test("settled validation reuses its exact Git result once and retains the failed
   try {
     git("init", "-b", "main");
     writeFileSync(join(checkout, "README.md"), "# Unchanged candidate\n");
+    writeFileSync(
+      join(checkout, "contract.md"),
+      "# Context\n\nRésumé 🧭.\n\n# Documentation\n\nDocument the readiness marker.\n\n# Other\n\nRetain other requirements.\n",
+    );
     git("add", ".");
     git(
       "-c",
@@ -566,6 +1013,11 @@ test("settled validation reuses its exact Git result once and retains the failed
     );
     const commit = git("rev-parse", "HEAD");
     const treeSha = git("rev-parse", "HEAD^{tree}");
+    const pinnedSources = planningSources(
+      "## Sources\n- README.md\n- contract.md\n",
+      commit,
+      checkout,
+    );
     const ready = join(root, "ready");
     const command = `${process.execPath} -e 'process.exit(require("node:fs").existsSync(${JSON.stringify(ready)}) ? 0 : 1)'`;
     const config = { repository: "integration/validation-rereview", checkout };
@@ -588,7 +1040,10 @@ test("settled validation reuses its exact Git result once and retains the failed
           requiredLfsRoles: [],
           sourceAssets: [],
           minimumAssetSets: 0,
-          citations: [],
+          citations: [
+            { path: "README.md", heading: "" },
+            { path: "contract.md", heading: "Documentation" },
+          ],
           validation: [{ command, provenance: "source-declared" }],
         },
       ],
@@ -611,6 +1066,7 @@ test("settled validation reuses its exact Git result once and retains the failed
         },
       ],
     };
+    hydrateWorkerInputSources(graph, pinnedSources);
     const work = {
       status: "failed",
       step: "validate",
@@ -799,6 +1255,92 @@ test("settled validation reuses its exact Git result once and retains the failed
       supplied[fileIndex].content,
       git("show", `${treeSha}:README.md`) + "\n",
     );
+    // Inspect the actual producer and shared renderer over the retained Git
+    // refusal, without generating a provider response or changing admission.
+    const beforeDiagnosis = JSON.stringify(refusedState);
+    const diagnosisRequest = workRepairDiagnosisRequest({
+      state: refusedState,
+      item,
+      evidence: supplied,
+      sources: pinnedSources,
+    });
+    const diagnosis = JSON.parse(
+      diagnosisRequest.objective.slice(
+        diagnosisRequest.objective.lastIndexOf("\n{") + 1,
+      ),
+    );
+    assert.deepEqual(diagnosis.repairEvidence, supplied);
+    assert.deepEqual(diagnosis.failure, refusal);
+    assert.deepEqual(diagnosisRequest.sources, pinnedSources);
+    assert.ok(
+      diagnosisRequest.sources.every((source) => !("complete" in source)),
+    );
+    for (const [index, input] of diagnosis.item.inputSources.entries()) {
+      assert.equal(input.content, undefined);
+      const span = input.sourceSpan;
+      const source = diagnosisRequest.sources[span.sourceIndex];
+      const selected = source.content.slice(
+        span.start,
+        span.start + span.length,
+      );
+      assert.equal(source.path, input.path);
+      assert.equal(selected, item.inputSources[index].content);
+      assert.equal(
+        createHash("sha256").update(source.content).digest("hex"),
+        span.sourceDigest,
+      );
+      assert.equal(
+        createHash("sha256").update(selected).digest("hex"),
+        span.contentDigest,
+      );
+    }
+    const section = diagnosis.item.inputSources.find(
+      (input) => input.heading === "Documentation",
+    );
+    assert.ok(section.sourceSpan.start > 0);
+    assert.ok(
+      section.sourceSpan.length <
+        pinnedSources[section.sourceSpan.sourceIndex].content.length,
+    );
+    assert.deepEqual(
+      { ...diagnosis.item, inputSources: item.inputSources },
+      item,
+    );
+    const renderedDiagnosis = renderDiagnosisCall(diagnosisRequest);
+    assert.equal(renderedDiagnosis.schema, diagnosisRequest.schema);
+    assert.ok(renderedDiagnosis.prompt.includes(JSON.stringify(supplied)));
+    assert.ok(
+      renderedDiagnosis.prompt.includes(
+        `Pinned sources:\n${JSON.stringify(pinnedSources)}`,
+      ),
+    );
+    assert.ok(
+      renderedDiagnosis.prompt.includes(
+        "Candidate-file contents and their ownership/completeness are supplied in repairEvidence, not pinned command authority.",
+      ),
+    );
+    assert.deepEqual(
+      JSON.parse(renderedDiagnosis.sourcePacket).sources,
+      pinnedSources,
+    );
+    const unmatchedItem = structuredClone(item);
+    unmatchedItem.inputSources[1].content += "An additional unavailable fact.";
+    const unmatchedRequest = workRepairDiagnosisRequest({
+      state: refusedState,
+      item: unmatchedItem,
+      evidence: supplied,
+      sources: pinnedSources,
+    });
+    const unmatchedDiagnosis = JSON.parse(
+      unmatchedRequest.objective.slice(
+        unmatchedRequest.objective.lastIndexOf("\n{") + 1,
+      ),
+    );
+    assert.deepEqual(
+      unmatchedDiagnosis.item.inputSources[1],
+      unmatchedItem.inputSources[1],
+    );
+    assert.equal(JSON.stringify(refusedState), beforeDiagnosis);
     // A declared correction exercises the shared admission gate over actual
     // workflow evidence; it is not a generated or scripted provider response.
     const declaration = {
@@ -823,6 +1365,10 @@ test("settled validation reuses its exact Git result once and retains the failed
       checkout,
     );
     assert.equal(typeof checkedReadiness, "object");
+    assert.equal(
+      checkedReadiness.inputDigest,
+      createHash("sha256").update(JSON.stringify(supplied)).digest("hex"),
+    );
     const incomplete = structuredClone(supplied);
     incomplete[fileIndex].complete = false;
     assert.equal(
@@ -1131,7 +1677,7 @@ test("source readiness prepares each real fresh checkout before its phase checks
         itemId: item.id,
         proof:
           index === 0
-            ? { kind: "result-semantic", acceptanceIndex: 0 }
+            ? { kind: "final-review" }
             : { kind: "result-command", validationIndex: 2 },
         environment: {
           kind: "real",
@@ -1163,6 +1709,11 @@ test("source readiness prepares each real fresh checkout before its phase checks
       checkout,
     });
     item = graph.items[0];
+    // Final semantic proof needs no extra QA item, but real final commands
+    // and their readiness still run in their own fresh checkout.
+    assert.equal(graph.items.length, 1);
+    assert.equal(graph.coverage[0].itemId, item.id);
+    assert.deepEqual(graph.coverage[0].proof, { kind: "final-review" });
     assert.deepEqual(
       graph.coverage.map((entry) => entry.source.text),
       ["Result is 42", `\`${acceptance}\``],
@@ -1534,6 +2085,16 @@ test("source readiness prepares each real fresh checkout before its phase checks
       [setup],
     );
     assert.equal(final.commands[0].index, 0);
+    // Passing real commands do not fabricate the missing independent
+    // semantic assessment of the original Objective criterion.
+    assert.throws(
+      () =>
+        assertCompletedCoverage({
+          graph,
+          finalValidation: { ...final, passed: true, criteria: [] },
+        }),
+      /Final acceptance coverage lacks its exact criterion proof/,
+    );
     assert.ok(
       final.preparation.every(
         (entry) => entry.treeSha === tree && entry.passed,

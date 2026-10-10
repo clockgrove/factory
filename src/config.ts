@@ -231,7 +231,11 @@ export interface FactoryConfig {
   /** Limits on unattended repair and amendment; omitted fields use bounded defaults. */
   autonomy?: AutonomyConfig;
   /** Explicit local sensitive-content opt-in; absent remains disabled. */
-  capture?: { enabled: boolean; maxBytesPerInvocation: number };
+  capture?: {
+    enabled: boolean;
+    maxBytesPerInvocation: number;
+    nativeBoundaryTelemetry?: boolean;
+  };
   /** Polling and an optional elapsed limit frozen before each fresh Objective starts. */
   queue?: { pollSeconds: number; objectiveDeadlineSeconds?: number };
   schemaVersion: 1;
@@ -816,10 +820,12 @@ export function validateConfig(value: unknown): FactoryConfig {
     assertObject(value.capture, "capture");
     assertOnlyKeys(
       value.capture,
-      ["enabled", "maxBytesPerInvocation"],
+      ["enabled", "maxBytesPerInvocation", "nativeBoundaryTelemetry"],
       "capture",
     );
     if (
+      (value.capture.nativeBoundaryTelemetry !== undefined &&
+        typeof value.capture.nativeBoundaryTelemetry !== "boolean") ||
       typeof value.capture.enabled !== "boolean" ||
       !Number.isSafeInteger(value.capture.maxBytesPerInvocation) ||
       (value.capture.maxBytesPerInvocation as number) <= 0

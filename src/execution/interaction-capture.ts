@@ -268,6 +268,8 @@ function safePartialText(text: string, secrets: string[]): string {
   return text.slice(0, end);
 }
 
+import { codexJsonBoundaries } from "../codex-boundary-telemetry.js";
+
 /** Adapter observations only: these records never decide a worker outcome. */
 export class WorkerInteractionCapture {
   private writer?: CaptureWriter;
@@ -277,6 +279,8 @@ export class WorkerInteractionCapture {
   private partialBytes = 0;
   private partialIncomplete = false;
   private partialLimit: number;
+  private boundaryStarted = performance.now();
+  private codexBoundary?: ReturnType<typeof codexJsonBoundaries>;
   constructor(
     request: HarnessRequest,
     progressPath: string,
@@ -284,6 +288,21 @@ export class WorkerInteractionCapture {
     configured?: CaptureContext["configured"],
   ) {
     this.partialLimit = request.capture?.policy?.maxBytesPerInvocation ?? 0;
+    if (request.capture?.policy?.nativeBoundaryTelemetry) {
+      this.codexBoundary = codexJsonBoundaries((boundary) =>
+        this.safely(() =>
+          this.writer!.record({
+            kind: "interaction",
+            coverage: "boundary",
+            boundary: {
+              ...boundary,
+              source: "codex-exec-json",
+              elapsedMs: Math.max(0, performance.now() - this.boundaryStarted),
+            },
+          }),
+        ),
+      );
+    }
     if (request.capture)
       this.writer = new CaptureWriter(
         { ...request.capture.context, ...(configured && { configured }) },
@@ -317,6 +336,21 @@ export class WorkerInteractionCapture {
   }
 
   request(prompt: string, instructions?: unknown): void {
+    if (this.codexBoundary)
+      this.safely(() =>
+        this.writer!.record({
+          kind: "interaction",
+          coverage: "boundary",
+          boundary: {
+            source: "codex-exec-json",
+            event: "telemetry-coverage",
+            elapsedMs: Math.max(0, performance.now() - this.boundaryStarted),
+            status: "unavailable",
+            submission: "unsupported",
+            nativeTransport: "unsupported",
+          },
+        }),
+      );
     this.safely(() =>
       this.writer!.record(
         {
@@ -438,6 +472,7 @@ export class WorkerInteractionCapture {
     usageBaseline?: ModelInvocationUsage,
   ): void {
     this.safely(() => {
+      this.codexBoundary?.(event);
       const projected = codexCaptureEvent(
         event,
         sessionId,

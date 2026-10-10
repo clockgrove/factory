@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { type StepClock, StepPaused, clearRepeats, step } from "./step.js";
-import type { PlanningModel, WorkItem } from "./contracts.js";
+import type { PlanningModel, PlanningRequest, WorkItem } from "./contracts.js";
+import { planningGraphView } from "./compiler/sources.js";
 import { blameDecision, cappedDiagnosis } from "./blame-decision.js";
 import { graphDigest, recordWorkerDiscovery } from "./graph-amendments.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
@@ -564,6 +565,7 @@ export function actionableReadiness(
   answer: DiagnosisAnswer,
   evidence: ReturnType<typeof repairEvidence>,
   checkout?: string,
+  deliveredEvidenceIndices?: readonly number[],
 ): RepairCorrection["readiness"] | string {
   const work = state.work[item.id]!;
   const failure = work.recovery!.failure!;
@@ -619,7 +621,11 @@ export function actionableReadiness(
     new Set(indices).size !== indices.length ||
     indices.some(
       (index) =>
-        !Number.isSafeInteger(index) || index < 0 || index >= evidence.length,
+        !Number.isSafeInteger(index) ||
+        index < 0 ||
+        index >= evidence.length ||
+        (deliveredEvidenceIndices !== undefined &&
+          !deliveredEvidenceIndices.includes(index)),
     )
   )
     return question(
@@ -978,6 +984,228 @@ export function diagnosisFiles(
   return files;
 }
 
+/** Narrow only a mapped exact-tree refusal; ambiguity keeps the complete workload. */
+function focusedDiagnosisSources(
+  state: FactoryState,
+  item: WorkItem,
+  evidence: ReturnType<typeof repairEvidence>,
+  sources: PlanningRequest<DiagnosisAnswer>["sources"],
+  checkout: string | undefined,
+): number[] | undefined {
+  const work = state.work[item.id]!;
+  const refusal = work.recovery?.failure?.semanticRefusal;
+  if (
+    !checkout ||
+    refusal?.source !== "model" ||
+    refusal.finding.question.trim() ||
+    work.step !== "validate" ||
+    work.failedValidation ||
+    item.dependencies.length ||
+    work.recovery?.history?.length ||
+    !work.baseSha ||
+    !work.changeRef ||
+    !work.validation?.worktreeObservation ||
+    work.validation.selectedLfs?.length ||
+    sources[0]?.path !== "OBJECTIVE" ||
+    planningGraphView(
+      { ...state.graph, items: [item] },
+      sources,
+    ).items[0]!.inputSources?.some((input) => !("sourceSpan" in input)) ||
+    state.graph.coverage.some(
+      (entry) =>
+        entry.itemId === item.id &&
+        (entry.environment.readiness !== "available" ||
+          entry.environment.preparedBy ||
+          [entry.environment.probe, ...(entry.environment.prerequisites ?? [])]
+            .filter(Boolean)
+            .some(
+              (command) => !item.validation.some((v) => v.command === command),
+            )),
+    )
+  )
+    return undefined;
+  try {
+    assertSemanticRefusalRecord(state, item.id, work, work.recovery!.failure);
+    if (
+      pinnedGitRaw(checkout, "rev-parse", `${work.changeRef}^{tree}`)
+        .toString("utf8")
+        .trim() !== work.treeSha
+    )
+      return undefined;
+    // This is the change-packet producer's exact path namespace, not review prose.
+    // Git supplies names/object identities only; supplied bodies are never reread.
+    const changed = pinnedGitRaw(
+      checkout,
+      "diff",
+      "--name-only",
+      "--no-renames",
+      "-z",
+      work.baseSha,
+      work.changeRef,
+      "--",
+    )
+      .toString("utf8")
+      .split("\0")
+      .filter(Boolean);
+    const selectedPaths = changed.filter((path) =>
+      refusal.evidence.some(
+        (reference) =>
+          reference.origin === "controller" &&
+          reference.complete &&
+          reference.path ===
+            `Exact Git change packet file ${JSON.stringify(path)}`,
+      ),
+    );
+    if (
+      !selectedPaths.length ||
+      selectedPaths.some((path) => !ownsPath(path, item.ownedPaths))
+    )
+      return undefined;
+    const files = evidence.filter((entry) => entry.kind === "candidate-file");
+    if (
+      selectedPaths.some(
+        (path) =>
+          !files.some(
+            (file) => "path" in file && file.path === path && file.complete,
+          ),
+      )
+    )
+      return undefined;
+    // Keep every complete owned candidate, including neighboring implementation.
+    // Verify its original bytes by the tree's blob ID, without a second body read.
+    const inventory = new Map(
+      pinnedGitRaw(checkout, "ls-tree", "-r", "-z", work.treeSha!)
+        .toString("utf8")
+        .split("\0")
+        .filter(Boolean)
+        .map((entry) => {
+          const tab = entry.indexOf("\t");
+          return [
+            entry.slice(tab + 1),
+            entry.slice(0, tab).split(" "),
+          ] as const;
+        }),
+    );
+    for (const file of files) {
+      if (!("path" in file) || !file.complete) continue;
+      const descriptor = inventory.get(file.path);
+      const content = Buffer.from(file.content);
+      const blob = createHash("sha1")
+        .update(`blob ${content.length}\0`)
+        .update(content)
+        .digest("hex");
+      if (
+        !ownsPath(file.path, item.ownedPaths) ||
+        !descriptor ||
+        !["100644", "100755"].includes(descriptor[0]!) ||
+        descriptor[1] !== "blob" ||
+        descriptor[2] !== blob
+      )
+        return undefined;
+    }
+    const retained = new Set([0]);
+    for (const reference of refusal.evidence) {
+      if (reference.origin !== "source") continue;
+      const index = sources.findIndex(
+        (source) =>
+          source.path === reference.path &&
+          reference.complete &&
+          createHash("sha256").update(source.content).digest("hex") ===
+            reference.digest,
+      );
+      if (index < 0) return undefined;
+      retained.add(index);
+    }
+    const authorityPaths = new Set([
+      ...item.validation.map((command) => command.source),
+      ...item.citations
+        .filter((citation) => citation.heading)
+        .map((citation) => citation.path),
+      ...state.graph.coverage
+        .filter((entry) => entry.itemId === item.id)
+        .map((entry) => entry.source.path),
+      ...selectedPaths,
+      "AGENTS.md",
+      "README.md",
+    ]);
+    if (
+      item.validation.some(
+        (command) =>
+          command.provenance !== "source-declared" ||
+          !sources.some((source) => source.path === command.source),
+      )
+    )
+      return undefined;
+    sources.forEach((source, index) => {
+      if (authorityPaths.has(source.path)) retained.add(index);
+    });
+    return [...retained].sort((a, b) => a - b);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Transient diagnosis inputs; canonical graph and indexed repair evidence remain unchanged. */
+export function workRepairDiagnosisRequest(args: {
+  state: FactoryState;
+  item: WorkItem;
+  evidence: ReturnType<typeof repairEvidence>;
+  sources: PlanningRequest<DiagnosisAnswer>["sources"];
+  rejected?: string;
+  invocation?: PlanningRequest<DiagnosisAnswer>["invocation"];
+  checkout?: string;
+}): PlanningRequest<DiagnosisAnswer> {
+  const { state, item, evidence, sources, rejected, invocation } = args;
+  const work = state.work[item.id]!;
+  const failure = work.recovery!.failure!;
+  const predecessors = mergedPredecessors(state, item);
+  const focusedSources = focusedDiagnosisSources(
+    state,
+    item,
+    evidence,
+    sources,
+    args.checkout,
+  );
+  const evidenceIndices = evidence.flatMap((entry, index) =>
+    !focusedSources ||
+    index < 2 ||
+    (entry.kind === "candidate-file" &&
+      "path" in entry &&
+      entry.complete &&
+      ownsPath(entry.path, item.ownedPaths))
+      ? [index]
+      : [],
+  );
+  const { inputSources: historicalInputs, ...focusedItem } = item;
+  const visibleEvidence = evidence.map((entry, index) => {
+    if (evidenceIndices.includes(index) || !("content" in entry)) return entry;
+    const { content, ...metadata } = entry;
+    return {
+      ...metadata,
+      contentDelivery: "omitted",
+      contentBytes: Buffer.byteLength(content),
+      contentDigest: createHash("sha256").update(content).digest("hex"),
+    };
+  });
+  return {
+    purpose: "diagnosis",
+    workRepairDiagnosis: {
+      mode: focusedSources ? "focused-semantic-refusal" : "complete",
+      evidenceDigest: inputDigest(evidence),
+      sourcesDigest: inputDigest(sources),
+      evidenceIndices,
+      sourceIndices: focusedSources ?? sources.map((_entry, index) => index),
+    },
+    objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return no commandAssessments when there are no failed commands. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item: focusedSources ? focusedItem : planningGraphView({ ...state.graph, items: [item] }, sources).items[0], ...(focusedSources && { historicalWorkerInputs: { contentDelivery: "omitted", count: historicalInputs?.length ?? 0, digest: inputDigest(historicalInputs ?? []) } }), failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: visibleEvidence })}`,
+    baseSha: work.executionBaseSha ?? state.baseSha,
+    sources,
+    controllerCapabilities: installedControllerCapabilities(),
+    controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+    schema: diagnosisSchema,
+    invocation,
+  };
+}
+
 export async function diagnoseWorkRepair(args: {
   state: FactoryState;
   item: WorkItem;
@@ -1058,7 +1286,6 @@ export async function diagnoseWorkRepair(args: {
   if (args.stopped()) return false;
   // A paid step: a lost answer is asked again, an invalid one again with
   // its validation error, until the paid bound makes it a decision.
-  const predecessors = mergedPredecessors(state, item);
   const files = diagnosisFiles(state, item, args.checkout);
   const evidence = repairEvidence(state, item, files);
   let answer: RepairCorrection | string | { blame: Blame; diagnosis: string };
@@ -1070,28 +1297,27 @@ export async function diagnoseWorkRepair(args: {
         // The last answer's error, kept in the step's record across a restart.
         const rejected = context.previousInvalid();
         return context.paid(async () => {
-          const response = await args.model.generateStructured<DiagnosisAnswer>(
-            {
-              purpose: "diagnosis",
-              objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return no commandAssessments when there are no failed commands. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item, failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: evidence })}`,
-              baseSha: work.executionBaseSha ?? state.baseSha,
-              sources: [...(args.sources ?? []), ...files],
-              controllerCapabilities: installedControllerCapabilities(),
-              controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
-              schema: diagnosisSchema,
-              invocation: {
-                invocationId: randomUUID(),
-                phase: "diagnosis",
-                ordinal: consumption(state).implementationRepairs,
-                observe: args.diagnostics?.modelObserver({
-                  scopeId: work.attempt!,
-                  runId: state.runId,
-                  itemId: item.id,
-                  attemptId: work.attempt,
-                }),
-              },
+          const request = workRepairDiagnosisRequest({
+            state,
+            item,
+            evidence,
+            sources: args.sources ?? [],
+            checkout: args.checkout,
+            rejected,
+            invocation: {
+              invocationId: randomUUID(),
+              phase: "diagnosis",
+              ordinal: consumption(state).implementationRepairs,
+              observe: args.diagnostics?.modelObserver({
+                scopeId: work.attempt!,
+                runId: state.runId,
+                itemId: item.id,
+                attemptId: work.attempt,
+              }),
             },
-          );
+          });
+          const response =
+            await args.model.generateStructured<DiagnosisAnswer>(request);
           if (
             !response ||
             typeof response !== "object" ||
@@ -1124,6 +1350,7 @@ export async function diagnoseWorkRepair(args: {
             response,
             evidence,
             args.checkout,
+            request.workRepairDiagnosis?.evidenceIndices,
           );
           if (typeof readiness === "string") return readiness;
           const proposed: RepairCorrection = {

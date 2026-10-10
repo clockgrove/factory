@@ -28,6 +28,13 @@ import { saveState } from "../dist/state-store.js";
 import { workerAttemptItem } from "../dist/item-worker.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { agentSessionContinuation } from "../dist/agent-session.js";
+import { StructuredPlanningModel } from "../dist/compiler/model.js";
+import {
+  ProviderTurnGuard,
+  ProviderTurnTimeoutError,
+} from "../dist/provider-turn.js";
+import { withProcessCancellation } from "../dist/process.js";
+import { attachedFault } from "../dist/fault.js";
 import { CodexPlanningTransport } from "../dist/compiler/codex-transport.js";
 import { materializeResultTree } from "../dist/result-evidence.js";
 import {
@@ -720,6 +727,65 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       assert.equal(disposedReview.status, "released");
       assert.equal(existsSync(disposedReview.data.sessionRoot), false);
       await transport.releaseSession(disposedReview);
+
+      // Exercise the real adapter with a controller timeout already settled
+      // before dispatch: no native child/provider is started, and the planner
+      // must surface the uncertainty without its former three-call replay.
+      const timeoutSnapshot = readFileSync(snapshot, "utf8");
+      const timeoutGuard = new ProviderTurnGuard(1, 1);
+      await assert.rejects(
+        timeoutGuard.race(new Promise(() => {})),
+        ProviderTurnTimeoutError,
+      );
+      timeoutGuard.finish();
+      const timeoutEvents = [];
+      const ownedProcesses = [];
+      const timeoutInvocation = {
+        invocationId: randomUUID(),
+        phase: "diagnosis",
+        ordinal: 0,
+        observe: (event) => timeoutEvents.push(event),
+      };
+      await assert.rejects(
+        () =>
+          withProcessCancellation(
+            timeoutGuard.signal,
+            () =>
+              new StructuredPlanningModel(transport).generateStructured({
+                purpose: "diagnosis",
+                objective:
+                  "Diagnose the retained failure without weakening acceptance.",
+                baseSha: result.baseSha,
+                sources: [],
+                schema: { type: "object" },
+                invocation: timeoutInvocation,
+              }),
+            (owned) => ownedProcesses.push(owned),
+          ),
+        (error) => {
+          assert.equal(attachedFault(error)?.kind, "decision");
+          assert.equal(error.cause.stopped, true);
+          assert.equal(error.cause.timeout.waitingFor, "model-response");
+          return true;
+        },
+      );
+      assert.equal(timeoutInvocation.providerAttempt, 1);
+      assert.equal(timeoutInvocation.providerMaxAttempts, 1);
+      assert.equal(
+        timeoutEvents.filter((event) => event.type === "started").length,
+        1,
+      );
+      assert.equal(
+        timeoutEvents.filter((event) => event.type === "retry-scheduled")
+          .length,
+        0,
+      );
+      assert.equal(
+        timeoutEvents.find((event) => event.type === "failed").usageAvailable,
+        false,
+      );
+      assert.deepEqual(ownedProcesses, []);
+      assert.equal(readFileSync(snapshot, "utf8"), timeoutSnapshot);
 
       const rejectedSession = agentSessionContinuation(
         loaded,

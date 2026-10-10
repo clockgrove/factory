@@ -13,7 +13,14 @@ import {
 import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import type { ReviewBodyFile, ReviewPacket } from "./review-evidence.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -670,6 +677,16 @@ export function configuredResultReviewTextBudget(): number {
     : 48_000;
 }
 
+/** Local raw Git reads are bounded separately from provider-rendered evidence. */
+export function configuredResultReviewRawBudget(): number {
+  const configured = Number(
+    process.env.FACTORY_RESULT_REVIEW_RAW_BUDGET_BYTES ?? 1_048_576,
+  );
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : 1_048_576;
+}
+
 /** Current immutable implementation observations; never pinned source authority. */
 export function amendmentImplementationEvidence(args: {
   state: FactoryState;
@@ -821,9 +838,10 @@ export function amendmentImplementationEvidence(args: {
 export function materializeResultTree(
   checkout: string,
   treeSha: string,
-): { directory: string; remove(): void } {
+  packet?: ReviewPacket,
+): { directory: string; reviewFiles?: ReviewBodyFile[]; remove(): void } {
   const root = mkdtempSync(join(tmpdir(), "factory-result-tree-"));
-  const directory = join(root, "tree");
+  const directory = join(root, packet ? "candidate" : "tree");
   const remove = () => rmSync(root, { recursive: true, force: true });
   try {
     mkdirSync(directory);
@@ -845,7 +863,43 @@ export function materializeResultTree(
           `Cannot materialize exact result tree for independent review: ${result.stderr.toString("utf8")}`,
         );
     }
-    return { directory, remove };
+    if (!packet) return { directory, remove };
+    rmSync(join(root, "index"));
+    mkdirSync(join(root, "pinned"));
+    const reviewFiles: ReviewBodyFile[] = [];
+    for (const [evidenceIndex, entry] of packet.evidence.entries()) {
+      // Normative prose and instructions stay inline. Large immutable code,
+      // scripts and data remain complete, available only in this call's root.
+      if (
+        entry.origin !== "source" ||
+        entry.complete !== true ||
+        entry.path === "OBJECTIVE" ||
+        /\.(?:md|mdx|rst|txt)$/i.test(entry.path) ||
+        Buffer.byteLength(entry.content) <= 2_048
+      )
+        continue;
+      const bytes = Buffer.from(entry.content, "utf8");
+      if (
+        bytes.toString("utf8") !== entry.content ||
+        createHash("sha256").update(bytes).digest("hex") !== entry.digest
+      )
+        throw new Error(
+          "Pinned review source bytes differ from canonical packet",
+        );
+      const path = `pinned/${evidenceIndex}.txt`;
+      writeFileSync(join(root, path), bytes, { flag: "wx", mode: 0o400 });
+      if (!readFileSync(join(root, path)).equals(bytes))
+        throw new Error("Materialized pinned review source bytes differ");
+      reviewFiles.push({
+        evidenceIndex,
+        root,
+        path,
+        encoding: "utf-8",
+        bytes: bytes.length,
+        digest: entry.digest,
+      });
+    }
+    return { directory: root, reviewFiles, remove };
   } catch (error) {
     remove();
     throw error;
@@ -866,7 +920,7 @@ export function unchangedResultByteEvidence(
   const sources: ResultReviewEvidenceSource[] = [];
   const budget = Number.isSafeInteger(limit) && limit >= 0 ? limit : 0;
   let remaining = budget;
-  const rawBudget = configuredResultReviewTextBudget();
+  const rawBudget = configuredResultReviewRawBudget();
   let rawRemaining = rawBudget;
   // Retain serialized room for an unavailable outcome after a bounded raw read.
   const available = () => Math.max(0, remaining - 512);
@@ -1118,10 +1172,23 @@ export function unchangedResultByteEvidence(
         },
         true,
       )
-    )
-      return unavailable(
-        "Complete comparison observed but serialized receipt exceeds budget",
-      );
+    ) {
+      if (
+        !emit(
+          label,
+          {
+            ...facts,
+            availability: "unavailable",
+            reason:
+              "Complete comparison observed but lossless binary bytes and serialized receipt exceed budget",
+          },
+          false,
+        )
+      )
+        return unavailable(
+          "Remaining serialized comparison evidence exceeds budget",
+        );
+    }
   }
   return {
     sources,

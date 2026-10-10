@@ -266,6 +266,22 @@ export class CodexPlanningTransport implements PlanningTransport {
       nativeAttempted = true;
       await runCodexExec({
         env: home.env,
+        ...(invocation.observe?.nativeBoundaryTelemetry && {
+          boundary: (
+            boundary: import("../capture.js").ModelBoundaryObservation,
+          ) =>
+            observeModelInvocation(invocation, {
+              type: "progress",
+              capture: {
+                event: {
+                  kind: "interaction",
+                  coverage: "boundary",
+                  providerSessionId: thread.id,
+                  boundary,
+                },
+              },
+            }),
+        }),
         options: {
           workingDirectory: args.tree ?? this.checkout,
           // The tree's read-only permission profile is Factory's config.

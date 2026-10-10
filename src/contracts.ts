@@ -205,6 +205,13 @@ export interface ModelInvocationObservation {
   detail?: string;
 }
 
+/** Capture policy conveyed by the existing observational sink, not model authority. */
+export type ModelInvocationObserver = ((
+  observation: ModelInvocationObservation,
+) => void) & {
+  nativeBoundaryTelemetry?: boolean;
+};
+
 export interface ModelInvocationContext {
   invocationId: string;
   phase: ModelInvocationPhase;
@@ -213,7 +220,7 @@ export interface ModelInvocationContext {
   providerAttempt?: number;
   /** Adapter-owned bounded provider-attempt count. */
   providerMaxAttempts?: number;
-  observe?: (observation: ModelInvocationObservation) => void;
+  observe?: ModelInvocationObserver;
 }
 
 /** Controller-observed native admission, not target source or WorkGraph edges. */
@@ -372,6 +379,14 @@ export interface PlanningRequest<T> {
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;
   purpose?: "diagnosis";
+  /** Transient Work Item delivery choices; canonical sources/evidence remain retained. */
+  workRepairDiagnosis?: {
+    mode: "complete" | "focused-semantic-refusal";
+    evidenceDigest: string;
+    sourcesDigest: string;
+    evidenceIndices: number[];
+    sourceIndices: number[];
+  };
   /** Actual decoded rejected graph; null when no canonical graph was produced. */
   rejectedGraph?: WorkGraph | null;
   coverageObligations?: CoverageObligation[];
@@ -524,7 +539,9 @@ export interface PlanningModel {
     invocation?: ModelInvocationContext;
     /** Why the previous answer was invalid; answer again without the error. */
     previousInvalid?: string;
-    /** Exported exact result-tree files for read-only review; no Git metadata. */
+    /** Current authenticated pinned-source files; absent for inline review. */
+    reviewFiles?: import("./review-evidence.js").ReviewBodyFile[];
+    /** Exported exact candidate and approved source files; no Git metadata. */
     tree?: string;
     session?: AgentSessionContinuation;
   }): Promise<{

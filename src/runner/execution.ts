@@ -33,7 +33,6 @@ import { runRegularGraph } from "../delivery/regular-runner.js";
 import { DiagnosticEmitter, StateDiagnostics } from "../diagnostics.js";
 import {
   awaitsOperator,
-  clearAllRepeats,
   outageOf,
   StepPaused,
   step,
@@ -69,7 +68,6 @@ import {
   canHandoff,
   CoordinatorHandoff,
   cancelRecordedSubprocesses,
-  closeCancelledIssues,
 } from "./ownership.js";
 import { prepareObjective } from "./planning.js";
 import {
@@ -643,18 +641,9 @@ export async function runObjectivePass(
       if (cancellationRequested()) {
         await owner.cancellation;
         await Promise.allSettled(active.values());
-        if (active.size === 0)
-          await closeCancelledIssues(current, github, () =>
-            saveState(path, current),
-          );
-        if (!current.coordinator?.cancelError && active.size === 0) {
-          current.cancelledAt = new Date().toISOString();
-          clearAllRepeats(current);
-          if (current.schemaVersion === 7)
-            for (const work of Object.values(current.work))
-              if (work.status !== "done" && work.status !== "published")
-                work.status = "cancelled";
-        }
+        // This pass still carries the aborted process scope. The owner
+        // finalizes cancellation after it unwinds: remote issue closure,
+        // session disposal and terminal state must not inherit this signal.
       } else if (current.schemaVersion === 8) {
         // Preparation resumes by repeating its step; record why it paused.
         current.coordinator.waitReason =

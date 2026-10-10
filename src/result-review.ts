@@ -214,12 +214,16 @@ export async function reviewAcceptance(args: {
   // repeats a lost answer and waits out a limit.
   // The reviewer reads the exact tree itself instead of asking for contents.
   const tree = undecided
-    ? materializeResultTree(checkout, evidence.treeSha)
+    ? materializeResultTree(checkout, evidence.treeSha, packet)
     : undefined;
   let response: Awaited<ReturnType<NonNullable<PlanningModel["reviewResult"]>>>;
   try {
     response = undecided
-      ? await model.reviewResult!({ ...request, tree: tree!.directory })
+      ? await model.reviewResult!({
+          ...request,
+          tree: tree!.directory,
+          reviewFiles: tree!.reviewFiles,
+        })
       : { packetId: packet.id, findings: [] };
   } finally {
     tree?.remove();

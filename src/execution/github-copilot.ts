@@ -258,6 +258,7 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
       typeof native.authenticationDigest !== "string" ||
       !/^[a-f0-9]{64}$/.test(native.authenticationDigest) ||
       native.nativeSessionId !== initial.nativeSessionId ||
+      native.profileId !== (initial.ref.data as CopilotSessionData).profileId ||
       native.selectionDigest !==
         (initial.ref.data as CopilotSessionData).selectionDigest
     )
@@ -311,6 +312,8 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
       input.session.root !== root ||
       input.session.ref.adapter !== this.sessionAdapter ||
       input.session.ref.identity !== session.identity ||
+      input.session.ref.executionIdentity !== identity ||
+      input.session.ref.turn !== session.turn ||
       !isDeepStrictEqual(input.session.ref.scope, session.scope)
     )
       throw new Error(
@@ -324,6 +327,8 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
         data?.worker?.requestPath !== requestPath ||
         input.session.ref.turn !== session.turn ||
         data.nativeSessionId !== input.session.nativeSessionId ||
+        data.profileId !==
+          (input.session.ref.data as CopilotSessionData).profileId ||
         data.selectionDigest !==
           (input.session.ref.data as CopilotSessionData).selectionDigest
       )

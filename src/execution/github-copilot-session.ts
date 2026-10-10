@@ -20,6 +20,7 @@ import type { WorkerHandleData } from "./worker-process.js";
 export const COPILOT_SESSION_ADAPTER = "github-copilot-sdk";
 export interface CopilotSessionData {
   selectionDigest: string;
+  profileId?: string;
   nativeSessionId: string;
   authenticationDigest?: string;
   nativeSettled?: true;
@@ -136,6 +137,9 @@ export function prepareCopilotSession(
     data: {
       selectionDigest,
       nativeSessionId,
+      ...(request.item.executionBinding && {
+        profileId: request.item.executionBinding.id,
+      }),
       ...((retained?.data as CopilotSessionData | undefined)
         ?.authenticationDigest && {
         authenticationDigest: (retained!.data as CopilotSessionData)

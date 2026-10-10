@@ -27,6 +27,7 @@ import type {
 import type {
   AgentHarness,
   AgentSessionRef,
+  AgentSessionRequest,
   CapturedAssetSet,
   ContentRef,
   ContentStore,
@@ -857,6 +858,52 @@ export function retainedFailedResultBrief(
   return failedContext;
 }
 
+/** Admit only the selected harness's native turn; preserve prior fresh-only ownership. */
+export function checkpointWorkerSession(
+  session: AgentSessionRequest | undefined,
+  options: {
+    adapter: string;
+    supportsResume: boolean;
+    executionIdentity: string;
+    profileId?: string;
+  },
+  checkpoint: ExecutionContext["checkpointSession"],
+): AgentSessionRequest | undefined {
+  if (!session) return undefined;
+  assertAgentSessionScope(session.scope);
+  if (session.retained) assertAgentSessionRef(session.retained, session.scope);
+  if (
+    session.retained?.status === "in-flight" ||
+    (session.retained?.currentTurn &&
+      session.retained.currentTurn.resources !== "settled")
+  )
+    throw new Error("Unsettled worker conversation cannot dispatch fresh work");
+  // This fresh worker has its own durable execution handle. The old native
+  // receipt remains unchanged and addressable by supported disposal.
+  if (!options.supportsResume && session.retained?.status === "ready")
+    return undefined;
+  checkpoint?.({
+    scope: structuredClone(session.scope),
+    adapter: options.adapter,
+    identity: session.identity,
+    turn: (session.retained?.turn ?? 0) + 1,
+    status: options.supportsResume ? "in-flight" : "unavailable",
+    executionIdentity: options.executionIdentity,
+    data: options.supportsResume
+      ? {
+          ...(session.retained?.data as Record<string, unknown> | undefined),
+          pendingWorkerIdentity: options.executionIdentity,
+          ...(options.profileId && { profileId: options.profileId }),
+        }
+      : {
+          reason:
+            "The selected harness does not support native conversation continuation",
+          ...(options.profileId && { profileId: options.profileId }),
+        },
+  });
+  return options.supportsResume ? session : undefined;
+}
+
 export class LocalExecutionDriver implements ExecutionDriver {
   readonly sessionCapabilities = { resumeRoles: ["implementation"] } as const;
   readonly freshCheckoutReadiness = true as const;
@@ -1023,6 +1070,24 @@ export class LocalExecutionDriver implements ExecutionDriver {
       );
     const running = this.active.get(identity);
     if (running) return { provider: "local", identity, data: running };
+    if (session) {
+      assertAgentSessionScope(session.scope);
+      if (
+        session.scope.role !== "implementation" ||
+        session.scope.itemId !== request.item.id
+      )
+        throw new Error("Local execution session belongs to another Work Item");
+      if (session.retained)
+        assertAgentSessionRef(session.retained, session.scope);
+      if (
+        session.retained?.status === "in-flight" ||
+        (session.retained?.currentTurn &&
+          session.retained.currentTurn.resources !== "settled")
+      )
+        throw new Error(
+          "Unsettled worker conversation cannot dispatch fresh work",
+        );
+    }
     const worktree = join(this.workRoot, identity);
     mkdirSync(this.workRoot, { recursive: true });
     if (existsSync(worktree)) {
@@ -1149,57 +1214,26 @@ export class LocalExecutionDriver implements ExecutionDriver {
         worktree,
         request.retainedFailedResult,
       );
-      if (session) {
-        assertAgentSessionScope(session.scope);
-        if (
-          session.scope.role !== "implementation" ||
-          session.scope.itemId !== request.item.id
-        )
-          throw new Error(
-            "Local execution session belongs to another Work Item",
-          );
-        if (session.retained)
-          assertAgentSessionRef(session.retained, session.scope);
-        context?.checkpointSession?.({
-          scope: structuredClone(session.scope),
+      const admittedSession = checkpointWorkerSession(
+        session,
+        {
           adapter:
             harness.sessionAdapter ??
             request.item.executionBinding?.adapter ??
             this.adapterIdentity,
-          identity: session.identity,
-          turn: (session.retained?.turn ?? 0) + 1,
-          status: harness.sessionCapabilities?.resumeRoles.includes(
-            "implementation",
-          )
-            ? "in-flight"
-            : "unavailable",
+          supportsResume:
+            harness.sessionCapabilities?.resumeRoles.includes(
+              "implementation",
+            ) === true,
           executionIdentity: identity,
-          data: harness.sessionCapabilities?.resumeRoles.includes(
-            "implementation",
-          )
-            ? {
-                ...(session.retained?.data as
-                  | Record<string, unknown>
-                  | undefined),
-                pendingWorkerIdentity: identity,
-                ...(request.item.executionBinding && {
-                  profileId: request.item.executionBinding.id,
-                }),
-              }
-            : {
-                reason:
-                  "The selected harness does not support native conversation continuation",
-                ...(request.item.executionBinding && {
-                  profileId: request.item.executionBinding.id,
-                }),
-              },
-        });
-      }
+          profileId: request.item.executionBinding?.id,
+        },
+        context?.checkpointSession,
+      );
+      const workerRequest = { ...request };
+      if (!admittedSession) delete workerRequest.session;
       const handle = await harness.start({
-        ...(session &&
-          harness.sessionCapabilities?.resumeRoles.includes(
-            "implementation",
-          ) && { session }),
+        ...(admittedSession && { session: admittedSession }),
         ...(request.captureContext &&
           this.captureSettings && {
             capture: {
@@ -1241,7 +1275,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       assertDurableHandle(handle);
       const active = {
         request: structuredClone({
-          ...request,
+          ...workerRequest,
           attemptId: identity,
           sourceAssets,
         }),
@@ -1604,7 +1638,13 @@ export class LocalExecutionDriver implements ExecutionDriver {
         "The retained session adapter is unavailable for cleanup",
       );
     }
-    for (const harness of harnesses) await harness.releaseSession?.(session);
+    for (const harness of harnesses) {
+      if (!harness.releaseSession)
+        throw new Error(
+          "The retained session adapter lacks supported disposal",
+        );
+      await harness.releaseSession(session);
+    }
   }
 }
 

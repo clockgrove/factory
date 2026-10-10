@@ -36,6 +36,11 @@ import { requestControl, serveControl } from "../dist/coordinator-control.js";
 import { checkpointExecutionState } from "../dist/runner/execution.js";
 import { canHandoff } from "../dist/runner/ownership.js";
 import { setCoordinatorMode } from "../dist/state.js";
+import {
+  checkpointWorkerSession,
+  CodexHarness,
+  LocalExecutionDriver,
+} from "../dist/execution/local.js";
 import { workerAttemptItem } from "../dist/item-worker.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import {
@@ -452,6 +457,58 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         .retained,
       receipt,
     );
+    const blockedWorkRoot = join(root, "blocked-worker");
+    const blockedDriver = new LocalExecutionDriver(
+      checkout,
+      blockedWorkRoot,
+      new CodexHarness(join(root, "blocked-credentials"), "off", {
+        model: "unused",
+        reasoningEffort: "low",
+      }),
+      1,
+      store,
+      "codex",
+    );
+    await assert.rejects(
+      blockedDriver.start(
+        {
+          item: loaded.graph.items.find((item) => item.id === "api"),
+          baseSha: loaded.baseSha,
+          attemptId: "blocked-fresh",
+          session: {
+            scope: session.scope,
+            identity: session.identity,
+            retained: receipt,
+          },
+        },
+        {
+          cancelled: () => false,
+          checkpoint: () => assert.fail("No worker may be admitted"),
+          checkpointSession: (ref) => session.checkpoint(ref),
+        },
+      ),
+      /Unsettled worker conversation/,
+    );
+    assert.equal(existsSync(blockedWorkRoot), false);
+    const otherGraph = structuredClone(inFlight);
+    otherGraph.graph.items[0].brief += "\nRefined implementation boundary.";
+    assert.throws(
+      () => agentSessionContinuation(otherGraph, "implementation", "api", save),
+      /unsettled agent ownership/,
+    );
+    const historicalUnknown = structuredClone(inFlight);
+    historicalUnknown.agentSessionHistory = [structuredClone(receipt)];
+    delete historicalUnknown.agentSessions;
+    assert.throws(
+      () =>
+        agentSessionContinuation(
+          historicalUnknown,
+          "implementation",
+          "api",
+          save,
+        ),
+      /unsettled agent ownership/,
+    );
     session.checkpoint({ ...receipt, status: "ready" });
     const ready = parseFactoryState(
       JSON.parse(readFileSync(snapshot, "utf8")),
@@ -463,6 +520,25 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         .identity,
       session.identity,
     );
+    const beforeFresh = readFileSync(snapshot, "utf8");
+    assert.equal(
+      checkpointWorkerSession(
+        {
+          scope: session.scope,
+          identity: session.identity,
+          retained: session.retained,
+        },
+        {
+          adapter: receipt.adapter,
+          supportsResume: false,
+          executionIdentity: "fresh-api",
+        },
+        (ref) => session.checkpoint(ref),
+      ),
+      undefined,
+    );
+    assert.equal(readFileSync(snapshot, "utf8"), beforeFresh);
+    assert.deepEqual(session.retained, { ...receipt, status: "ready" });
     assert.throws(
       () =>
         session.checkpoint({

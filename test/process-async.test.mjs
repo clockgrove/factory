@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -49,7 +50,11 @@ import {
   summarizeFormalHistory,
   withDiagnosticSession,
 } from "../dist/diagnostics.js";
-import { CodexHarness, LocalExecutionDriver } from "../dist/execution/local.js";
+import {
+  checkpointWorkerSession,
+  CodexHarness,
+  LocalExecutionDriver,
+} from "../dist/execution/local.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
@@ -1048,6 +1053,8 @@ test("collection settles an exited owned group before removing scratch", async (
     assert.equal(existsSync(sessionRoot), true);
     const retainedSession = {
       ...session,
+      executionIdentity: "exited",
+      status: "ready",
       data: {
         workerSettled: true,
         worker: {
@@ -1059,8 +1066,30 @@ test("collection settles an exited owned group before removing scratch", async (
         },
       },
     };
+    const retainedPath = join(root, "retained-session.json");
+    writeFileSync(retainedPath, `${JSON.stringify(retainedSession)}\n`);
+    const retainedBytes = readFileSync(retainedPath, "utf8");
+    // The READY fixture is not provider acceptance. It carries the actual
+    // exited worker's private ownership, whose disposal is exercised below.
+    assert.equal(
+      checkpointWorkerSession(
+        { scope, identity: session.identity, retained: retainedSession },
+        { adapter: "codex", supportsResume: false, executionIdentity: "fresh" },
+        (ref) => writeFileSync(retainedPath, `${JSON.stringify(ref)}\n`),
+      ),
+      undefined,
+    );
+    assert.equal(readFileSync(retainedPath, "utf8"), retainedBytes);
+    const driver = new LocalExecutionDriver(
+      root,
+      join(root, "work"),
+      harness,
+      1,
+      new LocalContentStore(join(root, "content")),
+      "codex",
+    );
     await assert.rejects(
-      harness.releaseSession({
+      driver.releaseSession({
         ...retainedSession,
         scope: { ...scope, runId: "other-run" },
       }),
@@ -1081,7 +1110,7 @@ test("collection settles an exited owned group before removing scratch", async (
       assert.ok(linuxProcessIdentity(pending.pid));
       writeFileSync(join(harnessRoot, "continuation.pid"), `${pending.pid}\n`);
       const exited = once(pending, "exit");
-      await harness.releaseSession({
+      await driver.releaseSession({
         ...retainedSession,
         data: {
           ...retainedSession.data,
@@ -1095,7 +1124,7 @@ test("collection settles an exited owned group before removing scratch", async (
         await killGroup(pending.pid, "integration continuation");
     }
     assert.equal(existsSync(sessionRoot), false);
-    await harness.releaseSession(retainedSession);
+    await driver.releaseSession(retainedSession);
   } finally {
     if (processGroupExists(child.pid))
       await killGroup(child.pid, "integration shell");

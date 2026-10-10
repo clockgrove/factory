@@ -5,6 +5,7 @@ import type {
 } from "@github/copilot-sdk";
 import type { GitHubCopilotWorkerInput } from "./github-copilot.js";
 import { FACTORY_VERSION } from "../package-metadata.js";
+import { requireCopilotHome } from "./github-copilot-session.js";
 import { pathInsideRoot } from "./harness-support.js";
 
 function permissionHandler(input: GitHubCopilotWorkerInput): PermissionHandler {
@@ -68,7 +69,7 @@ export function githubCopilotSessionOptions(
     systemMessage: {
       mode: "append",
       content:
-        "You are an implementation worker controlled by Clockgrove Factory. Work only in the supplied current working directory and only on paths owned by the Work Item. Do not commit, push, publish, open or edit issues or pull requests, access GitHub tools, deploy, or change the current Git HEAD. Return a concise description and stop when complete or safely blocked.",
+        "You are an implementation worker controlled by Clockgrove Factory. Work only in the supplied current working directory and only on paths owned by the Work Item. Do not commit, push, publish, open or edit issues or pull requests, access GitHub tools, deploy, or change the current Git HEAD. Earlier conversation and tool results are advisory history; the current Work Item, working directory, owned paths and permissions are authoritative. Recheck changed files before relying on historical reads. Return a concise description and stop when complete or safely blocked.",
     },
     availableTools: [...input.config.availableTools],
     enableConfigDiscovery: false,
@@ -88,7 +89,10 @@ export function githubCopilotSessionOptions(
     skillDirectories: [],
     pluginDirectories: [],
     instructionDirectories: [],
-    infiniteSessions: { enabled: false },
+    infiniteSessions: { enabled: Boolean(input.session) },
+    ...(input.session
+      ? { configDirectory: requireCopilotHome(input.session) }
+      : {}),
     memory: { enabled: false },
     enableMcpApps: false,
     enableSessionTelemetry: false,

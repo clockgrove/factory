@@ -253,11 +253,26 @@ export function claudeSessionEnvironment(
       throw new Error(
         "Claude login credential source is not an owned regular file",
       );
-    writeFileSync(
-      join(config, ".credentials.json"),
-      readFileSync(credentials),
-      { mode: 0o600 },
-    );
+    const destination = join(config, ".credentials.json");
+    const previous = lstatSync(destination, { throwIfNoEntry: false });
+    if (
+      previous &&
+      (!previous.isFile() ||
+        previous.isSymbolicLink() ||
+        previous.uid !== process.getuid?.() ||
+        previous.mode & 0o077)
+    )
+      throw new Error("Claude private credential destination changed");
+    const staging = join(config, `.credentials.${randomUUID()}.tmp`);
+    writeFileSync(staging, readFileSync(credentials), {
+      flag: "wx",
+      mode: 0o600,
+    });
+    try {
+      renameSync(staging, destination);
+    } finally {
+      rmSync(staging, { force: true });
+    }
   }
   return {
     ...environment,

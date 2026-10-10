@@ -202,7 +202,8 @@ assert.equal(retained.includes("private"), false);
 assert.deepEqual(JSON.parse(retained.trim()).transport, transport);
 const emitted = [];
 const writer = new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, invocationId: "actual-child-capture", providerAttempt: 1, phase: "integration", adapter: "local-process", configured: { provider: "not-invoked", model: "none" } }, { enabled: true, maxBytesPerInvocation: 1024 }, [], metadata => emitted.push(metadata));
-writer.record({ kind: "interaction" }, () => ({ text: "real child process capture" }));
+const prompt = "real child process capture π";
+writer.record({ kind: "request", promptComponents: { renderedPromptBytes: Buffer.byteLength(prompt), rolePreambleTaskSplit: "unavailable" } }, () => ({ text: "real child process capture" }));
 for (const event of nativeEvents) writer.record(event);
 process.stdout.write(JSON.stringify(emitted));`,
       ],
@@ -226,6 +227,32 @@ process.stdout.write(JSON.stringify(emitted));`,
     const analysis = analyzeInteractions([metadata], [], {
       includeNativeToolContent: true,
     });
+    assert.equal(
+      analysis.requestBytes.renderedPromptBytes.total,
+      Buffer.byteLength("real child process capture π"),
+    );
+    assert.equal(analysis.requestBytes.evidenceBytes.total, null);
+    assert.equal(analysis.requestBytes.exactBilledRoleTokens, null);
+    assert.equal(analysis.invocations[0].sessionTurnCoverage, "unavailable");
+    assert.equal(
+      analysis.sessionModes.find((mode) => mode.mode === "unknown")
+        .invocationCount,
+      1,
+    );
+    assert.equal(
+      analysis.nativeFamilyResponseUsage.cache.allObservedInputTokens,
+      null,
+    );
+    assert.equal(
+      analysis.nativeFamilyResponseUsage.cache
+        .knownCachedFractionOfAllObservedInput,
+      null,
+    );
+    assert.equal(
+      analysis.nativeFamilyResponseUsage.completeFamilyCoverage,
+      "unknown",
+    );
+    assert.equal(analysis.nativeFamilyResponseUsage.paidOwnedChildSessions, 0);
     assert.equal(analysis.nativeToolActivity.uniqueCalls, null);
     assert.equal(analysis.invocations[0].nativeToolActivity.contentReads, 0);
     assert.equal(

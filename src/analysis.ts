@@ -3,8 +3,10 @@ import type { InteractionMetadata } from "./capture.js";
 import type { DiagnosticEvent } from "./diagnostics.js";
 import { summarizeNativeTools } from "./native-tool-activity.js";
 import {
+  cumulativeTokenUsageDelta,
   normalizeCodexTokenUsage,
   normalizeTokenUsage,
+  summarizeInputCaching,
   tokenCategories,
 } from "./usage.js";
 
@@ -252,6 +254,7 @@ function summarizeNative(
 /** An alternate disjoint-response view, never added to SDK/thread cumulative totals. */
 function summarizeNativeFamily(
   scopes: ReturnType<typeof summarizeNativeScope>[],
+  parentScopes = 1,
 ) {
   const observedResponses = scopes.reduce(
     (total, scope) =>
@@ -301,8 +304,8 @@ function summarizeNativeFamily(
     accountingMethod:
       "Disjoint native session/response identities; cumulative and inherited checkpoints excluded" as const,
     addedToInvocationTotals: false,
-    parentScopes: 1,
-    observedChildScopes: scopes.length - 1,
+    parentScopes,
+    observedChildScopes: scopes.length - parentScopes,
     completeRequestAndAttemptCount: null,
     categories,
     cache: {
@@ -323,6 +326,18 @@ function summarizeNativeFamily(
           : pairs.every((pair) => pair.coverage === "available")
             ? "available"
             : "partial",
+      allObservedInputTokens: categories.inputTokens?.total ?? null,
+      inputWithUnknownCachedCategory:
+        categories.inputTokens?.total !== null &&
+        categories.inputTokens?.total !== undefined
+          ? categories.inputTokens.total - (inputTokens ?? 0)
+          : null,
+      knownCachedFractionOfAllObservedInput:
+        categories.inputTokens?.total && cachedInputTokens !== null
+          ? cachedInputTokens / categories.inputTokens.total
+          : null,
+      inputCoverage: categories.inputTokens?.coverage ?? "unavailable",
+      fullFamilyCoverage: "unknown" as const,
       upstreamCategoryAndBillingCoverage: "unknown" as const,
     },
   };
@@ -333,6 +348,26 @@ function summarizeNativeScope(records: InteractionMetadata[]) {
   const snapshot = records
     .filter((record) => record.nativeRollout)
     .at(-1)?.nativeRollout;
+  const sessionTurn = records.find(
+    (record) => record.sessionTurn && !record.nativeOwnership,
+  )?.sessionTurn;
+  const resumed =
+    sessionTurn?.mode === "resumed" ||
+    snapshot?.turnBoundaryBytes !== undefined;
+  const baseline =
+    sessionTurn?.mode === "resumed" && sessionTurn.boundaryBytes !== undefined
+      ? sessionTurn.usageBaseline
+      : undefined;
+  const threadUsage = resumed
+    ? baseline !== undefined && snapshot?.latestThreadUsage
+      ? cumulativeTokenUsageDelta(snapshot.latestThreadUsage, baseline)
+      : undefined
+    : snapshot?.latestThreadUsage;
+  const tokenCountUsage = resumed
+    ? baseline !== undefined && snapshot?.latestTokenCountUsage
+      ? cumulativeTokenUsageDelta(snapshot.latestTokenCountUsage, baseline)
+      : undefined
+    : snapshot?.latestTokenCountUsage;
   const conflicts = new Set(
     records
       .filter(
@@ -394,18 +429,24 @@ function summarizeNativeScope(records: InteractionMetadata[]) {
           latestTokenCountCounter:
             snapshot?.latestTokenCountUsage?.[category] ?? null,
           outerInvocationCounter: outer?.[category] ?? null,
+          checkpointScope: resumed
+            ? baseline !== undefined
+              ? "authenticated-current-turn-delta"
+              : "current-turn-unavailable"
+            : "fresh-thread",
+          currentTurnThreadCounter: threadUsage?.[category] ?? null,
+          currentTurnTokenCountCounter: tokenCountUsage?.[category] ?? null,
           threadVersusTokenCount:
-            snapshot?.latestThreadUsage?.[category] !== undefined &&
-            snapshot?.latestTokenCountUsage?.[category] !== undefined
-              ? snapshot.latestThreadUsage[category] ===
-                snapshot.latestTokenCountUsage[category]
+            threadUsage?.[category] !== undefined &&
+            tokenCountUsage?.[category] !== undefined
+              ? threadUsage[category] === tokenCountUsage[category]
                 ? "matches"
                 : "differs"
               : "unavailable",
           threadVersusOuterInvocation:
-            snapshot?.latestThreadUsage?.[category] !== undefined &&
+            threadUsage?.[category] !== undefined &&
             outer?.[category] !== undefined
-              ? snapshot.latestThreadUsage[category] === outer[category]
+              ? threadUsage[category] === outer[category]
                 ? "matches"
                 : "differs"
               : "unavailable",
@@ -414,8 +455,8 @@ function summarizeNativeScope(records: InteractionMetadata[]) {
             exact &&
             observed.length === responses.size &&
             !conflicts.size &&
-            snapshot?.latestThreadUsage?.[category] !== undefined
-              ? sum === snapshot.latestThreadUsage[category]
+            threadUsage?.[category] !== undefined
+              ? sum === threadUsage[category]
                 ? "matches"
                 : "differs"
               : "unavailable",
@@ -428,9 +469,9 @@ function summarizeNativeScope(records: InteractionMetadata[]) {
                   observed.length === responses.size &&
                   !missingIdentity &&
                   !conflicts.size &&
-                  sum === snapshot?.latestThreadUsage?.[category] &&
-                  (snapshot.latestTokenCountUsage?.[category] === undefined ||
-                    sum === snapshot.latestTokenCountUsage[category]) &&
+                  sum === threadUsage?.[category] &&
+                  (tokenCountUsage?.[category] === undefined ||
+                    sum === tokenCountUsage[category]) &&
                   (outer?.[category] === undefined || sum === outer[category])
                 ? "available"
                 : "partial",
@@ -468,6 +509,11 @@ function summarizeNativeScope(records: InteractionMetadata[]) {
     completeRequestAndAttemptCount: null,
     responseUsage: {
       scope: "observed-completed-response-subset" as const,
+      currentTurn: {
+        mode: resumed ? "resumed" : (sessionTurn?.mode ?? "unknown"),
+        authenticatedBaseline: baseline !== undefined,
+        lifetimeCountersAddedToResponseTotals: false,
+      },
       categories,
       conflicts: conflicts.size,
       missingIdentity,
@@ -493,6 +539,11 @@ function summarizeNativeScope(records: InteractionMetadata[]) {
                 categories.cachedInputTokens?.coverage === "available"
               ? "available"
               : "partial",
+        ...summarizeInputCaching(
+          selected.map((record) =>
+            normalizeCodexTokenUsage(record.usage?.normalized),
+          ),
+        ),
         upstreamCategoryAndBillingCoverage: "unknown" as const,
       },
     },
@@ -545,6 +596,14 @@ function summarizeInvocation(
     }),
   ) as Identity;
   const first = records[0]!;
+  const sessionTurns = records.flatMap((record) =>
+    record.sessionTurn ? [record.sessionTurn] : [],
+  );
+  const sessionTurn =
+    sessionTurns.length &&
+    sessionTurns.every((turn) => isDeepStrictEqual(turn, sessionTurns[0]))
+      ? sessionTurns[0]!
+      : null;
   const request = records.find((record) => record.kind === "request");
   const terminal = records
     .filter(
@@ -619,11 +678,24 @@ function summarizeInvocation(
         at: record.at,
         ...record.boundary!,
       })),
+    sessionTurn,
+    sessionTurnCoverage: sessionTurn
+      ? "available"
+      : sessionTurns.length
+        ? "conflicting"
+        : "unavailable",
     promptComponents: request?.promptComponents ?? null,
     usage: {
       scope: "invocation-cumulative" as const,
       recordId: usageRecord?.recordId ?? null,
       terminal: usage?.terminal ?? false,
+      inputSemantics: [
+        ...new Set(
+          records.flatMap((record) =>
+            record.usage?.inputSemantics ? [record.usage.inputSemantics] : [],
+          ),
+        ),
+      ],
       categories: Object.fromEntries(
         tokenCategories.map((category) => [
           category,
@@ -652,6 +724,30 @@ function summarizeInvocation(
 }
 
 type Invocation = ReturnType<typeof summarizeInvocation>;
+
+function sumRequestBytes(
+  invocations: Invocation[],
+  key: "renderedPromptBytes" | "schemaBytes" | "evidenceBytes",
+) {
+  const values = invocations.flatMap((invocation) => {
+    const value = invocation.promptComponents?.[key];
+    return value !== undefined && Number.isSafeInteger(value) && value >= 0
+      ? [value]
+      : [];
+  });
+  const total = values.reduce((sum, value) => sum + value, 0);
+  return {
+    total: values.length && Number.isSafeInteger(total) ? total : null,
+    contributingInvocations: values.length,
+    eligibleInvocations: invocations.length,
+    coverage:
+      !values.length || !Number.isSafeInteger(total)
+        ? "unavailable"
+        : values.length === invocations.length
+          ? "available"
+          : "partial",
+  };
+}
 
 function aggregate(invocations: Invocation[]) {
   const timestamps = invocations
@@ -746,6 +842,18 @@ function aggregate(invocations: Invocation[]) {
       ).length,
     },
     usage,
+    inputCaching: summarizeInputCaching(
+      invocations.map((invocation) =>
+        normalizeTokenUsage(invocation.usage.categories),
+      ),
+    ),
+    requestBytes: {
+      renderedPromptBytes: sumRequestBytes(invocations, "renderedPromptBytes"),
+      schemaBytes: sumRequestBytes(invocations, "schemaBytes"),
+      evidenceBytes: sumRequestBytes(invocations, "evidenceBytes"),
+      componentsOverlap: true,
+      exactBilledRoleTokens: null,
+    },
     nativeToolActivity: {
       observedCallRecords: invocations.reduce(
         (sum, invocation) =>
@@ -887,6 +995,58 @@ export function analyzeInteractions(
     )
     .map((entries) => summarizeInvocation(entries, options))
     .sort((a, b) => a.key.localeCompare(b.key));
+  const includedKeys = new Set(invocations.map((invocation) => invocation.key));
+  const nativeGroups = new Map<string, InteractionMetadata[]>();
+  const nativeIdentities = new Map<string, InteractionMetadata>();
+  const nativeConflictKeys = new Set<string>();
+  for (const record of unique.values()) {
+    if (!includedKeys.has(invocationKey(record)) || !record.providerSessionId)
+      continue;
+    if (
+      record.providerEvent === "codex.native-response-usage" &&
+      record.usage?.deduplicationKey
+    ) {
+      const key = JSON.stringify([
+        record.repository,
+        record.objective,
+        record.usage.deduplicationKey,
+      ]);
+      const previous = nativeIdentities.get(key);
+      if (previous) {
+        if (!isDeepStrictEqual(previous.usage, record.usage))
+          nativeConflictKeys.add(key);
+        continue;
+      }
+      nativeIdentities.set(key, record);
+    }
+    const key = JSON.stringify([
+      invocationKey(record),
+      record.providerSessionId,
+    ]);
+    const entries = nativeGroups.get(key) ?? [];
+    entries.push(record);
+    nativeGroups.set(key, entries);
+  }
+  for (const [key, record] of nativeIdentities) {
+    if (!nativeConflictKeys.has(key)) continue;
+    const group = nativeGroups.get(
+      JSON.stringify([invocationKey(record), record.providerSessionId]),
+    );
+    if (group)
+      group.push({ ...record, providerEvent: "codex.native-usage-conflict" });
+  }
+  const paidGroups = [...nativeGroups.values()].filter((entries) =>
+    entries.some(
+      (record) => record.providerEvent === "codex.native-response-usage",
+    ),
+  );
+  const paidParents = paidGroups.filter(
+    (entries) => !entries.some((record) => record.nativeOwnership),
+  );
+  const wholeNativeFamily = summarizeNativeFamily(
+    paidGroups.map(summarizeNativeScope),
+    paidParents.length,
+  );
   const groupBy = [...new Set<AnalysisField>(options.groupBy ?? ["phase"])];
   const groups = new Map<
     string,
@@ -965,6 +1125,40 @@ export function analyzeInteractions(
       ? "explicit-private-content-read"
       : "metadata-only",
     ...aggregate(invocations),
+    nativeFamilyResponseUsage: {
+      ...wholeNativeFamily,
+      source: "owned-codex-rollout" as const,
+      paidNativeSessions: new Set(
+        paidGroups.map((entries) => entries[0]!.providerSessionId),
+      ).size,
+      paidOwnedChildSessions: new Set(
+        paidGroups
+          .filter((entries) => entries.some((record) => record.nativeOwnership))
+          .map((entries) => entries[0]!.providerSessionId),
+      ).size,
+      conflictingResponseIdentities: nativeConflictKeys.size,
+      completeFamilyCoverage: "unknown" as const,
+    },
+    sessionModes: ["fresh", "resumed", "unknown"].map((mode) => ({
+      mode,
+      ...aggregate(
+        invocations.filter(
+          (invocation) => (invocation.sessionTurn?.mode ?? "unknown") === mode,
+        ),
+      ),
+      logicalSessions: new Set(
+        invocations
+          .filter(
+            (invocation) =>
+              (invocation.sessionTurn?.mode ?? "unknown") === mode,
+          )
+          .flatMap((invocation) =>
+            invocation.sessionTurn
+              ? [invocation.sessionTurn.sessionIdentity]
+              : [],
+          ),
+      ).size,
+    })),
     groups: [...groups.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([, group]) => ({
@@ -976,6 +1170,7 @@ export function analyzeInteractions(
     controllerObservations: controller,
     limitations: [
       "Observed intervals overlap; elapsed time is the observation envelope, not a sum of work durations or proof of current process activity.",
+      "Whole-family cached fractions use all observed disjoint native input, including input with unknown cached classification. Paired-cache cohorts remain separate; missing native scopes/input or upstream requests prevent a complete-family claim. Fresh/resumed modes use captured session-turn facts only. Resumed checkpoint comparisons require authenticated category baselines; raw lifetime totals are never new-turn usage.",
       "Missing counters and outcomes remain unavailable. Category totals cover only contributing invocations; cached/cache-write input and reasoning output overlap their parent categories.",
       "Native response records are observed completed responses with retained usage, not complete request/attempt counts. They are alternate accounting views, never extra parent tokens. Role/base/tool bytes are visible serialized history, not billed token attribution or the complete provider wire; replacement history is a context snapshot rather than new authored content.",
       "Only the latest invocation-cumulative usage contributes to totals. Provider-call and model breakdown observations are alternate views, not additional usage.",
@@ -996,6 +1191,7 @@ export function renderAnalysis(
   const lines = [
     `Factory retained observations: ${report.invocationCount} provider attempts`,
     `Native model tool calls: ${report.nativeTools.calls ?? "unavailable"}; outputs: ${report.nativeTools.observedOutputs ?? "unavailable"} (${report.nativeTools.coverage}; descendant union unknown)`,
+    `Observed native-family input: ${report.nativeFamilyResponseUsage.categories.inputTokens?.total ?? "unavailable"}; known cached / all observed input: ${report.nativeFamilyResponseUsage.cache.knownCachedFractionOfAllObservedInput ?? "unavailable"} (full-family coverage unknown)`,
     `Observed elapsed time: ${window.elapsedMs === null ? "unavailable" : `${window.elapsedMs} ms`} (${window.incompleteIntervals} incomplete intervals)`,
   ];
   for (const group of report.groups) {

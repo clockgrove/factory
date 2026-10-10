@@ -639,13 +639,8 @@ export class WorkerInteractionCapture {
               ? "available-categories"
               : "unavailable",
             raw,
-            normalized: normalizeTokenUsage({
-              inputTokens: raw.inputTokens,
-              outputTokens: raw.outputTokens,
-              cachedInputTokens: raw.cacheReadTokens,
-              cacheWriteInputTokens: raw.cacheWriteTokens,
-              reasoningOutputTokens: raw.reasoningTokens,
-            }),
+            inputSemantics: "provider-reported-inclusion-unknown",
+            normalized: normalizeTokenUsage(observedUsage.normalizedUsage),
           },
         });
       } else this.writer!.record(base);

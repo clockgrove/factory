@@ -866,30 +866,23 @@ export function materializeResultTree(
     if (!packet) return { directory, remove };
     rmSync(join(root, "index"));
     mkdirSync(join(root, "pinned"));
+    mkdirSync(join(root, "evidence"));
     const reviewFiles: ReviewBodyFile[] = [];
     for (const [evidenceIndex, entry] of packet.evidence.entries()) {
-      // Normative prose and instructions stay inline. Large immutable code,
-      // scripts and data remain complete, available only in this call's root.
-      if (
-        entry.origin !== "source" ||
-        entry.complete !== true ||
-        entry.path === "OBJECTIVE" ||
-        /\.(?:md|mdx|rst|txt)$/i.test(entry.path) ||
-        Buffer.byteLength(entry.content) <= 2_048
-      )
-        continue;
+      // This is an inline presentation threshold, not a truncation budget.
+      // Large source, design, patch and historical bodies stay byte-identical
+      // on demand. Incomplete bodies retain their incomplete packet binding.
+      if (Buffer.byteLength(entry.content) <= 2_048) continue;
       const bytes = Buffer.from(entry.content, "utf8");
       if (
         bytes.toString("utf8") !== entry.content ||
         createHash("sha256").update(bytes).digest("hex") !== entry.digest
       )
-        throw new Error(
-          "Pinned review source bytes differ from canonical packet",
-        );
-      const path = `pinned/${evidenceIndex}.txt`;
+        throw new Error("Review evidence bytes differ from canonical packet");
+      const path = `${entry.origin === "source" ? "pinned" : "evidence"}/${evidenceIndex}.txt`;
       writeFileSync(join(root, path), bytes, { flag: "wx", mode: 0o400 });
       if (!readFileSync(join(root, path)).equals(bytes))
-        throw new Error("Materialized pinned review source bytes differ");
+        throw new Error("Materialized review evidence bytes differ");
       reviewFiles.push({
         evidenceIndex,
         root,
@@ -1339,6 +1332,67 @@ function gitChangeMetadata(packet: ResultChangePacket) {
       lineStats,
       truncated,
     })),
+  };
+}
+
+/** Small investigation leads; the original change and receipt bodies stay authoritative. */
+export function reviewNavigationEvidence(args: {
+  change: string;
+  baseCommitSha: string;
+  resultCommitSha: string;
+  resultTreeSha: string;
+  commands: ValidationCommandReceipt[];
+}): ResultReviewEvidenceSource {
+  const packet = parseResultChangePacket(args.change);
+  const navigation = {
+    evidenceScope:
+      "Navigation and exact candidate identities only; previews do not establish implementation semantics or replace full command receipts.",
+    baseCommitSha: args.baseCommitSha,
+    resultCommitSha: args.resultCommitSha,
+    resultTreeSha: args.resultTreeSha,
+    changeEvidence: "Exact Git change packet",
+    changedPaths: [] as string[],
+    changedPathCount: packet.changes.length,
+    changedPathsComplete: packet.changes.length === 0,
+    commandEvidence: "Command pass evidence",
+    commands: [] as {
+      receiptIndex: number;
+      commandPreview: string;
+      commandComplete: boolean;
+      exitCode: number;
+      treeSha: string;
+    }[],
+    commandCount: args.commands.length,
+    commandsComplete: args.commands.length === 0,
+  };
+  for (const { path } of packet.changes) {
+    navigation.changedPaths.push(path);
+    navigation.changedPathsComplete =
+      navigation.changedPaths.length === packet.changes.length;
+    if (Buffer.byteLength(JSON.stringify(navigation)) <= 1_400) continue;
+    navigation.changedPaths.pop();
+    navigation.changedPathsComplete = false;
+    break;
+  }
+  for (const [receiptIndex, receipt] of args.commands.entries()) {
+    navigation.commands.push({
+      receiptIndex,
+      commandPreview: receipt.command.slice(0, 120),
+      commandComplete: receipt.command.length <= 120,
+      exitCode: receipt.exitCode,
+      treeSha: receipt.treeSha,
+    });
+    navigation.commandsComplete =
+      navigation.commands.length === args.commands.length;
+    if (Buffer.byteLength(JSON.stringify(navigation)) <= 2_048) continue;
+    navigation.commands.pop();
+    navigation.commandsComplete = false;
+    break;
+  }
+  return {
+    path: "Review navigation",
+    complete: true,
+    content: JSON.stringify(navigation),
   };
 }
 

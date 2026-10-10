@@ -108,6 +108,8 @@ export interface PlanningTransport {
 export interface StructuredCall {
   promptSections?: PromptSection[];
   exportedEvidenceFileBytes?: number;
+  /** Opt-in private capture only; full backing evidence is not provider input. */
+  reviewPacket?: import("../review-evidence.js").ReviewPacket;
   role: PlanningRole;
   prompt: string;
   schema: unknown;

@@ -15,6 +15,7 @@ import {
   materializeResultTree,
   resultChangePacket,
   resultTreeInventory,
+  reviewNavigationEvidence,
   selectedLfsReviewEvidence,
   unchangedResultByteEvidence,
 } from "./result-evidence.js";
@@ -136,6 +137,13 @@ export async function reviewAcceptance(args: {
       path: "Factory controller capabilities",
       content: JSON.stringify(installedControllerCapabilities()),
     },
+    reviewNavigationEvidence({
+      change,
+      baseCommitSha: baseSha,
+      resultCommitSha: commit,
+      resultTreeSha: evidence.treeSha,
+      commands: evidence.commands,
+    }),
     ...gitChangeEvidenceSources(change, {
       path: "Exact Git change packet",
       metadata: {

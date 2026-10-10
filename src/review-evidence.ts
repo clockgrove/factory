@@ -135,17 +135,19 @@ function reviewPacketChoices(
       !Number.isSafeInteger(file.evidenceIndex) ||
       file.evidenceIndex < 0 ||
       !entry ||
-      entry.origin !== "source" ||
-      entry.complete !== true ||
       bodyFiles.has(file.evidenceIndex) ||
-      file.path !== `pinned/${file.evidenceIndex}.txt` ||
+      file.path !==
+        `${entry.origin === "source" ? "pinned" : "evidence"}/${file.evidenceIndex}.txt` ||
       file.encoding !== "utf-8" ||
       file.digest !== entry.digest ||
       file.bytes !== Buffer.byteLength(entry.content) ||
       !lstatSync(file.root, { throwIfNoEntry: false })?.isDirectory() ||
-      !lstatSync(join(file.root, "pinned"), {
-        throwIfNoEntry: false,
-      })?.isDirectory() ||
+      !lstatSync(
+        join(file.root, entry.origin === "source" ? "pinned" : "evidence"),
+        {
+          throwIfNoEntry: false,
+        },
+      )?.isDirectory() ||
       !lstatSync(join(file.root, file.path), {
         throwIfNoEntry: false,
       })?.isFile() ||
@@ -154,7 +156,7 @@ function reviewPacketChoices(
       )
     )
       throw new ReviewProtocolError(
-        "Current review body file differs from its complete source",
+        "Current review body file differs from its canonical evidence",
       );
     bodyFiles.set(file.evidenceIndex, file);
   }
@@ -199,7 +201,8 @@ function reviewPacketChoices(
     };
   });
   const counts = new Map<string, number>();
-  for (const { key } of candidates) counts.set(key, (counts.get(key) ?? 0) + 1);
+  for (const [index, { key }] of candidates.entries())
+    if (!bodyFiles.has(index)) counts.set(key, (counts.get(key) ?? 0) + 1);
   const bodies: {
     bodyIndex: number;
     encoding: "utf-8";
@@ -209,10 +212,16 @@ function reviewPacketChoices(
     content: string;
   }[] = [];
   const indices = new Map<string, number>();
-  // Keep complete normative source bodies inline ahead of dynamic bindings.
+  // Only inline occurrences need a shared body. Exported occurrences must not
+  // leak their full bytes back into the initial prompt through this table.
   for (const [index, entry] of packet.evidence.entries()) {
     const body = candidates[index]!;
-    if (entry.origin !== "controller" || counts.get(body.key)! < 2) continue;
+    if (
+      bodyFiles.has(index) ||
+      entry.origin !== "controller" ||
+      (counts.get(body.key) ?? 0) < 2
+    )
+      continue;
     const prior = indices.get(body.key);
     if (prior !== undefined) {
       if (bodies[prior]!.content !== body.content)
@@ -298,7 +307,8 @@ export function resolveReviewBodyContent(
   if (typeof entry.content === "string") content = entry.content;
   else if ("file" in entry.content) {
     if (
-      entry.content.file !== `pinned/${evidenceIndex}.txt` ||
+      entry.content.file !==
+        `${binding.origin === "source" ? "pinned" : "evidence"}/${evidenceIndex}.txt` ||
       entry.content.encoding !== "utf-8" ||
       entry.content.bytes !== Buffer.byteLength(binding.content) ||
       entry.content.digest !== binding.digest

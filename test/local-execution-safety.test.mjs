@@ -765,6 +765,13 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     assert.match(prompt, /Timestamp uses UTC/);
     assert.match(prompt, /Controller-bound Objective knowledge view/);
     assert.match(prompt, /advisory-agent-claim/);
+    assert.ok(
+      prompt.includes(JSON.stringify(join(checkout, ".factory-handoff.json"))),
+    );
+    assert.match(
+      prompt,
+      /allowed private staging exception even when absent from Owned paths/,
+    );
     writeFileSync(join(checkout, "schema.json"), '{"timestamp":"local"}\n');
     git(checkout, "add", "schema.json");
     git(

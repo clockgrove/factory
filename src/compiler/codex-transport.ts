@@ -167,7 +167,11 @@ export class CodexPlanningTransport implements PlanningTransport {
         "Codex reconciliation differs from its retained model and policy",
       );
     if (session.status === "in-flight" && data.transport === "app-server") {
-      if (!data.threadId || !data.turnId || !session.currentTurn)
+      if (
+        !data.threadId ||
+        !data.turnId ||
+        session.currentTurn?.resources !== "settled"
+      )
         return { disposition: "unknown" };
       assertOwnedCodexHome(data.sessionRoot, this.sessionOwner(session));
       const home = createCodexHome({
@@ -252,8 +256,9 @@ export class CodexPlanningTransport implements PlanningTransport {
 
   async releaseSession(session: AgentSessionRef): Promise<void> {
     if (
-      session.status === "in-flight" ||
-      (session.currentTurn && session.currentTurn.resources !== "settled")
+      session.currentTurn
+        ? session.currentTurn.resources !== "settled"
+        : session.status === "in-flight"
     )
       throw new Error(
         "Cannot release reviewer session with unproved process settlement",
@@ -691,7 +696,9 @@ export class CodexPlanningTransport implements PlanningTransport {
           });
           if (event.type === "turn.failed") {
             state.ended = true;
-            if (session?.currentTurn) session.currentTurn.terminal = "failed";
+            // The app-server SDK projection can map an authenticated
+            // interrupted terminal to turn.failed; preserve its native fact.
+            if (session?.currentTurn) session.currentTurn.terminal ??= "failed";
             throw new Error(event.error.message);
           }
           if (event.type === "error") streamError = new Error(event.message);
@@ -743,11 +750,6 @@ export class CodexPlanningTransport implements PlanningTransport {
         );
         if (session?.currentTurn && sessionData) {
           session.currentTurn.resources = "settled";
-          if (
-            session.currentTurn.dispatch === "submitted" &&
-            !session.currentTurn.terminal
-          )
-            session.currentTurn.terminal = "interrupted";
           if (session.currentTurn.terminal === "completed" && turnCompleted) {
             sessionData.response = state.response;
             sessionData.responseDigest = createHash("sha256")
@@ -756,7 +758,11 @@ export class CodexPlanningTransport implements PlanningTransport {
           }
           if (state.usage) sessionData.usage = state.usage;
         }
-        if (session && !thread.id) {
+        if (session && nativeAttempted && !session.currentTurn?.terminal) {
+          // Local process closure settles resources, not the provider outcome.
+          // Retain native IDs and the unknown turn for read-only reconciliation.
+          checkpointSession("in-flight");
+        } else if (session && !thread.id) {
           checkpointSession("unavailable");
           releaseCodexHome(home.root, this.sessionOwner(session));
           checkpointSession("released");

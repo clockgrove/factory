@@ -10,6 +10,7 @@ import { runCodexExec } from "../codex-exec.js";
 import {
   assertOwnedCodexHome,
   CODEX_PLANNING_CONFIG,
+  CODEX_SOURCE_READ_CONFIG,
   CODEX_TREE_REVIEW_CONFIG,
   createCodexHome,
   releaseCodexHome,
@@ -184,7 +185,11 @@ export class CodexPlanningTransport implements PlanningTransport {
           role,
           "read-only",
           "never",
-          tree || sourceRead ? CODEX_TREE_REVIEW_CONFIG : CODEX_PLANNING_CONFIG,
+          sourceRead
+            ? CODEX_SOURCE_READ_CONFIG
+            : tree
+              ? CODEX_TREE_REVIEW_CONFIG
+              : CODEX_PLANNING_CONFIG,
           ...(sourceRead ? ["pinned-source-read-v1"] : []),
         ]),
       )
@@ -563,7 +568,9 @@ export class CodexPlanningTransport implements PlanningTransport {
     const home = createCodexHome(
       args.tree || sourceRead
         ? {
-            config: CODEX_TREE_REVIEW_CONFIG,
+            config: sourceRead
+              ? CODEX_SOURCE_READ_CONFIG
+              : CODEX_TREE_REVIEW_CONFIG,
             ...(session && sessionData
               ? {
                   root: sessionData.sessionRoot,

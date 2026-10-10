@@ -71,6 +71,24 @@ export const CODEX_TREE_REVIEW_CONFIG = CODEX_PLANNING_CONFIG.replace(
   "shell_tool = true",
 ).replace("code_mode_host = false", "code_mode_host = true");
 
+/** Source reads retain provider authentication in the parent, never in tools. */
+export const CODEX_SOURCE_READ_CONFIG = `allow_login_shell = false
+${CODEX_TREE_REVIEW_CONFIG}
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = false
+experimental_use_profile = false
+
+[shell_environment_policy.filters]
+"PATH" = "include"
+"HOME" = "include"
+"TMPDIR" = "include"
+"LANG" = "include"
+"LC_*" = "include"
+"TZ" = "include"
+"GIT_OPTIONAL_LOCKS" = "include"
+`;
+
 /** Ambient variables a Factory Codex process keeps; everything else is dropped. */
 const ENVIRONMENT = [
   /^PATH$/,

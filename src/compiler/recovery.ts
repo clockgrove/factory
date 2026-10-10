@@ -505,13 +505,23 @@ async function compilePlanAdmitted(
     if (context.stopped?.())
       throw new Error("Planning is paused or cancelled before diagnosis");
     const diagnosisInvocation = invocation("diagnosis");
+    const correctionDescriptions = {
+      "planning-output":
+        "malformed or invalid generated graph including invented assets",
+      "planning-evidence": "omitted already supplied source facts",
+      "planning-choice":
+        "routine engineering choice already delegated by the Objective",
+    };
+    const allowedCorrections = permitted
+      .map((kind) => `${kind} (${correctionDescriptions[kind]})`)
+      .join(", ");
     const diagnosisRequest = {
       ...(prerequisites ? { prerequisites } : {}),
       ...(localExecutables ? { localExecutables } : {}),
       ...(executionBounds ? { executionBounds } : {}),
       purpose: "diagnosis" as const,
       rejectedGraph: graph ?? null,
-      objective: `Classify this planning failure from the supplied sources. Allowed engineering corrections: planning-output (malformed or invalid generated graph including invented assets), planning-evidence (omitted already supplied source facts), planning-choice (routine engineering choice already delegated by the Objective). ${COMPILER_READINESS_GUIDANCE} Return operator for missing product/security decisions, new authority or unsupported capability. Give a concrete correction within the permitted classes and recorded attempt limits; never waive findings, claim a future probe passed or infer extra retry/spending authority.\nObjective:\n${body}\nFailure:\n${failure}`,
+      objective: `Classify this planning failure from the supplied sources. Allowed engineering corrections: ${allowedCorrections}. ${COMPILER_READINESS_GUIDANCE} Return operator for missing product/security decisions, new authority or unsupported capability. Give a concrete correction within the permitted classes and recorded attempt limits; never waive findings, claim a future probe passed or infer extra retry/spending authority.\nObjective:\n${body}\nFailure:\n${failure}`,
       baseSha,
       sources,
       controllerCapabilities: installedControllerCapabilities(),

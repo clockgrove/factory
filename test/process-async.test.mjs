@@ -19,7 +19,10 @@ import { analyzeInteractions } from "../dist/analysis.js";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
 import { codexStderrCapture } from "../dist/codex-exec.js";
-import { codexBoundaryTelemetry } from "../dist/codex-boundary-telemetry.js";
+import {
+  codexBoundaryTelemetry,
+  codexJsonBoundaries,
+} from "../dist/codex-boundary-telemetry.js";
 import {
   ProviderTurnGuard,
   ProviderTurnTimeoutError,
@@ -433,6 +436,10 @@ setTimeout(() => {
       (event) => observeBoundary("codex-trace-safe", event),
       ordinaryCapture.chunk,
     );
+    const jsonBoundaries = codexJsonBoundaries((event) =>
+      observeBoundary("codex-exec-json", event),
+    );
+    let unsupportedJsonSeen = false;
     const nativeDiagnosticLines = [
       '2026-10-10T05:59:46.827332Z INFO codex_otel.trace_safe: event.name="codex.websocket_request" duration_ms=3 success="true" auth.header_name="authorization" auth.account_id="excluded-account"',
       '2026-10-10T05:59:51.510209Z INFO codex_otel.trace_safe: event.name="codex.turn_ttft" duration_ms=5842',
@@ -451,10 +458,14 @@ setTimeout(() => {
         `
       setTimeout(() => process.stdin.resume(), 25);
       const lines = ${JSON.stringify(nativeDiagnosticLines)};
-      for (const line of lines) process.stderr.write(line + '\\n');
+      process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', id: 'legacy-shaped-item' } }) + '\\n');
       const ordinary = Buffer.from(${JSON.stringify("ordinary π " + secret + "\n")});
       process.stderr.write(ordinary.subarray(0, 10));
-      setTimeout(() => process.stderr.write(ordinary.subarray(10)), 15);
+      setTimeout(() => {
+        process.stderr.write(ordinary.subarray(10));
+        for (const line of lines) process.stderr.write(line + '\\n');
+        process.stderr.write('private multiline continuation excluded-account\\n');
+      }, 15);
       setTimeout(() => process.stderr.write('INFO codex_otel.trace_safe: event.name="unknown" error.message="' + 'x'.repeat(70000) + '"\\n'), 60);
       setInterval(() => process.stderr.write(lines[1] + '\\n'), 25);
     `,
@@ -463,8 +474,13 @@ setTimeout(() => {
       "x".repeat(256 * 1024),
       (stream, chunk) => {
         if (stream === "stderr") boundaryParser.chunk(chunk);
+        if (stream === "stdout") {
+          jsonBoundaries(JSON.parse(chunk.toString()));
+          unsupportedJsonSeen = true;
+        }
       },
       (boundary) => observeBoundary("factory-process", boundary),
+      { stderr: false },
     );
     const settledTelemetry = telemetryChild.finally(() => {
       childClosed = true;
@@ -490,6 +506,7 @@ setTimeout(() => {
     );
     await boundedTelemetry;
     await closedTelemetry;
+    assert.equal(unsupportedJsonSeen, true);
     quiet.finish();
     boundaryParser.finish();
     ordinaryCapture.finish();
@@ -533,11 +550,14 @@ setTimeout(() => {
       ),
     );
     const coverage = boundaryView.find(
-      (event) => event.event === "telemetry-coverage",
+      (event) =>
+        event.event === "telemetry-coverage" &&
+        event.source === "codex-trace-safe",
     );
     assert.equal(coverage.status, "incomplete");
     assert.ok(coverage.unparsedRecords >= 2);
     assert.ok(coverage.truncatedRecords > 0);
+    assert.ok(coverage.quarantinedRecords > 0);
     assert.equal(coverage.submission, "unsupported");
     assert.equal(
       boundaryView.some((event) => event.durationMs === 9999),
@@ -570,9 +590,35 @@ setTimeout(() => {
     assert.equal(filteredDiagnostic.text.includes(secret), false);
     assert.equal(filteredDiagnostic.text.includes("error.message"), false);
     assert.equal(
+      filteredDiagnostic.text.includes("private multiline continuation"),
+      false,
+    );
+    assert.equal(
       analyzeInteractions(boundaryRecords).usage.inputTokens.total,
       null,
     );
+    let drainedStderrBytes = 0;
+    const noRawStderr = await subprocessAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        "process.stderr.write('x'.repeat(128 * 1024)); process.stdout.write('drained');",
+      ],
+      {},
+      undefined,
+      (stream, chunk) => {
+        if (stream === "stderr") drainedStderrBytes += chunk.length;
+      },
+      () => {
+        throw new Error("local observer rejected");
+      },
+      { stderr: false },
+    );
+    assert.equal(noRawStderr.status, 0);
+    assert.equal(noRawStderr.stdout, "drained");
+    assert.equal(noRawStderr.stderr, "");
+    assert.equal(drainedStderrBytes, 128 * 1024);
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previousStateHome;

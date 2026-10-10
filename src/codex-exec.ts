@@ -186,6 +186,7 @@ export async function runCodexExec(args: {
         }
       },
       args.boundary ? (event) => observe("factory-process", event) : undefined,
+      args.boundary ? { stderr: false } : undefined,
     );
     pending += decoder.end();
     if (pending) line(pending);

@@ -1190,6 +1190,7 @@ export async function subprocessAsync(
       "source" | "elapsedMs"
     >,
   ) => void,
+  retention?: { stderr?: boolean },
 ): Promise<{
   status: number | null;
   stdout: string;
@@ -1244,7 +1245,8 @@ export async function subprocessAsync(
   };
   for (const stream of ["stdout", "stderr"] as const)
     child[stream]?.on("data", (chunk: Buffer) => {
-      output[stream].push(chunk);
+      if (stream !== "stderr" || retention?.stderr !== false)
+        output[stream].push(chunk);
       observe?.(stream, chunk);
     });
   // A child may exit before consuming input; its exit status remains authoritative.

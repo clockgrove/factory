@@ -57,6 +57,7 @@ export interface ModelBoundaryObservation {
   observedBytes?: number;
   truncatedRecords?: number;
   unparsedRecords?: number;
+  quarantinedRecords?: number;
   parsedRecords?: number;
   status?: "observed" | "incomplete" | "unavailable" | "verified";
   /** Native response counters can include prewarm; never add them to outer usage. */

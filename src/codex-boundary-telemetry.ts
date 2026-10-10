@@ -141,6 +141,8 @@ export function codexBoundaryTelemetry(
   let finished = false;
   let observedBytes = 0;
   let parsedBytes = 0;
+  let traceSeen = false;
+  let quarantinedRecords = 0;
   let parsedRecords = 0;
   let unparsedRecords = 0;
   let truncatedRecords = 0;
@@ -154,9 +156,14 @@ export function codexBoundaryTelemetry(
   const line = (text: string) => {
     const marker = text.indexOf("codex_otel.trace_safe");
     if (marker < 0) {
-      ordinary(Buffer.from(`${text}\n`));
+      // Display-formatted native errors can contain real newlines. After a
+      // trace record, unknown continuation lines cannot enter ordinary stderr.
+      if (!traceSeen || text === "Reading prompt from stdin...")
+        ordinary(Buffer.from(`${text}\n`));
+      else quarantinedRecords++;
       return;
     }
+    traceSeen = true;
     parsedBytes += Buffer.byteLength(text) + 1;
     if (parsedBytes > limit) {
       truncatedRecords++;
@@ -191,6 +198,7 @@ export function codexBoundaryTelemetry(
           pending = "";
           dropping = true;
           parsedBytes = limit + 1;
+          traceSeen = true;
           truncatedRecords++;
         }
       }
@@ -211,13 +219,14 @@ export function codexBoundaryTelemetry(
       emit({
         event: "telemetry-coverage",
         status:
-          truncatedRecords || unparsedRecords
+          truncatedRecords || unparsedRecords || quarantinedRecords
             ? "incomplete"
             : parsedRecords
               ? "observed"
               : "unavailable",
         parsedRecords,
         unparsedRecords,
+        quarantinedRecords,
         truncatedRecords,
         observedBytes,
         submission: "unsupported",
@@ -230,10 +239,17 @@ export function codexBoundaryTelemetry(
 export function codexJsonBoundaries(observe: (event: Boundary) => void) {
   const tools = new Map<string, number>();
   let firstOutput = false;
-  return (event: ThreadEvent) => {
-    if (event.type === "thread.started") observe({ event: "thread-started" });
-    if (event.type === "turn.completed") observe({ event: "turn-completed" });
-    if (event.type === "turn.failed") observe({ event: "turn-failed" });
+  const emit = (event: Boundary) => {
+    try {
+      void Promise.resolve(observe(event)).catch(() => undefined);
+    } catch {
+      /* Optional JSON observations never affect provider work. */
+    }
+  };
+  const projectEvent = (event: ThreadEvent) => {
+    if (event.type === "thread.started") emit({ event: "thread-started" });
+    if (event.type === "turn.completed") emit({ event: "turn-completed" });
+    if (event.type === "turn.failed") emit({ event: "turn-failed" });
     if (
       event.type !== "item.started" &&
       event.type !== "item.updated" &&
@@ -242,20 +258,44 @@ export function codexJsonBoundaries(observe: (event: Boundary) => void) {
       return;
     const item = event.item;
     if (
+      (item.type === "agent_message" || item.type === "reasoning") &&
+      typeof item.text !== "string"
+    ) {
+      emit({
+        event: "telemetry-coverage",
+        status: "incomplete",
+        unparsedRecords: 1,
+      });
+      return;
+    }
+    if (
       !firstOutput &&
       event.type === "item.completed" &&
       (item.type === "agent_message" || item.type === "reasoning") &&
+      typeof item.text === "string" &&
       item.text.trim().length > 0
     ) {
       firstOutput = true;
-      observe({ event: "visible-output-item" });
+      emit({ event: "visible-output-item" });
     }
     if (item.type !== "command_execution" && item.type !== "mcp_tool_call")
       return;
+    if (
+      item.status !== "in_progress" &&
+      item.status !== "completed" &&
+      item.status !== "failed"
+    ) {
+      emit({
+        event: "telemetry-coverage",
+        status: "incomplete",
+        unparsedRecords: 1,
+      });
+      return;
+    }
     const tool = item.type === "command_execution" ? "shell" : "mcp";
     if (item.status === "in_progress" && !tools.has(item.id)) {
       tools.set(item.id, performance.now());
-      observe({
+      emit({
         event: "tool-start",
         tool,
         ...(typeof item.id === "string" && /^[\w-]{1,256}$/.test(item.id)
@@ -267,7 +307,7 @@ export function codexJsonBoundaries(observe: (event: Boundary) => void) {
     if (event.type === "item.completed") {
       const start = tools.get(item.id);
       tools.delete(item.id);
-      observe({
+      emit({
         event: "tool-end",
         tool,
         ...(typeof item.id === "string" && /^[\w-]{1,256}$/.test(item.id)
@@ -277,6 +317,17 @@ export function codexJsonBoundaries(observe: (event: Boundary) => void) {
         ...(start === undefined
           ? {}
           : { durationMs: Math.max(0, performance.now() - start) }),
+      });
+    }
+  };
+  return (event: ThreadEvent) => {
+    try {
+      projectEvent(event);
+    } catch {
+      emit({
+        event: "telemetry-coverage",
+        status: "incomplete",
+        unparsedRecords: 1,
       });
     }
   };

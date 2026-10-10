@@ -77,6 +77,17 @@ import {
 } from "./projection.js";
 import { finalizeObjective } from "./finalization.js";
 
+/** Publish the execution snapshot before yielding to live owner control. */
+export function checkpointExecutionState(
+  owner: Pick<LocalOwner, "snapshot" | "pause" | "workPause" | "handoff">,
+  path: string,
+  state: FactoryState,
+): void {
+  owner.snapshot = state;
+  synchronizeWorkItemPause(owner);
+  saveState(path, state);
+}
+
 /** Draining finishes admitted work; a plain pause still stops its next step. */
 export function workItemPauseSignal(
   owner: Pick<LocalOwner, "snapshot" | "pause" | "workPause">,
@@ -111,8 +122,6 @@ export async function runObjectivePass(
   );
   let stateDiagnostics: StateDiagnostics | undefined;
   const save = (state: FactoryState) => {
-    owner.snapshot = state;
-    synchronizeWorkItemPause(owner);
     if (state.coordinator) {
       const phases = [
         ...new Set(
@@ -127,7 +136,7 @@ export async function runObjectivePass(
         state.coordinator.phaseStartedAt = new Date().toISOString();
       }
     }
-    saveState(path, state);
+    checkpointExecutionState(owner, path, state);
     try {
       stateDiagnostics?.observe();
     } catch (error) {
@@ -373,6 +382,10 @@ export async function runObjectivePass(
         plan,
         projected,
       });
+      // Live control must own the activated coordinator before any awaited
+      // amendment, readiness or driver preflight can receive a pause.
+      stateForSignal = state;
+      save(state);
       stateDiagnostics = new StateDiagnostics(
         diagnostics,
         state,

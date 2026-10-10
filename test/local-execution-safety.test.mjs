@@ -24,7 +24,18 @@ import {
 } from "../dist/objective-knowledge.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
 import { parseFactoryState } from "../dist/state.js";
-import { readContinuation, saveState, statePath } from "../dist/state-store.js";
+import {
+  acquireControllerLock,
+  objectiveLockPath,
+  readContinuation,
+  releaseControllerLock,
+  saveState,
+  statePath,
+} from "../dist/state-store.js";
+import { requestControl, serveControl } from "../dist/coordinator-control.js";
+import { checkpointExecutionState } from "../dist/runner/execution.js";
+import { canHandoff } from "../dist/runner/ownership.js";
+import { setCoordinatorMode } from "../dist/state.js";
 import { workerAttemptItem } from "../dist/item-worker.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import {
@@ -39,7 +50,7 @@ import {
   ProviderTurnGuard,
   ProviderTurnTimeoutError,
 } from "../dist/provider-turn.js";
-import { withProcessCancellation } from "../dist/process.js";
+import { subprocessAsync, withProcessCancellation } from "../dist/process.js";
 import { attachedFault } from "../dist/fault.js";
 import { CodexPlanningTransport } from "../dist/compiler/codex-transport.js";
 import { materializeResultTree } from "../dist/result-evidence.js";
@@ -810,19 +821,100 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       sourcePacketDigest: preparation.sourcePacketDigest,
       agentSessions: resumedPreparation.agentSessions,
       agentSessionHistory: resumedPreparation.agentSessionHistory,
+      coordinator: {
+        ...resumedPreparation.coordinator,
+        phase: "active",
+      },
+      work: Object.fromEntries(
+        loaded.graph.items.map((item) => [item.id, { status: "pending" }]),
+      ),
     };
     const activationPath = join(root, "activated-planner.json");
-    const saveActivation = () => saveState(activationPath, activated);
+    const owner = {
+      snapshot: resumedPreparation,
+      pause: new AbortController(),
+      workPause: new AbortController(),
+    };
+    const saveActivation = () =>
+      checkpointExecutionState(owner, activationPath, activated);
     saveActivation();
+    assert.equal(owner.snapshot, activated);
+    assert.equal(owner.snapshot.schemaVersion, 7);
+    assert.equal(canHandoff(owner.snapshot), true);
+    const lockPath = objectiveLockPath(
+      activated.repository,
+      activated.objective,
+    );
+    const lock = acquireControllerLock(lockPath, activated.objective);
+    let server;
+    try {
+      server = await serveControl(
+        activated.repository,
+        lock,
+        async (request) => {
+          assert.equal(request.action, "pause");
+          setCoordinatorMode(owner.snapshot, "paused");
+          owner.pause.abort(new Error("Coordinator pause"));
+          checkpointExecutionState(owner, activationPath, owner.snapshot);
+          return owner.snapshot.coordinator;
+        },
+        activated.objective,
+      );
+      let paused;
+      const preflight = await subprocessAsync(
+        "sh",
+        ["-c", "echo preflight; sleep 0.05; echo settled; exit 23"],
+        {},
+        undefined,
+        (stream) => {
+          if (stream === "stdout" && !paused)
+            paused = requestControl(activated.repository, {
+              objective: activated.objective,
+              action: "pause",
+            });
+        },
+      );
+      assert.equal(preflight.status, 23);
+      assert.ok(preflight.stdout.includes("settled"));
+      assert.equal((await paused).handled, true);
+      // Even failed preflight retains the active pending graph. A post-await
+      // checkpoint cannot restore the stale Preparation coordinator's running mode.
+      saveActivation();
+      assert.equal(owner.snapshot, activated);
+      assert.equal(activated.coordinator.mode, "paused");
+      assert.equal(resumedPreparation.coordinator.mode, "running");
+      assert.equal(owner.workPause.signal.aborted, true);
+      assert.ok(
+        Object.values(activated.work).every(
+          (work) => work.status === "pending",
+        ),
+      );
+      assert.equal(canHandoff(activated), true);
+    } finally {
+      if (server)
+        await new Promise((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      releaseControllerLock(lockPath, lock);
+    }
     const reloadedActivation = parseFactoryState(
       JSON.parse(readFileSync(activationPath, "utf8")),
       activated.repository,
       activated.objective,
     );
+    assert.equal(reloadedActivation.coordinator.mode, "paused");
+    assert.ok(
+      Object.values(reloadedActivation.work).every(
+        (work) => work.status === "pending",
+      ),
+    );
     assert.equal(
       planningSessionInputDigest(preparation),
       planningSessionInputDigest(reloadedActivation),
     );
+    setCoordinatorMode(activated, "running");
+    owner.pause = new AbortController();
+    saveActivation();
     const continuedPlanner = agentSessionContinuation(
       activated,
       "planning",

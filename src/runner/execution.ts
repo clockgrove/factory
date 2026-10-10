@@ -76,6 +76,16 @@ import {
 } from "./projection.js";
 import { finalizeObjective } from "./finalization.js";
 
+/** Draining finishes admitted work; a plain pause still stops its next step. */
+export function workItemPauseSignal(
+  owner: Pick<LocalOwner, "snapshot" | "pause">,
+): AbortSignal | undefined {
+  return owner.snapshot?.coordinator?.mode === "draining" &&
+    !canHandoff(owner.snapshot)
+    ? undefined
+    : owner.pause.signal;
+}
+
 export async function runObjectivePass(
   config: FactoryConfig,
   objective: number,
@@ -477,7 +487,7 @@ export async function runObjectivePass(
         signal: owner.abort.signal,
         // Read at each step: resume replaces the controller.
         get pause() {
-          return owner.pause.signal;
+          return workItemPauseSignal(owner);
         },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),
@@ -504,7 +514,7 @@ export async function runObjectivePass(
         signal: owner.abort.signal,
         // Read at each step: resume replaces the controller.
         get pause() {
-          return owner.pause.signal;
+          return workItemPauseSignal(owner);
         },
         paused: () => state.coordinator?.mode !== "running",
         amendmentPending: () => amendmentBlocksDispatch(state),

@@ -55,7 +55,12 @@ import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import { withGitHubTransportObserver } from "../dist/github-client.js";
-import { runObjectivePass } from "../dist/runner/execution.js";
+import {
+  runObjectivePass,
+  workItemPauseSignal,
+} from "../dist/runner/execution.js";
+import { canHandoff } from "../dist/runner/ownership.js";
+import { validateItem } from "../dist/item-steps.js";
 import { killGroup } from "../dist/execution/worker-process.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
@@ -1173,7 +1178,7 @@ test("settled validation reuses its exact Git result once and retains the failed
     };
     hydrateWorkerInputSources(graph, pinnedSources);
     const work = {
-      status: "failed",
+      status: "running",
       step: "validate",
       attempt: "one-implementation",
       baseSha: commit,
@@ -1197,27 +1202,56 @@ test("settled validation reuses its exact Git result once and retains the failed
       work: { local: work },
       autonomy: resolveAutonomy({ allowances: { implementationRepairs: 0 } }),
     };
-    await assert.rejects(
-      () =>
-        validateTree(
-          checkout,
-          join(root, "validation"),
-          commit,
-          treeSha,
-          [command],
-          undefined,
-          undefined,
-          [],
-          undefined,
-          commit,
-        ),
-      (error) => {
-        assert.ok(error instanceof CandidateValidationFailure);
-        assert.equal(error.failedValidation.commands[0].exitCode, 1);
-        recordWorkFailure(state, "local", error);
-        return true;
-      },
-    );
+    const pause = new AbortController();
+    pause.abort(new Error("Coordinator paused"));
+    const owner = { snapshot: state, pause };
+    state.coordinator = {
+      mode: "paused",
+      phase: "validate",
+      phaseStartedAt: new Date().toISOString(),
+      processes: [],
+    };
+    const validate = () =>
+      validateTree(
+        checkout,
+        join(root, "validation"),
+        commit,
+        treeSha,
+        [command],
+        undefined,
+        undefined,
+        [],
+        undefined,
+        commit,
+      );
+    const validationStep = () =>
+      validateItem({
+        state,
+        item: graph.items[0],
+        save: () => undefined,
+        pause: workItemPauseSignal(owner),
+        validate,
+      });
+    // A plain pause refuses the next command. Draining must reach a real
+    // failure/operator or publication boundary before that pause applies.
+    assert.equal(canHandoff(state), false);
+    assert.equal(workItemPauseSignal(owner), pause.signal);
+    await assert.rejects(validationStep, StepPaused);
+    assert.equal(existsSync(join(root, "validation")), false);
+    state.coordinator.mode = "draining";
+    assert.equal(workItemPauseSignal(owner), undefined);
+    await assert.rejects(validationStep, (error) => {
+      assert.ok(error instanceof CandidateValidationFailure);
+      assert.equal(error.failedValidation.commands[0].exitCode, 1);
+      // The delivery runner fails the admitted item after this real
+      // validation command rejects, retaining its exact failed capture.
+      work.status = "failed";
+      recordWorkFailure(state, "local", error);
+      return true;
+    });
+    assert.equal(work.status, "failed");
+    assert.equal(canHandoff(state), true);
+    assert.equal(workItemPauseSignal(owner), pause.signal);
     const original = structuredClone(work.failedValidation);
     const originalFailure = structuredClone(work.recovery.failure);
     const request = { item: "local", actor: "integration-operator" };

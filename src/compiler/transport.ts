@@ -10,6 +10,7 @@ import type {
   PlanningRequest,
 } from "../contracts.js";
 import type { Fault } from "../fault.js";
+import type { PromptSection } from "../prompt-bytes.js";
 import type { PlanningSourceDelivery } from "./source-delivery.js";
 
 export interface PlanningModelOptions {
@@ -105,6 +106,8 @@ export interface PlanningTransport {
 }
 
 export interface StructuredCall {
+  promptSections?: PromptSection[];
+  exportedEvidenceFileBytes?: number;
   role: PlanningRole;
   prompt: string;
   schema: unknown;

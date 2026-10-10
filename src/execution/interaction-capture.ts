@@ -8,9 +8,10 @@ import {
   type InteractionMetadata,
 } from "../capture.js";
 import type { HarnessRequest, ModelInvocationUsage } from "../contracts.js";
+import type { PromptSection } from "../prompt-bytes.js";
 import {
-  codexRawTokenUsage,
   codexInvocationUsage,
+  codexRawTokenUsage,
   codexSdkTokenUsage,
   codexTokenUsage,
   normalizeTokenUsage,
@@ -340,7 +341,11 @@ export class WorkerInteractionCapture {
     }
   }
 
-  request(prompt: string, instructions?: unknown): void {
+  request(
+    prompt: string,
+    instructions?: unknown,
+    sections?: PromptSection[],
+  ): void {
     if (this.codexBoundary)
       this.safely(() =>
         this.writer!.record({
@@ -364,6 +369,7 @@ export class WorkerInteractionCapture {
           coverage: "boundary",
           promptComponents: {
             renderedPromptBytes: Buffer.byteLength(prompt),
+            sections,
             rolePreambleTaskSplit: "unavailable",
           },
         },

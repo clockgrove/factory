@@ -40,7 +40,7 @@ import {
   privateProgress,
   readProducedAssets,
   redact,
-  workItemPrompt,
+  renderWorkItemPrompt,
   writeHarnessResult,
 } from "./harness-support.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
@@ -222,19 +222,24 @@ async function main(): Promise<void> {
         }),
       );
     }
-    const prompt = workItemPrompt(input.request);
+    const rendered = renderWorkItemPrompt(input.request);
+    const prompt = rendered.prompt;
     const options = claudeQueryOptions(
       input,
       process.env,
       controller,
       prepared,
     );
-    capture.request(prompt, {
-      systemPrompt: options.systemPrompt,
-      tools: options.tools,
-      allowedTools: options.allowedTools,
-      permissionMode: options.permissionMode,
-    });
+    capture.request(
+      prompt,
+      {
+        systemPrompt: options.systemPrompt,
+        tools: options.tools,
+        allowedTools: options.allowedTools,
+        permissionMode: options.permissionMode,
+      },
+      rendered.sections,
+    );
     if (input.session) {
       input.session.ref.currentTurn = {
         ...input.session.ref.currentTurn!,

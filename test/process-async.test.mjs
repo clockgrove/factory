@@ -19,16 +19,11 @@ import test from "node:test";
 import { analyzeInteractions } from "../dist/analysis.js";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
-import { codexStderrCapture } from "../dist/codex-exec.js";
 import {
   codexBoundaryTelemetry,
   codexJsonBoundaries,
 } from "../dist/codex-boundary-telemetry.js";
-import {
-  ProviderTurnElapsedTimeoutError,
-  ProviderTurnGuard,
-  ProviderTurnTimeoutError,
-} from "../dist/provider-turn.js";
+import { codexStderrCapture } from "../dist/codex-exec.js";
 import { createCodexHome } from "../dist/codex-planning-isolation.js";
 import {
   CodexPlanningModel,
@@ -36,42 +31,34 @@ import {
   renderDiagnosisCall,
 } from "../dist/compiler/model.js";
 import {
-  hydrateWorkerInputSources,
-  planningSources,
-} from "../dist/compiler/sources.js";
-import {
   prepareCompilationRequest,
   validateCompiledGraph,
 } from "../dist/compiler/planning.js";
-import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import {
-  diagnosticPath,
+  hydrateWorkerInputSources,
+  planningSources,
+} from "../dist/compiler/sources.js";
+import { factoryConfigDigest, stateRoot } from "../dist/config.js";
+import { LocalContentStore } from "../dist/content/local.js";
+import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
+import { RegularDelivery } from "../dist/delivery/regular.js";
+import {
   DiagnosticEmitter,
+  diagnosticPath,
   readDiagnostics,
   summarizeFormalHistory,
   withDiagnosticSession,
 } from "../dist/diagnostics.js";
 import {
-  checkpointWorkerSession,
   CodexHarness,
+  checkpointWorkerSession,
   LocalExecutionDriver,
 } from "../dist/execution/local.js";
-import { LocalContentStore } from "../dist/content/local.js";
-import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
-import { RegularDelivery } from "../dist/delivery/regular.js";
+import { killGroup } from "../dist/execution/worker-process.js";
 import { RealGitHubGateway } from "../dist/github.js";
 import { withGitHubTransportObserver } from "../dist/github-client.js";
-import {
-  runObjectivePass,
-  workItemPauseSignal,
-} from "../dist/runner/execution.js";
-import {
-  canHandoff,
-  synchronizeWorkItemPause,
-} from "../dist/runner/ownership.js";
-import { validateItem } from "../dist/item-steps.js";
-import { killGroup } from "../dist/execution/worker-process.js";
 import { graphDigest } from "../dist/graph-amendments.js";
+import { validateItem } from "../dist/item-steps.js";
 import {
   addWorktree,
   gitAsync,
@@ -83,6 +70,11 @@ import {
   withProcessCancellation,
 } from "../dist/process.js";
 import {
+  ProviderTurnElapsedTimeoutError,
+  ProviderTurnGuard,
+  ProviderTurnTimeoutError,
+} from "../dist/provider-turn.js";
+import {
   assertCompletedCoverage,
   environmentValidationIndices,
   objectivePreparationCommands,
@@ -93,17 +85,25 @@ import {
   chargeRepair,
   consumption,
   objectiveEvent,
-  resolveAutonomy,
   repairScopes,
+  resolveAutonomy,
 } from "../dist/repair-policy.js";
+import {
+  runObjectivePass,
+  workItemPauseSignal,
+} from "../dist/runner/execution.js";
+import {
+  canHandoff,
+  synchronizeWorkItemPause,
+} from "../dist/runner/ownership.js";
 import { decideResult, rereviewWorkItem } from "../dist/runner.js";
-import { readState, saveState, statePath } from "../dist/state-store.js";
 import { setCoordinatorMode } from "../dist/state.js";
+import { readState, saveState, statePath } from "../dist/state-store.js";
 import {
   assertStepAdmission,
+  StepPaused,
   step,
   stepCancellationSignal,
-  StepPaused,
 } from "../dist/step.js";
 import {
   validateCheckout,
@@ -111,12 +111,12 @@ import {
   validateWorkItem,
 } from "../dist/validation.js";
 import {
-  CandidateValidationFailure,
   actionableReadiness,
   applyWorkCorrection,
+  CandidateValidationFailure,
   diagnosisFiles,
-  repairEvidence,
   recordWorkFailure,
+  repairEvidence,
   workRepairDiagnosisRequest,
 } from "../dist/work-repair.js";
 
@@ -217,8 +217,9 @@ assert.equal(retained.includes("private"), false);
 assert.deepEqual(JSON.parse(retained.trim()).transport, transport);
 const emitted = [];
 const writer = new CaptureWriter({ repository: ${JSON.stringify(repository)}, objective: 1, invocationId: "actual-child-capture", providerAttempt: 1, phase: "integration", adapter: "local-process", configured: { provider: "not-invoked", model: "none" } }, { enabled: true, maxBytesPerInvocation: 1024 }, [], metadata => emitted.push(metadata));
-const prompt = "real child process capture π";
-writer.record({ kind: "request", promptComponents: { renderedPromptBytes: Buffer.byteLength(prompt), rolePreambleTaskSplit: "unavailable" } }, () => ({ text: "real child process capture" }));
+const { renderPrompt } = await import(${JSON.stringify(new URL("../dist/prompt-bytes.js", import.meta.url).href)});
+const { prompt, sections } = renderPrompt([["instructions", "real child process "], ["objective", "capture π"]]);
+writer.record({ kind: "request", promptComponents: { renderedPromptBytes: Buffer.byteLength(prompt), sections, exportedEvidenceFileBytes: Buffer.byteLength(readFileSync(new URL(${JSON.stringify(new URL("../dist/prompt-bytes.js", import.meta.url).href)}))), rolePreambleTaskSplit: "unavailable" } }, () => ({ text: "real child process capture" }));
 for (const event of nativeEvents) writer.record(event);
 process.stdout.write(JSON.stringify(emitted));`,
       ],
@@ -247,6 +248,46 @@ process.stdout.write(JSON.stringify(emitted));`,
       Buffer.byteLength("real child process capture π"),
     );
     assert.equal(analysis.requestBytes.evidenceBytes.total, null);
+    assert.equal(analysis.requestBytes.sections.coverage, "available");
+    assert.equal(
+      analysis.requestBytes.sections.totals.instructions,
+      Buffer.byteLength("real child process "),
+    );
+    assert.equal(
+      analysis.requestBytes.sections.totals.objective,
+      Buffer.byteLength("capture π"),
+    );
+    assert.equal(
+      analysis.requestBytes.exportedEvidenceFileBytes.total,
+      Buffer.byteLength(
+        readFileSync(new URL("../dist/prompt-bytes.js", import.meta.url)),
+      ),
+    );
+    const legacyRequest = {
+      ...metadata,
+      promptComponents: { ...metadata.promptComponents, sections: undefined },
+    };
+    assert.equal(
+      analyzeInteractions([legacyRequest]).requestBytes.sections.coverage,
+      "unavailable",
+    );
+    const malformedRequest = {
+      ...metadata,
+      promptComponents: {
+        ...metadata.promptComponents,
+        sections: [
+          {
+            kind: "objective",
+            startByte: 1,
+            endByte: metadata.promptComponents.renderedPromptBytes,
+          },
+        ],
+      },
+    };
+    assert.equal(
+      analyzeInteractions([malformedRequest]).requestBytes.sections.coverage,
+      "unavailable",
+    );
     assert.equal(analysis.requestBytes.exactBilledRoleTokens, null);
     assert.equal(analysis.invocations[0].sessionTurnCoverage, "unavailable");
     assert.equal(

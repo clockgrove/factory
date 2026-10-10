@@ -14,6 +14,7 @@ import {
   summarizeDiagnosticUsage,
 } from "./diagnostics.js";
 import { formatDuration, summarizeEfficiency } from "./efficiency.js";
+import { validPromptSections } from "./prompt-bytes.js";
 import { readContinuation } from "./state-store.js";
 import {
   codexTokenUsage,
@@ -759,7 +760,7 @@ function directNativeCapture(
           !Number.isSafeInteger(components.renderedPromptBytes) ||
           components.renderedPromptBytes < 0 ||
           components.rolePreambleTaskSplit !== "unavailable" ||
-          !["schemaBytes", "evidenceBytes"].every(
+          !["schemaBytes", "evidenceBytes", "exportedEvidenceFileBytes"].every(
             (key) =>
               components[key] === undefined ||
               (Number.isSafeInteger(components[key]) && components[key] >= 0),
@@ -770,6 +771,13 @@ function directNativeCapture(
           renderedPromptBytes: components.renderedPromptBytes,
           schemaBytes: components.schemaBytes,
           evidenceBytes: components.evidenceBytes,
+          exportedEvidenceFileBytes: components.exportedEvidenceFileBytes,
+          ...(validPromptSections(
+            components.sections,
+            components.renderedPromptBytes,
+          )
+            ? { sections: components.sections }
+            : {}),
           rolePreambleTaskSplit: "unavailable",
         };
       }

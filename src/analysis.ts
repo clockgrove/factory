@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { InteractionMetadata } from "./capture.js";
 import type { DiagnosticEvent } from "./diagnostics.js";
 import { summarizeNativeTools } from "./native-tool-activity.js";
+import { PROMPT_SECTION_KINDS, validPromptSections } from "./prompt-bytes.js";
 import {
   cumulativeTokenUsageDelta,
   normalizeCodexTokenUsage,
@@ -748,7 +749,11 @@ type Invocation = ReturnType<typeof summarizeInvocation>;
 
 function sumRequestBytes(
   invocations: Invocation[],
-  key: "renderedPromptBytes" | "schemaBytes" | "evidenceBytes",
+  key:
+    | "renderedPromptBytes"
+    | "schemaBytes"
+    | "evidenceBytes"
+    | "exportedEvidenceFileBytes",
 ) {
   const values = invocations.flatMap((invocation) => {
     const value = invocation.promptComponents?.[key];
@@ -767,6 +772,47 @@ function sumRequestBytes(
         : values.length === invocations.length
           ? "available"
           : "partial",
+  };
+}
+
+function sumPromptSections(invocations: Invocation[]) {
+  const eligible = invocations.filter((invocation) =>
+    validPromptSections(
+      invocation.promptComponents?.sections,
+      invocation.promptComponents?.renderedPromptBytes ?? -1,
+    ),
+  );
+  return {
+    coverage:
+      eligible.length === 0
+        ? "unavailable"
+        : eligible.length === invocations.length
+          ? "available"
+          : "partial",
+    contributingInvocations: eligible.length,
+    eligibleInvocations: invocations.length,
+    totals: Object.fromEntries(
+      PROMPT_SECTION_KINDS.map((kind) => [
+        kind,
+        eligible.length
+          ? eligible.reduce(
+              (total, invocation) =>
+                total +
+                invocation
+                  .promptComponents!.sections!.filter(
+                    (section) => section.kind === kind,
+                  )
+                  .reduce(
+                    (sum, section) => sum + section.endByte - section.startByte,
+                    0,
+                  ),
+              0,
+            )
+          : null,
+      ]),
+    ),
+    scope:
+      "disjoint-rendered-text-bytes; producer labels, not model roles or tokens",
   };
 }
 
@@ -872,6 +918,11 @@ function aggregate(invocations: Invocation[]) {
       renderedPromptBytes: sumRequestBytes(invocations, "renderedPromptBytes"),
       schemaBytes: sumRequestBytes(invocations, "schemaBytes"),
       evidenceBytes: sumRequestBytes(invocations, "evidenceBytes"),
+      exportedEvidenceFileBytes: sumRequestBytes(
+        invocations,
+        "exportedEvidenceFileBytes",
+      ),
+      sections: sumPromptSections(invocations),
       componentsOverlap: true,
       exactBilledRoleTokens: null,
     },

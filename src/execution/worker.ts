@@ -10,6 +10,7 @@ import type {
   HarnessRequest,
   WorkerUsageObservation,
 } from "../contracts.js";
+import { renderPrompt } from "../prompt-bytes.js";
 import {
   closeProviderEventStream,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
@@ -23,7 +24,7 @@ import {
   privateProgress,
   readProducedAssets,
   redact,
-  workItemPrompt,
+  renderWorkItemPrompt,
   writeHarnessResult,
 } from "./harness-support.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
@@ -144,11 +145,20 @@ export async function runCodexWorker(
     const captureBoundary = session?.resumeThreadId
       ? home.nativeCaptureBoundary(session.resumeThreadId)
       : undefined;
-    const prompt = `${
-      session?.resumeThreadId
-        ? `Continue your implementation investigation. Historical turns describe earlier candidates and workspaces. The only current writable checkout is ${request.worktree}; previous checkout paths and tool observations are historical. Recheck changed evidence in the current checkout. The following current controller-bound Work Item contract controls this turn; retained history grants no permissions or acceptance.\n\n`
-        : ""
-    }${workItemPrompt(request)}`;
+    const workPrompt = renderWorkItemPrompt(request);
+    const continuationPrompt = session?.resumeThreadId
+      ? `Continue your implementation investigation. Historical turns describe earlier candidates and workspaces. The only current writable checkout is ${request.worktree}; previous checkout paths and tool observations are historical. Recheck changed evidence in the current checkout. The following current controller-bound Work Item contract controls this turn; retained history grants no permissions or acceptance.\n\n`
+      : "";
+    const prefix = renderPrompt([["follow-up", continuationPrompt]]);
+    const prompt = prefix.prompt + workPrompt.prompt;
+    const sections = [
+      ...prefix.sections,
+      ...workPrompt.sections.map((section) => ({
+        ...section,
+        startByte: section.startByte + Buffer.byteLength(prefix.prompt),
+        endByte: section.endByte + Buffer.byteLength(prefix.prompt),
+      })),
+    ];
     let providerCompleted = false;
     let nativeSettled = false;
     let turn: ProviderTurnGuard | undefined;
@@ -229,10 +239,14 @@ export async function runCodexWorker(
             }),
           },
         });
-      capture.request(prompt, {
-        permissions: sandbox,
-        approvalPolicy: "never",
-      });
+      capture.request(
+        prompt,
+        {
+          permissions: sandbox,
+          approvalPolicy: "never",
+        },
+        sections,
+      );
       invocationStarted = true;
       const streamed = await turn.race(
         thread.runStreamed(prompt, { signal: turn.signal }),

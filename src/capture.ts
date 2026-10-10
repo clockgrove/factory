@@ -18,6 +18,7 @@ import {
   redactDiagnosticDetail,
 } from "./diagnostics.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
+import type { PromptSection } from "./prompt-bytes.js";
 
 /** Observed client boundaries, never submission, billing or server-time authority. */
 export interface ModelBoundaryObservation {
@@ -190,9 +191,13 @@ export interface InteractionMetadata {
       InteractionMetadata["usage"]
     >["normalized"];
   };
-  /** Author-owned overlapping components, not a tokenizer or an inferred additive split. */
+  /** Author-owned byte measurements; section ranges are disjoint, other views may overlap. */
   promptComponents?: {
     renderedPromptBytes: number;
+    /** Disjoint complete rendered-text ranges, supplied by the actual renderer. */
+    sections?: PromptSection[];
+    /** Separately exported evidence bodies; never added to inline prompt bytes. */
+    exportedEvidenceFileBytes?: number;
     schemaBytes?: number;
     evidenceBytes?: number;
     rolePreambleTaskSplit: "unavailable";

@@ -34,17 +34,18 @@ import {
 } from "../dist/controller-capabilities.js";
 import { deliveryDescription } from "../dist/delivery/description.js";
 import { transplantIndependentChange } from "../dist/delivery/transplant.js";
-import { coverageObligations } from "../dist/qa.js";
-import {
-  renderReviewPacketChoices,
-  reviewPacket,
-} from "../dist/review-evidence.js";
 import { graphDigest } from "../dist/graph-amendments.js";
+import { validPromptSections } from "../dist/prompt-bytes.js";
+import { coverageObligations } from "../dist/qa.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
 import {
   gitChangeEvidenceSources,
   resultChangePacket,
 } from "../dist/result-evidence.js";
+import {
+  renderReviewPacketChoices,
+  reviewPacket,
+} from "../dist/review-evidence.js";
 import { SemanticAcceptanceFailure } from "../dist/semantic-refusal.js";
 import { validateWorkItem } from "../dist/validation.js";
 import {
@@ -250,6 +251,10 @@ test("independent prepared change is replayed on the observed integration head",
       "omitted",
     );
     const call = renderDiagnosisCall(request);
+    assert.equal(
+      validPromptSections(call.promptSections, Buffer.byteLength(call.prompt)),
+      true,
+    );
     assert.deepEqual(call.planningSources.suppliedSourceIndices, [0]);
     const deliveredByFocusedDiagnosis = deliveredPlanningSources(
       request.baseSha,
@@ -401,12 +406,16 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       join(root, "additional.txt"),
       'Literal "quotes" and Unicode λ.\n\n',
     );
+    writeFileSync(
+      join(root, "duplicate.txt"),
+      readFileSync(join(root, "contract.md")),
+    );
     writeFileSync(join(root, "empty.txt"), "");
     git(root, "add", ".");
     git(root, "commit", "-m", "pin complete public API source");
     const baseSha = git(root, "rev-parse", "HEAD");
     const body =
-      "## Acceptance\n- Preserve every required interface.\n\n## Sources\n- contract.md\n";
+      "## Acceptance\n- Preserve every required interface.\n\n## Sources\n- contract.md\n- duplicate.txt\n";
     const sources = planningSources(body, baseSha, root);
     const obligations = coverageObligations(body, [
       "Preserve every required interface.",
@@ -484,6 +493,10 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
     };
     const { wire, call } = renderCompilationCall(request);
+    assert.equal(
+      validPromptSections(call.promptSections, Buffer.byteLength(call.prompt)),
+      true,
+    );
     const sourceRoot = planningSourceDirectory(
       privateSources,
       baseSha,
@@ -495,7 +508,25 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       sources,
       deliveredPlanningSources(baseSha, sources),
     );
+    assert.ok(
+      new Set(sourceFiles.files.map((file) => file.file)).size <
+        sourceFiles.files.length,
+    );
     const resumed = renderCompilationCall(request, sourceFiles);
+    assert.equal(
+      validPromptSections(
+        resumed.call.promptSections,
+        Buffer.byteLength(resumed.call.prompt),
+      ),
+      true,
+    );
+    assert.equal(
+      resumed.call.exportedEvidenceFileBytes,
+      [...new Set(sourceFiles.files.map((file) => file.file))].reduce(
+        (sum, file) => sum + readFileSync(join(sourceRoot, file)).byteLength,
+        0,
+      ),
+    );
     const resumedChoices = JSON.parse(
       resumed.call.prompt.split("Compiler choices (JSON data):\n")[1],
     );

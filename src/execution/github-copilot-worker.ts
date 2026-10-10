@@ -1,41 +1,41 @@
-import { GITHUB_COPILOT_SDK_ADAPTER_IDENTITY } from "../config.js";
-import { WorkerInteractionCapture } from "./interaction-capture.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { isDeepStrictEqual } from "node:util";
-import {
-  copilotDigest,
-  requireCopilotHome,
-  requireCopilotWorkspace,
-  type CopilotSessionData,
-} from "./github-copilot-session.js";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { SessionEvent } from "@github/copilot-sdk";
-import {
-  githubCopilotAuthenticationValues,
-  githubCopilotAuthenticationSelection,
-  type GitHubCopilotWorkerInput,
-} from "./github-copilot.js";
-import {
-  harnessFailure,
-  privateProgress,
-  readProducedAssets,
-  redact,
-  workItemPrompt,
-  writeHarnessResult,
-} from "./harness-support.js";
-import {
-  githubCopilotClientOptions,
-  githubCopilotSessionOptions,
-} from "./github-copilot-options.js";
-import { bounded, cleanupCopilotClient } from "./github-copilot-lifecycle.js";
-import { CopilotUsage } from "./github-copilot-usage.js";
+import { GITHUB_COPILOT_SDK_ADAPTER_IDENTITY } from "../config.js";
 import type { WorkerUsageObservation } from "../contracts.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnGuard,
   ProviderTurnIncompleteError,
 } from "../provider-turn.js";
+import {
+  type GitHubCopilotWorkerInput,
+  githubCopilotAuthenticationSelection,
+  githubCopilotAuthenticationValues,
+} from "./github-copilot.js";
+import { bounded, cleanupCopilotClient } from "./github-copilot-lifecycle.js";
+import {
+  githubCopilotClientOptions,
+  githubCopilotSessionOptions,
+} from "./github-copilot-options.js";
+import {
+  type CopilotSessionData,
+  copilotDigest,
+  requireCopilotHome,
+  requireCopilotWorkspace,
+} from "./github-copilot-session.js";
+import { CopilotUsage } from "./github-copilot-usage.js";
+import {
+  harnessFailure,
+  privateProgress,
+  readProducedAssets,
+  redact,
+  renderWorkItemPrompt,
+  writeHarnessResult,
+} from "./harness-support.js";
+import { WorkerInteractionCapture } from "./interaction-capture.js";
 
 function progressEvent(
   event: SessionEvent,
@@ -389,11 +389,16 @@ async function main(): Promise<void> {
     usage.excludeHistory(await race(session.getEvents()), session.sessionId);
     // Startup idleness cannot qualify the implementation turn.
     terminal = false;
-    const prompt = workItemPrompt(input.request);
-    capture.request(prompt, {
-      systemMessage: sessionOptions.systemMessage,
-      availableTools: sessionOptions.availableTools,
-    });
+    const rendered = renderWorkItemPrompt(input.request);
+    const prompt = rendered.prompt;
+    capture.request(
+      prompt,
+      {
+        systemMessage: sessionOptions.systemMessage,
+        availableTools: sessionOptions.availableTools,
+      },
+      rendered.sections,
+    );
     dispatched = true;
     const response = await race(
       session.sendAndWait({ prompt }, input.config.timeoutSeconds * 1_000),

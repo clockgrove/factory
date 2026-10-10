@@ -504,7 +504,9 @@ export class StructuredPlanningModel implements PlanningModel {
   }
 
   async releaseSession(session: AgentSessionRef): Promise<void> {
-    await this.transport.releaseSession?.(session);
+    if (!this.transport.releaseSession)
+      throw new Error("Planning transport does not support session disposal");
+    await this.transport.releaseSession(session);
   }
 
   constructor(

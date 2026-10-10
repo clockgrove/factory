@@ -37,6 +37,15 @@ import { checkpointExecutionState } from "../dist/runner/execution.js";
 import { canHandoff } from "../dist/runner/ownership.js";
 import { setCoordinatorMode } from "../dist/state.js";
 import {
+  CoordinatorHandoff,
+  observeObjectiveController,
+} from "../dist/runner.js";
+import {
+  DiagnosticEmitter,
+  readDiagnostics,
+  summarizeFormalHistory,
+} from "../dist/diagnostics.js";
+import {
   checkpointWorkerSession,
   CodexHarness,
   LocalExecutionDriver,
@@ -988,6 +997,125 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       planningSessionInputDigest(preparation),
       planningSessionInputDigest(reloadedActivation),
     );
+    const diagnostics = new DiagnosticEmitter(
+      activated.repository,
+      activated.objective,
+    );
+    const firstObservation = readDiagnostics(
+      activated.repository,
+      activated.objective,
+    ).length;
+    const observe = (task) =>
+      observeObjectiveController(
+        diagnostics,
+        activated.configDigest,
+        task,
+        (result) => ({ runId: result.runId, outcome: "not-accepted" }),
+      );
+    const handoff = new CoordinatorHandoff();
+    const pausedBytes = readFileSync(activationPath, "utf8");
+    // The real pause and owned preflight above have settled. Exercise the
+    // production controller observation boundary at that supported safe point.
+    await assert.rejects(
+      observe(async () => {
+        const settled = await subprocessAsync(
+          "sh",
+          ["-c", "echo handed-off"],
+          {},
+        );
+        assert.equal(settled.status, 0);
+        assert.equal(canHandoff(reloadedActivation), true);
+        throw handoff;
+      }),
+      (error) => error === handoff,
+    );
+    const observations = () =>
+      readDiagnostics(activated.repository, activated.objective).slice(
+        firstObservation,
+      );
+    const handoffRecords = observations();
+    const expectedObservations = {
+      repository: activated.repository,
+      objective: activated.objective,
+      configDigest: activated.configDigest,
+      observerSourceDigest: handoffRecords[0].metadata.observerSourceDigest,
+      sessionIds: [handoffRecords[0].observerSessionId],
+    };
+    const handoffTerminal = handoffRecords.find(
+      (event) => event.formalAttempt?.terminal,
+    );
+    assert.equal(handoffTerminal.outcome, "waiting");
+    assert.equal(handoffTerminal.formalAttempt.status, "paused");
+    assert.equal(handoffTerminal.formalAttempt.faultClass, undefined);
+    assert.equal(handoffTerminal.metadata.controllerDisposition, "handed-off");
+    const handoffSummary = summarizeFormalHistory(
+      handoffRecords,
+      expectedObservations,
+    );
+    assert.equal(handoffSummary.completeness, "complete");
+    assert.equal(handoffSummary.hasFailedAttempt, false);
+    assert.deepEqual(handoffSummary.lifecycleOutcomes, ["handed-off"]);
+    assert.equal(readFileSync(activationPath, "utf8"), pausedBytes);
+    assert.equal(reloadedActivation.cancelledAt, undefined);
+    assert.equal(reloadedActivation.finalAcceptance, undefined);
+    await observe(async () => {
+      const settled = await subprocessAsync("sh", ["-c", "echo restarted"], {});
+      assert.equal(settled.status, 0);
+      return reloadedActivation;
+    });
+    expectedObservations.sessionIds = observations()
+      .filter(
+        (event) =>
+          event.operation === "observer-session" && event.outcome === "started",
+      )
+      .map((event) => event.observerSessionId);
+    const restartSummary = summarizeFormalHistory(
+      observations(),
+      expectedObservations,
+    );
+    assert.equal(restartSummary.completeness, "complete");
+    assert.equal(restartSummary.hasFailedAttempt, false);
+    assert.deepEqual(restartSummary.lifecycleOutcomes, [
+      "handed-off",
+      "not-accepted",
+    ]);
+    // A real nonzero process with the same text is still an ordinary failure;
+    // subsequent observer closure cannot rewrite either historical outcome.
+    await assert.rejects(
+      observe(async () => {
+        const failed = await subprocessAsync(
+          "sh",
+          ["-c", "echo failure; exit 23"],
+          {},
+        );
+        assert.equal(failed.status, 23);
+        throw new Error(handoff.message);
+      }),
+      (error) =>
+        error.constructor === Error && error.message === handoff.message,
+    );
+    expectedObservations.sessionIds = observations()
+      .filter(
+        (event) =>
+          event.operation === "observer-session" && event.outcome === "started",
+      )
+      .map((event) => event.observerSessionId);
+    const failureSummary = summarizeFormalHistory(
+      observations(),
+      expectedObservations,
+    );
+    assert.equal(failureSummary.completeness, "complete");
+    assert.equal(failureSummary.hasFailedAttempt, true);
+    assert.deepEqual(failureSummary.lifecycleOutcomes, [
+      "handed-off",
+      "not-accepted",
+      "failed",
+    ]);
+    const failureTerminal = observations().find(
+      (event) => event.formalAttempt?.status === "failed",
+    );
+    assert.equal(failureTerminal.outcome, "failed");
+    assert.equal(failureTerminal.formalAttempt.faultClass, "defect");
     setCoordinatorMode(activated, "running");
     owner.pause = new AbortController();
     saveActivation();

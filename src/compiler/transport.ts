@@ -11,6 +11,8 @@ import type {
 import type { Fault } from "../fault.js";
 
 export interface PlanningModelOptions {
+  /** Nonrenewable elapsed budget for one admitted planning invocation, including capacity backoff. */
+  providerTurnElapsedTimeoutMs?: number;
   reviewCapacityRetryDelaysMs?: readonly number[];
   wait?: (milliseconds: number) => Promise<void>;
 }
@@ -81,6 +83,8 @@ export interface PlanningTransport {
     session?: AgentSessionContinuation;
     /** Optional caller deadline; the transport still proves owned process settlement. */
     signal?: AbortSignal;
+    /** Admitted elapsed ceiling; native activity never renews it. */
+    deadlineAt?: string;
   }): Promise<void>;
 }
 

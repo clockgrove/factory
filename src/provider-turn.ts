@@ -37,9 +37,23 @@ export class ProviderTurnIncompleteError extends Error {
   }
 }
 
+/** Activity never extends the admitted elapsed budget. */
+export class ProviderTurnElapsedTimeoutError extends ProviderTurnTimeoutError {
+  constructor(
+    readonly deadlineAt: string,
+    lastOperation = "provider-start",
+    inactivityMs = 0,
+  ) {
+    super(0, "provider-turn", lastOperation, inactivityMs);
+    this.name = "ProviderTurnElapsedTimeoutError";
+    this.message = `Provider turn reached its admitted elapsed deadline ${deadlineAt} (last observed operation: ${lastOperation}; inactivity ${inactivityMs} ms)`;
+  }
+}
+
 export class ProviderTurnGuard {
   private readonly controller = new AbortController();
   private timer: NodeJS.Timeout | undefined;
+  private elapsedTimer: NodeJS.Timeout | undefined;
   private ended = false;
   private timeoutError: ProviderTurnTimeoutError | undefined;
   private readonly activeTools = new Set<string>();
@@ -52,6 +66,7 @@ export class ProviderTurnGuard {
   constructor(
     private readonly idleTimeoutMs: number,
     private readonly toolIdleTimeoutMs?: number,
+    readonly deadlineAt?: string,
   ) {
     if (
       [idleTimeoutMs, toolIdleTimeoutMs ?? idleTimeoutMs].some(
@@ -60,6 +75,30 @@ export class ProviderTurnGuard {
     )
       throw new Error("Provider turn idle timeout must be a positive integer");
     this.reset();
+    if (deadlineAt !== undefined) {
+      const deadline = Date.parse(deadlineAt);
+      if (!Number.isFinite(deadline)) {
+        this.finish();
+        throw new Error("Provider turn elapsed deadline must be a valid date");
+      }
+      const arm = () => {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          this.expire(
+            new ProviderTurnElapsedTimeoutError(
+              deadlineAt,
+              this.lastOperation,
+              Date.now() - this.lastProgressAt,
+            ),
+          );
+        } else
+          this.elapsedTimer = setTimeout(
+            arm,
+            Math.min(remaining, 2_147_483_647),
+          );
+      };
+      arm();
+    }
   }
 
   get signal(): AbortSignal {
@@ -97,11 +136,22 @@ export class ProviderTurnGuard {
   finish(): void {
     this.ended = true;
     if (this.timer) clearTimeout(this.timer);
+    if (this.elapsedTimer) clearTimeout(this.elapsedTimer);
     this.timer = undefined;
+    this.elapsedTimer = undefined;
+  }
+
+  private expire(error: ProviderTurnTimeoutError): void {
+    if (this.ended || this.controller.signal.aborted) return;
+    this.timeoutError = error;
+    this.finish();
+    this.controller.abort(error);
+    for (const reject of this.timeoutWaiters) reject(error);
+    this.timeoutWaiters.clear();
   }
 
   private reset(): void {
-    // Progress reschedules the shared deadline without detaching active waits.
+    // Progress reschedules inactivity without extending elapsed admission.
     // Settled waits remove their subscription instead of retaining payloads.
     const waitingFor =
       this.toolIdleTimeoutMs === undefined
@@ -113,15 +163,14 @@ export class ProviderTurnGuard {
       ? (this.toolIdleTimeoutMs ?? this.idleTimeoutMs)
       : this.idleTimeoutMs;
     this.timer = setTimeout(() => {
-      this.timeoutError = new ProviderTurnTimeoutError(
-        timeoutMs,
-        waitingFor,
-        this.lastOperation,
-        Date.now() - this.lastProgressAt,
+      this.expire(
+        new ProviderTurnTimeoutError(
+          timeoutMs,
+          waitingFor,
+          this.lastOperation,
+          Date.now() - this.lastProgressAt,
+        ),
       );
-      this.controller.abort(this.timeoutError);
-      for (const reject of this.timeoutWaiters) reject(this.timeoutError);
-      this.timeoutWaiters.clear();
     }, timeoutMs);
   }
 }

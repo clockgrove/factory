@@ -108,6 +108,7 @@ const observationScope = new AsyncLocalStorage<{
 const admissionScope = new AsyncLocalStorage<{
   check: () => void;
   signal?: AbortSignal;
+  deadlineAt: () => string | undefined;
 }>();
 
 export function assertStepAdmission(): void {
@@ -116,6 +117,11 @@ export function assertStepAdmission(): void {
 
 export function stepCancellationSignal(): AbortSignal | undefined {
   return admissionScope.getStore()?.signal;
+}
+
+/** The existing authoritative Objective ceiling, including preparation and fresh-only adapters. */
+export function stepDeadlineAt(): string | undefined {
+  return admissionScope.getStore()?.deadlineAt();
 }
 
 export function withStepObserver<T>(
@@ -630,15 +636,21 @@ async function repeat<T>(
 
     try {
       const invoke = () =>
-        admissionScope.run({ check: stopWaiting, signal }, () =>
-          fn({
-            progress,
-            paid,
-            pending,
-            paidLost,
-            previousInvalid,
-            invalid,
-          }),
+        admissionScope.run(
+          {
+            check: stopWaiting,
+            signal,
+            deadlineAt: () => state.coordinator?.deadlineAt,
+          },
+          () =>
+            fn({
+              progress,
+              paid,
+              pending,
+              paidLost,
+              previousInvalid,
+              invalid,
+            }),
         );
       const inherited = observationScope.getStore();
       const result = await (inherited

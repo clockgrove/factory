@@ -188,6 +188,7 @@ export function assertAgentSessionRef(
         (key) =>
           ![
             "invocationId",
+            "deadlineAt",
             ...digests,
             "dispatch",
             "terminal",
@@ -202,6 +203,12 @@ export function assertAgentSessionRef(
       typeof current.requestDigest !== "string"
     )
       throw new Error("Agent session turn identity is missing");
+    if (
+      current.deadlineAt !== undefined &&
+      (typeof current.deadlineAt !== "string" ||
+        !Number.isFinite(Date.parse(current.deadlineAt)))
+    )
+      throw new Error("Agent session turn elapsed deadline is invalid");
     for (const name of digests)
       if (
         current[name] !== undefined &&
@@ -340,6 +347,9 @@ export function agentSessionContinuation(
   let previous = JSON.stringify(retained);
   const continuation: AgentSessionContinuation = {
     scope,
+    ...(state.coordinator?.deadlineAt
+      ? { objectiveDeadlineAt: state.coordinator.deadlineAt }
+      : {}),
     ...(scope.role === "planning" && admittedGraphDigest
       ? { currentGraphDigest: admittedGraphDigest }
       : {}),
@@ -445,6 +455,7 @@ export function agentSessionContinuation(
           const after = ref.currentTurn;
           for (const field of [
             "invocationId",
+            "deadlineAt",
             "requestDigest",
             "graphDigest",
             "candidateDigest",

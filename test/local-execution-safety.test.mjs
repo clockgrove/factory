@@ -32,6 +32,7 @@ import {
   assertAgentSessionCapabilities,
   assertAgentSessions,
   planningSessionInputDigest,
+  releaseAgentSessions,
 } from "../dist/agent-session.js";
 import { StructuredPlanningModel } from "../dist/compiler/model.js";
 import {
@@ -738,6 +739,16 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       },
     };
     planner.checkpoint(intent);
+    await assert.rejects(
+      () =>
+        releaseAgentSessions(
+          preparation,
+          undefined,
+          undefined,
+          savePreparation,
+        ),
+      /settled native resources/,
+    );
     assert.deepEqual(
       Object.values(
         readContinuation(preparation.repository, preparation.objective)

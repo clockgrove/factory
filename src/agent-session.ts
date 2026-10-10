@@ -469,6 +469,13 @@ export async function releaseAgentSessions(
   assertAgentSessions(state);
   if (state.coordinator?.processes?.length)
     throw new Error("Agent session disposal requires settled owned processes");
+  if (
+    [
+      ...Object.values(state.agentSessions ?? {}),
+      ...(state.agentSessionHistory ?? []),
+    ].some((ref) => ref.currentTurn && ref.currentTurn.resources !== "settled")
+  )
+    throw new Error("Agent session disposal requires settled native resources");
   for (const [entryKey, ref] of Object.entries(state.agentSessions ?? {})) {
     if (ref.status === "released") continue;
     const owner = ref.scope.role === "implementation" ? driver : model;

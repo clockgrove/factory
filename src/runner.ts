@@ -869,13 +869,12 @@ async function runObjectiveOwned(
         await owner.cancellation;
         await closeCancelledIssues(state, services.github, persist);
         if (!state.coordinator?.cancelError) {
-          if (state.schemaVersion === 7)
-            await releaseAgentSessions(
-              state,
-              services.driver,
-              services.planningModel,
-              persist,
-            );
+          await releaseAgentSessions(
+            state,
+            services.driver,
+            services.planningModel,
+            persist,
+          );
           const alreadyCancelled = !!state.cancelledAt;
           state.cancelledAt = new Date().toISOString();
           clearAllRepeats(state);
@@ -1074,10 +1073,9 @@ async function cancelObjectiveOwned(
       (continuation.schemaVersion === 7 && objectiveComplete(continuation)) ||
       continuation.cancelledAt
     ) {
-      if (continuation.schemaVersion === 7)
-        await releaseAgentSessions(continuation, driver, planningModel, () =>
-          saveState(statePath(config.repository, objective), continuation),
-        );
+      await releaseAgentSessions(continuation, driver, planningModel, () =>
+        saveState(statePath(config.repository, objective), continuation),
+      );
       return "cancelled";
     }
     if (continuation.schemaVersion === 7 && continuation.finalAcceptance)
@@ -1131,10 +1129,9 @@ async function cancelObjectiveOwned(
           work.completedAt = new Date().toISOString();
         }
       }
-    if (continuation.schemaVersion === 7)
-      await releaseAgentSessions(continuation, driver, planningModel, () =>
-        saveState(statePath(config.repository, objective), continuation),
-      );
+    await releaseAgentSessions(continuation, driver, planningModel, () =>
+      saveState(statePath(config.repository, objective), continuation),
+    );
     continuation.cancelledAt = new Date().toISOString();
     clearAllRepeats(continuation);
     saveState(statePath(config.repository, objective), continuation);

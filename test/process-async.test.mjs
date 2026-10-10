@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
   chmodSync,
@@ -24,7 +24,6 @@ import {
   codexJsonBoundaries,
 } from "../dist/codex-boundary-telemetry.js";
 import { codexStderrCapture } from "../dist/codex-exec.js";
-import { createCodexHome } from "../dist/codex-planning-isolation.js";
 import {
   CodexPlanningModel,
   renderCompilationCall,
@@ -39,6 +38,11 @@ import {
   planningSources,
 } from "../dist/compiler/sources.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
+import { agentSessionContinuation } from "../dist/agent-session.js";
+import {
+  CODEX_PLANNING_CONFIG,
+  createCodexHome,
+} from "../dist/codex-planning-isolation.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
@@ -96,9 +100,19 @@ import {
   canHandoff,
   synchronizeWorkItemPause,
 } from "../dist/runner/ownership.js";
-import { decideResult, rereviewWorkItem } from "../dist/runner.js";
+import {
+  cancelObjective,
+  decideResult,
+  rereviewWorkItem,
+  runObjective,
+} from "../dist/runner.js";
 import { parseFactoryState, setCoordinatorMode } from "../dist/state.js";
-import { readState, saveState, statePath } from "../dist/state-store.js";
+import {
+  readContinuation,
+  readState,
+  saveState,
+  statePath,
+} from "../dist/state-store.js";
 import {
   assertStepAdmission,
   StepPaused,
@@ -1088,6 +1102,172 @@ test("cancellation stops an owned shell and its process group", async () => {
       "Retained unresolved owned cancellation",
     );
     assert.equal(readState(config.repository, 1).cancelledAt, undefined);
+
+    // Actual pre-dispatch Codex receipts and owned homes exercise preparation
+    // cancellation without native inference, GitHub calls or invented terminals.
+    const planningModel = new CodexPlanningModel(
+      checkout,
+      selection,
+      selection,
+      undefined,
+      { sessionRoot: join(root, "planning-sessions") },
+    );
+    const preparationServices = { ...services, planningModel };
+    await withGitHubTransportObserver(
+      (observation) => observations.push(observation),
+      async () => {
+        for (const route of ["direct", "controller"]) {
+          const preparation = {
+            schemaVersion: 8,
+            kind: "preparing",
+            repository: config.repository,
+            objective: 1,
+            runId: randomUUID(),
+            configDigest: factoryConfigDigest(config),
+            baseSha,
+            objectiveBodyDigest: createHash("sha256")
+              .update("Objective")
+              .digest("hex"),
+            sourcePacketDigest: createHash("sha256")
+              .update("Source")
+              .digest("hex"),
+            issueByItemId: {},
+            autonomy: snapshot.autonomy,
+            capacity: snapshot.capacity,
+            coordinator: {
+              mode: "paused",
+              phase: "planning",
+              phaseStartedAt: new Date().toISOString(),
+              processes: [],
+            },
+          };
+          const savePreparation = () =>
+            saveState(statePath(config.repository, 1), preparation);
+          savePreparation();
+          const session = agentSessionContinuation(
+            preparation,
+            "planning",
+            undefined,
+            savePreparation,
+          );
+          let stoppedReceipt;
+          const nativeTurn = { response: "", ended: false };
+          await assert.rejects(() =>
+            planningModel.transport.run({
+              role: "planner",
+              prompt: "Do not dispatch this already cancelled turn",
+              schema: { type: "object" },
+              invocation: {
+                invocationId: randomUUID(),
+                phase: "compile",
+                ordinal: 0,
+              },
+              turn: nativeTurn,
+              signal: AbortSignal.abort(
+                new Error("Stopped before native dispatch"),
+              ),
+              session: {
+                ...session,
+                checkpoint: (ref) => {
+                  session.checkpoint(ref);
+                  if (ref.status === "unavailable")
+                    stoppedReceipt = structuredClone(ref);
+                },
+              },
+            }),
+          );
+          assert.equal(nativeTurn.started, undefined);
+          assert.equal(nativeTurn.usage, undefined);
+          assert.equal(stoppedReceipt.currentTurn.dispatch, "intent");
+          assert.equal(stoppedReceipt.currentTurn.terminal, undefined);
+          assert.equal(stoppedReceipt.currentTurn.resources, "settled");
+          const sessionKey = Object.keys(preparation.agentSessions)[0];
+          const restoreOwnedHome = () => {
+            // Restore the actual pre-disposal checkpoint for an atomic-save gap;
+            // home ownership uses the adapter's exact immutable identity binding.
+            preparation.agentSessions[sessionKey] =
+              structuredClone(stoppedReceipt);
+            createCodexHome({
+              root: stoppedReceipt.data.sessionRoot,
+              owner: createHash("sha256")
+                .update(
+                  JSON.stringify([
+                    stoppedReceipt.scope,
+                    stoppedReceipt.identity,
+                    stoppedReceipt.adapter,
+                    stoppedReceipt.data.selectionDigest,
+                  ]),
+                )
+                .digest("hex"),
+              config: CODEX_PLANNING_CONFIG,
+            });
+            savePreparation();
+          };
+          restoreOwnedHome();
+          if (route === "direct") {
+            await assert.rejects(
+              () => cancelObjective(config, 1, services.driver, github),
+              /requires its authenticated adapter/,
+            );
+            assert.equal(
+              readContinuation(config.repository, 1).cancelledAt,
+              undefined,
+            );
+            assert.equal(existsSync(stoppedReceipt.data.sessionRoot), true);
+            assert.equal(
+              await cancelObjective(
+                config,
+                1,
+                services.driver,
+                github,
+                planningModel,
+              ),
+              "cancelled",
+            );
+          } else {
+            preparation.cancelRequested = true;
+            savePreparation();
+            await assert.rejects(
+              () => runObjective(config, 1, preparationServices),
+              /Objective cancellation requested/,
+            );
+          }
+          const cancelled = readContinuation(config.repository, 1);
+          assert.ok(cancelled.cancelledAt);
+          assert.equal(cancelled.agentSessions[sessionKey].status, "released");
+          assert.deepEqual(
+            cancelled.agentSessions[sessionKey].currentTurn,
+            stoppedReceipt.currentTurn,
+          );
+          assert.deepEqual(cancelled.autonomy, snapshot.autonomy);
+          assert.equal(existsSync(stoppedReceipt.data.sessionRoot), false);
+          // Repeated cancellation also disposes a retained old terminal checkpoint.
+          Object.assign(preparation, cancelled);
+          restoreOwnedHome();
+          assert.equal(
+            await cancelObjective(
+              config,
+              1,
+              services.driver,
+              github,
+              planningModel,
+            ),
+            "cancelled",
+          );
+          assert.equal(
+            readContinuation(config.repository, 1).cancelledAt,
+            cancelled.cancelledAt,
+          );
+          assert.equal(
+            readContinuation(config.repository, 1).agentSessions[sessionKey]
+              .status,
+            "released",
+          );
+          assert.equal(existsSync(stoppedReceipt.data.sessionRoot), false);
+        }
+      },
+    );
+    assert.deepEqual(observations, []);
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previousStateHome;

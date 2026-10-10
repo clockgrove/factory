@@ -515,7 +515,10 @@ export async function releaseAgentSessions(
   for (const [entryKey, ref] of Object.entries(state.agentSessions ?? {})) {
     if (ref.status === "released") continue;
     const owner = ref.scope.role === "implementation" ? driver : model;
-    if (!owner?.releaseSession) continue;
+    if (!owner?.releaseSession)
+      throw new Error(
+        "Agent session disposal requires its authenticated adapter",
+      );
     await owner.releaseSession(ref);
     state.agentSessions![entryKey] = { ...ref, status: "released" };
     save();
@@ -523,7 +526,10 @@ export async function releaseAgentSessions(
   for (const [index, ref] of (state.agentSessionHistory ?? []).entries()) {
     if (ref.status === "released") continue;
     const owner = ref.scope.role === "implementation" ? driver : model;
-    if (!owner?.releaseSession) continue;
+    if (!owner?.releaseSession)
+      throw new Error(
+        "Agent session disposal requires its authenticated adapter",
+      );
     await owner.releaseSession(ref);
     state.agentSessionHistory![index] = { ...ref, status: "released" };
     save();

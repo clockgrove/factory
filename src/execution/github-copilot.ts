@@ -126,7 +126,9 @@ export function githubCopilotWorkerEnvironment(
 
 export class GitHubCopilotSdkHarness implements AgentHarness {
   readonly sessionAdapter = COPILOT_SESSION_ADAPTER;
-  readonly sessionCapabilities = { resumeRoles: ["implementation"] } as const;
+  // Retention plumbing remains available for owned receipts, but new work stays
+  // fresh until native account, installed restart and workspace binding qualify it.
+  readonly sessionCapabilities = undefined;
   readonly capabilities = {
     protocolVersion: 1,
     worktree: "factory-owned-read-write",

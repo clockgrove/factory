@@ -47,6 +47,7 @@ import {
   withProcessCancellation,
 } from "../dist/process.js";
 import {
+  assertCompletedCoverage,
   environmentValidationIndices,
   objectivePreparationCommands,
 } from "../dist/qa.js";
@@ -1131,7 +1132,7 @@ test("source readiness prepares each real fresh checkout before its phase checks
         itemId: item.id,
         proof:
           index === 0
-            ? { kind: "result-semantic", acceptanceIndex: 0 }
+            ? { kind: "final-review" }
             : { kind: "result-command", validationIndex: 2 },
         environment: {
           kind: "real",
@@ -1163,6 +1164,11 @@ test("source readiness prepares each real fresh checkout before its phase checks
       checkout,
     });
     item = graph.items[0];
+    // Final semantic proof needs no extra QA item, but real final commands
+    // and their readiness still run in their own fresh checkout.
+    assert.equal(graph.items.length, 1);
+    assert.equal(graph.coverage[0].itemId, item.id);
+    assert.deepEqual(graph.coverage[0].proof, { kind: "final-review" });
     assert.deepEqual(
       graph.coverage.map((entry) => entry.source.text),
       ["Result is 42", `\`${acceptance}\``],
@@ -1534,6 +1540,16 @@ test("source readiness prepares each real fresh checkout before its phase checks
       [setup],
     );
     assert.equal(final.commands[0].index, 0);
+    // Passing real commands do not fabricate the missing independent
+    // semantic assessment of the original Objective criterion.
+    assert.throws(
+      () =>
+        assertCompletedCoverage({
+          graph,
+          finalValidation: { ...final, passed: true, criteria: [] },
+        }),
+      /Final acceptance coverage lacks its exact criterion proof/,
+    );
     assert.ok(
       final.preparation.every(
         (entry) => entry.treeSha === tree && entry.passed,

@@ -294,7 +294,7 @@ factory decide --objective N --outcome refuse --reason "Why"
 factory decide --objective N --item ITEM --outcome accept|refuse --reason "Reviewed evidence"
 ```
 
-Decisions read the exact plan or tree from state, apply only to that plan or tree, and never bypass branch protection. Refusing a Work Item result records a failed-result event for the existing bounded correction path; it never turns passing command receipts into failed ones. Review excerpts can be truncated, and a truncated excerpt cannot auto-pass, so inspect the full tree before accepting. Raising `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` may allow a complete automatic review.
+Decisions read the exact plan or tree from state, apply only to that plan or tree, and never bypass branch protection. Refusing a Work Item result records a failed-result event for the existing bounded correction path; it never turns passing command receipts into failed ones. Review excerpts can be truncated, and a truncated excerpt cannot auto-pass, so inspect the full tree before accepting. Raising `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` may allow a complete automatic review. Local raw comparison reads use the separate `FACTORY_RESULT_REVIEW_RAW_BUDGET_BYTES` limit, which defaults to 1 MiB; increasing either budget does not supply missing evidence or semantic acceptance.
 
 ```sh
 # Request validation and review again on the same retained result. Accepts nothing.

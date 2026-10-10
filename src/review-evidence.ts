@@ -1,5 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/** Current-call file bindings only; never persisted into canonical packets. */
+export interface ReviewBodyFile {
+  evidenceIndex: number;
+  root: string;
+  path: string;
+  encoding: "utf-8";
+  bytes: number;
+  digest: string;
+}
 
 /** Transient wire identities; labels and repository text never define authority. */
 export interface ReviewEvidenceInput {
@@ -112,7 +124,40 @@ export function assertReviewPacketBinding(
  * The packet's criteria and evidence as provider choices, which omit opaque
  * identities. This part repeats across calls over the same sources.
  */
-function reviewPacketChoices(packet: ReviewPacket) {
+function reviewPacketChoices(
+  packet: ReviewPacket,
+  files: ReviewBodyFile[] = [],
+) {
+  const bodyFiles = new Map<number, ReviewBodyFile>();
+  for (const file of files) {
+    const entry = packet.evidence[file.evidenceIndex];
+    if (
+      !Number.isSafeInteger(file.evidenceIndex) ||
+      file.evidenceIndex < 0 ||
+      !entry ||
+      entry.origin !== "source" ||
+      entry.complete !== true ||
+      bodyFiles.has(file.evidenceIndex) ||
+      file.path !== `pinned/${file.evidenceIndex}.txt` ||
+      file.encoding !== "utf-8" ||
+      file.digest !== entry.digest ||
+      file.bytes !== Buffer.byteLength(entry.content) ||
+      !lstatSync(file.root, { throwIfNoEntry: false })?.isDirectory() ||
+      !lstatSync(join(file.root, "pinned"), {
+        throwIfNoEntry: false,
+      })?.isDirectory() ||
+      !lstatSync(join(file.root, file.path), {
+        throwIfNoEntry: false,
+      })?.isFile() ||
+      !readFileSync(join(file.root, file.path)).equals(
+        Buffer.from(entry.content),
+      )
+    )
+      throw new ReviewProtocolError(
+        "Current review body file differs from its complete source",
+      );
+    bodyFiles.set(file.evidenceIndex, file);
+  }
   const candidates = packet.evidence.map((entry) => {
     if (
       typeof entry.content !== "string" ||
@@ -186,15 +231,23 @@ function reviewPacketChoices(packet: ReviewPacket) {
     });
   }
   const choices = {
+    ...(bodies.length ? { bodies } : {}),
     evidence: packet.evidence.map(
       ({ id: _id, reusableBody: _range, content, ...entry }, evidenceIndex) => {
         const body = candidates[evidenceIndex]!;
         const bodyIndex = indices.get(body.key);
+        const file = bodyFiles.get(evidenceIndex);
         return {
           evidenceIndex,
           ...entry,
-          content:
-            bodyIndex === undefined
+          content: file
+            ? {
+                file: file.path,
+                encoding: file.encoding,
+                bytes: file.bytes,
+                digest: file.digest,
+              }
+            : bodyIndex === undefined
               ? content
               : {
                   prefix: content.slice(0, body.range.start),
@@ -204,7 +257,6 @@ function reviewPacketChoices(packet: ReviewPacket) {
         };
       },
     ),
-    ...(bodies.length ? { bodies } : {}),
     criteria: packet.criteria.map(({ text }, criterionIndex) => ({
       criterionIndex,
       text,
@@ -244,7 +296,18 @@ export function resolveReviewBodyContent(
     throw new ReviewProtocolError("Review binding index is invalid");
   let content: string;
   if (typeof entry.content === "string") content = entry.content;
-  else {
+  else if ("file" in entry.content) {
+    if (
+      entry.content.file !== `pinned/${evidenceIndex}.txt` ||
+      entry.content.encoding !== "utf-8" ||
+      entry.content.bytes !== Buffer.byteLength(binding.content) ||
+      entry.content.digest !== binding.digest
+    )
+      throw new ReviewProtocolError(
+        "Review body file binding differs from its source",
+      );
+    content = binding.content;
+  } else {
     if (
       !entry.content ||
       typeof entry.content.prefix !== "string" ||
@@ -276,16 +339,22 @@ export function resolveReviewBodyContent(
  * last and the choices before it stay a stable prompt prefix for the provider
  * cache.
  */
-export function renderReviewPacket(packet: ReviewPacket): string {
+export function renderReviewPacket(
+  packet: ReviewPacket,
+  files?: ReviewBodyFile[],
+): string {
   return JSON.stringify({
-    ...reviewPacketChoices(packet),
+    ...reviewPacketChoices(packet, files),
     packetId: packet.id,
   });
 }
 
 /** The packet's repeatable choices without its per-call id; see `renderReviewPacketId`. */
-export function renderReviewPacketChoices(packet: ReviewPacket): string {
-  return JSON.stringify(reviewPacketChoices(packet));
+export function renderReviewPacketChoices(
+  packet: ReviewPacket,
+  files?: ReviewBodyFile[],
+): string {
+  return JSON.stringify(reviewPacketChoices(packet, files));
 }
 
 /** The per-call packet id, rendered for the end of a prompt. */
@@ -296,22 +365,19 @@ export function renderReviewPacketId(packet: ReviewPacket): string {
 /** Packet-local choices; passing findings can cite only complete evidence. */
 export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
   reviewPacketChoices(packet);
-  const index = (length: number) => ({
-    type: "integer",
-    minimum: 0,
-    // An empty packet has no valid selection; the decoder also checks membership.
-    maximum: Math.max(0, length - 1),
-  });
+  // Exact packet identity and current index membership stay decoder-enforced.
+  // Stable wire schemas avoid changing the provider prefix for every packet.
+  const index = () => ({ type: "integer", minimum: 0 });
   const finding = (
     verdicts = ["pass", "needs-human", "refuse"],
-    evidenceIndex: unknown = index(packet.evidence.length),
+    evidenceIndex: unknown = index(),
   ) => ({
     type: "object",
     properties: {
       ...(graph
         ? {}
         : {
-            criterionIndex: index(packet.criteria.length),
+            criterionIndex: index(),
             verdict: {
               type: "string",
               enum: verdicts,
@@ -360,7 +426,7 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
           ...(hasCompleteEvidence
             ? [
                 finding(["pass"], {
-                  ...index(packet.evidence.length),
+                  ...index(),
                   description:
                     "Select only evidence indices whose packet entries have complete true; incomplete entries cannot support a pass.",
                 }),
@@ -373,7 +439,7 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
   return {
     type: "object",
     properties: {
-      packetId: { type: "string", enum: [packet.id] },
+      packetId: { type: "string" },
       findings: {
         type: "array",
         items,

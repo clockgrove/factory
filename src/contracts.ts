@@ -524,7 +524,9 @@ export interface PlanningModel {
     invocation?: ModelInvocationContext;
     /** Why the previous answer was invalid; answer again without the error. */
     previousInvalid?: string;
-    /** Exported exact result-tree files for read-only review; no Git metadata. */
+    /** Current authenticated pinned-source files; absent for inline review. */
+    reviewFiles?: import("./review-evidence.js").ReviewBodyFile[];
+    /** Exported exact candidate and approved source files; no Git metadata. */
     tree?: string;
     session?: AgentSessionContinuation;
   }): Promise<{

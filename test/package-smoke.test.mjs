@@ -156,9 +156,11 @@ try {
         `
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { planningSources, hydrateWorkerInputSources, validateGraphSources } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "compiler.js")).href)};
+import { deliveredPlanningSources, materializePlanningSources, planningSourceDirectory, assertPlanningSourceDelivery } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "compiler", "source-delivery.js")).href)};
+import { validatePlanning } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "config.js")).href)};
 import { assertPinnedNpmScripts, validateWorkItem } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "validation.js")).href)};
 const checkout = ${JSON.stringify(checkout)};
 const probe = ${JSON.stringify(versionProbe)};
@@ -166,6 +168,19 @@ const git = (...args) => execFileSync("git", ["-C", checkout, ...args], { encodi
 const baseSha = git("rev-parse", "HEAD");
 const body = "## Outcome\\nQualify the pinned tooling.\\n\\n## Acceptance\\n- \u0060" + probe + "\u0060\\n- \u0060npm test\u0060\\n\\n## Sources\\n- README.md\\n\\n## Constraints\\nKeep package configuration fixed.\\n";
 const sources = planningSources(body, baseSha, checkout);
+const configured = { kind: "codex-sdk", planner: { model: "gpt-5.4", reasoningEffort: "high" }, reviewer: { model: "gpt-5.4", reasoningEffort: "high" } };
+validatePlanning(configured);
+assert.equal(configured.codex, undefined);
+validatePlanning({ ...configured, codex: { sourceArtifacts: true } });
+assert.throws(() => validatePlanning({ ...configured, codex: { sourceArtifacts: true, transport: "app-server" } }), /require the exec transport/);
+assert.throws(() => validatePlanning({ ...configured, codex: { sourceArtifacts: "true" } }), /must be boolean/);
+const sourceRoot = planningSourceDirectory(${JSON.stringify(root)}, baseSha, sources);
+const delivered = materializePlanningSources(sourceRoot, baseSha, sources, deliveredPlanningSources(baseSha, sources));
+assert.equal(delivered.reusedSourceIndices.length, sources.length);
+for (const file of delivered.files) assert.equal(readFileSync(join(sourceRoot, file.file), "utf8"), sources[file.sourceIndex].content);
+rmSync(join(sourceRoot, delivered.files[0].file));
+assertPlanningSourceDelivery(delivered, baseSha, sources);
+assert.equal(readFileSync(join(sourceRoot, delivered.files[0].file), "utf8"), sources[0].content);
 const item = { id: "tooling", kind: "qa", title: "Verify tooling", acceptance: [], citations: [{ path: "README.md", heading: "" }], dependencies: [], ownedPaths: [], validation: [{ command: probe, provenance: "source-declared", source: "README.md" }, { command: "npm test", provenance: "base-observed", source: "package.json" }], brief: "Run the pinned tooling checks.", minimumAssetSets: 0 };
 const graph = { objective: 1, baseSha, items: [item], coverage: [] };
 hydrateWorkerInputSources(graph, sources);

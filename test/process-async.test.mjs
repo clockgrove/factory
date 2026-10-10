@@ -646,6 +646,84 @@ setTimeout(() => {
     assert.equal(noRawStderr.stdout, "drained");
     assert.equal(noRawStderr.stderr, "");
     assert.equal(drainedStderrBytes, 128 * 1024);
+
+    // Real bidirectional stdin: the second write waits for observed stdout.
+    // Protocol input and output stay transient, with ordinary owned closure.
+    const interactiveOwners = [];
+    const observeInteractiveOwner = (owner, settled) => {
+      interactiveOwners.push({ ...owner, settled });
+    };
+    let echoed = "";
+    let receivedFirst;
+    const firstEcho = new Promise((resolve) => {
+      receivedFirst = resolve;
+    });
+    const interactive = await withProcessCancellation(
+      undefined,
+      () =>
+        subprocessAsync(
+          "/usr/bin/cat",
+          [],
+          {},
+          {
+            run: async (channel) => {
+              await channel.write("first π\n");
+              await firstEcho;
+              await channel.write("second\n");
+              channel.end();
+            },
+          },
+          (stream, chunk) => {
+            if (stream === "stdout") {
+              echoed += chunk;
+              if (echoed.includes("first π\n")) receivedFirst();
+            }
+          },
+          undefined,
+          { stdout: false, stderr: false },
+        ),
+      observeInteractiveOwner,
+    );
+    assert.equal(interactive.status, 0);
+    assert.equal(interactive.stdout, "");
+    assert.equal(echoed, "first π\nsecond\n");
+
+    const interactiveAbort = new AbortController();
+    let inputChannel;
+    let interruptionRequested = false;
+    await assert.rejects(
+      withProcessCancellation(
+        undefined,
+        () =>
+          subprocessAsync(
+            "/usr/bin/cat",
+            [],
+            { signal: interactiveAbort.signal },
+            {
+              cancellationGraceMs: 250,
+              cancel: () => {
+                interruptionRequested = true;
+                inputChannel.end();
+              },
+              run: async (channel) => {
+                inputChannel = channel;
+                await channel.write("interrupt after echo\n");
+                await channel.closed;
+              },
+            },
+            (stream) => {
+              if (stream === "stdout") interactiveAbort.abort();
+            },
+          ),
+        observeInteractiveOwner,
+      ),
+      /cancelled after verified cessation/,
+    );
+    assert.equal(interruptionRequested, true);
+    assert.equal(interactiveOwners.filter((owner) => !owner.settled).length, 2);
+    assert.equal(interactiveOwners.filter((owner) => owner.settled).length, 2);
+    for (const owner of interactiveOwners.filter((owner) => owner.settled))
+      assert.equal(processGroupExists(owner.pid), false);
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previousStateHome;

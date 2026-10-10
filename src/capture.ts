@@ -42,6 +42,13 @@ export interface InteractionMetadata {
   providerEvent?: string;
   providerSessionId?: string;
   providerMessageId?: string;
+  sessionTurn?: {
+    mode: "fresh" | "resumed";
+    ordinal: number;
+    sessionIdentity: string;
+    /** Authenticated native append cutoff for resumed Codex turns. */
+    boundaryBytes?: number;
+  };
   toolCallId?: string;
   role?: "system" | "developer" | "user" | "assistant" | "tool";
   tool?: string;
@@ -79,7 +86,10 @@ export interface InteractionMetadata {
     parentSessionId: string;
     childSessionId: string;
     toolCallId?: string;
-    relation: "observed-spawn" | "authenticated-owned-home";
+    relation:
+      | "observed-spawn"
+      | "observed-reference"
+      | "authenticated-owned-home";
     status:
       | "pending-init"
       | "running"
@@ -105,6 +115,7 @@ export interface InteractionMetadata {
     reportedReasoningEffort?: string;
     modelContextWindow?: number;
     status: "available" | "partial" | "unavailable";
+    turnBoundaryBytes?: number;
     readBytes: number | null;
     totalBytes: number | null;
     observedCompletedResponses: number | null;
@@ -156,6 +167,7 @@ export interface InteractionMetadata {
       totalTokens?: number;
     };
     raw?: Record<string, number>;
+    rawScope?: "thread-cumulative";
     modelBreakdown?: Record<string, Record<string, number>>;
     cost?: {
       value: number;

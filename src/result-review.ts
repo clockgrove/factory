@@ -2,6 +2,7 @@ import type {
   ModelInvocationContext,
   PlanningModel,
   ResultReviewEvidenceSource,
+  AgentSessionContinuation,
 } from "./contracts.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { attachFault, StepFault, transient } from "./fault.js";
@@ -50,6 +51,7 @@ export async function reviewAcceptance(args: {
   decisions?: AcceptanceDecision[];
   observations?: string;
   invocation?: ModelInvocationContext;
+  session?: AgentSessionContinuation;
   beforeSubmit?: () => void;
   /** Why the previous answer was invalid; the reviewer is asked again with it. */
   previousInvalid?: string;
@@ -185,6 +187,9 @@ export async function reviewAcceptance(args: {
     evidence: suppliedEvidence,
     observations: args.observations,
     invocation: args.invocation,
+    ...(model.sessionContinuation && args.session
+      ? { session: args.session }
+      : {}),
     ...(args.previousInvalid ? { previousInvalid: args.previousInvalid } : {}),
   };
   // Criteria the operator decided on this tree need no reviewer.

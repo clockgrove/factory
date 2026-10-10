@@ -1,4 +1,6 @@
 import { assertFinalAcceptance } from "./completion.js";
+import { assertAgentSessions } from "./agent-session.js";
+import { assertObjectiveKnowledge } from "./objective-knowledge.js";
 import { assertSemanticRefusalRecord } from "./semantic-refusal.js";
 import { type Capacity, validateCapacity } from "./config.js";
 import type {
@@ -97,6 +99,7 @@ export function pendingQuestions(
 }
 
 export interface WorkState {
+  knowledge?: import("./objective-knowledge.js").ObjectiveKnowledgeRecord;
   recovery?: import("./repair-policy.js").WorkRecovery;
   /** Reservation survives an uncertain effect; item ownership is separate. */
   phaseReservation?: import("./config.js").ResourcePhase;
@@ -262,6 +265,8 @@ export function setCoordinatorMode(
 }
 
 export interface FactoryState {
+  agentSessions?: Record<string, import("./contracts.js").AgentSessionRef>;
+  agentSessionHistory?: import("./contracts.js").AgentSessionRef[];
   acceptedPlanningDecision?: import("./planning-decision-context.js").AcceptedPlanningDecision;
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
   githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
@@ -606,6 +611,7 @@ export function parseFactoryState(
   assertPreIntegrationCheckShape(graph as unknown as WorkGraph);
   assertCoverageShape(graph as unknown as WorkGraph);
   assertGraphRevisions(state as unknown as FactoryState);
+  assertAgentSessions(state as unknown as FactoryState);
   assertRepairLedger(state as unknown as FactoryState);
   const ids = new Set<string>();
   for (const [index, raw] of graph.items.entries()) {
@@ -709,6 +715,7 @@ export function parseFactoryState(
       "graph, projected Issues, and work state have different keys",
     );
   for (const id of ids) {
+    assertObjectiveKnowledge(state as unknown as FactoryState, id);
     if (!Number.isSafeInteger(projected[id]) || Number(projected[id]) <= 0)
       throw new Error(`Work Item ${id} has no projected Issue identity`);
     const item = record(work[id], `work.${id}`);
@@ -880,6 +887,11 @@ export function parseFactoryState(
     if (!archivedFailure)
       assertSemanticRefusalRecord(controllerState, id, currentWork, failure);
     for (const prior of currentWork.recovery?.history ?? []) {
+      assertObjectiveKnowledge(
+        state as unknown as FactoryState,
+        id,
+        prior.work,
+      );
       assertSemanticRefusalRecord(
         controllerState,
         id,

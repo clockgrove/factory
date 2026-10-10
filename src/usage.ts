@@ -105,3 +105,20 @@ export function codexRawTokenUsage(value: unknown): Record<string, number> {
     "total_tokens",
   ]);
 }
+
+/** Pinned Codex exec emits thread totals, including earlier resumed turns. */
+export function codexInvocationUsage(
+  cumulative: unknown,
+  baseline?: ModelInvocationUsage,
+): ModelInvocationUsage {
+  const current = codexSdkTokenUsage(cumulative);
+  if (baseline === undefined) return current;
+  const delta: ModelInvocationUsage = {};
+  for (const category of tokenCategories) {
+    const before = baseline[category];
+    const after = current[category];
+    if (before !== undefined && after !== undefined && after >= before)
+      delta[category] = after - before;
+  }
+  return normalizeCodexTokenUsage(delta);
+}

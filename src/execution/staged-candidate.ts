@@ -244,6 +244,26 @@ async function scanChangedFile(
   }
 }
 
+/** Private worker notes cross the same secret boundary before retention or dispatch. */
+export async function scanPrivateStaging(
+  worktree: string,
+  checkout: string,
+  path: string,
+): Promise<void> {
+  const scanRoot = mkdtempSync(join(dirname(worktree), "secret-scan-"));
+  try {
+    await scanChangedFile(
+      worktree,
+      path,
+      join(worktree, path),
+      join(scanRoot, "report.txt"),
+      checkout,
+    );
+  } finally {
+    rmSync(scanRoot, { recursive: true, force: true });
+  }
+}
+
 /** Guard the staged candidate before any controller-side publication or upload. */
 export async function checkStagedCandidate(
   worktree: string,

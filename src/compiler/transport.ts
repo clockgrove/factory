@@ -2,6 +2,8 @@ import type {
   ModelInvocationUsage,
   ModelInvocationContext,
   ModelInvocationPhase,
+  AgentSessionContinuation,
+  AgentSessionRef,
 } from "../contracts.js";
 import type { Fault } from "../fault.js";
 
@@ -13,6 +15,8 @@ export interface PlanningModelOptions {
 export interface CodexPlanningModelOptions extends PlanningModelOptions {
   /** Capture redaction only; never sent to the provider. */
   redactionValues?: string[];
+  /** Installation-owned private reviewer session storage; absence uses fresh turns. */
+  sessionRoot?: string;
 }
 
 /** Which configured model selection a planning call uses. */
@@ -45,6 +49,8 @@ export interface PlanningTransport {
   readonly provider: string;
   /** Pinned adapter identity recorded with opt-in captures. */
   readonly adapter: string;
+  readonly sessionContinuation?: true;
+  releaseSession?(session: AgentSessionRef): Promise<void>;
   selection(role: PlanningRole): { model: string; reasoningEffort?: string };
   /** Provider settings recorded with opt-in request capture content. */
   settings(role: PlanningRole, tree?: string): Record<string, unknown>;
@@ -60,6 +66,7 @@ export interface PlanningTransport {
     invocation: ModelInvocationContext;
     turn: PlanningTurn;
     tree?: string;
+    session?: AgentSessionContinuation;
     /** Optional caller deadline; the transport still proves owned process settlement. */
     signal?: AbortSignal;
   }): Promise<void>;
@@ -74,6 +81,7 @@ export interface StructuredCall {
   sourcePacket?: string;
   /** A directory holding the exact tree under review, readable read-only. */
   tree?: string;
+  session?: AgentSessionContinuation;
 }
 
 export const CODEX_PLANNING_PROVIDER = "openai-codex-sdk";

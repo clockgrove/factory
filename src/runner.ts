@@ -38,10 +38,12 @@ import { objectiveComplete } from "./completion.js";
 import { withGitHubTransportObserver } from "./github-client.js";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest, stateRoot } from "./config.js";
+import { releaseAgentSessions } from "./agent-session.js";
 import type {
   ContentStore,
   ExecutionDriver,
   GitHubGateway,
+  PlanningModel,
 } from "./contracts.js";
 import { cancelledFault } from "./fault.js";
 import { SemanticAcceptanceFailure } from "./semantic-refusal.js";
@@ -842,6 +844,13 @@ async function runObjectiveOwned(
         await owner.cancellation;
         await closeCancelledIssues(state, services.github, persist);
         if (!state.coordinator?.cancelError) {
+          if (state.schemaVersion === 7)
+            await releaseAgentSessions(
+              state,
+              services.driver,
+              services.planningModel,
+              persist,
+            );
           const alreadyCancelled = !!state.cancelledAt;
           state.cancelledAt = new Date().toISOString();
           clearAllRepeats(state);
@@ -922,8 +931,19 @@ async function runObjectiveOwned(
         result.schemaVersion === 8 ||
         objectiveComplete(result) ||
         result.cancelledAt
-      )
+      ) {
+        if (
+          result.schemaVersion === 7 &&
+          (objectiveComplete(result) || result.cancelledAt)
+        )
+          await releaseAgentSessions(
+            result,
+            services.driver,
+            services.planningModel,
+            persist,
+          );
         return result;
+      }
       if (
         result.coordinator?.mode === "running" &&
         amendmentBlocksDispatch(result) &&
@@ -992,9 +1012,10 @@ export async function cancelObjective(
   objective: number,
   driver: ExecutionDriver,
   github: GitHubGateway,
+  planningModel?: PlanningModel,
 ): Promise<"requested" | "cancelled"> {
   return withGitHubDiagnostics(config, objective, () =>
-    cancelObjectiveOwned(config, objective, driver, github),
+    cancelObjectiveOwned(config, objective, driver, github, planningModel),
   );
 }
 
@@ -1003,6 +1024,7 @@ async function cancelObjectiveOwned(
   objective: number,
   driver: ExecutionDriver,
   github: GitHubGateway,
+  planningModel?: PlanningModel,
 ): Promise<"requested" | "cancelled"> {
   const control = await requestControl(config.repository, {
     objective,
@@ -1025,8 +1047,13 @@ async function cancelObjectiveOwned(
     if (
       (continuation.schemaVersion === 7 && objectiveComplete(continuation)) ||
       continuation.cancelledAt
-    )
+    ) {
+      if (continuation.schemaVersion === 7)
+        await releaseAgentSessions(continuation, driver, planningModel, () =>
+          saveState(statePath(config.repository, objective), continuation),
+        );
       return "cancelled";
+    }
     if (continuation.schemaVersion === 7 && continuation.finalAcceptance)
       throw new Error(
         "Acceptance is sealed; resume to reconcile Objective closure",
@@ -1078,6 +1105,10 @@ async function cancelObjectiveOwned(
           work.completedAt = new Date().toISOString();
         }
       }
+    if (continuation.schemaVersion === 7)
+      await releaseAgentSessions(continuation, driver, planningModel, () =>
+        saveState(statePath(config.repository, objective), continuation),
+      );
     continuation.cancelledAt = new Date().toISOString();
     clearAllRepeats(continuation);
     saveState(statePath(config.repository, objective), continuation);

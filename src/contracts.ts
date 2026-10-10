@@ -458,7 +458,50 @@ export interface ResultReviewCandidate {
 
 export type ResultReviewFinding = ReviewChoiceFinding;
 
+/** Factory-owned scope; native session identifiers remain inside adapters. */
+export interface AgentSessionScope {
+  repository: string;
+  objective: number;
+  runId: string;
+  configDigest: string;
+  graphDigest: string;
+  role: "implementation" | "result-review" | "objective-review";
+  itemId?: string;
+}
+
+/** Durable adapter receipt, separate from a paid attempt or acceptance verdict. */
+export interface AgentSessionRef {
+  scope: AgentSessionScope;
+  adapter: string;
+  identity: string;
+  data?: unknown;
+  turn: number;
+  status: "ready" | "in-flight" | "unavailable" | "released";
+}
+
+export interface AgentSessionRequest {
+  scope: AgentSessionScope;
+  /** Controller-allocated logical identity; distinct from native thread IDs. */
+  identity: string;
+  retained?: AgentSessionRef;
+}
+
+/** Controller callback only; never serialized into a worker or model prompt. */
+export interface AgentSessionContinuation extends AgentSessionRequest {
+  checkpoint(ref: AgentSessionRef): void;
+}
+
+/** Private advisory learning; never source, command or acceptance authority. */
+export interface WorkHandoffNote {
+  kind: "interface" | "pitfall" | "hypothesis";
+  summary: string;
+  paths: string[];
+  consumers: string[];
+}
+
 export interface PlanningModel {
+  readonly sessionContinuation?: true;
+  releaseSession?(session: AgentSessionRef): Promise<void>;
   approvedPlaybook?: ApprovedPlaybook;
   approvedPlaybookPin?: ApprovedPlaybookPin;
   generateStructured<T>(request: PlanningRequest<T>): Promise<T>;
@@ -481,6 +524,7 @@ export interface PlanningModel {
     previousInvalid?: string;
     /** Exported exact result-tree files for read-only review; no Git metadata. */
     tree?: string;
+    session?: AgentSessionContinuation;
   }): Promise<{
     packetId: string;
     findings: ResultReviewFinding[];
@@ -488,6 +532,7 @@ export interface PlanningModel {
 }
 
 export interface ExecutionRequest {
+  session?: AgentSessionRequest;
   captureContext?: { objective: number; runId: string };
   item: WorkItem;
   baseSha: string;
@@ -548,6 +593,11 @@ export interface WorkDiscovery {
 }
 
 export interface ExecutionResult {
+  session?: AgentSessionRef;
+  handoff?: {
+    notes: WorkHandoffNote[];
+    sources: { path: string; ref: ContentRef }[];
+  };
   discovery?: WorkDiscovery;
   /** Driver observation during successful original-worktree collection, not continuous retention. */
   collection?: { acceptedIgnoredLinks: string[] };
@@ -563,6 +613,7 @@ export interface ExecutionOrphan {
   detail: string;
 }
 export interface ExecutionContext {
+  checkpointSession?(session: AgentSessionRef): void;
   observeReadiness?(observation: {
     workerIdentity: string;
     index: number;
@@ -584,6 +635,8 @@ export interface ExecutionContext {
 }
 
 export interface ExecutionDriver {
+  readonly sessionContinuation?: true;
+  releaseSession?(session: AgentSessionRef): Promise<void>;
   /** Supports authenticated preparation in its actual fresh worker checkout. */
   readonly freshCheckoutReadiness?: true;
   /** Can expose an authenticated retained failed Git result in its fresh checkout. */
@@ -627,6 +680,7 @@ export interface ExecutionDriver {
 }
 
 export interface HarnessRequest {
+  session?: AgentSessionRequest;
   /** Pinned Objective section, parsed by the controller; never model-granted authority. */
   packageManagerUpdate?: string;
   capture?: {
@@ -653,6 +707,8 @@ export interface HarnessHandle {
   data?: unknown;
 }
 export interface HarnessObservation {
+  /** Settled native context may survive a subsequently failed candidate. */
+  session?: AgentSessionRef;
   state: "running" | "complete" | "failed" | "cancelled";
   /** Failed only because the worker ended without writing a result; repeat it. */
   interrupted?: boolean;
@@ -661,6 +717,7 @@ export interface HarnessObservation {
   authentication?: AuthenticationRequest;
 }
 export interface HarnessResult {
+  session?: AgentSessionRef;
   assets?: ProducedAssetSet[];
   evidence?: unknown;
 }
@@ -674,6 +731,9 @@ export interface AgentHarnessCapabilities {
   authentication: "local-environment" | "adapter-owned" | "none";
 }
 export interface AgentHarness {
+  readonly sessionContinuation?: true;
+  readonly sessionAdapter?: string;
+  releaseSession?(session: AgentSessionRef): Promise<void>;
   /** Declared before composition; Factory rejects incompatible semantics. */
   readonly capabilities: AgentHarnessCapabilities;
   /**

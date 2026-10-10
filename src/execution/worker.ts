@@ -5,14 +5,18 @@ import type { ThreadEvent } from "@openai/codex-sdk";
 import { Codex } from "@openai/codex-sdk";
 import { createCodexHome } from "../codex-planning-isolation.js";
 import type { CodexModelSelection } from "../config.js";
-import type { HarnessRequest, WorkerUsageObservation } from "../contracts.js";
+import type {
+  AgentSessionRef,
+  HarnessRequest,
+  WorkerUsageObservation,
+} from "../contracts.js";
 import {
   closeProviderEventStream,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnGuard,
   requireCompletedProviderTurn,
 } from "../provider-turn.js";
-import { codexRawTokenUsage, codexSdkTokenUsage } from "../usage.js";
+import { codexInvocationUsage, codexRawTokenUsage } from "../usage.js";
 import {
   harnessFailure,
   ProviderStreamError,
@@ -30,6 +34,12 @@ interface WorkerInput {
   allowedSecretNames?: string[];
   model: CodexModelSelection;
   providerTurnIdleTimeoutMs: number;
+  session?: {
+    ref: AgentSessionRef;
+    root: string;
+    owner: string;
+    resumeThreadId?: string;
+  };
 }
 
 function progressEvent(
@@ -87,6 +97,7 @@ export async function runCodexWorker(
     allowedSecretNames = [],
     model,
     providerTurnIdleTimeoutMs,
+    session,
   } = JSON.parse(readFileSync(inputPath, "utf8")) as WorkerInput;
   const redactionValues = allowedSecretNames
     .map((name) => process.env[name])
@@ -109,7 +120,11 @@ export async function runCodexWorker(
   // worktree, the private HOME and TMPDIR, and the platform runtime alone.
   const sandbox = { workspace: "write", network: network === "host" } as const;
   const home = createCodexHome({
-    root: `${inputPath}.codex-home`,
+    root: session?.root ?? `${inputPath}.codex-home`,
+    ...(session && {
+      owner: session.owner,
+      resume: Boolean(session.resumeThreadId),
+    }),
     config: "",
     sandbox: { ...sandbox, directory: request.worktree },
     keep: allowedSecretNames,
@@ -117,16 +132,44 @@ export async function runCodexWorker(
   let invocationStarted = false;
   try {
     const codex = new Codex({ env: home.env });
-    const thread = codex.startThread({
+    const options = {
       workingDirectory: request.worktree,
-      approvalPolicy: "never",
+      approvalPolicy: "never" as const,
       model: model.model,
       modelReasoningEffort: model.reasoningEffort,
-    });
-    const prompt = workItemPrompt(request);
+    };
+    const thread = session?.resumeThreadId
+      ? codex.resumeThread(session.resumeThreadId, options)
+      : codex.startThread(options);
+    const captureBoundary = session?.resumeThreadId
+      ? home.nativeCaptureBoundary(session.resumeThreadId)
+      : undefined;
+    const prompt = `${
+      session?.resumeThreadId
+        ? `Continue your implementation investigation. Historical turns describe earlier candidates and workspaces. The only current writable checkout is ${request.worktree}; previous checkout paths and tool observations are historical. Recheck changed evidence in the current checkout. The following current controller-bound Work Item contract controls this turn; retained history grants no permissions or acceptance.\n\n`
+        : ""
+    }${workItemPrompt(request)}`;
     let providerCompleted = false;
+    let nativeSettled = false;
     let turn: ProviderTurnGuard | undefined;
     let usage: unknown = null;
+    const invocationUsage = () =>
+      codexInvocationUsage(
+        usage,
+        session?.resumeThreadId ? (captureBoundary?.usage ?? {}) : undefined,
+      );
+    const readySession = (): AgentSessionRef | undefined =>
+      session && nativeSettled && thread.id
+        ? {
+            ...session.ref,
+            status: "ready",
+            data: {
+              ...(session.ref.data as Record<string, unknown>),
+              threadId: thread.id,
+              nativeEof: true,
+            },
+          }
+        : undefined;
     let progressLost = false;
     const observe = (event: unknown): void => {
       if (progressLost) return;
@@ -155,7 +198,7 @@ export async function runCodexWorker(
         provider: "codex",
         model: model.model,
         reasoningEffort: model.reasoningEffort,
-        usage: codexSdkTokenUsage(usage),
+        usage: invocationUsage(),
       };
       observe({
         eventId: randomUUID(),
@@ -170,6 +213,19 @@ export async function runCodexWorker(
         providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
       );
       observeUsage("started");
+      if (session)
+        capture.native({
+          kind: "interaction",
+          providerEvent: "factory.session-turn",
+          coverage: "boundary",
+          providerSessionId: session.resumeThreadId,
+          sessionTurn: {
+            mode: session.resumeThreadId ? "resumed" : "fresh",
+            ordinal: session.ref.turn,
+            sessionIdentity: session.ref.identity,
+            ...(captureBoundary && { boundaryBytes: captureBoundary.bytes }),
+          },
+        });
       capture.request(prompt, {
         permissions: sandbox,
         approvalPolicy: "never",
@@ -190,7 +246,13 @@ export async function runCodexWorker(
           if (next.done) break;
           const event = next.value;
           turn.progress();
-          capture.codex(event, thread.id ?? undefined);
+          capture.codex(
+            event,
+            thread.id ?? undefined,
+            session?.resumeThreadId
+              ? (captureBoundary?.usage ?? {})
+              : undefined,
+          );
           const observation = progressEvent(
             event,
             request.attemptId ?? "",
@@ -241,31 +303,41 @@ export async function runCodexWorker(
       }
       if (!turnCompleted && streamError) throw streamError;
       requireCompletedProviderTurn(turnCompleted);
+      if (session?.resumeThreadId && thread.id !== session.resumeThreadId)
+        throw new Error("Codex resumed a different native conversation");
+      nativeSettled = true;
       turn.finish();
       // Pinned SDK natural EOF awaits the native child exit. This snapshot does
       // not prove outer harness/group cessation or a sealed native daemon stream.
-      home.nativeCapture(thread.id ?? undefined, (event, content) =>
-        capture.native(event, content),
+      home.nativeCapture(
+        thread.id ?? undefined,
+        (event, content) => capture.native(event, content),
+        captureBoundary,
       );
       const parsedAssets = readProducedAssets(request);
       observeUsage("completed");
-      capture.outcome(
-        "completed",
-        codexSdkTokenUsage(usage),
-        undefined,
-        "protocol",
-      );
+      capture.outcome("completed", invocationUsage(), undefined, "protocol");
       writeHarnessResult(resultPath, {
         state: "complete",
         assets: parsedAssets,
-        evidence: { finalResponse, threadId: thread.id, usage },
+        evidence: {
+          finalResponse,
+          threadId: thread.id,
+          usage,
+          usageScope: "thread-cumulative",
+          invocationUsage: invocationUsage(),
+        },
+        ...(readySession() && { session: readySession() }),
       });
       return true;
     } catch (caught) {
       const error = caught;
-      // Early SDK return does not await native settlement. Do not read its writer.
-      home.nativeCapture(undefined, (event, content) =>
-        capture.native(event, content),
+      // An app manifest can fail after a fully settled native turn. Earlier
+      // stream failures cannot establish that the native writer has ceased.
+      home.nativeCapture(
+        nativeSettled ? (thread.id ?? undefined) : undefined,
+        (event, content) => capture.native(event, content),
+        captureBoundary,
       );
       capture.nativeFailure(
         () => home.nativeMetadata(thread.id ?? undefined),
@@ -274,21 +346,21 @@ export async function runCodexWorker(
       observeUsage("failed");
       capture.outcome(
         "failed",
-        codexSdkTokenUsage(usage),
+        invocationUsage(),
         error,
         providerCompleted ? "protocol" : "provider",
       );
-      writeHarnessResult(
-        resultPath,
-        harnessFailure("codex", error, redactionValues),
-      );
+      writeHarnessResult(resultPath, {
+        ...harnessFailure("codex", error, redactionValues),
+        ...(readySession() && { session: readySession() }),
+      });
       return false;
     } finally {
       turn?.finish();
     }
   } finally {
     // Once launched, the durable harness owner disposes the home after group cessation.
-    if (!invocationStarted) home.dispose();
+    if (!invocationStarted && !session?.resumeThreadId) home.dispose();
   }
 }
 

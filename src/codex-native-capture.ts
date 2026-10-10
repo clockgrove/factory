@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { fstatSync, readSync } from "node:fs";
+import type { ModelInvocationUsage } from "./contracts.js";
 import type { CaptureEvent } from "./capture.js";
 import { codexRawTokenUsage, codexTokenUsage } from "./usage.js";
 
@@ -7,6 +8,116 @@ export type NativeCaptureObserver = (
   event: CaptureEvent,
   content?: () => unknown,
 ) => void;
+
+/** An authenticated append boundary taken before a resumed provider turn. */
+export interface NativeCaptureBoundary {
+  threadId: string;
+  dev: number;
+  ino: number;
+  bytes: number;
+  headerBytes: number;
+  digest: string;
+  responseIds: readonly string[];
+  /** Native token-count thread totals; missing categories remain unknown. */
+  usage: ModelInvocationUsage;
+}
+
+function digestOwnedPrefix(fd: number, size: number): string {
+  const hash = createHash("sha256");
+  const buffer = Buffer.alloc(Math.min(size, 64 * 1024));
+  let offset = 0;
+  while (offset < size) {
+    const bytes = readSync(
+      fd,
+      buffer,
+      0,
+      Math.min(buffer.length, size - offset),
+      offset,
+    );
+    if (!bytes)
+      throw new Error("Owned native history ended before its turn boundary");
+    hash.update(buffer.subarray(0, bytes));
+    offset += bytes;
+  }
+  return hash.digest("hex");
+}
+
+export function ownedRolloutBoundary(
+  fd: number,
+  threadId: string,
+): NativeCaptureBoundary {
+  const stat = fstatSync(fd);
+  const buffer = Buffer.alloc(64 * 1024);
+  const hash = createHash("sha256");
+  const responseIds = new Set<string>();
+  let usage: ModelInvocationUsage = {};
+  let header = false;
+  let headerBytes = 0;
+  let pending = Buffer.alloc(0);
+  let offset = 0;
+  // Stream the authenticated prefix; a long conversation does not need to fit
+  // inside the observational per-turn capture budget or one allocated buffer.
+  while (offset < stat.size) {
+    const bytes = readSync(
+      fd,
+      buffer,
+      0,
+      Math.min(buffer.length, stat.size - offset),
+      offset,
+    );
+    if (!bytes) break;
+    offset += bytes;
+    const chunk = buffer.subarray(0, bytes);
+    hash.update(chunk);
+    pending = Buffer.concat([pending, chunk]);
+    let end = pending.indexOf(10);
+    while (end >= 0) {
+      const row = JSON.parse(pending.subarray(0, end).toString("utf8"));
+      pending = pending.subarray(end + 1);
+      if (!header) {
+        if (row?.type !== "session_meta" || row.payload?.id !== threadId)
+          throw new Error(
+            "Owned native history does not match its observed thread",
+          );
+        header = true;
+        headerBytes = end + 1;
+      } else {
+        if (
+          row.type === "token_usage_record" &&
+          row.payload?.thread_id === threadId &&
+          typeof row.payload.response_id === "string"
+        )
+          responseIds.add(row.payload.response_id);
+        if (row.type === "event_msg" && row.payload?.type === "token_count")
+          usage = codexTokenUsage(row.payload.info?.total_token_usage);
+      }
+      end = pending.indexOf(10);
+    }
+    if (pending.length > 8 * 1024 * 1024)
+      throw new Error(
+        "Owned native history contains an oversized incomplete record",
+      );
+  }
+  const after = fstatSync(fd);
+  if (
+    !header ||
+    offset !== stat.size ||
+    pending.length ||
+    after.size !== stat.size ||
+    after.mtimeMs !== stat.mtimeMs
+  )
+    throw new Error("Owned native history lacks a settled complete boundary");
+  return {
+    threadId,
+    dev: stat.dev,
+    ino: stat.ino,
+    bytes: offset,
+    headerBytes,
+    digest: hash.digest("hex"),
+    responseIds: [...responseIds],
+    usage,
+  };
+}
 
 /** Only explicit transport fields: never inspect shell text or nested output. */
 export function nativeToolObservation(
@@ -152,6 +263,7 @@ export function captureOwnedRollout(
     rootThreadId?: string;
     budget?: OwnedRolloutBudget;
     child?: (child: OwnedChild) => void;
+    boundary?: NativeCaptureBoundary;
   } = {},
 ): "available" | "partial" {
   const stat = fstatSync(fd);
@@ -159,11 +271,30 @@ export function captureOwnedRollout(
     remainingBytes: 8 * 1024 * 1024,
     remainingEvents: 4094,
   };
+  const boundary = options.boundary;
+  const offset = boundary?.bytes ?? 0;
+  if (boundary) {
+    if (
+      boundary.threadId !== threadId ||
+      boundary.dev !== stat.dev ||
+      boundary.ino !== stat.ino ||
+      stat.size < offset
+    )
+      throw new Error("Owned native history changed across its turn boundary");
+    if (digestOwnedPrefix(fd, offset) !== boundary.digest)
+      throw new Error("Owned native history changed before its turn boundary");
+  }
   const limit = Math.max(0, budget.remainingBytes);
-  const buffer = Buffer.alloc(Math.min(stat.size, limit));
+  const buffer = Buffer.alloc(Math.min(stat.size - offset, limit));
   let bytes = 0;
   while (bytes < buffer.length) {
-    const read = readSync(fd, buffer, bytes, buffer.length - bytes, bytes);
+    const read = readSync(
+      fd,
+      buffer,
+      bytes,
+      buffer.length - bytes,
+      offset + bytes,
+    );
     if (!read) break;
     bytes += read;
   }
@@ -172,7 +303,14 @@ export function captureOwnedRollout(
   const terminated = text.endsWith("\n");
   const lines = text.split("\n");
   lines.pop(); // An incomplete final record is never reconstructed.
-  const header = JSON.parse(lines.shift() ?? "null");
+  let header;
+  if (boundary) {
+    const first = Buffer.alloc(boundary.headerBytes);
+    const count = readSync(fd, first, 0, first.length, 0);
+    header = JSON.parse(
+      first.subarray(0, count).toString("utf8").split("\n")[0] ?? "null",
+    );
+  } else header = JSON.parse(lines.shift() ?? "null");
   if (header?.type !== "session_meta" || header.payload?.id !== threadId)
     throw new Error("Owned native history does not match its observed thread");
   const childSource = header.payload.source?.subagent?.thread_spawn;
@@ -182,7 +320,7 @@ export function captureOwnedRollout(
       header.payload.parent_thread_id !== options.parentThreadId)
   )
     throw new Error("Native descendant lacks authenticated parent ownership");
-  let partial = bytes !== stat.size || !terminated;
+  let partial = bytes !== stat.size - offset || !terminated;
   const inheritedOrdinal = header.payload.subagent_history_start_ordinal;
   const inheritedBoundary =
     Number.isSafeInteger(inheritedOrdinal) && inheritedOrdinal >= 0
@@ -234,29 +372,42 @@ export function captureOwnedRollout(
   let modelContextWindow: number | undefined;
   const children = new Set<string>();
   const spawnCalls = new Set<string>();
+  const continuationTools = new Set([
+    "send_input",
+    "resume_agent",
+    "send_message",
+    "followup_task",
+  ]);
   const descendant = (
     child: OwnedChild,
     status: NonNullable<CaptureEvent["nativeDescendant"]>["status"],
     spawned: boolean,
     toolCallId?: string,
+    referenced = false,
   ) => {
     childHistory = true;
+    // A prior child has no authenticated per-turn append boundary here. Its
+    // current reference is observable, but replaying its full history would
+    // recount earlier tools and provider responses as work of this turn.
+    if (referenced) partial = true;
     if (spawned && !children.has(child.id)) {
       children.add(child.id);
       options.child?.(child);
     }
     emit({
       kind: "interaction",
-      providerEvent: spawned
-        ? "codex.native-descendant"
-        : "codex.native-descendant-status",
+      providerEvent: referenced
+        ? "codex.native-descendant-reference"
+        : spawned
+          ? "codex.native-descendant"
+          : "codex.native-descendant-status",
       providerSessionId: threadId,
       coverage: "boundary",
       nativeDescendant: {
         parentSessionId: threadId,
         childSessionId: child.id,
         ...(toolCallId ? { toolCallId } : {}),
-        relation: "observed-spawn",
+        relation: referenced ? "observed-reference" : "observed-spawn",
         status,
         recordedAt: rowTime,
         ...(child.model ? { model: child.model } : {}),
@@ -336,7 +487,7 @@ export function captureOwnedRollout(
       () => payload,
     );
   };
-  if (typeof header.payload.base_instructions?.text === "string")
+  if (!boundary && typeof header.payload.base_instructions?.text === "string")
     visible(
       { text: header.payload.base_instructions.text },
       undefined,
@@ -459,7 +610,15 @@ export function captureOwnedRollout(
           descendant({ id }, "unknown", true, callId);
         else if (call.kind === "completed" && children.has(id))
           descendant({ id }, "completed", false);
-        else partial = true;
+        else {
+          descendant(
+            { id },
+            call.kind === "completed" ? "completed" : "unknown",
+            false,
+            callId,
+            true,
+          );
+        }
       }
       if (
         call.type === "CollabAgentToolCall" &&
@@ -487,7 +646,7 @@ export function captureOwnedRollout(
           if (!threadIdentity(id) || id === threadId) continue;
           const spawned =
             call.tool === "spawn_agent" && call.status !== "in_progress";
-          if (!spawned && !children.has(id)) continue;
+          const referenced = !spawned && !children.has(id);
           const child: OwnedChild = {
             id,
             ...(label(call.model) ? { model: label(call.model)! } : {}),
@@ -504,6 +663,7 @@ export function captureOwnedRollout(
             ),
             spawned,
             callId,
+            referenced,
           );
         }
       }
@@ -524,6 +684,8 @@ export function captureOwnedRollout(
         partial = true;
         continue;
       }
+      // A replayed checkpoint or copied response is not a newly paid call.
+      if (boundary?.responseIds.includes(payload.response_id)) continue;
       const canonical = JSON.stringify(payload);
       const previous = responses.get(payload.response_id);
       if (previous !== undefined) {
@@ -581,6 +743,22 @@ export function captureOwnedRollout(
           : {};
     } else if (row.type === "response_item") {
       if (payload.name === "spawn_agent") childHistory = true;
+      if (
+        boundary &&
+        continuationTools.has(String(payload.name)) &&
+        ["function_call", "custom_tool_call"].includes(String(payload.type))
+      ) {
+        // Some pinned native tool surfaces omit a typed receiver identity.
+        // Never turn that missing descendant accounting into a complete turn.
+        childHistory = true;
+        partial = true;
+        emit({
+          kind: "interaction",
+          providerEvent: "codex.native-descendant-boundary-unavailable",
+          providerSessionId: threadId,
+          coverage: "boundary",
+        });
+      }
       message(payload, false, row.timestamp);
     } else if (row.type === "compacted") {
       visible(
@@ -641,6 +819,7 @@ export function captureOwnedRollout(
       ...(reportedModel ? { reportedModel } : {}),
       ...(reportedReasoningEffort ? { reportedReasoningEffort } : {}),
       ...(modelContextWindow !== undefined ? { modelContextWindow } : {}),
+      ...(boundary ? { turnBoundaryBytes: boundary.bytes } : {}),
       readBytes: bytes,
       totalBytes: stat.size,
       observedCompletedResponses: responses.size,

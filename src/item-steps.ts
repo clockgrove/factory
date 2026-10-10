@@ -9,12 +9,15 @@ import type {
   ExecutionRequest,
   ExecutionResult,
   WorkItem,
+  AgentSessionContinuation,
 } from "./contracts.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { workerContext } from "./execution/checkpoint.js";
 import { cancelledFault, faultOf } from "./fault.js";
 import { repeatKey, StepPaused, step } from "./step.js";
 import type { FactoryState } from "./state.js";
+import { agentSessionContinuation } from "./agent-session.js";
+import { reviewObjectiveKnowledge } from "./objective-knowledge.js";
 import {
   type ReviewOutcome,
   reviewAcceptance,
@@ -89,15 +92,18 @@ export async function executeItem(
     request: (attemptId: string) => ExecutionRequest;
     cancelled: () => boolean;
     diagnostics?: DiagnosticEmitter;
+    session?: AgentSessionContinuation;
   },
 ): Promise<ExecutionResult> {
   const { state, item, driver, save } = args;
   const work = state.work[item.id]!;
-  const context = () =>
-    workerContext(work, save, args.cancelled, args.diagnostics, {
+  const context = () => ({
+    ...workerContext(work, save, args.cancelled, args.diagnostics, {
       runId: state.runId,
       itemId: item.id,
-    });
+    }),
+    ...(args.session ? { checkpointSession: args.session.checkpoint } : {}),
+  });
   // A start cut off by a crash is counted once by `step` on entry; the
   // worker it may have left is that same lost effect, not a second one.
   let crashedStart = Boolean(
@@ -223,14 +229,30 @@ export function reviewItem(
       if (stopped(args)) throw cancelledFault();
       const previousInvalid = ctx.previousInvalid();
       const ask = () =>
-        ctx.paid(() =>
-          reviewAcceptance(
-            args.review({
-              ...(previousInvalid ? { previousInvalid } : {}),
-              onInvalid: (detail) => ctx.invalid(detail),
-            }),
-          ),
-        );
+        ctx.paid(() => {
+          const request = args.review({
+            ...(previousInvalid ? { previousInvalid } : {}),
+            onInvalid: (detail) => ctx.invalid(detail),
+          });
+          return reviewAcceptance({
+            ...request,
+            evidenceSources: [
+              ...(request.evidenceSources ?? []),
+              ...reviewObjectiveKnowledge(
+                args.state,
+                args.item.id,
+                request.checkout,
+                request.commit,
+              ),
+            ],
+            session: agentSessionContinuation(
+              args.state,
+              "result-review",
+              args.item.id,
+              args.save,
+            ),
+          });
+        });
       return args.diagnostics
         ? args.diagnostics.span(
             {

@@ -178,10 +178,7 @@ export function agentSessionContinuation(
         throw new Error(
           "Terminal or cancelling Objective cannot continue an agent session",
         );
-      if (
-        graphDigest(state.graph) !== scope.graphDigest ||
-        JSON.stringify(state.agentSessions?.[entryKey]) !== previous
-      )
+      if (graphDigest(state.graph) !== scope.graphDigest)
         throw new Error("Agent session checkpoint was superseded");
       assertAgentSessionRef(ref, scope);
       const prior = state.agentSessions?.[entryKey];
@@ -197,7 +194,20 @@ export function agentSessionContinuation(
         );
       // Repeated settlement and disposal are safe after the caller's identity
       // has rotated for a future fresh conversation.
-      if (prior && isDeepStrictEqual(prior, ref)) return;
+      if (prior && isDeepStrictEqual(prior, ref)) {
+        // Cancellation and collection may each hold a callback for the same
+        // admitted turn. A matching settled receipt acknowledges its result,
+        // without overwriting any newer turn or rewriting the snapshot.
+        previous = JSON.stringify(prior);
+        if (["unavailable", "released"].includes(ref.status)) {
+          delete continuation.retained;
+          if (continuation.identity === ref.identity)
+            continuation.identity = randomUUID();
+        } else continuation.retained = structuredClone(prior);
+        return;
+      }
+      if (JSON.stringify(state.agentSessions?.[entryKey]) !== previous)
+        throw new Error("Agent session checkpoint was superseded");
       const disposingUnavailable =
         sameTurn && prior.status === "unavailable" && ref.status === "released";
       if (ref.identity !== continuation.identity && !disposingUnavailable)

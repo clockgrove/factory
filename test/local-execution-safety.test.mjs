@@ -582,6 +582,63 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     );
     delete loaded.cancelledAt;
     delete loaded.cancelRequested;
+    const concurrentOwner = agentSessionContinuation(
+      loaded,
+      "implementation",
+      "docs",
+      save,
+    );
+    const concurrentReceipt = {
+      scope: concurrentOwner.scope,
+      adapter: "local-integration-controller",
+      identity: concurrentOwner.identity,
+      executionIdentity: "docs-attempt",
+      turn: 1,
+      status: "in-flight",
+    };
+    concurrentOwner.checkpoint(concurrentReceipt);
+    const cancellationCallback = agentSessionContinuation(
+      loaded,
+      "implementation",
+      "docs",
+      save,
+    );
+    const executionCallback = agentSessionContinuation(
+      loaded,
+      "implementation",
+      "docs",
+      save,
+    );
+    loaded.cancelRequested = true;
+    save();
+    const stoppedReceipt = { ...concurrentReceipt, status: "unavailable" };
+    cancellationCallback.checkpoint(stoppedReceipt);
+    const stoppedSnapshot = readFileSync(snapshot, "utf8");
+    executionCallback.checkpoint(stoppedReceipt);
+    assert.equal(readFileSync(snapshot, "utf8"), stoppedSnapshot);
+    assert.equal(executionCallback.retained, undefined);
+    assert.notEqual(executionCallback.identity, concurrentReceipt.identity);
+    assert.throws(
+      () =>
+        executionCallback.checkpoint({
+          ...stoppedReceipt,
+          data: { controllerObservation: "different settlement declaration" },
+        }),
+      /logical identity/,
+    );
+    assert.equal(readFileSync(snapshot, "utf8"), stoppedSnapshot);
+    const concurrentSettlement = parseFactoryState(
+      JSON.parse(stoppedSnapshot),
+      loaded.repository,
+      1,
+    );
+    assert.deepEqual(
+      Object.values(concurrentSettlement.agentSessions).find(
+        (ref) => ref.identity === concurrentReceipt.identity,
+      ),
+      stoppedReceipt,
+    );
+    delete loaded.cancelRequested;
     const prompt = workItemPrompt({
       item: workerAttemptItem(loaded, consumer, result.changeRef, current),
       worktree: checkout,

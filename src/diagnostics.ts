@@ -19,8 +19,8 @@ import { replacementRefusal } from "./amendment-admission.js";
 import {
   type CapturePolicy,
   CaptureWriter,
-  readInteractionMetadata,
   type InteractionMetadata,
+  readInteractionMetadata,
 } from "./capture.js";
 import { objectiveComplete } from "./completion.js";
 import {
@@ -37,6 +37,7 @@ import type {
 import { linearDeliveryUnits } from "./delivery/plan.js";
 import { faultDetail, faultOf, type Wait } from "./fault.js";
 import type { GitHubTransportObservation } from "./github-client.js";
+import type { GitHubProgressProjection } from "./github-progress-state.js";
 import { graphDigest } from "./graph-amendments.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
 import { objectiveCandidate } from "./qa.js";
@@ -57,7 +58,6 @@ import type {
 } from "./state.js";
 import { projectionStarted } from "./state.js";
 import type { PreState } from "./state-store.js";
-import type { GitHubProgressProjection } from "./github-progress-state.js";
 import {
   type PendingDecisionView,
   shortPlanDigest,
@@ -1779,6 +1779,40 @@ function progressStatus(projection: GitHubProgressProjection | undefined) {
   };
 }
 
+/** Local status observes the existing snapshot, never opaque adapter receipts. */
+function sessionStatus(
+  sessions: FactoryState["agentSessions"],
+  secrets: string[],
+) {
+  return Object.values(sessions ?? {}).map((session) => ({
+    identity: redactDiagnosticDetail(session.identity, secrets),
+    adapter: redactDiagnosticDetail(session.adapter, secrets),
+    role: session.scope.role,
+    itemId:
+      session.scope.role === "implementation" ||
+      session.scope.role === "result-review"
+        ? session.scope.itemId
+        : null,
+    turn: session.turn,
+    turnKind: session.turn === 1 ? "first" : "continued",
+    nativeSessionMode: "unavailable",
+    status: session.status,
+    currentTurn: session.currentTurn
+      ? {
+          invocationId: session.currentTurn.invocationId,
+          requestDigest: session.currentTurn.requestDigest,
+          graphDigest: session.currentTurn.graphDigest ?? null,
+          candidateDigest: session.currentTurn.candidateDigest ?? null,
+          evidenceDigest: session.currentTurn.evidenceDigest ?? null,
+          schemaDigest: session.currentTurn.schemaDigest ?? null,
+          dispatch: session.currentTurn.dispatch,
+          terminal: session.currentTurn.terminal ?? null,
+          resources: session.currentTurn.resources,
+        }
+      : null,
+  }));
+}
+
 export function statusDocument(
   state: FactoryState | undefined,
   repository: string,
@@ -1969,6 +2003,7 @@ export function statusDocument(
     repository,
     objective,
     runActive,
+    agentSessions: sessionStatus(state.agentSessions, secrets),
     githubProgress: progressStatus(state.githubProgress),
     githubProjectTracking: projectTracking(state.githubProjectStatus),
     // The Objective was started under another configuration: the run refuses
@@ -2096,6 +2131,7 @@ export function preparationStatusDocument(
     objective: preparation.objective,
     runId: preparation.runId,
     runActive,
+    agentSessions: sessionStatus(preparation.agentSessions, secrets),
     githubProgress: progressStatus(preparation.githubProgress),
     githubProjectTracking: projectTracking(preparation.githubProjectStatus),
     // Planned under another configuration: the run refuses it (see runObjective).

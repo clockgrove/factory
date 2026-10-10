@@ -379,6 +379,14 @@ export interface PlanningRequest<T> {
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;
   purpose?: "diagnosis";
+  /** Transient Work Item delivery choices; canonical sources/evidence remain retained. */
+  workRepairDiagnosis?: {
+    mode: "complete" | "focused-semantic-refusal";
+    evidenceDigest: string;
+    sourcesDigest: string;
+    evidenceIndices: number[];
+    sourceIndices: number[];
+  };
   /** Actual decoded rejected graph; null when no canonical graph was produced. */
   rejectedGraph?: WorkGraph | null;
   coverageObligations?: CoverageObligation[];

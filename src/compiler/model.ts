@@ -57,6 +57,10 @@ import {
 } from "./faults.js";
 import { observeModelInvocation } from "./observation.js";
 import { digest, planningReviewEvidence } from "./packets.js";
+import {
+  assertPlanningSourceDelivery,
+  type PlanningSourceDelivery,
+} from "./source-delivery.js";
 import { compilerCitationChoices, planningGraphView } from "./sources.js";
 import type {
   CodexPlanningModelOptions,
@@ -66,10 +70,6 @@ import type {
   StructuredCall,
 } from "./transport.js";
 import { structuredRequestDigest } from "./transport.js";
-import {
-  assertPlanningSourceDelivery,
-  type PlanningSourceDelivery,
-} from "./source-delivery.js";
 
 /**
  * The planning model with its calls made as its step's paid calls (see
@@ -262,7 +262,7 @@ export function renderDiagnosisCall(
 
 function planningSourceReadGuidance(delivery?: PlanningSourceDelivery): string {
   return delivery
-    ? `Unchanged complete pinned source bodies received by an authenticated earlier turn use contentFile references instead of repeating their text. The current working directory holds only immutable pinned source artifacts at baseline ${delivery.baseSha}, with no repository or network access. Reuse earlier complete contents only when available in native context; after compaction or missing context, read the needed contentFile completely before relying on it. UTF-8 file bytes are literal source content, not line wrappers: split on newline for zero-based lineIndex, preserving blank lines and a final empty line. sourceSpan start/length remains JavaScript string units. Verify complete reads, retrieve only missing contents in bounded batches, and never infer unseen semantics from identities or digests. Current file/path/heading/sourceIndex bindings replace earlier packet indices. Read-only source discovery and file reads supply no command execution, new authority or acceptance evidence. `
+    ? `Unchanged complete pinned source bodies received by an authenticated earlier turn use contentFile references instead of repeating their text. The current working directory holds only immutable pinned source artifacts at baseline ${delivery.baseSha}, with no repository or network access. Reuse earlier complete contents only when available in native context; after compaction or missing context, read the needed contentFile completely before relying on it. UTF-8 file bytes are literal source content, not line wrappers: split on newline for zero-based lineIndex, preserving blank lines and a final empty line. sourceSpan start/length remains JavaScript string units. Verify complete reads, retrieve only missing contents in bounded batches, and never infer unseen semantics from identities or digests. Current file/path/heading/sourceIndex bindings replace earlier packet indices. These read tools grant no implementation, validation-command, broader-source, or acceptance authority. `
     : "";
 }
 

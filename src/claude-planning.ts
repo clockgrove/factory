@@ -63,6 +63,7 @@ import { claudeCaptureEvents } from "./execution/interaction-capture.js";
 import { type Fault, transient } from "./fault.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
+  assertProviderTurnDeadline,
   closeProviderEventStream,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   modelResponseTimeoutMs,
@@ -511,7 +512,8 @@ class ClaudePlanningTransport implements PlanningTransport {
       completed.session.currentTurn?.invocationId !==
         ref.currentTurn?.invocationId ||
       completed.session.currentTurn?.requestDigest !==
-        ref.currentTurn?.requestDigest
+        ref.currentTurn?.requestDigest ||
+      completed.session.currentTurn?.deadlineAt !== ref.currentTurn?.deadlineAt
     )
       return { disposition: "unknown" };
     const native = requireClaudeSession(
@@ -578,6 +580,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     session?: AgentSessionContinuation & { currentGraphDigest?: string };
     sourcePacket?: string;
     signal?: AbortSignal;
+    deadlineAt?: string;
   }): Promise<void> {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
@@ -605,6 +608,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       );
       owned.ref.currentTurn = {
         invocationId: invocation.invocationId,
+        ...(args.deadlineAt ? { deadlineAt: args.deadlineAt } : {}),
         requestDigest: claudeDigest([args.prompt, args.schema]),
         schemaDigest: claudeDigest(args.schema),
         dispatch: "intent",
@@ -629,13 +633,12 @@ class ClaudePlanningTransport implements PlanningTransport {
     const guard = new ProviderTurnGuard(
       this.providerTurnIdleTimeoutMs ?? modelResponseTimeoutMs(reasoningEffort),
       this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+      args.deadlineAt,
     );
     const abortController = new AbortController();
-    guard.signal.addEventListener(
-      "abort",
-      () => abortController.abort(guard.signal.reason),
-      { once: true },
-    );
+    const expire = () => abortController.abort(guard.signal.reason);
+    if (guard.signal.aborted) expire();
+    else guard.signal.addEventListener("abort", expire, { once: true });
     const cancel = () => abortController.abort(args.signal?.reason);
     if (args.signal?.aborted) cancel();
     else args.signal?.addEventListener("abort", cancel, { once: true });
@@ -658,6 +661,8 @@ class ClaudePlanningTransport implements PlanningTransport {
       continuation.checkpoint(owned.ref);
     };
     try {
+      assertProviderTurnDeadline(args.deadlineAt);
+      abortController.signal.throwIfAborted();
       root = mkdtempSync(join(tmpdir(), "factory-claude-planning-"));
       const query = this.query ?? (await guard.race(loadClaudeQuery()));
       // A tree review reads the exact tree; any other session gets an empty
@@ -693,6 +698,8 @@ class ClaudePlanningTransport implements PlanningTransport {
           }
         });
         options.spawnClaudeCodeProcess = (options) => {
+          assertProviderTurnDeadline(args.deadlineAt);
+          abortController.signal.throwIfAborted();
           nativeSpawnAttempted = true;
           return spawnNative(options);
         };
@@ -701,6 +708,8 @@ class ClaudePlanningTransport implements PlanningTransport {
         Object.assign(options, claudeResumeOptions(owned));
         options.env = claudeSessionEnvironment(owned, options.env ?? {});
       }
+      assertProviderTurnDeadline(args.deadlineAt);
+      abortController.signal.throwIfAborted();
       events = query({ prompt: args.prompt, options })[Symbol.asyncIterator]();
       for (;;) {
         const next = await guard.race(events.next());
@@ -799,22 +808,47 @@ class ClaudePlanningTransport implements PlanningTransport {
       throw error;
     } finally {
       args.signal?.removeEventListener("abort", cancel);
+      guard.signal.removeEventListener("abort", expire);
       if (events && !closeStarted)
         void closeProviderEventStream(events, guard, false);
       guard.finish();
-      const completed = Boolean(
-        streamClosed &&
-          facts.initialized &&
+      const nativeTerminal = Boolean(
+        facts.initialized &&
           result &&
           result.subtype !== "error_during_execution" &&
           (!owned || result.session_id === owned.data.nativeSessionId),
       );
+      const completed = streamClosed && nativeTerminal;
+      const terminal =
+        result?.subtype === "success" && !result.is_error
+          ? ("completed" as const)
+          : ("failed" as const);
+      if (nativeTerminal) {
+        const totals = usage.totals();
+        state.usage = Object.keys(totals).length ? totals : undefined;
+      }
+      if (owned && nativeTerminal) {
+        // A genuine SDK result remains a native fact if later draining fails.
+        // Response acceptance and reusable context still require full settlement.
+        owned.data.nativeTerminal = true;
+        owned.ref.currentTurn = {
+          ...owned.ref.currentTurn!,
+          terminal,
+          resources: "unknown",
+        };
+        // Retain authenticated native facts even if owned closure throws; this
+        // private record is not a ready-session or accepted-response receipt.
+        claudePrivateWrite(join(owned.data.root, "pending.json"), {
+          ...owned.ref,
+          data: { ...owned.data },
+        });
+      }
       if (owned && completed) {
         owned.data.nativeTerminal = true;
         owned.data.baseline = usage.boundary();
         owned.ref.currentTurn = {
           ...owned.ref.currentTurn!,
-          terminal: state.ended && !state.failureClass ? "completed" : "failed",
+          terminal,
           resources: "unknown",
         };
         claudePrivateWrite(join(owned.data.root, "completed.json"), {
@@ -838,8 +872,7 @@ class ClaudePlanningTransport implements PlanningTransport {
           owned.data.historyDigest = claudeHistoryDigest(owned);
           owned.ref.currentTurn = {
             ...owned.ref.currentTurn!,
-            terminal:
-              state.ended && !state.failureClass ? "completed" : "failed",
+            terminal,
             resources: "settled",
           };
           checkpoint("ready");
@@ -852,12 +885,15 @@ class ClaudePlanningTransport implements PlanningTransport {
           owned.data.settled = true;
           owned.ref.currentTurn = {
             ...owned.ref.currentTurn!,
-            ...(owned.ref.currentTurn?.dispatch === "submitted"
-              ? { terminal: "interrupted" as const }
-              : {}),
             resources: "settled",
           };
-          checkpoint("unavailable");
+          // Closing the local owner cannot authenticate native turn completion.
+          checkpoint(
+            owned.ref.currentTurn.dispatch === "submitted" &&
+              !owned.ref.currentTurn.terminal
+              ? "in-flight"
+              : "unavailable",
+          );
         }
       }
       if (root) rmSync(root, { recursive: true, force: true });

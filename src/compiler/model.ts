@@ -26,7 +26,11 @@ import {
 import { attachedFault, attachFault, decision, transient } from "../fault.js";
 import { readPinnedPlaybook } from "../learning.js";
 import { UnsettledSubprocessError } from "../process.js";
-import { ProviderTurnTimeoutError } from "../provider-turn.js";
+import {
+  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  ProviderTurnElapsedTimeoutError,
+  ProviderTurnTimeoutError,
+} from "../provider-turn.js";
 import {
   type ReviewBodyFile,
   type ReviewPacket,
@@ -36,7 +40,11 @@ import {
   reviewPacket,
   reviewSchema,
 } from "../review-evidence.js";
-import { assertStepAdmission, stepCancellationSignal } from "../step.js";
+import {
+  assertStepAdmission,
+  stepCancellationSignal,
+  stepDeadlineAt,
+} from "../step.js";
 import { CodexPlanningTransport } from "./codex-transport.js";
 import {
   invalidOutput,
@@ -425,6 +433,7 @@ export class StructuredPlanningModel implements PlanningModel {
   approvedPlaybookPin?: ApprovedPlaybookPin;
   private readonly reviewCapacityRetryDelaysMs: readonly number[];
   private readonly wait: (milliseconds: number) => Promise<void>;
+  private readonly providerTurnElapsedTimeoutMs: number;
 
   get sessionCapabilities() {
     return this.transport.sessionCapabilities;
@@ -447,6 +456,16 @@ export class StructuredPlanningModel implements PlanningModel {
     readonly transport: PlanningTransport,
     options: PlanningModelOptions = {},
   ) {
+    this.providerTurnElapsedTimeoutMs =
+      options.providerTurnElapsedTimeoutMs ??
+      DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS;
+    if (
+      !Number.isSafeInteger(this.providerTurnElapsedTimeoutMs) ||
+      this.providerTurnElapsedTimeoutMs <= 0
+    )
+      throw new Error(
+        "Planning provider elapsed timeout must be a positive integer",
+      );
     this.reviewCapacityRetryDelaysMs = [
       ...(options.reviewCapacityRetryDelaysMs ??
         DEFAULT_REVIEW_CAPACITY_RETRY_DELAYS_MS),
@@ -500,6 +519,30 @@ export class StructuredPlanningModel implements PlanningModel {
       ordinal: 0,
     };
     invocation.phase = args.defaultPhase;
+    // Admit once, before capacity backoff or native startup. The Objective
+    // ceiling and a retained same-turn deadline can only shorten this budget.
+    const retained = args.session?.retained;
+    const sameTurn =
+      retained?.currentTurn?.invocationId === invocation.invocationId;
+    if (
+      sameTurn &&
+      retained?.status === "in-flight" &&
+      !retained.currentTurn?.deadlineAt
+    )
+      throw new Error(
+        "Retained unfinished planning turn has no elapsed admission; reconcile its existing owner before any new dispatch",
+      );
+    const limits = [
+      Date.now() + this.providerTurnElapsedTimeoutMs,
+      stepDeadlineAt(),
+      args.session?.objectiveDeadlineAt,
+      sameTurn ? retained?.currentTurn?.deadlineAt : undefined,
+    ]
+      .filter((value): value is number | string => value !== undefined)
+      .map((value) => (typeof value === "string" ? Date.parse(value) : value));
+    if (limits.some((value) => !Number.isFinite(value)))
+      throw new Error("Planning elapsed admission has an invalid deadline");
+    const deadlineAt = new Date(Math.min(...limits)).toISOString();
     const retryDelays = REVIEW_PHASES.has(args.defaultPhase)
       ? this.reviewCapacityRetryDelaysMs
       : [];
@@ -511,14 +554,20 @@ export class StructuredPlanningModel implements PlanningModel {
       assertStepAdmission();
       invocation.providerAttempt = attempt;
       try {
-        return await this.runStructuredAttempt<T>({ ...args, invocation });
+        return await this.runStructuredAttempt<T>({
+          ...args,
+          invocation,
+          deadlineAt,
+        });
       } catch (error) {
         if (error instanceof ProviderResponseTimeoutFailure) {
           const reason = !error.stopped
             ? "Timed-out model invocation cessation is unproved; no automatic retry is safe."
-            : error.timeout.waitingFor === "active-tool"
-              ? "Observed active tool exceeded its existing inactivity timeout; no model-response retry was dispatched."
-              : "Model response timed out; its outcome and unavailable usage remain uncertain. No unchanged automatic replay was dispatched.";
+            : error.timeout instanceof ProviderTurnElapsedTimeoutError
+              ? "Planning invocation reached its admitted elapsed deadline despite any observed activity; no automatic replay was dispatched."
+              : error.timeout.waitingFor === "active-tool"
+                ? "Observed active tool exceeded its existing inactivity timeout; no model-response retry was dispatched."
+                : "Model response timed out; its outcome and unavailable usage remain uncertain. No unchanged automatic replay was dispatched.";
           // A decision also prevents the enclosing paid step replaying this call.
           throw attachFault(
             new CompletedModelInvocationError(error),
@@ -532,7 +581,12 @@ export class StructuredPlanningModel implements PlanningModel {
           error instanceof ProviderCapacityFailure &&
           attempt <= retryDelays.length;
         if (!retryCapacity || attempt === maxAttempts) throw error;
-        const retryDelayMs = retryDelays[attempt - 1]!;
+        // Backoff consumes the same admission, rather than delaying a fresh
+        // deadline until the next attempt. Expiry is surfaced by its preflight.
+        const retryDelayMs = Math.min(
+          retryDelays[attempt - 1]!,
+          Math.max(0, Date.parse(deadlineAt) - Date.now()),
+        );
         assertStepAdmission();
         const selection = this.transport.selection(args.role);
         observeModelInvocation(invocation, {
@@ -550,7 +604,10 @@ export class StructuredPlanningModel implements PlanningModel {
   }
 
   private async runStructuredAttempt<T>(
-    args: StructuredCall & { invocation: ModelInvocationContext },
+    args: StructuredCall & {
+      invocation: ModelInvocationContext;
+      deadlineAt: string;
+    },
   ): Promise<T> {
     const invocation = args.invocation;
     const provider = this.transport.provider;
@@ -585,6 +642,7 @@ export class StructuredPlanningModel implements PlanningModel {
           prompt: args.prompt,
           schema: args.schema,
           settings: this.transport.settings(args.role, args.tree),
+          admittedDeadlineAt: args.deadlineAt,
           coverage: {
             implicitSystemPrompt: "not-exposed",
             providerConversation: "not-exposed",
@@ -607,6 +665,10 @@ export class StructuredPlanningModel implements PlanningModel {
           }),
     });
     try {
+      if (Date.now() >= Date.parse(args.deadlineAt)) {
+        turn.stopped = true;
+        throw new ProviderTurnElapsedTimeoutError(args.deadlineAt);
+      }
       await this.transport.run({
         role: args.role,
         prompt: args.prompt,
@@ -619,6 +681,7 @@ export class StructuredPlanningModel implements PlanningModel {
         tree: args.tree,
         session: args.session,
         signal: stepCancellationSignal(),
+        deadlineAt: args.deadlineAt,
       });
       const responseBytes = Buffer.byteLength(turn.response);
       const responseDigest = digest(turn.response);
@@ -735,6 +798,7 @@ export class StructuredPlanningModel implements PlanningModel {
     const scoped = new StructuredPlanningModel(this.transport, {
       reviewCapacityRetryDelaysMs: this.reviewCapacityRetryDelaysMs,
       wait: this.wait,
+      providerTurnElapsedTimeoutMs: this.providerTurnElapsedTimeoutMs,
     });
     scoped.approvedPlaybook = playbook;
     scoped.approvedPlaybookPin = pin;

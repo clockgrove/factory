@@ -415,6 +415,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     tree?: string;
     session?: AgentSessionContinuation;
     signal?: AbortSignal;
+    deadlineAt?: string;
   }): Promise<void> {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
@@ -496,6 +497,7 @@ export class CodexPlanningTransport implements PlanningTransport {
         data: sessionData,
         currentTurn: {
           invocationId: invocation.invocationId,
+          ...(args.deadlineAt ? { deadlineAt: args.deadlineAt } : {}),
           requestDigest: structuredRequestDigest(args.prompt, args.schema),
           schemaDigest: createHash("sha256")
             .update(JSON.stringify(args.schema))
@@ -638,6 +640,7 @@ export class CodexPlanningTransport implements PlanningTransport {
           ? LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS
           : DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS),
       this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+      args.deadlineAt,
     );
     const checkpointSession = (status: AgentSessionRef["status"]) => {
       if (!session || !sessionData || !continuation) return;
@@ -768,6 +771,7 @@ export class CodexPlanningTransport implements PlanningTransport {
             },
           }),
         signal,
+        deadlineAt: args.deadlineAt,
         event: (event) => {
           if (event.type === "thread.started") {
             if (thread.id && event.thread_id !== thread.id)

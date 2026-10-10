@@ -202,9 +202,29 @@ function summarizeNative(
   const observations = records
     .filter((record) => record.nativeDescendant)
     .map((record) => record.nativeDescendant!);
+  const parentSessionIds = new Set(
+    parent.flatMap((record) =>
+      record.providerSessionId ? [record.providerSessionId] : [],
+    ),
+  );
+  // A child can message its parent. That authenticated reference is observable
+  // activity, but it does not make the already counted ancestor another child.
+  const ancestorReferences = records.flatMap((record) => {
+    const reference = record.nativeDescendant;
+    return reference?.relation === "observed-reference" &&
+      reference.parentSessionId === record.providerSessionId &&
+      (parentSessionIds.has(reference.childSessionId) ||
+        reference.childSessionId === record.nativeOwnership?.rootSessionId ||
+        reference.childSessionId === record.nativeOwnership?.parentSessionId)
+      ? [reference]
+      : [];
+  });
+  const ancestors = new Set(ancestorReferences);
   const ids = [
     ...new Set([
-      ...observations.map((child) => child.childSessionId),
+      ...observations
+        .filter((child) => !ancestors.has(child))
+        .map((child) => child.childSessionId),
       ...children.keys(),
     ]),
   ];
@@ -219,6 +239,7 @@ function summarizeNative(
     tools: summarizeTools(parentTools),
     descendants: {
       observedChildren: ids.length,
+      ancestorReferences,
       accountingUnion: null,
       parentUsageIncludesChildren: "unknown" as const,
       resourceCessation: "unavailable" as const,

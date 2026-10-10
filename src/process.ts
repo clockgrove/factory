@@ -1178,11 +1178,27 @@ async function groupEnds(
   return true;
 }
 
+/** A bidirectional input channel inside the same owned subprocess lifecycle. */
+export interface SubprocessInputChannel {
+  signal?: AbortSignal;
+  closed: Promise<number | null>;
+  write(input: string): Promise<void>;
+  end(): void;
+}
+
+export interface InteractiveSubprocessInput {
+  run(channel: SubprocessInputChannel): Promise<void>;
+  /** Request protocol interruption before bounded process-group cancellation. */
+  cancel?(reason: unknown): void;
+  /** Part of closure, never extra time to dispatch work. At most one second. */
+  cancellationGraceMs?: number;
+}
+
 export async function subprocessAsync(
   file: string,
   args: string[],
   options: SpawnOptions = {},
-  input?: string,
+  input?: string | InteractiveSubprocessInput,
   observe?: (stream: "stdout" | "stderr", chunk: Buffer) => void,
   boundary?: (
     observation: Omit<
@@ -1190,7 +1206,7 @@ export async function subprocessAsync(
       "source" | "elapsedMs"
     >,
   ) => void,
-  retention?: { stderr?: boolean },
+  retention?: { stdout?: boolean; stderr?: boolean },
 ): Promise<{
   status: number | null;
   stdout: string;
@@ -1217,18 +1233,44 @@ export async function subprocessAsync(
       ? AbortSignal.any([scope.signal, extra])
       : (scope?.signal ?? extra);
   signal?.throwIfAborted();
+  const interactive = typeof input === "object" ? input : undefined;
+  const cancellationGraceMs = interactive?.cancellationGraceMs ?? 0;
+  if (
+    !Number.isSafeInteger(cancellationGraceMs) ||
+    cancellationGraceMs < 0 ||
+    cancellationGraceMs > 1_000
+  )
+    throw new Error(
+      "Interactive subprocess cancellation grace must be 0–1000 ms",
+    );
   const child = spawn(file, args, { ...spawnOptions, detached: true });
+  let error: Error | undefined;
+  let inputError: unknown;
+  let inputFailed = false;
+  // Register exit/close listeners before ownership checks or protocol writes.
+  const closed = new Promise<number | null>((resolve) =>
+    child.on("close", resolve),
+  );
+  const exited = new Promise<number | null>((resolve) => {
+    child.on("error", (cause) => {
+      error = cause;
+    });
+    child.on("exit", (code) => {
+      observed({ event: "process-exit", exitCode: code, status: "observed" });
+      resolve(code);
+    });
+    void closed.then(resolve);
+  });
   if (child.pid) observed({ event: "process-start", status: "observed" });
   const identity = child.pid ? linuxProcessIdentity(child.pid) : null;
   const owned =
     child.pid && identity
       ? { pid: child.pid, startTime: identity.startTime }
       : undefined;
-  if (owned) scope?.observe?.(owned, false);
   let cancellationError: unknown;
   let aborted = false;
-  const cancel = () => {
-    aborted = true;
+  let cancelTimer: NodeJS.Timeout | undefined;
+  const kill = () => {
     if (!child.pid) return;
     try {
       process.kill(-child.pid, "SIGKILL");
@@ -1236,6 +1278,18 @@ export async function subprocessAsync(
       if ((error as NodeJS.ErrnoException).code !== "ESRCH")
         cancellationError = error;
     }
+  };
+  const cancel = () => {
+    if (aborted) return;
+    aborted = true;
+    try {
+      interactive?.cancel?.(signal?.reason);
+    } catch {
+      // An unsupported interruption never prevents process cancellation.
+    }
+    if (cancellationGraceMs)
+      cancelTimer = setTimeout(kill, cancellationGraceMs);
+    else kill();
   };
   signal?.addEventListener("abort", cancel, { once: true });
   if (signal?.aborted) cancel();
@@ -1245,8 +1299,7 @@ export async function subprocessAsync(
   };
   for (const stream of ["stdout", "stderr"] as const)
     child[stream]?.on("data", (chunk: Buffer) => {
-      if (stream !== "stderr" || retention?.stderr !== false)
-        output[stream].push(chunk);
+      if (retention?.[stream] !== false) output[stream].push(chunk);
       observe?.(stream, chunk);
     });
   // A child may exit before consuming input; its exit status remains authoritative.
@@ -1257,29 +1310,59 @@ export async function subprocessAsync(
   child.stdin?.on("finish", () =>
     observed({
       event: "stdin-finished",
-      observedBytes: Buffer.byteLength(input ?? ""),
+      ...(typeof input === "string" && {
+        observedBytes: Buffer.byteLength(input),
+      }),
       status: "observed",
     }),
   );
-  child.stdin?.end(input);
-  let error: Error | undefined;
-  // `close` waits for the output pipes, which a leftover descendant may hold
-  // open; the grace period starts when the command itself exits.
-  const closed = new Promise<number | null>((resolve) =>
-    child.on("close", resolve),
-  );
-  const status = await new Promise<number | null>((resolve) => {
-    child.on("error", (cause) => {
-      error = cause;
-    });
-    child.on("exit", (code) => {
-      observed({ event: "process-exit", exitCode: code, status: "observed" });
-      resolve(code);
-    });
-    // A command that never started emits close without exit.
-    void closed.then(resolve);
-  });
+  let inputTask: Promise<void> | undefined;
+  try {
+    if (interactive && (!owned || identity?.group !== owned.pid))
+      throw new Error(
+        "Interactive subprocess ownership could not be established",
+      );
+    if (owned) scope?.observe?.(owned, false);
+    if (interactive) {
+      const channel: SubprocessInputChannel = {
+        signal,
+        closed,
+        write: (text) =>
+          new Promise<void>((resolve, reject) => {
+            if (
+              !child.stdin ||
+              child.stdin.destroyed ||
+              child.stdin.writableEnded
+            )
+              return reject(new Error("Owned subprocess input is closed"));
+            child.stdin.write(text, (cause) =>
+              cause ? reject(cause) : resolve(),
+            );
+          }),
+        end: () => {
+          child.stdin?.end();
+        },
+      };
+      inputTask = Promise.resolve()
+        .then(() => interactive.run(channel))
+        .catch((cause) => {
+          inputFailed = true;
+          inputError = cause;
+          kill();
+        })
+        .finally(() => child.stdin?.end());
+    } else child.stdin?.end(input);
+  } catch (cause) {
+    inputFailed = true;
+    inputError = cause;
+    kill();
+    child.stdin?.end();
+  }
+  // `close` may await descendant-held pipes; settlement starts at parent exit.
+  const status = await exited;
   signal?.removeEventListener("abort", cancel);
+  clearTimeout(cancelTimer);
+  if (aborted) kill();
   if (aborted && child.pid) {
     // SIGKILL is asynchronous. Allow the kernel to reap runnable descendants.
     if (cancellationError || !(await groupEnds(child.pid, 1_000))) {
@@ -1333,9 +1416,13 @@ export async function subprocessAsync(
     child.stderr?.destroy();
   }
   if (owned) scope?.observe?.(owned, true);
+  // Interactive clients observe `closed` and reject pending protocol waits.
+  // A client cannot postpone process settlement by retaining an input promise.
+  if (inputTask) await Promise.race([inputTask, closed]);
   if (aborted)
     throw new Error("Owned subprocess cancelled after verified cessation");
   if (error) throw error;
+  if (inputFailed) throw inputError;
   return {
     status,
     stdout: Buffer.concat(output.stdout).toString("utf8"),

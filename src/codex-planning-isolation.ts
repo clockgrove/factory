@@ -606,6 +606,11 @@ function authenticateHome(root: string, owner: string) {
 }
 
 /** Remove only an authenticated, settled retained adapter home. */
+export function assertOwnedCodexHome(root: string, owner: string): void {
+  authenticateHome(root, owner);
+}
+
+/** Remove only an authenticated, settled retained adapter home. */
 export function releaseCodexHome(root: string, owner: string): void {
   authenticateHome(root, owner);
   rmSync(root, { recursive: true });

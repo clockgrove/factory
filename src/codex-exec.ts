@@ -6,6 +6,11 @@ import { codexRuntimeDirectory } from "./codex-planning-isolation.js";
 import { attachFault } from "./fault.js";
 import { subprocessAsync, UnsettledSubprocessError } from "./process.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
+import type { ModelBoundaryObservation } from "./capture.js";
+import {
+  codexBoundaryTelemetry,
+  codexJsonBoundaries,
+} from "./codex-boundary-telemetry.js";
 
 export interface CodexStderrDiagnostic {
   text: string;
@@ -72,7 +77,25 @@ export async function runCodexExec(args: {
   event: (event: ThreadEvent) => void;
   stderr?: (diagnostic: CodexStderrDiagnostic) => void | Promise<void>;
   redactionValues?: string[];
+  boundary?: (observation: ModelBoundaryObservation) => void;
 }): Promise<void> {
+  const started = performance.now();
+  const observe = (
+    source: ModelBoundaryObservation["source"],
+    observation: Omit<ModelBoundaryObservation, "source" | "elapsedMs">,
+  ) => {
+    try {
+      void Promise.resolve(
+        args.boundary?.({
+          ...observation,
+          source,
+          elapsedMs: Math.max(0, performance.now() - started),
+        }),
+      ).catch(() => undefined);
+    } catch {
+      /* Boundary sinks cannot change provider work. */
+    }
+  };
   const target =
     process.arch === "arm64"
       ? "aarch64-unknown-linux-musl"
@@ -85,6 +108,7 @@ export async function runCodexExec(args: {
     ...args.env,
     CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "codex_sdk_ts",
   };
+  if (args.boundary) env.RUST_LOG = "off,codex_otel.trace_safe=trace";
   if (existsSync(path)) env.PATH = `${path}${delimiter}${env.PATH ?? ""}`;
   const schema = join(env.TMPDIR!, "output-schema.json");
   writeFileSync(schema, JSON.stringify(args.schema), { mode: 0o600 });
@@ -108,13 +132,28 @@ export async function runCodexExec(args: {
   let pending = "";
   let failed = false;
   let failure: unknown;
-  const stderr = args.stderr
-    ? codexStderrCapture(args.stderr, args.redactionValues)
+  let filteredStderr = "";
+  const stderr =
+    args.stderr || args.boundary
+      ? codexStderrCapture((diagnostic) => {
+          filteredStderr = diagnostic.text;
+          return args.stderr?.(diagnostic);
+        }, args.redactionValues)
+      : undefined;
+  const telemetry = args.boundary
+    ? codexBoundaryTelemetry(
+        (event) => observe("codex-trace-safe", event),
+        (chunk) => stderr?.chunk(chunk),
+      )
+    : undefined;
+  const jsonBoundary = args.boundary
+    ? codexJsonBoundaries((event) => observe("codex-exec-json", event))
     : undefined;
   const line = (text: string) => {
     if (failed) return;
     try {
       const event = JSON.parse(text) as ThreadEvent;
+      jsonBoundary?.(event);
       args.event(event);
     } catch (error) {
       failed = true;
@@ -130,7 +169,8 @@ export async function runCodexExec(args: {
       args.prompt,
       (stream, chunk) => {
         if (stream === "stderr") {
-          stderr?.chunk(chunk);
+          if (telemetry) telemetry.chunk(chunk);
+          else stderr?.chunk(chunk);
           return;
         }
         if (stream !== "stdout" || failed) return;
@@ -145,14 +185,20 @@ export async function runCodexExec(args: {
           line(next);
         }
       },
+      args.boundary ? (event) => observe("factory-process", event) : undefined,
     );
     pending += decoder.end();
     if (pending) line(pending);
     if (failed) throw failure;
-    if (result.status !== 0)
+    if (result.status !== 0) {
+      if (args.boundary) {
+        telemetry?.finish();
+        stderr?.finish();
+      }
       throw new Error(
-        `Codex Exec exited with code ${result.status}: ${result.stderr}`,
+        `Codex Exec exited with code ${result.status}: ${args.boundary ? filteredStderr : result.stderr}`,
       );
+    }
   } catch (error) {
     if (error instanceof UnsettledSubprocessError)
       throw attachFault(
@@ -169,6 +215,7 @@ export async function runCodexExec(args: {
     if (args.signal.aborted) throw args.signal.reason;
     throw error;
   } finally {
+    telemetry?.finish();
     stderr?.finish();
   }
 }

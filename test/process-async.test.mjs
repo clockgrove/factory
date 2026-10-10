@@ -19,6 +19,11 @@ import { analyzeInteractions } from "../dist/analysis.js";
 import { runAnalysisCommand } from "../dist/analysis-cli.js";
 import { readInteractionContent } from "../dist/capture.js";
 import { codexStderrCapture } from "../dist/codex-exec.js";
+import { codexBoundaryTelemetry } from "../dist/codex-boundary-telemetry.js";
+import {
+  ProviderTurnGuard,
+  ProviderTurnTimeoutError,
+} from "../dist/provider-turn.js";
 import { createCodexHome } from "../dist/codex-planning-isolation.js";
 import {
   CodexPlanningModel,
@@ -358,6 +363,216 @@ setTimeout(() => {
     const stderrAnalysis = analyzeInteractions([stderrMetadata]);
     assert.equal(stderrAnalysis.nativeToolActivity.uniqueCalls, null);
     assert.equal(JSON.stringify(stderrAnalysis).includes("[REDACTED]"), false);
+
+    // Real child stdin/stderr and the production metadata writer: native-shaped
+    // diagnostic records are test data, never a provider or an accepted answer.
+    // The safe target's omitted fields must not reach either metadata or content.
+    const boundaryDiagnostics = new DiagnosticEmitter(repository, 3, [secret], {
+      enabled: false,
+      maxBytesPerInvocation: 1024,
+      nativeBoundaryTelemetry: true,
+    });
+    const boundaryObserver = boundaryDiagnostics.modelObserver({
+      scopeId: "actual-client-boundaries",
+    });
+    assert.equal(boundaryObserver.nativeBoundaryTelemetry, true);
+    assert.equal(
+      new DiagnosticEmitter(repository, 4).modelObserver({
+        scopeId: "disabled",
+      }).nativeBoundaryTelemetry,
+      false,
+    );
+    const boundaryStarted = performance.now();
+    let firstBoundary;
+    const sawLiveBoundary = new Promise((resolve) => {
+      firstBoundary = resolve;
+    });
+    const observeBoundary = (source, boundary) => {
+      boundaryObserver({
+        invocationId: "actual-client-boundaries",
+        providerAttempt: 1,
+        phase: "result-review",
+        ordinal: 0,
+        type: "progress",
+        adapter: "local-process",
+        provider: "not-invoked",
+        model: "none",
+        capture: {
+          event: {
+            kind: "interaction",
+            coverage: "boundary",
+            boundary: {
+              ...boundary,
+              source,
+              elapsedMs: performance.now() - boundaryStarted,
+            },
+          },
+        },
+      });
+      if (boundary.event === "first-output") firstBoundary();
+    };
+    let filteredDiagnostic;
+    const ordinaryCapture = codexStderrCapture(
+      (diagnostic) => {
+        filteredDiagnostic = diagnostic;
+        return boundaryObserver({
+          invocationId: "actual-client-boundaries",
+          providerAttempt: 1,
+          phase: "result-review",
+          ordinal: 0,
+          type: "progress",
+          capture: {
+            event: { kind: "interaction", coverage: "boundary" },
+            content: () => diagnostic,
+          },
+        });
+      },
+      [secret],
+    );
+    const boundaryParser = codexBoundaryTelemetry(
+      (event) => observeBoundary("codex-trace-safe", event),
+      ordinaryCapture.chunk,
+    );
+    const nativeDiagnosticLines = [
+      '2026-10-10T05:59:46.827332Z INFO codex_otel.trace_safe: event.name="codex.websocket_request" duration_ms=3 success="true" auth.header_name="authorization" auth.account_id="excluded-account"',
+      '2026-10-10T05:59:51.510209Z INFO codex_otel.trace_safe: event.name="codex.turn_ttft" duration_ms=5842',
+      '2026-10-10T05:59:46.612150Z INFO codex_otel.trace_safe: event.name="codex.sse_event" event.kind=response.completed input_token_count=7660 output_token_count=0 cached_token_count=0 cache_write_token_count=0 reasoning_token_count=0 tool_token_count=7660 ttft_ms=37',
+      '2026-10-10T05:59:52.510209Z TRACE codex_otel.trace_safe: event.name="codex.retry" retry.attempt=0 retry.delay_ms=200 retry.layer="http" retry.operation="request"',
+      `2026-10-10T05:59:52.510209Z INFO codex_otel.trace_safe: event.name="unknown" error.message=${JSON.stringify(secret + ' event.name="codex.turn_ttft" duration_ms=9999')} auth.account_id="excluded-account"`,
+      '2026-10-10T05:59:52.510209Z INFO codex_otel.trace_safe: event.name="codex.turn_ttft" duration_ms=unsafe',
+    ];
+    const quiet = new ProviderTurnGuard(320);
+    let childClosed = false;
+    const telemetryChild = subprocessAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+      setTimeout(() => process.stdin.resume(), 25);
+      const lines = ${JSON.stringify(nativeDiagnosticLines)};
+      for (const line of lines) process.stderr.write(line + '\\n');
+      const ordinary = Buffer.from(${JSON.stringify("ordinary π " + secret + "\n")});
+      process.stderr.write(ordinary.subarray(0, 10));
+      setTimeout(() => process.stderr.write(ordinary.subarray(10)), 15);
+      setTimeout(() => process.stderr.write('INFO codex_otel.trace_safe: event.name="unknown" error.message="' + 'x'.repeat(70000) + '"\\n'), 60);
+      setInterval(() => process.stderr.write(lines[1] + '\\n'), 25);
+    `,
+      ],
+      { signal: quiet.signal },
+      "x".repeat(256 * 1024),
+      (stream, chunk) => {
+        if (stream === "stderr") boundaryParser.chunk(chunk);
+      },
+      (boundary) => observeBoundary("factory-process", boundary),
+    );
+    const settledTelemetry = telemetryChild.finally(() => {
+      childClosed = true;
+    });
+    // Install rejection handlers before waiting for a live receipt.
+    const boundedTelemetry = assert.rejects(
+      quiet.race(settledTelemetry),
+      ProviderTurnTimeoutError,
+    );
+    const closedTelemetry = assert.rejects(
+      settledTelemetry,
+      /cancelled after verified cessation/,
+    );
+    await sawLiveBoundary;
+    assert.equal(childClosed, false);
+    const liveRecords = readDiagnostics(repository, 3).filter(
+      (event) => event.capture?.boundary,
+    );
+    assert.ok(
+      liveRecords.some(
+        (event) => event.capture.boundary.event === "first-output",
+      ),
+    );
+    await boundedTelemetry;
+    await closedTelemetry;
+    quiet.finish();
+    boundaryParser.finish();
+    ordinaryCapture.finish();
+    const boundaryRecords = readDiagnostics(repository, 3)
+      .filter((event) => event.capture)
+      .map((event) => event.capture);
+    const boundaryView =
+      analyzeInteractions(boundaryRecords).invocations[0].boundaryObservations;
+    assert.ok(
+      boundaryView.some(
+        (event) =>
+          event.event === "stdin-finished" &&
+          event.observedBytes === 256 * 1024,
+      ),
+    );
+    assert.ok(
+      boundaryView.some(
+        (event) => event.event === "cessation" && event.status === "verified",
+      ),
+    );
+    assert.ok(
+      boundaryView.some(
+        (event) =>
+          event.event === "transport-completed" && event.durationMs === 3,
+      ),
+    );
+    assert.ok(
+      boundaryView.some(
+        (event) =>
+          event.event === "retry" &&
+          event.nativeAttempt === 0 &&
+          event.retryLayer === "http",
+      ),
+    );
+    assert.ok(
+      boundaryView.some(
+        (event) =>
+          event.event === "response-completed" &&
+          event.responseCounters.inputTokens === 7660 &&
+          event.responseCounters.ttftMs === 37,
+      ),
+    );
+    const coverage = boundaryView.find(
+      (event) => event.event === "telemetry-coverage",
+    );
+    assert.equal(coverage.status, "incomplete");
+    assert.ok(coverage.unparsedRecords >= 2);
+    assert.ok(coverage.truncatedRecords > 0);
+    assert.equal(coverage.submission, "unsupported");
+    assert.equal(
+      boundaryView.some((event) => event.durationMs === 9999),
+      false,
+    );
+    assert.equal(JSON.stringify(boundaryRecords).includes(secret), false);
+    assert.equal(
+      JSON.stringify(boundaryRecords).includes("excluded-account"),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(boundaryRecords).includes("error.message"),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(boundaryRecords).includes("authorization"),
+      false,
+    );
+    assert.equal(
+      boundaryRecords.every((record) => !record.content.reference),
+      true,
+    );
+    assert.ok(filteredDiagnostic.text.includes("ordinary π "));
+    assert.ok(filteredDiagnostic.text.includes("[REDACTED]"));
+    assert.equal(
+      filteredDiagnostic.text.includes("codex_otel.trace_safe"),
+      false,
+    );
+    assert.equal(filteredDiagnostic.text.includes("excluded-account"), false);
+    assert.equal(filteredDiagnostic.text.includes(secret), false);
+    assert.equal(filteredDiagnostic.text.includes("error.message"), false);
+    assert.equal(
+      analyzeInteractions(boundaryRecords).usage.inputTokens.total,
+      null,
+    );
   } finally {
     if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = previousStateHome;

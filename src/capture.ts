@@ -19,6 +19,61 @@ import {
 } from "./diagnostics.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
 
+/** Observed client boundaries, never submission, billing or server-time authority. */
+export interface ModelBoundaryObservation {
+  source: "factory-process" | "codex-exec-json" | "codex-trace-safe";
+  event:
+    | "process-start"
+    | "stdin-finished"
+    | "stdin-error"
+    | "thread-started"
+    | "transport-completed"
+    | "first-output"
+    | "visible-output-item"
+    | "response-completed"
+    | "stream-terminal"
+    | "retry"
+    | "tool-start"
+    | "tool-end"
+    | "turn-completed"
+    | "turn-failed"
+    | "process-exit"
+    | "pipes-closed"
+    | "cessation"
+    | "telemetry-coverage";
+  elapsedMs: number;
+  durationMs?: number;
+  transport?: "http" | "websocket-connect" | "websocket-request";
+  statusCode?: number;
+  success?: boolean;
+  nativeAttempt?: number;
+  retryLayer?: "http" | "stream";
+  retryOperation?: "request" | "sampling" | "remote_compaction_v2";
+  delayMs?: number;
+  tool?: "shell" | "mcp";
+  toolCallId?: string;
+  toolStatus?: "in_progress" | "completed" | "failed";
+  exitCode?: number | null;
+  observedBytes?: number;
+  truncatedRecords?: number;
+  unparsedRecords?: number;
+  parsedRecords?: number;
+  status?: "observed" | "incomplete" | "unavailable" | "verified";
+  /** Native response counters can include prewarm; never add them to outer usage. */
+  responseCounters?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedInputTokens?: number;
+    cacheWriteInputTokens?: number;
+    reasoningOutputTokens?: number;
+    totalTokens?: number;
+    ttftMs?: number;
+  };
+  /** Transport acceptance and provider-internal time are not exposed by this path. */
+  submission?: "unsupported";
+  nativeTransport?: "unsupported";
+}
+
 /** Versioned local observation contract; never lifecycle authority. */
 export interface InteractionMetadata {
   schemaVersion: 1;
@@ -57,6 +112,7 @@ export interface InteractionMetadata {
   promptDigest?: string;
   schemaDigest?: string;
   durationMs?: number;
+  boundary?: ModelBoundaryObservation;
   coverage: "boundary" | "sdk-exposed";
   /** Visible serialized native history, never billed tokens or a complete wire request. */
   visible?: {
@@ -189,6 +245,7 @@ export interface InteractionMetadata {
 export interface CapturePolicy {
   enabled: boolean;
   maxBytesPerInvocation: number;
+  nativeBoundaryTelemetry?: boolean;
 }
 export type CaptureContext = Pick<
   InteractionMetadata,

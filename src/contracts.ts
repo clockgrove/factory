@@ -205,6 +205,13 @@ export interface ModelInvocationObservation {
   detail?: string;
 }
 
+/** Capture policy conveyed by the existing observational sink, not model authority. */
+export type ModelInvocationObserver = ((
+  observation: ModelInvocationObservation,
+) => void) & {
+  nativeBoundaryTelemetry?: boolean;
+};
+
 export interface ModelInvocationContext {
   invocationId: string;
   phase: ModelInvocationPhase;
@@ -213,7 +220,7 @@ export interface ModelInvocationContext {
   providerAttempt?: number;
   /** Adapter-owned bounded provider-attempt count. */
   providerMaxAttempts?: number;
-  observe?: (observation: ModelInvocationObservation) => void;
+  observe?: ModelInvocationObserver;
 }
 
 /** Controller-observed native admission, not target source or WorkGraph edges. */

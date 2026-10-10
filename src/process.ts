@@ -1184,6 +1184,12 @@ export async function subprocessAsync(
   options: SpawnOptions = {},
   input?: string,
   observe?: (stream: "stdout" | "stderr", chunk: Buffer) => void,
+  boundary?: (
+    observation: Omit<
+      import("./capture.js").ModelBoundaryObservation,
+      "source" | "elapsedMs"
+    >,
+  ) => void,
 ): Promise<{
   status: number | null;
   stdout: string;
@@ -1191,6 +1197,16 @@ export async function subprocessAsync(
   /** Processes the exited command left running that were stopped after the grace period. */
   stoppedLeftovers?: number;
 }> {
+  const observed = (
+    observation: Parameters<NonNullable<typeof boundary>>[0],
+  ) => {
+    if (!boundary) return;
+    try {
+      void Promise.resolve(boundary(observation)).catch(() => undefined);
+    } catch {
+      /* Observation never changes process work or settlement. */
+    }
+  };
   const scope = processCancellation.getStore();
   let stoppedLeftovers = 0;
   // `options.signal` (such as a deadline) also stops the whole process group.
@@ -1201,6 +1217,7 @@ export async function subprocessAsync(
       : (scope?.signal ?? extra);
   signal?.throwIfAborted();
   const child = spawn(file, args, { ...spawnOptions, detached: true });
+  if (child.pid) observed({ event: "process-start", status: "observed" });
   const identity = child.pid ? linuxProcessIdentity(child.pid) : null;
   const owned =
     child.pid && identity
@@ -1232,8 +1249,16 @@ export async function subprocessAsync(
     });
   // A child may exit before consuming input; its exit status remains authoritative.
   child.stdin?.on("error", () => {
+    observed({ event: "stdin-error", status: "observed" });
     /* Child exit status is authoritative. */
   });
+  child.stdin?.on("finish", () =>
+    observed({
+      event: "stdin-finished",
+      observedBytes: Buffer.byteLength(input ?? ""),
+      status: "observed",
+    }),
+  );
   child.stdin?.end(input);
   let error: Error | undefined;
   // `close` waits for the output pipes, which a leftover descendant may hold
@@ -1245,7 +1270,10 @@ export async function subprocessAsync(
     child.on("error", (cause) => {
       error = cause;
     });
-    child.on("exit", resolve);
+    child.on("exit", (code) => {
+      observed({ event: "process-exit", exitCode: code, status: "observed" });
+      resolve(code);
+    });
     // A command that never started emits close without exit.
     void closed.then(resolve);
   });
@@ -1254,6 +1282,7 @@ export async function subprocessAsync(
     // SIGKILL is asynchronous. Allow the kernel to reap runnable descendants.
     if (cancellationError || !(await groupEnds(child.pid, 1_000))) {
       if (scope) scope.unresolved = true;
+      observed({ event: "cessation", status: "unavailable" });
       throw new UnsettledSubprocessError(
         "Owned subprocess cessation could not be verified; outcome unknown",
         { cause: cancellationError },
@@ -1275,6 +1304,7 @@ export async function subprocessAsync(
     }
     if (stopError || !(await groupEnds(owned.pid, 1_000))) {
       if (scope) scope.unresolved = true;
+      observed({ event: "cessation", status: "unavailable" });
       throw new UnsettledSubprocessError(
         "Owned subprocess group remains active; outcome unknown",
         { cause: stopError },
@@ -1291,6 +1321,11 @@ export async function subprocessAsync(
     }),
   ]);
   clearTimeout(timer);
+  observed({
+    event: "pipes-closed",
+    status: drained ? "observed" : "incomplete",
+  });
+  observed({ event: "cessation", status: owned ? "verified" : "unavailable" });
   if (!drained) {
     child.stdout?.destroy();
     child.stderr?.destroy();

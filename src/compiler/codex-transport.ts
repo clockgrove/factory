@@ -198,6 +198,8 @@ export class CodexPlanningTransport implements PlanningTransport {
     let retainHome = false;
     let turnCompleted = false;
     let nativeCompleted = false;
+    let nativeAttempted = false;
+    let initialCheckpointed = false;
     let streamError: Error | undefined;
     // A tree review's shell reads the tree alone, offline.
     const home = createCodexHome(
@@ -240,12 +242,14 @@ export class CodexPlanningTransport implements PlanningTransport {
     );
     const checkpointSession = (status: AgentSessionRef["status"]) => {
       if (!session || !sessionData || !continuation) return;
-      sessionData.threadId = thread.id;
+      if (thread.id === undefined) delete sessionData.threadId;
+      else sessionData.threadId = thread.id;
       session = { ...session, data: { ...sessionData }, status };
       continuation.checkpoint(session);
     };
     try {
       checkpointSession("in-flight");
+      initialCheckpointed = true;
       if (sessionTurn)
         observeModelInvocation(invocation, {
           type: "progress",
@@ -259,6 +263,7 @@ export class CodexPlanningTransport implements PlanningTransport {
             },
           },
         });
+      nativeAttempted = true;
       await runCodexExec({
         env: home.env,
         options: {
@@ -430,7 +435,9 @@ export class CodexPlanningTransport implements PlanningTransport {
         capture: {
           event: {
             kind: "interaction",
-            providerEvent: "codex.native-failure",
+            providerEvent: nativeAttempted
+              ? "codex.native-failure"
+              : "codex.native-startup-failure",
             providerSessionId: thread?.id ?? undefined,
             coverage: "boundary",
           },
@@ -441,7 +448,14 @@ export class CodexPlanningTransport implements PlanningTransport {
     } finally {
       state.providerThreadId = thread.id;
       turn.finish();
-      if (!retainHome) {
+      if (!nativeAttempted && !initialCheckpointed) {
+        // Rejected startup ownership precedes all native work. Dispose only
+        // this freshly created authenticated home; an earlier conversation
+        // and a superseding controller's receipt remain untouched.
+        if (session && !captureBoundary)
+          releaseCodexHome(home.root, this.sessionOwner(session));
+        else if (!session) home.dispose();
+      } else if (!retainHome) {
         home.nativeCapture(
           thread.id,
           (event, content) =>

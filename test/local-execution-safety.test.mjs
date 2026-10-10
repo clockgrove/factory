@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   cpSync,
@@ -28,6 +28,8 @@ import { saveState } from "../dist/state-store.js";
 import { workerAttemptItem } from "../dist/item-worker.js";
 import { workItemPrompt } from "../dist/execution/harness-support.js";
 import { agentSessionContinuation } from "../dist/agent-session.js";
+import { CodexPlanningTransport } from "../dist/compiler/codex-transport.js";
+import { materializeResultTree } from "../dist/result-evidence.js";
 import {
   CLAUDE_EXPORT_SCRIPT,
   materializeClaudeSnapshot,
@@ -639,6 +641,123 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       stoppedReceipt,
     );
     delete loaded.cancelRequested;
+    const reviewTree = materializeResultTree(checkout, result.treeSha);
+    try {
+      const reviewHomes = join(root, "private-review-homes");
+      const selection = { model: "gpt-6.1", reasoningEffort: "medium" };
+      const transport = new CodexPlanningTransport(
+        checkout,
+        selection,
+        selection,
+        undefined,
+        [],
+        reviewHomes,
+      );
+      const abortReason = new Error(
+        "Review stopped before native process startup",
+      );
+      const stoppedSignal = AbortSignal.abort(abortReason);
+      const checkpoints = [];
+      const reviewSession = agentSessionContinuation(
+        loaded,
+        "result-review",
+        "api",
+        () => {
+          save();
+          const snapshotState = parseFactoryState(
+            JSON.parse(readFileSync(snapshot, "utf8")),
+            loaded.repository,
+            1,
+          );
+          const retained = Object.values(snapshotState.agentSessions).find(
+            (ref) => ref.identity === reviewIdentity,
+          );
+          checkpoints.push({
+            status: retained.status,
+            homeExists: existsSync(retained.data.sessionRoot),
+            threadIdPresent: Object.hasOwn(retained.data, "threadId"),
+          });
+        },
+      );
+      const reviewIdentity = reviewSession.identity;
+      const reviewTurn = { response: "", ended: false };
+      // The real transport receives an already-aborted signal. subprocessAsync
+      // throws this exact reason before spawning any native executable/model.
+      await assert.rejects(
+        () =>
+          transport.run({
+            role: "reviewer",
+            prompt: "Inspect the exact candidate",
+            schema: { type: "object" },
+            invocation: {
+              invocationId: randomUUID(),
+              phase: "result-review",
+              ordinal: 0,
+            },
+            turn: reviewTurn,
+            tree: reviewTree.directory,
+            session: reviewSession,
+            signal: stoppedSignal,
+          }),
+        (error) => error === abortReason,
+      );
+      assert.deepEqual(checkpoints, [
+        { status: "in-flight", homeExists: true, threadIdPresent: false },
+        { status: "unavailable", homeExists: true, threadIdPresent: false },
+        { status: "released", homeExists: false, threadIdPresent: false },
+      ]);
+      assert.equal(reviewTurn.started, undefined);
+      assert.equal(reviewTurn.stopped, true);
+      assert.equal(reviewTurn.usage, undefined);
+      const reviewReload = parseFactoryState(
+        JSON.parse(readFileSync(snapshot, "utf8")),
+        loaded.repository,
+        1,
+      );
+      const disposedReview = Object.values(reviewReload.agentSessions).find(
+        (ref) => ref.identity === reviewIdentity,
+      );
+      assert.equal(disposedReview.status, "released");
+      assert.equal(existsSync(disposedReview.data.sessionRoot), false);
+      await transport.releaseSession(disposedReview);
+
+      const rejectedSession = agentSessionContinuation(
+        loaded,
+        "result-review",
+        "ui",
+        save,
+      );
+      const rejectedHome = join(reviewHomes, rejectedSession.identity);
+      loaded.cancelRequested = true;
+      save();
+      const rejectedSnapshot = readFileSync(snapshot, "utf8");
+      const rejectedTurn = { response: "", ended: false };
+      await assert.rejects(
+        () =>
+          transport.run({
+            role: "reviewer",
+            prompt: "Inspect the exact candidate",
+            schema: { type: "object" },
+            invocation: {
+              invocationId: randomUUID(),
+              phase: "result-review",
+              ordinal: 0,
+            },
+            turn: rejectedTurn,
+            tree: reviewTree.directory,
+            session: rejectedSession,
+            signal: stoppedSignal,
+          }),
+        /Cancelling/,
+      );
+      assert.equal(existsSync(rejectedHome), false);
+      assert.equal(readFileSync(snapshot, "utf8"), rejectedSnapshot);
+      assert.equal(rejectedTurn.started, undefined);
+      assert.equal(rejectedTurn.usage, undefined);
+      delete loaded.cancelRequested;
+    } finally {
+      reviewTree.remove();
+    }
     const prompt = workItemPrompt({
       item: workerAttemptItem(loaded, consumer, result.changeRef, current),
       worktree: checkout,

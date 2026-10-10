@@ -361,6 +361,8 @@ export function assertApprovedPlaybookPin(
 }
 
 export interface PlanningRequest<T> {
+  /** Controller-owned planner continuation; never model-authored or persisted in a graph. */
+  session?: AgentSessionContinuation;
   approvedPlaybookPin?: ApprovedPlaybookPin;
   /** Trusted transient compile input; not part of canonical or persisted graphs. */
   compileContext?: {
@@ -542,6 +544,8 @@ export interface AgentSessionRef {
 
 export interface AgentSessionRequest {
   scope: AgentSessionScope;
+  /** Transient current graph binding; planning lifetime identity excludes it. */
+  currentGraphDigest?: string;
   /** Controller-allocated logical identity; distinct from native thread IDs. */
   identity: string;
   retained?: AgentSessionRef;

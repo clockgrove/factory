@@ -317,6 +317,9 @@ export function agentSessionContinuation(
   let previous = JSON.stringify(retained);
   const continuation: AgentSessionContinuation = {
     scope,
+    ...(scope.role === "planning" && admittedGraphDigest
+      ? { currentGraphDigest: admittedGraphDigest }
+      : {}),
     identity:
       retained && ["ready", "in-flight"].includes(retained.status)
         ? retained.identity

@@ -92,8 +92,10 @@ Factory can retain a planner from preparation through compilation, correction, d
 | Claude planning   | Planning, independent result review and Objective review, using adapter-owned private storage.                                 |
 | Codex worker      | Implementation.                                                                                                                |
 | Claude worker     | Implementation, except when `settingSources` includes `user`; those workers stay fresh to preserve the selected user settings. |
-| Copilot worker    | Implementation, after native idle and resource settlement are verified.                                                        |
+| Copilot worker    | Fresh; retained continuation is disabled pending live qualification.                                                           |
 | Managed execution | Fresh across attempts.                                                                                                         |
+
+Copilot continuation is implemented but remains disabled until native account access, restart, current-checkout rebinding and accounting behavior are qualified.
 
 Codex defaults to exec. `--planning-transport app-server` at setup, or setting `planning.codex.transport` to `"app-server"` in the configuration before starting an Objective, selects the app-server transport for tool-free compilation, graph review and diagnosis. Tree result and final Objective reviews remain explicitly on exec with their exact-candidate offline permission profile; SDK workers are unchanged. This is selected routing, never a fallback after an ambiguous dispatch. The [upstream app-server documentation](https://learn.chatgpt.com/docs/app-server) labels the command experimental and unsupported for production workloads. Opt-in does not establish improved latency or live qualification.
 

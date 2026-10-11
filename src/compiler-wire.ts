@@ -624,7 +624,8 @@ export function compilerWire(
                   .length ||
                 typeof item.minimumAssetSets !== "string" ||
                 !/^[1-9][0-9]*$/.test(item.minimumAssetSets) ||
-                !Number.isSafeInteger(Number(item.minimumAssetSets))
+                !Number.isSafeInteger(Number(item.minimumAssetSets)) ||
+                String(Number(item.minimumAssetSets)) !== item.minimumAssetSets
               )
                 throw new Error(
                   "Planner media outputs need a positive safe-integer candidate count",

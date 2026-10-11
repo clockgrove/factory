@@ -56,6 +56,7 @@ import {
   workItemReviewObservations,
 } from "../validation.js";
 import { linearDeliveryUnits } from "./plan.js";
+import { expansionBlocksItem } from "../expansion-readiness.js";
 import { transplantIndependentChange } from "./transplant.js";
 
 export async function runNativeGraph(args: {
@@ -74,6 +75,8 @@ export async function runNativeGraph(args: {
   cancelled: () => boolean;
   paused?: () => boolean;
   amendmentPending?: () => boolean;
+  /** Authenticated settlements for this immutable graph pass. */
+  resolvedExpansionIds?: ReadonlySet<string>;
   reconcile?: () => Promise<void>;
   diagnostics?: DiagnosticEmitter;
   /** The Objective run's cancel signal, passed to every step. */
@@ -195,6 +198,15 @@ export async function runNativeGraph(args: {
     }
   };
   const units = linearDeliveryUnits(state.graph);
+  for (const unit of units)
+    for (const item of unit.items)
+      if (
+        ["running", "published"].includes(state.work[item.id]?.status ?? "") &&
+        expansionBlocksItem(state.graph, item.id, args.resolvedExpansionIds)
+      )
+        throw new Error(
+          `Work Item ${item.id} cannot resume before its required expansion settles`,
+        );
   let preparationFailure: unknown;
   const workerArgs = (item: WorkItem) => ({
     state,
@@ -272,6 +284,9 @@ export async function runNativeGraph(args: {
     )) {
       if (prepared.length >= limit) break;
       if (
+        unit.items.some((item) =>
+          expansionBlocksItem(state.graph, item.id, args.resolvedExpansionIds),
+        ) ||
         unit.items[0]!.kind === "qa" ||
         phases.reason(unit.items[0]!.id, "coding") ||
         unit.items[0]!.kind === "aggregate" ||
@@ -367,6 +382,9 @@ export async function runNativeGraph(args: {
     const ranked = rankPending(state.graph, state.work);
     const eligible = remainingUnits.filter(
       (unit) =>
+        !unit.items.some((item) =>
+          expansionBlocksItem(state.graph, item.id, args.resolvedExpansionIds),
+        ) &&
         !unit.items.some((item) =>
           ["failed", "cancelled"].includes(state.work[item.id]!.status),
         ) &&

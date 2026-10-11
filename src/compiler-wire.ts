@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { assertDiscoverySpecification } from "./discovery.js";
+import { assertGraphExpansionEnvelope } from "./graph-expansion.js";
 import {
   assertHumanPlanningDependency,
   assertContextRequest,
@@ -457,6 +458,66 @@ export function compilerWire(
     },
     coverage: coverageSchema,
   });
+  if (request.contextLookup) {
+    const template = structuredClone(itemSchema);
+    template.properties!.kind = { type: "string", enum: ["work"] };
+    template.properties!.children = { type: "array", maxItems: 0, items: text };
+    template.properties!.newPackages = {
+      type: "array",
+      maxItems: 0,
+      items: text,
+    };
+    template.properties!.sourceAssets = {
+      type: "array",
+      maxItems: 0,
+      items: strict({ kind: text }),
+    };
+    template.properties!.discoveryInputs = {
+      type: "array",
+      maxItems: 0,
+      items: strict({ producerItemId: text }),
+    };
+    for (const field of outputFields) delete template.properties![field];
+    template.required = template.required!.filter(
+      (field) => !outputFields.includes(field),
+    );
+    schema.properties!.expansions = {
+      type: "array",
+      items: strict({
+        schemaVersion: { type: "integer", enum: [1] },
+        id: { ...text, minLength: 1 },
+        input: strict({
+          producerItemId: text,
+          role: text,
+          schema: { type: "string", enum: ["factory.repository-inventory/v1"] },
+        }),
+        selectors: { type: "array", minItems: 1, items: text },
+        workShape: { type: "string", enum: ["migration", "cross-cutting-fix"] },
+        selection: {
+          anyOf: [
+            strict({ kind: { type: "string", enum: ["all-regular-files"] } }),
+            strict({
+              kind: { type: "string", enum: ["classified"] },
+              included: { type: "array", minItems: 1, items: text },
+              excluded: { type: "array", items: text },
+            }),
+          ],
+        },
+        batching: strict({ maxFilesPerChild: { type: "integer", minimum: 1 } }),
+        limits: strict({
+          maxChildren: { type: "integer", minimum: 1 },
+          maxIterations: { type: "integer", enum: [1] },
+        }),
+        resources: { type: "array", items: text },
+        eligibleProfileIds: { type: "array", items: text },
+        dependencies: { type: "array", items: text },
+        integrationBarrierItemIds: { type: "array", minItems: 1, items: text },
+        empty: { type: "string", enum: ["settle-without-children"] },
+        template,
+      }),
+    };
+    schema.required!.push("expansions");
+  }
   // Stable content first, so repeated and revised compilations share a
   // provider-cache prefix; the revision-specific parts and the context
   // identity, which hashes them, come last.
@@ -510,7 +571,13 @@ export function compilerWire(
       const wire = object(value, "response");
       keys(
         wire,
-        ["contextId", "items", "coverage", "requiredPreIntegrationChecks"],
+        [
+          "contextId",
+          "items",
+          "coverage",
+          "requiredPreIntegrationChecks",
+          ...(request.contextLookup ? ["expansions"] : []),
+        ],
         "response",
       );
       if (wire.contextId !== contextId)
@@ -921,6 +988,38 @@ export function compilerWire(
         throw new PlannerChoiceError(
           "Planner QA node has no acceptance coverage",
         );
+      if (request.contextLookup) {
+        if (!Array.isArray(wire.expansions))
+          throw new Error("Planner expansions must be an array");
+        if (wire.expansions.length) {
+          graph.expansions = wire.expansions.map((raw) => {
+            const envelope = structuredClone(object(raw, "expansion"));
+            const rawTemplate = object(envelope.template, "expansion template");
+            if (
+              !Array.isArray(rawTemplate.newPackages) ||
+              rawTemplate.newPackages.length
+            )
+              throw new PlannerChoiceError(
+                "Expansion templates cannot invent packages outside their observed existing-file work shape",
+              );
+            if (
+              rawTemplate.kind !== "work" ||
+              graph.items.some((item) => item.id === rawTemplate.id)
+            )
+              throw new PlannerChoiceError(
+                "Expansion template must be a separate ordinary-work shape, never a retained or executable item",
+              );
+            const decoded = graphWire.decode({
+              ...wire,
+              expansions: [],
+              items: [...(wire.items as unknown[]), rawTemplate],
+            });
+            envelope.template = decoded.items.at(-1)!;
+            assertGraphExpansionEnvelope(envelope);
+            return envelope;
+          });
+        }
+      }
       return graph;
     },
   };

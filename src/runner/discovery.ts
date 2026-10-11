@@ -35,7 +35,7 @@ export function assertDiscoveryAdmission(
   );
   const admitted = config.planningContext?.selectors;
   if (
-    state.schemaVersion !== 9 ||
+    (state.schemaVersion !== 9 && state.schemaVersion !== 11) ||
     !config.planningContext?.enabled ||
     !admitted ||
     !item.discovery ||

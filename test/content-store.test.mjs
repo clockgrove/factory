@@ -27,6 +27,14 @@ import {
 } from "../dist/discovery.js";
 import { selectedDiscoveryInputs } from "../dist/runner/discovery.js";
 import { linearDeliveryUnits } from "../dist/delivery/plan.js";
+import { materializeGraphExpansion } from "../dist/graph-expansion.js";
+import { readyItems, validateAndOrderGraph } from "../dist/scheduler.js";
+import {
+  aggregateAcceptance,
+  assertCompletedCoverage,
+  assertExpansionCoverage,
+  coverageObligations,
+} from "../dist/qa.js";
 
 test("disk content survives storage and materialization, and corruption is refused", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-content-"));
@@ -307,7 +315,17 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
   git("config", "user.email", "fixture@example.test");
   const bytes = Buffer.from("export const observed = 7;\n");
   writeFileSync(join(checkout, "src", "api.ts"), bytes);
+  writeFileSync(
+    join(checkout, "src", "helper.ts"),
+    "export const helper = 8;\n",
+  );
+  mkdirSync(join(checkout, "src", "ui"));
+  writeFileSync(
+    join(checkout, "src", "ui", "view.ts"),
+    "export const view = 9;\n",
+  );
   writeFileSync(join(checkout, "private.txt"), "Outside selector\n");
+  writeFileSync(join(checkout, "notes.txt"), "Shared migration notes\n");
   git("add", ".");
   git("commit", "-m", "Discovery source");
   const baseSha = git("rev-parse", "HEAD");
@@ -343,7 +361,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
   assert.equal(manifest.status, "complete");
   assert.deepEqual(
     body.entries.map((entry) => entry.path),
-    ["src/api.ts"],
+    ["src/api.ts", "src/helper.ts", "src/ui/view.ts"],
   );
   assert.equal(
     body.entries[0].content.digest,
@@ -398,6 +416,216 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     ),
     [["inventory"], ["consumer"]],
   );
+  // The reviewed graph retains its original integration proof while a complete
+  // real inventory materializes related files into bounded, literal batches.
+  const criterion =
+    "The migration preserves behavior for all affected source modules.";
+  const common = {
+    title: "Migrate observed modules",
+    goal: criterion,
+    acceptance: [criterion],
+    nonGoals: ["No work outside the approved selectors"],
+    citations: [{ path: "OBJECTIVE" }],
+    dependencies: [],
+    ownedPaths: [],
+    validation: [],
+    brief: "Apply the approved migration while retaining module behavior.",
+  };
+  const envelope = {
+    schemaVersion: 1,
+    id: "migrate-modules",
+    input: {
+      producerItemId: inventory.id,
+      role: specification.role,
+      schema: specification.schema,
+    },
+    selectors: specification.selectors,
+    workShape: "migration",
+    selection: { kind: "all-regular-files" },
+    batching: { maxFilesPerChild: 2 },
+    limits: { maxChildren: 2, maxIterations: 1 },
+    resources: [],
+    eligibleProfileIds: [],
+    dependencies: [],
+    integrationBarrierItemIds: ["join", "integration"],
+    empty: "settle-without-children",
+    template: {
+      ...common,
+      id: "migration-template",
+      ownedPaths: specification.selectors,
+    },
+  };
+  const graph = {
+    objective: producer.objective,
+    baseSha,
+    expansions: [envelope],
+    items: [
+      { ...common, ...inventory },
+      { ...common, id: "independent", ownedPaths: ["private.txt"] },
+      {
+        ...common,
+        id: "join",
+        ownedPaths: ["notes.txt"],
+        dependencies: ["independent"],
+      },
+      {
+        ...common,
+        id: "integration",
+        kind: "qa",
+        dependencies: [inventory.id, "join"],
+      },
+      {
+        ...common,
+        id: "summary",
+        kind: "aggregate",
+        dependencies: ["integration"],
+        children: ["integration"],
+        acceptance: aggregateAcceptance({ id: "summary" }),
+      },
+    ],
+    coverage: [
+      {
+        ...coverageObligations(criterion, [criterion])[0],
+        itemId: "integration",
+        proof: { kind: "integrated-semantic", acceptanceIndex: 0 },
+        environment: {
+          kind: "local",
+          readiness: "available",
+          probe: "",
+          preparedBy: "",
+        },
+      },
+    ],
+  };
+  validateAndOrderGraph(
+    graph,
+    producer.objective,
+    baseSha,
+    new Set(["OBJECTIVE"]),
+  );
+  const waiting = Object.fromEntries(
+    graph.items.map((item) => [
+      item.id,
+      { status: item.id === inventory.id ? "done" : "pending" },
+    ]),
+  );
+  assert.deepEqual(
+    readyItems(graph, waiting, new Set(), 4).map((item) => item.id),
+    ["independent"],
+  );
+  waiting.independent.status = "done";
+  assert.deepEqual(readyItems(graph, waiting, new Set(), 4), []);
+  assert.equal(
+    linearDeliveryUnits(graph).find((unit) =>
+      unit.items.some((item) => item.id === "join"),
+    ).items.length,
+    1,
+  );
+  waiting.join.status = "done";
+  waiting.integration.status = "done";
+  assert.deepEqual(readyItems(graph, waiting, new Set(), 4), []);
+  waiting.join.status = "pending";
+  waiting.integration.status = "pending";
+  const materialized = materializeGraphExpansion({
+    graph,
+    envelopeId: envelope.id,
+    manifest,
+    body,
+    runId: producer.runId,
+    iteration: 1,
+  });
+  const children = materialized.childIds.map((id) =>
+    materialized.graph.items.find((item) => item.id === id),
+  );
+  assert.deepEqual(
+    children.map((item) => item.ownedPaths),
+    [["src/api.ts", "src/helper.ts"], ["src/ui/view.ts"]],
+  );
+  assert.equal(
+    new Set(children.flatMap((item) => item.ownedPaths)).size,
+    body.entries.length,
+  );
+  assertExpansionCoverage(graph, materialized.graph);
+  assert.deepEqual(
+    materialized.graph.items.find((item) => item.id === "integration")
+      .dependencies,
+    [inventory.id, "join", ...materialized.childIds],
+  );
+  assert.deepEqual(
+    materialized.graph.items.find((item) => item.id === "join").dependencies,
+    ["independent", inventory.id, ...materialized.childIds],
+  );
+  for (const child of children) {
+    assert.deepEqual(child.dependencies, [inventory.id]);
+    assert.deepEqual(child.discoveryInputs[0].fields, [
+      "path",
+      "mode",
+      "blobSha",
+      "contentRef",
+    ]);
+    waiting[child.id] = { status: "done" };
+  }
+  assert.deepEqual(readyItems(materialized.graph, waiting, new Set(), 4), []);
+  assert.deepEqual(
+    readyItems(
+      materialized.graph,
+      waiting,
+      new Set(),
+      4,
+      new Set([envelope.id]),
+    ).map((item) => item.id),
+    ["join"],
+  );
+  waiting.join.status = "done";
+  assert.deepEqual(
+    readyItems(
+      materialized.graph,
+      waiting,
+      new Set(),
+      4,
+      new Set([envelope.id]),
+    ).map((item) => item.id),
+    ["integration"],
+  );
+  assert.equal(
+    linearDeliveryUnits(materialized.graph).find((unit) =>
+      unit.items.some((item) => item.id === "integration"),
+    ).items.length,
+    1,
+  );
+  const packetRef = store.putBytes(
+    Buffer.from(JSON.stringify(materialized.inputPacket)),
+    { mediaType: "application/json" },
+  );
+  writeFileSync(
+    join(checkout, "src", "helper.ts"),
+    "Working copy changed after materialization\n",
+  );
+  const retainedPacket = JSON.parse(
+    store.readBytes(packetRef).toString("utf8"),
+  );
+  const reloaded = materializeGraphExpansion({
+    graph: JSON.parse(JSON.stringify(graph)),
+    envelopeId: retainedPacket.envelope.id,
+    manifest: retainedPacket.manifest,
+    body: retainedPacket.body,
+    runId: retainedPacket.runId,
+    iteration: retainedPacket.iteration,
+  });
+  assert.deepEqual(reloaded, materialized);
+  assert.throws(
+    () =>
+      materializeGraphExpansion({
+        graph,
+        envelopeId: envelope.id,
+        manifest,
+        body,
+        runId: producer.runId,
+        iteration: 1,
+        immutableItemIds: ["integration"],
+      }),
+    /started or completed integration barrier/,
+  );
   const emptySpec = { ...specification, selectors: ["missing/"] };
   const empty = await discoverRepository({
     checkout,
@@ -419,6 +647,42 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     ).entries,
     [],
   );
+  const emptyGraph = structuredClone(graph);
+  emptyGraph.items.find((item) => item.id === inventory.id).discovery =
+    emptySpec;
+  emptyGraph.expansions[0].selectors = emptySpec.selectors;
+  emptyGraph.expansions[0].template.ownedPaths = emptySpec.selectors;
+  const emptyBody = await authenticateDiscoveryOutput({
+    checkout,
+    specification: emptySpec,
+    manifest: empty,
+    store,
+  });
+  const emptyExpansion = materializeGraphExpansion({
+    graph: emptyGraph,
+    envelopeId: envelope.id,
+    manifest: empty,
+    body: emptyBody,
+    runId: producer.runId,
+    iteration: 1,
+  });
+  assert.deepEqual(emptyExpansion.childIds, []);
+  assertExpansionCoverage(emptyGraph, emptyExpansion.graph);
+  assert.deepEqual(
+    readyItems(
+      emptyExpansion.graph,
+      waiting,
+      new Set(),
+      4,
+      new Set([envelope.id]),
+    ).map((item) => item.id),
+    ["integration"],
+  );
+  assert.throws(
+    () =>
+      assertCompletedCoverage({ graph: emptyExpansion.graph, work: waiting }),
+    /completed exact-tree proof/,
+  );
   const boundedSpec = {
     ...specification,
     allowance: { ...specification.allowance, maxBytes: 1 },
@@ -431,6 +695,18 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     store,
   });
   assert.equal(truncated.status, "truncated");
+  assert.throws(
+    () =>
+      materializeGraphExpansion({
+        graph,
+        envelopeId: envelope.id,
+        manifest: truncated,
+        body,
+        runId: producer.runId,
+        iteration: 1,
+      }),
+    /complete exact producer-bound/,
+  );
   await authenticateDiscoveryOutput({
     checkout,
     specification: boundedSpec,

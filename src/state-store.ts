@@ -1,3 +1,4 @@
+import { assertGraphProjectionIntents } from "./graph-projection-control.js";
 import { assertPlanningLookupRecord } from "./compiler/context.js";
 import {
   assertRepositoryMemoryBindings,
@@ -176,7 +177,14 @@ export function saveState(path: string, state: ContinuationState): void {
 
 const currentVersion = (value: unknown): boolean => {
   const version = (value as { schemaVersion?: unknown } | null)?.schemaVersion;
-  return version === 7 || version === 8 || version === 9 || version === 10;
+  return (
+    version === 7 ||
+    version === 8 ||
+    version === 9 ||
+    version === 10 ||
+    version === 11 ||
+    version === 12
+  );
 };
 
 /** Every Objective (or preparation) directory whose snapshot an earlier version wrote. */
@@ -253,20 +261,25 @@ function parsePreparation(
     assertRepositoryMemoryBindings(value.memoryBindings);
   const lookup = value.planningRecovery?.contextLookup;
   if (lookup !== undefined) {
-    if (value.schemaVersion !== 10)
+    if (value.schemaVersion !== 10 && value.schemaVersion !== 12)
       throw new Error(
         "Adaptive context requires preparation schema version 10",
       );
     assertPlanningLookupRecord(lookup);
   }
   if (value.plan) {
+    const expanded = !!value.plan.graph.expansions?.length;
     const adaptive =
       value.plan.contextLookup !== undefined ||
       value.plan.graph.items.some((item) => item.kind === "discovery");
     if (
-      adaptive !== (value.plan.schemaVersion === 4) ||
+      (expanded
+        ? value.plan.schemaVersion !== 5
+        : adaptive !== (value.plan.schemaVersion === 4)) ||
       (value.schemaVersion === 8 && adaptive) ||
-      (value.schemaVersion === 10 && value.plan.schemaVersion !== 4)
+      (value.schemaVersion === 10 && value.plan.schemaVersion !== 4) ||
+      (value.schemaVersion === 12 && value.plan.schemaVersion !== 5) ||
+      (expanded && value.schemaVersion !== 12)
     )
       throw new Error(
         "Preparation plan schema differs from adaptive semantics",
@@ -281,11 +294,14 @@ function parsePreparation(
         "Preparation plan context differs from retained lookup evidence",
       );
   }
+  assertGraphProjectionIntents(value);
   assertGitHubProgressProjection(value.githubProgress, value);
   assertGitHubPlanDecision(value.githubPlanDecision, value);
   assertGitHubProjectStatusProjection(value.githubProjectStatus, value);
   if (
-    (value.schemaVersion !== 8 && value.schemaVersion !== 10) ||
+    (value.schemaVersion !== 8 &&
+      value.schemaVersion !== 10 &&
+      value.schemaVersion !== 12) ||
     value.kind !== "preparing" ||
     value.repository !== repository ||
     value.objective !== objective ||

@@ -445,6 +445,20 @@ export function itemCoverage(
   return graph.coverage.filter((entry) => entry.itemId === itemId);
 }
 
+/** Deterministic children add local acceptance, never replace admitted Objective proof. */
+export function assertExpansionCoverage(
+  original: WorkGraph,
+  materialized: WorkGraph,
+): void {
+  if (
+    JSON.stringify(original.coverage) !== JSON.stringify(materialized.coverage)
+  )
+    throw new Error(
+      "Graph expansion must preserve every original coverage identity, source, owner, proof and environment unchanged",
+    );
+  assertCoverageShape(materialized);
+}
+
 export function assertCompletedCoverage(state: FactoryState): void {
   for (const entry of state.graph.coverage) {
     assertProofShape(entry);

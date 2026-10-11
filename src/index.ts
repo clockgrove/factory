@@ -17,6 +17,7 @@ export * from "./compiler/context.js";
 export { createPlanningContextResolver } from "./compiler/context-runtime.js";
 export * from "./contracts.js";
 export * from "./discovery.js";
+export * from "./graph-expansion.js";
 export type { DiagnosticEvent } from "./diagnostics.js";
 export { summarizeFormalHistory } from "./diagnostics.js";
 export * from "./repository-memory.js";

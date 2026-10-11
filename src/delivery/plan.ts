@@ -1,4 +1,5 @@
 import type { WorkGraph, WorkItem } from "../contracts.js";
+import { expansionBlocksItem } from "../expansion-readiness.js";
 
 export interface DeliveryUnit {
   id: string;
@@ -32,6 +33,7 @@ export function linearDeliveryUnits(graph: WorkGraph): DeliveryUnit[] {
       item.kind === "qa" ||
       item.kind === "aggregate" ||
       item.kind === "discovery" ||
+      expansionBlocksItem(graph, item.id) ||
       item.dependencies.length !== 1
     )
       continue;
@@ -48,6 +50,7 @@ export function linearDeliveryUnits(graph: WorkGraph): DeliveryUnit[] {
       byId.get(parent)?.kind === "qa" ||
       byId.get(parent)?.kind === "aggregate" ||
       byId.get(parent)?.kind === "discovery" ||
+      expansionBlocksItem(graph, parent) ||
       children.get(parent)?.length !== 1
     )
       continue;

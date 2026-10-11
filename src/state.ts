@@ -39,6 +39,8 @@ import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
 import { assertGitHubProgressProjection } from "./github-progress-state.js";
 import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
 import { assertGraphRevisions, graphDigest } from "./graph-amendments.js";
+import { assertGraphProjectionIntents } from "./graph-projection-control.js";
+import { assertExpansionState } from "./runner/expansion.js";
 import {
   assertAssetCaptureReceipt,
   assertHydrationReceipt,
@@ -200,6 +202,10 @@ export interface CoordinatorDisposition {
 export interface PreparationState {
   /** Observational pointers; absence supplies no historical memory. */
   memoryBindings?: import("./repository-memory.js").RepositoryMemoryBinding[];
+  graphProjectionIntents?: Record<
+    string,
+    import("./graph-projection-control.js").GraphProjectionIntent
+  >;
   agentSessions?: Record<string, import("./contracts.js").AgentSessionRef>;
   agentSessionHistory?: import("./contracts.js").AgentSessionRef[];
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
@@ -214,7 +220,7 @@ export interface PreparationState {
   /** Worker ceiling and scheduling resolved when the Objective started. */
   capacity: import("./config.js").Capacity;
   charges?: import("./repair-policy.js").RepairLedger["charges"];
-  schemaVersion: 8 | 10;
+  schemaVersion: 8 | 10 | 12;
   kind: "preparing";
   repository: string;
   objective: number;
@@ -251,13 +257,21 @@ export type ContinuationState = FactoryState | PreparationState;
 export function isPreparationState(
   state: ContinuationState | null | undefined,
 ): state is PreparationState {
-  return state?.schemaVersion === 8 || state?.schemaVersion === 10;
+  return (
+    state?.schemaVersion === 8 ||
+    state?.schemaVersion === 10 ||
+    state?.schemaVersion === 12
+  );
 }
 
 export function isExecutionState(
   state: ContinuationState | null | undefined,
 ): state is FactoryState {
-  return state?.schemaVersion === 7 || state?.schemaVersion === 9;
+  return (
+    state?.schemaVersion === 7 ||
+    state?.schemaVersion === 9 ||
+    state?.schemaVersion === 11
+  );
 }
 
 /**
@@ -297,6 +311,10 @@ export function setCoordinatorMode(
 export interface FactoryState {
   /** Observational pointers; absence supplies no historical memory. */
   memoryBindings?: import("./repository-memory.js").RepositoryMemoryBinding[];
+  graphProjectionIntents?: Record<
+    string,
+    import("./graph-projection-control.js").GraphProjectionIntent
+  >;
   /** Frozen original preparation inputs; required for a retained planner. */
   sourcePacketDigest?: string;
   agentSessions?: Record<string, import("./contracts.js").AgentSessionRef>;
@@ -321,6 +339,10 @@ export interface FactoryState {
   discoveryAttemptCounts?: Record<string, number>;
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
+  /** Exact deterministic additions, saved before any GitHub projection. */
+  pendingExpansion?: import("./runner/expansion.js").PendingGraphExpansion;
+  /** Settled immutable inputs and admitted children; no paid review is fabricated. */
+  expansionHistory?: import("./runner/expansion.js").GraphExpansionSettlement[];
   /** Superseded known rejections retain their original proposal and evidence. */
   rejectedAmendments?: import("./graph-amendments.js").PendingAmendment[];
   coordinator?: CoordinatorDisposition;
@@ -334,7 +356,7 @@ export interface FactoryState {
   prerequisitesDigest?: string;
   /** Immutable authenticated admission facts, bound to prerequisitesDigest. */
   prerequisites?: import("./contracts.js").PlanningPrerequisites;
-  schemaVersion: 7 | 9;
+  schemaVersion: 7 | 9 | 11;
   approvedPlaybookAdmission?: import("./contracts.js").ApprovedPlaybookAdmission;
   approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
   repository: string;
@@ -668,7 +690,9 @@ export function parseFactoryState(
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
   if (
-    (state.schemaVersion !== 7 && state.schemaVersion !== 9) ||
+    (state.schemaVersion !== 7 &&
+      state.schemaVersion !== 9 &&
+      state.schemaVersion !== 11) ||
     state.repository !== repository ||
     state.objective !== objective
   )
@@ -681,7 +705,7 @@ export function parseFactoryState(
   const lookup = (state.planningRecovery as FactoryState["planningRecovery"])
     ?.contextLookup;
   if (lookup !== undefined) {
-    if (state.schemaVersion !== 9)
+    if (state.schemaVersion !== 9 && state.schemaVersion !== 11)
       throw new Error("Adaptive context requires execution schema version 9");
     assertPlanningLookupRecord(lookup);
   }
@@ -739,6 +763,8 @@ export function parseFactoryState(
   assertPreIntegrationCheckShape(graph as unknown as WorkGraph);
   assertCoverageShape(graph as unknown as WorkGraph);
   assertGraphRevisions(state as unknown as FactoryState);
+  assertGraphProjectionIntents(state as unknown as FactoryState);
+  assertExpansionState(state as unknown as FactoryState);
   assertAgentSessions(state as unknown as FactoryState);
   assertRepairLedger(state as unknown as FactoryState);
   const ids = new Set<string>();
@@ -746,7 +772,7 @@ export function parseFactoryState(
     const item = record(raw, `graph.items[${index}]`);
     const id = string(item.id, "Work Item ID");
     if (item.kind === "discovery") {
-      if (state.schemaVersion !== 9)
+      if (state.schemaVersion !== 9 && state.schemaVersion !== 11)
         throw new Error("Discovery requires execution schema version 9");
       assertDiscoverySpecification(item.discovery);
     } else if (item.discovery !== undefined) {
@@ -831,7 +857,7 @@ export function parseFactoryState(
       throw new Error(`${id}.validation is invalid`);
   }
   if (state.discoveryAttemptCounts !== undefined) {
-    if (state.schemaVersion !== 9)
+    if (state.schemaVersion !== 9 && state.schemaVersion !== 11)
       throw new Error(
         "Discovery start admissions require execution schema version 9",
       );

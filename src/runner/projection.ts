@@ -1,3 +1,4 @@
+import { graphProjectionControl } from "../graph-projection-control.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -77,6 +78,13 @@ export async function projectPreparedObjective(args: {
       "Accepted plan execution profile policy differs from installation",
     );
   const graph = plan.graph;
+  if (
+    preparation.schemaVersion === 12 &&
+    github.projectionMutationAdmission !== "controller-checkpoint-v1"
+  )
+    throw new Error(
+      "GitHub adapter cannot checkpoint expanded plan projection effects",
+    );
   verifyExecutionProfiles(graph, executionProfileChoices(config));
   await diagnostics.span(
     { runId: preparation.runId, operation: "execution-readiness-preflight" },
@@ -132,6 +140,15 @@ export async function projectPreparedObjective(args: {
       objectiveStep(preparation, "project", (context) =>
         github.projectGraph({
           graph,
+          ...(preparation.schemaVersion === 12
+            ? {
+                expansionControl: graphProjectionControl(
+                  preparation,
+                  graph,
+                  () => saveState(path, preparation),
+                ),
+              }
+            : {}),
           objectiveIssue: objective,
           knownIssues: preparation!.issueByItemId,
           author: preparation!.issueAuthor,
@@ -206,7 +223,18 @@ export function activateProjectedObjective(args: {
   );
   return {
     schemaVersion:
-      preparation.schemaVersion === 10 || plan.schemaVersion === 4 ? 9 : 7,
+      preparation.schemaVersion === 12 || plan.schemaVersion === 5
+        ? 11
+        : preparation.schemaVersion === 10 || plan.schemaVersion === 4
+          ? 9
+          : 7,
+    ...(preparation.graphProjectionIntents
+      ? {
+          graphProjectionIntents: structuredClone(
+            preparation.graphProjectionIntents,
+          ),
+        }
+      : {}),
     ...(preparation.memoryBindings
       ? { memoryBindings: structuredClone(preparation.memoryBindings) }
       : {}),

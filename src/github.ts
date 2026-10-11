@@ -10,6 +10,7 @@ import type {
   GitHubGateway,
   IntakeIssuePage,
   GraphProjection,
+  GraphProjectionEffectRequest,
   MergeResult,
   NamedCheckEvidence,
   NativeStackLayer,
@@ -32,6 +33,7 @@ import {
   type GitHubCall,
   GITHUB_LAG_MS,
   gitHubFault,
+  gitHubTransportOf,
   GitHubRequestError,
   MERGE_COMMITS_REQUIRED,
   sharedGitHubClient,
@@ -123,6 +125,7 @@ function unverifiedCreate(message: string): Error {
 }
 
 export class RealGitHubGateway implements GitHubGateway {
+  readonly projectionMutationAdmission = "controller-checkpoint-v1" as const;
   constructor(
     readonly repository: string,
     private readonly native: NativeStackDelivery,
@@ -837,6 +840,129 @@ export class RealGitHubGateway implements GitHubGateway {
   }
 
   async projectGraph(request: GraphProjection): Promise<ProjectedGraph> {
+    const control = request.expansionControl;
+    const effects = new Map(
+      (control?.effects ?? []).map((effect) => [effect.key, effect]),
+    );
+    if (effects.size !== (control?.effects.length ?? 0))
+      throw foreignChange("Ambiguous recorded graph projection mutation");
+    const unreconciled = new Set(
+      [...effects.values()]
+        .filter((effect) => !effect.reconciliation)
+        .map((effect) => effect.key),
+    );
+    const digest = (value: unknown) =>
+      createHash("sha256")
+        .update(JSON.stringify(value ?? null))
+        .digest("hex");
+    const identity = (value: unknown) => {
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        return undefined;
+      const record = value as Record<string, unknown>;
+      const id =
+        Number.isSafeInteger(record.id) && Number(record.id) > 0
+          ? Number(record.id)
+          : undefined;
+      const number =
+        Number.isSafeInteger(record.number) && Number(record.number) > 0
+          ? Number(record.number)
+          : undefined;
+      const name = typeof record.name === "string" ? record.name : undefined;
+      return id !== undefined || number !== undefined || name !== undefined
+        ? {
+            ...(id ? { id } : {}),
+            ...(number ? { number } : {}),
+            ...(name !== undefined ? { name } : {}),
+          }
+        : undefined;
+    };
+    // A recorded dispatch is permanently one-shot. Only an authenticated
+    // observation of the desired remote state can advance its receipt.
+    const reconcile = async (
+      key: string,
+      method: GraphProjectionEffectRequest["method"],
+      path: string,
+      value: unknown,
+    ) => {
+      const effect = effects.get(key);
+      if (!control || !effect) return;
+      if (effect.method !== method || effect.path !== this.route(path))
+        throw foreignChange("Recorded graph projection mutation changed scope");
+      const expectedIdentity = effect.observation?.identity;
+      const observedIdentity = identity(value);
+      if (
+        expectedIdentity &&
+        Object.entries(expectedIdentity).some(
+          ([key, expected]) =>
+            observedIdentity?.[key as keyof typeof observedIdentity] !==
+            expected,
+        )
+      )
+        throw foreignChange(
+          "Graph projection readback differs from its recorded response identity",
+        );
+      await control.observed(effect.id, {
+        outcome: "reconciled",
+        responseDigest: digest(value),
+        ...(observedIdentity ? { identity: observedIdentity } : {}),
+      });
+      unreconciled.delete(key);
+    };
+    const write = async <T>(
+      key: string,
+      method: GraphProjectionEffectRequest["method"],
+      path: string,
+      body?: Record<string, unknown>,
+      call: Omit<GitHubCall, "method" | "path"> = {},
+    ): Promise<T> => {
+      if (!control) return this.api<T>(method, path, body, undefined, call);
+      if (effects.has(key))
+        throw foreignChange(
+          `Recorded graph projection mutation ${key} has no matching readback; resubmission is refused`,
+        );
+      if (unreconciled.size)
+        throw foreignChange(
+          "Recorded graph projection mutations remain unresolved; continuation is read-only",
+        );
+      const metadata = {
+        method,
+        path: this.route(path),
+        bodyDigest: digest(body),
+      };
+      const effect: GraphProjectionEffectRequest = {
+        key,
+        id: digest(metadata),
+        ...metadata,
+      };
+      await control.beforeWrite(effect);
+      effects.set(key, effect);
+      let response: T;
+      try {
+        response = await this.api<T>(method, path, body, undefined, call);
+      } catch (error) {
+        const status = gitHubTransportOf(error)?.status;
+        await control.observed(effect.id, {
+          outcome:
+            status !== null &&
+            status !== undefined &&
+            status >= 400 &&
+            status < 500 &&
+            status !== 408
+              ? "rejected"
+              : "unknown",
+          ...(status !== null && status !== undefined ? { status } : {}),
+        });
+        throw error;
+      }
+      // The response itself is retained separately from later semantic proof.
+      // A callback failure must stop control flow, not be called a transport failure.
+      await control.observed(effect.id, {
+        outcome: "responded",
+        responseDigest: digest(response),
+        ...(identity(response) ? { identity: identity(response) } : {}),
+      });
+      return response;
+    };
     const authenticated = (issue: Issue, number?: number) =>
       this.authenticatedIssue(issue, number);
     const roles = ["factory:objective", "factory:work-item"];
@@ -851,7 +977,7 @@ export class RealGitHubGateway implements GitHubGateway {
           `Required Factory role label is archived or ambiguous: ${role}`,
         );
       if (!matches.length) {
-        await this.api("POST", "labels", {
+        await write(`label-create:${role}`, "POST", "labels", {
           name: role,
           color: "ededed",
         });
@@ -867,14 +993,21 @@ export class RealGitHubGateway implements GitHubGateway {
             `Factory role label creation did not reconcile exactly: ${role}`,
           );
         settled(key);
+        await reconcile(`label-create:${role}`, "POST", "labels", created[0]);
+      } else {
+        await reconcile(`label-create:${role}`, "POST", "labels", matches[0]);
       }
     }
     const ensureRole = async (issue: Issue, role: string): Promise<Issue> => {
       const names = (issue.labels ?? []).map((label) =>
         typeof label === "string" ? label : label.name,
       );
-      if (names.includes(role)) return issue;
-      await this.api("POST", `issues/${issue.number}/labels`, {
+      const key = `issue-role:${issue.number}:${role}`;
+      if (names.includes(role)) {
+        await reconcile(key, "POST", `issues/${issue.number}/labels`, issue);
+        return issue;
+      }
+      await write(key, "POST", `issues/${issue.number}/labels`, {
         labels: [role],
       });
       const observed = authenticated(
@@ -894,13 +1027,14 @@ export class RealGitHubGateway implements GitHubGateway {
         throw foreignChange(
           "Factory role label did not reconcile exactly; issue changed",
         );
-      const key = `${this.repository}:issue-label:${issue.number}:${role}`;
+      const lagKey = `${this.repository}:issue-label:${issue.number}:${role}`;
       if (!observedNames.includes(role))
         throw stillLagging(
-          key,
+          lagKey,
           `Factory role label ${role} is not visible yet`,
         );
-      settled(key);
+      settled(lagKey);
+      await reconcile(key, "POST", `issues/${issue.number}/labels`, observed);
       return observed;
     };
     const objective = authenticated(
@@ -936,6 +1070,10 @@ export class RealGitHubGateway implements GitHubGateway {
           !(issue.state === "closed" && issue.state_reason === "not_planned"),
       );
       if (candidates.length < 2) return candidates[0];
+      if (control)
+        throw foreignChange(
+          `Work Item ${item.id} has ambiguous duplicate issues; adaptive projection will not mutate or close them`,
+        );
       const old = request.previousGraph?.items.find(
         (previous) => previous.id === item.id,
       );
@@ -1011,10 +1149,15 @@ export class RealGitHubGateway implements GitHubGateway {
               throw foreignChange(
                 `Work Item ${item.id} projection changed; edits are proposals, not graph authority`,
               );
-            await this.api("PATCH", `issues/${found.number}`, {
-              title: item.title,
-              body: expectedBody,
-            });
+            await write(
+              `issue-update:${item.id}`,
+              "PATCH",
+              `issues/${found.number}`,
+              {
+                title: item.title,
+                body: expectedBody,
+              },
+            );
             const observed = await this.api<Issue>(
               "GET",
               `issues/${found.number}`,
@@ -1044,6 +1187,13 @@ export class RealGitHubGateway implements GitHubGateway {
             `Work Item ${item.id} projection changed; edits are proposals, not graph authority`,
           );
         found = await ensureRole(found, roles[1]!);
+        await reconcile(`issue-create:${item.id}`, "POST", "issues", found);
+        await reconcile(
+          `issue-update:${item.id}`,
+          "PATCH",
+          `issues/${found.number}`,
+          found,
+        );
         issueByItemId[item.id] = found.number;
         issues.set(found.number, found);
         request.projected?.(item.id, found.number);
@@ -1053,12 +1203,17 @@ export class RealGitHubGateway implements GitHubGateway {
       taskType ??= availableIssueType(this.client, this.repository, "Task");
       const type = await taskType;
       await request.beforeCreate?.(item.id);
-      const created = await this.api<Issue>("POST", "issues", {
-        title: item.title,
-        body,
-        labels: [roles[1]!],
-        ...(type ? { type } : {}),
-      });
+      const created = await write<Issue>(
+        `issue-create:${item.id}`,
+        "POST",
+        "issues",
+        {
+          title: item.title,
+          body,
+          labels: [roles[1]!],
+          ...(type ? { type } : {}),
+        },
+      );
       if (
         !created ||
         !Number.isSafeInteger(created.number) ||
@@ -1091,6 +1246,7 @@ export class RealGitHubGateway implements GitHubGateway {
           "Created Work Item projection did not reconcile exactly",
         );
       issues.set(created.number, created);
+      await reconcile(`issue-create:${item.id}`, "POST", "issues", created);
       createdAt.set(created.number, time.now());
       existing?.push(created);
     }
@@ -1122,6 +1278,33 @@ export class RealGitHubGateway implements GitHubGateway {
       );
       if (observations.some((issue) => !allowed.has(issue.number)))
         throw foreignChange("Unreviewed remote dependency edit");
+      // On restart, acknowledge already-visible desired links before any
+      // subsequent new write. The original transport outcome stays retained.
+      for (const dependency of item.dependencies) {
+        const observed = observations.find(
+          (issue) => issue.number === issueByItemId[dependency],
+        );
+        if (observed)
+          await reconcile(
+            `dependency-add:${item.id}:${dependency}`,
+            "POST",
+            `issues/${number}/dependencies/blocked_by`,
+            observed,
+          );
+      }
+      for (const dependency of request.previousGraph?.items.find(
+        (entry) => entry.id === item.id,
+      )?.dependencies ?? []) {
+        if (item.dependencies.includes(dependency)) continue;
+        const removed = issues.get(issueByItemId[dependency]!)!;
+        if (!observations.some((issue) => issue.id === removed.id))
+          await reconcile(
+            `dependency-remove:${item.id}:${removed.id}`,
+            "DELETE",
+            `issues/${number}/dependencies/blocked_by/${removed.id}`,
+            observations,
+          );
+      }
       if (request.previousGraph) {
         for (const issue of observations) {
           if (
@@ -1129,14 +1312,18 @@ export class RealGitHubGateway implements GitHubGateway {
           )
             continue;
           try {
-            await this.api(
+            await write(
+              `dependency-remove:${item.id}:${issue.id}`,
               "DELETE",
               `issues/${number}/dependencies/blocked_by/${issue.id}`,
             );
           } catch (error) {
             // Already removed, perhaps by a repeat whose response was lost;
             // the read-back below confirms the result.
-            if (!(error instanceof GitHubRequestError && error.status === 404))
+            if (
+              control ||
+              !(error instanceof GitHubRequestError && error.status === 404)
+            )
               throw error;
           }
         }
@@ -1149,19 +1336,22 @@ export class RealGitHubGateway implements GitHubGateway {
             throw new Error(
               "Dependency issue has no authenticated database identity",
             );
-          await this.linked(
-            () =>
-              this.api(
-                "POST",
-                `issues/${number}/dependencies/blocked_by`,
-                { issue_id: issue.id },
-                undefined,
-                fresh,
-              ),
-            `issues/${number}/dependencies/blocked_by`,
-            issue.id,
-            fresh,
-          );
+          const post = () =>
+            write(
+              `dependency-add:${item.id}:${dependency}`,
+              "POST",
+              `issues/${number}/dependencies/blocked_by`,
+              { issue_id: issue.id },
+              fresh,
+            );
+          if (control) await post();
+          else
+            await this.linked(
+              post,
+              `issues/${number}/dependencies/blocked_by`,
+              issue.id,
+              fresh,
+            );
         }
       }
       {
@@ -1188,6 +1378,29 @@ export class RealGitHubGateway implements GitHubGateway {
             `Work Item issue #${number} dependencies did not reconcile exactly`,
           );
         settled(key);
+        for (const dependency of item.dependencies) {
+          const issue = observed.find(
+            (entry) => entry.number === issueByItemId[dependency],
+          )!;
+          await reconcile(
+            `dependency-add:${item.id}:${dependency}`,
+            "POST",
+            `issues/${number}/dependencies/blocked_by`,
+            issue,
+          );
+        }
+        for (const dependency of request.previousGraph?.items.find(
+          (entry) => entry.id === item.id,
+        )?.dependencies ?? []) {
+          if (item.dependencies.includes(dependency)) continue;
+          const removed = issues.get(issueByItemId[dependency]!)!;
+          await reconcile(
+            `dependency-remove:${item.id}:${removed.id}`,
+            "DELETE",
+            `issues/${number}/dependencies/blocked_by/${removed.id}`,
+            observed,
+          );
+        }
       }
     }
     {
@@ -1241,7 +1454,18 @@ export class RealGitHubGateway implements GitHubGateway {
       }
       for (const [child, parent] of desiredParents) {
         const currentParent = observedParents.get(child);
-        if (currentParent === parent) continue;
+        if (currentParent === parent) {
+          const item = request.graph.items.find(
+            (entry) => issueByItemId[entry.id] === child,
+          )!;
+          await reconcile(
+            `hierarchy:${item.id}`,
+            "POST",
+            `issues/${parent}/sub_issues`,
+            issues.get(child)!,
+          );
+          continue;
+        }
         const childIssue = authenticated(
           await this.api<Issue>(
             "GET",
@@ -1284,19 +1508,22 @@ export class RealGitHubGateway implements GitHubGateway {
         const call = {
           createdAt: latest(createdAt.get(parent), createdAt.get(child)),
         };
-        await this.linked(
-          () =>
-            this.api(
-              "POST",
-              `issues/${parent}/sub_issues`,
-              { sub_issue_id: childIssue.id, replace_parent: replacing },
-              undefined,
-              call,
-            ),
-          `issues/${parent}/sub_issues`,
-          childIssue.id,
-          { createdAt: createdAt.get(parent) },
-        );
+        const post = () =>
+          write(
+            `hierarchy:${request.graph.items.find((item) => issueByItemId[item.id] === child)!.id}`,
+            "POST",
+            `issues/${parent}/sub_issues`,
+            { sub_issue_id: childIssue.id, replace_parent: replacing },
+            call,
+          );
+        if (control) await post();
+        else
+          await this.linked(
+            post,
+            `issues/${parent}/sub_issues`,
+            childIssue.id,
+            { createdAt: createdAt.get(parent) },
+          );
       }
       // Read back every affected parent, including those that became empty.
       for (const [parent, children] of childrenByParent) {
@@ -1322,6 +1549,18 @@ export class RealGitHubGateway implements GitHubGateway {
             `Issue #${parent} sub-issues did not reconcile exactly`,
           );
         settled(key);
+        for (const child of children) {
+          const item = request.graph.items.find(
+            (entry) => issueByItemId[entry.id] === child,
+          )!;
+          const issue = observed.find((entry) => entry.number === child)!;
+          await reconcile(
+            `hierarchy:${item.id}`,
+            "POST",
+            `issues/${parent}/sub_issues`,
+            issue,
+          );
+        }
       }
     }
     return { issueByItemId };

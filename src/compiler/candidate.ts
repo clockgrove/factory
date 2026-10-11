@@ -39,11 +39,12 @@ import { assertPreIntegrationCheckSources } from "../delivery/readiness.js";
 import { assertKnownCheckNames, workflowCheckNames } from "../check-names.js";
 import { validateAndOrderGraph } from "../scheduler.js";
 import { assertCoverageSources, coverageObligations } from "../qa.js";
+import { assertGraphExpansions } from "../graph-expansion.js";
 
 export interface PlanCandidate {
   contextLookup?: PlanningContextPacket;
   approvedPlaybookPin?: ApprovedPlaybookPin;
-  schemaVersion: 3 | 4;
+  schemaVersion: 3 | 4 | 5;
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;
@@ -112,9 +113,10 @@ export function buildPlanCandidate(
     ...(review.failure ? { failure: review.failure } : {}),
   };
   return {
-    schemaVersion:
-      packet.contextLookup ||
-      graph.items.some((item) => item.kind === "discovery")
+    schemaVersion: graph.expansions?.length
+      ? 5
+      : packet.contextLookup ||
+          graph.items.some((item) => item.kind === "discovery")
         ? 4
         : 3,
     ...(packet.contextLookup
@@ -184,6 +186,9 @@ export function verifyPlanCandidate(
   if (candidate.contextLookup)
     assertContextFactsResolved(candidate.contextLookup);
   assertDiscoveryContextScope(candidate.graph, candidate.contextLookup);
+  assertGraphExpansions(candidate.graph, {
+    executionProfiles: candidate.executionProfiles,
+  });
   assertInstalledControllerCapabilities(
     candidate.controllerCapabilities,
     candidate.controllerCapabilitiesDigest,
@@ -221,10 +226,12 @@ export function verifyPlanCandidate(
         JSON.stringify(candidate.localExecutables.finalCommands) !==
           JSON.stringify(expectedPacket.finalCommands))) ||
     candidate.schemaVersion !==
-      (candidate.contextLookup ||
-      candidate.graph.items.some((item) => item.kind === "discovery")
-        ? 4
-        : 3) ||
+      (candidate.graph.expansions?.length
+        ? 5
+        : candidate.contextLookup ||
+            candidate.graph.items.some((item) => item.kind === "discovery")
+          ? 4
+          : 3) ||
     candidate.objective !== objective ||
     candidate.baseSha !== baseSha ||
     candidate.bodyDigest !== digest(body) ||

@@ -14,6 +14,7 @@ import {
 export { replacementRefusal } from "./amendment-admission.js";
 
 import { createHash, randomUUID } from "node:crypto";
+import { graphProjectionControl } from "./graph-projection-control.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   intakeRefusal,
@@ -123,6 +124,8 @@ export interface GraphRevision {
   digest: string;
   parentDigest?: string;
   proposal?: AmendmentProposal;
+  /** Deterministic derivation from the independently reviewed original envelope. */
+  expansion?: import("./runner/expansion.js").GraphExpansionSettlement;
   reviewDigest?: string;
   acceptedAt?: string;
 }
@@ -205,9 +208,15 @@ export function assertGraphRevisions(state: FactoryState): void {
       if (
         index &&
         (revision.parentDigest !== revisions[index - 1]!.digest ||
-          !revision.proposal ||
-          revision.proposal.expectedGraphDigest !== revision.parentDigest ||
-          !/^[a-f0-9]{64}$/.test(revision.reviewDigest ?? "") ||
+          (revision.expansion
+            ? revision.proposal !== undefined ||
+              revision.reviewDigest !== undefined ||
+              revision.expansion.parentGraphDigest !== revision.parentDigest ||
+              revision.expansion.graphDigest !== revision.digest ||
+              revision.expansion.acceptedAt !== revision.acceptedAt
+            : !revision.proposal ||
+              revision.proposal.expectedGraphDigest !== revision.parentDigest ||
+              !/^[a-f0-9]{64}$/.test(revision.reviewDigest ?? "")) ||
           !Number.isFinite(Date.parse(revision.acceptedAt ?? "")))
       )
         throw new Error(
@@ -332,7 +341,9 @@ export function assertGraphRevisions(state: FactoryState): void {
   ).length;
   if (
     started.some((entry) => !state.charges?.[amendmentEvent(entry)]) ||
-    (revisions?.length ?? 1) - 1 + started.length > charged
+    (revisions ?? []).filter((revision) => !!revision.proposal).length +
+      started.length >
+      charged
   )
     throw new Error(
       "Known amendment attempts exceed retained planning charges",
@@ -347,6 +358,10 @@ export function submitAmendment(
   state: FactoryState,
   proposal: AmendmentProposal,
 ): PendingAmendment {
+  if (state.pendingExpansion)
+    throw new Error(
+      "A deterministic expansion already owns the next graph transition; preserve its exact projection before proposing an amendment",
+    );
   const intake = intakeRefusal(state);
   if (intake) throw new Error(intake.message);
   assertDiscovery(proposal);
@@ -530,6 +545,18 @@ export function validateAmendment(
   body: string,
 ): void {
   const pending = state.pendingAmendment!;
+  for (const settled of state.expansionHistory ?? []) {
+    const previous = state.graph.expansions?.find(
+      (entry) => entry.id === settled.envelopeId,
+    );
+    const next = graph.expansions?.find(
+      (entry) => entry.id === settled.envelopeId,
+    );
+    if (!previous || !next || !isDeepStrictEqual(previous, next))
+      throw new Error(
+        "An amendment cannot rewrite a settled expansion envelope; add a separately reviewed successor envelope",
+      );
+  }
   if (pending.proposal.expectedGraphDigest !== graphDigest(state.graph))
     throw new Error("Stale amendment candidate");
   const sources = planningSources(body, state.baseSha, config.checkout);
@@ -1034,9 +1061,30 @@ async function advanceAmendment(args: {
       await verifyPrerequisites();
       stage = "projection";
       calling = "projection";
+      if (
+        state.schemaVersion === 11 &&
+        args.github.projectionMutationAdmission !== "controller-checkpoint-v1"
+      )
+        throw attachFault(
+          new Error(
+            "GitHub adapter cannot checkpoint expanded amendment projection",
+          ),
+          decision(
+            "Use an adapter that retains exact expanded graph projection requests",
+          ),
+        );
       // Projection finds existing issues by marker, so repeating it is safe.
       const projected = await args.github.projectGraph({
         graph: pending.graph!,
+        ...(state.schemaVersion === 11
+          ? {
+              expansionControl: graphProjectionControl(
+                state,
+                pending.graph!,
+                save,
+              ),
+            }
+          : {}),
         previousGraph: state.graph,
         objectiveIssue: state.objective,
         knownIssues: pending.issueByItemId,

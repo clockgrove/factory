@@ -329,7 +329,11 @@ Memory lookup supplies verified text. Binary bodies remain retained under their 
 
 Discovery selectors must also fit the admitted `planningContext.selectors` ceiling. A missing-context human question must cite an actual required, unresolved lookup receipt; human-owned choices and permissions do not require an unnecessary search.
 
-Broader graph expansion, adaptive scheduling, recipes, speculative branches and portable memory export remain deferred.
+For an approved migration or cross-cutting fix whose file inventory is unknown, describe the permitted directory, intended change and final acceptance. The compiler can include a reviewed expansion envelope rather than inventing a file list. It declares the discovery input, work template, literal scope, selected profile/resources, batch and child limits and integration barriers before execution. Complete discovered files become stable multi-file Work Items without another model compilation or review for each conforming child.
+
+Integration waits for authenticated expansion and every required child. A complete empty inventory creates no children and still requires the original acceptance proof. Partial or unreadable inputs, unknown semantic classifications and exhausted expansion bounds remain visible stops; scope changes use the existing amendment or human-decision paths. One immutable input materializes each envelope; changing that input requires an explicit successor or revalidation. Restarts retain the same child identities and input packets, and uncertain GitHub writes are reconciled without being submitted again.
+
+Library GitHub gateways supporting expansion must declare and enforce `projectionMutationAdmission: "controller-checkpoint-v1"`; unsupported gateways refuse before projection. Adaptive scheduling, recipes, speculative branches and portable memory export remain deferred.
 
 ### Writing Objectives that deliver
 

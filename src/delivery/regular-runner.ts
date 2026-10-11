@@ -38,6 +38,7 @@ import { runQaItem } from "../qa-execution.js";
 import { runDiscoveryItem } from "../runner/discovery.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
+import { expansionBlocksItem } from "../expansion-readiness.js";
 import type { FactoryState } from "../state.js";
 import {
   awaitsOperator,
@@ -76,6 +77,8 @@ export async function runRegularGraph(args: {
   cancelled: () => boolean;
   paused?: () => boolean;
   amendmentPending?: () => boolean;
+  /** Authenticated settlements for this immutable graph pass. */
+  resolvedExpansionIds?: ReadonlySet<string>;
   reconcile?: () => Promise<void>;
   diagnostics?: DiagnosticEmitter;
   /** The Objective run's cancel signal, passed to every step. */
@@ -767,6 +770,13 @@ export async function runRegularGraph(args: {
   /** Drive a running or published item on from where its state stands. */
   const resume = (item: WorkItem): void => {
     const work = state.work[item.id]!;
+    if (
+      (work.status === "running" || work.status === "published") &&
+      expansionBlocksItem(graph, item.id, args.resolvedExpansionIds)
+    )
+      throw new Error(
+        `Work Item ${item.id} cannot resume before its required expansion settles`,
+      );
     if (work.status === "published") dispatch(item, work.baseSha!);
     else if (work.status !== "running") return;
     else if (
@@ -826,6 +836,7 @@ export async function runRegularGraph(args: {
                 .map((item) => item.id),
             ]),
             slots,
+            args.resolvedExpansionIds,
           ).filter((item) => {
             const blocked =
               item.kind === "qa" ||

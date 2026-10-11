@@ -100,7 +100,10 @@ export function normalizeExecutionProfiles(
   graph: WorkGraph,
   choices?: ExecutionProfileChoices,
 ): void {
-  for (const item of graph.items) {
+  for (const item of [
+    ...graph.items,
+    ...(graph.expansions ?? []).map((entry) => entry.template),
+  ]) {
     if (item.executionProfile === null) delete item.executionProfile;
     if (
       item.kind === "qa" ||
@@ -167,7 +170,11 @@ export function verifyExecutionProfiles(
   choices?: ExecutionProfileChoices,
 ): void {
   const expected = structuredClone(graph);
-  for (const item of expected.items) delete item.executionBinding;
+  for (const item of [
+    ...expected.items,
+    ...(expected.expansions ?? []).map((entry) => entry.template),
+  ])
+    delete item.executionBinding;
   normalizeExecutionProfiles(expected, choices);
   if (JSON.stringify(expected) !== JSON.stringify(graph))
     throw new Error(

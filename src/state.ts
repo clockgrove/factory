@@ -1,3 +1,10 @@
+import { assertPlanningLookupRecord } from "./compiler/context.js";
+import {
+  assertDiscoveryOutputManifest,
+  assertDiscoverySpecification,
+  discoverySpecificationDigest,
+} from "./discovery.js";
+import { assertRepositoryMemoryBindings } from "./repository-memory.js";
 import { assertReviewArtifacts } from "./review-artifacts.js";
 import { assertAgentSessions } from "./agent-session.js";
 import { assertFinalAcceptance } from "./completion.js";
@@ -112,6 +119,7 @@ export interface WorkState {
   graphRevisionDigest?: string;
   discovery?: import("./contracts.js").WorkDiscovery & { attempt: string };
   discoveryDisposition?: "proposed" | "accepted";
+  discoveryOutput?: import("./discovery.js").DiscoveryOutputManifest;
   qaChecks?: NamedCheckEvidence[];
   /** Exact-head successful named checks observed before submitting integration. */
   preIntegrationChecks?: NamedCheckEvidence[];
@@ -190,6 +198,8 @@ export interface CoordinatorDisposition {
 
 /** Preparation shares the atomic state path; no executable graph is invented. */
 export interface PreparationState {
+  /** Observational pointers; absence supplies no historical memory. */
+  memoryBindings?: import("./repository-memory.js").RepositoryMemoryBinding[];
   agentSessions?: Record<string, import("./contracts.js").AgentSessionRef>;
   agentSessionHistory?: import("./contracts.js").AgentSessionRef[];
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
@@ -204,7 +214,7 @@ export interface PreparationState {
   /** Worker ceiling and scheduling resolved when the Objective started. */
   capacity: import("./config.js").Capacity;
   charges?: import("./repair-policy.js").RepairLedger["charges"];
-  schemaVersion: 8;
+  schemaVersion: 8 | 10;
   kind: "preparing";
   repository: string;
   objective: number;
@@ -237,6 +247,19 @@ export interface PreparationState {
 }
 export type ContinuationState = FactoryState | PreparationState;
 
+/** Classify already typed continuations; validation remains the load boundary. */
+export function isPreparationState(
+  state: ContinuationState | null | undefined,
+): state is PreparationState {
+  return state?.schemaVersion === 8 || state?.schemaVersion === 10;
+}
+
+export function isExecutionState(
+  state: ContinuationState | null | undefined,
+): state is FactoryState {
+  return state?.schemaVersion === 7 || state?.schemaVersion === 9;
+}
+
 /**
  * Projection may create an issue before recording it, so it has started once
  * an issue is recorded or the phase is entered. A plan cannot be refused then.
@@ -258,7 +281,7 @@ export function projectionStarted(
  */
 export function rejectionHoldsPause(state: ContinuationState): boolean {
   return (
-    state.schemaVersion === 7 && state.pendingAmendment?.phase === "rejected"
+    isExecutionState(state) && state.pendingAmendment?.phase === "rejected"
   );
 }
 
@@ -272,6 +295,8 @@ export function setCoordinatorMode(
 }
 
 export interface FactoryState {
+  /** Observational pointers; absence supplies no historical memory. */
+  memoryBindings?: import("./repository-memory.js").RepositoryMemoryBinding[];
   /** Frozen original preparation inputs; required for a retained planner. */
   sourcePacketDigest?: string;
   agentSessions?: Record<string, import("./contracts.js").AgentSessionRef>;
@@ -292,6 +317,8 @@ export interface FactoryState {
   /** Charged failure events (see repair-policy.ts). */
   charges?: import("./repair-policy.js").RepairLedger["charges"];
   backlogDiscoveries?: import("./graph-amendments.js").AmendmentProposal[];
+  /** Start admissions charged before discovery effects; survives replacement WorkState. */
+  discoveryAttemptCounts?: Record<string, number>;
   graphRevisions?: import("./graph-amendments.js").GraphRevision[];
   pendingAmendment?: import("./graph-amendments.js").PendingAmendment;
   /** Superseded known rejections retain their original proposal and evidence. */
@@ -307,7 +334,7 @@ export interface FactoryState {
   prerequisitesDigest?: string;
   /** Immutable authenticated admission facts, bound to prerequisitesDigest. */
   prerequisites?: import("./contracts.js").PlanningPrerequisites;
-  schemaVersion: 7;
+  schemaVersion: 7 | 9;
   approvedPlaybookAdmission?: import("./contracts.js").ApprovedPlaybookAdmission;
   approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
   repository: string;
@@ -346,6 +373,81 @@ export interface FactoryState {
   /** Step repeat records for Work Items and the Objective (#515). */
   repeats?: Record<string, RepeatRecord>;
   wait?: Wait;
+}
+
+/** Discovery completion is authenticated observation, separate from QA and delivery. */
+export function assertWorkDiscoveryOutput(
+  state: FactoryState,
+  id: string,
+  work: WorkState,
+): void {
+  const attemptGraph =
+    work.graphRevisionDigest === undefined
+      ? state.graph
+      : (state.graphRevisions?.find(
+          (revision) => revision.digest === work.graphRevisionDigest,
+        )?.graph ?? state.graph);
+  const accepted = attemptGraph.items.find((item) => item.id === id);
+  if (!accepted)
+    throw new Error(`Work Item ${id} has no admitted discovery definition`);
+  if (work.discoveryOutput !== undefined) {
+    if (accepted.kind !== "discovery" || !accepted.discovery)
+      throw new Error(`Work Item ${id} has an undeclared discovery output`);
+    assertDiscoveryOutputManifest(work.discoveryOutput);
+    const output = work.discoveryOutput;
+    if (
+      output.producer.objective !== state.objective ||
+      output.producer.runId !== state.runId ||
+      output.producer.itemId !== id ||
+      output.producer.attemptId !== work.attempt ||
+      output.source.commitSha !== work.baseSha ||
+      output.role !== accepted.discovery.role ||
+      output.schema !== accepted.discovery.schema ||
+      output.specificationDigest !==
+        discoverySpecificationDigest(accepted.discovery) ||
+      JSON.stringify(output.source.selectors) !==
+        JSON.stringify(accepted.discovery.selectors)
+    )
+      throw new Error(
+        `Work Item ${id} discovery output differs from its admitted attempt`,
+      );
+  }
+  if (accepted.kind === "discovery") {
+    if (
+      work.pullRequest !== undefined ||
+      work.changeRef !== undefined ||
+      work.treeSha !== undefined ||
+      work.integratedSha !== undefined ||
+      work.validation !== undefined ||
+      work.assets !== undefined ||
+      work.selectedAssetSet !== undefined ||
+      work.selection !== undefined ||
+      accepted.ownedPaths.length ||
+      accepted.validation.length ||
+      accepted.sourceAssets?.length ||
+      accepted.minimumAssetSets ||
+      accepted.expectedOutputRoles?.length ||
+      accepted.requiredLfsRoles?.length
+    )
+      throw new Error(
+        `Discovery Work Item ${id} cannot contain delivery, QA or asset evidence`,
+      );
+    if (
+      work.status === "done" &&
+      (work.execution !== undefined ||
+        work.discoveryOutput === undefined ||
+        (
+          work.discoveryOutput as import("./discovery.js").DiscoveryOutputManifest
+        ).status !== "complete" ||
+        (accepted.discovery?.mode === "semantic" &&
+          (
+            work.discoveryOutput as import("./discovery.js").DiscoveryOutputManifest
+          ).disposition !== "advisory"))
+    )
+      throw new Error(
+        `Discovery Work Item ${id} lacks settled complete output`,
+      );
+  }
 }
 
 export function assertCoordinator(value: unknown): void {
@@ -566,7 +668,7 @@ export function parseFactoryState(
   const state = record(value, "state");
   assertCoordinator(state.coordinator);
   if (
-    state.schemaVersion !== 7 ||
+    (state.schemaVersion !== 7 && state.schemaVersion !== 9) ||
     state.repository !== repository ||
     state.objective !== objective
   )
@@ -574,6 +676,15 @@ export function parseFactoryState(
       "schema version, repository, or Objective identity differs from the installation",
     );
   string(state.runId, "runId");
+  if (state.memoryBindings !== undefined)
+    assertRepositoryMemoryBindings(state.memoryBindings);
+  const lookup = (state.planningRecovery as FactoryState["planningRecovery"])
+    ?.contextLookup;
+  if (lookup !== undefined) {
+    if (state.schemaVersion !== 9)
+      throw new Error("Adaptive context requires execution schema version 9");
+    assertPlanningLookupRecord(lookup);
+  }
   assertGitHubProgressProjection(state.githubProgress, {
     repository,
     objective,
@@ -634,6 +745,15 @@ export function parseFactoryState(
   for (const [index, raw] of graph.items.entries()) {
     const item = record(raw, `graph.items[${index}]`);
     const id = string(item.id, "Work Item ID");
+    if (item.kind === "discovery") {
+      if (state.schemaVersion !== 9)
+        throw new Error("Discovery requires execution schema version 9");
+      assertDiscoverySpecification(item.discovery);
+    } else if (item.discovery !== undefined) {
+      throw new Error(
+        `Work Item ${id} has discovery specification without discovery kind`,
+      );
+    }
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id) || ids.has(id))
       throw new Error(`invalid or duplicate Work Item ID ${id}`);
     if (
@@ -710,6 +830,53 @@ export function parseFactoryState(
     )
       throw new Error(`${id}.validation is invalid`);
   }
+  if (state.discoveryAttemptCounts !== undefined) {
+    if (state.schemaVersion !== 9)
+      throw new Error(
+        "Discovery start admissions require execution schema version 9",
+      );
+    const counts = record(
+      state.discoveryAttemptCounts,
+      "discoveryAttemptCounts",
+    );
+    const revisions =
+      (state.graphRevisions as FactoryState["graphRevisions"]) ?? [];
+    for (const [id, count] of Object.entries(counts)) {
+      // Accepted revisions retain historical identities; counters are never dropped
+      // merely because a graph no longer selects their discovery item.
+      const admitted =
+        (graph.items as WorkGraph["items"]).find(
+          (item) => item.id === id && item.kind === "discovery",
+        ) ??
+        [...revisions]
+          .reverse()
+          .flatMap((revision) => revision.graph.items)
+          .find((item) => item.id === id && item.kind === "discovery");
+      if (!admitted?.discovery)
+        throw new Error(
+          `Discovery start admissions name an unadmitted item ${id}`,
+        );
+      assertDiscoverySpecification(admitted.discovery);
+      if (
+        !Number.isSafeInteger(count) ||
+        Number(count) < 0 ||
+        Number(count) > admitted.discovery.allowance.maxAttempts
+      )
+        throw new Error(
+          `Discovery start admissions exceed the recorded allowance for ${id}`,
+        );
+    }
+  }
+  if (
+    state.schemaVersion === 9 &&
+    lookup === undefined &&
+    !(graph.items as Record<string, unknown>[]).some(
+      (item) => item.kind === "discovery",
+    )
+  )
+    throw new Error(
+      "Adaptive execution lacks its retained context or discovery semantics",
+    );
   for (const raw of graph.items) {
     const item = raw as Record<string, unknown>;
     if (
@@ -877,6 +1044,11 @@ export function parseFactoryState(
     const accepted = (graph.items as WorkGraph["items"]).find(
       (candidate) => candidate.id === id,
     )!;
+    assertWorkDiscoveryOutput(
+      state as unknown as FactoryState,
+      id,
+      item as unknown as WorkState,
+    );
     const controllerState = state as unknown as FactoryState;
     const currentWork = item as unknown as WorkState;
     const failure = currentWork.recovery?.failure;
@@ -904,6 +1076,7 @@ export function parseFactoryState(
     if (!archivedFailure)
       assertSemanticRefusalRecord(controllerState, id, currentWork, failure);
     for (const prior of currentWork.recovery?.history ?? []) {
+      assertWorkDiscoveryOutput(controllerState, id, prior.work);
       assertObjectiveKnowledge(
         state as unknown as FactoryState,
         id,

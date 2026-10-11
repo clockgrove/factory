@@ -40,6 +40,13 @@ import { operatorName } from "./operator.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import { configurationCommand, shellWord } from "./status-summary.js";
 import { objectiveComplete } from "./completion.js";
+import { isExecutionState } from "./state.js";
+import { LocalContentStore } from "./content/local.js";
+import {
+  LocalRepositoryMemory,
+  type RepositoryMemoryBinding,
+  type RepositoryMemoryRecord,
+} from "./repository-memory.js";
 
 export const DEFAULT_PLAYBOOK_BUDGET_BYTES = 16_384;
 export const learningDigest = (value: string | Buffer): string =>
@@ -229,6 +236,152 @@ export function readRetrospectives(
     });
 }
 
+/** Retain original learning bytes/provenance for retrieval, without promoting guidance.
+ * Missing historical snapshot bodies stay explicit; Dream's stricter source validation
+ * is unchanged. Catalog rebuild/intake can call this bridge for preexisting records.
+ */
+export function retainLearningMemory(
+  repository: string,
+): RepositoryMemoryBinding[] {
+  const root = stateRoot(repository);
+  const store = new LocalContentStore(join(root, "content"));
+  const memory = new LocalRepositoryMemory(root, repository, store);
+  const bindings: RepositoryMemoryBinding[] = [];
+  for (const name of readdirSync(directory(repository, "episodes"))
+    .filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
+    .sort()) {
+    const raw = privateRead(join(directory(repository, "episodes"), name));
+    const episode = record(JSON.parse(raw)) as unknown as Retrospective;
+    if (
+      episode.schemaVersion !== 1 ||
+      episode.repository !== repository ||
+      !Number.isSafeInteger(episode.objective) ||
+      episode.objective < 1 ||
+      !["accepted", "cancelled"].includes(episode.outcome) ||
+      !Number.isFinite(Date.parse(episode.recordedAt))
+    )
+      throw new Error("Invalid retrospective memory provenance");
+    text(episode.runId);
+    hash(episode.snapshotDigest);
+    const id = name.slice(0, -5);
+    if (
+      id !==
+      learningDigest(
+        JSON.stringify([repository, episode.objective, episode.runId]),
+      )
+    )
+      throw new Error("Retrospective memory identity changed");
+    const episodeRef = store.putBytes(Buffer.from(raw), {
+      mediaType: "application/json",
+    });
+    const bodies: RepositoryMemoryRecord["bodies"] = [
+      { role: "episode", ref: episodeRef, availability: "retained" },
+    ];
+    let snapshotRef: import("./contracts.js").ContentRef | undefined;
+    const snapshotPath = join(directory(repository, "snapshots"), `${id}.json`);
+    if (existsSync(snapshotPath)) {
+      const snapshot = privateRead(snapshotPath);
+      if (learningDigest(snapshot) !== episode.snapshotDigest)
+        throw new Error("Retrospective memory snapshot changed");
+      snapshotRef = store.putBytes(Buffer.from(snapshot), {
+        mediaType: "application/json",
+      });
+      bodies.push({
+        role: "original-snapshot",
+        ref: snapshotRef,
+        availability: "retained",
+      });
+    } else
+      bodies.push({
+        role: "original-snapshot",
+        availability: "missing-legacy",
+      });
+    bindings.push(
+      memory.retain({
+        schemaVersion: 1,
+        repository,
+        visibility: "private",
+        kind: "episode",
+        producer: {
+          objective: episode.objective,
+          runId: episode.runId,
+          status: episode.outcome,
+        },
+        createdAt: episode.recordedAt,
+        authority: "observation",
+        summary: `Objective ${episode.objective}: ${episode.outcome} retrospective; historical outcome without inherited acceptance`,
+        bodies,
+        sources: [
+          {
+            identity: `learning:episodes/${id}`,
+            ref: episodeRef,
+            complete: true,
+          },
+          {
+            identity: `learning:snapshots/${id}`,
+            ...(snapshotRef ? { ref: snapshotRef } : {}),
+            complete: !!snapshotRef,
+          },
+        ],
+        bindings: {},
+        validity: { state: "historical", conditions: [] },
+        supersedes: [],
+      }),
+    );
+  }
+  const latest = readPlaybookRevision(repository);
+  let previous: string | undefined;
+  for (let version = 1; version <= (latest?.version ?? 0); version++) {
+    const revision = readPlaybookRevision(repository, version)!;
+    const raw = privateRead(
+      join(
+        directory(repository, "versions"),
+        `${String(version).padStart(10, "0")}.json`,
+      ),
+    );
+    const revisionRef = store.putBytes(Buffer.from(raw), {
+      mediaType: "application/json",
+    });
+    const binding = memory.retain({
+      schemaVersion: 1,
+      repository,
+      visibility: "private",
+      kind: "lesson",
+      producer: {
+        identity: revision.invocationId,
+        status: "approved-advisory-guidance",
+      },
+      createdAt: revision.approval.at,
+      authority: "advisory",
+      summary:
+        revision.draft.lessons.map((lesson) => lesson.text).join("\n") ||
+        `Approved advisory playbook version ${version}`,
+      bodies: [
+        {
+          role: "approved-playbook-revision",
+          ref: revisionRef,
+          availability: "retained",
+        },
+      ],
+      sources: [
+        {
+          identity: "learning:approved-playbook",
+          version: String(version),
+          retrievedAt: revision.approval.at,
+          ref: revisionRef,
+          complete: true,
+        },
+      ],
+      bindings: { environment: { configDigest: revision.configDigest } },
+      validity: { state: "historical", conditions: [] },
+      supersedes: previous ? [previous] : [],
+    });
+    bindings.push(binding);
+    previous = binding.id;
+  }
+  return bindings;
+}
+
 /** Observes terminal snapshots, never supplies a verdict or changes Objective state. */
 export function recordRetrospective(
   config: FactoryConfig,
@@ -239,13 +392,13 @@ export function recordRetrospective(
     !state ||
     (!state.cancelledAt &&
       !(
-        state.schemaVersion === 7 &&
+        isExecutionState(state) &&
         state.finalAcceptance &&
         objectiveComplete(state)
       )) ||
     state.coordinator?.processes?.length ||
     state.coordinator?.cancelError ||
-    (state.schemaVersion === 7 &&
+    (isExecutionState(state) &&
       Object.values(state.work).some(
         (work) => work.status === "running" || work.status === "published",
       )) ||
@@ -281,38 +434,37 @@ export function recordRetrospective(
     `https://github.com/${config.repository}/issues/${objective}`,
     snapshot,
   ];
-  const experiences =
-    state.schemaVersion === 7
-      ? Object.entries(state.work).map(([itemId, work]) => {
-          if (work.pullRequest)
+  const experiences = isExecutionState(state)
+    ? Object.entries(state.work).map(([itemId, work]) => {
+        if (work.pullRequest)
+          links.push(
+            `https://github.com/${config.repository}/pull/${work.pullRequest}`,
+          );
+        for (const past of work.recovery?.history ?? [])
+          if (past.work.pullRequest)
             links.push(
-              `https://github.com/${config.repository}/pull/${work.pullRequest}`,
+              `https://github.com/${config.repository}/pull/${past.work.pullRequest}`,
             );
-          for (const past of work.recovery?.history ?? [])
-            if (past.work.pullRequest)
-              links.push(
-                `https://github.com/${config.repository}/pull/${past.work.pullRequest}`,
-              );
-          return {
-            itemId,
-            status: work.status,
-            attempt: work.attempt ?? null,
-            pullRequest: work.pullRequest ?? null,
-            acceptedResult: work.integratedSha ?? null,
-            failure: work.recovery?.failure ?? null,
-            failedValidation: work.failedValidation ?? null,
-            correction: work.recovery?.correction ?? null,
-            prior: (work.recovery?.history ?? []).map((past) => ({
-              failure: past.failure,
-              correction: past.correction,
-              attempt: past.work.attempt ?? null,
-              status: past.work.status,
-              failedValidation: past.work.failedValidation ?? null,
-            })),
-            operatorDecisions: work.acceptanceDecisions ?? [],
-          };
-        })
-      : [];
+        return {
+          itemId,
+          status: work.status,
+          attempt: work.attempt ?? null,
+          pullRequest: work.pullRequest ?? null,
+          acceptedResult: work.integratedSha ?? null,
+          failure: work.recovery?.failure ?? null,
+          failedValidation: work.failedValidation ?? null,
+          correction: work.recovery?.correction ?? null,
+          prior: (work.recovery?.history ?? []).map((past) => ({
+            failure: past.failure,
+            correction: past.correction,
+            attempt: past.work.attempt ?? null,
+            status: past.work.status,
+            failedValidation: past.work.failedValidation ?? null,
+          })),
+          operatorDecisions: work.acceptanceDecisions ?? [],
+        };
+      })
+    : [];
   const episode: Retrospective = {
     schemaVersion: 1,
     repository: config.repository,
@@ -321,24 +473,25 @@ export function recordRetrospective(
     recordedAt: new Date().toISOString(),
     endedAt:
       state.cancelledAt ??
-      (state.schemaVersion === 7 ? state.finalAcceptance!.sealedAt : ""),
+      (isExecutionState(state) ? state.finalAcceptance!.sealedAt : ""),
     outcome: state.cancelledAt ? "cancelled" : "accepted",
-    objectiveClosure:
-      state.schemaVersion === 7
-        ? (state.objectiveClosure ?? "unobserved")
-        : "unobserved",
+    objectiveClosure: isExecutionState(state)
+      ? (state.objectiveClosure ?? "unobserved")
+      : "unobserved",
     sourceLinks: [...new Set(links)],
     snapshotDigest: learningDigest(raw),
     experiences: {
       items: experiences,
       planning: state.planningRecovery ?? null,
-      operatorDecisions:
-        state.schemaVersion === 7 ? (state.finalAcceptanceDecisions ?? []) : [],
+      operatorDecisions: isExecutionState(state)
+        ? (state.finalAcceptanceDecisions ?? [])
+        : [],
       charges: state.charges ?? [],
       repeats: state.repeats ?? {},
       error: state.error ?? null,
-      acceptance:
-        state.schemaVersion === 7 ? (state.finalAcceptance ?? null) : null,
+      acceptance: isExecutionState(state)
+        ? (state.finalAcceptance ?? null)
+        : null,
     },
   };
   append(path, encoded(episode));
@@ -352,6 +505,7 @@ export function observeRetrospective(
 ): void {
   try {
     recordRetrospective(config, objective);
+    retainLearningMemory(config.repository);
   } catch (error) {
     try {
       process.stderr.write(

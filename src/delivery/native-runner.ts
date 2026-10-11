@@ -39,6 +39,7 @@ import { materializeAssetSet, validationLfsMembersForItem } from "../media.js";
 import { cancelledFault, faultOf } from "../fault.js";
 import { currentProcessSignal } from "../process.js";
 import { runQaItem } from "../qa-execution.js";
+import { runDiscoveryItem } from "../runner/discovery.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { itemsConflict, rankPending } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
@@ -241,7 +242,9 @@ export async function runNativeGraph(args: {
     if (
       state.graph.items.some(
         (item) =>
-          (item.kind === "qa" || item.kind === "aggregate") &&
+          (item.kind === "qa" ||
+            item.kind === "aggregate" ||
+            item.kind === "discovery") &&
           state.work[item.id]?.status === "pending" &&
           item.dependencies.every((id) => state.work[id]?.status === "done"),
       )
@@ -272,6 +275,7 @@ export async function runNativeGraph(args: {
         unit.items[0]!.kind === "qa" ||
         phases.reason(unit.items[0]!.id, "coding") ||
         unit.items[0]!.kind === "aggregate" ||
+        unit.items[0]!.kind === "discovery" ||
         state.work[unit.items[0]!.id]?.status !== "pending" ||
         !unit.externalDependencies.every(
           (dependency) => state.work[dependency]?.status === "done",
@@ -331,7 +335,7 @@ export async function runNativeGraph(args: {
           else delete work.authentication;
           if (work.step === "execute") await stopWorker(item);
           const isolated = recordWorkFailure(state, item.id, error);
-          if (isolated && !stopped()) {
+          if (isolated && item.kind !== "discovery" && !stopped()) {
             await diagnose(item);
             return;
           }
@@ -399,7 +403,8 @@ export async function runNativeGraph(args: {
           );
         }) ||
         unit.items[0]!.kind === "qa" ||
-        unit.items[0]!.kind === "aggregate",
+        unit.items[0]!.kind === "aggregate" ||
+        unit.items[0]!.kind === "discovery",
     );
     const unit = completionReady[0] ?? eligible[0];
     if (!unit) {
@@ -440,7 +445,11 @@ export async function runNativeGraph(args: {
         `Delivery unit ${unit.id} started before its dependencies`,
       );
     }
-    if (unit.items[0]!.kind === "qa" || unit.items[0]!.kind === "aggregate") {
+    if (
+      unit.items[0]!.kind === "qa" ||
+      unit.items[0]!.kind === "aggregate" ||
+      unit.items[0]!.kind === "discovery"
+    ) {
       const item = unit.items[0]!;
       if (state.work[item.id]?.status === "waiting") return settlePrepared();
       if (state.work[item.id]?.status === "pending") {
@@ -452,32 +461,52 @@ export async function runNativeGraph(args: {
       if (args.paused?.() && state.work[item.id]?.wait?.kind === "ci")
         return settlePrepared();
       try {
-        await runQaItem({
-          config,
-          root,
-          state,
-          item,
-          github,
-          model: args.planningModel,
-          diagnostics: args.diagnostics,
-          objectiveBody: args.objectiveBody,
-          store: contentStore,
-          save,
-          cancelled: args.cancelled,
-          paused: args.paused,
-          signal,
-          pause: args.pause,
-          phases,
-        });
+        if (item.kind === "discovery")
+          await runDiscoveryItem({
+            config,
+            state,
+            item,
+            driver,
+            github,
+            store: contentStore,
+            save,
+            cancelled: args.cancelled,
+            signal,
+            pause: args.pause,
+            phases,
+            diagnostics: args.diagnostics,
+          });
+        else
+          await runQaItem({
+            config,
+            root,
+            state,
+            item,
+            github,
+            model: args.planningModel,
+            diagnostics: args.diagnostics,
+            objectiveBody: args.objectiveBody,
+            store: contentStore,
+            save,
+            cancelled: args.cancelled,
+            paused: args.paused,
+            signal,
+            pause: args.pause,
+            phases,
+          });
       } catch (error) {
         // A decision or a configuration fix is the item's wait (its step
         // saved it), and cancel stops it quietly: the unit keeps its place.
         if (staysInPlace(error)) return settlePrepared();
+        if (item.kind === "discovery") {
+          await stopWorker(item);
+          if (!state.work[item.id]!.execution) phases.release(item.id);
+        }
         // Read-only QA retains and diagnoses its failed attempt under the
         // same configured policy as coding results, before the unit stops.
         const isolated = recordWorkFailure(state, item.id, error);
         save();
-        if (isolated && !stopped()) {
+        if (isolated && item.kind !== "discovery" && !stopped()) {
           await diagnose(item);
           return settlePrepared();
         }
@@ -846,7 +875,7 @@ export async function runNativeGraph(args: {
           // A wrong result is repaired, published or not: the next attempt
           // republishes the same branch with a lease.
           const isolated = recordWorkFailure(state, item.id, error);
-          if (isolated && !stopped()) {
+          if (isolated && item.kind !== "discovery" && !stopped()) {
             await diagnose(item);
             return;
           }

@@ -205,7 +205,11 @@ export function activateProjectedObjective(args: {
     preparation.approvedPlaybookPin !== undefined,
   );
   return {
-    schemaVersion: 7,
+    schemaVersion:
+      preparation.schemaVersion === 10 || plan.schemaVersion === 4 ? 9 : 7,
+    ...(preparation.memoryBindings
+      ? { memoryBindings: structuredClone(preparation.memoryBindings) }
+      : {}),
     ...(preparation.sourcePacketDigest
       ? { sourcePacketDigest: preparation.sourcePacketDigest }
       : {}),

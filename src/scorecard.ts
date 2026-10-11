@@ -1,3 +1,4 @@
+import { isExecutionState } from "./state.js";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { isAbsolute } from "node:path";
@@ -354,7 +355,7 @@ export function factoryObjectiveSummary(
   now: number,
 ) {
   const state = readContinuation(repository, objective);
-  const executing = state?.schemaVersion === 7 ? state : undefined;
+  const executing = isExecutionState(state) ? state : undefined;
   const events = readDiagnosticMetadata(repository, objective).filter(
     (event) => !event.capture,
   );

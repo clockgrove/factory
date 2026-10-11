@@ -286,6 +286,10 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
    * unrecorded start of it spawned is stopped first (#585).
    */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
+    if (request.discovery || request.item.kind === "discovery")
+      throw new Error(
+        "Claude harness does not support enforced read-only discovery",
+      );
     const identity = request.attemptId ?? randomUUID();
     const boundRequest = { ...request, attemptId: identity };
     const session = this.workerSession(boundRequest);

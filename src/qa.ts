@@ -11,7 +11,8 @@ import type { FactoryState } from "./state.js";
 /** The accepted graph determines whether this run qualifies existing bytes or delivers changes. */
 export function baselineQaGraph(graph: WorkGraph): boolean {
   return (
-    graph.items.length > 0 && graph.items.every((item) => item.kind === "qa")
+    graph.items.length > 0 &&
+    graph.items.every((item) => item.kind === "qa" || item.kind === "discovery")
   );
 }
 
@@ -35,9 +36,11 @@ export function objectiveCandidate(
   if (baselineQaGraph(state.graph)) {
     if (
       state.integratedSha !== undefined ||
-      Object.values(state.work).some(
-        (work) =>
-          work.execution ||
+      Object.entries(state.work).some(
+        ([id, work]) =>
+          (work.execution &&
+            state.graph.items.find((item) => item.id === id)?.kind !==
+              "discovery") ||
           work.pullRequest ||
           work.integratedSha ||
           work.preIntegrationChecks?.length,
@@ -177,6 +180,10 @@ export function assertCoverageShape(graph: WorkGraph): void {
       throw new Error("Coverage lacks pinned source identity");
     const item = graph.items.find((item) => item.id === entry.itemId);
     if (!item) throw new Error("Coverage owner is absent from the graph");
+    if (item.kind === "discovery")
+      throw new Error(
+        "Discovery observations cannot own acceptance coverage proof",
+      );
     assertProofShape(entry);
     const proof = entry.proof;
     const integrated = proof.kind.startsWith("integrated-");
@@ -221,7 +228,8 @@ export function assertCoverageShape(graph: WorkGraph): void {
         !target ||
         !item.dependencies.includes(proof.targetItem) ||
         target.kind === "qa" ||
-        target.kind === "aggregate"
+        target.kind === "aggregate" ||
+        target.kind === "discovery"
       )
         throw new Error("Published CI requires the actual delivery dependency");
     }
@@ -256,6 +264,7 @@ export function assertCoverageShape(graph: WorkGraph): void {
           (candidate) =>
             candidate.kind !== "qa" &&
             candidate.kind !== "aggregate" &&
+            candidate.kind !== "discovery" &&
             !ancestors.has(candidate.id),
         )
       )

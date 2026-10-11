@@ -15,7 +15,7 @@ import type {
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { isDeepStrictEqual } from "node:util";
 import { workerContext } from "./execution/checkpoint.js";
-import { cancelledFault, faultOf } from "./fault.js";
+import { cancelledFault, faultOf, workFault } from "./fault.js";
 import { repeatKey, StepPaused, step } from "./step.js";
 import type { FactoryState } from "./state.js";
 import { agentSessionContinuation } from "./agent-session.js";
@@ -208,9 +208,22 @@ export async function executeItem(
           settleSession(identity);
         }
         if (stopped(args)) throw cancelledFault();
-        handle = await ctx.paid(() =>
-          driver.start(args.request(workerIdentity(work)), context()),
-        );
+        handle = await ctx.paid(() => {
+          if (item.kind === "discovery") {
+            const allowance = item.discovery?.allowance.maxAttempts;
+            const consumed = state.discoveryAttemptCounts?.[item.id] ?? 0;
+            if (!allowance || consumed >= allowance)
+              throw workFault("Declared discovery attempt allowance exhausted");
+            // Admissions are durable before the paid effect; unknown starts remain spent.
+            // Finding an owned handle above resumes that admission without charging another.
+            state.discoveryAttemptCounts = {
+              ...state.discoveryAttemptCounts,
+              [item.id]: consumed + 1,
+            };
+            save();
+          }
+          return driver.start(args.request(workerIdentity(work)), context());
+        });
         // Drivers checkpoint before start returns; record it otherwise.
         if (!work.execution) {
           work.execution = structuredClone(handle);

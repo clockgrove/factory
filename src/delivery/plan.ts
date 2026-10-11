@@ -31,6 +31,7 @@ export function linearDeliveryUnits(graph: WorkGraph): DeliveryUnit[] {
     if (
       item.kind === "qa" ||
       item.kind === "aggregate" ||
+      item.kind === "discovery" ||
       item.dependencies.length !== 1
     )
       continue;
@@ -46,6 +47,7 @@ export function linearDeliveryUnits(graph: WorkGraph): DeliveryUnit[] {
     if (
       byId.get(parent)?.kind === "qa" ||
       byId.get(parent)?.kind === "aggregate" ||
+      byId.get(parent)?.kind === "discovery" ||
       children.get(parent)?.length !== 1
     )
       continue;

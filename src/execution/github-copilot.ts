@@ -175,6 +175,10 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
    * unrecorded start of it spawned is stopped first (#585).
    */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
+    if (request.discovery || request.item.kind === "discovery")
+      throw new Error(
+        "GitHub Copilot harness does not support enforced read-only discovery",
+      );
     const identity = request.attemptId ?? randomUUID();
     requireCopilotRuntime();
     const boundRequest = { ...request, attemptId: identity };

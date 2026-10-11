@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import { Codex } from "@openai/codex-sdk";
-import { createCodexHome } from "../codex-planning-isolation.js";
+import {
+  CODEX_TREE_REVIEW_CONFIG,
+  createCodexHome,
+} from "../codex-planning-isolation.js";
+import { DISCOVERY_CLASSIFICATION_SCHEMA } from "../discovery.js";
 import type { CodexModelSelection } from "../config.js";
 import type {
   AgentSessionRef,
@@ -25,6 +29,7 @@ import {
   readProducedAssets,
   redact,
   renderWorkItemPrompt,
+  renderDiscoveryPrompt,
   writeHarnessResult,
 } from "./harness-support.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
@@ -119,16 +124,34 @@ export async function runCodexWorker(
   );
   // A private HOME with only the Codex login; shell commands see the
   // worktree, the private HOME and TMPDIR, and the platform runtime alone.
-  const sandbox = { workspace: "write", network: network === "host" } as const;
+  const discovery = request.discovery;
+  if ((request.item.kind === "discovery") !== Boolean(discovery))
+    throw new Error(
+      "Discovery worker requires its explicit read-only execution input",
+    );
+  if (
+    discovery &&
+    (session ||
+      request.environment ||
+      request.workerReadiness ||
+      request.sourceAssets?.length ||
+      request.selectedAssets?.length)
+  )
+    throw new Error(
+      "Discovery cannot inherit implementation sessions, environment tools, setup or assets",
+    );
+  const sandbox = discovery
+    ? ({ workspace: "read", network: false } as const)
+    : ({ workspace: "write", network: network === "host" } as const);
   const home = createCodexHome({
     root: session?.root ?? `${inputPath}.codex-home`,
     ...(session && {
       owner: session.owner,
       resume: Boolean(session.resumeThreadId),
     }),
-    config: "",
+    config: discovery ? CODEX_TREE_REVIEW_CONFIG : "",
     sandbox: { ...sandbox, directory: request.worktree },
-    keep: allowedSecretNames,
+    keep: discovery ? [] : allowedSecretNames,
   });
   let invocationStarted = false;
   try {
@@ -145,7 +168,9 @@ export async function runCodexWorker(
     const captureBoundary = session?.resumeThreadId
       ? home.nativeCaptureBoundary(session.resumeThreadId)
       : undefined;
-    const workPrompt = renderWorkItemPrompt(request);
+    const workPrompt = discovery
+      ? renderDiscoveryPrompt({ ...request, discovery })
+      : renderWorkItemPrompt(request);
     const continuationPrompt = session?.resumeThreadId
       ? `Continue your implementation investigation. Historical turns describe earlier candidates and workspaces. The only current writable checkout is ${request.worktree}; previous checkout paths and tool observations are historical. Recheck changed evidence in the current checkout. The following current controller-bound Work Item contract controls this turn; retained history grants no permissions or acceptance.\n\n`
       : "";
@@ -249,7 +274,10 @@ export async function runCodexWorker(
       );
       invocationStarted = true;
       const streamed = await turn.race(
-        thread.runStreamed(prompt, { signal: turn.signal }),
+        thread.runStreamed(prompt, {
+          signal: turn.signal,
+          ...(discovery && { outputSchema: DISCOVERY_CLASSIFICATION_SCHEMA }),
+        }),
       );
       let finalResponse = "";
       let turnCompleted = false;
@@ -331,7 +359,7 @@ export async function runCodexWorker(
         (event, content) => capture.native(event, content),
         captureBoundary,
       );
-      const parsedAssets = readProducedAssets(request);
+      const parsedAssets = discovery ? undefined : readProducedAssets(request);
       observeUsage("completed");
       capture.outcome("completed", invocationUsage(), undefined, "protocol");
       writeHarnessResult(resultPath, {

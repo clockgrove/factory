@@ -17,6 +17,11 @@ import { checkStagedCandidate } from "../dist/execution/staged-candidate.js";
 import { collectWorktreeResult } from "../dist/execution/local.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import {
+  discoverRepository,
+  authenticateDiscoveryOutput,
+  readDiscoveryBody,
+} from "../dist/discovery.js";
+import {
   applyPendingAmendment,
   graphDigest,
 } from "../dist/graph-amendments.js";
@@ -86,6 +91,170 @@ function git(checkout, ...args) {
     encoding: "utf8",
   }).trim();
 }
+
+test("read-only discovery authenticates a pinned Git inventory and retains complete bodies outside the checkout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-discovery-"));
+  try {
+    const checkout = join(root, "target");
+    mkdirSync(join(checkout, "src"), { recursive: true });
+    git(checkout, "init", "-b", "main");
+    writeFileSync(join(checkout, "src", "a.txt"), "original\n");
+    writeFileSync(
+      join(checkout, "src", "binary\tfile.bin"),
+      Buffer.from([0, 255, 1, 2]),
+    );
+    git(checkout, "add", ".");
+    git(
+      checkout,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "base",
+    );
+    const baseSha = git(checkout, "rev-parse", "HEAD");
+    writeFileSync(join(checkout, "src", "a.txt"), "uncommitted edit\n");
+    writeFileSync(join(checkout, "src", "untracked.txt"), "untracked\n");
+    const before = git(checkout, "status", "--porcelain=v1");
+    const store = new LocalContentStore(join(root, "objects"));
+    const specification = {
+      mode: "inventory",
+      selectors: ["src/"],
+      schema: "factory.repository-inventory/v1",
+      role: "inventory",
+      completeness: "complete",
+      allowance: { maxEntries: 10, maxBytes: 1024, maxAttempts: 1 },
+    };
+    const request = {
+      checkout,
+      baseSha,
+      specification,
+      producer: {
+        objective: 1,
+        runId: "inventory-run",
+        itemId: "inventory",
+        attemptId: "inventory-attempt",
+      },
+      store,
+    };
+    const manifest = await discoverRepository(request);
+    const body = await authenticateDiscoveryOutput({ ...request, manifest });
+    assert.equal(manifest.status, "complete");
+    assert.equal(manifest.selectedEntries, 2);
+    assert.deepEqual(
+      body.entries.map((entry) => entry.path),
+      ["src/a.txt", "src/binary\tfile.bin"],
+    );
+    assert.equal(
+      Buffer.from(
+        await new Response(
+          await store.open(body.entries[0].content),
+        ).arrayBuffer(),
+      ).toString(),
+      "original\n",
+    );
+    assert.equal(git(checkout, "status", "--porcelain=v1"), before);
+    assert.equal(git(checkout, "rev-parse", "HEAD"), baseSha);
+    const emptySpec = { ...specification, selectors: ["absent/"] };
+    const empty = await discoverRepository({
+      ...request,
+      specification: emptySpec,
+    });
+    assert.equal(empty.status, "complete");
+    assert.equal(empty.selectedEntries, 0);
+    assert.deepEqual(
+      (
+        await authenticateDiscoveryOutput({
+          ...request,
+          specification: emptySpec,
+          manifest: empty,
+        })
+      ).entries,
+      [],
+    );
+    const limitedSpec = {
+      ...specification,
+      allowance: { ...specification.allowance, maxEntries: 1 },
+    };
+    const limited = await discoverRepository({
+      ...request,
+      specification: limitedSpec,
+    });
+    assert.equal(limited.status, "truncated");
+    assert.equal(limited.selectedEntries, 2);
+    assert.equal(
+      (
+        await authenticateDiscoveryOutput({
+          ...request,
+          specification: limitedSpec,
+          manifest: limited,
+        })
+      ).entries.length,
+      1,
+    );
+    await assert.rejects(
+      authenticateDiscoveryOutput({
+        ...request,
+        manifest: {
+          ...limited,
+          status: "complete",
+          specificationDigest: manifest.specificationDigest,
+        },
+      }),
+      /completeness/,
+    );
+    await assert.rejects(
+      authenticateDiscoveryOutput({
+        ...request,
+        manifest: {
+          ...manifest,
+          source: { ...manifest.source, treeSha: "f".repeat(40) },
+        },
+      }),
+      /binding differs/,
+    );
+    git(
+      checkout,
+      "update-index",
+      "--add",
+      "--cacheinfo",
+      `160000,${baseSha},vendor/library`,
+    );
+    git(
+      checkout,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.invalid",
+      "commit",
+      "-m",
+      "tracked submodule boundary",
+    );
+    const submoduleSpec = { ...specification, selectors: ["vendor/"] };
+    const unreadable = await discoverRepository({
+      ...request,
+      baseSha: git(checkout, "rev-parse", "HEAD"),
+      specification: submoduleSpec,
+    });
+    assert.equal(unreadable.status, "unreadable");
+    assert.equal(unreadable.selectedEntries, 1);
+    const unreadableBody = await authenticateDiscoveryOutput({
+      ...request,
+      specification: submoduleSpec,
+      manifest: unreadable,
+    });
+    assert.deepEqual(unreadableBody.entries, []);
+    assert.equal(unreadableBody.failures[0].path, "vendor/library");
+    rmSync(checkout, { recursive: true });
+    const retained = await readDiscoveryBody(store, manifest.body);
+    for (const entry of retained.entries) await store.verify(entry.content);
+    assert.equal(retained.entries.length, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("staged secrets cannot be hidden by replacing working bytes", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-staged-secret-"));

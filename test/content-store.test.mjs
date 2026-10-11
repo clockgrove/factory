@@ -838,6 +838,22 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(firstInspection.current.logicalFiles, closure.files.length);
   assert.equal(firstInspection.current.manifestBytes > 0, true);
   assert.equal(firstInspection.storage, "git-logical-bytes");
+  assert.deepEqual(firstInspection.capacity.cancellationAncestry, {
+    availability: "unavailable",
+    reason: "not-traversed",
+  });
+  assert.equal(
+    firstInspection.capacity.current.bytes,
+    firstInspection.current.manifestBytes +
+      firstInspection.current.uniqueBodyBytes,
+  );
+  assert.equal(
+    firstInspection.capacity.current.fileHeadroom,
+    config.gitPersistence.maxFiles -
+      firstInspection.current.logicalFiles -
+      firstInspection.current.uniqueBodies -
+      1,
+  );
   // Round-trip the workflow's retained originals and an opaque body through
   // the same batch I/O used by full archive publication and verification.
   const opaque = Buffer.alloc(1024 * 1024, 0xff);
@@ -1218,6 +1234,32 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   });
   assert.equal(secondCheckpoint.status, "acknowledged");
   const secondInspection = await inspectRecoveryCheckpoint(config);
+  assert.equal(
+    secondInspection.capacity.cancellationAncestry.availability,
+    "available",
+  );
+  for (const usage of secondInspection.capacity.cancellationAncestry
+    .traversals) {
+    assert.equal(usage.commits > 1, true);
+    assert.equal(usage.manifestTransportBytes > 0, true);
+    assert.equal(usage.retainedOriginalBytes > 0, true);
+    assert.equal(
+      usage.chargedBytes,
+      usage.manifestTransportBytes + usage.retainedOriginalBytes,
+    );
+    assert.equal(
+      usage.byteHeadroom,
+      config.gitPersistence.maxBytes - usage.chargedBytes,
+    );
+    assert.equal(
+      usage.commitHeadroom,
+      config.gitPersistence.maxFiles - usage.commits,
+    );
+    assert.equal(
+      usage.manifestBufferHeadroom,
+      config.gitPersistence.maxBytes + 65536 - usage.manifestTransportBytes,
+    );
+  }
   assert.equal(secondInspection.reachableHistory.availability, "available");
   assert.equal(
     secondInspection.reachableHistory.logicalObjectBytes >

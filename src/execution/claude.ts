@@ -111,9 +111,10 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   readonly sessionAdapter = "claude-agent-sdk";
   get sessionCapabilities() {
     // Isolating session storage must not silently discard explicitly requested user settings.
+    // Workers stay fresh until their installed continuation lifecycle is qualified.
     return this.config.settingSources.includes("user")
       ? undefined
-      : { resumeRoles: ["implementation"] as const };
+      : { resumeRoles: [] as const };
   }
   private get sessionStorage(): string {
     return join(this.root, "sessions");

@@ -1,3 +1,4 @@
+import { graphExpansionPending } from "./runner/expansion.js";
 import {
   bindPlanningPlaybook,
   resolvePlan,
@@ -973,9 +974,10 @@ async function runObjectiveOwned(
       }
       if (
         result.coordinator?.mode === "running" &&
-        amendmentBlocksDispatch(result) &&
+        (amendmentBlocksDispatch(result) || graphExpansionPending(result)) &&
         result.pendingAmendment?.phase !== "rejected" &&
-        !hasReadinessWait(result)
+        !hasReadinessWait(result) &&
+        !awaitsOperator(result.wait)
       )
         continue;
       if (

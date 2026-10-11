@@ -25,6 +25,14 @@ import { assertKnownCheckNames, workflowCheckNames } from "../check-names.js";
 import { isAbsolute } from "node:path";
 import { recognizedObjectiveAttachment } from "../media.js";
 
+/** Reviewed templates share source and command authority without becoming executable nodes. */
+function workShapes(graph: WorkGraph) {
+  return [
+    ...graph.items,
+    ...(graph.expansions ?? []).map((entry) => entry.template),
+  ];
+}
+
 interface CitationChoice {
   path: string;
   heading: string;
@@ -77,7 +85,7 @@ export function compilerCitationChoices(sources: PlanningSource[]) {
 
 function workerInputSources(graph: WorkGraph, sources: PlanningSource[]) {
   const choices = compilerCitationChoices(sources);
-  return graph.items.map((item) =>
+  return workShapes(graph).map((item) =>
     item.citations.map((citation) => {
       const source = choices.find(
         (choice) =>
@@ -99,7 +107,7 @@ export function hydrateWorkerInputSources(
   sources: PlanningSource[],
 ): void {
   const inputs = workerInputSources(graph, sources);
-  graph.items.forEach((item, index) => {
+  workShapes(graph).forEach((item, index) => {
     item.inputSources = inputs[index]!;
   });
 }
@@ -122,26 +130,35 @@ export function planningGraphView(graph: WorkGraph, sources: PlanningSource[]) {
       ...(heading === undefined ? {} : { heading }),
     };
   };
+  const itemView = (item: WorkGraph["items"][number]) => ({
+    ...item,
+    ...(item.inputSources && {
+      inputSources: item.inputSources.map((input) => {
+        const matched = choices.some(
+          (choice) =>
+            choice.path === input.path &&
+            choice.heading === (input.heading ?? "") &&
+            choice.content === input.content,
+        );
+        const sourceSpan =
+          matched && span(input.path, input.content, input.heading);
+        if (!sourceSpan) return input;
+        const { content: _content, ...identity } = input;
+        return { ...identity, sourceSpan };
+      }),
+    }),
+  });
   return {
     ...graph,
-    items: graph.items.map((item) => ({
-      ...item,
-      ...(item.inputSources && {
-        inputSources: item.inputSources.map((input) => {
-          const matched = choices.some(
-            (choice) =>
-              choice.path === input.path &&
-              choice.heading === (input.heading ?? "") &&
-              choice.content === input.content,
-          );
-          const sourceSpan =
-            matched && span(input.path, input.content, input.heading);
-          if (!sourceSpan) return input;
-          const { content: _content, ...identity } = input;
-          return { ...identity, sourceSpan };
-        }),
-      }),
-    })),
+    items: graph.items.map(itemView),
+    ...(graph.expansions
+      ? {
+          expansions: graph.expansions.map((envelope) => ({
+            ...envelope,
+            template: itemView(envelope.template),
+          })),
+        }
+      : {}),
     ...(graph.requiredPreIntegrationChecks && {
       requiredPreIntegrationChecks: graph.requiredPreIntegrationChecks.map(
         (check) => {
@@ -161,7 +178,7 @@ export function assertWorkerInputSources(
   sources: PlanningSource[],
 ): void {
   const inputs = workerInputSources(graph, sources);
-  for (const [index, item] of graph.items.entries()) {
+  for (const [index, item] of workShapes(graph).entries()) {
     if (JSON.stringify(item.inputSources) !== JSON.stringify(inputs[index]))
       throw new Error(
         `Work Item ${item.id} inputs differ from pinned citation sections`,
@@ -184,7 +201,7 @@ export function validateCommandProvenance(
     sources.find((source) => source.path === "OBJECTIVE")?.content ?? "",
     checkout,
   );
-  for (const item of graph.items) {
+  for (const item of workShapes(graph)) {
     for (const check of item.validation) {
       if (!authorizedCommand(check, graph.baseSha, sources, checkout)) {
         throw new Error(
@@ -211,7 +228,7 @@ export function commandAuthorizations(
   sources: PlanningSource[],
   checkout: string,
 ): PlanCandidate["commands"] {
-  const workCommands = graph.items.flatMap((item) =>
+  const workCommands = workShapes(graph).flatMap((item) =>
     item.validation.map((check) => {
       const declared = authorizedCommand(
         check,
@@ -656,7 +673,7 @@ export function validateCitations(
   graph: WorkGraph,
   sources: PlanningSource[],
 ): void {
-  for (const item of graph.items) {
+  for (const item of workShapes(graph)) {
     for (const citation of item.citations) {
       const matching = sources.filter(
         (source) => source.path === citation.path,
@@ -714,7 +731,7 @@ export function validateGraphSources(
   validateCitations(graph, sources);
   assertWorkerInputSources(graph, sources);
   validateCommandProvenance(graph, sources, checkout);
-  for (const item of graph.items) {
+  for (const item of workShapes(graph)) {
     if (
       new Set(item.expectedOutputRoles ?? []).size !==
       (item.expectedOutputRoles ?? []).length

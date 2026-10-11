@@ -509,7 +509,8 @@ export async function prepareObjective(args: {
       );
     }
   preparation.plan = plan;
-  if (plan.graph.items.some((item) => item.kind === "discovery"))
+  if (plan.schemaVersion === 5) preparation.schemaVersion = 12;
+  else if (plan.graph.items.some((item) => item.kind === "discovery"))
     preparation.schemaVersion = 10;
   if (!["clean", "human-accepted"].includes(plan.review.status)) {
     // A plan Factory's own checks refuse can only be refused: it still

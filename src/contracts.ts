@@ -119,7 +119,34 @@ export interface RequiredPreIntegrationCheck {
   source: { path: string; digest: string; text: string };
 }
 
+/** Reviewed authority for one deterministic inventory-driven graph addition. */
+export interface GraphExpansionEnvelope {
+  schemaVersion: 1;
+  id: string;
+  input: {
+    producerItemId: string;
+    role: string;
+    schema: "factory.repository-inventory/v1";
+  };
+  selectors: string[];
+  workShape: "migration" | "cross-cutting-fix";
+  selection:
+    | { kind: "all-regular-files" }
+    | { kind: "classified"; included: string[]; excluded: string[] };
+  batching: { maxFilesPerChild: number };
+  limits: { maxChildren: number; maxIterations: 1 };
+  resources: string[];
+  eligibleProfileIds: string[];
+  dependencies: string[];
+  integrationBarrierItemIds: string[];
+  empty: "settle-without-children";
+  /** Reviewed ordinary-work shape, never a separately executable node. */
+  template: WorkItem;
+}
+
 export interface WorkGraph {
+  /** Initially reviewed declarations; settlement remains in the atomic snapshot. */
+  expansions?: GraphExpansionEnvelope[];
   /** Source-required gates on every ordinary delivery head, separate from final proof. */
   requiredPreIntegrationChecks?: RequiredPreIntegrationCheck[];
   /** Complete Objective-wide mapping from source obligations to executable proof. */
@@ -1101,7 +1128,33 @@ export interface AssetSelectionDecision {
   downstreamItems: string[];
 }
 
+export interface GraphProjectionEffectRequest {
+  id: string;
+  key: string;
+  method: "POST" | "PATCH" | "DELETE";
+  path: string;
+  bodyDigest: string;
+}
+export interface GraphProjectionEffectObservation {
+  outcome: "responded" | "reconciled" | "unknown" | "rejected";
+  responseDigest?: string;
+  status?: number;
+  identity?: { id?: number; number?: number; name?: string };
+}
+export interface GraphProjectionEffect extends GraphProjectionEffectRequest {
+  observation?: GraphProjectionEffectObservation;
+  /** Read-only reconciliation never replaces the original transport observation. */
+  reconciliation?: GraphProjectionEffectObservation;
+}
 export interface GraphProjection {
+  expansionControl?: {
+    effects: GraphProjectionEffect[];
+    beforeWrite(effect: GraphProjectionEffectRequest): void | Promise<void>;
+    observed(
+      effectId: string,
+      receipt: GraphProjectionEffectObservation,
+    ): void | Promise<void>;
+  };
   previousGraph?: WorkGraph;
   completedItems?: string[];
   graph: WorkGraph;
@@ -1177,6 +1230,7 @@ export interface NamedCheckEvidence {
 }
 
 export interface GitHubGateway {
+  readonly projectionMutationAdmission?: "controller-checkpoint-v1";
   projectStatus?(
     request: import("./github-project-state.js").ProjectStatusRequest,
   ): Promise<import("./github-project-state.js").ProjectStatusObservation>;

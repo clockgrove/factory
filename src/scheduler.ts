@@ -5,6 +5,7 @@ export { pathsOverlap } from "./ownership.js";
 import type { WorkGraph, WorkItem } from "./contracts.js";
 import { assertCoverageShape } from "./qa.js";
 import { assertDiscoverySpecification } from "./discovery.js";
+import { expansionBlocksItem } from "./expansion-readiness.js";
 import type { WorkState } from "./state.js";
 
 /** Native item types must hold before proof, path, scheduler or review consumers. */
@@ -315,12 +316,14 @@ export function readyItems(
   work: Record<string, WorkState>,
   active: Set<string>,
   slots: number,
+  resolvedExpansionIds?: ReadonlySet<string>,
 ): WorkItem[] {
   const admitted: WorkItem[] = [];
   for (const item of rankPending(graph, work)) {
     if (admitted.length >= slots) break;
     if (
       work[item.id]?.status !== "pending" ||
+      expansionBlocksItem(graph, item.id, resolvedExpansionIds) ||
       !item.dependencies.every((id) => work[id]?.status === "done")
     )
       continue;

@@ -1,3 +1,4 @@
+import { assertGraphExpansions } from "../graph-expansion.js";
 import { createHash } from "node:crypto";
 import {
   assertHumanPlanningDependency,
@@ -315,6 +316,7 @@ export function validateGraph(
   previousGraph?: WorkGraph,
 ): void {
   assertPreIntegrationCheckShape(graph);
+  assertGraphExpansions(graph);
   if (
     previousGraph &&
     JSON.stringify(graph.requiredPreIntegrationChecks ?? []) !==
@@ -544,6 +546,7 @@ export function validateCompiledGraph(args: {
     );
     hydrateWorkerInputSources(graph, sources);
     normalizeExecutionProfiles(graph, executionProfiles);
+    assertGraphExpansions(graph, { executionProfiles });
     validateGraph(
       graph,
       objective,

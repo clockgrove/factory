@@ -31,6 +31,9 @@ import {
   reviewObjectiveKnowledge,
 } from "../dist/objective-knowledge.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
+import { materializeGraphExpansion } from "../dist/graph-expansion.js";
+import { authenticateExpansionInputs } from "../dist/runner/expansion.js";
+import { graphProjectionControl } from "../dist/graph-projection-control.js";
 import { parseFactoryState } from "../dist/state.js";
 import {
   acquireControllerLock,
@@ -493,6 +496,251 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       state.repository,
       1,
     );
+    {
+      // Reuse this real Git/ContentStore and atomic snapshot workflow for expansion:
+      // the checkpoint records possible submission, not an invented GitHub response.
+      const inventorySpec = {
+        mode: "inventory",
+        selectors: ["README.md"],
+        schema: "factory.repository-inventory/v1",
+        role: "affected-files",
+        completeness: "complete",
+        allowance: { maxEntries: 10, maxBytes: 1024, maxAttempts: 1 },
+      };
+      const inventoryItem = {
+        ...item("inventory", [], []),
+        kind: "discovery",
+        discovery: inventorySpec,
+      };
+      const expanded = structuredClone(loaded);
+      expanded.schemaVersion = 11;
+      expanded.work = Object.fromEntries(
+        expanded.graph.items.map((entry) => [entry.id, { status: "pending" }]),
+      );
+      expanded.graph.items.push(inventoryItem);
+      expanded.graph.expansions = [
+        {
+          schemaVersion: 1,
+          id: "migration",
+          input: {
+            producerItemId: "inventory",
+            role: "affected-files",
+            schema: inventorySpec.schema,
+          },
+          selectors: ["README.md"],
+          workShape: "migration",
+          selection: { kind: "all-regular-files" },
+          batching: { maxFilesPerChild: 1 },
+          limits: { maxChildren: 2, maxIterations: 1 },
+          resources: [],
+          eligibleProfileIds: [],
+          dependencies: [],
+          integrationBarrierItemIds: ["docs"],
+          empty: "settle-without-children",
+          template: item("migration-template", [], ["README.md"]),
+        },
+      ];
+      for (const candidate of [
+        ...expanded.graph.items,
+        expanded.graph.expansions[0].template,
+      ]) {
+        candidate.nonGoals = ["Do not change unrelated files"];
+        candidate.citations = [{ path: "README.md" }];
+      }
+      expanded.planGraphDigest = graphDigest(expanded.graph);
+      expanded.issueByItemId.inventory = 6;
+      const inventoryManifest = await discoverRepository({
+        checkout,
+        baseSha,
+        specification: inventorySpec,
+        producer: {
+          objective: 1,
+          runId: expanded.runId,
+          itemId: "inventory",
+          attemptId: "inventory-attempt",
+        },
+        store,
+      });
+      expanded.work.inventory = {
+        status: "done",
+        attempt: "inventory-attempt",
+        baseSha,
+        discoveryOutput: inventoryManifest,
+      };
+      const inventoryBody = await authenticateDiscoveryOutput({
+        checkout,
+        specification: inventorySpec,
+        manifest: inventoryManifest,
+        store,
+      });
+      const materialized = materializeGraphExpansion({
+        graph: expanded.graph,
+        envelopeId: "migration",
+        manifest: inventoryManifest,
+        body: inventoryBody,
+        runId: expanded.runId,
+        iteration: 1,
+      });
+      const inputBytes = new TextEncoder().encode(
+        JSON.stringify(materialized.inputPacket),
+      );
+      const inputPacketRef = await store.put(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(inputBytes);
+            controller.close();
+          },
+        }),
+        { mediaType: "application/json" },
+      );
+      const expansionReceipt = {
+        schemaVersion: 1,
+        id: `migration-${materialized.digest}`,
+        envelopeId: "migration",
+        parentGraphDigest: graphDigest(expanded.graph),
+        graphDigest: graphDigest(materialized.graph),
+        envelopeDigest: materialized.envelopeDigest,
+        materializationDigest: materialized.digest,
+        inputPacketRef,
+        childIds: materialized.childIds,
+      };
+      expanded.pendingExpansion = {
+        ...expansionReceipt,
+        graph: materialized.graph,
+        phase: "admitted",
+        issueByItemId: { ...expanded.issueByItemId },
+      };
+      const expansionPath = join(root, "private-state", "expansion.json");
+      const saveExpanded = () => saveState(expansionPath, expanded);
+      saveExpanded();
+      const effectMetadata = {
+        method: "POST",
+        path: `repos/${expanded.repository}/issues`,
+        bodyDigest: createHash("sha256")
+          .update(
+            JSON.stringify({
+              title: materialized.graph.items.find(
+                (entry) => entry.id === materialized.childIds[0],
+              ).title,
+            }),
+          )
+          .digest("hex"),
+      };
+      const effect = {
+        key: `issue-create:${materialized.childIds[0]}`,
+        id: createHash("sha256")
+          .update(JSON.stringify(effectMetadata))
+          .digest("hex"),
+        ...effectMetadata,
+      };
+      graphProjectionControl(
+        expanded,
+        materialized.graph,
+        saveExpanded,
+      ).beforeWrite(effect);
+      const reloadedExpansion = parseFactoryState(
+        JSON.parse(readFileSync(expansionPath, "utf8")),
+        expanded.repository,
+        1,
+      );
+      assert.deepEqual(
+        reloadedExpansion.pendingExpansion.childIds,
+        materialized.childIds,
+      );
+      assert.equal(
+        reloadedExpansion.graphProjectionIntents[expansionReceipt.graphDigest]
+          .effects[0].observation,
+        undefined,
+      );
+      assert.throws(
+        () =>
+          graphProjectionControl(
+            reloadedExpansion,
+            reloadedExpansion.pendingExpansion.graph,
+            () => saveState(expansionPath, reloadedExpansion),
+          ).beforeWrite(effect),
+        /already submitted/,
+      );
+      assert.deepEqual(
+        [
+          ...(await authenticateExpansionInputs({
+            state: reloadedExpansion,
+            config: { checkout, execution: { kind: "local" } },
+            contentStore: store,
+          })),
+        ],
+        [],
+      );
+      const settledReceipt = {
+        ...expansionReceipt,
+        acceptedAt: new Date().toISOString(),
+      };
+      reloadedExpansion.graphRevisions = [
+        {
+          graph: structuredClone(reloadedExpansion.graph),
+          digest: reloadedExpansion.planGraphDigest,
+        },
+        {
+          graph: structuredClone(materialized.graph),
+          digest: expansionReceipt.graphDigest,
+          parentDigest: expansionReceipt.parentGraphDigest,
+          expansion: settledReceipt,
+          acceptedAt: settledReceipt.acceptedAt,
+        },
+      ];
+      reloadedExpansion.graph = materialized.graph;
+      reloadedExpansion.expansionHistory = [settledReceipt];
+      delete reloadedExpansion.pendingExpansion;
+      reloadedExpansion.work[materialized.childIds[0]] = { status: "pending" };
+      reloadedExpansion.issueByItemId[materialized.childIds[0]] = 7;
+      saveState(expansionPath, reloadedExpansion);
+      const settledReload = parseFactoryState(
+        JSON.parse(readFileSync(expansionPath, "utf8")),
+        expanded.repository,
+        1,
+      );
+      assert.deepEqual(
+        [
+          ...(await authenticateExpansionInputs({
+            state: settledReload,
+            config: { checkout, execution: { kind: "local" } },
+            contentStore: store,
+          })),
+        ],
+        ["migration"],
+      );
+      const changedProducer = structuredClone(settledReload);
+      changedProducer.work.inventory.discoveryOutput.producer.attemptId =
+        "other-attempt";
+      await assert.rejects(
+        authenticateExpansionInputs({
+          state: changedProducer,
+          config: { checkout, execution: { kind: "local" } },
+          contentStore: store,
+        }),
+        /exact complete accepted discovery/,
+      );
+      const preservedExpansion = readFileSync(expansionPath, "utf8");
+      rmSync(
+        join(
+          root,
+          "private-content",
+          inputPacketRef.digest.slice(0, 2),
+          inputPacketRef.digest,
+        ),
+      );
+      await assert.rejects(
+        authenticateExpansionInputs({
+          state: settledReload,
+          config: { checkout, execution: { kind: "local" } },
+          contentStore: store,
+        }),
+        /ENOENT|missing|unavailable/i,
+      );
+      assert.equal(readFileSync(expansionPath, "utf8"), preservedExpansion);
+      // Missing retained bytes still allow diagnostics/cancellation to parse state.
+      parseFactoryState(JSON.parse(preservedExpansion), expanded.repository, 1);
+    }
     // Historical graph snapshots have no planner-session inputs. A real
     // execution pass probes amendments even when only final review remains.
     const legacy = structuredClone(loaded);

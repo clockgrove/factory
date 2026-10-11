@@ -341,7 +341,7 @@ export function agentSessionContinuation(
     )
   )
     throw new Error(
-      "Agent role has unsettled ownership in another graph scope",
+      "Role has unsettled agent ownership in another graph scope",
     );
   const retained = state.agentSessions?.[entryKey];
   let previous = JSON.stringify(retained);

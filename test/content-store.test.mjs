@@ -1392,6 +1392,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     nonGoals: ["No work outside the approved selectors"],
     citations: [{ path: "OBJECTIVE" }],
     dependencies: [],
+    discoveryInputs: [],
     ownedPaths: [],
     validation: [],
     brief: "Apply the approved migration while retaining module behavior.",
@@ -1467,6 +1468,33 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     producer.objective,
     baseSha,
     new Set(["OBJECTIVE"]),
+  );
+  // Empty selection is no consumption for work, discovery, QA, aggregates and
+  // the expansion template; actual selected outputs still require work consumers.
+  const malformedSelection = structuredClone(graph);
+  malformedSelection.items[1].discoveryInputs = null;
+  assert.throws(
+    () =>
+      validateAndOrderGraph(
+        malformedSelection,
+        producer.objective,
+        baseSha,
+        new Set(["OBJECTIVE"]),
+      ),
+    /Discovery inputs must declare/,
+  );
+  const readonlySelection = structuredClone(graph);
+  readonlySelection.items.find((item) => item.kind === "qa").discoveryInputs =
+    consumer.discoveryInputs;
+  assert.throws(
+    () =>
+      validateAndOrderGraph(
+        readonlySelection,
+        producer.objective,
+        baseSha,
+        new Set(["OBJECTIVE"]),
+      ),
+    /ordinary work consumer/,
   );
   const {
     assertWorkflowRecipeGraph,
@@ -2490,6 +2518,80 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
       objectiveBody: "## Adaptive workflow\nenabled\n",
       contentStore: store,
     }),
+  );
+  // Roundtrip the current adaptive wire's required literal empty selections,
+  // using this workflow's pinned Git Sources and actual retained lookup packet.
+  const { renderCompilationCall } = await import("../dist/compiler/model.js");
+  const { installedControllerCapabilities, CONTROLLER_CAPABILITIES_DIGEST } =
+    await import("../dist/controller-capabilities.js");
+  const compilation = renderCompilationCall({
+    objective: criterion,
+    baseSha,
+    sources: [{ path: "OBJECTIVE", content: criterion }, ...sources],
+    compileContext: {
+      objectiveNumber: producer.objective,
+      instructions: "Preserve the migration contract.",
+    },
+    coverageObligations: graph.coverage.map(
+      ({ itemId, proof, environment, ...obligation }) => obligation,
+    ),
+    contextLookup: lookup.packet,
+    controllerCapabilities: installedControllerCapabilities(),
+    controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+  });
+  assert.match(
+    compilation.call.prompt,
+    /Return empty discoveryInputs when none are needed/,
+  );
+  const wireGraph = {
+    contextId: compilation.wire.data.contextId,
+    requiredPreIntegrationChecks: [],
+    expansions: [],
+    conditions: [],
+    items: graph.items
+      .filter((item) => !item.kind)
+      .map((item) => ({
+        ...item,
+        kind: "work",
+        citations: [{ choiceIndex: 0 }],
+        children: [],
+        newPackages: [],
+        priority: 0,
+        resources: [],
+        sourceAssets: [],
+        scheduling: null,
+        condition: null,
+      })),
+    coverage: [
+      {
+        itemId: "join",
+        proof: { kind: "result-semantic", acceptanceIndex: 0 },
+        environment: {
+          kind: "local",
+          readiness: "available",
+          probeValidationIndex: null,
+          prerequisiteValidationIndices: [],
+          preparedBy: "",
+        },
+      },
+    ],
+  };
+  const decoded = compilation.wire.decode({
+    contextId: wireGraph.contextId,
+    outcome: { kind: "graph", graph: wireGraph },
+  }).graph;
+  assert.deepEqual(
+    decoded.items.map((item) => item.discoveryInputs),
+    [[], []],
+  );
+  assert.deepEqual(
+    validateAndOrderGraph(
+      decoded,
+      producer.objective,
+      baseSha,
+      new Set(["OBJECTIVE", ...sources.map((source) => source.path)]),
+    ).map((item) => item.id),
+    ["independent", "join"],
   );
   const routeDefaults = {
     ...common,

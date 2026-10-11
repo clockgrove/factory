@@ -271,13 +271,13 @@ export function validateAndOrderGraph(
       parents.add(child);
     }
     if (item.discoveryInputs !== undefined) {
-      if ((item.kind ?? "work") !== "work")
-        throw new Error(
-          "Discovery inputs currently require an ordinary work consumer",
-        );
-      if (!Array.isArray(item.discoveryInputs) || !item.discoveryInputs.length)
+      if (!Array.isArray(item.discoveryInputs))
         throw new Error(
           "Discovery inputs must declare selected producers, roles and fields",
+        );
+      if (item.discoveryInputs.length && (item.kind ?? "work") !== "work")
+        throw new Error(
+          "Discovery inputs currently require an ordinary work consumer",
         );
       const seen = new Set<string>();
       for (const selection of item.discoveryInputs) {

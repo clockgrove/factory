@@ -20,6 +20,10 @@ import {
   type ReviewArtifactSelector,
 } from "./review-artifacts.js";
 import { refuseUnknownFields } from "./unknown-fields.js";
+import {
+  assertContextLookupBounds,
+  type ContextLookupBounds,
+} from "./compiler/context.js";
 
 export type CodexReasoningEffort =
   | "minimal"
@@ -227,6 +231,15 @@ export function hostSchedulingDefaults(host: HostFacts): {
 }
 
 export interface FactoryConfig {
+  /** Explicit bounded retrieval admission; omission retains the static planner. */
+  planningContext?: {
+    enabled: true;
+    bounds: ContextLookupBounds;
+    /** Literal repository files or directory prefixes ending with a slash. */
+    selectors: string[];
+    /** Eligible retained knowledge in this same repository only. */
+    memory?: boolean;
+  };
   /** Explicit generated PNG evidence selection; omission retains no artifacts. */
   reviewArtifacts?: ReviewArtifactSelector[];
   /** Explicit disclosure opt-in; omission publishes no operational summary. */
@@ -619,10 +632,58 @@ export function validateConfig(value: unknown): FactoryConfig {
       "queue",
       "githubManagement",
       "reviewArtifacts",
+      "planningContext",
     ],
     "configuration",
   );
   assertReviewArtifactSelectors(value.reviewArtifacts);
+  if (value.planningContext !== undefined) {
+    assertObject(value.planningContext, "planningContext");
+    const context = value.planningContext;
+    assertOnlyKeys(
+      context,
+      ["enabled", "bounds", "selectors", "memory"],
+      "planningContext",
+    );
+    if (context.enabled !== true)
+      throw new Error(
+        "planningContext.enabled must be true; omit the section to disable retrieval",
+      );
+    assertContextLookupBounds(context.bounds as ContextLookupBounds);
+    const selectors = assertUniqueStrings(
+      context.selectors,
+      "planningContext.selectors",
+    );
+    if (
+      !selectors.length ||
+      selectors.length > 64 ||
+      selectors.some(
+        (selector) =>
+          selector !== selector.trim() ||
+          selector.startsWith("/") ||
+          selector.includes("\\") ||
+          selector
+            .split("/")
+            .some(
+              (part, index, parts) =>
+                part === "." ||
+                part === ".." ||
+                (!part && index !== parts.length - 1),
+            ) ||
+          Array.from(selector).some(
+            (character) =>
+              character.codePointAt(0)! < 32 ||
+              character.codePointAt(0) === 127 ||
+              "*?[]{}".includes(character),
+          ),
+      )
+    )
+      throw new Error(
+        "planningContext.selectors requires 1–64 literal relative files or directory prefixes",
+      );
+    if (context.memory !== undefined && typeof context.memory !== "boolean")
+      throw new Error("planningContext.memory must be a boolean");
+  }
   validateTarget(value.repository, value.checkout);
   if (value.githubManagement !== undefined) {
     assertObject(value.githubManagement, "githubManagement");

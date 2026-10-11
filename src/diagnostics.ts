@@ -56,7 +56,7 @@ import type {
   PreparationState,
   WorkState,
 } from "./state.js";
-import { projectionStarted } from "./state.js";
+import { isPreparationState, projectionStarted } from "./state.js";
 import type { PreState } from "./state-store.js";
 import {
   type PendingDecisionView,
@@ -2201,7 +2201,7 @@ export function continuationStatusDocument(
   preState?: PreState,
   installationConfigDigest?: string,
 ) {
-  return continuation?.schemaVersion === 8
+  return isPreparationState(continuation)
     ? preparationStatusDocument(
         continuation,
         secrets,

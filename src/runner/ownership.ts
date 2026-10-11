@@ -1,3 +1,4 @@
+import { isExecutionState, isPreparationState } from "../state.js";
 import { agentSessionContinuation } from "../agent-session.js";
 import { closeCancelledWorkItems } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
@@ -62,7 +63,7 @@ export function canHandoff(state: ContinuationState): boolean {
     )
   )
     return false;
-  if (state.schemaVersion === 8)
+  if (isPreparationState(state))
     return state.planningRecovery?.phase !== "submitted";
   if (
     Object.values(state.work).some(
@@ -136,7 +137,7 @@ export function mutationState(
   const snapshot =
     owners.get(ownerKey(config, objective))?.snapshot ??
     readContinuation(config.repository, objective);
-  if (snapshot?.schemaVersion === 8)
+  if (isPreparationState(snapshot))
     throw new Error("Objective is still preparing");
   const state = snapshot ?? readState(config.repository, objective);
   return state;
@@ -231,7 +232,7 @@ export async function cancelKnownWork(
 ): Promise<void> {
   const errors: string[] = [];
   const tasks: (() => Promise<void>)[] = [];
-  if (state.schemaVersion === 7)
+  if (isExecutionState(state))
     for (const [itemId, work] of Object.entries(state.work)) {
       if (
         work.step !== "execute" ||

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { authenticateDiscoveryOutput } from "../discovery.js";
+import { assertWorkDiscoveryOutput } from "../state.js";
 import { agentSessionContinuation } from "../agent-session.js";
 import { reviewObjectiveKnowledge } from "../objective-knowledge.js";
 import { join } from "node:path";
@@ -35,6 +37,7 @@ import {
 } from "../validation.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import type { ObjectiveStep } from "./ownership.js";
+import { assertDiscoveryAdmission } from "./discovery.js";
 
 /** Heads others push during final validation that Factory follows before asking. */
 const FOLLOWED_HEAD_LIMIT = 3;
@@ -95,6 +98,18 @@ export async function finalizeObjective(args: {
   )
     return state;
   stopIfCancelled();
+  // A loaded manifest is shape-checked state, not proof that its retained bodies remain available.
+  for (const item of graph.items.filter((item) => item.kind === "discovery")) {
+    assertDiscoveryAdmission(config, state, item);
+    assertWorkDiscoveryOutput(state, item.id, state.work[item.id]!);
+    await authenticateDiscoveryOutput({
+      checkout: config.checkout,
+      specification: item.discovery!,
+      manifest: state.work[item.id]!.discoveryOutput!,
+      store: contentStore,
+    });
+    stopIfCancelled();
+  }
   /**
    * Fetch the default branch. Commits others pushed on top of the
    * integrated Objective move the final candidate to that head, which is

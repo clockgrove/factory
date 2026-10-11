@@ -35,6 +35,7 @@ import { faultOf } from "../fault.js";
 import { materializeAssetSet, validationLfsMembersForItem } from "../media.js";
 import { currentProcessSignal } from "../process.js";
 import { runQaItem } from "../qa-execution.js";
+import { runDiscoveryItem } from "../runner/discovery.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { readyItems } from "../scheduler.js";
 import type { FactoryState } from "../state.js";
@@ -442,6 +443,23 @@ export async function runRegularGraph(args: {
       await deliver(item, itemBase);
       return;
     }
+    if (item.kind === "discovery") {
+      await runDiscoveryItem({
+        config,
+        state,
+        item,
+        driver,
+        github,
+        store: contentStore,
+        save,
+        cancelled: args.cancelled,
+        signal,
+        pause: args.pause,
+        phases,
+        diagnostics: args.diagnostics,
+      });
+      return;
+    }
     if (item.kind === "qa" || item.kind === "aggregate") {
       if (args.paused?.() && work.wait?.kind === "ci") return;
       await runQaItem({
@@ -703,7 +721,7 @@ export async function runRegularGraph(args: {
       // A wrong result is repaired, published or not: the next attempt
       // republishes the same branch with a lease.
       const isolated = recordWorkFailure(state, item.id, error);
-      if (isolated && !stopped()) {
+      if (isolated && item.kind !== "discovery" && !stopped()) {
         phases.release(item.id);
         save();
         await phases.reserve(item.id, "review");
@@ -751,7 +769,11 @@ export async function runRegularGraph(args: {
     const work = state.work[item.id]!;
     if (work.status === "published") dispatch(item, work.baseSha!);
     else if (work.status !== "running") return;
-    else if (item.kind === "qa" || item.kind === "aggregate")
+    else if (
+      item.kind === "qa" ||
+      item.kind === "aggregate" ||
+      item.kind === "discovery"
+    )
       dispatch(item, state.integratedSha ?? baseSha);
     else if (
       ((work.step === "validate" || work.step === "deliver") &&
@@ -806,7 +828,10 @@ export async function runRegularGraph(args: {
             slots,
           ).filter((item) => {
             const blocked =
-              item.kind === "qa" || item.kind === "aggregate"
+              item.kind === "qa" ||
+              item.kind === "aggregate" ||
+              (item.kind === "discovery" &&
+                item.discovery?.mode === "inventory")
                 ? undefined
                 : (phases.reason(item.id, "coding") ??
                   (workerSlots <= 0
@@ -826,7 +851,15 @@ export async function runRegularGraph(args: {
               return false;
             }
             clearWait(state, { item: item.id });
-            if (item.kind !== "qa" && item.kind !== "aggregate") workerSlots--;
+            if (
+              item.kind !== "qa" &&
+              item.kind !== "aggregate" &&
+              !(
+                item.kind === "discovery" &&
+                item.discovery?.mode === "inventory"
+              )
+            )
+              workerSlots--;
             return true;
           });
     if (ready.length) await args.reconcile?.();

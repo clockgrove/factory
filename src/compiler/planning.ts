@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
 import {
+  assertHumanPlanningDependency,
+  assertDiscoveryContextScope,
+  assertContextFactsResolved,
+  type PlanningContextPacket,
+  type PlanningTurnResponse,
+} from "./context.js";
+import {
   agentSessionContinuation,
   planningSessionInputDigest,
 } from "../agent-session.js";
@@ -45,7 +52,7 @@ import {
   reviewPacket,
 } from "../review-evidence.js";
 import { validateAndOrderGraph } from "../scheduler.js";
-import type { ContinuationState } from "../state.js";
+import { isExecutionState, type ContinuationState } from "../state.js";
 import type { StepContext } from "../step.js";
 import { assertStepAdmission, StepPaused } from "../step.js";
 import { invalidOutput, PlanValidationError } from "./faults.js";
@@ -72,8 +79,7 @@ export async function withPlannerAdmission<T>(
   task: () => Promise<T>,
 ): Promise<T> {
   const input = planningSessionInputDigest(state);
-  const graph =
-    state.schemaVersion === 7 ? graphDigest(state.graph) : undefined;
+  const graph = isExecutionState(state) ? graphDigest(state.graph) : undefined;
   const predecessor = plannerAdmissions.get(state) ?? Promise.resolve();
   let release!: () => void;
   const owned = new Promise<void>((resolve) => {
@@ -88,7 +94,7 @@ export async function withPlannerAdmission<T>(
     if (
       state.cancelRequested ||
       state.cancelledAt ||
-      (state.schemaVersion === 7 &&
+      (isExecutionState(state) &&
         (state.finalAcceptance || state.objectiveClosure === "complete"))
     )
       throw new StepFault(
@@ -96,8 +102,7 @@ export async function withPlannerAdmission<T>(
       );
     if (
       planningSessionInputDigest(state) !== input ||
-      (state.schemaVersion === 7 ? graphDigest(state.graph) : undefined) !==
-        graph
+      (isExecutionState(state) ? graphDigest(state.graph) : undefined) !== graph
     )
       throw new StepFault(
         decision(
@@ -224,6 +229,9 @@ export function paidModel(
 ): PlanningModel {
   const reviewResult = model.reviewResult?.bind(model);
   return {
+    ...(model.providerAttemptAdmission
+      ? { providerAttemptAdmission: model.providerAttemptAdmission }
+      : {}),
     ...(model.sessionCapabilities
       ? { sessionCapabilities: model.sessionCapabilities }
       : {}),
@@ -286,6 +294,15 @@ export function paidPlanningModel(
  * decide --objective N --outcome refuse`); `retry` cannot reopen it, because
  * the record of what was tried and the spent allowance stay.
  */
+export class PlanningContextResponse extends Error {
+  override readonly name = "PlanningContextResponse";
+  constructor(
+    readonly response: Exclude<PlanningTurnResponse, { kind: "graph" }>,
+  ) {
+    super("Planning requested missing context or a human dependency");
+  }
+}
+
 export class PlanningNeedsDecision extends Error {
   override readonly name = "PlanningNeedsDecision";
 }
@@ -376,6 +393,7 @@ export async function compileObjective(
   executionBounds?: PlanningExecutionBounds,
   observeDecodedGraph?: (graph: WorkGraph) => void,
   session?: AgentSessionContinuation,
+  contextLookup?: PlanningContextPacket,
 ): Promise<WorkGraph> {
   const request = prepareCompilationRequest({
     objective,
@@ -392,10 +410,28 @@ export async function compileObjective(
     executionBounds,
     approvedPlaybookPin: model.approvedPlaybookPin,
     session,
+    contextLookup,
   });
-  const graph = await model
-    .generateStructured<WorkGraph>(request)
+  const result = await model
+    .generateStructured<WorkGraph | PlanningTurnResponse>(request)
     .catch(planningFailure);
+  let graph: WorkGraph;
+  if (contextLookup) {
+    const response = result as PlanningTurnResponse;
+    if (response.kind === "human-dependency")
+      assertHumanPlanningDependency(response, contextLookup);
+    if (
+      response.kind === "context-request" ||
+      response.kind === "human-dependency"
+    )
+      throw new PlanningContextResponse(response);
+    if (response.kind !== "graph")
+      throw invalidOutput(
+        "Context-enabled compilation requires a discriminated response",
+      );
+    assertContextFactsResolved(contextLookup);
+    graph = response.graph;
+  } else graph = result as WorkGraph;
   observeDecodedGraph?.(graph);
   return validateCompiledGraph({ graph, request, body, checkout });
 }
@@ -422,6 +458,7 @@ export function prepareCompilationRequest(args: {
   executionBounds?: PlanningExecutionBounds;
   approvedPlaybookPin?: ApprovedPlaybookPin;
   session?: AgentSessionContinuation;
+  contextLookup?: PlanningContextPacket;
 }): PlanningRequest<WorkGraph> {
   const {
     objective,
@@ -451,6 +488,7 @@ export function prepareCompilationRequest(args: {
   const prompt = `Objective #${objective}\n${body}${instructions}`;
   const scripts = fixedScripts(body, baseSha, checkout);
   return {
+    ...(args.contextLookup ? { contextLookup: args.contextLookup } : {}),
     ...(prerequisites ? { prerequisites } : {}),
     ...(localExecutables ? { localExecutables } : {}),
     ...(executionBounds ? { executionBounds } : {}),
@@ -499,6 +537,7 @@ export function validateCompiledGraph(args: {
   if (objective === undefined)
     throw new Error("Compilation requires trusted compile context");
   try {
+    assertDiscoveryContextScope(graph, request.contextLookup);
     hydrateCoverageSources(
       graph,
       coverageObligations(body, objectiveCriteria(body)),

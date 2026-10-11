@@ -1,3 +1,4 @@
+import { isExecutionState } from "./state.js";
 import { createHash } from "node:crypto";
 import type { FactoryConfig } from "./config.js";
 import type { GitHubGateway, PlanningPrerequisites } from "./contracts.js";
@@ -35,7 +36,7 @@ export async function planningPrerequisites(
   for (const predecessor of [...predecessors].sort((a, b) => a - b)) {
     const previous = readContinuation(config.repository, predecessor);
     if (
-      previous?.schemaVersion !== 7 ||
+      !isExecutionState(previous) ||
       !objectiveComplete(previous) ||
       !previous.finalAcceptance
     )

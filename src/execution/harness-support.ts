@@ -20,6 +20,7 @@ import type {
   ProducedAssetSet,
   WorkHandoffNote,
 } from "../contracts.js";
+import type { DiscoveryBody, DiscoveryOutputManifest } from "../discovery.js";
 import { networkFailure } from "../fault.js";
 import { parseProducedAssetSets } from "../media.js";
 import { parseWorkHandoffNotes } from "../objective-knowledge.js";
@@ -34,6 +35,37 @@ import {
   currentWorkerReadiness,
   workerReadinessInstructions,
 } from "../worker-readiness.js";
+
+/** The supplied inventory is current evidence; classification remains advisory. */
+export function renderDiscoveryPrompt(
+  request: HarnessRequest & {
+    discovery: { manifest: DiscoveryOutputManifest; body: DiscoveryBody };
+  },
+): ReturnType<typeof renderPrompt> {
+  return renderPrompt([
+    [
+      "instructions",
+      `Classify this authenticated repository inventory for the approved discovery goal. Use only the supplied source entries and their exported exact bytes. The export contains the selected paths at the bound tree and has no Git metadata. Read-only execution, disabled network and disabled child agents are enforced by the adapter. Return the declared JSON response schema in your final response. Every returned path must be an exact supplied path; include every supplied entry to claim status complete, including entries that are irrelevant to the goal. If classification is incomplete or failed, report that status and the reason. Classifications are advisory observations and grant no permission, acceptance or source delivery authority.`,
+    ],
+    [
+      "objective",
+      JSON.stringify({
+        title: request.item.title,
+        goal: request.item.goal,
+        brief: request.item.brief,
+        acceptance: request.item.acceptance,
+        nonGoals: request.item.nonGoals,
+      }),
+    ],
+    [
+      "evidence",
+      JSON.stringify({
+        manifest: request.discovery.manifest,
+        inventory: request.discovery.body,
+      }),
+    ],
+  ]);
+}
 
 export function privateProgress(path: string, event: unknown): void {
   const fd = openSync(

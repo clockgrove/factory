@@ -285,6 +285,52 @@ Factory refuses the earlier sections with a message that says where the content 
 
 Keep the first Objective small. Editing the issue after planning invalidates the saved plan; refuse it (below) and run again.
 
+### Planning context and read-only discovery
+
+Planning keeps its complete pinned Sources independently of optional retrieval. To enable adaptive planning, add this explicit section to the Objective:
+
+```markdown
+## Adaptive workflow
+
+enabled
+```
+
+Also add `planningContext` to the private installation configuration before starting that Objective. All six positive integer bounds are required. For example:
+
+```json
+{
+  "planningContext": {
+    "enabled": true,
+    "selectors": ["src/", "docs/ARCHITECTURE.md"],
+    "memory": true,
+    "bounds": {
+      "maxRounds": 4,
+      "maxRequestsPerRound": 8,
+      "maxResults": 64,
+      "maxBytes": 262144,
+      "maxElapsedMs": 30000,
+      "maxProviderCalls": 5
+    }
+  }
+}
+```
+
+Configuration alone keeps an Objective on static planning. An absent or `disabled` Adaptive workflow section preserves the legacy path; an `enabled` section without configuration is refused before provider calls. The section must contain exactly `enabled` or `disabled`, with one level-two or level-three heading. This selection belongs to the pinned Objective body digest: changing it after planning cannot switch the retained run's mode and follows the normal changed-Objective refusal or cancellation rules.
+
+Selectors are literal relative files or subtrees ending in `/`; globs and parent paths are refused. Repository context comes from the Objective's immutable Git base. `memory` is optional and enables eligible retained knowledge from the same repository. Factory filters repository, visibility, Objective/path scope and applicability before ranking or opening supporting bodies. Required facts and retained current human decisions remain mandatory independently of optional relevance ranking. An unavailable, stale, incomplete or exhausted required lookup stops compilation for a dependency or decision; an empty search does not supply a missing fact.
+
+The planner can request bounded reads, searches or inventories, then continue compilation with the exact returned context. `maxBytes` caps serialized returned matches, including content and provenance; catalog and request metadata have separate finite validation limits. The frozen binding and allowances survive restart; each turn retains its exact packet and accounting. These limits grant no new provider, connector, network, repair or spending permissions. Retained manifests and source bodies stay in private Factory storage after native conversations and worktrees are released. The SQLite catalog is a rebuildable search index; the atomic Objective snapshot still owns lifecycle and acceptance. If SQLite is unavailable, including on Node 22 before 22.13, Factory uses the eligible retained manifest scan and reports the catalog unavailable.
+
+A plan may also declare a discovery Work Item with literal read selectors, output schema/role and finite entry, byte and attempt allowances. Controller inventory reads selected Git objects without a worker call. Semantic discovery currently requires the explicitly supported Codex discovery profile: it receives only the exported immutable selected files, has read-only tools, no network, no child agents and no Git metadata. Unsupported profiles are refused before dispatch. Outputs retain exact producer, commit/tree, selectors, content references and completeness; inventories are observations and semantic classifications are advisory. They authorize neither source changes nor pull requests and do not satisfy QA or implementation acceptance. Consumers name the producer, output role and selected fields through `discoveryInputs`, with an explicit dependency on that producer; incomplete output is refused.
+
+Custom library adapters must implement the admission contracts: adaptive `PlanningModel` declares `providerAttemptAdmission: "controller-checkpoint-v1"`, and semantic discovery requires an `ExecutionDriver` declaring `readonlyDiscovery: "selector-bound-read-only-v1"` with actual adapter preflight enforcement. Opaque or unsupported adapters are refused before paid calls; a declaration alone supplies no permissions or enforced isolation.
+
+Memory lookup supplies verified text. Binary bodies remain retained under their exact content references and report an unavailable text body; they are never decoded into replacement text. Supplied documentation is retained with its exact path, selected heading, version digest and observation time. A complete heading selection does not claim the whole underlying file was supplied. Already supplied source bodies are excluded from optional memory ranking and remain reachable through their existing pinned-source indices.
+
+Discovery selectors must also fit the admitted `planningContext.selectors` ceiling. A missing-context human question must cite an actual required, unresolved lookup receipt; human-owned choices and permissions do not require an unnecessary search.
+
+Broader graph expansion, adaptive scheduling, recipes, speculative branches and portable memory export remain deferred.
+
 ### Writing Objectives that deliver
 
 Keep Objectives small and executable:

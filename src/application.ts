@@ -301,13 +301,16 @@ export function composePlanningModel(config: FactoryConfig): PlanningModel {
   );
 }
 
-/** Planning composition never constructs a driver, content store, or run state. */
+/** Planning composition constructs retained input storage but no execution driver. */
 export function composePlanning(
   config: FactoryConfig,
   options: LocalHarnessCompositionOptions = {},
 ): Pick<FactoryApplication, "planObjective" | "decidePlan" | "decide"> {
   validateTarget(config.repository, config.checkout);
   const services = {
+    contentStore: new LocalContentStore(
+      join(stateRoot(config.repository), "content"),
+    ),
     planningModel: composedPlanningModel(
       options.planningModel ?? composePlanningModel(config),
     ),

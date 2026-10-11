@@ -1,3 +1,4 @@
+import { isExecutionState } from "./state.js";
 import { readFileSync } from "node:fs";
 import { runAnalysisCommand, writeAnalysisReport } from "./analysis-cli.js";
 import { readInteractionContent, readInteractionMetadata } from "./capture.js";
@@ -144,7 +145,7 @@ export async function runDiagnosticsCommand(
     const timeline = readAgentTimeline(
       config.repository,
       objective,
-      current?.schemaVersion === 7 ? current : undefined,
+      isExecutionState(current) ? current : undefined,
     );
     for (const event of timeline) {
       const json = JSON.stringify(event);

@@ -1,3 +1,8 @@
+import { assertPlanningLookupRecord } from "./compiler/context.js";
+import {
+  assertRepositoryMemoryBindings,
+  retainStateMemory,
+} from "./repository-memory.js";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -37,6 +42,7 @@ import {
 import { assertRepairLedger } from "./repair-policy.js";
 import {
   assertCoordinator,
+  isPreparationState,
   type ContinuationState,
   type FactoryState,
   type PreparationState,
@@ -117,13 +123,38 @@ export function readPreState(
  * it first, so no write can persist state a later run would refuse.
  */
 export function saveState(path: string, state: ContinuationState): void {
-  const text = `${JSON.stringify(state, null, 2)}\n`;
+  let text = `${JSON.stringify(state, null, 2)}\n`;
   try {
     parseContinuation(JSON.parse(text), state.repository, state.objective);
   } catch (error) {
     throw new Error(
       `Refusing to save invalid Factory state: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+  // Memory observes validated state. Availability never changes lifecycle evidence.
+  try {
+    const observed = retainStateMemory(state, stateRoot(state.repository));
+    assertRepositoryMemoryBindings(observed);
+    const merged = [...(state.memoryBindings ?? [])];
+    const ids = new Set(merged.map((binding) => binding.id));
+    for (const binding of observed) {
+      if (ids.has(binding.id)) continue;
+      ids.add(binding.id);
+      merged.push(binding);
+    }
+    if (merged.length) {
+      const retained = { ...state, memoryBindings: merged };
+      const retainedText = `${JSON.stringify(retained, null, 2)}\n`;
+      parseContinuation(
+        JSON.parse(retainedText),
+        state.repository,
+        state.objective,
+      );
+      state.memoryBindings = merged;
+      text = retainedText;
+    }
+  } catch {
+    process.stderr.write("Factory repository memory unavailable\n");
   }
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${randomUUID()}.tmp`;
@@ -145,7 +176,7 @@ export function saveState(path: string, state: ContinuationState): void {
 
 const currentVersion = (value: unknown): boolean => {
   const version = (value as { schemaVersion?: unknown } | null)?.schemaVersion;
-  return version === 7 || version === 8;
+  return version === 7 || version === 8 || version === 9 || version === 10;
 };
 
 /** Every Objective (or preparation) directory whose snapshot an earlier version wrote. */
@@ -198,7 +229,7 @@ export function readContinuation(
   if (!existsSync(path)) return undefined;
   const value = JSON.parse(readFileSync(path, "utf8"));
   assertCurrentVersion(repository, path, value);
-  if (value.schemaVersion !== 8) return readState(repository, objective);
+  if (!isPreparationState(value)) return readState(repository, objective);
   return parsePreparation(value, repository, objective);
 }
 
@@ -208,7 +239,7 @@ function parseContinuation(
   repository: string,
   objective: number,
 ): ContinuationState {
-  return value.schemaVersion === 8
+  return isPreparationState(value)
     ? parsePreparation(value, repository, objective)
     : parseExecution(value, repository, objective);
 }
@@ -218,10 +249,43 @@ function parsePreparation(
   repository: string,
   objective: number,
 ): PreparationState {
+  if (value.memoryBindings !== undefined)
+    assertRepositoryMemoryBindings(value.memoryBindings);
+  const lookup = value.planningRecovery?.contextLookup;
+  if (lookup !== undefined) {
+    if (value.schemaVersion !== 10)
+      throw new Error(
+        "Adaptive context requires preparation schema version 10",
+      );
+    assertPlanningLookupRecord(lookup);
+  }
+  if (value.plan) {
+    const adaptive =
+      value.plan.contextLookup !== undefined ||
+      value.plan.graph.items.some((item) => item.kind === "discovery");
+    if (
+      adaptive !== (value.plan.schemaVersion === 4) ||
+      (value.schemaVersion === 8 && adaptive) ||
+      (value.schemaVersion === 10 && value.plan.schemaVersion !== 4)
+    )
+      throw new Error(
+        "Preparation plan schema differs from adaptive semantics",
+      );
+    if (
+      value.plan.contextLookup !== undefined &&
+      (lookup === undefined ||
+        JSON.stringify(value.plan.contextLookup) !==
+          JSON.stringify(lookup.packet))
+    )
+      throw new Error(
+        "Preparation plan context differs from retained lookup evidence",
+      );
+  }
   assertGitHubProgressProjection(value.githubProgress, value);
   assertGitHubPlanDecision(value.githubPlanDecision, value);
   assertGitHubProjectStatusProjection(value.githubProjectStatus, value);
   if (
+    (value.schemaVersion !== 8 && value.schemaVersion !== 10) ||
     value.kind !== "preparing" ||
     value.repository !== repository ||
     value.objective !== objective ||

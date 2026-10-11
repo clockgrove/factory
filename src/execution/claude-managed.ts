@@ -234,6 +234,7 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     let privateIndex = 0;
     const prompt = workItemPrompt({
       ...data.request,
+      discovery: undefined,
       packageManagerUpdate: packageManagerUpdate(
         data.request.objectiveBody ?? "",
       ),
@@ -352,6 +353,10 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     input: ExecutionRequest,
     context?: ExecutionContext,
   ): Promise<ExecutionHandle> {
+    if (input.item.kind === "discovery" || input.discovery)
+      throw new Error(
+        "Managed execution does not support enforced read-only discovery",
+      );
     if (input.environmentReadiness?.validationIndices.length)
       throw new Error(
         "Managed worker readiness in its fresh environment is unsupported; source decision required",

@@ -3,7 +3,12 @@ import { graphDigest, amendmentBlocksDispatch } from "./graph-amendments.js";
 import { assertCompletedCoverage, objectiveCandidate } from "./qa.js";
 import { assertApprovedPlaybookAdmission } from "./contracts.js";
 import type { GitHubGateway } from "./contracts.js";
-import type { ContinuationState, FactoryState } from "./state.js";
+import {
+  isExecutionState,
+  assertWorkDiscoveryOutput,
+  type ContinuationState,
+  type FactoryState,
+} from "./state.js";
 import { attachFault, decision } from "./fault.js";
 import { step } from "./step.js";
 import {
@@ -91,6 +96,20 @@ export function assertTerminalEligibility(state: FactoryState): void {
   }
   for (const item of state.graph.items) {
     const work = state.work[item.id];
+    if (item.kind === "discovery") {
+      assertWorkDiscoveryOutput(state, item.id, work!);
+      if (
+        work?.status !== "done" ||
+        work.githubClosure !== "complete" ||
+        work.execution ||
+        !work.discoveryOutput ||
+        work.discoveryOutput.status !== "complete"
+      )
+        throw new Error(
+          `Required discovery Work Item ${item.id} is not complete and closed`,
+        );
+      continue;
+    }
     if (
       work?.status !== "done" ||
       work.githubClosure !== "complete" ||
@@ -106,13 +125,15 @@ export function assertTerminalEligibility(state: FactoryState): void {
   }
   for (const [validation, decisions] of [
     [state.finalValidation, state.finalAcceptanceDecisions],
-    ...state.graph.items.map(
-      ({ id }) =>
-        [
-          state.work[id]!.validation,
-          state.work[id]!.acceptanceDecisions,
-        ] as const,
-    ),
+    ...state.graph.items
+      .filter((item) => item.kind !== "discovery")
+      .map(
+        ({ id }) =>
+          [
+            state.work[id]!.validation,
+            state.work[id]!.acceptanceDecisions,
+          ] as const,
+      ),
   ] as const) {
     if (
       !validation ||
@@ -219,8 +240,23 @@ export async function closeWorkItem(
   const work = state.work[itemId]!;
   if (work.githubClosure === "complete") return;
   const kind = state.graph.items.find((item) => item.id === itemId)?.kind;
-  const readOnly = kind === "qa" || kind === "aggregate";
-  if (readOnly) {
+  const discovery = kind === "discovery";
+  const readOnly = discovery || kind === "qa" || kind === "aggregate";
+  if (discovery) {
+    assertWorkDiscoveryOutput(state, itemId, work);
+    if (
+      work.status !== "done" ||
+      !work.discoveryOutput ||
+      work.discoveryOutput.status !== "complete" ||
+      !state.issueByItemId[itemId] ||
+      work.pullRequest ||
+      work.execution
+    )
+      throw new Error(
+        `Completed discovery ${itemId} lacks complete immutable output`,
+      );
+  }
+  if (readOnly && !discovery) {
     if (
       work.status !== "done" ||
       !work.changeRef ||
@@ -233,18 +269,21 @@ export async function closeWorkItem(
     )
       throw new Error(`Completed QA ${itemId} lacks read-only proof identity`);
   } else if (
-    work.status !== "done" ||
-    !work.pullRequest ||
-    !work.changeRef ||
-    !work.treeSha ||
-    !state.issueByItemId[itemId]
+    !discovery &&
+    (work.status !== "done" ||
+      !work.pullRequest ||
+      !work.changeRef ||
+      !work.treeSha ||
+      !state.issueByItemId[itemId])
   )
     throw new Error(`Completed Work Item ${itemId} lacks delivery identity`);
-  const comment = readOnly
-    ? `QA completed at commit ${work.changeRef}; validated tree ${work.treeSha}.`
-    : native
-      ? `Completed by native delivery PR #${work.pullRequest}; integrated at ${work.integratedSha ?? state.integratedSha}.`
-      : `Completed by PR #${work.pullRequest}; validated tree ${work.treeSha}.`;
+  const comment = discovery
+    ? `Discovery completed at source commit ${work.discoveryOutput!.source.commitSha}; retained ${work.discoveryOutput!.selectedEntries} observed entries as immutable output ${work.discoveryOutput!.body.digest}.`
+    : readOnly
+      ? `QA completed at commit ${work.changeRef}; validated tree ${work.treeSha}.`
+      : native
+        ? `Completed by native delivery PR #${work.pullRequest}; integrated at ${work.integratedSha ?? state.integratedSha}.`
+        : `Completed by PR #${work.pullRequest}; validated tree ${work.treeSha}.`;
   await step(
     state,
     { scope: { item: itemId }, name: "close" },
@@ -290,7 +329,7 @@ export async function closeCancelledWorkItems(
   github: GitHubGateway,
 ): Promise<void> {
   for (const [itemId, number] of Object.entries(state.issueByItemId)) {
-    if (state.schemaVersion === 7 && state.work[itemId]?.status === "done")
+    if (isExecutionState(state) && state.work[itemId]?.status === "done")
       continue;
     await github.closeIssue(
       number,

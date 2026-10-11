@@ -1,3 +1,4 @@
+import { isExecutionState, isPreparationState } from "./state.js";
 import { randomUUID } from "node:crypto";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest } from "./config.js";
@@ -10,10 +11,10 @@ import { gitHubTransportOf } from "./github-client.js";
 
 /** Derived presentation only; a Project card never grants lifecycle authority. */
 export function projectPhase(state: ContinuationState): ProjectPhase {
-  if (state.schemaVersion === 7 && objectiveComplete(state)) return "accepted";
+  if (isExecutionState(state) && objectiveComplete(state)) return "accepted";
   if (state.cancelRequested || state.cancelledAt || state.error)
     return "stopped";
-  if (state.schemaVersion === 8) {
+  if (isPreparationState(state)) {
     if (state.plan?.review.status === "needs-human") return "needs-human";
     return state.coordinator.mode === "running" ? "planning" : "stopped";
   }

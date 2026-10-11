@@ -102,9 +102,13 @@ export function normalizeExecutionProfiles(
 ): void {
   for (const item of graph.items) {
     if (item.executionProfile === null) delete item.executionProfile;
-    if (item.kind === "qa" || item.kind === "aggregate") {
+    if (
+      item.kind === "qa" ||
+      item.kind === "aggregate" ||
+      (item.kind === "discovery" && item.discovery?.mode === "inventory")
+    ) {
       if (item.executionProfile || item.executionBinding)
-        throw new Error("QA has no worker profile");
+        throw new Error("Controller-only nodes have no worker profile");
       continue;
     }
     if (item.executionBinding !== undefined)

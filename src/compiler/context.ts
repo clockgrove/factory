@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { ContentRef, ContentStore, WorkGraph } from "../contracts.js";
+import { memorySourceHeading } from "../repository-memory.js";
+import type { PlanningSource } from "./sources.js";
 import { pinnedGitEnvironment } from "../process.js";
 
 export type ContextDisposition =
@@ -51,18 +53,27 @@ export interface ContextMatch {
   digest: string;
   bytes: number;
 }
-/** A rendered body reference is local to one result, never an alias to a different source version. */
+/** Reuse closes over exact bytes in this result or its separately supplied source packet. */
+export interface SuppliedSourceReuse {
+  kind: "supplied-source";
+  sourceIndex: number;
+  path: string;
+  heading?: string;
+  digest: string;
+}
 export type PlanningMemoryBody =
   | { role: string; ref: ContentRef; text: string }
   | {
       role: string;
       ref: ContentRef;
-      reuseRef: {
-        kind: "context-match";
-        identity: string;
-        role: string;
-        digest: string;
-      };
+      reuseRef:
+        | SuppliedSourceReuse
+        | {
+            kind: "context-match";
+            identity: string;
+            role: string;
+            digest: string;
+          };
     };
 export interface PlanningMemoryProjection {
   format: "factory.memory-projection/v1";
@@ -251,8 +262,59 @@ function assertResult(result: ContextResult): void {
   if (result.disposition === "no-match" && result.matches.length)
     throw new Error("Scoped no-match cannot contain matches");
 }
-/** Verify that every reused memory body closes over earlier authenticated literal bytes in this result. */
-export function assertPlanningMemoryProjection(result: ContextResult): void {
+/** Match only complete original source selections, never merely equal unrelated bodies. */
+function memoryBodySourceSelection(
+  record: PlanningMemoryProjection["record"],
+  ref: ContentRef,
+  selection: { path: string; heading?: string },
+): boolean {
+  return record.sources.some((source) => {
+    const path =
+      source.path ??
+      (source.identity.startsWith("repository:")
+        ? source.identity.slice("repository:".length)
+        : undefined);
+    return (
+      source.complete &&
+      path === selection.path &&
+      memorySourceHeading(source.heading) ===
+        memorySourceHeading(selection.heading) &&
+      source.ref?.digest === ref.digest &&
+      source.ref.bytes === ref.bytes &&
+      source.ref.mediaType === ref.mediaType
+    );
+  });
+}
+/** Actual source bytes must accompany a supplied-source reference at every consuming boundary. */
+export function memoryBodySuppliedSource(
+  record: PlanningMemoryProjection["record"],
+  body: { ref: ContentRef; text: string },
+  sources: readonly PlanningSource[],
+): SuppliedSourceReuse | undefined {
+  const sourceIndex = sources.findIndex(
+    (source) =>
+      memoryBodySourceSelection(record, body.ref, source) &&
+      source.content === body.text &&
+      Buffer.byteLength(source.content) === body.ref.bytes &&
+      createHash("sha256").update(source.content).digest("hex") ===
+        body.ref.digest,
+  );
+  if (sourceIndex < 0) return undefined;
+  const source = sources[sourceIndex]!;
+  const heading = memorySourceHeading(source.heading);
+  return {
+    kind: "supplied-source",
+    sourceIndex,
+    path: source.path,
+    ...(heading === undefined ? {} : { heading }),
+    digest: body.ref.digest,
+  };
+}
+/** Retained validation binds references; supplied sources additionally authenticate their available literal bytes. */
+export function assertPlanningMemoryProjection(
+  result: ContextResult,
+  sources?: readonly PlanningSource[],
+): void {
   const bodies = new Map<string, ContentRef>();
   for (const match of result.matches) {
     if (
@@ -302,10 +364,39 @@ export function assertPlanningMemoryProjection(result: ContextResult): void {
           JSON.stringify([match.identity, body.role, body.ref.digest]),
           body.ref,
         ]);
+      } else if (body.reuseRef?.kind === "supplied-source") {
+        const reuse = body.reuseRef;
+        if (
+          !Number.isSafeInteger(reuse.sourceIndex) ||
+          reuse.sourceIndex < 0 ||
+          typeof reuse.path !== "string" ||
+          !reuse.path ||
+          (reuse.heading !== undefined &&
+            (typeof reuse.heading !== "string" || !reuse.heading)) ||
+          reuse.digest !== body.ref.digest ||
+          !memoryBodySourceSelection(projection.record, body.ref, reuse)
+        )
+          throw new Error(
+            "Projected memory reference lacks a complete exact source selection",
+          );
+        if (sources) {
+          const source = sources[reuse.sourceIndex];
+          if (
+            !source ||
+            source.path !== reuse.path ||
+            memorySourceHeading(source.heading) !== reuse.heading ||
+            Buffer.byteLength(source.content) !== body.ref.bytes ||
+            createHash("sha256").update(source.content).digest("hex") !==
+              reuse.digest
+          )
+            throw new Error(
+              "Projected memory reference lacks its exact supplied source bytes",
+            );
+        }
       } else {
         const reuse = body.reuseRef;
         const target =
-          reuse &&
+          reuse?.kind === "context-match" &&
           bodies.get(
             JSON.stringify([reuse.identity, reuse.role, reuse.digest]),
           );
@@ -325,8 +416,31 @@ export function assertPlanningMemoryProjection(result: ContextResult): void {
     for (const [key, ref] of pending) bodies.set(key, ref);
   }
 }
+/** Source indices used by the typed memory projection; legacy literal results have none. */
+export function planningMemorySourceIndices(
+  packet: PlanningContextPacket,
+): number[] {
+  const indices = new Set<number>();
+  for (const result of [...packet.automatic, ...packet.batches.flat()]) {
+    if (result.request.collection !== "memory") continue;
+    for (const match of result.matches) {
+      let projection: PlanningMemoryProjection;
+      try {
+        projection = JSON.parse(match.content);
+      } catch {
+        continue;
+      }
+      if (projection?.format !== "factory.memory-projection/v1") continue;
+      for (const body of projection.content)
+        if (!("text" in body) && body.reuseRef.kind === "supplied-source")
+          indices.add(body.reuseRef.sourceIndex);
+    }
+  }
+  return [...indices].sort((a, b) => a - b);
+}
 export function assertPlanningContextPacket(
   packet: PlanningContextPacket,
+  sources?: readonly PlanningSource[],
 ): void {
   if (
     !packet ||
@@ -379,6 +493,7 @@ export function assertPlanningContextPacket(
   const requestIds = new Set<string>();
   for (const result of [...packet.automatic, ...packet.batches.flat()]) {
     assertResult(result);
+    if (sources) assertPlanningMemoryProjection(result, sources);
     if (requestIds.has(result.request.id))
       throw new Error("Retained context repeats a request identity");
     requestIds.add(result.request.id);
@@ -447,13 +562,25 @@ function resolvedContextResult(result: ContextResult): boolean {
 }
 export function assertContextFactsResolved(
   packet: PlanningContextPacket,
+  sources?: readonly PlanningSource[],
 ): void {
-  assertPlanningContextPacket(packet);
+  assertPlanningContextPacket(packet, sources);
   const latest = new Map<string, ContextResult>();
   for (const result of [...packet.automatic, ...packet.batches.flat()]) {
     if (result.request.required)
       latest.set(contextResultIdentity(packet, result), result);
   }
+  if (
+    !sources &&
+    planningMemorySourceIndices({
+      ...packet,
+      automatic: [...latest.values()],
+      batches: [],
+    }).length
+  )
+    throw new MissingPlanningContext(
+      "Required memory source reuse needs the actual supplied source bytes",
+    );
   const missing = [...latest.values()].filter(
     (result) => !resolvedContextResult(result),
   );

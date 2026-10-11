@@ -29,6 +29,7 @@ import {
 import {
   assertContextRequest,
   contextDigest,
+  memoryBodySuppliedSource,
   contextMatch,
   contextResultBytes,
   repositoryContextResult,
@@ -39,6 +40,64 @@ import {
   type PlanningMemoryProjection,
 } from "./context.js";
 import type { PlanningSource } from "./sources.js";
+
+/** Project verified retained bodies against this exact supplied source packet without storage effects. */
+export function planningMemoryMatches(
+  results: MemoryResult[],
+  sources: readonly PlanningSource[],
+  standalone: boolean,
+): ContextMatch[] {
+  const emitted = new Map<string, { identity: string; role: string }>();
+  return results.map((result) => {
+    const identity = `memory:${result.binding.id}`;
+    const content: PlanningMemoryProjection["content"] = [];
+    const pending: { digest: string; role: string }[] = [];
+    for (const body of result.content ?? []) {
+      const supplied =
+        !standalone && memoryBodySuppliedSource(result.record, body, sources);
+      const earlier = !standalone && emitted.get(body.ref.digest);
+      if (supplied)
+        content.push({ role: body.role, ref: body.ref, reuseRef: supplied });
+      else if (earlier)
+        content.push({
+          role: body.role,
+          ref: body.ref,
+          reuseRef: {
+            kind: "context-match",
+            ...earlier,
+            digest: body.ref.digest,
+          },
+        });
+      else {
+        content.push(body);
+        pending.push({ digest: body.ref.digest, role: body.role });
+      }
+    }
+    for (const body of pending)
+      if (!emitted.has(body.digest))
+        emitted.set(body.digest, { identity, role: body.role });
+    const projection: PlanningMemoryProjection = {
+      format: "factory.memory-projection/v1",
+      record: result.record,
+      content,
+    };
+    return contextMatch(
+      `memory:${result.binding.id}`,
+      JSON.stringify(projection),
+      {
+        repository: result.record.repository,
+        manifestRef: result.binding.manifestRef,
+        disposition: result.disposition,
+        gaps: result.gaps,
+        authority: result.record.authority,
+        ...(result.record.validity.expiresAt
+          ? { validUntil: result.record.validity.expiresAt }
+          : {}),
+        complete: result.disposition === "current",
+      },
+    );
+  });
+}
 
 const digest = (text: string) =>
   createHash("sha256").update(text).digest("hex");
@@ -293,54 +352,7 @@ export function createPlanningContextResolver(input: {
       };
     return { request, disposition, matches, detail };
   };
-  const memoryMatches = (results: MemoryResult[], standalone: boolean) => {
-    const emitted = new Map<string, { identity: string; role: string }>();
-    return results.map((result) => {
-      const identity = `memory:${result.binding.id}`;
-      const content: PlanningMemoryProjection["content"] = [];
-      const pending: { digest: string; role: string }[] = [];
-      for (const body of result.content ?? []) {
-        const earlier = !standalone && emitted.get(body.ref.digest);
-        if (earlier)
-          content.push({
-            role: body.role,
-            ref: body.ref,
-            reuseRef: {
-              kind: "context-match",
-              ...earlier,
-              digest: body.ref.digest,
-            },
-          });
-        else {
-          content.push(body);
-          pending.push({ digest: body.ref.digest, role: body.role });
-        }
-      }
-      for (const body of pending)
-        if (!emitted.has(body.digest))
-          emitted.set(body.digest, { identity, role: body.role });
-      const projection: PlanningMemoryProjection = {
-        format: "factory.memory-projection/v1",
-        record: result.record,
-        content,
-      };
-      return contextMatch(
-        `memory:${result.binding.id}`,
-        JSON.stringify(projection),
-        {
-          repository: config.repository,
-          manifestRef: result.binding.manifestRef,
-          disposition: result.disposition,
-          gaps: result.gaps,
-          authority: result.record.authority,
-          ...(result.record.validity.expiresAt
-            ? { validUntil: result.record.validity.expiresAt }
-            : {}),
-          complete: result.disposition === "current",
-        },
-      );
-    });
-  };
+
   return {
     binding: contextDigest({
       repository: config.repository,
@@ -589,7 +601,7 @@ export function createPlanningContextResolver(input: {
             : "complete";
       return bound(
         request,
-        memoryMatches(results, request.operation === "read"),
+        planningMemoryMatches(results, sources, request.operation === "read"),
         remaining,
         disposition,
         "Exact retained memory bodies with explicit applicability and freshness; historical leads cannot establish current facts and unavailable or expired references require an explicit unavailable refresh",

@@ -211,8 +211,6 @@ export function verifyPlanCandidate(
       throw new Error("Recipe origin differs from candidate base");
   }
   assertObjectiveCriteria(body);
-  if (candidate.contextLookup)
-    assertContextFactsResolved(candidate.contextLookup);
   assertDiscoveryContextScope(candidate.graph, candidate.contextLookup);
   assertDeclaredConditions(candidate.graph);
   assertGraphExpansions(candidate.graph, {
@@ -231,6 +229,8 @@ export function verifyPlanCandidate(
       "Planning execution bounds differ from current configuration",
     );
   const expectedSources = planningSources(body, baseSha, checkout);
+  if (candidate.contextLookup)
+    assertContextFactsResolved(candidate.contextLookup, expectedSources);
   const expectedPacket = planReviewPacket(
     body,
     baseSha,

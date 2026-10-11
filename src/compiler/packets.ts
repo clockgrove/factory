@@ -52,7 +52,7 @@ export function planReviewPacket(
   if (executionBounds) assertPlanningExecutionBounds(executionBounds);
   if (approvedPlaybookPin !== undefined)
     assertApprovedPlaybookPin(approvedPlaybookPin);
-  if (contextLookup) assertPlanningContextPacket(contextLookup);
+  if (contextLookup) assertPlanningContextPacket(contextLookup, sources);
   return {
     ...(workflowRecipe ? { workflowRecipe } : {}),
     ...(contextLookup ? { contextLookup } : {}),

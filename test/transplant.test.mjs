@@ -814,6 +814,7 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     assertHumanPlanningDependency,
     assertPlanningLookupRecord,
     assertPlanningMemoryProjection,
+    assertPlanningContextPacket,
     contextMatch,
     contextDigest,
     initializeContextLookup,
@@ -1287,6 +1288,181 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     "repeated original body roles still resolve the exact referenced digest",
   );
 
+  // Actual mixed semantic advice retains its source grounding without repeating
+  // complete bytes already supplied in this request.
+  const handoff = retainedMemory.retain({
+    ...sourceReference.record,
+    kind: "handoff",
+    authority: "advisory",
+    producer: {
+      objective: 1,
+      runId: "observed-interface-handoff",
+      status: "observed-git-source-difference",
+    },
+    summary:
+      "mixedhandoffneedle: complete interface and observed Git difference",
+    bindings: {
+      ...sourceReference.record.bindings,
+      environment: { configDigest: factoryConfigDigest(rankedConfig) },
+    },
+    bodies: [
+      { role: "handoff", ref: differenceRef, availability: "retained" },
+      {
+        role: "source:api/contract.txt",
+        ref: retainedSource.content[0].ref,
+        availability: "retained",
+      },
+    ],
+    sources: [
+      {
+        identity: "repository:api/contract.txt",
+        complete: true,
+        ref: retainedSource.content[0].ref,
+      },
+    ],
+  });
+  const mixedResolver = createPlanningContextResolver({
+    ...runtimeInput,
+    config: rankedConfig,
+  });
+  const mixed = await mixedResolver.resolve(
+    { ...historicalSearch, id: "mixed-handoff", query: "mixedhandoffneedle" },
+    { maxResults: 8, maxBytes: 32768, deadlineAt: Date.now() + 5000 },
+  );
+  assert.equal(mixed.matches.length, 1);
+  const mixedProjection = JSON.parse(mixed.matches[0].content);
+  assert.equal(mixedProjection.content[0].text, difference);
+  assert.deepEqual(mixedProjection.content[1].reuseRef, {
+    kind: "supplied-source",
+    sourceIndex: 1,
+    path: "api/contract.txt",
+    digest: retainedSource.content[0].ref.digest,
+  });
+  assert.equal(
+    mixed.matches[0].provenance.manifestRef.digest,
+    handoff.manifestRef.digest,
+  );
+  assert.equal(mixedProjection.record.authority, "advisory");
+  assert.doesNotThrow(() =>
+    assertPlanningMemoryProjection(mixed, runtimeInput.sources),
+  );
+  assert.throws(
+    () => assertPlanningMemoryProjection(mixed, [runtimeInput.sources[0]]),
+    /exact supplied source bytes/,
+  );
+  assert.throws(
+    () =>
+      assertPlanningMemoryProjection(
+        mixed,
+        runtimeInput.sources.map((source) => ({
+          ...source,
+          content: `${source.content}changed`,
+        })),
+      ),
+    /exact supplied source bytes/,
+  );
+  assert.throws(
+    () =>
+      assertPlanningMemoryProjection(
+        mixed,
+        runtimeInput.sources.map((source) => ({
+          ...source,
+          heading: "different literal section",
+        })),
+      ),
+    /exact supplied source bytes/,
+  );
+  const { planningMemoryMatches } = await import(
+    "../dist/compiler/context-runtime.js"
+  );
+  const originalMixed = retainedMemory.read({
+    access: memoryAccess,
+    id: handoff.id,
+  });
+  for (const incomplete of [
+    { ...originalMixed.record.sources[0], complete: false },
+    {
+      ...originalMixed.record.sources[0],
+      heading: "different literal section",
+    },
+    {
+      ...originalMixed.record.sources[0],
+      ref: {
+        ...originalMixed.record.sources[0].ref,
+        mediaType: "application/json",
+      },
+    },
+  ]) {
+    const matches = planningMemoryMatches(
+      [
+        {
+          ...originalMixed,
+          record: { ...originalMixed.record, sources: [incomplete] },
+        },
+      ],
+      runtimeInput.sources,
+      false,
+    );
+    assert.equal(
+      JSON.parse(matches[0].content).content[1].text,
+      originalBody,
+      "incomplete or different selections cannot reuse complete supplied bytes",
+    );
+  }
+  const exactMixed = await mixedResolver.resolve(
+    {
+      ...mixed.request,
+      id: "standalone-handoff",
+      operation: "read",
+      selector: handoff.id,
+      query: "",
+    },
+    { maxResults: 8, maxBytes: 32768, deadlineAt: Date.now() + 5000 },
+  );
+  assert.equal(
+    JSON.parse(exactMixed.matches[0].content).content[1].text,
+    originalBody,
+  );
+  const mixedPacket = {
+    ...dedupRecord.packet,
+    automatic: [mixed],
+    batches: [],
+  };
+  assert.doesNotThrow(() =>
+    assertPlanningContextPacket(mixedPacket, runtimeInput.sources),
+  );
+  const { planningReviewEvidence } = await import(
+    "../dist/compiler/packets.js"
+  );
+  const reviewRequest = {
+    objective: enabledBody,
+    baseSha,
+    sources: runtimeInput.sources,
+    graph: { items: [] },
+    commands: [],
+    finalCommands: [],
+    contextLookup: mixedPacket,
+    controllerCapabilities: installedControllerCapabilities(),
+    controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+  };
+  const mixedReviewPacket = reviewPacket(
+    [],
+    planningReviewEvidence(reviewRequest),
+  );
+  const mixedReview = renderGraphReviewCall({
+    ...reviewRequest,
+    reviewPacket: mixedReviewPacket,
+  });
+  assert.ok(mixedReview.prompt.includes('"sourceIndex":1,"evidenceIndex":2'));
+  assert.throws(
+    () =>
+      renderGraphReviewCall({
+        ...reviewRequest,
+        reviewPacket: reviewPacket([], []),
+      }),
+    /complete source review evidence/,
+  );
+
   const observedSource = sourceReference.record;
   const observation = (summary) => ({
     ...observedSource,
@@ -1328,8 +1504,8 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     "automatic relevance ranking supplies the older exact body despite preview truncation",
   );
   assert.equal(
-    JSON.parse(relevantAutomatic.content).content[0].text,
-    originalBody,
+    JSON.parse(relevantAutomatic.content).content[0].reuseRef.sourceIndex,
+    1,
   );
   assert.ok(
     rankedRecord.packet.automatic.every((result) =>
@@ -1376,7 +1552,13 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     originalBody,
   );
   rankedRecord.packet.batches.push(rankedBatch);
-  assert.doesNotThrow(() => assertContextFactsResolved(rankedRecord.packet));
+  assert.throws(
+    () => assertContextFactsResolved(rankedRecord.packet),
+    /actual supplied source bytes/,
+  );
+  assert.doesNotThrow(() =>
+    assertContextFactsResolved(rankedRecord.packet, runtimeInput.sources),
+  );
 
   const memoryStore = new LocalContentStore(
     join(stateRoot(config.repository), "content"),

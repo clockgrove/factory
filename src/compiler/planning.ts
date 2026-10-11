@@ -13,6 +13,7 @@ import {
   assertHumanPlanningDependency,
   assertDiscoveryContextScope,
   assertContextFactsResolved,
+  assertPlanningContextPacket,
   type PlanningContextPacket,
   type PlanningTurnResponse,
 } from "./context.js";
@@ -457,7 +458,7 @@ export async function compileObjective(
       throw invalidOutput(
         "Context-enabled compilation requires a discriminated response",
       );
-    assertContextFactsResolved(contextLookup);
+    assertContextFactsResolved(contextLookup, request.sources);
     graph = response.graph;
   } else graph = result as WorkGraph;
   observeDecodedGraph?.(graph);
@@ -519,6 +520,8 @@ export function prepareCompilationRequest(args: {
   assertObjectiveCriteria(body);
   const sources = planningSources(body, baseSha, checkout);
   sources.push(...extraSources);
+  if (args.contextLookup)
+    assertPlanningContextPacket(args.contextLookup, sources);
   const instructions = renderPlanningInstructions(
     body,
     sources,
@@ -574,6 +577,8 @@ export function validateCompiledGraph(args: {
 }): WorkGraph {
   const { graph, request, body, checkout } = args;
   const { sources, baseSha, executionProfiles, invocation } = request;
+  if (request.contextLookup)
+    assertPlanningContextPacket(request.contextLookup, sources);
   const objective = request.compileContext?.objectiveNumber;
   if (objective === undefined)
     throw new Error("Compilation requires trusted compile context");

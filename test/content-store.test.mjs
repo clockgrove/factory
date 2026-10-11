@@ -1384,6 +1384,71 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     multiWitnessArchive.queueOwnerLineage.originalClaim,
     secondLineage.originalClaim,
   );
+  const priorWitnessArchive = await readVerifiedRecoveryCheckpoint(
+    config,
+    undefined,
+    { objective: 2, claimId: claim.id, runId: claimInitial.runId },
+  );
+  for (const [actual, original, initialOriginal, foreignRefs] of [
+    [
+      priorWitnessArchive.queueOwnerLineage,
+      lineage,
+      initialBytes,
+      [secondLineage.initialSnapshot, secondTerminalFile.ref],
+    ],
+    [
+      multiWitnessArchive.queueOwnerLineage,
+      secondLineage,
+      secondInitialBytes,
+      [lineage.initialSnapshot, terminalFile.ref],
+    ],
+  ]) {
+    assert.ok(actual);
+    assert.deepEqual(actual.checkpoints, original.checkpoints);
+    assert.deepEqual(actual.bodies, original.bodies);
+    assert.deepEqual(
+      actual.bodies.map(({ ref }) => ref),
+      [
+        original.checkpoints.before.manifest,
+        original.checkpoints.claimed.manifest,
+        original.checkpoints.initial.manifest,
+        original.originalClaim,
+        original.initialSnapshot,
+      ],
+    );
+    for (const { ref, bytes } of actual.bodies) {
+      assert.equal(bytes.byteLength, ref.bytes);
+      assert.equal(
+        createHash("sha256").update(bytes).digest("hex"),
+        ref.digest,
+      );
+      assert.equal(ref.mediaType, "application/json");
+      assert.equal(
+        foreignRefs.some((foreign) => foreign.digest === ref.digest),
+        false,
+      );
+    }
+    assert.deepEqual(
+      Buffer.from(
+        actual.bodies.find(
+          ({ ref }) => ref.digest === original.initialSnapshot.digest,
+        ).bytes,
+      ),
+      initialOriginal,
+    );
+  }
+  await withRecoveryCheckpointOperation(
+    operationInput,
+    async () => {
+      const cold = await inspectRecoveryCheckpoint(config);
+      const warm = await inspectRecoveryCheckpoint(config);
+      assert.equal(cold.commitSha, multiWitnessInspection.commitSha);
+      assert.equal(warm.commitSha, cold.commitSha);
+      assert.deepEqual(cold.capacity, multiWitnessInspection.capacity);
+      assert.deepEqual(warm.capacity, cold.capacity);
+    },
+    { queueControlVerification: true },
+  );
   await assert.rejects(
     readVerifiedRecoveryCheckpoint(config, undefined, {
       objective: 4,

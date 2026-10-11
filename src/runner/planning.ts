@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { releaseAgentSessions } from "../agent-session.js";
+import { adaptiveWorkflowEnabled } from "../adaptive-workflow.js";
 import {
   bindPlanningPlaybook,
   compilePlan,
@@ -11,6 +12,7 @@ import {
   verifyPlanCandidate,
 } from "../compiler.js";
 import type { FactoryConfig } from "../config.js";
+import { createPlanningContextResolver } from "../compiler/context-runtime.js";
 import {
   factoryConfigDigest,
   resolveCapacity,
@@ -26,7 +28,7 @@ import { planningPrerequisites } from "../objective-prerequisites.js";
 import { fetchHead, git } from "../process.js";
 import { checkRequiredEnvironment, resolveAutonomy } from "../repair-policy.js";
 import type { PreparationState } from "../state.js";
-import { projectionStarted } from "../state.js";
+import { isPreparationState, projectionStarted } from "../state.js";
 import {
   assertNoEarlierVersion,
   readContinuation,
@@ -79,7 +81,10 @@ function preparationSourceDigest(
 export async function planObjective(
   config: FactoryConfig,
   objective: number,
-  services: Pick<ApplicationServices, "planningModel" | "github">,
+  services: Pick<
+    ApplicationServices,
+    "planningModel" | "github" | "contentStore"
+  >,
 ): Promise<PlanCandidate> {
   const digest = factoryConfigDigest(config);
   const emitter = new DiagnosticEmitter(
@@ -103,7 +108,10 @@ export async function planObjective(
 async function planObjectiveObserved(
   config: FactoryConfig,
   objective: number,
-  services: Pick<ApplicationServices, "planningModel" | "github">,
+  services: Pick<
+    ApplicationServices,
+    "planningModel" | "github" | "contentStore"
+  >,
 ): Promise<PlanCandidate> {
   validateTarget(config.repository, config.checkout);
   checkRequiredEnvironment(config);
@@ -141,6 +149,15 @@ async function planObjectiveObserved(
       executionProfileChoices(config),
       // The same recoverable planning as run, over a ledger nothing saves.
       {
+        contextResolver: createPlanningContextResolver({
+          config,
+          objective,
+          objectiveBody: issue.body,
+          runId: planningScopeId,
+          baseSha,
+          sources: planningSources(issue.body, baseSha, config.checkout),
+          contentStore: services.contentStore,
+        }),
         state: {
           autonomy: resolveAutonomy(config.autonomy),
           approvedPlaybookPin: planningModel.approvedPlaybookPin,
@@ -205,7 +222,7 @@ export async function decidePlan(
   try {
     const path = statePath(config.repository, objective);
     const preparation = readContinuation(config.repository, objective);
-    if (preparation?.schemaVersion !== 8)
+    if (!isPreparationState(preparation))
       throw new Error(
         "Objective has no persisted plan awaiting a decision; run it first",
       );
@@ -296,6 +313,7 @@ export async function prepareObjective(args: {
   diagnostics: DiagnosticEmitter;
   planningModel: PlanningModel;
   github: GitHubGateway;
+  contentStore: ApplicationServices["contentStore"];
   owner: LocalOwner;
   installationConfigDigest: string;
   preparation?: PreparationState;
@@ -319,6 +337,11 @@ export async function prepareObjective(args: {
     reportRunStatus,
   } = args;
   let { preparation } = args;
+  const adaptive = adaptiveWorkflowEnabled(issue.body);
+  if (adaptive && !config.planningContext?.enabled)
+    throw new Error(
+      "Adaptive workflow is enabled for this Objective; admit planningContext bounds and selectors in configuration before planning",
+    );
   let planningModel = args.planningModel;
   // A new plan starts from the default branch as origin has it now; the
   // checkout's own refs are only as new as its last fetch. A preparation
@@ -353,7 +376,7 @@ export async function prepareObjective(args: {
     preparation = {
       approvedPlaybookPin,
       sourcePacketDigest,
-      schemaVersion: 8,
+      schemaVersion: adaptive ? 10 : 8,
       kind: "preparing",
       repository: config.repository,
       objective,
@@ -449,6 +472,19 @@ export async function prepareObjective(args: {
                 diagnostics.modelObserver({ scopeId: planningScopeId }),
                 executionProfileChoices(config),
                 {
+                  contextResolver: createPlanningContextResolver({
+                    config,
+                    objective,
+                    objectiveBody: issue.body,
+                    runId: preparation!.runId,
+                    baseSha,
+                    sources: planningSources(
+                      issue.body,
+                      baseSha,
+                      config.checkout,
+                    ),
+                    contentStore: args.contentStore,
+                  }),
                   state: preparation!,
                   sessionState: preparation!,
                   save: () => saveState(path, preparation!),
@@ -473,6 +509,8 @@ export async function prepareObjective(args: {
       );
     }
   preparation.plan = plan;
+  if (plan.graph.items.some((item) => item.kind === "discovery"))
+    preparation.schemaVersion = 10;
   if (!["clean", "human-accepted"].includes(plan.review.status)) {
     // A plan Factory's own checks refuse can only be refused: it still
     // waits for the operator's plan decision (exit 2), never a failure.

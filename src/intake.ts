@@ -43,7 +43,11 @@ import {
   saveState,
   statePath,
 } from "./state-store.js";
-import { setCoordinatorMode } from "./state.js";
+import {
+  isExecutionState,
+  isPreparationState,
+  setCoordinatorMode,
+} from "./state.js";
 import type { ContinuationState } from "./state.js";
 
 /**
@@ -242,8 +246,7 @@ function continuations(config: FactoryConfig): ContinuationState[] {
 }
 function terminal(state: ContinuationState): boolean {
   return (
-    !!state.cancelledAt ||
-    (state.schemaVersion === 7 && objectiveComplete(state))
+    !!state.cancelledAt || (isExecutionState(state) && objectiveComplete(state))
   );
 }
 /** Under the installation lock, sync dormant queued snapshots; the active controller owns its state. */
@@ -600,7 +603,7 @@ export async function runIntake(
       )
         return preparing.coordinator;
       if (
-        preparing?.schemaVersion !== 8 ||
+        !isPreparationState(preparing) ||
         preparing.objective !== request.objective ||
         !record.objectives.includes(request.objective)
       )
@@ -696,7 +699,7 @@ export async function runIntake(
               const missing = predecessors.find((before) => {
                 const state = readContinuation(config.repository, before);
                 return (
-                  state?.schemaVersion !== 7 ||
+                  !isExecutionState(state) ||
                   !objectiveComplete(state) ||
                   !state.finalAcceptance
                 );
@@ -753,7 +756,7 @@ export async function runIntake(
             throw new Error(
               "Current Objective is failed or cancelling; explicit supported recovery is required",
             );
-          if (!state || state.schemaVersion === 8) {
+          if (!state || isPreparationState(state)) {
             const issue = await services.github
               .objective(selected)
               .catch((error: unknown) => {

@@ -6,10 +6,12 @@ import {
   createReadStream,
   existsSync,
   fsyncSync,
+  fstatSync,
   linkSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeSync,
@@ -52,6 +54,78 @@ export class LocalContentStore implements ContentStore {
   private path(ref: ContentRef): string {
     assertRef(ref);
     return join(this.root, ref.digest.slice(0, 2), ref.digest);
+  }
+
+  /** Retain small controller manifests before publishing the atomic snapshot. */
+  putBytes(bytes: Uint8Array, metadata: ContentMetadata): ContentRef {
+    if (!metadata.mediaType) throw new Error("Content metadata is incomplete");
+    const ref = {
+      digest: createHash("sha256").update(bytes).digest("hex"),
+      bytes: bytes.byteLength,
+      mediaType: metadata.mediaType,
+    };
+    const path = this.path(ref);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const temporary = join(this.root, `${randomUUID()}.tmp`);
+    const fd = openSync(temporary, "wx", 0o600);
+    let complete = false;
+    try {
+      let offset = 0;
+      while (offset < bytes.byteLength)
+        offset += writeSync(fd, bytes, offset, bytes.byteLength - offset);
+      fsyncSync(fd);
+      complete = true;
+    } finally {
+      closeSync(fd);
+      if (!complete) rmSync(temporary, { force: true });
+    }
+    try {
+      try {
+        linkSync(temporary, path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      this.readBytes(ref);
+      const directory = openSync(dirname(path), "r");
+      try {
+        fsyncSync(directory);
+      } finally {
+        closeSync(directory);
+      }
+      return ref;
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+  }
+
+  /** Exact complete bytes for synchronous controller retention and lookup. */
+  readBytes(ref: ContentRef): Buffer {
+    const path = this.path(ref);
+    if (realpathSync(dirname(path)) !== resolve(dirname(path)))
+      throw new Error("Content object parent resolves through a symlink");
+    if (!lstatSync(path).isFile())
+      throw new Error("Content object must be a regular file");
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (
+        !stat.isFile() ||
+        stat.uid !== process.getuid?.() ||
+        stat.mode & 0o077
+      )
+        throw new Error("Content object must be an owned private regular file");
+      const bytes = readFileSync(fd);
+      if (
+        bytes.length !== ref.bytes ||
+        createHash("sha256").update(bytes).digest("hex") !== ref.digest
+      )
+        throw new Error(
+          `Content object ${ref.digest} failed digest verification`,
+        );
+      return bytes;
+    } finally {
+      closeSync(fd);
+    }
   }
 
   async put(

@@ -1,3 +1,4 @@
+import { isExecutionState, isPreparationState } from "./state.js";
 import { objectiveComplete } from "./completion.js";
 import type { IntakeAuthorization } from "./intake.js";
 import { objectiveCandidate } from "./qa.js";
@@ -81,7 +82,7 @@ export function runOutcome(
   const wait = state.wait;
   if (
     wait?.kind === "prerequisite" &&
-    !(state.schemaVersion === 7 && objectiveComplete(state))
+    !(isExecutionState(state) && objectiveComplete(state))
   )
     return {
       code: EXIT_NEEDS_DECISION,
@@ -89,13 +90,13 @@ export function runOutcome(
     };
   if (
     wait?.kind === "decision" &&
-    !(state.schemaVersion === 7 && objectiveComplete(state))
+    !(isExecutionState(state) && objectiveComplete(state))
   )
     return {
       code: EXIT_NEEDS_DECISION,
       message: `Objective #${objective} needs a decision: ${wait.detail}\nAnswer with \`${retry}\` (the step runs again on \`${rerun}\`), or \`${configurationCommand(`factory cancel --objective ${objective}`, configuration)}\``,
     };
-  if (state.schemaVersion === 8)
+  if (isPreparationState(state))
     return {
       code: EXIT_NEEDS_DECISION,
       message: state.plan

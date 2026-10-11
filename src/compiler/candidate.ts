@@ -1,3 +1,8 @@
+import {
+  assertDiscoveryContextScope,
+  assertContextFactsResolved,
+  type PlanningContextPacket,
+} from "./context.js";
 import type {
   ApprovedPlaybookPin,
   PlanningPrerequisites,
@@ -36,8 +41,9 @@ import { validateAndOrderGraph } from "../scheduler.js";
 import { assertCoverageSources, coverageObligations } from "../qa.js";
 
 export interface PlanCandidate {
+  contextLookup?: PlanningContextPacket;
   approvedPlaybookPin?: ApprovedPlaybookPin;
-  schemaVersion: 3;
+  schemaVersion: 3 | 4;
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
   executionBounds?: PlanningExecutionBounds;
@@ -106,7 +112,14 @@ export function buildPlanCandidate(
     ...(review.failure ? { failure: review.failure } : {}),
   };
   return {
-    schemaVersion: 3,
+    schemaVersion:
+      packet.contextLookup ||
+      graph.items.some((item) => item.kind === "discovery")
+        ? 4
+        : 3,
+    ...(packet.contextLookup
+      ? { contextLookup: structuredClone(packet.contextLookup) }
+      : {}),
     ...(packet.approvedPlaybookPin !== undefined
       ? { approvedPlaybookPin: packet.approvedPlaybookPin }
       : {}),
@@ -168,6 +181,9 @@ export function verifyPlanCandidate(
   configuredConcurrency?: number,
 ): void {
   assertObjectiveCriteria(body);
+  if (candidate.contextLookup)
+    assertContextFactsResolved(candidate.contextLookup);
+  assertDiscoveryContextScope(candidate.graph, candidate.contextLookup);
   assertInstalledControllerCapabilities(
     candidate.controllerCapabilities,
     candidate.controllerCapabilitiesDigest,
@@ -192,6 +208,7 @@ export function verifyPlanCandidate(
     candidate.localExecutables,
     candidate.executionBounds,
     candidate.approvedPlaybookPin,
+    candidate.contextLookup,
   );
   if (
     (candidate.prerequisites &&
@@ -203,7 +220,11 @@ export function verifyPlanCandidate(
         candidate.localExecutables.baseSha !== baseSha ||
         JSON.stringify(candidate.localExecutables.finalCommands) !==
           JSON.stringify(expectedPacket.finalCommands))) ||
-    candidate.schemaVersion !== 3 ||
+    candidate.schemaVersion !==
+      (candidate.contextLookup ||
+      candidate.graph.items.some((item) => item.kind === "discovery")
+        ? 4
+        : 3) ||
     candidate.objective !== objective ||
     candidate.baseSha !== baseSha ||
     candidate.bodyDigest !== digest(body) ||

@@ -40,6 +40,7 @@ import {
 } from "./repair-policy.js";
 import type { FactoryState } from "./state.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
+import { selectedDiscoveryInputs } from "./runner/discovery.js";
 
 interface ItemWorker {
   state: FactoryState;
@@ -152,12 +153,20 @@ export async function runWorker(
   // A reattached worker keeps the coding slot it holds while it runs remotely.
   if (work.phaseReservation !== "coding")
     await phases.reserve(item.id, "coding");
-  const attemptedItem = workerAttemptItem(
-    state,
-    item,
-    baseSha,
-    objectiveKnowledgeView(state, item, args.config.checkout, baseSha),
-  );
+  const attemptedItem = workerAttemptItem(state, item, baseSha, {
+    knowledge: objectiveKnowledgeView(
+      state,
+      item,
+      args.config.checkout,
+      baseSha,
+    ),
+    discoveryInputs: await selectedDiscoveryInputs({
+      state,
+      item,
+      checkout: args.config.checkout,
+      store: args.store,
+    }),
+  });
   const session = args.driver.sessionCapabilities?.resumeRoles.includes(
     "implementation",
   )

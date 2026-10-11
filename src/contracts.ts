@@ -46,7 +46,15 @@ export interface ExecutionProfileChoices {
 
 export interface WorkItem {
   /** Read-only proof node; uses the ordinary scheduler without a worker or PR. */
-  kind?: "work" | "qa" | "aggregate";
+  kind?: "work" | "qa" | "aggregate" | "discovery";
+  /** Bound read-only observation; never coding or publication authority. */
+  discovery?: import("./discovery.js").DiscoverySpecification;
+  /** Declared dependency observations, selected by exact role and typed fields. */
+  discoveryInputs?: {
+    producerItemId: string;
+    role: string;
+    fields: ("path" | "mode" | "blobSha" | "contentRef" | "classification")[];
+  }[];
   /** Hierarchy only; every required child also has an explicit dependency edge. */
   children?: string[];
   executionProfile?: { id: string; reason: string };
@@ -213,6 +221,8 @@ export type ModelInvocationObserver = ((
 };
 
 export interface ModelInvocationContext {
+  /** Synchronous controller checkpoint immediately before each native provider submission; absent on cached decode. */
+  beforeProviderAttempt?: () => void;
   invocationId: string;
   phase: ModelInvocationPhase;
   ordinal: number;
@@ -361,6 +371,8 @@ export function assertApprovedPlaybookPin(
 }
 
 export interface PlanningRequest<T> {
+  /** Retained controller-selected facts, separate from normative source authority. */
+  contextLookup?: import("./compiler/context.js").PlanningContextPacket;
   /** Controller-owned planner continuation; never model-authored or persisted in a graph. */
   session?: AgentSessionContinuation;
   approvedPlaybookPin?: ApprovedPlaybookPin;
@@ -415,6 +427,8 @@ export interface PlanCommandAuthorization {
 }
 
 export interface PlanReviewRequest {
+  /** The exact context packet used by compilation, independently reviewed. */
+  contextLookup?: import("./compiler/context.js").PlanningContextPacket;
   approvedPlaybookPin?: ApprovedPlaybookPin;
   prerequisites?: PlanningPrerequisites;
   localExecutables?: PlanningLocalExecutables;
@@ -599,6 +613,7 @@ export type AgentSessionReconciliation =
     };
 
 export interface PlanningModel {
+  readonly providerAttemptAdmission?: "controller-checkpoint-v1";
   readonly sessionCapabilities?: AgentSessionCapabilities;
   reconcileSession?(
     session: AgentSessionRef,
@@ -639,6 +654,8 @@ export interface PlanningModel {
 }
 
 export interface ExecutionRequest {
+  /** Controller-authenticated selector-bound observation supplied to discovery. */
+  discovery?: { manifest: import("./discovery.js").DiscoveryOutputManifest };
   session?: AgentSessionRequest;
   captureContext?: { objective: number; runId: string };
   item: WorkItem;
@@ -702,6 +719,7 @@ export interface WorkDiscovery {
 }
 
 export interface ExecutionResult {
+  discoveryOutput?: import("./discovery.js").DiscoveryOutputManifest;
   session?: AgentSessionRef;
   handoff?: {
     notes: WorkHandoffNote[];
@@ -750,6 +768,8 @@ export interface ExecutionContext {
 }
 
 export interface ExecutionDriver {
+  /** Semantic discovery is admitted only after this driver's selector-bound read-only preflight. */
+  readonly readonlyDiscovery?: "selector-bound-read-only-v1";
   readonly sessionCapabilities?: AgentSessionCapabilities;
   releaseSession?(session: AgentSessionRef): Promise<void>;
   /** Supports authenticated preparation in its actual fresh worker checkout. */
@@ -795,6 +815,11 @@ export interface ExecutionDriver {
 }
 
 export interface HarnessRequest {
+  /** Only authenticated selected blobs are exposed to a read-only discovery harness. */
+  discovery?: {
+    manifest: import("./discovery.js").DiscoveryOutputManifest;
+    body: import("./discovery.js").DiscoveryBody;
+  };
   /** Controller preparation in this exact checkout; never acceptance or lifetime proof. */
   workerReadiness?: import("./worker-readiness.js").WorkerReadinessReceipt;
   session?: AgentSessionRequest;
@@ -839,6 +864,13 @@ export interface HarnessResult {
   evidence?: unknown;
 }
 export interface AgentHarnessCapabilities {
+  discovery?: {
+    schema: "factory.repository-inventory/v1";
+    worktree: "read-only";
+    children: "disabled";
+    network: "off";
+    freshConversation: true;
+  };
   protocolVersion: 1;
   worktree: "factory-owned-read-write";
   head: "preserve";

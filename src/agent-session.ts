@@ -1,5 +1,10 @@
+import { isExecutionState, isPreparationState } from "./state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import {
+  assertContextLookupBounds,
+  type PlanningContextPacket,
+} from "./compiler/context.js";
 import type {
   AgentSessionCapabilities,
   AgentSessionContinuation,
@@ -40,12 +45,14 @@ export function assertAgentSessionCapabilities(
     throw new Error("Agent session capabilities are invalid");
 }
 
-/** Same producer before and after projection; no graph or candidate enters it. */
+/** Frozen inputs survive projection and lookup rounds; each turn binds its exact current packet separately. */
 export function planningSessionInputDigest(inputs: {
   baseSha: string;
   objectiveBodyDigest?: string;
   sourcePacketDigest?: string;
   approvedPlaybookPin?: ApprovedPlaybookPin;
+  contextLookup?: PlanningContextPacket;
+  planningRecovery?: { contextLookup?: { packet: PlanningContextPacket } };
 }): string {
   if (!/^[a-f0-9]{40}$/.test(inputs.baseSha))
     throw new Error("Planner immutable base is invalid");
@@ -57,23 +64,39 @@ export function planningSessionInputDigest(inputs: {
       throw new Error(`Planner immutable ${name} is unavailable`);
   if (inputs.approvedPlaybookPin !== undefined)
     assertApprovedPlaybookPin(inputs.approvedPlaybookPin);
-  return createHash("sha256")
-    .update(
-      JSON.stringify([
-        inputs.baseSha,
-        inputs.objectiveBodyDigest,
-        inputs.sourcePacketDigest,
-        inputs.approvedPlaybookPin === undefined
-          ? "absent"
-          : inputs.approvedPlaybookPin === null
-            ? null
-            : {
-                version: inputs.approvedPlaybookPin.version,
-                digest: inputs.approvedPlaybookPin.digest,
-              },
-      ]),
-    )
-    .digest("hex");
+  const frozen: unknown[] = [
+    inputs.baseSha,
+    inputs.objectiveBodyDigest,
+    inputs.sourcePacketDigest,
+    inputs.approvedPlaybookPin === undefined
+      ? "absent"
+      : inputs.approvedPlaybookPin === null
+        ? null
+        : {
+            version: inputs.approvedPlaybookPin.version,
+            digest: inputs.approvedPlaybookPin.digest,
+          },
+  ];
+  const context =
+    inputs.planningRecovery?.contextLookup?.packet ?? inputs.contextLookup;
+  if (context) {
+    if (context.schemaVersion !== 1 || !/^[a-f0-9]{64}$/.test(context.binding))
+      throw new Error("Planner immutable context binding is invalid");
+    assertContextLookupBounds(context.bounds);
+    frozen.push({
+      contextVersion: context.schemaVersion,
+      binding: context.binding,
+      bounds: [
+        context.bounds.maxRounds,
+        context.bounds.maxRequestsPerRound,
+        context.bounds.maxResults,
+        context.bounds.maxBytes,
+        context.bounds.maxElapsedMs,
+        context.bounds.maxProviderCalls,
+      ],
+    });
+  }
+  return createHash("sha256").update(JSON.stringify(frozen)).digest("hex");
 }
 
 /** Scope validation authenticates identities, never native transcript contents. */
@@ -272,7 +295,7 @@ export function assertAgentSessions(state: ContinuationState): void {
       ref.scope.configDigest !== state.configDigest ||
       (ref.scope.role === "planning"
         ? ref.scope.planningInputDigest !== planningSessionInputDigest(state)
-        : state.schemaVersion === 8 ||
+        : isPreparationState(state) ||
           (ref.scope.itemId !== undefined &&
             !state.graph.items.some((item) => item.id === ref.scope.itemId)))
     )
@@ -306,7 +329,7 @@ export function agentSessionContinuation(
       planningInputDigest: planningSessionInputDigest(state),
     };
   } else {
-    if (state.schemaVersion !== 7)
+    if (!isExecutionState(state))
       throw new Error("Preparation cannot own a graph session");
     const binding = {
       ...objectiveScope,
@@ -322,8 +345,9 @@ export function agentSessionContinuation(
     }
   }
   assertAgentSessionScope(scope);
-  const admittedGraphDigest =
-    state.schemaVersion === 7 ? graphDigest(state.graph) : undefined;
+  const admittedGraphDigest = isExecutionState(state)
+    ? graphDigest(state.graph)
+    : undefined;
   const entryKey = key(scope);
   if (
     role !== "planning" &&
@@ -362,9 +386,9 @@ export function agentSessionContinuation(
       : {}),
     checkpoint(ref) {
       if (
-        (state.schemaVersion === 7 && state.finalAcceptance) ||
+        (isExecutionState(state) && state.finalAcceptance) ||
         state.cancelledAt ||
-        (state.schemaVersion === 7 && state.objectiveClosure === "complete")
+        (isExecutionState(state) && state.objectiveClosure === "complete")
       )
         throw new Error(
           "Terminal or cancelling Objective cannot continue an agent session",
@@ -372,7 +396,7 @@ export function agentSessionContinuation(
       if (
         scope.role === "planning"
           ? planningSessionInputDigest(state) !== scope.planningInputDigest
-          : state.schemaVersion !== 7 ||
+          : !isExecutionState(state) ||
             graphDigest(state.graph) !== scope.graphDigest
       )
         throw new Error("Agent session checkpoint was superseded");

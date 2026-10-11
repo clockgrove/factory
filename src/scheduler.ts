@@ -4,6 +4,7 @@ export { pathsOverlap } from "./ownership.js";
 
 import type { WorkGraph, WorkItem } from "./contracts.js";
 import { assertCoverageShape } from "./qa.js";
+import { assertDiscoverySpecification } from "./discovery.js";
 import type { WorkState } from "./state.js";
 
 /** Native item types must hold before proof, path, scheduler or review consumers. */
@@ -156,7 +157,7 @@ export function validateAndOrderGraph(
       !item.brief ||
       !item.acceptance.length ||
       !item.nonGoals?.length ||
-      (!["qa", "aggregate"].includes(item.kind ?? "work") &&
+      (!["qa", "aggregate", "discovery"].includes(item.kind ?? "work") &&
         !item.ownedPaths.length) ||
       !item.citations.length ||
       !item.citations.every((citation) => sources.has(citation.path))
@@ -167,7 +168,7 @@ export function validateAndOrderGraph(
     }
     if (
       item.kind !== undefined &&
-      !["qa", "work", "aggregate"].includes(item.kind)
+      !["qa", "work", "aggregate", "discovery"].includes(item.kind)
     )
       throw new Error("Unknown Work Item kind");
     if (
@@ -181,6 +182,23 @@ export function validateAndOrderGraph(
       throw new Error(
         "Read-only QA nodes cannot own changes, assets, or workers",
       );
+    if (item.kind === "discovery") {
+      assertDiscoverySpecification(item.discovery);
+      if (
+        item.ownedPaths.length ||
+        item.validation.length ||
+        item.sourceAssets?.length ||
+        item.expectedOutputRoles?.length ||
+        item.minimumAssetSets ||
+        item.requiredLfsRoles?.length ||
+        (item.discovery.mode === "inventory" &&
+          (item.executionProfile || item.executionBinding))
+      )
+        throw new Error(
+          "Discovery cannot own changes, validation, media or inventory workers",
+        );
+    } else if (item.discovery !== undefined)
+      throw new Error("Only discovery nodes declare a discovery specification");
     for (const check of item.validation) {
       if (!validValidationCommand(check.command))
         throw new Error(
@@ -220,6 +238,54 @@ export function validateAndOrderGraph(
           "Aggregate children require unique hierarchy and explicit dependencies",
         );
       parents.add(child);
+    }
+    if (item.discoveryInputs !== undefined) {
+      if ((item.kind ?? "work") !== "work")
+        throw new Error(
+          "Discovery inputs currently require an ordinary work consumer",
+        );
+      if (!Array.isArray(item.discoveryInputs) || !item.discoveryInputs.length)
+        throw new Error(
+          "Discovery inputs must declare selected producers, roles and fields",
+        );
+      const seen = new Set<string>();
+      for (const selection of item.discoveryInputs) {
+        const producer = byId.get(selection?.producerItemId);
+        if (
+          !selection ||
+          typeof selection !== "object" ||
+          Object.keys(selection).some(
+            (key) => !["producerItemId", "role", "fields"].includes(key),
+          ) ||
+          !producer ||
+          producer.kind !== "discovery" ||
+          !item.dependencies.includes(producer.id) ||
+          selection.role !== producer.discovery?.role ||
+          seen.has(producer.id) ||
+          !Array.isArray(selection.fields) ||
+          !selection.fields.length ||
+          new Set(selection.fields).size !== selection.fields.length ||
+          selection.fields.some(
+            (field) =>
+              ![
+                "path",
+                "mode",
+                "blobSha",
+                "contentRef",
+                "classification",
+              ].includes(field),
+          )
+        )
+          throw new Error(
+            "Discovery input selection differs from its declared direct dependency output",
+          );
+        if (
+          selection.fields.includes("classification") &&
+          producer.discovery?.mode !== "semantic"
+        )
+          throw new Error("Inventory discovery has no classification field");
+        seen.add(producer.id);
+      }
     }
     for (const dependency of item.dependencies) {
       if (!byId.has(dependency) || dependency === item.id)

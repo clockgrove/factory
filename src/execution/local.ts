@@ -48,6 +48,14 @@ import type {
 import { AuthenticationRequiredError } from "../contracts.js";
 import { assertExecutionBinding } from "../execution-profiles.js";
 import {
+  authenticateDiscoveryOutput,
+  classifyDiscoveryOutput,
+  assertDiscoverySpecification,
+  assertDiscoveryOutputManifest,
+  assertDiscoveryBody,
+  discoverySpecificationDigest,
+} from "../discovery.js";
+import {
   attachedFault,
   cancelledFault,
   classifyFaults,
@@ -173,6 +181,13 @@ export class CodexHarness implements AgentHarness {
     publication: "controller-only",
     assetSets: true,
     authentication: "local-environment",
+    discovery: {
+      schema: "factory.repository-inventory/v1",
+      worktree: "read-only",
+      children: "disabled",
+      network: "off",
+      freshConversation: true,
+    },
   } as const;
 
   constructor(
@@ -304,6 +319,41 @@ export class CodexHarness implements AgentHarness {
    * unrecorded start of it spawned is stopped first (#585).
    */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
+    if ((request.item.kind === "discovery") !== Boolean(request.discovery))
+      throw new Error(
+        "Codex discovery requires its explicit read-only execution input",
+      );
+    if (request.discovery) {
+      assertDiscoverySpecification(request.item.discovery);
+      assertDiscoveryOutputManifest(request.discovery.manifest);
+      assertDiscoveryBody(request.discovery.body);
+      const { manifest, body } = request.discovery;
+      if (
+        request.item.discovery.mode !== "semantic" ||
+        manifest.status !== "complete" ||
+        manifest.producer.itemId !== request.item.id ||
+        manifest.specificationDigest !==
+          discoverySpecificationDigest(request.item.discovery) ||
+        manifest.body.bytes !== Buffer.byteLength(JSON.stringify(body)) ||
+        manifest.body.digest !==
+          createHash("sha256").update(JSON.stringify(body)).digest("hex")
+      )
+        throw new Error(
+          "Codex discovery input differs from its bound inventory",
+        );
+      await verifyDiscoveryExport(request.worktree, body.entries);
+    }
+    if (
+      request.discovery &&
+      (request.session ||
+        request.environment ||
+        request.workerReadiness ||
+        request.sourceAssets?.length ||
+        request.selectedAssets?.length)
+    )
+      throw new Error(
+        "Codex discovery cannot inherit implementation capabilities",
+      );
     const identity = request.attemptId ?? randomUUID();
     const boundRequest = { ...request, attemptId: identity };
     const session = await this.workerSession(boundRequest);
@@ -317,14 +367,14 @@ export class CodexHarness implements AgentHarness {
         input: codexWorkerInput(
           boundRequest,
           this.network,
-          this.allowedSecretNames,
+          request.discovery ? [] : this.allowedSecretNames,
           this.model,
           this.providerTurnIdleTimeoutMs,
           session,
         ),
         env: sanitizedWorkerEnvironment(
           this.credentialDirectory,
-          this.allowedSecretNames,
+          request.discovery ? [] : this.allowedSecretNames,
         ),
       }),
     };
@@ -509,6 +559,40 @@ async function verifyBoundInput(path: string, ref: ContentRef): Promise<void> {
   }
   if (bytes !== ref.bytes || hash.digest("hex") !== ref.digest)
     throw workFault("Bound asset input differs from its captured digest");
+}
+
+async function verifyDiscoveryExport(
+  worktree: string,
+  entries: { path: string; content: ContentRef }[],
+): Promise<void> {
+  if (
+    !existsSync(worktree) ||
+    !lstatSync(worktree).isDirectory() ||
+    realpathSync(worktree) !== resolve(worktree)
+  )
+    throw workFault("Discovery export is missing or redirected");
+  const expected = new Set(entries.map((entry) => entry.path));
+  const inspect = (directory: string, relative = ""): void => {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name);
+      const shown = relative ? `${relative}/${name}` : name;
+      const stat = lstatSync(path);
+      if (name === ".git")
+        throw workFault("Discovery export contains Git metadata");
+      if (stat.isDirectory()) inspect(path, shown);
+      else if (!stat.isFile() || !expected.has(shown))
+        throw workFault(
+          "Read-only discovery export contains an unexpected source or link",
+        );
+    }
+  };
+  inspect(worktree);
+  for (const entry of entries) {
+    const path = resolve(worktree, entry.path);
+    if (!path.startsWith(`${resolve(worktree)}${sep}`))
+      throw workFault("Discovery export escapes its selected source scope");
+    await verifyBoundInput(path, entry.content);
+  }
 }
 
 function assertDurableHandle(handle: HarnessHandle): void {
@@ -906,6 +990,7 @@ export function checkpointWorkerSession(
 }
 
 export class LocalExecutionDriver implements ExecutionDriver {
+  readonly readonlyDiscovery = "selector-bound-read-only-v1" as const;
   readonly sessionCapabilities = { resumeRoles: ["implementation"] } as const;
   readonly freshCheckoutReadiness = true as const;
   readonly retainedFailedResultContext = true as const;
@@ -1034,11 +1119,48 @@ export class LocalExecutionDriver implements ExecutionDriver {
     }
   }
 
+  private assertDiscoveryCapability(
+    item: WorkItem,
+    harness: AgentHarness,
+  ): void {
+    if (item.kind !== "discovery") return;
+    assertDiscoverySpecification(item.discovery);
+    if (item.discovery.mode === "inventory") return;
+    const capability = harness.capabilities.discovery;
+    if (
+      !capability ||
+      capability.schema !== item.discovery.schema ||
+      capability.worktree !== "read-only" ||
+      capability.children !== "disabled" ||
+      capability.network !== "off" ||
+      capability.freshConversation !== true
+    )
+      throw new Error(
+        `Assigned execution adapter cannot enforce this read-only discovery contract; no provider call was made`,
+      );
+    if (
+      item.sourceAssets?.length ||
+      item.validation.length ||
+      item.ownedPaths.length
+    )
+      throw new Error(
+        "Discovery cannot declare source ownership, setup commands or assets",
+      );
+  }
+
+  private async removeExecutionDirectory(path: string): Promise<void> {
+    if (existsSync(join(path, ".git")))
+      await removeWorktree(this.checkout, path);
+    else rmSync(path, { recursive: true, force: true });
+  }
+
   @classifyFaults(executionFault)
   async preflight(graph: WorkGraph): Promise<void> {
     for (const item of graph.items) {
+      if (item.kind === "discovery" && item.discovery?.mode === "inventory")
+        continue;
       if (item.kind !== "qa" && item.kind !== "aggregate")
-        this.resolveHarness(item);
+        this.assertDiscoveryCapability(item, this.resolveHarness(item));
     }
   }
 
@@ -1061,6 +1183,29 @@ export class LocalExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<ExecutionHandle> {
     const harness = this.resolveHarness(request.item);
+    this.assertDiscoveryCapability(request.item, harness);
+    if (request.item.kind === "discovery") {
+      if (
+        !request.discovery ||
+        request.item.discovery?.mode !== "semantic" ||
+        request.session ||
+        request.environmentReadiness ||
+        request.sourceAssets?.length ||
+        request.selectedAssets?.length ||
+        request.retainedFailedResult
+      )
+        throw new Error(
+          "Semantic discovery requires its bound inventory and a fresh read-only request",
+        );
+      if (
+        request.discovery.manifest.source.commitSha !== request.baseSha ||
+        request.discovery.manifest.status !== "complete"
+      )
+        throw new Error(
+          "Semantic discovery cannot execute from an incomplete or differently bound inventory",
+        );
+    } else if (request.discovery)
+      throw new Error("Unrequested discovery execution input");
     const identity = request.attemptId ?? randomUUID();
     const session = request.session
       ? structuredClone(request.session)
@@ -1093,7 +1238,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     mkdirSync(this.workRoot, { recursive: true });
     if (existsSync(worktree)) {
       await (harness as RecoverableHarness).cancelUnrecorded?.(identity);
-      await removeWorktree(this.checkout, worktree);
+      await this.removeExecutionDirectory(worktree);
     }
     if (context?.cancelled())
       throw cancelledFault("Cancelled before the worker started");
@@ -1105,8 +1250,32 @@ export class LocalExecutionDriver implements ExecutionDriver {
     );
     if (verified !== request.baseSha)
       throw new Error("Execution base does not resolve exactly");
-    await addWorktree(this.checkout, worktree, request.baseSha);
+    if (request.discovery)
+      mkdirSync(worktree, { recursive: false, mode: 0o700 });
+    else await addWorktree(this.checkout, worktree, request.baseSha);
     try {
+      const discoveryBody = request.discovery
+        ? await authenticateDiscoveryOutput({
+            checkout: this.checkout,
+            specification: request.item.discovery!,
+            manifest: request.discovery.manifest,
+            store: this.contentStore,
+          })
+        : undefined;
+      if (discoveryBody) {
+        for (const entry of discoveryBody.entries) {
+          const path = resolve(worktree, entry.path);
+          if (
+            !path.startsWith(`${resolve(worktree)}${sep}`) ||
+            entry.path.split("/").includes(".git")
+          )
+            throw new Error(
+              "Discovery export path escapes the selected source scope",
+            );
+          mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+          await this.contentStore.materialize(entry.content, path);
+        }
+      }
       let environmentReadiness: ValidationEvidence | undefined;
       if (request.environmentReadiness) {
         const readiness = request.environmentReadiness;
@@ -1177,12 +1346,14 @@ export class LocalExecutionDriver implements ExecutionDriver {
             "Cancelled after worker environment preparation",
           );
       }
-      const sourceAssets = await importSourceAssets(
-        this.contentStore,
-        worktree,
-        request.item,
-        request.objectiveBody,
-      );
+      const sourceAssets = request.discovery
+        ? []
+        : await importSourceAssets(
+            this.contentStore,
+            worktree,
+            request.item,
+            request.objectiveBody,
+          );
       const inputRoot = join(worktree, ".factory-inputs");
       const privateSources = sourceAssets.filter(
         (source) =>
@@ -1207,9 +1378,10 @@ export class LocalExecutionDriver implements ExecutionDriver {
           return { ...asset, path };
         }),
       );
-      const environment = request.item.executionProfile
-        ? this.profiles?.get(request.item.executionProfile.id)?.environment
-        : undefined;
+      const environment =
+        !request.discovery && request.item.executionProfile
+          ? this.profiles?.get(request.item.executionProfile.id)?.environment
+          : undefined;
       const failedContext = retainedFailedResultBrief(
         this.checkout,
         worktree,
@@ -1257,6 +1429,13 @@ export class LocalExecutionDriver implements ExecutionDriver {
         ...(workerReadiness && { receiptDigest: workerReadiness.digest }),
       });
       const handle = await harness.start({
+        ...(request.discovery &&
+          discoveryBody && {
+            discovery: {
+              manifest: structuredClone(request.discovery.manifest),
+              body: discoveryBody,
+            },
+          }),
         ...(workerReadiness && { workerReadiness }),
         ...(admittedSession && { session: admittedSession }),
         ...(request.captureContext &&
@@ -1326,7 +1505,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     } catch (error) {
       this.active.delete(identity);
       if (!hasUnresolvedSubprocesses())
-        await removeWorktree(this.checkout, worktree);
+        await this.removeExecutionDirectory(worktree);
       throw error;
     }
   }
@@ -1354,7 +1533,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       resolve(worktree).startsWith(`${resolve(this.workRoot)}${sep}`) &&
       existsSync(worktree)
     )
-      await removeWorktree(this.checkout, worktree);
+      await this.removeExecutionDirectory(worktree);
   }
 
   /** Every harness this driver can start a worker with. */
@@ -1483,7 +1662,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     // An ended attempt: its worktree goes if a crash kept it.
     if (settled?.result || settled?.stopped !== undefined) {
       if (settled.worktree && existsSync(settled.worktree))
-        await removeWorktree(this.checkout, settled.worktree);
+        await this.removeExecutionDirectory(settled.worktree);
       if (settled.result) return structuredClone(settled.result);
       throw stoppedFault(settled.stopped!, true);
     }
@@ -1516,13 +1695,44 @@ export class LocalExecutionDriver implements ExecutionDriver {
         else context?.checkpointSession?.(structuredClone(result.session));
         sessionCheckpointed = true;
       }
-      collected = await collectWorktreeResult(
-        this.checkout,
-        active.worktree,
-        active.request,
-        this.contentStore,
-        result,
-      );
+      if (active.request.discovery) {
+        if (result.session || result.assets?.length)
+          throw workFault(
+            "Discovery returned unsolicited implementation effects",
+          );
+        const response = (
+          result.evidence as { finalResponse?: unknown } | undefined
+        )?.finalResponse;
+        if (typeof response !== "string")
+          throw workFault("Discovery returned no structured classification");
+        const original = await authenticateDiscoveryOutput({
+          checkout: this.checkout,
+          specification: active.request.item.discovery!,
+          manifest: active.request.discovery.manifest,
+          store: this.contentStore,
+        });
+        await verifyDiscoveryExport(active.worktree, original.entries);
+        const manifest = await classifyDiscoveryOutput({
+          checkout: this.checkout,
+          specification: active.request.item.discovery!,
+          manifest: active.request.discovery!.manifest,
+          store: this.contentStore,
+          response,
+        });
+        collected = {
+          treeSha: manifest.source.treeSha,
+          changeRef: manifest.source.commitSha,
+          discoveryOutput: manifest,
+          evidence: result.evidence,
+        };
+      } else
+        collected = await collectWorktreeResult(
+          this.checkout,
+          active.worktree,
+          active.request,
+          this.contentStore,
+          result,
+        );
       if (result.session) collected.session = structuredClone(result.session);
     } catch (error) {
       collectionError = error;
@@ -1597,9 +1807,10 @@ export class LocalExecutionDriver implements ExecutionDriver {
     this.active.delete(handle.identity);
     if (
       collected ||
+      active.request.discovery ||
       !existsSync(join(active.worktree, ".factory-discovery.json"))
     )
-      await removeWorktree(this.checkout, active.worktree);
+      await this.removeExecutionDirectory(active.worktree);
     if (!collected) {
       if (collectionError instanceof AuthenticationRequiredError)
         throw collectionError;

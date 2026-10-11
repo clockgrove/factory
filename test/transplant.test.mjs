@@ -803,3 +803,537 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     rmSync(privateSources, { recursive: true, force: true });
   }
 });
+
+test("compiler retrieves scoped immutable bodies and retains exact bounded context", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-context-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { mkdirSync } = await import("node:fs");
+  const { LocalContentStore } = await import("../dist/content/local.js");
+  const {
+    assertContextFactsResolved,
+    assertHumanPlanningDependency,
+    assertPlanningLookupRecord,
+    contextDigest,
+    initializeContextLookup,
+    repositoryContextResult,
+    resolveContextRequests,
+    retainContextPacket,
+  } = await import("../dist/compiler/context.js");
+  const checkout = join(root, "target");
+  mkdirSync(checkout);
+  git(checkout, "init", "-q");
+  git(checkout, "config", "user.email", "test@example.invalid");
+  git(checkout, "config", "user.name", "Factory integration");
+  mkdirSync(join(checkout, "api"));
+  writeFileSync(
+    join(checkout, "api", "contract.txt"),
+    "version one\ncomplete interface body\n",
+  );
+  writeFileSync(join(checkout, "secret.txt"), "outside admitted selector\n");
+  const tabPath = "api/tab\tcontract.txt";
+  writeFileSync(join(checkout, tabPath), "literal tab filename body\n");
+  mkdirSync(join(checkout, "unrelated"));
+  for (let index = 0; index < 500; index++)
+    writeFileSync(
+      join(
+        checkout,
+        "unrelated",
+        `${String(index).padStart(4, "0")}-${"x".repeat(120)}.txt`,
+      ),
+      "unrelated body\n",
+    );
+
+  git(checkout, "add", ".");
+  git(checkout, "commit", "-qm", "immutable context baseline");
+  const baseSha = git(checkout, "rev-parse", "HEAD");
+  const store = new LocalContentStore(join(root, "private-content"));
+  const originalBody = "version one\ncomplete interface body\n";
+  const originalBlob = git(
+    checkout,
+    "rev-parse",
+    `${baseSha}:api/contract.txt`,
+  );
+  const replacementBlob = execFileSync(
+    "git",
+    ["-C", checkout, "hash-object", "-w", "--stdin"],
+    { input: "replacement body\n", encoding: "utf8" },
+  ).trim();
+  git(checkout, "replace", originalBlob, replacementBlob);
+  const { createPlanningContextResolver } = await import(
+    "../dist/compiler/context-runtime.js"
+  );
+  const { validateConfig, stateRoot, factoryConfigDigest } = await import(
+    "../dist/config.js"
+  );
+  git(
+    checkout,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/factory-qualification/compiler-context.git",
+  );
+  const enabledBody = "## Adaptive workflow\nenabled\n";
+  const model = { model: "gpt-6.1-sol", reasoningEffort: "medium" };
+  const config = validateConfig({
+    schemaVersion: 1,
+    repository: "factory-qualification/compiler-context",
+    checkout,
+    planning: { kind: "codex-sdk", planner: model, reviewer: model },
+    execution: {
+      kind: "local",
+      concurrency: 1,
+      harness: { kind: "codex-sdk", ...model },
+    },
+    delivery: { kind: "regular" },
+    policy: { network: "off", allowedSecretNames: [] },
+    planningContext: {
+      enabled: true,
+      bounds: {
+        maxRounds: 3,
+        maxRequestsPerRound: 4,
+        maxResults: 8,
+        maxBytes: 4096,
+        maxElapsedMs: 5000,
+        maxProviderCalls: 1,
+      },
+      selectors: ["api/"],
+      memory: false,
+    },
+  });
+  const runtimeInput = {
+    config,
+    objective: 1,
+    runId: "scoped-context-integration",
+    baseSha,
+    objectiveBody: enabledBody,
+    sources: [
+      { path: "OBJECTIVE", content: enabledBody },
+      { path: "api/contract.txt", content: originalBody },
+    ],
+    contentStore: store,
+  };
+  assert.equal(
+    createPlanningContextResolver({
+      ...runtimeInput,
+      objectiveBody: "Static Objective",
+    }),
+    undefined,
+  );
+  assert.equal(
+    createPlanningContextResolver({
+      ...runtimeInput,
+      objectiveBody: "## Adaptive workflow\ndisabled\n",
+    }),
+    undefined,
+  );
+  const { planningContext: _planningContext, ...staticConfig } = config;
+  assert.throws(
+    () =>
+      createPlanningContextResolver({ ...runtimeInput, config: staticConfig }),
+    /admit planningContext/,
+  );
+  const runtimeResolver = createPlanningContextResolver(runtimeInput);
+  const remaining = {
+    maxResults: 8,
+    maxBytes: 4096,
+    deadlineAt: Date.now() + 5000,
+  };
+  const exactSource = await runtimeResolver.resolve(
+    {
+      id: "pinned",
+      operation: "read",
+      collection: "pinned-sources",
+      selector: "1",
+      query: "",
+      required: true,
+      reason: "Read the already supplied immutable interface",
+    },
+    remaining,
+  );
+  assert.equal(exactSource.disposition, "complete");
+  assert.equal(exactSource.matches[0].content, originalBody);
+  assert.equal(exactSource.matches[0].provenance.sourceIndex, 1);
+  const memoryConfig = validateConfig({
+    ...config,
+    planningContext: { ...config.planningContext, memory: true },
+  });
+  const memoryResolver = createPlanningContextResolver({
+    ...runtimeInput,
+    config: memoryConfig,
+  });
+  const { LocalRepositoryMemory } = await import(
+    "../dist/repository-memory.js"
+  );
+  const retainedMemory = new LocalRepositoryMemory(
+    stateRoot(config.repository),
+    config.repository,
+  );
+  const memoryAccess = {
+    repository: config.repository,
+    visibility: ["repository", "private"],
+  };
+  const sourceReference = retainedMemory
+    .metadata({ access: memoryAccess, limit: 8 })
+    .entries.find(
+      (entry) =>
+        entry.record.kind === "reference" &&
+        entry.record.sources.some(
+          (source) => source.path === "api/contract.txt",
+        ),
+    );
+  assert.ok(
+    sourceReference,
+    "the actual supplied source reference survives in repository memory",
+  );
+  const retainedSource = retainedMemory.read({
+    access: memoryAccess,
+    id: sourceReference.binding.id,
+    maxBytes: 4096,
+  });
+  assert.equal(retainedSource.content[0].text, originalBody);
+  assert.ok(
+    !memoryResolver.catalog
+      .find((collection) => collection.id === "memory")
+      .selectors.includes(sourceReference.binding.id),
+    "already supplied source identity is excluded before ranking or body reads",
+  );
+  const automaticMemory = await initializeContextLookup(memoryResolver);
+  assert.ok(
+    automaticMemory.packet.automatic.every((result) =>
+      result.matches.every(
+        (match) => match.identity !== `memory:${sourceReference.binding.id}`,
+      ),
+    ),
+    "automatic delivery does not reload an already supplied source body",
+  );
+  const memoryPinned = await memoryResolver.resolve(
+    { ...exactSource.request, id: "memory-pinned" },
+    remaining,
+  );
+  assert.equal(memoryPinned.disposition, "complete");
+  assert.equal(memoryPinned.matches[0].content, originalBody);
+
+  const rankedConfig = validateConfig({
+    ...memoryConfig,
+    planningContext: {
+      ...memoryConfig.planningContext,
+      bounds: {
+        ...memoryConfig.planningContext.bounds,
+        maxResults: 64,
+        maxBytes: 131072,
+        maxElapsedMs: 30000,
+      },
+    },
+  });
+  const observedSource = sourceReference.record;
+  const observation = (summary) => ({
+    ...observedSource,
+    kind: "observation",
+    createdAt: new Date().toISOString(),
+    summary,
+    bindings: {
+      ...observedSource.bindings,
+      environment: { configDigest: factoryConfigDigest(rankedConfig) },
+    },
+  });
+  const relevantSummary =
+    "Adaptive workflow enabled: api interface version one, complete body; scopedretrievalneedle";
+  const relevant = retainedMemory.retain(observation(relevantSummary));
+  for (let index = 0; index < 66; index++)
+    retainedMemory.retain(
+      observation(`Observed immutable interface body, receipt ${index}`),
+    );
+  const rankedResolver = createPlanningContextResolver({
+    ...runtimeInput,
+    config: rankedConfig,
+  });
+  const rankedCatalog = rankedResolver.catalog.find(
+    (collection) => collection.id === "memory",
+  );
+  assert.equal(rankedCatalog.completeness, "incomplete");
+  assert.equal(rankedCatalog.selectors.length, 65);
+  assert.ok(
+    !rankedCatalog.selectors.includes(relevant.id),
+    "the older relevant observation falls outside the newest 64 displayed manifests",
+  );
+  assert.ok(!rankedCatalog.selectors.includes(sourceReference.binding.id));
+  const rankedRecord = await initializeContextLookup(rankedResolver);
+  const relevantAutomatic = rankedRecord.packet.automatic
+    .flatMap((result) => result.matches)
+    .find((match) => match.identity === `memory:${relevant.id}`);
+  assert.ok(
+    relevantAutomatic,
+    "automatic relevance ranking supplies the older exact body despite preview truncation",
+  );
+  assert.equal(
+    JSON.parse(relevantAutomatic.content).content[0].text,
+    originalBody,
+  );
+  assert.ok(
+    rankedRecord.packet.automatic.every((result) =>
+      result.matches.every(
+        (match) => match.identity !== `memory:${sourceReference.binding.id}`,
+      ),
+    ),
+  );
+  const focusedSearch = {
+    id: "focused-memory-search",
+    operation: "search",
+    collection: "memory",
+    selector: "",
+    query: "scopedretrievalneedle",
+    required: true,
+    reason: "Retrieve the exact earlier observed interface fact",
+  };
+  const rankedBatch = await resolveContextRequests(
+    rankedRecord,
+    rankedResolver,
+    [
+      focusedSearch,
+      {
+        ...focusedSearch,
+        id: "absent-memory-search",
+        query: "unobservedretrievalneedle",
+      },
+      {
+        ...focusedSearch,
+        id: "older-memory-read",
+        operation: "read",
+        selector: relevant.id,
+        query: "",
+      },
+    ],
+  );
+  assert.equal(rankedBatch[0].disposition, "complete");
+  assert.equal(rankedBatch[0].matches.length, 1);
+  assert.equal(rankedBatch[0].matches[0].identity, `memory:${relevant.id}`);
+  assert.equal(rankedBatch[1].disposition, "no-match");
+  assert.equal(rankedBatch[2].disposition, "complete");
+  assert.equal(
+    JSON.parse(rankedBatch[2].matches[0].content).content[0].text,
+    originalBody,
+  );
+  rankedRecord.packet.batches.push(rankedBatch);
+  assert.doesNotThrow(() => assertContextFactsResolved(rankedRecord.packet));
+
+  const memoryStore = new LocalContentStore(
+    join(stateRoot(config.repository), "content"),
+  );
+  const outsideRef = memoryStore.putBytes(
+    execFileSync("git", ["-C", checkout, "show", `${baseSha}:secret.txt`]),
+    { mediaType: "text/plain; charset=utf-8" },
+  );
+  const outsideMemory = retainedMemory.retain({
+    ...observation("Observed a file outside the admitted source selectors"),
+    bodies: [
+      { role: "observed-file", ref: outsideRef, availability: "retained" },
+    ],
+    sources: [
+      {
+        identity: "secret.txt#",
+        path: "secret.txt",
+        complete: true,
+        ref: outsideRef,
+      },
+    ],
+    bindings: { paths: [{ path: "secret.txt", digest: outsideRef.digest }] },
+  });
+  const rankedRemaining = {
+    maxResults: 8,
+    maxBytes: 131072,
+    deadlineAt: Date.now() + 30000,
+  };
+  for (const selector of ["invalid-memory-identity", outsideMemory.id]) {
+    const deniedMemory = await rankedResolver.resolve(
+      {
+        ...focusedSearch,
+        id: `denied-${selector}`,
+        operation: "read",
+        selector,
+        query: "",
+      },
+      rankedRemaining,
+    );
+    assert.equal(deniedMemory.disposition, "denied");
+    assert.deepEqual(deniedMemory.matches, []);
+  }
+
+  const outside = await runtimeResolver.resolve(
+    {
+      id: "outside",
+      operation: "read",
+      collection: "repository",
+      selector: "secret.txt",
+      query: "",
+      required: false,
+      reason: "Verify scoped denial",
+    },
+    remaining,
+  );
+  assert.equal(outside.disposition, "denied");
+  const required = {
+    id: "contract",
+    operation: "read",
+    collection: "repository",
+    selector: "api/contract.txt",
+    query: "",
+    required: true,
+    reason: "Missing material interface body",
+  };
+  const resolver = {
+    binding: contextDigest({ baseSha, selectors: ["api/"] }),
+    bounds: {
+      maxRounds: 3,
+      maxRequestsPerRound: 4,
+      maxResults: 8,
+      maxBytes: 4096,
+      maxElapsedMs: 5000,
+      maxProviderCalls: 1,
+    },
+    catalog: [
+      {
+        id: "repository",
+        selectors: ["api/"],
+        operations: ["read", "search", "inventory"],
+        freshness: `immutable:${baseSha}`,
+        completeness: "complete",
+      },
+    ],
+    automatic: [required],
+    contentStore: store,
+    resolve: async (request, remaining) =>
+      repositoryContextResult(checkout, baseSha, request, remaining),
+  };
+  const oldGitDir = process.env.GIT_DIR;
+  try {
+    process.env.GIT_DIR = join(root, "unrelated-git-directory");
+    const pinned = repositoryContextResult(
+      checkout,
+      baseSha,
+      required,
+      remaining,
+    );
+    assert.equal(pinned.disposition, "complete");
+    assert.equal(pinned.matches[0].content, originalBody);
+  } finally {
+    if (oldGitDir === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = oldGitDir;
+  }
+
+  writeFileSync(join(checkout, tabPath), "dirty tab filename body\n");
+  const literalTab = repositoryContextResult(
+    checkout,
+    baseSha,
+    { ...required, id: "literal-tab", selector: tabPath },
+    remaining,
+  );
+  assert.equal(literalTab.disposition, "complete");
+  assert.equal(literalTab.matches[0].content, "literal tab filename body\n");
+  assert.equal(literalTab.matches[0].provenance.path, tabPath);
+  const record = await initializeContextLookup(resolver);
+  assertContextFactsResolved(record.packet);
+  assert.equal(
+    record.packet.automatic[0].matches[0].content,
+    "version one\ncomplete interface body\n",
+  );
+  writeFileSync(
+    join(checkout, "api", "contract.txt"),
+    "uncommitted changed body\n",
+  );
+  const results = await resolveContextRequests(record, resolver, [
+    { ...required, id: "reused" },
+    { ...required, id: "inventory", operation: "inventory", selector: "api/" },
+    {
+      ...required,
+      id: "empty",
+      operation: "inventory",
+      selector: "api/missing/",
+    },
+    { ...required, id: "denied", selector: "secret.txt", required: false },
+  ]);
+  assert.match(results[0].detail, /Reused retained exact result/);
+  assert.equal(
+    results[0].matches[0].content,
+    record.packet.automatic[0].matches[0].content,
+  );
+  assert.equal(results[1].disposition, "complete");
+  assert.equal(
+    JSON.parse(results[1].matches[0].content)[0].path,
+    "api/contract.txt",
+  );
+  assert.equal(results[2].disposition, "no-match");
+  assert.equal(results[3].disposition, "denied");
+  record.packet.batches.push(results);
+  record.requestDigests.push(contextDigest(results.map((r) => r.request)));
+  await retainContextPacket(record, store);
+  const restarted = JSON.parse(JSON.stringify(record));
+  assertPlanningLookupRecord(restarted);
+  const persisted = await store.open(restarted.packetRef);
+  const persistedBytes = await new Response(persisted).text();
+  assert.equal(persistedBytes, JSON.stringify(restarted.packet));
+  await store.verify(restarted.packetRef);
+  assertContextFactsResolved(restarted.packet);
+  assert.throws(
+    () =>
+      assertHumanPlanningDependency(
+        {
+          kind: "human-dependency",
+          dependencyKind: "unavailable-context",
+          requestIds: ["empty"],
+          question: "Supply missing inventory facts",
+          detail: "The scoped inventory returned no matches",
+        },
+        restarted.packet,
+      ),
+    /still-unresolved required lookup result/,
+  );
+  assert.doesNotThrow(() =>
+    assertHumanPlanningDependency(
+      {
+        kind: "human-dependency",
+        dependencyKind: "human-choice",
+        requestIds: [],
+        question: "Which new entries should the empty inventory contain?",
+        detail:
+          "A complete scoped inventory establishes absence; choosing new entries is a human decision",
+      },
+      restarted.packet,
+    ),
+  );
+
+  const missing = await resolveContextRequests(restarted, resolver, [
+    { ...required, id: "missing-body", selector: "api/missing.txt" },
+  ]);
+  restarted.packet.batches.push(missing);
+  await retainContextPacket(restarted, store);
+  assert.throws(
+    () => assertContextFactsResolved(restarted.packet),
+    /Mandatory planning facts remain unknown/,
+  );
+  const expired = JSON.parse(JSON.stringify(record.packet));
+  for (const result of [...expired.automatic, ...expired.batches.flat()]) {
+    for (const match of result.matches)
+      match.provenance.validUntil = "2000-01-01T00:00:00.000Z";
+  }
+  assert.throws(
+    () => assertContextFactsResolved(expired),
+    /Mandatory planning facts remain unknown/,
+  );
+  assert.equal(
+    repositoryContextResult(
+      checkout,
+      baseSha,
+      { ...required, selector: "../secret.txt" },
+      { maxResults: 1, maxBytes: 4096, deadlineAt: Date.now() + 5000 },
+    ).disposition,
+    "denied",
+  );
+  assert.equal(
+    repositoryContextResult(checkout, baseSha, required, {
+      maxResults: 1,
+      maxBytes: 2,
+      deadlineAt: Date.now() + 5000,
+    }).disposition,
+    "incomplete",
+  );
+});

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { authenticateDiscoveryOutput } from "./discovery.js";
+import { assertWorkDiscoveryOutput } from "./state.js";
 import { join } from "node:path";
 import { planningSources } from "./compiler.js";
 import { closeWorkItem } from "./completion.js";
@@ -179,12 +181,27 @@ export async function runQaItem(args: {
       !item.dependencies.every(
         (id) =>
           state.work[id]?.status === "done" &&
-          (state.work[id]?.integratedSha ||
+          (state.graph.items.find((peer) => peer.id === id)?.kind ===
+            "discovery" ||
+            state.work[id]?.integratedSha ||
             (candidate?.basis === "pinned-baseline" &&
               state.work[id]?.changeRef === candidate.commitSha)),
       )
     )
       throw new Error("QA cannot run before actual dependency integration");
+    for (const id of item.dependencies) {
+      const dependency = state.graph.items.find((peer) => peer.id === id);
+      if (dependency?.kind !== "discovery") continue;
+      assertWorkDiscoveryOutput(state, id, state.work[id]!);
+      if (state.work[id]?.discoveryOutput?.status !== "complete")
+        throw new Error("QA discovery dependency is incomplete");
+      await authenticateDiscoveryOutput({
+        checkout: args.config.checkout,
+        specification: dependency.discovery!,
+        manifest: state.work[id]!.discoveryOutput!,
+        store: args.store,
+      });
+    }
     if (!candidate) throw new Error("QA has no integrated candidate");
     if (args.cancelled()) throw cancelled();
     const commit = candidate.commitSha;

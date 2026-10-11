@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import {
+  assertPlanningContextPacket,
+  type PlanningContextPacket,
+} from "./context.js";
+import {
   type PlanningSource,
   commandAuthorizations,
   finalObjectiveCommands,
@@ -37,11 +41,14 @@ export function planReviewPacket(
   localExecutables?: PlanningLocalExecutables,
   executionBounds?: PlanningExecutionBounds,
   approvedPlaybookPin?: ApprovedPlaybookPin,
+  contextLookup?: PlanningContextPacket,
 ): PlanReviewRequest {
   if (executionBounds) assertPlanningExecutionBounds(executionBounds);
   if (approvedPlaybookPin !== undefined)
     assertApprovedPlaybookPin(approvedPlaybookPin);
+  if (contextLookup) assertPlanningContextPacket(contextLookup);
   return {
+    ...(contextLookup ? { contextLookup } : {}),
     ...(approvedPlaybookPin !== undefined ? { approvedPlaybookPin } : {}),
     ...(prerequisites ? { prerequisites } : {}),
     ...(localExecutables ? { localExecutables } : {}),
@@ -80,6 +87,7 @@ export function reviewResultDigest(
 export function planningReviewEvidence(
   packet: Pick<
     PlanReviewRequest,
+    | "contextLookup"
     | "sources"
     | "prerequisites"
     | "localExecutables"
@@ -88,6 +96,15 @@ export function planningReviewEvidence(
   >,
 ) {
   return [
+    ...(packet.contextLookup
+      ? [
+          {
+            origin: "controller" as const,
+            path: "FACTORY_PLANNING_CONTEXT",
+            content: JSON.stringify(packet.contextLookup),
+          },
+        ]
+      : []),
     ...(packet.amendment?.currentImplementationEvidence ?? []).map(
       (source) => ({
         ...source,

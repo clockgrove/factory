@@ -1,3 +1,4 @@
+import { isExecutionState, isPreparationState } from "./state.js";
 import { randomUUID } from "node:crypto";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest } from "./config.js";
@@ -66,7 +67,7 @@ export async function projectGitHubProgress(args: {
   const decisions: GitHubProgressDecision[] = [];
   if (config.githubManagement.progress.includeQuestions) {
     if (
-      retained.schemaVersion === 8 &&
+      isPreparationState(retained) &&
       retained.plan?.review.status === "needs-human"
     ) {
       const questions = [
@@ -84,7 +85,7 @@ export async function projectGitHubProgress(args: {
             "A supported local decision records your answer for this plan. Normal validation and independent acceptance still apply. Refusal uses the local supported path.",
           binding: `Objective ${objective}; run ${retained.runId}; plan ${retained.plan.reviewDigest}; question ${progressDigest(question)}`,
         });
-    } else if (retained.schemaVersion === 7) {
+    } else if (isExecutionState(retained)) {
       const groups = [
         ...Object.entries(retained.work).map(([id, work]) => ({
           id,
@@ -127,7 +128,7 @@ export async function projectGitHubProgress(args: {
   if (retained.coordinator?.mode === "draining")
     blockers.push("The coordinator is draining owned work.");
   const template =
-    retained.schemaVersion === 8 && github.planDecisionComments
+    isPreparationState(retained) && github.planDecisionComments
       ? planDecisionTemplate(config, retained)
       : undefined;
   const next =

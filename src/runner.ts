@@ -74,6 +74,8 @@ import {
 import { objectiveCandidate } from "./qa.js";
 import type { ContinuationState, WorkState } from "./state.js";
 import {
+  isExecutionState,
+  isPreparationState,
   pendingQuestions,
   rejectionHoldsPause,
   setCoordinatorMode,
@@ -173,7 +175,7 @@ export async function decideObjective(
     throw new Error(
       `Objective #${objective} has no Factory state; run \`factory run --objective ${objective}\` first`,
     );
-  if (state.schemaVersion === 8) {
+  if (isPreparationState(state)) {
     if (input.item || input.criterion)
       throw new Error(
         "--item names a Work Item's result; a plan decision takes none",
@@ -208,7 +210,7 @@ export async function decideObjective(
   // Criteria of the same review that still wait keep the Objective stopped.
   const after = readContinuation(config.repository, objective);
   const open =
-    after?.schemaVersion === 7 &&
+    isExecutionState(after) &&
     (input.item
       ? after.work[input.item]?.acceptancePending
       : after.finalAcceptancePending);
@@ -272,7 +274,7 @@ export async function controlObjective(
       // stopped: it records the pending amendment under the lock (the same
       // checks, review and charges as an owner's) and the next run compiles,
       // reviews and projects it.
-      if (state.schemaVersion !== 7)
+      if (!isExecutionState(state))
         throw new Error("Planning has no active graph to amend");
       if (request.input?.scope !== "in-scope")
         throw new Error(
@@ -364,7 +366,7 @@ export async function runObjective(
     (result) => ({
       runId: result.runId,
       outcome:
-        result.schemaVersion === 7 && objectiveComplete(result)
+        isExecutionState(result) && objectiveComplete(result)
           ? "accepted"
           : result.cancelledAt
             ? "cancelled"
@@ -498,7 +500,7 @@ async function runObjectiveOwned(
   };
   const cancel = (): void => {
     if (!owner.snapshot) return;
-    if (owner.snapshot.schemaVersion === 7 && owner.snapshot.finalAcceptance) {
+    if (isExecutionState(owner.snapshot) && owner.snapshot.finalAcceptance) {
       owner.snapshot.coordinator!.waitReason =
         "Acceptance is sealed; reconcile Objective closure before successor work";
       persist();
@@ -585,7 +587,7 @@ async function runObjectiveOwned(
       };
       if (request.action === "status") return state.coordinator;
       if (request.action === "propose-amendment") {
-        if (state.schemaVersion !== 7)
+        if (!isExecutionState(state))
           throw new Error("Planning has no active graph to amend");
         if (owner.abort.signal.aborted)
           throw new Error(
@@ -600,7 +602,7 @@ async function runObjectiveOwned(
         return result;
       }
       if (request.action === "cancel") {
-        if (state.schemaVersion === 7 && state.finalAcceptance)
+        if (isExecutionState(state) && state.finalAcceptance)
           throw new Error(
             "Acceptance is sealed; resume to reconcile Objective closure",
           );
@@ -747,7 +749,7 @@ async function runObjectiveOwned(
   const observePhoneDecision = async (): Promise<boolean> => {
     const state = owner.snapshot;
     if (
-      state?.schemaVersion !== 8 ||
+      !isPreparationState(state) ||
       !phonePlanEligible(config, state) ||
       !services.github.planDecisionComments ||
       owner.handoff ||
@@ -776,7 +778,7 @@ async function runObjectiveOwned(
           const apply = async () => {
             const current = owner.snapshot;
             if (
-              current?.schemaVersion !== 8 ||
+              !isPreparationState(current) ||
               current !== state ||
               !current.plan ||
               owner.handoff ||
@@ -878,7 +880,7 @@ async function runObjectiveOwned(
           const alreadyCancelled = !!state.cancelledAt;
           state.cancelledAt = new Date().toISOString();
           clearAllRepeats(state);
-          if (state.schemaVersion === 7) {
+          if (isExecutionState(state)) {
             for (const work of Object.values(state.work))
               if (work.status === "pending" || work.status === "running")
                 work.status = "cancelled";
@@ -898,7 +900,7 @@ async function runObjectiveOwned(
         state?.coordinator?.mode !== "running" &&
         state?.coordinator &&
         !(
-          state.schemaVersion === 7 &&
+          isExecutionState(state) &&
           Object.values(state.work).some(
             (work) => work.status === "running" || work.status === "published",
           )
@@ -907,7 +909,7 @@ async function runObjectiveOwned(
         await wait();
         continue;
       }
-      if (state?.schemaVersion === 8 && phonePlanEligible(config, state)) {
+      if (isPreparationState(state) && phonePlanEligible(config, state)) {
         await projectProgress();
         if (await observePhoneDecision()) continue;
         await wait(30_000);
@@ -936,7 +938,7 @@ async function runObjectiveOwned(
         if (current?.cancelRequested && !owner.handoff) return undefined;
         // Planning stops at a pause or drain; the owner keeps serving control until resume.
         if (
-          current?.schemaVersion === 8 &&
+          isPreparationState(current) &&
           current.coordinator.mode !== "running" &&
           !current.cancelRequested &&
           !owner.handoff
@@ -948,17 +950,17 @@ async function runObjectiveOwned(
       owner.snapshot = result;
       // A pass that stopped for the cancel request: the loop records it.
       if (result.cancelRequested && !owner.handoff) continue;
-      if (result.schemaVersion === 8 && phonePlanEligible(config, result)) {
+      if (isPreparationState(result) && phonePlanEligible(config, result)) {
         continue;
       }
       // A preparation comes back only when its plan needs a human decision.
       if (
-        result.schemaVersion === 8 ||
+        isPreparationState(result) ||
         objectiveComplete(result) ||
         result.cancelledAt
       ) {
         if (
-          result.schemaVersion === 7 &&
+          isExecutionState(result) &&
           (objectiveComplete(result) || result.cancelledAt)
         )
           await releaseAgentSessions(
@@ -1070,7 +1072,7 @@ async function cancelObjectiveOwned(
     const continuation = readContinuation(config.repository, objective);
     if (!continuation) throw new Error("Objective has no Factory state");
     if (
-      (continuation.schemaVersion === 7 && objectiveComplete(continuation)) ||
+      (isExecutionState(continuation) && objectiveComplete(continuation)) ||
       continuation.cancelledAt
     ) {
       await releaseAgentSessions(continuation, driver, planningModel, () =>
@@ -1078,7 +1080,7 @@ async function cancelObjectiveOwned(
       );
       return "cancelled";
     }
-    if (continuation.schemaVersion === 7 && continuation.finalAcceptance)
+    if (isExecutionState(continuation) && continuation.finalAcceptance)
       throw new Error(
         "Acceptance is sealed; resume to reconcile Objective closure",
       );
@@ -1107,7 +1109,7 @@ async function cancelObjectiveOwned(
     );
     if (continuation.coordinator?.cancelError)
       throw new Error(continuation.coordinator.cancelError);
-    if (continuation.schemaVersion === 7)
+    if (isExecutionState(continuation))
       for (const work of Object.values(continuation.work)) {
         if (work.execution && work.step === "execute")
           await driver

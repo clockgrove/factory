@@ -33,6 +33,7 @@ import {
   queueDigest,
   readQueueHistory,
   requireProjectQueueEffects,
+  verifyQueueObservation,
   type VerifiedQueueObservation,
 } from "./project-queue-state.js";
 import {
@@ -258,15 +259,19 @@ async function writeControl(
   mode: QueueMode,
   watch?: boolean,
   approval: QueueOperation["approval"] = { kind: "queue-command" },
+  prepared?: Awaited<ReturnType<typeof mutationSnapshot>>,
 ): Promise<void> {
-  const { snapshot, history } = await mutationSnapshot(config, github);
+  // Only the caller's fresh pair in this locked operation, before its first
+  // effect, can be reused. No observation survives into a later operation.
+  const { snapshot, history } =
+    prepared ?? (await mutationSnapshot(config, github));
   const previous =
     snapshot.control.metadata === null
       ? undefined
       : parseQueueMetadata(snapshot.control.metadata);
   if (previous && previous.kind !== "control")
     throw new Error("Bound Project control metadata is invalid");
-  if (previous) await observeProjectQueue(config, github, "explicit-operation");
+  if (previous) verifyQueueObservation(config, snapshot, history, true);
   const watching =
     watch ?? (previous?.kind === "control" ? previous.watch : false);
   if (
@@ -329,7 +334,14 @@ async function enqueueOwned(
   checkRequiredEnvironment(config);
   const initialized = await mutationSnapshot(config, github);
   if (initialized.snapshot.control.metadata === null)
-    await writeControl(config, github, "running");
+    await writeControl(
+      config,
+      github,
+      "running",
+      undefined,
+      undefined,
+      initialized,
+    );
   else {
     const previousControl = parseQueueMetadata(
       initialized.snapshot.control.metadata,
@@ -341,6 +353,8 @@ async function enqueueOwned(
       github,
       previousControl.mode,
       previousControl.watch,
+      undefined,
+      initialized,
     );
   }
   for (const objective of objectives) {
@@ -507,7 +521,8 @@ export async function watchIntake(
   const reply = await projectControlRequest(config, "watch");
   if (reply.handled) return reply.result as IntakeAuthorization;
   return locked(config, async () => {
-    const { snapshot } = await mutationSnapshot(config, github);
+    const prepared = await mutationSnapshot(config, github);
+    const { snapshot } = prepared;
     const previous =
       snapshot.control.metadata === null
         ? undefined
@@ -518,6 +533,7 @@ export async function watchIntake(
       previous?.kind === "control" ? previous.mode : "running",
       true,
       { kind: "background-setup" },
+      prepared,
     );
     return view(config, await observeProjectQueue(config, github));
   });
@@ -528,11 +544,15 @@ async function applyControl(
   action: string,
   objective?: number,
 ): Promise<IntakeAuthorization> {
-  const observed = await observeProjectQueue(
-    config,
-    github,
-    "explicit-operation",
+  const controlAction = ["pause", "resume", "drain", "handoff"].includes(
+    action,
   );
+  const prepared = controlAction
+    ? await mutationSnapshot(config, github)
+    : undefined;
+  const observed = prepared
+    ? verifyQueueObservation(config, prepared.snapshot, prepared.history, true)
+    : await observeProjectQueue(config, github, "explicit-operation");
   if (action === "dequeue") {
     const entry = observed.entries.find(
       (candidate) =>
@@ -575,7 +595,7 @@ async function applyControl(
       metadata: operation.metadata,
     });
     await completeQueueOperation(config, operation);
-  } else if (["pause", "resume", "drain", "handoff"].includes(action))
+  } else if (controlAction)
     await writeControl(
       config,
       github,
@@ -584,6 +604,9 @@ async function applyControl(
         : action === "resume"
           ? "running"
           : "draining",
+      undefined,
+      undefined,
+      prepared,
     );
   else if (action !== "status" && action !== "sync")
     throw new Error("Unsupported queue action");
@@ -801,10 +824,22 @@ async function runIntakeOwned(
             | undefined,
         });
     } else if (request.action === "watch") {
-      const observed = await observeProjectQueue(config, services.github);
-      await writeControl(config, services.github, observed.control.mode, true, {
-        kind: "background-setup",
-      });
+      const prepared = await mutationSnapshot(config, services.github);
+      const observed = verifyQueueObservation(
+        config,
+        prepared.snapshot,
+        prepared.history,
+      );
+      await writeControl(
+        config,
+        services.github,
+        observed.control.mode,
+        true,
+        {
+          kind: "background-setup",
+        },
+        prepared,
+      );
       record = view(config, await observeProjectQueue(config, services.github));
     } else {
       try {

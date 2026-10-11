@@ -51,6 +51,24 @@ export interface ContextMatch {
   digest: string;
   bytes: number;
 }
+/** A rendered body reference is local to one result, never an alias to a different source version. */
+export type PlanningMemoryBody =
+  | { role: string; ref: ContentRef; text: string }
+  | {
+      role: string;
+      ref: ContentRef;
+      reuseRef: {
+        kind: "context-match";
+        identity: string;
+        role: string;
+        digest: string;
+      };
+    };
+export interface PlanningMemoryProjection {
+  format: "factory.memory-projection/v1";
+  record: import("../repository-memory.js").RepositoryMemoryRecord;
+  content: PlanningMemoryBody[];
+}
 export interface ContextResult {
   request: ContextRequest;
   disposition: ContextDisposition;
@@ -86,6 +104,7 @@ export interface PlanningLookupRecord {
   /** Exact packet bytes are also retained in the installation's existing content store. */
   packetRef?: ContentRef;
 }
+export type ContextLookupPurpose = "automatic" | "requested";
 export interface PlanningContextResolver {
   binding: string;
   catalog: ContextCollection[];
@@ -94,6 +113,7 @@ export interface PlanningContextResolver {
   resolve(
     request: ContextRequest,
     remaining: { maxResults: number; maxBytes: number; deadlineAt: number },
+    purpose?: ContextLookupPurpose,
   ): Promise<ContextResult>;
   contentStore: ContentStore;
   bounds: ContextLookupBounds;
@@ -104,14 +124,29 @@ export function contextDigest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 /** Recipe inputs carry frozen controller scopes; equal query text does not merge those facts. */
-export function contextRequestIdentity(request: ContextRequest): string {
+export function contextRequestIdentity(
+  request: ContextRequest,
+  purpose: ContextLookupPurpose = "requested",
+): string {
   return contextDigest([
     request.collection,
     request.operation,
     request.selector,
     request.query,
     ...(request.id.startsWith("recipe-memory-") ? [request.id] : []),
+    ...(purpose === "automatic" && request.id === "automatic-relevant-memory"
+      ? ["automatic-source-selection"]
+      : []),
   ]);
+}
+function contextResultIdentity(
+  packet: PlanningContextPacket,
+  result: ContextResult,
+): string {
+  return contextRequestIdentity(
+    result.request,
+    packet.automatic.includes(result) ? "automatic" : "requested",
+  );
 }
 export function contextResultBytes(
   result: Pick<ContextResult, "matches">,
@@ -206,6 +241,7 @@ function assertResult(result: ContextResult): void {
         "Context result complete bytes differ from retained identity",
       );
   }
+  assertPlanningMemoryProjection(result);
   if (
     result.disposition === "complete" &&
     result.request.operation === "read" &&
@@ -214,6 +250,74 @@ function assertResult(result: ContextResult): void {
     throw new Error("A complete exact-body read must supply its body");
   if (result.disposition === "no-match" && result.matches.length)
     throw new Error("Scoped no-match cannot contain matches");
+}
+/** Verify that every reused memory body closes over earlier authenticated literal bytes in this result. */
+export function assertPlanningMemoryProjection(result: ContextResult): void {
+  const bodies = new Map<string, ContentRef>();
+  for (const match of result.matches) {
+    if (
+      result.request.collection !== "memory" ||
+      !match.identity.startsWith("memory:")
+    )
+      continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(match.content);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || !("format" in parsed))
+      continue;
+    const projection = parsed as PlanningMemoryProjection;
+    if (
+      projection.format !== "factory.memory-projection/v1" ||
+      !projection.record ||
+      !Array.isArray(projection.content)
+    )
+      throw new Error("Invalid planning memory projection");
+    const pending: [string, ContentRef][] = [];
+    for (const body of projection.content) {
+      if (
+        !body ||
+        typeof body.role !== "string" ||
+        !body.role ||
+        !body.ref ||
+        !/^[a-f0-9]{64}$/.test(body.ref.digest) ||
+        !Number.isSafeInteger(body.ref.bytes) ||
+        body.ref.bytes < 0
+      )
+        throw new Error("Invalid projected memory body identity");
+      if ("text" in body) {
+        if (
+          "reuseRef" in body ||
+          typeof body.text !== "string" ||
+          Buffer.byteLength(body.text) !== body.ref.bytes ||
+          createHash("sha256").update(body.text).digest("hex") !==
+            body.ref.digest
+        )
+          throw new Error(
+            "Projected memory body differs from its exact retained bytes",
+          );
+        pending.push([JSON.stringify([match.identity, body.role]), body.ref]);
+      } else {
+        const reuse = body.reuseRef;
+        const target =
+          reuse && bodies.get(JSON.stringify([reuse.identity, reuse.role]));
+        if (
+          !reuse ||
+          reuse.kind !== "context-match" ||
+          reuse.digest !== body.ref.digest ||
+          !target ||
+          target.digest !== body.ref.digest ||
+          target.bytes !== body.ref.bytes
+        )
+          throw new Error(
+            "Projected memory body reference lacks earlier exact bytes in this result",
+          );
+      }
+    }
+    for (const [key, ref] of pending) bodies.set(key, ref);
+  }
 }
 export function assertPlanningContextPacket(
   packet: PlanningContextPacket,
@@ -342,7 +446,7 @@ export function assertContextFactsResolved(
   const latest = new Map<string, ContextResult>();
   for (const result of [...packet.automatic, ...packet.batches.flat()]) {
     if (result.request.required)
-      latest.set(contextRequestIdentity(result.request), result);
+      latest.set(contextResultIdentity(packet, result), result);
   }
   const missing = [...latest.values()].filter(
     (result) => !resolvedContextResult(result),
@@ -394,6 +498,7 @@ export async function initializeContextLookup(
     record,
     resolver,
     resolver.automatic,
+    "automatic",
   );
   await retainContextPacket(record, resolver.contentStore);
   return record;
@@ -402,6 +507,7 @@ export async function resolveContextRequests(
   record: PlanningLookupRecord,
   resolver: PlanningContextResolver,
   requests: ContextRequest[],
+  purpose: ContextLookupPurpose = "requested",
 ): Promise<ContextResult[]> {
   if (resolver.binding !== record.packet.binding)
     throw new Error(
@@ -469,7 +575,8 @@ export async function resolveContextRequests(
               (typeof m.provenance.validUntil === "string" &&
                 Date.parse(m.provenance.validUntil) > Date.now()),
           ) &&
-          contextRequestIdentity(r.request) === contextRequestIdentity(request),
+          contextResultIdentity(record.packet, r) ===
+            contextRequestIdentity(request, purpose),
       );
       result = prior
         ? {
@@ -477,11 +584,15 @@ export async function resolveContextRequests(
             request,
             detail: `Reused retained exact result: ${prior.detail}`,
           }
-        : await resolver.resolve(request, {
-            maxResults: bounds.maxResults - record.results,
-            maxBytes: bounds.maxBytes - record.bytes,
-            deadlineAt,
-          });
+        : await resolver.resolve(
+            request,
+            {
+              maxResults: bounds.maxResults - record.results,
+              maxBytes: bounds.maxBytes - record.bytes,
+              deadlineAt,
+            },
+            purpose,
+          );
       if (contextDigest(result.request) !== contextDigest(request))
         throw new Error(
           "Context resolver returned a different request binding",
@@ -757,8 +868,8 @@ export function assertHumanPlanningDependency(
       .reverse()
       .find(
         (entry) =>
-          contextRequestIdentity(entry.request) ===
-          contextRequestIdentity(result.request),
+          contextResultIdentity(packet, entry) ===
+          contextResultIdentity(packet, result),
       );
     if (
       !result.request.required ||

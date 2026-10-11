@@ -512,6 +512,7 @@ export async function buildAdaptiveContext(input: {
           itemIds: [...relatedIds],
         },
         suppliedBodyDigests: [...bodyProviders.keys()],
+        excludeSuppliedSourceHistory: true,
         suppliedSources: sources.map((source) => ({
           path: source.path,
           ...(memorySourceHeading(source.heading) === undefined

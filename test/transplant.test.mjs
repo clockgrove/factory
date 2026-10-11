@@ -813,6 +813,8 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     assertContextFactsResolved,
     assertHumanPlanningDependency,
     assertPlanningLookupRecord,
+    assertPlanningMemoryProjection,
+    contextMatch,
     contextDigest,
     initializeContextLookup,
     repositoryContextResult,
@@ -844,6 +846,18 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     );
 
   git(checkout, "add", ".");
+  const historicalBody =
+    "version zero\nhistoricalinputneedle\n" +
+    "original complete historical interface detail\n".repeat(80);
+  writeFileSync(join(checkout, "api", "contract.txt"), historicalBody);
+  git(checkout, "add", "api/contract.txt");
+  git(checkout, "commit", "-qm", "original historical context");
+  const historicalBase = git(checkout, "rev-parse", "HEAD");
+  writeFileSync(
+    join(checkout, "api", "contract.txt"),
+    "version one\ncomplete interface body\n",
+  );
+  git(checkout, "add", "api/contract.txt");
   git(checkout, "commit", "-qm", "immutable context baseline");
   const baseSha = git(checkout, "rev-parse", "HEAD");
   const store = new LocalContentStore(join(root, "private-content"));
@@ -1025,6 +1039,216 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
       },
     },
   });
+  // Retain actual older Git bytes from four original observations. Their
+  // immutable manifests differ, but the underlying historical body is equal.
+  const { retainPlanningSourceMemory } = await import(
+    "../dist/repository-memory.js"
+  );
+  const historyBindings = Array.from(
+    { length: 4 },
+    (_, index) =>
+      retainPlanningSourceMemory({
+        repository: config.repository,
+        objective: 1,
+        runId: `historical-source-observation-${index}`,
+        baseSha: historicalBase,
+        treeSha: git(checkout, "rev-parse", `${historicalBase}^{tree}`),
+        configDigest: factoryConfigDigest(rankedConfig),
+        sources: [
+          {
+            path: "api/contract.txt",
+            heading: "",
+            content: execFileSync(
+              "git",
+              ["-C", checkout, "show", `${historicalBase}:api/contract.txt`],
+              { encoding: "utf8" },
+            ),
+          },
+        ],
+      })[0],
+  );
+  const historicalRecord = retainedMemory.read({
+    access: memoryAccess,
+    id: historyBindings[0].id,
+  });
+  const memoryBodies = new LocalContentStore(
+    join(stateRoot(config.repository), "content"),
+  );
+  const difference = execFileSync(
+    "git",
+    ["-C", checkout, "diff", historicalBase, baseSha, "--", "api/contract.txt"],
+    { encoding: "utf8" },
+  );
+  const differenceRef = memoryBodies.putBytes(Buffer.from(difference), {
+    mediaType: "text/plain; charset=utf-8",
+  });
+  const correction = retainedMemory.retain({
+    ...historicalRecord.record,
+    kind: "diagnosed-correction",
+    producer: {
+      objective: 1,
+      runId: "actual-source-difference",
+      status: "observed-git-source-difference",
+    },
+    summary:
+      "Adaptive workflow api interface: observed complete historical/current Git difference",
+    bodies: [
+      {
+        role: "observed-source-difference",
+        ref: differenceRef,
+        availability: "retained",
+      },
+    ],
+  });
+  const dedupResolver = createPlanningContextResolver({
+    ...runtimeInput,
+    config: rankedConfig,
+  });
+  const dedupRecord = await initializeContextLookup(dedupResolver);
+  const automaticResult = dedupRecord.packet.automatic.find(
+    (result) => result.request.id === "automatic-relevant-memory",
+  );
+  assert.ok(
+    automaticResult.matches.some(
+      (match) => match.identity === `memory:${correction.id}`,
+    ),
+    "genuine source-difference observations are not suppressed with machine snapshots",
+  );
+  assert.ok(
+    historyBindings.every(
+      (binding) =>
+        !automaticResult.matches.some(
+          (match) => match.identity === `memory:${binding.id}`,
+        ),
+    ),
+    "automatic context omits historical machine snapshots of the exact supplied selection",
+  );
+  const explicitSameQuery = await resolveContextRequests(
+    dedupRecord,
+    dedupResolver,
+    [{ ...automaticResult.request, id: "deliberate-history-query" }],
+  );
+  assert.ok(
+    historyBindings.every((binding) =>
+      explicitSameQuery[0].matches.some(
+        (match) => match.identity === `memory:${binding.id}`,
+      ),
+    ),
+    "explicit history lookup does not reuse the filtered automatic cache",
+  );
+  const historicalSearch = {
+    ...automaticResult.request,
+    id: "automatic-relevant-memory",
+    query: "historicalinputneedle",
+  };
+  const historyResult = await dedupResolver.resolve(historicalSearch, {
+    maxResults: 8,
+    maxBytes: 32768,
+    deadlineAt: Date.now() + 5000,
+  });
+  assert.equal(historyResult.disposition, "stale");
+  assert.equal(
+    historyResult.matches.filter((match) =>
+      historyBindings.some(
+        (binding) => match.identity === `memory:${binding.id}`,
+      ),
+    ).length,
+    4,
+    "model chosen automatic ID does not change explicit retrieval semantics",
+  );
+  const projections = historyResult.matches.map((match) =>
+    JSON.parse(match.content),
+  );
+  assert.equal(
+    projections.filter(
+      (projection) => projection.content[0].text === historicalBody,
+    ).length,
+    1,
+  );
+  assert.equal(
+    projections.filter(
+      (projection) => projection.content[0].reuseRef?.kind === "context-match",
+    ).length,
+    3,
+  );
+  assert.deepEqual(
+    new Set(
+      historyResult.matches
+        .filter((match) =>
+          historyBindings.some(
+            (binding) => match.identity === `memory:${binding.id}`,
+          ),
+        )
+        .map((match) => match.provenance.manifestRef.digest),
+    ),
+    new Set(historyBindings.map((binding) => binding.manifestRef.digest)),
+    "every original manifest and its stale provenance survives projection",
+  );
+  assert.doesNotThrow(() => assertPlanningMemoryProjection(historyResult));
+  const inlineHistoryIndex = projections.findIndex(
+    (projection) => projection.content[0].text === historicalBody,
+  );
+  const aliasHistoryIndex = projections.findIndex(
+    (projection) => projection.content[0].reuseRef,
+  );
+  const dangling = {
+    ...historyResult,
+    matches: historyResult.matches.filter(
+      (_, index) => index !== inlineHistoryIndex,
+    ),
+  };
+  assert.throws(
+    () => assertPlanningMemoryProjection(dangling),
+    /lacks earlier exact bytes/,
+  );
+  const changed = structuredClone(projections[aliasHistoryIndex]);
+  changed.content[0].reuseRef.digest = "0".repeat(64);
+  const wrongVersion = {
+    ...historyResult,
+    matches: [
+      historyResult.matches[inlineHistoryIndex],
+      contextMatch(
+        historyResult.matches[aliasHistoryIndex].identity,
+        JSON.stringify(changed),
+        historyResult.matches[aliasHistoryIndex].provenance,
+      ),
+    ],
+  };
+  assert.throws(
+    () => assertPlanningMemoryProjection(wrongVersion),
+    /lacks earlier exact bytes/,
+  );
+  const exactHistory = await dedupResolver.resolve(
+    {
+      ...historicalSearch,
+      id: "exact-history",
+      operation: "read",
+      selector: historyBindings[0].id,
+      query: "",
+    },
+    { maxResults: 8, maxBytes: 32768, deadlineAt: Date.now() + 5000 },
+  );
+  assert.equal(exactHistory.disposition, "stale");
+  assert.equal(
+    JSON.parse(exactHistory.matches[0].content).content[0].text,
+    historicalBody,
+    "exact-ID history remains a complete standalone original body",
+  );
+  assert.ok(exactHistory.matches[0].provenance.gaps.length);
+  assert.equal(
+    retainedMemory
+      .search({
+        access: memoryAccess,
+        query: "historicalinputneedle",
+        scope: { kinds: ["reference"] },
+        limit: 4,
+        maxBytes: Buffer.byteLength(historicalBody),
+      })
+      .filter((result) => result.content[0]?.text === historicalBody).length,
+    4,
+    "duplicate underlying bytes consume the admitted body allowance once",
+  );
+
   const observedSource = sourceReference.record;
   const observation = (summary) => ({
     ...observedSource,

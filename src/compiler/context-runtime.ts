@@ -36,6 +36,7 @@ import {
   type ContextRequest,
   type ContextResult,
   type PlanningContextResolver,
+  type PlanningMemoryProjection,
 } from "./context.js";
 import type { PlanningSource } from "./sources.js";
 
@@ -292,22 +293,54 @@ export function createPlanningContextResolver(input: {
       };
     return { request, disposition, matches, detail };
   };
-  const memoryMatch = (result: MemoryResult) =>
-    contextMatch(
-      `memory:${result.binding.id}`,
-      JSON.stringify({ record: result.record, content: result.content }),
-      {
-        repository: config.repository,
-        manifestRef: result.binding.manifestRef,
-        disposition: result.disposition,
-        gaps: result.gaps,
-        authority: result.record.authority,
-        ...(result.record.validity.expiresAt
-          ? { validUntil: result.record.validity.expiresAt }
-          : {}),
-        complete: result.disposition === "current",
-      },
-    );
+  const memoryMatches = (results: MemoryResult[], standalone: boolean) => {
+    const emitted = new Map<string, { identity: string; role: string }>();
+    return results.map((result) => {
+      const identity = `memory:${result.binding.id}`;
+      const content: PlanningMemoryProjection["content"] = [];
+      const pending: { digest: string; role: string }[] = [];
+      for (const body of result.content ?? []) {
+        const earlier = !standalone && emitted.get(body.ref.digest);
+        if (earlier)
+          content.push({
+            role: body.role,
+            ref: body.ref,
+            reuseRef: {
+              kind: "context-match",
+              ...earlier,
+              digest: body.ref.digest,
+            },
+          });
+        else {
+          content.push(body);
+          pending.push({ digest: body.ref.digest, role: body.role });
+        }
+      }
+      for (const body of pending)
+        if (!emitted.has(body.digest))
+          emitted.set(body.digest, { identity, role: body.role });
+      const projection: PlanningMemoryProjection = {
+        format: "factory.memory-projection/v1",
+        record: result.record,
+        content,
+      };
+      return contextMatch(
+        `memory:${result.binding.id}`,
+        JSON.stringify(projection),
+        {
+          repository: config.repository,
+          manifestRef: result.binding.manifestRef,
+          disposition: result.disposition,
+          gaps: result.gaps,
+          authority: result.record.authority,
+          ...(result.record.validity.expiresAt
+            ? { validUntil: result.record.validity.expiresAt }
+            : {}),
+          complete: result.disposition === "current",
+        },
+      );
+    });
+  };
   return {
     binding: contextDigest({
       repository: config.repository,
@@ -327,7 +360,7 @@ export function createPlanningContextResolver(input: {
     catalog,
     automatic,
     contentStore,
-    async resolve(request, remaining) {
+    async resolve(request, remaining, purpose = "requested") {
       const answer = (
         disposition: ContextResult["disposition"],
         detail: string,
@@ -346,9 +379,27 @@ export function createPlanningContextResolver(input: {
           "denied",
           "Recipe memory request differs from its pinned query and scope",
         );
+      const automaticMemory = automatic.find(
+        (entry) => entry.id === "automatic-relevant-memory",
+      );
+      if (
+        purpose === "automatic" &&
+        request.id === "automatic-relevant-memory" &&
+        (!automaticMemory ||
+          contextDigest(automaticMemory) !== contextDigest(request))
+      )
+        return answer(
+          "denied",
+          "Automatic memory request differs from the admitted selection",
+        );
       const selectedLookup = recipeRequest
         ? { ...lookup, scope: recipeRequest.scope }
-        : lookup;
+        : {
+            ...lookup,
+            excludeSuppliedSourceHistory:
+              purpose === "automatic" &&
+              request.id === "automatic-relevant-memory",
+          };
       if (request.collection === "pinned-sources") {
         const index = sources.findIndex(
           (_, i) => String(i) === request.selector,
@@ -538,7 +589,7 @@ export function createPlanningContextResolver(input: {
             : "complete";
       return bound(
         request,
-        results.map(memoryMatch),
+        memoryMatches(results, request.operation === "read"),
         remaining,
         disposition,
         "Exact retained memory bodies with explicit applicability and freshness; historical leads cannot establish current facts and unavailable or expired references require an explicit unavailable refresh",

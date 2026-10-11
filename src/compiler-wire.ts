@@ -203,8 +203,16 @@ export function compilerWire(
         visibility: { type: "string", enum: ["private", "repository"] },
       }),
     },
-    expectedOutputRoles: { type: "array", items: text },
-    minimumAssetSets: { type: "integer", minimum: 0 },
+    expectedOutputRoles: {
+      type: "array",
+      minItems: 1,
+      items: text,
+      description:
+        "Roles of staged media outputs, never code, tests or documentation categories.",
+    },
+    // Numeric bounds are not supported by every structured-output grammar.
+    // A decimal pattern enforces positivity before strict safe-integer decoding.
+    minimumAssetSets: { type: "string", pattern: "^[1-9][0-9]*$" },
     requiredLfsRoles: { type: "array", items: text },
   });
   if (request.executionProfiles) {
@@ -322,6 +330,11 @@ export function compilerWire(
     "newPackages",
     "executionProfile",
   ];
+  const outputFields = [
+    "expectedOutputRoles",
+    "minimumAssetSets",
+    "requiredLfsRoles",
+  ];
   const schema = strict({
     contextId: { type: "string", enum: [contextId] },
     requiredPreIntegrationChecks: {
@@ -337,7 +350,7 @@ export function compilerWire(
       minItems: 1,
       items: {
         anyOf: [
-          ...Object.entries(modes).map(([kind]) => {
+          ...Object.entries(modes).flatMap(([kind]) => {
             const item = structuredClone(itemSchema);
             item.properties!.kind = { type: "string", enum: [kind] };
             item.properties!.children = {
@@ -358,7 +371,14 @@ export function compilerWire(
                 (field) => field !== "acceptance",
               );
             }
-            return item;
+            if (kind !== "work") return [item];
+            const ordinary = structuredClone(item);
+            for (const field of outputFields)
+              delete ordinary.properties![field];
+            ordinary.required = ordinary.required!.filter(
+              (field) => !outputFields.includes(field),
+            );
+            return [ordinary, item];
           }),
           ...Object.keys(modes).flatMap((kind) => {
             const ids = [...retainedItems.values()]
@@ -521,9 +541,13 @@ export function compilerWire(
             );
           if (typeof item.kind !== "string" || !modes[item.kind])
             throw new Error("Planner Work Item kind is invalid");
+          const hasOutputs = Object.hasOwn(item, "expectedOutputRoles");
           const expected = itemSchema.required!.filter(
             (field) =>
               (item.kind === "work" || !readonlyFields.includes(field)) &&
+              (item.kind !== "work" ||
+                hasOutputs ||
+                !outputFields.includes(field)) &&
               (item.kind !== "aggregate" || field !== "acceptance"),
           );
           keys(item, expected, "item");
@@ -534,7 +558,26 @@ export function compilerWire(
             );
           if (item.kind !== "work")
             Object.assign(item, structuredClone(readonlyConstants));
-          else newPackages = strings(item.newPackages, "newPackages");
+          else {
+            newPackages = strings(item.newPackages, "newPackages");
+            if (hasOutputs) {
+              if (
+                !strings(item.expectedOutputRoles, "expectedOutputRoles")
+                  .length ||
+                typeof item.minimumAssetSets !== "string" ||
+                !/^[1-9][0-9]*$/.test(item.minimumAssetSets) ||
+                !Number.isSafeInteger(Number(item.minimumAssetSets))
+              )
+                throw new Error(
+                  "Planner media outputs need a positive safe-integer candidate count",
+                );
+              item.minimumAssetSets = Number(item.minimumAssetSets);
+            } else {
+              item.expectedOutputRoles = [];
+              item.minimumAssetSets = 0;
+              item.requiredLfsRoles = [];
+            }
+          }
           delete item.newPackages;
           if (!Array.isArray(item.sourceAssets))
             throw new Error("Planner sourceAssets must be an array");

@@ -200,6 +200,14 @@ function text(value: unknown): asserts value is string {
   if (typeof value !== "string" || !value || value.includes("\0"))
     throw new Error("Memory text must be nonempty and contain no NUL");
 }
+/** Full-file wire selections use an empty heading; memory stores its optional equivalent. */
+export function memorySourceHeading(
+  heading: string | undefined,
+): string | undefined {
+  if (heading === undefined || heading === "") return undefined;
+  text(heading);
+  return heading;
+}
 function date(value: unknown): void {
   text(value);
   if (!Number.isFinite(Date.parse(value)))
@@ -1035,7 +1043,7 @@ export class LocalRepositoryMemory {
         keys(source, ["path", "heading", "digest"]);
         if (!validOwnershipPath(source.path) || !isHash(source.digest))
           throw new Error("Invalid supplied memory source identity");
-        if (source.heading !== undefined) text(source.heading);
+        memorySourceHeading(source.heading);
       }
     }
     if (
@@ -1073,7 +1081,8 @@ export class LocalRepositoryMemory {
             (lookup.suppliedSources ?? []).some(
               (supplied) =>
                 source.path === supplied.path &&
-                source.heading === supplied.heading &&
+                memorySourceHeading(source.heading) ===
+                  memorySourceHeading(supplied.heading) &&
                 source.ref?.digest === supplied.digest &&
                 entry.record.bodies[0]?.ref?.digest === supplied.digest,
             ),
@@ -1709,7 +1718,8 @@ export function retainPlanningSourceMemory(input: {
       const sourceRef = store.putBytes(Buffer.from(source.content), {
         mediaType: "text/plain; charset=utf-8",
       });
-      const selectedSection = source.heading !== undefined;
+      const heading = memorySourceHeading(source.heading);
+      const selectedSection = heading !== undefined;
       return memory.retain({
         schemaVersion: 1,
         repository: input.repository,
@@ -1722,7 +1732,7 @@ export function retainPlanningSourceMemory(input: {
         },
         createdAt: observedAt,
         authority: "observation",
-        summary: `Retained ${selectedSection ? "complete supplied section of" : "complete supplied source"} ${source.path}${selectedSection ? `#${source.heading}; underlying whole file was not supplied` : ""}`,
+        summary: `Retained ${selectedSection ? "complete supplied section of" : "complete supplied source"} ${source.path}${selectedSection ? `#${heading}; underlying whole file was not supplied` : ""}`,
         bodies: [
           {
             role: "supplied-source-selection",
@@ -1734,7 +1744,7 @@ export function retainPlanningSourceMemory(input: {
           {
             identity: `${source.path}#${source.heading ?? ""}`,
             path: source.path,
-            ...(selectedSection ? { heading: source.heading } : {}),
+            ...(selectedSection ? { heading } : {}),
             version: sourceRef.digest,
             commitSha: input.baseSha,
             treeSha: input.treeSha,

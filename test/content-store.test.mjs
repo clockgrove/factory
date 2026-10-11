@@ -40,6 +40,7 @@ import {
   retainPlanningSourceMemory,
 } from "../dist/repository-memory.js";
 import { createPlanningContextResolver } from "../dist/compiler/context-runtime.js";
+import { hydrateWorkerInputSources } from "../dist/compiler/sources.js";
 import {
   assertContextFactsResolved,
   initializeContextLookup,
@@ -1290,7 +1291,10 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     "export const view = 9;\n",
   );
   writeFileSync(join(checkout, "private.txt"), "Outside selector\n");
-  writeFileSync(join(checkout, "notes.txt"), "Shared migration notes\n");
+  writeFileSync(
+    join(checkout, "notes.txt"),
+    "# Migration notes\n\nShared migration notes\n",
+  );
   git("add", ".");
   git("commit", "-m", "Discovery source");
   const baseSha = git("rev-parse", "HEAD");
@@ -1984,7 +1988,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
         ]),
       );
   }
-  const sources = ["src/api.ts", "notes.txt"].map((path) => ({
+  const pinnedSources = ["src/api.ts", "notes.txt"].map((path) => ({
     path,
     content: execFileSync(
       "git",
@@ -1992,7 +1996,34 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
       { encoding: "utf8" },
     ),
   }));
-  retainPlanningSourceMemory({
+  // The real controller hydration keeps the graph wire's empty full-file heading.
+  const citedGraph = {
+    items: [
+      {
+        ...children[0],
+        citations: [
+          ...pinnedSources.map((source) => ({
+            path: source.path,
+            heading: "",
+          })),
+          { path: "notes.txt", heading: "Migration notes" },
+        ],
+      },
+    ],
+  };
+  hydrateWorkerInputSources(citedGraph, pinnedSources);
+  const sources = citedGraph.items[0].inputSources.slice(0, 2);
+  assert.deepEqual(
+    sources.map((source) => source.heading),
+    ["", ""],
+  );
+  assert.deepEqual(
+    sources.map((source) => source.content),
+    pinnedSources.map((source) => source.content),
+  );
+  const sectionSource = citedGraph.items[0].inputSources[2];
+  assert.equal(sectionSource.heading, "Migration notes");
+  const retainedSources = retainPlanningSourceMemory({
     repository: expandedState.repository,
     objective: producer.objective,
     runId: producer.runId,
@@ -2001,6 +2032,83 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     configDigest: expandedState.configDigest,
     sources,
   });
+  const sourceMemory = new LocalRepositoryMemory(
+    stateRoot(expandedState.repository),
+    expandedState.repository,
+  );
+  const sourceLookup = {
+    access: {
+      repository: expandedState.repository,
+      visibility: ["private", "repository"],
+    },
+    scope: { objective: producer.objective, paths: ["src/", "notes.txt"] },
+    limit: 64,
+  };
+  for (const [index, binding] of retainedSources.entries()) {
+    const retained = sourceMemory.read({ ...sourceLookup, id: binding.id });
+    assert.equal(retained.record.sources[0].heading, undefined);
+    assert.deepEqual(retained.record.bindings.paths, [
+      { path: sources[index].path, digest: retained.content[0].ref.digest },
+    ]);
+    assert.equal(retained.content[0].text, sources[index].content);
+  }
+  const [sectionBinding] = retainPlanningSourceMemory({
+    repository: expandedState.repository,
+    objective: producer.objective,
+    runId: producer.runId,
+    baseSha,
+    treeSha: git("rev-parse", "HEAD^{tree}"),
+    configDigest: expandedState.configDigest,
+    sources: [sectionSource],
+  });
+  const retainedSection = sourceMemory.read({
+    ...sourceLookup,
+    id: sectionBinding.id,
+  });
+  assert.equal(
+    retainedSection.record.sources[0].heading,
+    sectionSource.heading,
+  );
+  assert.equal(retainedSection.record.bindings.paths, undefined);
+  assert.equal(retainedSection.content[0].text, sectionSource.content);
+  const suppliedSources = sources.map((source) => ({
+    path: source.path,
+    heading: source.heading,
+    digest: createHash("sha256").update(source.content).digest("hex"),
+  }));
+  const sourceCatalog = sourceMemory.metadata({
+    ...sourceLookup,
+    suppliedSources,
+  });
+  assert.equal(sourceCatalog.complete, true);
+  assert.deepEqual(
+    sourceCatalog.entries.map((entry) => entry.binding.id),
+    [sectionBinding.id],
+  );
+  assert.deepEqual(
+    sourceMemory.metadata({
+      ...sourceLookup,
+      suppliedSources: [
+        ...suppliedSources,
+        {
+          path: sectionSource.path,
+          heading: sectionSource.heading,
+          digest: retainedSection.content[0].ref.digest,
+        },
+      ],
+    }).entries,
+    [],
+  );
+  assert.throws(
+    () =>
+      sourceMemory.metadata({
+        ...sourceLookup,
+        suppliedSources: [
+          { ...suppliedSources[0], heading: "Migration\0notes" },
+        ],
+      }),
+    /no NUL/,
+  );
   expandedState.planningRecovery = {
     contextLookup: {
       packet: {
@@ -2162,6 +2270,14 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
         ],
         bindings: {
           treeSha: git("rev-parse", "HEAD^{tree}"),
+          paths: [
+            {
+              path: sources[0].path,
+              digest: createHash("sha256")
+                .update(sources[0].content)
+                .digest("hex"),
+            },
+          ],
           environment: { configDigest: expandedState.configDigest },
         },
         validity: { state: "current", conditions: [] },
@@ -2178,7 +2294,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     state: advisoryState,
     role: "diagnosis",
     item: materialized.graph.items.find((item) => item.id === "join"),
-    sources: [],
+    sources: [sources[0]],
     required: {},
     requiredSelections: [],
   };

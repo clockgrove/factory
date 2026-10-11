@@ -20,6 +20,7 @@ import { retainLearningMemory } from "../learning.js";
 import { pinnedGit, pinnedGitEnvironment } from "../process.js";
 import {
   LocalRepositoryMemory,
+  memorySourceHeading,
   retainPlanningSourceMemory,
   type MemoryApplicability,
   type MemoryLookup,
@@ -94,7 +95,8 @@ export function createPlanningContextResolver(input: {
       sources
         .filter(
           (source) =>
-            source.path !== "OBJECTIVE" && source.heading === undefined,
+            source.path !== "OBJECTIVE" &&
+            memorySourceHeading(source.heading) === undefined,
         )
         .map((source) => [source.path, digest(source.content)]),
     ),
@@ -114,7 +116,9 @@ export function createPlanningContextResolver(input: {
     applicability,
     suppliedSources: sources.map((source) => ({
       path: source.path,
-      ...(source.heading === undefined ? {} : { heading: source.heading }),
+      ...(memorySourceHeading(source.heading) === undefined
+        ? {}
+        : { heading: memorySourceHeading(source.heading) }),
       digest: digest(source.content),
     })),
     scope: { objective, paths: options.selectors },
@@ -379,7 +383,8 @@ export function createPlanningContextResolver(input: {
           );
         const source = sources.find(
           (source) =>
-            source.path === request.selector && source.heading === undefined,
+            source.path === request.selector &&
+            memorySourceHeading(source.heading) === undefined,
         );
         let blobSha: string | undefined;
         if (request.operation === "read" && source) {

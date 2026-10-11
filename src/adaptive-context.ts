@@ -14,6 +14,7 @@ import { pinnedGit } from "./process.js";
 import { acceptedPlanningDecisionContext } from "./planning-decision-context.js";
 import {
   LocalRepositoryMemory,
+  memorySourceHeading,
   type MemoryLookup,
 } from "./repository-memory.js";
 import type { FactoryState } from "./state.js";
@@ -513,7 +514,9 @@ export async function buildAdaptiveContext(input: {
         suppliedBodyDigests: [...bodyProviders.keys()],
         suppliedSources: sources.map((source) => ({
           path: source.path,
-          ...(source.heading === undefined ? {} : { heading: source.heading }),
+          ...(memorySourceHeading(source.heading) === undefined
+            ? {}
+            : { heading: memorySourceHeading(source.heading) }),
           digest: byteHash(source.content),
         })),
         applicability: {
@@ -528,7 +531,8 @@ export async function buildAdaptiveContext(input: {
             sources
               .filter(
                 (source) =>
-                  source.path !== "OBJECTIVE" && source.heading === undefined,
+                  source.path !== "OBJECTIVE" &&
+                  memorySourceHeading(source.heading) === undefined,
               )
               .map((source) => [source.path, byteHash(source.content)]),
           ),

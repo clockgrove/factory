@@ -620,7 +620,13 @@ export function applyPendingAmendment(
   return step(
     args.state,
     { scope: "objective", name: "amend", paid: true },
-    (context) => {
+    async (context) => {
+      selectWorkerAmendment(args.state);
+      if (
+        !args.state.pendingAmendment ||
+        args.state.pendingAmendment.phase === "backlog"
+      )
+        return false;
       const paid = paidModel(args.model, context);
       return withPlannerAdmission(
         args.state,
@@ -691,7 +697,6 @@ async function advanceAmendment(args: {
   diagnostics?: DiagnosticEmitter;
 }): Promise<boolean> {
   const { state, config, save } = args;
-  selectWorkerAmendment(state);
   const pending = state.pendingAmendment;
   if (!pending || pending.phase === "backlog") return false;
   if (

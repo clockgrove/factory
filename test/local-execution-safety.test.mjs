@@ -16,7 +16,10 @@ import test from "node:test";
 import { checkStagedCandidate } from "../dist/execution/staged-candidate.js";
 import { collectWorktreeResult } from "../dist/execution/local.js";
 import { LocalContentStore } from "../dist/content/local.js";
-import { graphDigest } from "../dist/graph-amendments.js";
+import {
+  applyPendingAmendment,
+  graphDigest,
+} from "../dist/graph-amendments.js";
 import {
   objectiveKnowledgeView,
   publishObjectiveKnowledge,
@@ -321,6 +324,101 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       state.repository,
       1,
     );
+    // Historical graph snapshots have no planner-session inputs. A real
+    // execution pass probes amendments even when only final review remains.
+    const legacy = structuredClone(loaded);
+    legacy.objectiveBodyDigest = createHash("sha256")
+      .update(git(checkout, "show", `${legacy.baseSha}:README.md`))
+      .digest("hex");
+    for (const work of Object.values(legacy.work)) work.status = "done";
+    const legacyPath = join(root, "private-state", "legacy.json");
+    saveState(legacyPath, legacy);
+    const legacyReload = parseFactoryState(
+      JSON.parse(readFileSync(legacyPath, "utf8")),
+      legacy.repository,
+      legacy.objective,
+    );
+    const legacySelection = { model: "unused", reasoningEffort: "low" };
+    const legacyModel = new StructuredPlanningModel(
+      new CodexPlanningTransport(
+        checkout,
+        legacySelection,
+        legacySelection,
+        undefined,
+        [],
+        join(root, "legacy-planner-homes"),
+      ),
+    );
+    const retainedGraph = structuredClone(legacyReload.graph);
+    const retainedWork = structuredClone(legacyReload.work);
+    assert.equal(
+      await applyPendingAmendment({
+        state: legacyReload,
+        config: { repository: legacy.repository, checkout },
+        body: git(checkout, "show", `${legacy.baseSha}:README.md`),
+        model: legacyModel,
+        // The real adapter must never start a provider process for a no-op.
+        save: () => saveState(legacyPath, legacyReload),
+        cancelled: () => false,
+      }),
+      false,
+    );
+    const continuedLegacy = parseFactoryState(
+      JSON.parse(readFileSync(legacyPath, "utf8")),
+      legacy.repository,
+      legacy.objective,
+    );
+    assert.deepEqual(continuedLegacy.graph, retainedGraph);
+    assert.deepEqual(continuedLegacy.work, retainedWork);
+    assert.equal(continuedLegacy.sourcePacketDigest, undefined);
+    assert.equal(continuedLegacy.agentSessions, undefined);
+    assert.equal(
+      agentSessionContinuation(
+        continuedLegacy,
+        "objective-review",
+        undefined,
+        () => saveState(legacyPath, continuedLegacy),
+      ).scope.graphDigest,
+      graphDigest(retainedGraph),
+    );
+    assert.throws(
+      () =>
+        agentSessionContinuation(continuedLegacy, "planning", undefined, () =>
+          saveState(legacyPath, continuedLegacy),
+        ),
+      /Planner immutable sourcePacketDigest is unavailable/,
+    );
+    await releaseAgentSessions(continuedLegacy, undefined, undefined, () =>
+      saveState(legacyPath, continuedLegacy),
+    );
+    assert.equal(existsSync(join(root, "legacy-planner-homes")), false);
+    // Eligible discoveries still enter the planner and retain the strict
+    // missing-input fence instead of being skipped as a historical no-op.
+    continuedLegacy.work.api.attempt = "legacy-discovery";
+    continuedLegacy.work.api.discovery = {
+      scope: "in-scope",
+      reason: "Extend the accepted interface",
+      evidence: ["schema.json"],
+      ownership: ["api.json"],
+      acceptance: ["Implement owned files"],
+      dependencies: ["schema"],
+      attempt: "legacy-discovery",
+    };
+    await assert.rejects(
+      () =>
+        applyPendingAmendment({
+          state: continuedLegacy,
+          config: { repository: legacy.repository, checkout },
+          body: git(checkout, "show", `${legacy.baseSha}:README.md`),
+          model: legacyModel,
+          save: () => saveState(legacyPath, continuedLegacy),
+          cancelled: () => false,
+        }),
+      /Planner immutable sourcePacketDigest is unavailable/,
+    );
+    assert.equal(continuedLegacy.pendingAmendment.phase, "ready");
+    assert.equal(continuedLegacy.work.api.discoveryDisposition, "proposed");
+    assert.equal(existsSync(join(root, "legacy-planner-homes")), false);
     await store.verify(loaded.work.schema.knowledge.recordRef);
     const current = objectiveKnowledgeView(
       loaded,

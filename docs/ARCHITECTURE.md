@@ -45,6 +45,7 @@ The target owns requirements, validation commands, permissions, protection rules
 Pin the Objective, default-branch commit and complete cited source contents. Models select semantic choices; code derives canonical identities, hashes, command text and relationships. Providers share the same grounding and validation rules.
 
 The transient compiler wire separates ordinary work from staged media outputs. Ordinary work omits output-media fields; the decoder supplies the canonical empty roles and zero candidates. Media output requires nonempty roles and a positive decimal candidate-count string, strictly decoded to a safe integer in the WorkGraph. This uses provider-supported array and string constraints rather than numerical bounds that some structured-output transports discard. Source assets remain available in either form. Retained items keep their original canonical fields, and semantic media validation remains authoritative.
+
 Adaptive planning requires both bounded `planningContext` configuration and an explicit Objective declaration:
 
 ```markdown

@@ -883,7 +883,7 @@ export class LocalRepositoryMemory {
   private result(
     entry: ReturnType<LocalRepositoryMemory["manifest"]>,
     applicability: MemoryApplicability | undefined,
-    budget: { bytes: number; bodies?: Set<string> },
+    budget: { bytes: number; bodies?: Map<string, Uint8Array> },
     superseded = false,
   ): MemoryResult {
     const { binding, record } = entry;
@@ -959,7 +959,10 @@ export class LocalRepositoryMemory {
         continue;
       }
       try {
-        const bytes = this.observedBody(body.ref);
+        const bytes =
+          budget.bodies?.get(body.ref.digest) ?? this.store.readBytes(body.ref);
+        if (bytes.length !== body.ref.bytes)
+          throw new Error("Retained body size differs");
         let decoded: string;
         try {
           decoded = new TextDecoder("utf-8", {
@@ -984,7 +987,7 @@ export class LocalRepositoryMemory {
           continue;
         }
         budget.bytes -= cost;
-        budget.bodies?.add(body.ref.digest);
+        budget.bodies?.set(body.ref.digest, bytes);
         content.push({
           role: body.role,
           ref: body.ref,
@@ -1295,7 +1298,7 @@ export class LocalRepositoryMemory {
     );
     const budget = {
       bytes: lookup.maxBytes ?? 262_144,
-      bodies: new Set<string>(),
+      bodies: new Map<string, Uint8Array>(),
     };
     const entries = retained.entries
       .sort((left, right) =>
@@ -1380,7 +1383,7 @@ export class LocalRepositoryMemory {
     );
     const budget = {
       bytes: lookup.maxBytes ?? 262_144,
-      bodies: new Set<string>(),
+      bodies: new Map<string, Uint8Array>(),
     };
     return selected.map((entry) =>
       this.result(

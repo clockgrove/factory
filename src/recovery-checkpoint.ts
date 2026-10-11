@@ -1915,6 +1915,7 @@ interface QueueAncestryObservation {
   summary(
     entry: QueueAncestryObservation["entries"][number],
   ): HistoricalManifestSummary;
+  prefetchOriginals(request: QueueOwnerLineageRequest): void;
   readOriginal(commit: string, ref: ContentRef): Buffer;
   description(
     ref: ContentRef,
@@ -2042,6 +2043,8 @@ function observeQueueAncestry(
   };
   const tuple = (ref: ContentRef) =>
     canonical([ref.digest, ref.bytes, ref.mediaType ?? null]);
+  const originalKey = (commit: string, ref: ContentRef) =>
+    canonical([commit, `blobs/${ref.digest}`, tuple(ref)]);
   return {
     key: capturedKey,
     tip,
@@ -2061,10 +2064,116 @@ function observeQueueAncestry(
         summaries.set(key, value);
       return value;
     },
+    prefetchOriginals(request) {
+      const claimPath = `project-queue-history/${request.claimId}.json`;
+      const statePaths = [
+        `objectives/${request.objective}/state.json`,
+        `objectives/${request.objective}/pre-state.json`,
+      ];
+      const first = new Set<string>();
+      const needed: { commit: string; ref: ContentRef; key: string }[] = [];
+      let charge = 0;
+      const select = (commit: string, ref: ContentRef) => {
+        if (first.has(ref.digest)) return true;
+        first.add(ref.digest);
+        const key = originalKey(commit, ref);
+        if (originals.has(key)) return true;
+        const source = `${commit}:blobs/${ref.digest}\n`;
+        // Reserve raw batch framing and detached retained bytes as well as keys.
+        // This optional pool does not change a query's logical original charge.
+        charge +=
+          ref.bytes * 2 +
+          Buffer.byteLength(key) +
+          Buffer.byteLength(source) +
+          2 * (64 + String(ref.bytes).length + 8);
+        if (
+          needed.length >= options.maxFiles ||
+          !Number.isSafeInteger(charge) ||
+          memoBytes + charge > budget
+        )
+          return false;
+        needed.push({ commit, ref, key });
+        return true;
+      };
+      let before = false;
+      let claimed = false;
+      let initial = false;
+      for (const entry of entries) {
+        const manifest = this.summary(entry);
+        const claim = manifest.files.find((file) => file.path === claimPath);
+        const states = manifest.files.filter((file) =>
+          statePaths.includes(file.path),
+        );
+        for (const file of manifest.files.filter((file) =>
+          /^project-queue-history\/[a-f0-9-]{36}\.json$/.test(file.path),
+        ))
+          if (!select(entry.commit, file.ref)) return;
+        if (!claim) {
+          if (claimed || states.length) return;
+          before = true;
+          continue;
+        }
+        if (claim.kind !== "historical" || claim.visibility !== "private")
+          return;
+        if (!claimed) {
+          if (!before) return;
+          claimed = true;
+          first.add(entry.ref.digest); // Preserve selected-witness seeding order.
+        }
+        if (states.length > 1) return;
+        if (!states.length) {
+          if (initial) return;
+          continue;
+        }
+        const state = states[0]!;
+        if (state.kind !== "continuation" || state.visibility !== "private")
+          return;
+        if (!select(entry.commit, state.ref)) return;
+        if (!initial) {
+          initial = true;
+          first.add(entry.ref.digest);
+        }
+      }
+      if (
+        !needed.length ||
+        memoBytes + charge > budget ||
+        summaries.size + originals.size + descriptions.size + needed.length >
+          options.maxFiles
+      )
+        return;
+      const metadata = git(
+        directory,
+        options,
+        ["cat-file", "--batch-check"],
+        needed
+          .map(({ commit, ref }) => `${commit}:blobs/${ref.digest}\n`)
+          .join(""),
+      )
+        .toString("utf8")
+        .split("\n");
+      if (metadata.pop() !== "" || metadata.length !== needed.length)
+        throw new Error(
+          "Queue lineage original source inventory is incomplete",
+        );
+      const selected = needed.map(({ ref }, index) => {
+        const match = /^([a-f0-9]{40,64}) blob ([0-9]+)$/.exec(
+          metadata[index]!,
+        );
+        if (!match || Number(match[2]) !== ref.bytes)
+          throw new Error("Queue lineage original source type or size differs");
+        return { ref, oid: match[1]! };
+      });
+      const loaded = readRecoveryCheckpointBodies(directory, options, selected);
+      for (const { key, ref } of needed) {
+        const bytes = loaded.get(ref.digest)!;
+        if (retain(bytes.length + Buffer.byteLength(key)))
+          originals.set(key, Buffer.from(bytes));
+      }
+    },
     readOriginal(commit, ref) {
       // The historical source association must be authenticated before another
       // query can reuse literal bytes. A current-tip body is not that proof.
-      const key = canonical([commit, `blobs/${ref.digest}`, tuple(ref)]);
+      const key = originalKey(commit, ref);
       const retained = originals.get(key);
       if (retained) return retained;
       const bytes = git(directory, options, [
@@ -2137,6 +2246,7 @@ function queueOwnerLineage(
   const commits = observation.entries;
   const manifestTransportBytes = observation.manifestTransportBytes;
   const manifestBufferBytes = options.maxBytes + 65536;
+  observation.prefetchOriginals(request);
   const bodies = new Map<string, { ref: ContentRef; bytes: Uint8Array }>();
   let retainedOriginalBytes = 0;
   const body = (commit: string, ref: ContentRef) => {

@@ -8,6 +8,8 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -729,6 +731,30 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       scope: "private-history",
     });
   const closure = await buildClosure();
+  // A linked checkout has a .git file; packing uses its common object storage.
+  const linkedCheckout = join(root, "linked-checkpoint");
+  git("worktree", "add", "--detach", linkedCheckout, "HEAD");
+  try {
+    const objects = realpathSync(
+      git("rev-parse", "--path-format=absolute", "--git-path", "objects"),
+    );
+    const originalEntries = readdirSync(objects).sort();
+    const linkedClosure = await buildRecoveryCheckpointClosure({
+      config: { ...config, checkout: linkedCheckout },
+      scope: "private-history",
+    });
+    assert.deepEqual(
+      linkedClosure.files
+        .filter((file) => file.kind === "git-pack")
+        .map((file) => file.ref),
+      closure.files
+        .filter((file) => file.kind === "git-pack")
+        .map((file) => file.ref),
+    );
+    assert.deepEqual(readdirSync(objects).sort(), originalEntries);
+  } finally {
+    git("worktree", "remove", linkedCheckout);
+  }
   const knowledge = await buildRecoveryCheckpointClosure({
     config,
     scope: "repository-knowledge",

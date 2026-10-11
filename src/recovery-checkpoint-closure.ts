@@ -8,7 +8,6 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
 import {
@@ -1204,8 +1203,21 @@ export async function buildRecoveryCheckpointClosure(input: {
         throw new Error(
           "Required recovery Git object is missing or has another type",
         );
+    // Git finalizes its pack from the repository object directory by rename.
+    // Keep our owned output on that filesystem, including linked worktrees.
+    const objectDirectory = realpathSync(
+      pinnedGit(
+        config.checkout,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "objects",
+      ),
+    );
+    if (!lstatSync(objectDirectory).isDirectory())
+      throw new Error("Recovery Git object storage is not a directory");
     const temporary = mkdtempSync(
-      join(tmpdir(), "factory-checkpoint-objects-"),
+      join(objectDirectory, "factory-checkpoint-objects-"),
     );
     try {
       const packed = await subprocessAsync(

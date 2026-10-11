@@ -70,6 +70,21 @@ export async function reviewAcceptance(args: {
 }): Promise<ReviewOutcome> {
   const { model, checkout, baseSha, commit, evidence, criteria, sources } =
     args;
+  const reviewPhase = args.reviewPhase ?? "result-review";
+  if (args.session && args.session.scope.role !== reviewPhase)
+    throw new Error("Review continuation differs from the reviewer role");
+  const session = model.sessionCapabilities?.resumeRoles.includes(reviewPhase)
+    ? args.session
+    : undefined;
+  if (
+    !session &&
+    (args.session?.retained?.status === "in-flight" ||
+      (args.session?.retained?.currentTurn &&
+        args.session.retained.currentTurn.resources !== "settled"))
+  )
+    throw new Error(
+      "Unsettled reviewer conversation cannot dispatch fresh review",
+    );
   if (!criteria.length) throw new Error("No acceptance criteria to prove");
   const observedTree = pinnedGit(checkout, "rev-parse", `${commit}^{tree}`);
   if (observedTree !== evidence.treeSha)
@@ -207,7 +222,7 @@ export async function reviewAcceptance(args: {
     }),
   );
   const request: Parameters<NonNullable<PlanningModel["reviewResult"]>>[0] = {
-    reviewPhase: args.reviewPhase ?? ("result-review" as const),
+    reviewPhase,
     criteria,
     reviewPacket: packet,
     baseSha,
@@ -218,11 +233,7 @@ export async function reviewAcceptance(args: {
     evidence: suppliedEvidence,
     observations: args.observations,
     invocation: args.invocation,
-    ...(model.sessionCapabilities?.resumeRoles.includes(
-      args.reviewPhase ?? "result-review",
-    ) && args.session
-      ? { session: args.session }
-      : {}),
+    ...(session ? { session } : {}),
     ...(args.previousInvalid ? { previousInvalid: args.previousInvalid } : {}),
   };
   // Criteria the operator decided on this tree need no reviewer.

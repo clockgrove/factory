@@ -1517,6 +1517,7 @@ function readArchive(
 ): {
   manifest: RecoveryCheckpointManifest;
   blobs: Map<string, Buffer>;
+  blobEntries: { ref: ContentRef; oid: string }[];
   manifestBytes: number;
   originalManifestBytes: Buffer;
   payloadDigest: string;
@@ -1564,14 +1565,15 @@ function readArchive(
   ].sort();
   if (canonical(names) !== canonical(expected))
     throw new Error("Archive contains unexpected or missing bytes");
-  const blobs = readRecoveryCheckpointBodies(
-    directory,
-    options,
-    refs.map((ref) => ({ ref, oid: objectIds.get(`blobs/${ref.digest}`)! })),
-  );
+  const blobEntries = refs.map((ref) => ({
+    ref,
+    oid: objectIds.get(`blobs/${ref.digest}`)!,
+  }));
+  const blobs = readRecoveryCheckpointBodies(directory, options, blobEntries);
   return {
     manifest,
     blobs,
+    blobEntries,
     manifestBytes: manifestBytes.length,
     originalManifestBytes: manifestBytes,
     payloadDigest: hash(manifestBytes),
@@ -2500,6 +2502,7 @@ async function publishCheckpoint(
     }
     initializeGit(p.git, options);
     const base = await remoteTip(p.git, options);
+    let verifiedBaseEntries: { ref: ContentRef; oid: string }[] = [];
     if (base) {
       if (!record.lastAcknowledged) {
         const missingBaseline =
@@ -2531,7 +2534,12 @@ async function publishCheckpoint(
         throw new CheckpointConflict(
           "Remote checkpoint changed during base fetch",
         );
-      readArchive(p.git, base, config, options);
+      verifiedBaseEntries = readArchive(
+        p.git,
+        base,
+        config,
+        options,
+      ).blobEntries;
     } else if (record.lastAcknowledged)
       throw new CheckpointConflict(
         "Acknowledged archive ref is missing; no branch recreation is admitted",
@@ -2545,7 +2553,26 @@ async function publishCheckpoint(
     )
       .toString("utf8")
       .trim();
-    const blobEntries = writeRecoveryCheckpointBodies(p.git, options, blobs);
+    // Reuse only identities fully authenticated by this publication's fresh
+    // base fetch. Current local bytes were independently checked above, and
+    // the complete collection remains bounded before selecting new bodies.
+    assertBodyBounds(
+      blobs.map(({ ref }) => ref),
+      options,
+    );
+    const verifiedBase = new Map(
+      verifiedBaseEntries.map((entry) => [entry.ref.digest, entry]),
+    );
+    const blobEntries: { ref: ContentRef; oid: string }[] = [];
+    const newBodies = blobs.filter(({ ref }) => {
+      const prior = verifiedBase.get(ref.digest);
+      if (!prior || canonical(prior.ref) !== canonical(ref)) return true;
+      blobEntries.push({ ref, oid: prior.oid });
+      return false;
+    });
+    blobEntries.push(
+      ...writeRecoveryCheckpointBodies(p.git, options, newBodies),
+    );
     const blobsTree = git(
       p.git,
       options,

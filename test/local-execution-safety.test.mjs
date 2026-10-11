@@ -23,7 +23,12 @@ import {
   withRecoveryCheckpointScope,
   awaitCheckpointAdmission,
   gitPersistenceStatus,
+  CheckpointAdmissionFailure,
 } from "../dist/recovery-checkpoint.js";
+import {
+  executionContext,
+  assertDurableValue,
+} from "../dist/execution/checkpoint.js";
 import {
   describeContinuationReferences,
   buildRecoveryCheckpointClosure,
@@ -1753,6 +1758,99 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     delete loaded.work.schema.validation;
     delete loaded.work.schema.acceptanceDecisions;
     delete loaded.work.schema.pullRequest;
+
+    // Exercise the stock prepared-request producer and its real strict atomic
+    // checkpoint, holding before Codex starts; these are no provider responses.
+    const prepare = async (objectiveBody, policy) => {
+      const originalHead = git(checkout, "rev-parse", "HEAD");
+      const preparedState = structuredClone(loaded);
+      preparedState.schemaVersion = 17;
+      const attempt = randomUUID();
+      preparedState.work.api = {
+        status: "running",
+        step: "execute",
+        attempt,
+        baseSha: loaded.baseSha,
+        startedAt: new Date().toISOString(),
+      };
+      const preparedFile = join(root, `prepared-${attempt}.json`);
+      const work = preparedState.work.api;
+      const context = executionContext(
+        work,
+        () => saveState(preparedFile, preparedState),
+        undefined,
+        undefined,
+        undefined,
+        preparedState.repository,
+        true,
+      );
+      const hold = new CheckpointAdmissionFailure(
+        "Integration admission remains held before native dispatch",
+        "before-effect",
+      );
+      context.admitEffect = async () => {
+        throw hold;
+      };
+      const driver = new LocalExecutionDriver(
+        checkout,
+        join(stateRoot(preparedState.repository), "worktrees"),
+        new CodexHarness(join(root, "prepared-credentials"), "off", {
+          model: "unused",
+          reasoningEffort: "low",
+        }),
+        1,
+        store,
+        "codex",
+        undefined,
+        {
+          repository: preparedState.repository,
+          configDigest: preparedState.configDigest,
+          policy,
+        },
+      );
+      await assert.rejects(
+        driver.start(
+          {
+            item: preparedState.graph.items.find((item) => item.id === "api"),
+            baseSha: preparedState.baseSha,
+            attemptId: attempt,
+            objectiveBody,
+            captureContext: {
+              objective: 1,
+              runId: preparedState.runId,
+              attemptId: attempt,
+            },
+          },
+          context,
+        ),
+        (error) => error === hold,
+      );
+      assertDurableValue(
+        work.execution,
+        "Actual prepared execution checkpoint",
+      );
+      const reloaded = parseFactoryState(
+        JSON.parse(readFileSync(preparedFile, "utf8")),
+        preparedState.repository,
+        1,
+      );
+      assert.deepEqual(reloaded.work.api.execution, work.execution);
+      assert.equal(work.execution.data.phase, "prepared");
+      assert.equal(work.execution.data.handle, undefined);
+      assert.ok(work.execution.data.admissionBlockedAt);
+      assert.equal(git(checkout, "rev-parse", "HEAD"), originalHead);
+      return work.execution.data.preparedHarnessRequest;
+    };
+    const absent = await prepare("## Package manager update\n_No response_\n");
+    assert.equal(Object.hasOwn(absent, "packageManagerUpdate"), false);
+    assert.equal(Object.hasOwn(absent.capture, "policy"), false);
+    const policy = { enabled: false, maxBytesPerInvocation: 1024 };
+    const declared = await prepare(
+      "## Package manager update\n- `npm@10.1.0`\n",
+      policy,
+    );
+    assert.equal(declared.packageManagerUpdate, "npm@10.1.0");
+    assert.deepEqual(declared.capture.policy, policy);
 
     const save = () => saveState(snapshot, loaded);
     const session = agentSessionContinuation(

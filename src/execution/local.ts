@@ -2057,6 +2057,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
           0,
         ...(workerReadiness && { receiptDigest: workerReadiness.digest }),
       });
+      const managerUpdate = packageManagerUpdate(request.objectiveBody ?? "");
       const preparedHarnessRequest: HarnessRequest = {
         ...(request.childAgents && { childAgents: request.childAgents }),
         ...(request.discovery &&
@@ -2071,7 +2072,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
         ...(request.captureContext &&
           this.captureSettings && {
             capture: {
-              policy: this.captureSettings.policy,
+              ...(this.captureSettings.policy !== undefined && {
+                policy: this.captureSettings.policy,
+              }),
               context: {
                 repository: this.captureSettings.repository,
                 ...request.captureContext,
@@ -2098,7 +2101,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
           }),
         ...(environment && { environment: structuredClone(environment) }),
         item: { ...request.item, brief: request.item.brief + failedContext },
-        packageManagerUpdate: packageManagerUpdate(request.objectiveBody ?? ""),
+        ...(managerUpdate !== undefined && {
+          packageManagerUpdate: managerUpdate,
+        }),
         worktree,
         attemptId: identity,
         sourceAssets: sourceAssets.map(

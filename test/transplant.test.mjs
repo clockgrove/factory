@@ -1249,6 +1249,44 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     "duplicate underlying bytes consume the admitted body allowance once",
   );
 
+  retainedMemory.retain({
+    ...historicalRecord.record,
+    kind: "observation",
+    summary: "repeatedbodyrole",
+  });
+  retainedMemory.retain({
+    ...historicalRecord.record,
+    kind: "observation",
+    summary: Array(8).fill("repeatedbodyrole").join(" "),
+    bodies: [
+      {
+        role: "source",
+        ref: historicalRecord.content[0].ref,
+        availability: "retained",
+      },
+      {
+        role: "source",
+        ref: retainedSource.content[0].ref,
+        availability: "retained",
+      },
+    ],
+  });
+  const repeatedRoles = await dedupResolver.resolve(
+    {
+      ...historicalSearch,
+      id: "repeated-body-roles",
+      query: "repeatedbodyrole",
+    },
+    { maxResults: 8, maxBytes: 32768, deadlineAt: Date.now() + 5000 },
+  );
+  assert.equal(repeatedRoles.matches.length, 2);
+  assert.equal(JSON.parse(repeatedRoles.matches[0].content).content.length, 2);
+  assert.ok(JSON.parse(repeatedRoles.matches[1].content).content[0].reuseRef);
+  assert.doesNotThrow(
+    () => assertPlanningMemoryProjection(repeatedRoles),
+    "repeated original body roles still resolve the exact referenced digest",
+  );
+
   const observedSource = sourceReference.record;
   const observation = (summary) => ({
     ...observedSource,

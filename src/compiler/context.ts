@@ -298,11 +298,17 @@ export function assertPlanningMemoryProjection(result: ContextResult): void {
           throw new Error(
             "Projected memory body differs from its exact retained bytes",
           );
-        pending.push([JSON.stringify([match.identity, body.role]), body.ref]);
+        pending.push([
+          JSON.stringify([match.identity, body.role, body.ref.digest]),
+          body.ref,
+        ]);
       } else {
         const reuse = body.reuseRef;
         const target =
-          reuse && bodies.get(JSON.stringify([reuse.identity, reuse.role]));
+          reuse &&
+          bodies.get(
+            JSON.stringify([reuse.identity, reuse.role, reuse.digest]),
+          );
         if (
           !reuse ||
           reuse.kind !== "context-match" ||

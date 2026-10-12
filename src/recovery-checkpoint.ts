@@ -1161,6 +1161,48 @@ export function withRecoveryCheckpointControllerVerification<T>(
 ): Promise<T> {
   return withQueueControlVerification(input, task);
 }
+/** Restore only this controller's checkpoint context across its authenticated IPC boundary. */
+export function bindRecoveryCheckpointControllerScope<
+  Args extends unknown[],
+  Result,
+>(
+  callback: (...args: Args) => Promise<Result>,
+): (...args: Args) => Promise<Result> {
+  const owner = scopes.getStore();
+  const options = owner && settings(owner.config);
+  if (!owner?.verification || !options)
+    throw new Error("Controller checkpoint callback has no owned verifier");
+  // Commands own their operation/completion bookkeeping. The owner contributes
+  // only its existing remote-only verifier, never a parent's operation authority
+  // or another AsyncLocalStorage's cancellation signal/deadline.
+  const frame = {
+    config: owner.config,
+    buildClosure: owner.buildClosure,
+    verification: owner.verification,
+  };
+  const capturedKey = verificationKey(frame.config, options);
+  const assertOwner = () => {
+    const current = settings(frame.config);
+    if (
+      frame.verification.closed ||
+      frame.verification.quarantined ||
+      !current ||
+      frame.verification.key !== capturedKey ||
+      verificationKey(frame.config, current) !== capturedKey
+    )
+      throw new Error(
+        "Controller checkpoint callback is closed, uncertain or differently bound",
+      );
+  };
+  assertOwner();
+  return (...args) =>
+    scopes.run(frame, async () => {
+      assertOwner();
+      const result = await callback(...args);
+      assertOwner();
+      return result;
+    });
+}
 /** One derived pack identity; current Git roots and local body bytes remain checked. */
 export function cachedRecoveryCheckpointGitPack(
   key: string,

@@ -2,7 +2,11 @@ import { chmodSync, closeSync, existsSync, openSync, rmSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { stateRoot } from "./config.js";
-import { currentProcessSignal, withProcessCancellation } from "./process.js";
+import {
+  currentProcessDeadlineAt,
+  currentProcessSignal,
+  withProcessCancellation,
+} from "./process.js";
 import {
   type ControllerLock,
   installationLockPath,
@@ -80,6 +84,10 @@ export async function serveControl(
   ) => Promise<unknown>,
   objective?: number,
 ): Promise<Server> {
+  const inheritedSignal = currentProcessSignal();
+  const inheritedDeadline = inheritedSignal
+    ? currentProcessDeadlineAt()
+    : undefined;
   const directoryPath = objective
     ? objectiveRoot(repository, objective)
     : stateRoot(repository);
@@ -94,6 +102,9 @@ export async function serveControl(
       socket.removeAllListeners("data");
       void (async () => {
         const cancellation = new AbortController();
+        const signal = inheritedSignal
+          ? AbortSignal.any([inheritedSignal, cancellation.signal])
+          : cancellation.signal;
         let timer: ReturnType<typeof setTimeout> | undefined;
         let completed = false;
         let admittedRequest: ControlRequest | undefined;
@@ -125,19 +136,26 @@ export async function serveControl(
             throw new Error("Controller command owner changed");
           if (
             request.command &&
-            (typeof request.command.id !== "string" ||
-              !/^[a-f0-9-]{36}$/.test(request.command.id) ||
+            (typeof request.command?.id !== "string" ||
+              !/^[a-f0-9-]{36}$/.test(request.command?.id) ||
               !Number.isFinite(request.command.deadlineAt) ||
               Object.keys(request.command).some(
                 (key) => !["id", "deadlineAt"].includes(key),
               ))
           )
             throw new Error("Invalid finite controller command binding");
-          const deadlineAt = request.command?.deadlineAt as number | undefined;
+          const deadlines = [
+            request.command?.deadlineAt,
+            inheritedDeadline ? Date.parse(inheritedDeadline) : undefined,
+          ].filter((value): value is number => value !== undefined);
+          const deadlineAt = deadlines.length
+            ? Math.min(...deadlines)
+            : undefined;
+          signal.throwIfAborted();
           if (deadlineAt !== undefined) {
             if (deadlineAt <= Date.now())
               throw new ControllerCommandIncompleteError(
-                request.command.id,
+                request.command?.id,
                 "not-sent",
                 deadlineAt,
               );
@@ -145,7 +163,7 @@ export async function serveControl(
               () =>
                 cancellation.abort(
                   new ControllerCommandIncompleteError(
-                    request.command.id,
+                    request.command?.id,
                     "unknown",
                     deadlineAt,
                   ),
@@ -154,13 +172,13 @@ export async function serveControl(
             );
           }
           const context: ControlContext = {
-            signal: cancellation.signal,
+            signal,
             deadlineAt,
             acknowledge(value) {
-              cancellation.signal.throwIfAborted();
+              signal.throwIfAborted();
               if (deadlineAt !== undefined && Date.now() >= deadlineAt)
                 throw new ControllerCommandIncompleteError(
-                  request.command.id,
+                  request.command?.id,
                   "unknown",
                   deadlineAt,
                 );
@@ -194,17 +212,17 @@ export async function serveControl(
             } satisfies ControllerReadiness;
           } else
             result = await withProcessCancellation(
-              cancellation.signal,
+              signal,
               () => handle(request, context),
               undefined,
               deadlineAt === undefined
                 ? undefined
                 : new Date(deadlineAt).toISOString(),
             );
-          cancellation.signal.throwIfAborted();
+          signal.throwIfAborted();
           if (deadlineAt !== undefined && Date.now() >= deadlineAt)
             throw new ControllerCommandIncompleteError(
-              request.command.id,
+              request.command?.id,
               "unknown",
               deadlineAt,
             );
@@ -214,7 +232,7 @@ export async function serveControl(
           );
         } catch (error) {
           socket.end(
-            `${JSON.stringify({ error: error instanceof Error ? error.message : String(error), ...(admittedRequest?.command && (cancellation.signal.aborted || Date.now() >= admittedRequest.command.deadlineAt) ? { incomplete: { requestId: admittedRequest.command.id, deadlineAt: admittedRequest.command.deadlineAt, submission: "unknown" } } : {}) })}\n`,
+            `${JSON.stringify({ error: error instanceof Error ? error.message : String(error), ...(admittedRequest?.command && (signal.aborted || Date.now() >= admittedRequest.command.deadlineAt) ? { incomplete: { requestId: admittedRequest.command.id, deadlineAt: admittedRequest.command.deadlineAt, submission: "unknown" } } : {}) })}\n`,
           );
         } finally {
           if (timer) clearTimeout(timer);

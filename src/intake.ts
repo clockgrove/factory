@@ -22,9 +22,11 @@ import {
 import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { attachedFault } from "./fault.js";
 import { RealGitHubGateway } from "./github.js";
+import { gitHubTransportOf } from "./github-client.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import {
   currentProcessSignal,
+  currentProcessDeadlineAt,
   assertProcessActive,
   fetchHead,
   git,
@@ -49,6 +51,7 @@ import {
 import {
   awaitCheckpointAdmission,
   acceptForwardedCheckpointCompletion,
+  bindRecoveryCheckpointControllerScope,
   gitPersistenceStatus,
   readVerifiedRecoveryCheckpoint,
   withRecoveryCheckpointCommandOperation,
@@ -982,6 +985,59 @@ async function runIntakeOwned(
   let heldUntil = 0;
   let controlTail: Promise<unknown> = Promise.resolve();
   let pendingMutations = 0;
+  let backgroundObservation: AbortController | undefined;
+  const observationPreempted = new DOMException(
+    "Read-only Project observation yielded to an authenticated queue command",
+    "AbortError",
+  );
+  const observeBackground = async (): Promise<VerifiedQueueObservation> => {
+    const poll = new AbortController();
+    backgroundObservation = poll;
+    const inherited = currentProcessSignal();
+    const inheritedDeadline = inherited
+      ? currentProcessDeadlineAt()
+      : undefined;
+    const signal = inherited
+      ? AbortSignal.any([inherited, poll.signal])
+      : poll.signal;
+    try {
+      const binding = requireProjectQueueEffects(config);
+      if (!services.github.projectQueueRead)
+        throw new Error("GitHub gateway cannot read Project queue metadata");
+      // Only the serial read-only GitHub leg is preemptible. Archive checking
+      // keeps the original controller scope and its authenticated verifier.
+      const snapshot = await withProcessCancellation(
+        signal,
+        async () => {
+          const current = await services.github.projectQueueRead!(binding);
+          signal.throwIfAborted();
+          return current;
+        },
+        undefined,
+        inheritedDeadline,
+      );
+      const history = await readQueueHistory(config);
+      inherited?.throwIfAborted();
+      poll.signal.throwIfAborted();
+      return verifyQueueObservation(config, snapshot, history);
+    } catch (error) {
+      const transport = gitHubTransportOf(error);
+      if (
+        poll.signal.reason === observationPreempted &&
+        !inherited?.aborted &&
+        (error === observationPreempted ||
+          attachedFault(error)?.kind === "cancelled" ||
+          (transport?.operation === "read" &&
+            transport.cancellation === true &&
+            transport.category === "cancelled" &&
+            transport.timeout !== true))
+      )
+        throw observationPreempted;
+      throw error;
+    } finally {
+      if (backgroundObservation === poll) backgroundObservation = undefined;
+    }
+  };
   const holdFor = (error: unknown) => {
     const fault = attachedFault(error);
     const at =
@@ -1147,6 +1203,8 @@ async function runIntakeOwned(
     // Token/live-owner authentication happens in serveControl; semantic authority
     // is checked above before any local dispatch state changes.
     if (request.action === "status") return handleOwned(request);
+    if (request.objective === 0)
+      backgroundObservation?.abort(observationPreempted);
     if (
       request.objective === 0 &&
       ["pause", "drain", "handoff"].includes(request.action)
@@ -1238,15 +1296,30 @@ async function runIntakeOwned(
         );
     }
     record = view(config, await observeProjectQueue(config, services.github));
-    server = await serveControl(config.repository, lock, handle);
+    server = await serveControl(
+      config.repository,
+      lock,
+      bindRecoveryCheckpointControllerScope(handle),
+    );
     for (;;) {
       if (handingOff || localMode === "draining")
         return { ...record, mode: "draining" };
+      if (pendingMutations) {
+        await controlTail;
+        continue;
+      }
       let observed: VerifiedQueueObservation | undefined;
       try {
-        observed = await observeProjectQueue(config, services.github);
+        observed = await observeBackground();
         record = view(config, observed);
       } catch (error) {
+        currentProcessSignal()?.throwIfAborted();
+        assertProcessActive();
+        if (error === observationPreempted) {
+          // Keep the prior timestamp and contents for local status. A cancelled
+          // observation grants no dispatch authority; the next poll is fresh.
+          continue;
+        }
         holdFor(error);
         record = view(config, undefined, error);
       }

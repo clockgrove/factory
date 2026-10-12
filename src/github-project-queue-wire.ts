@@ -45,10 +45,27 @@ export const TARGET = `query FactoryQueueTarget($item:ID!,$objective:Int!,$inclu
     nameWithOwner issue(number:$objective) @include(if:$includeIssue) { ${ISSUE_CONTENT} }
   }
 }`;
-export const ITEMS = `query FactoryQueueItems($project:ID!,$after:String) {
+const QUEUE_CARD = `${CARD.slice(0, CARD.indexOf("  fieldValues"))}
+  metadataValue:fieldValueByName(name:$metadataName) { ${VALUE} }
+  orderValue:fieldValueByName(name:$orderName) { ${VALUE} }`;
+export const FIELD_BINDING = BINDING.replace(
+  "FactoryQueueBinding",
+  "FactoryQueueFieldBinding",
+)
+  .replace("$order:ID!", "$order:ID!,$after:String")
+  .replace(
+    "id closed viewerCanUpdate",
+    `id closed viewerCanUpdate
+    fields(first:100,after:$after) {
+      nodes { __typename ... on ProjectV2FieldCommon { id name } }
+      pageInfo { hasNextPage endCursor }
+    }`,
+  )
+  .replaceAll("id dataType project { id }", "id name dataType project { id }");
+export const ITEMS = `query FactoryQueueItems($project:ID!,$after:String,$metadataName:String!,$orderName:String!) {
   node(id:$project) { __typename ... on ProjectV2 {
     id items(first:100,after:$after,archivedStates:[ARCHIVED,NOT_ARCHIVED]) {
-      nodes { ${CARD} } pageInfo { hasNextPage endCursor }
+      nodes { ${QUEUE_CARD} } pageInfo { hasNextPage endCursor }
     }
   } }
 }`;
@@ -84,6 +101,7 @@ export function issueBatchQuery(count: number): string {
 }
 const QUEUE_READ_QUERIES = Object.freeze([
   BINDING,
+  FIELD_BINDING,
   ITEMS,
   FIELDS,
   ISSUE_IDENTITY,

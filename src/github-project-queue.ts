@@ -16,9 +16,8 @@ import { currentProcessSignal, assertProcessActive } from "./process.js";
 import {
   ADD,
   UPDATE,
-  BINDING,
   ITEMS,
-  FIELDS,
+  FIELD_BINDING,
   TARGET,
   ISSUE_IDENTITY,
   issueBatchQuery,
@@ -357,27 +356,6 @@ export class ProjectQueueResponseError extends Error {
   }
 }
 
-async function readBinding(
-  repository: string,
-  binding: ProjectQueueBinding,
-  graphql: ProjectGraphQL,
-) {
-  assertProjectQueueBinding(binding, repository);
-  assertProcessActive();
-  const data = object(
-    await graphql(
-      BINDING,
-      {
-        project: binding.projectId,
-        metadata: binding.metadataFieldId,
-        order: binding.orderFieldId,
-      },
-      true,
-    ),
-  );
-  return bindingAccess(repository, binding, data);
-}
-
 function bindingAccess(
   repository: string,
   binding: ProjectQueueBinding,
@@ -413,6 +391,101 @@ function bindingAccess(
       );
   }
   return { actorId, owner: owner.login };
+}
+
+/** Complete current field-name proof is required by fieldValueByName's first-match semantics. */
+async function readQueueBinding(
+  repository: string,
+  binding: ProjectQueueBinding,
+  graphql: ProjectGraphQL,
+) {
+  assertProjectQueueBinding(binding, repository);
+  let access: ReturnType<typeof bindingAccess> | undefined;
+  let names: { metadata: string; order: string } | undefined;
+  const fields = new Map<string, string>();
+  const cursors = new Set<string>();
+  let after: string | null = null;
+  for (;;) {
+    assertProcessActive();
+    const data = object(
+      await graphql(
+        FIELD_BINDING,
+        {
+          project: binding.projectId,
+          metadata: binding.metadataFieldId,
+          order: binding.orderFieldId,
+          after,
+        },
+        true,
+      ),
+    );
+    const current = bindingAccess(repository, binding, data);
+    const currentNames = {
+      metadata: object(data.metadata).name,
+      order: object(data.order).name,
+    };
+    if (
+      typeof currentNames.metadata !== "string" ||
+      typeof currentNames.order !== "string" ||
+      (access && !same(access, current)) ||
+      (names && !same(names, currentNames))
+    )
+      throw new Error(
+        "Project queue field names or access changed during observation",
+      );
+    access = current;
+    names = currentNames as { metadata: string; order: string };
+    const page = connection(object(data.project).fields);
+    for (const raw of page.nodes) {
+      const field = object(raw);
+      if (
+        !nodeId(field.id) ||
+        typeof field.name !== "string" ||
+        fields.has(field.id)
+      )
+        throw new Error(
+          "Project queue field catalog is unavailable or duplicated",
+        );
+      fields.set(field.id, field.name);
+    }
+    if (!page.hasNextPage) break;
+    if (!page.endCursor || cursors.has(page.endCursor))
+      throw new Error(
+        "Project queue field catalog pagination is incomplete or repeated",
+      );
+    cursors.add(page.endCursor);
+    after = page.endCursor;
+  }
+  for (const [id, name] of [
+    [binding.metadataFieldId, names!.metadata],
+    [binding.orderFieldId, names!.order],
+  ] as const) {
+    if (
+      fields.get(id) !== name ||
+      [...fields.values()].filter((value) => value === name).length !== 1
+    )
+      throw new Error(
+        "Project queue bound field names must be unique in the complete Project",
+      );
+  }
+  return { access: access!, names: names! };
+}
+
+function queueFieldValues(card: ObjectValue, binding: ProjectQueueBinding) {
+  const values: unknown[] = [];
+  for (const [key, id] of [
+    ["metadataValue", binding.metadataFieldId],
+    ["orderValue", binding.orderFieldId],
+  ] as const) {
+    const value = card[key];
+    if (value === null) continue;
+    if (object(object(value).field).id !== id)
+      throw new Error(
+        "Project queue named field returned another field identity",
+      );
+    values.push(value);
+  }
+  return fieldValues(values, binding);
 }
 
 async function readIssues(
@@ -495,7 +568,11 @@ async function readQueueFresh(
   binding: ProjectQueueBinding,
   graphql: ProjectGraphQL,
 ) {
-  const access = await readBinding(repository, binding, graphql);
+  const { access, names } = await readQueueBinding(
+    repository,
+    binding,
+    graphql,
+  );
   const cards: ProjectQueueSnapshot["cards"] = [];
   const ignoredCards: ProjectQueueSnapshot["ignoredCards"] = [];
   const seenCards = new Set<string>();
@@ -513,6 +590,8 @@ async function readQueueFresh(
         {
           project: binding.projectId,
           after,
+          metadataName: names.metadata,
+          orderName: names.order,
         },
         true,
       ),
@@ -543,43 +622,7 @@ async function readQueueFresh(
       if (seenCards.has(itemId))
         throw new Error("Project queue has duplicate card identities");
       seenCards.add(itemId);
-      const firstFields = connection(card.fieldValues);
-      const allFields = [...firstFields.nodes];
-      let fieldAfter = firstFields.endCursor;
-      let next = firstFields.hasNextPage;
-      const fieldCursors = new Set<string>();
-      for (let fieldPage = 0; next; fieldPage++) {
-        if (fieldPage >= 100 || !fieldAfter || fieldCursors.has(fieldAfter))
-          throw new Error(
-            "Project queue field pagination is incomplete or repeated",
-          );
-        fieldCursors.add(fieldAfter);
-        assertProcessActive();
-        const result = object(
-          await graphql(
-            FIELDS,
-            {
-              item: itemId,
-              after: fieldAfter,
-            },
-            true,
-          ),
-        );
-        const node = object(result.node);
-        if (
-          node.__typename !== "ProjectV2Item" ||
-          node.id !== itemId ||
-          object(node.project).id !== binding.projectId
-        )
-          throw new Error(
-            "Project queue field pagination changed card identity",
-          );
-        const fieldsPage = connection(node.fieldValues);
-        allFields.push(...fieldsPage.nodes);
-        fieldAfter = fieldsPage.endCursor;
-        next = fieldsPage.hasNextPage;
-      }
-      const fields = fieldValues(allFields, binding);
+      const fields = queueFieldValues(card, binding);
       const content = object(card.content);
       if (itemId === binding.controlItemId) {
         if (
@@ -642,8 +685,12 @@ async function readQueueFresh(
   if (!control)
     throw new Error("Project queue lacks its configured control card");
   // Recheck capabilities after pagination; the API offers no version/CAS guarantee.
-  const current = await readBinding(repository, binding, graphql);
-  if (current.actorId !== access.actorId || current.owner !== access.owner)
+  const current = await readQueueBinding(repository, binding, graphql);
+  if (
+    !same(current.names, names) ||
+    current.access.actorId !== access.actorId ||
+    current.access.owner !== access.owner
+  )
     throw new Error("Project queue access changed during observation");
   const snapshot: ProjectQueueSnapshot = {
     binding: structuredClone(binding),

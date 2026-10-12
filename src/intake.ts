@@ -1544,7 +1544,15 @@ async function runIntakeOwned(
         holdFor(error);
         record = view(config, undefined, error);
       }
-      if (record.complete && record.mode === "draining") return record;
+      // A verified background owner remains available for explicit queue
+      // control after restart; the actual draining mode never admits dispatch.
+      // Local drain/handoff still ceases it through the branch above.
+      if (
+        record.complete &&
+        record.mode === "draining" &&
+        !options.backgroundConfigurationPath
+      )
+        return record;
       if (
         observed &&
         record.mode === "running" &&

@@ -528,10 +528,6 @@ export function checkPreparedIntakeServiceState(
       "A complete current Project observation is required before background readiness",
     );
   checkIntakeLocalServiceState(config, configPath, intake);
-  if (intake.mode === "draining")
-    throw new Error(
-      `The queue is draining; run \`factory queue resume --config ${word(configPath)}\`, then \`${supervisorCommand("start", configPath)}\``,
-    );
 }
 export async function checkIntakeServiceState(
   config: FactoryConfig,

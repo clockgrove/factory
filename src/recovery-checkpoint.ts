@@ -2501,8 +2501,8 @@ function closureIdentity(value: RecoveryCheckpointClosure): string {
     gaps: ordered(value.gaps),
   });
 }
-// A transport batch bounds framing and argv overhead; archive admission limits
-// and every body's exact identity still apply to the complete collection.
+// Writes retain a small argv batch. Reads use the existing bounded stdout
+// allowance; complete archive limits and every exact body identity still apply.
 const BODY_BATCH_SIZE = 64;
 function assertBodyBounds(
   refs: readonly ContentRef[],
@@ -2526,10 +2526,29 @@ export function readRecoveryCheckpointBodies(
     options,
   );
   const bodies = new Map<string, Buffer>();
-  for (let offset = 0; offset < entries.length; offset += BODY_BATCH_SIZE) {
-    const batch = entries.slice(offset, offset + BODY_BATCH_SIZE);
-    if (batch.some(({ oid }) => !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid)))
-      throw new Error("Checkpoint body Git identity is invalid");
+  for (let offset = 0; offset < entries.length; ) {
+    let end = offset;
+    let packetBytes = 0;
+    while (end < entries.length) {
+      const { ref, oid } = entries[end]!;
+      if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid))
+        throw new Error("Checkpoint body Git identity is invalid");
+      const bytes =
+        ref.bytes + Buffer.byteLength(`${oid} blob ${ref.bytes}\n`) + 1;
+      const nextPacketBytes = packetBytes + bytes;
+      if (
+        !Number.isSafeInteger(bytes) ||
+        !Number.isSafeInteger(nextPacketBytes)
+      )
+        throw new Error("Checkpoint body framing exceeds exact integer range");
+      if (nextPacketBytes > options.maxBytes + 65536) break;
+      packetBytes = nextPacketBytes;
+      end++;
+    }
+    if (end === offset)
+      throw new Error("Checkpoint body framing exceeds bounded Git output");
+    const batch = entries.slice(offset, end);
+    offset = end;
     const output = git(
       directory,
       options,

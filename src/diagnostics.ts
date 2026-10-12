@@ -302,6 +302,23 @@ export async function withDiagnosticSession<T>(
   );
 }
 
+/** Optional checkpoint observations inherit the actual active diagnostic owner. */
+export function checkpointDiagnosticEmitter(
+  repository: string,
+  secrets: string[],
+): DiagnosticEmitter | undefined {
+  const session = observerSessions.getStore();
+  if (session && (session.repository !== repository || session.closed))
+    return undefined;
+  return new DiagnosticEmitter(
+    repository,
+    session?.objective ?? 0,
+    secrets,
+    undefined,
+    session?.configDigest,
+  );
+}
+
 export function redactDiagnosticDetail(
   value: string,
   secrets: string[] = [],

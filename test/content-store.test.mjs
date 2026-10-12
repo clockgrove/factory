@@ -57,6 +57,8 @@ import {
   diagnosticPath,
   readUsageSummaryEvents,
   summarizeDiagnosticUsage,
+  summarizeFormalHistory,
+  withDiagnosticSession,
 } from "../dist/diagnostics.js";
 import {
   authenticateDiscoveryOutput,
@@ -982,10 +984,49 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       firstInspection.current.uniqueBodyBytes,
     true,
   );
-  const unchangedCheckpoint = await synchronizeRecoveryCheckpoint(config, {
-    reason: "explicit",
-    buildClosure,
+  const diagnosticConfig = factoryConfigDigest(config);
+  const unchangedCheckpoint = await withDiagnosticSession(
+    new DiagnosticEmitter(repository, 1, [], undefined, diagnosticConfig),
+    diagnosticConfig,
+    () =>
+      synchronizeRecoveryCheckpoint(config, {
+        reason: "explicit",
+        buildClosure,
+      }),
+    () => "checkpoint-revalidated",
+  );
+  const diagnosticRows = readFileSync(diagnosticPath(repository, 1), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const diagnosticSession = diagnosticRows.findLast(
+    (row) =>
+      row.operation === "observer-session" && row.outcome === "completed",
+  );
+  const checkpointSessionRows = diagnosticRows.filter(
+    (row) => row.observerSessionId === diagnosticSession.observerSessionId,
+  );
+  assert(
+    checkpointSessionRows.some(
+      (row) =>
+        row.operation === "recovery-checkpoint-archive" &&
+        row.outcome === "completed",
+    ),
+  );
+  const formalHistory = summarizeFormalHistory(checkpointSessionRows, {
+    repository,
+    objective: 1,
+    configDigest: diagnosticConfig,
+    observerSourceDigest:
+      checkpointSessionRows[0].metadata.observerSourceDigest,
+    sessionIds: [diagnosticSession.observerSessionId],
   });
+  // This real storage synchronization observes no formal Objective step.
+  // Every session/source/config/sequence/loss check must nevertheless pass.
+  assert.equal(formalHistory.completeness, "unknown");
+  assert.deepEqual(formalHistory.reasons, ["no-formal-attempts-observed"]);
+  assert.equal(diagnosticSession.metadata.lostObservations, 0);
+  assert.equal(diagnosticSession.metadata.writeFailures, 0);
   assert.equal(unchangedCheckpoint.status, "acknowledged");
   assert.equal(
     unchangedCheckpoint.lastAcknowledged.commitSha,

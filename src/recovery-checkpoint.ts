@@ -29,7 +29,10 @@ import {
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import type { ContentRef } from "./contracts.js";
-import { DiagnosticEmitter } from "./diagnostics.js";
+import {
+  checkpointDiagnosticEmitter,
+  type DiagnosticEmitter,
+} from "./diagnostics.js";
 import { attachFault, decision } from "./fault.js";
 import {
   assertProcessActive,
@@ -330,7 +333,7 @@ function checkpointObservation(
   let operationAttemptId: string | undefined;
   try {
     operationAttemptId = randomUUID();
-    emitter = new DiagnosticEmitter(config.repository, 0, [
+    emitter = checkpointDiagnosticEmitter(config.repository, [
       ...(config.policy?.allowedSecretNames ?? [])
         .map((name) => process.env[name])
         .filter((value): value is string => Boolean(value)),

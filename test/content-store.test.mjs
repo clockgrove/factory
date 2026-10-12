@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import childProcess, { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -15,6 +15,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -803,11 +804,17 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     "Private unrelated orchard debugging notes",
     { mode: 0o600 },
   );
-  const buildClosure = () =>
-    buildRecoveryCheckpointClosure({
+  const retainedCheckpointSources = [];
+  const buildClosure = async () => {
+    const actual = await buildRecoveryCheckpointClosure({
       config,
       scope: "private-history",
     });
+    return {
+      ...actual,
+      contentRefs: [...actual.contentRefs, ...retainedCheckpointSources],
+    };
+  };
   const closure = await buildClosure();
   // A linked checkout has a .git file; packing uses its common object storage.
   const linkedCheckout = join(root, "linked-checkpoint");
@@ -2166,34 +2173,83 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           ),
         /scope.*different|scope.*match|different.*configuration|Nested checkpoint/,
       );
-      saveState(statePath(repository, 1), cancelled);
-      await synchronizeRecoveryCheckpoint(config, {
-        reason: "explicit",
-        buildClosure,
-      });
-      const advanced = await readVerifiedRecoveryCheckpoint(config);
-      assert.notEqual(advanced.commitSha, restoredRead.commitSha);
-      assert.equal(verifierDirectories().length, 1);
-      // Observe the real producer after the changed candidate is independently
-      // acknowledged. Local/remote facts for one body share the byte budget;
-      // they do not consume separate archive file slots.
-      const originalReferences =
-        LocalContentStore.prototype.checkpointReferences;
-      let accountingReuse = 0;
-      LocalContentStore.prototype.checkpointReferences = function (
-        description,
-      ) {
-        const result = Reflect.apply(originalReferences, this, [description]);
-        if (JSON.parse(description)[0] === "accounting-original" && result)
-          accountingReuse++;
-        return result;
+      const protocolPath = join(root, "controller-negotiation.packet");
+      const originalSpawn = childProcess.spawn;
+      // Trace the real Git protocol; every command still uses the actual child.
+      childProcess.spawn = function (file, args, options) {
+        if (
+          file === "git" &&
+          args.includes("fetch") &&
+          args[1].startsWith(join(state, "recovery", "verify-")) &&
+          args[1].endsWith(".git")
+        )
+          options = {
+            ...options,
+            env: { ...options.env, GIT_TRACE_PACKET: protocolPath },
+          };
+        return Reflect.apply(originalSpawn, this, [file, args, options]);
       };
+      syncBuiltinESMExports();
       try {
-        const afterAdvanced = await buildClosure();
-        assert(accountingReuse > 0);
-        assert.deepEqual(await buildClosure(), afterAdvanced);
+        saveState(statePath(repository, 1), cancelled);
+        await synchronizeRecoveryCheckpoint(config, {
+          reason: "explicit",
+          buildClosure,
+        });
+        const advanced = await readVerifiedRecoveryCheckpoint(config);
+        assert.notEqual(advanced.commitSha, restoredRead.commitSha);
+        assert.equal(verifierDirectories().length, 1);
+        // Observe the real producer after the changed candidate is independently
+        // acknowledged. Local/remote facts for one body share the byte budget;
+        // they do not consume separate archive file slots.
+        const originalReferences =
+          LocalContentStore.prototype.checkpointReferences;
+        let accountingReuse = 0;
+        LocalContentStore.prototype.checkpointReferences = function (
+          description,
+        ) {
+          const result = Reflect.apply(originalReferences, this, [description]);
+          if (JSON.parse(description)[0] === "accounting-original" && result)
+            accountingReuse++;
+          return result;
+        };
+        try {
+          const afterAdvanced = await buildClosure();
+          assert(accountingReuse > 0);
+          assert.deepEqual(await buildClosure(), afterAdvanced);
+        } finally {
+          LocalContentStore.prototype.checkpointReferences = originalReferences;
+        }
+        assert.match(
+          readFileSync(protocolPath, "utf8"),
+          new RegExp(`have ${restoredRead.commitSha}\\b`),
+        );
+        // The following changed payload uses a real newly retained opaque body,
+        // without inventing another provider observation or changing a run.
+        const nextSource = content.putBytes(
+          Buffer.from("Actual second retained checkpoint source"),
+          { mediaType: "text/plain" },
+        );
+        retainedCheckpointSources.push(nextSource);
+        const nextCheckpoint = await synchronizeRecoveryCheckpoint(config, {
+          reason: "explicit",
+          buildClosure,
+        });
+        assert.notEqual(
+          nextCheckpoint.lastAcknowledged.commitSha,
+          advanced.commitSha,
+        );
+        assert.match(
+          readFileSync(protocolPath, "utf8"),
+          new RegExp(`have ${advanced.commitSha}\\b`),
+        );
+        assert.equal(
+          (await readVerifiedRecoveryCheckpoint(config)).commitSha,
+          nextCheckpoint.lastAcknowledged.commitSha,
+        );
       } finally {
-        LocalContentStore.prototype.checkpointReferences = originalReferences;
+        childProcess.spawn = originalSpawn;
+        syncBuiltinESMExports();
       }
     },
   );

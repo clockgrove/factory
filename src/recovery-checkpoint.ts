@@ -339,6 +339,7 @@ interface QueueVerificationContext {
   pendingReferenceBytes: number;
   objects?: Map<string, string>;
   objectBytes: number;
+  negotiationTip?: string;
   lineages: Map<string, CachedQueueLineage>;
   lineageBytes: number;
   reservationPrefixes: Map<string, string>;
@@ -1183,6 +1184,7 @@ export function withQueueControlVerification<T>(
       verification.lineages.clear();
       verification.reservationPrefixes.clear();
       delete verification.objects;
+      delete verification.negotiationTip;
     }
     if (failed) throw failure;
     assertCaptured(verification, true);
@@ -1604,8 +1606,33 @@ function verificationMetadataBytes(context: QueueVerificationContext): number {
     context.lineageBytes +
     context.reservationPrefixBytes +
     context.pendingReferenceBytes +
-    (context.objects ? context.objectBytes : 0)
+    (context.objects ? context.objectBytes : 0) +
+    negotiationTipCharge(context.negotiationTip)
   );
+}
+
+function negotiationTipCharge(tip?: string): number {
+  return tip
+    ? Buffer.byteLength("negotiation-tip") + Buffer.byteLength(tip)
+    : 0;
+}
+function retainVerifiedNegotiationTip(
+  context: QueueVerificationContext,
+  options: GitPersistenceConfig,
+  tip: string,
+): void {
+  if (
+    !reserveVerificationMetadata(
+      context,
+      options,
+      negotiationTipCharge(tip),
+      negotiationTipCharge(context.negotiationTip),
+    )
+  ) {
+    delete context.negotiationTip;
+    return;
+  }
+  context.negotiationTip = tip;
 }
 
 function reserveVerificationMetadata(
@@ -3976,9 +4003,25 @@ async function freshArchiveOwned(
       observeCapacity,
       context,
     );
-  return scope?.verification && context === scope.verification
-    ? withFiniteCheckpointReads(config, read, true, scope)
-    : read();
+  const result =
+    scope?.verification && context === scope.verification
+      ? await withFiniteCheckpointReads(config, read, true, scope)
+      : await read();
+  if (context?.objects && scope?.verification === context) {
+    // Only a fully completed independent read may seed the next transport's
+    // common-history hint. It supplies no archive or publication authority.
+    assertProcessActive();
+    if (
+      context.closed ||
+      context.quarantined ||
+      context.key !== verificationKey(config, options)
+    )
+      throw new Error(
+        "Queue verifier binding changed before retaining its tip",
+      );
+    retainVerifiedNegotiationTip(context, options, result.remoteTip);
+  }
+  return result;
 }
 
 async function freshArchiveOwnedStrict(
@@ -4005,6 +4048,7 @@ async function freshArchiveOwnedStrict(
         scanVerifierObjects(directory, options),
         priorObjects,
       );
+    const negotiationTip = priorObjects ? context?.negotiationTip : undefined;
     const tip = await remoteTip(directory, options);
     if (!tip) throw new Error("Configured Git archive ref has no checkpoint");
     if (context && context.key !== verificationKey(config, options))
@@ -4022,6 +4066,7 @@ async function freshArchiveOwnedStrict(
       "transfer.fsckObjects=true",
       "fetch",
       "--no-tags",
+      ...(negotiationTip ? [`--negotiation-tip=${negotiationTip}`] : []),
       "--",
       options.remote,
       options.ref,
@@ -4064,10 +4109,13 @@ async function freshArchiveOwnedStrict(
       )
         clearContentVerification(context);
       const fits =
-        context.pendingReferenceBytes + objectBytes <=
+        context.pendingReferenceBytes +
+          objectBytes +
+          negotiationTipCharge(context.negotiationTip) <=
         verificationMetadataBudget(options);
       context.objects = fits ? objects : undefined;
       context.objectBytes = fits ? objectBytes : 0;
+      if (!context.objects) delete context.negotiationTip;
     }
     if (context && context.key !== verificationKey(config, options))
       throw new Error(
@@ -4418,6 +4466,7 @@ async function freshArchiveOwnedStrict(
         context.content.clear();
         context.contentBytes = 0;
         delete context.objects;
+        delete context.negotiationTip;
       }
     }
     if (context && settled) {
@@ -4430,6 +4479,7 @@ async function freshArchiveOwnedStrict(
       context.reservationPrefixes.clear();
       context.reservationPrefixBytes = 0;
       delete context.objects;
+      delete context.negotiationTip;
       context.quarantined = true;
       try {
         rmSync(directory, { recursive: true, force: true });

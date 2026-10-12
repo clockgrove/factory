@@ -844,7 +844,6 @@ async function main(): Promise<void> {
     "drain",
     "resume",
     "cancel",
-    "handoff",
   ]);
   if (!command || !mutating.has(command)) return dispatchMain();
   assertKnownFlags(command, args);

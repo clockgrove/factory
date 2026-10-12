@@ -797,6 +797,26 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         sha256: hash(refusedProofBytes),
         bytes: refusedProofBytes.length,
       };
+      const refusedEvidence = {
+        schemaVersion: 1,
+        kind: "operator-retired-admission-unknown",
+        operationId: randomUUID(),
+        originalInstallation: {
+          cli: process.execPath,
+          configPath,
+          configSha256: hash(configBytes),
+          ownFileInventory: refusedOriginal,
+        },
+        originals: Object.fromEntries(
+          [
+            "ownerObservation",
+            "installedPlan",
+            "callerFailure",
+            "sourceProtocolReview",
+            "physicalClosure",
+          ].map((name) => [name, refusedOriginal]),
+        ),
+      };
       const maintenanceOffset = (await readFile(diagnosticPath(repository, 0)))
         .length;
       // An actual rewritten retained original makes error settlement durable;
@@ -816,26 +836,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
               action: "handoff",
               input: {
                 actor: "Fixture",
-                retiredAdmissionEvidence: {
-                  schemaVersion: 1,
-                  kind: "operator-retired-admission-unknown",
-                  operationId: randomUUID(),
-                  originalInstallation: {
-                    cli: process.execPath,
-                    configPath,
-                    configSha256: hash(configBytes),
-                    ownFileInventory: refusedOriginal,
-                  },
-                  originals: Object.fromEntries(
-                    [
-                      "ownerObservation",
-                      "installedPlan",
-                      "callerFailure",
-                      "sourceProtocolReview",
-                      "physicalClosure",
-                    ].map((name) => [name, refusedOriginal]),
-                  ),
-                },
+                retiredAdmissionEvidence: refusedEvidence,
               },
             },
             {},
@@ -873,6 +874,53 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         "terminal error settlement reuses the same authenticated verifier",
       );
       assert.equal(existsSync(installationLockPath(repository)), false);
+      // The normal compiled CLI delegates this complete guarded controller;
+      // rejection must not trigger an unowned, duplicate cold synchronization.
+      const evidencePath = join(directory, "refused-maintenance-evidence.json");
+      await writeFile(evidencePath, JSON.stringify(refusedEvidence), {
+        mode: 0o600,
+      });
+      const cliOffset = (await readFile(diagnosticPath(repository, 0))).length;
+      assert.throws(
+        () =>
+          execFileSync(
+            process.execPath,
+            [
+              new URL("../dist/cli.js", import.meta.url).pathname,
+              "handoff",
+              "--objective",
+              "4",
+              "--retired-admission-evidence",
+              evidencePath,
+              "--config",
+              configPath,
+            ],
+            { env: process.env, encoding: "utf8", timeout: 30_000 },
+          ),
+        (error) =>
+          error.status === 1 &&
+          /Other partial effects or active owners remain held/.test(
+            error.stderr,
+          ),
+      );
+      const cliReads = (await readFile(diagnosticPath(repository, 0)))
+        .subarray(cliOffset)
+        .toString("utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .filter(
+          (event) =>
+            event.operation === "recovery-checkpoint-verify" &&
+            event.outcome === "started",
+        );
+      assert(cliReads.length > 0);
+      assert(
+        cliReads.every((event) => event.metadata.owned === true),
+        "CLI error propagation never reopens an unowned verifier",
+      );
+      assert.equal(existsSync(installationLockPath(repository)), false);
+
       assert.deepEqual(
         await readFile(join(history, `${operationId}.json`)),
         unknownBytes,

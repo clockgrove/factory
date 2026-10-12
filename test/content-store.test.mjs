@@ -983,6 +983,50 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     firstCheckpoint.lastAcknowledged.commitSha,
   );
   assert.deepEqual(readFileSync(join(checkout, "api.md")), source);
+  // A failed verification of an acknowledged original remains failed until
+  // explicit synchronization verifies the restored exact bytes and same ACK.
+  const beforeRevalidationJournal = JSON.parse(
+    readFileSync(join(state, "recovery", "checkpoint.json"), "utf8"),
+  );
+  const corruptAcknowledgedSource = Buffer.from(source);
+  corruptAcknowledgedSource[0] ^= 1;
+  writeFileSync(retainedSourcePath, corruptAcknowledgedSource);
+  try {
+    await assert.rejects(
+      synchronizeRecoveryCheckpoint(config, {
+        reason: "explicit",
+        buildClosure,
+      }),
+      /digest verification|failed exact verification/,
+    );
+    const failedRevalidation = gitPersistenceStatus(config);
+    assert.equal(failedRevalidation.status, "failed");
+    assert.equal(failedRevalidation.protectedContinuation, false);
+    assert.equal(failedRevalidation.pendingChanges, false);
+    assert.deepEqual(
+      failedRevalidation.lastAcknowledged,
+      unchangedCheckpoint.lastAcknowledged,
+    );
+  } finally {
+    writeFileSync(retainedSourcePath, source);
+  }
+  const restoredRevalidation = await synchronizeRecoveryCheckpoint(config, {
+    reason: "explicit",
+    buildClosure,
+  });
+  assert.equal(restoredRevalidation.status, "acknowledged");
+  assert.equal(restoredRevalidation.protectedContinuation, true);
+  assert.equal(restoredRevalidation.pendingChanges, false);
+  assert.deepEqual(
+    restoredRevalidation.lastAcknowledged,
+    unchangedCheckpoint.lastAcknowledged,
+  );
+  assert.deepEqual(
+    JSON.parse(
+      readFileSync(join(state, "recovery", "checkpoint.json"), "utf8"),
+    ),
+    beforeRevalidationJournal,
+  );
   // The CLI's forwarding scope reuses the actual producer's completed Git
   // barrier. A later atomic snapshot save invalidates that exact completion.
   let operationClosureBuilds = 0;

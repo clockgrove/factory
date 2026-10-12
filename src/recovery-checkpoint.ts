@@ -4444,8 +4444,35 @@ async function publishCheckpoint(
           throw new Error(
             "Verified archived bytes differ from the retained acknowledgement",
           );
-        if (closureIdentity(closure) === closureIdentity(acknowledged.manifest))
-          return status(journal(config, options), options);
+        if (
+          closureIdentity(closure) === closureIdentity(acknowledged.manifest)
+        ) {
+          // A successful explicit revalidation supersedes only the current
+          // synchronization error. It never completes the failed caller or
+          // changes any attempted transport/Objective/queue history.
+          const expected = record.lastAcknowledged;
+          const current = record.error
+            ? mutate(config, options, (latest) => {
+                const attempt = latest.attempts.at(-1);
+                if (
+                  latest.error === record.error &&
+                  latest.sequence === sequence &&
+                  latest.acknowledgedSequence === sequence &&
+                  canonical(latest.lastAcknowledged) === canonical(expected) &&
+                  !latest.hold &&
+                  !latest.retentionGaps?.length &&
+                  !latest.changed.length &&
+                  attempt?.status === "acknowledged" &&
+                  attempt.candidate === expected.commitSha &&
+                  attempt.payloadDigest === expected.payloadDigest &&
+                  attempt.sequence === expected.sequence &&
+                  acknowledged.manifest.sequence === expected.sequence
+                )
+                  delete latest.error;
+              })
+            : journal(config, options);
+          return status(current, options);
+        }
         let observedSequence = sequence;
         record = mutate(config, options, (current) => {
           if (current.sequence !== sequence) return;

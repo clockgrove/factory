@@ -262,7 +262,12 @@ export async function setupTarget(
       );
     completed.push("github-readable");
     stage = "queue-binding";
-    if (!intake?.watch) intake = await composeIntake(config).watchIntake();
+    if (!intake?.watch) {
+      await composeIntake(config).watchIntake();
+      intake = await readIntake(config);
+    }
+    if (!intake)
+      throw new Error("Complete Project queue observation is unavailable");
     result.queue = {
       watch: intake.watch,
       mode: intake.mode,

@@ -41,6 +41,7 @@ import {
 import { projectStatusOnGitHub } from "./github-project.js";
 import {
   projectQueueReadOnGitHub,
+  projectQueueInspectOnGitHub,
   projectQueueWriteOnGitHub,
   withProjectQueueObservationOnGitHub,
 } from "./github-project-queue.js";
@@ -161,6 +162,18 @@ export class RealGitHubGateway implements GitHubGateway {
       this.repository,
       binding,
       this.queueGraphql,
+    );
+  }
+
+  projectQueueInspect(
+    binding: Parameters<NonNullable<GitHubGateway["projectQueueInspect"]>>[0],
+    request?: Parameters<NonNullable<GitHubGateway["projectQueueInspect"]>>[1],
+  ) {
+    return projectQueueInspectOnGitHub(
+      this.repository,
+      binding,
+      this.queueGraphql,
+      request,
     );
   }
 

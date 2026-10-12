@@ -67,6 +67,7 @@ import {
   settleProjectQueueRun,
   settleFailedProjectQueueReservation,
   abandonFailedProjectQueueReservation,
+  retireUnknownProjectWithdrawal,
   settleStoppedProjectQueueRun,
 } from "./project-queue-state.js";
 import { objectiveCandidate } from "./qa.js";
@@ -289,7 +290,8 @@ async function controlObjectiveUnscoped(
 ): Promise<unknown> {
   if (
     request.action === "handoff" &&
-    request.input?.failedReservationEvidence !== undefined
+    (request.input?.failedReservationEvidence !== undefined ||
+      request.input?.retiredWithdrawalEvidence !== undefined)
   ) {
     if (
       !github ||
@@ -299,9 +301,23 @@ async function controlObjectiveUnscoped(
       throw new Error(
         "Failed reservation disposition requires its explicit local operator and genuine Project gateway",
       );
+    if (
+      request.input.failedReservationEvidence !== undefined &&
+      request.input.retiredWithdrawalEvidence !== undefined
+    )
+      throw new Error("Choose one exact stopped operator disposition");
     const lockPath = installationLockPath(config.repository),
       lock = acquireInstallationLock(config.repository, request.objective);
     try {
+      if (request.input.retiredWithdrawalEvidence !== undefined)
+        return await retireUnknownProjectWithdrawal(
+          config,
+          github,
+          request.objective,
+          request.input.retiredWithdrawalEvidence,
+          request.input.actor,
+          lock,
+        );
       return await abandonFailedProjectQueueReservation(
         config,
         github,

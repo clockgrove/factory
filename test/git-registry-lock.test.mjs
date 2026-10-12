@@ -25,11 +25,16 @@ import {
 import {
   authenticateQueueOwnerReferences,
   settleFailedProjectQueueReservation,
+  readQueueHistory,
+  retainedQueueEntry,
 } from "../dist/project-queue-state.js";
 import {
   readVerifiedRecoveryCheckpoint,
   withRecoveryCheckpointScope,
+  markCheckpointDirty,
+  awaitCheckpointAdmission,
 } from "../dist/recovery-checkpoint.js";
+import { UPDATE } from "../dist/github-project-queue-wire.js";
 import { buildRecoveryCheckpointClosure } from "../dist/recovery-checkpoint-closure.js";
 
 const processUrl = new URL("../dist/process.js", import.meta.url).href;
@@ -279,6 +284,103 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         Buffer.from(await archive.readVerifiedBlob(ref)),
         Buffer.from(store.readBytes(ref)),
       );
+    // A retained intent is not a remote outcome. Archive a genuine local original
+    // through Git, then prove a later authority cannot ignore its unknown effect.
+    // No gateway, submitted mutation, response or operator retirement is fabricated.
+    const operationId = randomUUID(),
+      requestId = randomUUID();
+    const metadata = JSON.stringify({
+      schemaVersion: 1,
+      kind: "admission",
+      admissionId: claim.admissionId,
+      receiptId: operationId,
+      state: "withdrawn",
+    });
+    const binding = config.queue.project;
+    const unknown = {
+      schemaVersion: 1,
+      kind: "project-queue-operation",
+      id: operationId,
+      repository,
+      binding,
+      authorityDigest: "1".repeat(64),
+      at: new Date().toISOString(),
+      action: "withdraw",
+      approval: { kind: "queue-command" },
+      scope: "I_storage",
+      previousReceiptId: claim.receiptId,
+      objective: 1,
+      issueNodeId: "I_storage",
+      bodyDigest: claim.bodyDigest,
+      order: 1,
+      metadata,
+      effects: [
+        {
+          intent: {
+            binding,
+            requestId,
+            actorId: 1,
+            observedAt: new Date().toISOString(),
+            action: "set-metadata",
+            itemId: "PVTI_storage",
+            metadata,
+            fieldId: binding.metadataFieldId,
+            request: {
+              query: UPDATE,
+              variables: {
+                input: {
+                  clientMutationId: requestId,
+                  projectId: binding.projectId,
+                  itemId: "PVTI_storage",
+                  fieldId: binding.metadataFieldId,
+                  value: { text: metadata },
+                },
+              },
+            },
+          },
+        },
+      ],
+    };
+    const unknownBytes = Buffer.from(`${JSON.stringify(unknown)}\n`);
+    await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
+      await writeFile(join(history, `${operationId}.json`), unknownBytes, {
+        mode: 0o600,
+      });
+      markCheckpointDirty(repository, {
+        path: `project-queue-history/${operationId}.json`,
+        kind: "historical",
+      });
+      await awaitCheckpointAdmission(repository, "explicit");
+    });
+    const restoredHistory = await readQueueHistory(config);
+    assert.deepEqual(
+      restoredHistory.find((row) => row.id === operationId),
+      unknown,
+    );
+    assert.throws(
+      () => retainedQueueEntry(config, restoredHistory, 1),
+      /partial or unknown/,
+    );
+    const restoredArchive = await readVerifiedRecoveryCheckpoint(config);
+    const originalFile = restoredArchive.manifest.files.find(
+      (file) => file.path === `project-queue-history/${operationId}.json`,
+    );
+    assert.deepEqual(
+      Buffer.from(await restoredArchive.readVerifiedBlob(originalFile.ref)),
+      unknownBytes,
+    );
+    assert.equal(
+      restoredHistory.find((row) => row.id === operationId).completed,
+      undefined,
+    );
+    assert.equal(
+      restoredHistory.find((row) => row.id === operationId).beforeEffectFailure,
+      undefined,
+    );
+    assert.equal(
+      restoredHistory.find((row) => row.id === operationId).retiredWithdrawal,
+      undefined,
+    );
   } finally {
     releaseControllerLock(objectiveLockPath(repository, 1), lock);
     await rm(directory, { recursive: true, force: true });

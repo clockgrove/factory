@@ -5,6 +5,9 @@ import type {
   ProjectQueueAction,
   ProjectQueueBinding,
   ProjectQueueIntent,
+  ProjectQueueInspection,
+  ProjectQueueTarget,
+  ProjectQueueExpectedTarget,
   ProjectQueueSnapshot,
   ProjectQueueWriteReceipt,
   ProjectQueueWriteRequest,
@@ -15,6 +18,7 @@ import { currentProcessSignal, assertProcessActive } from "./process.js";
 
 import {
   ADD,
+  INSPECT,
   UPDATE,
   ITEMS,
   FIELD_BINDING,
@@ -814,6 +818,7 @@ async function readTarget(
   let issue: unknown = repositoryValue.issue;
   if (
     !request.expectedIssue &&
+    !request.expectedTarget &&
     (request.action === "ensure-card" ||
       itemId !== request.binding.controlItemId)
   ) {
@@ -860,6 +865,259 @@ function expectedIssue(issue: ObjectValue, request: ProjectQueueWriteRequest) {
     );
 }
 
+function inspectedFields(card: ObjectValue, binding: ProjectQueueBinding) {
+  const page = connection(card.fieldValues);
+  if (page.hasNextPage)
+    throw new Error("Project queue target field proof is incomplete");
+  return fieldValues(page.nodes, binding);
+}
+function inspectedTarget(
+  value: unknown,
+  binding: ProjectQueueBinding,
+): ProjectQueueTarget {
+  const card = cardIdentity(value, binding);
+  const content = object(card.content);
+  if (
+    content.__typename !== "Issue" ||
+    object(content.repository).nameWithOwner !== binding.repository
+  )
+    throw new Error(
+      "Project queue inspection target is not an authenticated repository Issue",
+    );
+  return {
+    itemId: String(card.id),
+    issueNodeId: String(content.id),
+    objective: Number(content.number),
+    repository: binding.repository,
+    archived: Boolean(card.isArchived),
+    ...inspectedFields(card, binding),
+  };
+}
+
+/** Only actual validated original response fields supply the next command target proof. */
+export function projectQueueReceiptTarget(
+  receipt: ProjectQueueWriteReceipt,
+): ProjectQueueExpectedTarget {
+  assertProjectQueueWriteReceipt(receipt);
+  const intent = receipt.intent;
+  const card =
+    receipt.kind === "existing-read"
+      ? object(receipt.original)
+      : object(
+          object(
+            object(receipt.original)[
+              intent.action === "ensure-card"
+                ? "addProjectV2ItemById"
+                : "updateProjectV2ItemFieldValue"
+            ],
+          )[intent.action === "ensure-card" ? "item" : "projectV2Item"],
+        );
+  const fields = inspectedFields(card, intent.binding);
+  return receipt.itemId === intent.binding.controlItemId
+    ? { itemId: receipt.itemId, ...fields }
+    : inspectedTarget(card, intent.binding);
+}
+
+export async function projectQueueInspectOnGitHub(
+  repository: string,
+  binding: ProjectQueueBinding,
+  graphql: ProjectGraphQL,
+  request: { itemId?: string; objective?: number } = {},
+): Promise<ProjectQueueInspection> {
+  binding = structuredClone(binding);
+  assertProjectQueueBinding(binding, repository);
+  if (
+    (request.itemId !== undefined &&
+      (!nodeId(request.itemId) || request.itemId === binding.controlItemId)) ||
+    (request.objective !== undefined && !positiveInteger(request.objective))
+  )
+    throw new Error("Invalid Project queue inspection target");
+  let observed: ProjectQueueInspection | undefined;
+  const seen = new Set<string>();
+  const cursors = new Set<string>();
+  let after: string | null = null;
+  for (;;) {
+    assertProcessActive();
+    const data = object(
+      await graphql(
+        INSPECT,
+        {
+          project: binding.projectId,
+          metadata: binding.metadataFieldId,
+          order: binding.orderFieldId,
+          control: binding.controlItemId,
+          item: request.itemId ?? binding.controlItemId,
+          includeItem: request.itemId !== undefined,
+          owner: repository.split("/")[0],
+          name: repository.split("/")[1],
+          objective: request.objective ?? 1,
+          includeIssue: request.objective !== undefined,
+          after,
+        },
+        true,
+      ),
+    );
+    const access = bindingAccess(repository, binding, data);
+    const controlCard = cardIdentity(data.control, binding);
+    if (
+      controlCard.id !== binding.controlItemId ||
+      controlCard.__typename !== "ProjectV2Item" ||
+      controlCard.isArchived ||
+      !["Issue", "DraftIssue"].includes(
+        String(object(controlCard.content).__typename),
+      )
+    )
+      throw new Error(
+        "Project queue inspection control identity is unavailable",
+      );
+    const control = {
+      itemId: binding.controlItemId,
+      metadata: inspectedFields(controlCard, binding).metadata,
+    };
+    const currentTarget =
+      request.itemId === undefined
+        ? undefined
+        : inspectedTarget(data.target, binding);
+    if (
+      currentTarget &&
+      (currentTarget.itemId !== request.itemId ||
+        object(data.target).__typename !== "ProjectV2Item")
+    )
+      throw new Error("Project queue inspection changed its requested target");
+    const repo = object(data.repository);
+    if (repo.nameWithOwner !== repository)
+      throw new Error("Project queue inspection changed repository identity");
+    if (
+      observed &&
+      (!same({ actorId: observed.actorId, owner: observed.owner }, access) ||
+        !same(observed.control, control) ||
+        !same(observed.target, currentTarget))
+    )
+      throw new Error(
+        "Project queue inspection changed during Issue membership pagination",
+      );
+    observed ??= {
+      scope: "target",
+      binding,
+      observedAt: new Date(time.now()).toISOString(),
+      ...access,
+      control,
+      ...(currentTarget ? { target: currentTarget } : {}),
+    };
+    if (request.objective === undefined) break;
+    const issueRaw = object(repo.issue);
+    const issue = issueDefinition(issueRaw, String(issueRaw.id), binding);
+    if (
+      issue.number !== request.objective ||
+      object(controlCard.content).id === issue.id
+    )
+      throw new Error(
+        "Project queue inspection Issue changed identity or targets its control content",
+      );
+    const issueValue: NonNullable<ProjectQueueInspection["issue"]> = {
+      issueNodeId: String(issue.id),
+      objective: Number(issue.number),
+      repository,
+      title: String(issue.title),
+      body: String(issue.body),
+      state: issue.state === "OPEN" ? "open" : "closed",
+    };
+    if (observed.issue && !same(observed.issue, issueValue))
+      throw new Error(
+        "Project queue inspection Issue contents changed during membership pagination",
+      );
+    observed.issue = issueValue;
+    observed.membership ??= [];
+    const page = connection(issue.projectItems);
+    for (const raw of page.nodes) {
+      const card = object(raw);
+      const project = object(card.project);
+      if (
+        !nodeId(card.id) ||
+        !nodeId(project.id) ||
+        typeof card.isArchived !== "boolean" ||
+        seen.has(card.id)
+      )
+        throw new Error(
+          "Project queue Issue membership is unavailable or duplicated",
+        );
+      seen.add(card.id);
+      if (project.id === binding.projectId)
+        observed.membership.push({
+          itemId: card.id,
+          archived: card.isArchived,
+        });
+    }
+    if (!page.hasNextPage) break;
+    if (!page.endCursor || cursors.has(page.endCursor))
+      throw new Error(
+        "Project queue Issue membership is incomplete or repeated",
+      );
+    cursors.add(page.endCursor);
+    after = page.endCursor;
+  }
+  if (observed!.membership) {
+    const active = observed!.membership.filter((item) => !item.archived);
+    if (active.length > 1)
+      throw new Error("Project queue has duplicate Objective cards");
+    if (
+      request.itemId &&
+      (!active.some((item) => item.itemId === request.itemId) ||
+        observed!.target?.issueNodeId !== observed!.issue?.issueNodeId ||
+        observed!.target?.objective !== request.objective)
+    )
+      throw new Error(
+        "Project queue prior target is not this Issue's current member",
+      );
+    if (!request.itemId && active[0]) {
+      const target = await projectQueueInspectOnGitHub(
+        repository,
+        binding,
+        graphql,
+        { itemId: active[0].itemId },
+      );
+      if (
+        target.actorId !== observed!.actorId ||
+        target.owner !== observed!.owner ||
+        !same(target.control, observed!.control) ||
+        target.target?.issueNodeId !== observed!.issue?.issueNodeId ||
+        target.target?.objective !== request.objective
+      )
+        throw new Error(
+          "Project queue Issue membership changed before target observation",
+        );
+      observed!.target = target.target;
+    }
+  }
+  return observed!;
+}
+
+function assertExpectedTarget(
+  card: ObjectValue,
+  request: ProjectQueueWriteRequest,
+) {
+  const expected = request.expectedTarget;
+  if (!expected) return;
+  const content = object(card.content);
+  const fields = inspectedFields(card, request.binding);
+  if (
+    card.id !== expected.itemId ||
+    fields.metadata !== expected.metadata ||
+    (expected.order !== undefined && fields.order !== expected.order) ||
+    (expected.issueNodeId !== undefined &&
+      (content.__typename !== "Issue" ||
+        content.id !== expected.issueNodeId ||
+        content.number !== expected.objective ||
+        object(content.repository).nameWithOwner !==
+          request.binding.repository)) ||
+    (expected.issueNodeId === undefined &&
+      expected.itemId !== request.binding.controlItemId)
+  )
+    throw new Error(
+      "Project queue mutation target changed after current owner inspection",
+    );
+}
+
 export async function projectQueueReadOnGitHub(
   repository: string,
   binding: ProjectQueueBinding,
@@ -881,6 +1139,12 @@ export async function projectQueueWriteOnGitHub(
     ...(request.expectedIssue
       ? { expectedIssue: structuredClone(request.expectedIssue) }
       : {}),
+    ...(request.expectedTarget
+      ? { expectedTarget: structuredClone(request.expectedTarget) }
+      : {}),
+    ...(request.observation
+      ? { observation: structuredClone(request.observation) }
+      : {}),
   };
   assertProcessActive();
   assertProjectQueueBinding(request.binding, repository);
@@ -893,12 +1157,94 @@ export async function projectQueueWriteOnGitHub(
     request.binding,
     graphql,
   );
+  if (request.action === "ensure-card" && !request.expectedIssue)
+    throw new Error(
+      "Project card admission requires its exact current Issue identity and contents",
+    );
+  let inspection: ProjectQueueInspection | undefined;
+  let initialTarget: Awaited<ReturnType<typeof readTarget>> | undefined;
+  let access: { actorId: number; owner: string };
+  let preparedTarget: ProjectQueueExpectedTarget | undefined;
+  const proof = request.observation;
+  if (proof) {
+    if ("scope" in proof) {
+      if (
+        proof.scope !== "target" ||
+        !same(proof.binding, request.binding) ||
+        !positiveInteger(proof.actorId) ||
+        typeof proof.owner !== "string" ||
+        proof.owner.toLowerCase() !== repository.split("/")[0]?.toLowerCase()
+      )
+        throw new Error(
+          "Project queue intent inspection differs from current binding",
+        );
+      inspection = proof;
+      access = { actorId: proof.actorId, owner: proof.owner };
+      preparedTarget =
+        request.action === "ensure-card"
+          ? proof.target
+          : request.itemId === request.binding.controlItemId
+            ? proof.control
+            : proof.target;
+      if (
+        proof.target?.archived &&
+        preparedTarget?.itemId === proof.target.itemId
+      )
+        throw new Error("Project queue intent cannot use an archived target");
+    } else {
+      assertProjectQueueWriteReceipt(proof);
+      if (
+        request.action === "ensure-card" ||
+        !same(proof.intent.binding, request.binding)
+      )
+        throw new Error(
+          "Project card intent requires its current scoped Issue inspection",
+        );
+      access = {
+        actorId: proof.intent.actorId,
+        owner: repository.split("/")[0]!,
+      };
+      preparedTarget = projectQueueReceiptTarget(proof);
+    }
+    if (
+      request.action !== "ensure-card" &&
+      (!preparedTarget || preparedTarget.itemId !== request.itemId)
+    )
+      throw new Error("Project queue intent lacks its exact observed target");
+    if (preparedTarget) {
+      if (
+        request.expectedTarget &&
+        (request.expectedTarget.itemId !== preparedTarget.itemId ||
+          request.expectedTarget.metadata !== preparedTarget.metadata ||
+          (request.expectedTarget.order !== undefined &&
+            request.expectedTarget.order !== preparedTarget.order) ||
+          request.expectedTarget.issueNodeId !== preparedTarget.issueNodeId ||
+          request.expectedTarget.objective !== preparedTarget.objective)
+      )
+        throw new Error(
+          "Project queue intent differs from its current target proof",
+        );
+      request.expectedTarget ??= preparedTarget;
+    } else if (request.expectedTarget)
+      throw new Error(
+        "Project queue prior target is missing from its current inspection",
+      );
+  } else if (request.action === "ensure-card") {
+    inspection = await projectQueueInspectOnGitHub(
+      repository,
+      request.binding,
+      graphql,
+      { objective: request.expectedIssue!.objective },
+    );
+    access = { actorId: inspection.actorId, owner: inspection.owner };
+  } else {
+    initialTarget = await readTarget(repository, request, graphql);
+    access = initialTarget.access;
+  }
   const observation =
     request.action === "ensure-card"
-      ? await readQueue(repository, request.binding, graphql)
+      ? undefined
       : await operationScope?.observation;
-  const initialTarget = await readTarget(repository, request, graphql);
-  const access = initialTarget.access;
   if (
     observation &&
     (observation.snapshot.actorId !== access.actorId ||
@@ -942,109 +1288,133 @@ export async function projectQueueWriteOnGitHub(
   } as ProjectQueueIntent;
   assertProjectQueueIntent(intent, request.binding);
   let currentIssue: ObjectValue | undefined;
+  const refreshInspection = (current: ProjectQueueInspection) => {
+    const issue = current.issue;
+    const expected = request.expectedIssue!;
+    if (
+      current.actorId !== access.actorId ||
+      current.owner.toLowerCase() !== access.owner.toLowerCase() ||
+      !issue ||
+      issue.issueNodeId !== expected.issueNodeId ||
+      issue.issueNodeId !==
+        (request.action === "ensure-card"
+          ? request.issueNodeId
+          : expected.issueNodeId) ||
+      issue.objective !== expected.objective ||
+      issue.repository !== request.binding.repository ||
+      issue.state !== "open" ||
+      createHash("sha256").update(issue.body).digest("hex") !==
+        expected.bodyDigest
+    )
+      throw new Error(
+        "Project card admission Issue or access changed after exact approval",
+      );
+    const target = request.expectedTarget;
+    if (
+      target &&
+      (!current.target ||
+        current.target.archived ||
+        current.target.itemId !== target.itemId ||
+        current.target.metadata !== target.metadata ||
+        (target.order !== undefined && current.target.order !== target.order) ||
+        current.target.issueNodeId !== target.issueNodeId ||
+        current.target.objective !== target.objective)
+    )
+      throw new Error(
+        "Project card prior admission target changed after owned inspection",
+      );
+    if (current.membership?.some((item) => item.archived) && !current.target)
+      throw new Error(
+        "An archived Objective card requires current unarchived membership",
+      );
+  };
   const refreshTarget = (target: Awaited<ReturnType<typeof readTarget>>) => {
     assertProcessActive();
     if (
       target.access.actorId !== access.actorId ||
-      target.access.owner !== access.owner
+      target.access.owner.toLowerCase() !== access.owner.toLowerCase()
     )
       throw new Error("Project queue access changed before mutation dispatch");
-    if (request.action === "ensure-card") {
-      const control = target.card;
-      if (
-        control.isArchived ||
-        !["Issue", "DraftIssue"].includes(
-          String(object(control.content).__typename),
-        )
-      )
-        throw new Error(
-          "Project queue control card is unavailable or archived",
-        );
-      if (object(control.content).id === request.issueNodeId)
-        throw new Error(
-          "Project queue control content cannot become an Objective card",
-        );
+    if (request.action === "ensure-card")
+      throw new Error(
+        "Project card membership requires its scoped Issue inspection",
+      );
+    const currentCard = target.card;
+    targetCard(currentCard, intent);
+    assertExpectedTarget(currentCard, request);
+    // The original mutation response must itself supply complete field proof.
+    const page = connection(currentCard.fieldValues);
+    if (page.hasNextPage)
+      throw new Error(
+        "Project queue mutation cannot supply complete original field proof",
+      );
+    fieldValues(page.nodes, request.binding);
+    if (
+      request.itemId !== request.binding.controlItemId &&
+      (!request.expectedTarget || request.expectedIssue)
+    ) {
+      const content = object(currentCard.content);
       currentIssue = issueDefinition(
         target.issue,
-        request.issueNodeId,
+        String(content.id),
         request.binding,
       );
-      if (currentIssue.state !== "OPEN")
-        throw new Error("Project queue cannot admit a closed Objective");
+      if (currentIssue.number !== content.number)
+        throw new Error("Project queue mutation Issue number changed identity");
       expectedIssue(currentIssue, request);
-    } else {
-      const currentCard = target.card;
-      targetCard(currentCard, intent);
-      // The original mutation response must itself supply complete field proof.
-      const page = connection(currentCard.fieldValues);
-      if (page.hasNextPage)
-        throw new Error(
-          "Project queue mutation cannot supply complete original field proof",
-        );
-      fieldValues(page.nodes, request.binding);
-      if (request.itemId !== request.binding.controlItemId) {
-        const content = object(currentCard.content);
-        currentIssue = issueDefinition(
-          target.issue,
-          String(content.id),
-          request.binding,
-        );
-        if (currentIssue.number !== content.number)
-          throw new Error(
-            "Project queue mutation Issue number changed identity",
-          );
-        expectedIssue(currentIssue, request);
-      } else if (request.expectedIssue)
-        throw new Error(
-          "Project queue content admission cannot target the control card",
-        );
-    }
-  };
-  refreshTarget(initialTarget);
-  if (request.action === "ensure-card") {
-    const { snapshot } = observation!;
-    const existing = snapshot.cards.find(
-      (card) => !card.archived && card.issueNodeId === request.issueNodeId,
-    );
-    if (existing) {
-      const target = await readTarget(
-        repository,
-        request,
-        graphql,
-        existing.itemId,
-      );
-      if (
-        target.access.actorId !== access.actorId ||
-        target.access.owner !== access.owner
-      )
-        throw new Error(
-          "Project queue access changed before existing card observation",
-        );
-      const card = target.card;
-      expectedIssue(
-        issueDefinition(target.issue, request.issueNodeId, request.binding),
-        request,
-      );
-      targetCard(card, intent);
-      const receipt: ProjectQueueWriteReceipt = {
-        intent,
-        itemId: existing.itemId,
-        observedAt: new Date(time.now()).toISOString(),
-        kind: "existing-read",
-        original: card,
-      };
-      assertProjectQueueWriteReceipt(receipt);
-      return receipt;
-    }
-    if (snapshot.cards.some((card) => card.issueNodeId === request.issueNodeId))
+    } else if (request.expectedIssue)
       throw new Error(
-        "An archived Objective card requires current unarchived membership",
+        "Project queue content admission cannot target the control card",
       );
+  };
+  if (inspection) refreshInspection(inspection);
+  else if (initialTarget) refreshTarget(initialTarget);
+  if (request.action === "ensure-card" && inspection?.target) {
+    const target = await readTarget(
+      repository,
+      request,
+      graphql,
+      inspection.target.itemId,
+    );
+    if (
+      target.access.actorId !== access.actorId ||
+      target.access.owner.toLowerCase() !== access.owner.toLowerCase()
+    )
+      throw new Error(
+        "Project queue access changed before existing card observation",
+      );
+    assertExpectedTarget(target.card, request);
+    expectedIssue(
+      issueDefinition(target.issue, request.issueNodeId, request.binding),
+      request,
+    );
+    targetCard(target.card, intent);
+    const receipt: ProjectQueueWriteReceipt = {
+      intent,
+      itemId: inspection.target.itemId,
+      observedAt: new Date(time.now()).toISOString(),
+      kind: "existing-read",
+      original: target.card,
+    };
+    assertProjectQueueWriteReceipt(receipt);
+    return receipt;
   }
   const admitted = structuredClone(intent);
   await request.beforeWrite(structuredClone(admitted));
   // Publication admission may await Git effects. Recheck this target and access afterward.
-  refreshTarget(await readTarget(repository, request, graphql));
+  if (request.action === "ensure-card") {
+    const current = await projectQueueInspectOnGitHub(
+      repository,
+      request.binding,
+      graphql,
+      { objective: request.expectedIssue!.objective },
+    );
+    refreshInspection(current);
+    if (current.target || !same(current.membership, inspection!.membership))
+      throw new Error(
+        "Project card membership changed before sole admission dispatch",
+      );
+  } else refreshTarget(await readTarget(repository, request, graphql));
   assertProcessActive();
   const scope = currentObservation(repository, request.binding, graphql);
   const priorObservation = scope?.observation;
@@ -1083,6 +1453,8 @@ export async function projectQueueWriteOnGitHub(
       scope?.active &&
       !currentProcessSignal()?.aborted &&
       priorObservation &&
+      (receipt.itemId === request.binding.controlItemId ||
+        currentIssue !== undefined) &&
       !connection(card.fieldValues).hasNextPage
     ) {
       const observed = await priorObservation;

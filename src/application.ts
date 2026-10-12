@@ -47,6 +47,7 @@ import {
   enqueueIntake,
   ensureProjectObjective,
   type IntakeAuthorization,
+  type QueueCommandAcknowledgment,
   intakeControl,
   runIntake,
   watchIntake,
@@ -103,12 +104,12 @@ export interface FactoryApplication {
   enqueueIntake(
     objectives: number[],
     options?: { expectedBodyDigests?: Record<string, string> },
-  ): Promise<IntakeAuthorization>;
+  ): Promise<QueueCommandAcknowledgment>;
   intakeControl(
     action: Parameters<typeof intakeControl>[1],
     objective?: number,
   ): Promise<unknown>;
-  watchIntake(): Promise<IntakeAuthorization>;
+  watchIntake(): Promise<QueueCommandAcknowledgment>;
   ensureProjectObjective(
     objective: number,
     provenance?: Parameters<typeof ensureProjectObjective>[3],

@@ -94,6 +94,7 @@ import {
 } from "../dist/qa.js";
 import {
   acceptForwardedCheckpointCompletion,
+  awaitCheckpointAdmission,
   gitPersistenceStatus,
   inspectRecoveryCheckpoint,
   readRecoveryCheckpointBodies,
@@ -1025,6 +1026,45 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     readContinuation(repository, 1).planningRecovery,
     cancelled.planningRecovery,
   );
+  const ownedCommand = {
+    requestId: randomUUID(),
+    action: "project-queue:pause",
+    inputDigest: learningDigest("owned storage completion"),
+  };
+  operationClosureBuilds = 0;
+  let ownedAck;
+  const ownedCompletion = await withRecoveryCheckpointCommandOperation(
+    operationInput,
+    ownedCommand,
+    async () => {
+      await awaitCheckpointAdmission(repository, "explicit");
+      ownedAck = gitPersistenceStatus(config).lastAcknowledged;
+    },
+  );
+  assert.equal(
+    operationClosureBuilds,
+    1,
+    "the same owned terminal ACK requires no second closure",
+  );
+  assert.deepEqual(ownedCompletion.checkpointCompletion.acknowledgment, {
+    commitSha: ownedAck.commitSha,
+    payloadDigest: ownedAck.payloadDigest,
+    sequence: ownedAck.sequence,
+  });
+  operationClosureBuilds = 0;
+  await withRecoveryCheckpointCommandOperation(
+    operationInput,
+    { ...ownedCommand, requestId: randomUUID() },
+    async () => {
+      await awaitCheckpointAdmission(repository, "explicit");
+      saveState(statePath(repository, 1), cancelled);
+    },
+  );
+  assert.equal(
+    operationClosureBuilds,
+    2,
+    "later own durable material invalidates the owned ACK",
+  );
   // Exercise the actual retention producer and adapter admission seam with a
   // literal storage-contract payload. This is no provider call, dispatch receipt
   // or semantic acceptance: the real store, saved owner and private Git ACK are
@@ -1838,6 +1878,32 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         readVerifiedRecoveryCheckpoint(config),
       ]);
       assert.equal(left.commitSha, right.commitSha);
+      const content = new LocalContentStore(join(state, "content"));
+      const cachedRef = left.manifest.contentRefs.find((ref) => ref.bytes > 0);
+      const cachedPath = join(
+        state,
+        "content",
+        cachedRef.digest.slice(0, 2),
+        cachedRef.digest,
+      );
+      const originalContent = content.readBytes(cachedRef);
+      assert.deepEqual(
+        new LocalContentStore(join(state, "content")).readBytes(cachedRef),
+        originalContent,
+      );
+      const altered = Buffer.from(originalContent);
+      altered[0] ^= 1;
+      writeFileSync(cachedPath, altered, { mode: 0o600 });
+      assert.throws(
+        () => content.readBytes(cachedRef),
+        /failed digest verification/,
+      );
+      writeFileSync(cachedPath, originalContent, { mode: 0o600 });
+      assert.deepEqual(content.readBytes(cachedRef), originalContent);
+      rmSync(cachedPath);
+      assert.throws(() => content.readBytes(cachedRef), /ENOENT/);
+      content.putBytes(originalContent, { mediaType: cachedRef.mediaType });
+      assert.deepEqual(content.readBytes(cachedRef), originalContent);
       assert.deepEqual(verifierDirectories().length, 1);
       firstVerifier = verifierDirectories()[0];
       const directory = join(state, "recovery", firstVerifier);

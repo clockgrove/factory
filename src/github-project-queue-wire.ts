@@ -99,9 +99,23 @@ export function issueBatchQuery(count: number): string {
   repository(owner:$owner,name:$name) { nameWithOwner ${selections} }
 }`;
 }
+export const INSPECT = `query FactoryQueueInspect($project:ID!,$metadata:ID!,$order:ID!,$control:ID!,$item:ID!,$includeItem:Boolean!,$owner:String!,$name:String!,$objective:Int!,$includeIssue:Boolean!,$after:String) {
+  ${BINDING.slice(BINDING.indexOf("{") + 1, BINDING.lastIndexOf("}"))}
+  control:node(id:$control) { __typename ... on ProjectV2Item { ${CARD} } }
+  target:node(id:$item) @include(if:$includeItem) { __typename ... on ProjectV2Item { ${CARD} } }
+  repository(owner:$owner,name:$name) {
+    nameWithOwner issue(number:$objective) @include(if:$includeIssue) {
+      ${ISSUE_CONTENT}
+      projectItems(first:100,after:$after,includeArchived:true) {
+        nodes { id isArchived project { id } } pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`;
 const QUEUE_READ_QUERIES = Object.freeze([
   BINDING,
   FIELD_BINDING,
+  INSPECT,
   ITEMS,
   FIELDS,
   ISSUE_IDENTITY,

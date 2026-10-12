@@ -149,6 +149,8 @@ function help(): void {
       "  pause|drain|resume|cancel --objective N",
       "  handoff --objective N --failed-reservation-evidence ABSOLUTE_PRIVATE_FILE",
       "      Permanently stop an authenticated failed pre-snapshot reservation and preserve its unaccepted evidence",
+      "  handoff --objective N --retired-withdrawal-evidence ABSOLUTE_PRIVATE_FILE",
+      "      Permanently exclude an authenticated stopped uncertain withdrawal; preserve its unknown result",
     ].join("\n"),
   );
 }
@@ -338,7 +340,9 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
   const queue = (await composeIntake(config).intakeControl(
     "status",
   )) as ServiceStatus["queue"] &
-    Pick<IntakeAuthorization, "remoteObservation"> & { localMode?: string };
+    Pick<IntakeAuthorization, "remoteObservation" | "retiredAdmissions"> & {
+      localMode?: string;
+    };
   const objective = queue.activeObjective ?? queue.observation?.needsDecision;
   let current: Pick<
     ServiceStatus,
@@ -383,6 +387,10 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
         queue.remoteObservation.availability === "last-observed"
           ? `Project observation: last observed at ${queue.remoteObservation.observedAt}.`
           : "Project observation: unavailable; status grants no new admission.",
+      );
+    for (const entry of queue.retiredAdmissions ?? [])
+      console.log(
+        `Objective #${entry.objective}: ${entry.state}; remote submission ${entry.remoteSubmission}; permanently ineligible. Admission ${entry.admissionId}, card ${entry.itemId}, retirement operation ${entry.operationId}.`,
       );
     console.log(`Durability: ${JSON.stringify(document.durability)}`);
   }
@@ -472,10 +480,16 @@ async function dispatchMain(): Promise<void> {
   const requireApplication = (): ReturnType<typeof compose> =>
     (application ??= compose(config));
   if (command === "handoff") {
-    const evidencePath = option(args, "failed-reservation-evidence");
-    if (!evidencePath || !isAbsolute(evidencePath))
+    const failedReservationPath = option(args, "failed-reservation-evidence");
+    const retiredWithdrawalPath = option(args, "retired-withdrawal-evidence");
+    if (!!failedReservationPath === !!retiredWithdrawalPath)
       throw new Error(
-        "handoff requires --failed-reservation-evidence ABSOLUTE_PRIVATE_FILE",
+        "handoff requires exactly one of --failed-reservation-evidence or --retired-withdrawal-evidence ABSOLUTE_PRIVATE_FILE",
+      );
+    const evidencePath = failedReservationPath ?? retiredWithdrawalPath!;
+    if (!isAbsolute(evidencePath))
+      throw new Error(
+        "Handoff evidence requires an absolute private file path",
       );
     const file = openSync(
       evidencePath,
@@ -490,7 +504,7 @@ async function dispatchMain(): Promise<void> {
         (observed.mode & 0o077) !== 0
       )
         throw new Error(
-          "Failed reservation evidence must be an owned private regular file",
+          "Handoff evidence must be an owned private regular file",
         );
       evidence = JSON.parse(readFileSync(file, "utf8"));
     } finally {
@@ -501,7 +515,12 @@ async function dispatchMain(): Promise<void> {
       {
         objective,
         action: "handoff",
-        input: { failedReservationEvidence: evidence, actor: operatorName() },
+        input: {
+          ...(failedReservationPath
+            ? { failedReservationEvidence: evidence }
+            : { retiredWithdrawalEvidence: evidence }),
+          actor: operatorName(),
+        },
       },
       new RealGitHubGateway(
         config.repository,

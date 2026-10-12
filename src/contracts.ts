@@ -1356,6 +1356,33 @@ export interface ProjectQueueSnapshot {
     archived: boolean;
   }[];
 }
+/** Exact current command target; never a complete Project scheduling observation. */
+export type ProjectQueueTarget = Omit<
+  ProjectQueueCard,
+  "title" | "body" | "state"
+>;
+export interface ProjectQueueInspection {
+  scope: "target";
+  binding: ProjectQueueBinding;
+  observedAt: string;
+  actorId: number;
+  owner: string;
+  control: { itemId: string; metadata: string | null };
+  target?: ProjectQueueTarget;
+  issue?: Pick<
+    ProjectQueueCard,
+    "issueNodeId" | "objective" | "repository" | "title" | "body" | "state"
+  >;
+  /** Complete membership for only the requested Issue in the configured Project. */
+  membership?: { itemId: string; archived: boolean }[];
+}
+export interface ProjectQueueExpectedTarget {
+  itemId: string;
+  metadata: string | null;
+  order?: number | null;
+  issueNodeId?: string;
+  objective?: number;
+}
 export type ProjectQueueAction =
   | { action: "ensure-card"; issueNodeId: string }
   | { action: "set-order"; itemId: string; order: number }
@@ -1378,6 +1405,10 @@ export type ProjectQueueWriteRequest = ProjectQueueAction & {
     objective: number;
     bodyDigest: string;
   };
+  /** Exact operation inspection or unchanged preceding original response, never persisted as authority. */
+  observation?: ProjectQueueInspection | ProjectQueueWriteReceipt;
+  /** Ephemeral current target proof, rechecked after durable admission. */
+  expectedTarget?: ProjectQueueExpectedTarget;
   /** The owner durably retains this exact intent and admits it before transport. */
   beforeWrite(intent: ProjectQueueIntent): void | Promise<void>;
   /** A submitted prior effect permits no further mutation. */
@@ -1423,6 +1454,10 @@ export interface GitHubGateway {
   projectQueueRead?(
     binding: ProjectQueueBinding,
   ): Promise<ProjectQueueSnapshot>;
+  projectQueueInspect?(
+    binding: ProjectQueueBinding,
+    request?: { itemId?: string; objective?: number },
+  ): Promise<ProjectQueueInspection>;
   projectQueueWrite?(
     request: ProjectQueueWriteRequest,
   ): Promise<ProjectQueueWriteReceipt>;

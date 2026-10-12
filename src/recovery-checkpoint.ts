@@ -332,6 +332,8 @@ interface QueueVerificationContext {
   quarantined: boolean;
   summaries: Map<string, HistoricalManifestSummary>;
   summaryBytes: number;
+  content: Map<string, string>;
+  contentBytes: number;
   objects?: Map<string, string>;
   lineages: Map<string, CachedQueueLineage>;
   lineageBytes: number;
@@ -344,6 +346,10 @@ const scopes = new AsyncLocalStorage<{
   buildClosure: () => Promise<RecoveryCheckpointClosure>;
   operation?: {
     completion?: string;
+    acknowledged?: {
+      fingerprint: string;
+      status: RecoveryCheckpointStatus;
+    };
     forwarded?: RecoveryCheckpointCommandCompletion;
     localWrites: number;
     localSequence?: number;
@@ -948,6 +954,7 @@ export function markAccountingGap(
   if (scope.operation) {
     scope.operation.localWrites++;
     delete scope.operation.completion;
+    delete scope.operation.acknowledged;
     delete scope.operation.forwarded;
   }
   mutate(scope.config, scope.options, (record) => {
@@ -979,6 +986,7 @@ export function resolveAccountingGap(
   if (scope.operation) {
     scope.operation.localWrites++;
     delete scope.operation.completion;
+    delete scope.operation.acknowledged;
     delete scope.operation.forwarded;
   }
   const identity = accountingGapIdentity(repository, descriptor);
@@ -1020,6 +1028,7 @@ export function markCheckpointDirty(
     throw new Error("Checkpoint scope repository differs from mutation");
   if (scope.operation) {
     delete scope.operation.completion;
+    delete scope.operation.acknowledged;
     delete scope.operation.forwarded;
     scope.operation.localWrites++;
   }
@@ -1115,6 +1124,8 @@ export function withQueueControlVerification<T>(
       quarantined: false,
       summaries: new Map(),
       summaryBytes: 0,
+      content: new Map(),
+      contentBytes: 0,
       lineages: new Map(),
       lineageBytes: 0,
       reservationPrefixes: new Map(),
@@ -1142,6 +1153,7 @@ export function withQueueControlVerification<T>(
       }
     } finally {
       verification.summaries.clear();
+      verification.content.clear();
       verification.lineages.clear();
       verification.reservationPrefixes.clear();
       delete verification.objects;
@@ -1160,6 +1172,90 @@ export function withRecoveryCheckpointControllerVerification<T>(
   task: () => Promise<T>,
 ): Promise<T> {
   return withQueueControlVerification(input, task);
+}
+function activeContentVerification() {
+  const scope = scopes.getStore();
+  const context = scope?.verification;
+  const options = scope && settings(scope.config);
+  if (!context || !scope || !options) return undefined;
+  if (
+    context.closed ||
+    context.quarantined ||
+    context.key !== verificationKey(scope.config, options)
+  )
+    throw new Error(
+      "Checkpoint content verification is closed, uncertain or differently bound",
+    );
+  try {
+    assertProcessActive();
+  } catch {
+    // Cancellation ends optional cache reuse, not strict local retention of
+    // the original failure/evidence. External effect boundaries still refuse.
+    return undefined;
+  }
+  return { context, options, scope };
+}
+function retainContentVerification(
+  context: QueueVerificationContext,
+  options: GitPersistenceConfig,
+  key: string,
+  identity: string,
+): void {
+  const charge = Buffer.byteLength(key) + Buffer.byteLength(identity);
+  if (charge > verificationMetadataBudget(options)) return;
+  if (
+    context.summaries.size + context.content.size >= options.maxFiles ||
+    context.summaryBytes + context.contentBytes + charge >
+      verificationMetadataBudget(options)
+  ) {
+    context.summaries.clear();
+    context.summaryBytes = 0;
+    context.content.clear();
+    context.contentBytes = 0;
+  }
+  const previous = context.content.get(key);
+  if (previous)
+    context.contentBytes -=
+      Buffer.byteLength(key) + Buffer.byteLength(previous);
+  context.content.set(key, identity);
+  context.contentBytes += charge;
+}
+/** Exact opened-file metadata may reuse only an earlier hash in this controller's content store. */
+export function checkpointContentVerified(
+  root: string,
+  ref: ContentRef,
+  identity: string,
+): boolean {
+  const active = activeContentVerification();
+  if (
+    !active ||
+    resolve(root) !== join(stateRoot(active.scope.config.repository), "content")
+  )
+    return false;
+  assertRef(ref);
+  return (
+    active.context.content.get(canonical(["local", resolve(root), ref])) ===
+    identity
+  );
+}
+export function retainCheckpointContentVerification(
+  root: string,
+  ref: ContentRef,
+  identity: string,
+): void {
+  const active = activeContentVerification();
+  if (
+    !active ||
+    resolve(root) !== join(stateRoot(active.scope.config.repository), "content")
+  )
+    return;
+  assertRef(ref);
+  retainContentVerification(
+    active.context,
+    active.options,
+    canonical(["local", resolve(root), ref]),
+    identity,
+  );
 }
 /** Restore only this controller's checkpoint context across its authenticated IPC boundary. */
 export function bindRecoveryCheckpointControllerScope<
@@ -1251,6 +1347,25 @@ export function withRecoveryCheckpointOperation<T>(
 ): Promise<T> {
   return checkpointOperation(input, task, options);
 }
+function checkpointCompletionFingerprint(
+  config: FactoryConfig,
+): string | undefined {
+  const persistence = settings(config);
+  if (!persistence) return `local-only:${factoryConfigDigest(config)}`;
+  const record = journal(config, persistence);
+  if (
+    record.sequence !== record.acknowledgedSequence ||
+    !record.lastAcknowledged ||
+    record.hold ||
+    record.error ||
+    record.changed.length ||
+    record.retentionGaps?.length ||
+    (record.attempts.at(-1) &&
+      record.attempts.at(-1)?.status !== "acknowledged")
+  )
+    return undefined;
+  return `${factoryConfigDigest(config)}:${canonical(record)}`;
+}
 function checkpointOperation<T>(
   input: {
     config: FactoryConfig;
@@ -1278,6 +1393,7 @@ function checkpointOperation<T>(
     const parent = scope.operation?.closed ? undefined : scope.operation;
     if (parent) {
       delete parent.completion;
+      delete parent.acknowledged;
       delete parent.forwarded;
       parent.activeChildren++;
     }
@@ -1288,24 +1404,7 @@ function checkpointOperation<T>(
     };
     // A fingerprint is an in-process completion witness, never a cached archive
     // or a newer acknowledgement manufactured from an older manifest.
-    const fingerprint = () => {
-      const persistence = settings(input.config);
-      if (!persistence)
-        return `local-only:${factoryConfigDigest(input.config)}`;
-      const record = journal(input.config, persistence);
-      if (
-        record.sequence !== record.acknowledgedSequence ||
-        !record.lastAcknowledged ||
-        record.hold ||
-        record.error ||
-        record.changed.length ||
-        record.retentionGaps?.length ||
-        (record.attempts.at(-1) &&
-          record.attempts.at(-1)?.status !== "acknowledged")
-      )
-        return undefined;
-      return `${factoryConfigDigest(input.config)}:${canonical(record)}`;
-    };
+    const fingerprint = () => checkpointCompletionFingerprint(input.config);
     return scopes.run({ ...scope, operation }, async () => {
       let completion: string | undefined;
       try {
@@ -1324,6 +1423,7 @@ function checkpointOperation<T>(
           throw error;
         }
         let acknowledged: RecoveryCheckpointStatus | undefined;
+        const owned = operation.acknowledged;
         const forwarded = operation.forwarded;
         if (
           forwarded &&
@@ -1334,6 +1434,12 @@ function checkpointOperation<T>(
             "Forwarded command configuration changed before completion",
           );
         if (
+          owned &&
+          operation.activeChildren === 0 &&
+          owned.fingerprint === fingerprint()
+        )
+          acknowledged = owned.status;
+        else if (
           !options.forwardCompletedBarrier ||
           operation.activeChildren !== 0 ||
           (!forwarded &&
@@ -1559,10 +1665,31 @@ export async function awaitCheckpointAdmission(
     settings(scope.config)?.scope === "repository-knowledge"
   )
     return;
-  await synchronizeRecoveryCheckpoint(scope.config, {
+  const acknowledged = await synchronizeRecoveryCheckpoint(scope.config, {
     reason,
     buildClosure: scope.buildClosure,
   });
+  const fingerprint = checkpointCompletionFingerprint(scope.config);
+  const persistence = settings(scope.config);
+  const current = persistence
+    ? journal(scope.config, persistence).lastAcknowledged
+    : undefined;
+  if (
+    scope.operation &&
+    !scope.operation.closed &&
+    fingerprint &&
+    (!persistence ||
+      (acknowledged.status === "acknowledged" &&
+        !acknowledged.pendingChanges &&
+        canonical(current) === canonical(acknowledged.lastAcknowledged) &&
+        (scope.operation.localSequence === undefined ||
+          (acknowledged.lastAcknowledged?.sequence ?? -1) >=
+            scope.operation.localSequence)))
+  )
+    scope.operation.acknowledged = {
+      fingerprint,
+      status: structuredClone(acknowledged),
+    };
 }
 function git(
   directory: string,
@@ -2080,7 +2207,7 @@ function readArchive(
   options: GitPersistenceConfig,
 ): {
   manifest: RecoveryCheckpointManifest;
-  blobs: Map<string, Buffer>;
+  readBlob(ref: ContentRef): Buffer | undefined;
   blobEntries: { ref: ContentRef; oid: string }[];
   manifestBytes: number;
   originalManifestBytes: Buffer;
@@ -2133,10 +2260,57 @@ function readArchive(
     ref,
     oid: objectIds.get(`blobs/${ref.digest}`)!,
   }));
-  const blobs = readRecoveryCheckpointBodies(directory, options, blobEntries);
+  const candidate = scopes.getStore()?.verification;
+  const context = candidate?.objects ? candidate : undefined;
+  const key = (entry: { ref: ContentRef; oid: string }) =>
+    canonical(["remote", entry.oid, entry.ref]);
+  const unverified = context
+    ? blobEntries.filter(
+        (entry) => context.content.get(key(entry)) !== "verified",
+      )
+    : blobEntries;
+  const verified = readRecoveryCheckpointBodies(directory, options, unverified);
+  if (context) {
+    for (const entry of unverified)
+      retainContentVerification(context, options, key(entry), "verified");
+    // Only bounded OID/ref facts survive. Semantic consumers read the actual
+    // immutable Git bytes they request; no archive-wide byte cache is retained.
+    verified.clear();
+  }
+  const byDigest = new Map(
+    blobEntries.map((entry) => [entry.ref.digest, entry]),
+  );
+  const readBlob = (ref: ContentRef): Buffer | undefined => {
+    const entry = byDigest.get(ref.digest);
+    if (!entry || entry.ref.bytes !== ref.bytes) return undefined;
+    if (context) {
+      if (
+        context.closed ||
+        context.quarantined ||
+        context.key !== verificationKey(config, options) ||
+        !context.objects
+      )
+        throw new Error(
+          "Checkpoint body reader has a closed or uncertain verifier",
+        );
+      assertRemoteOnlyVerifier(directory, options);
+      assertVerifierUnchanged(
+        scanVerifierObjects(directory, options),
+        context.objects,
+      );
+    }
+    let bytes = verified.get(ref.digest);
+    if (!bytes) {
+      bytes = readRecoveryCheckpointBodies(directory, options, [entry]).get(
+        ref.digest,
+      )!;
+      verified.set(ref.digest, bytes);
+    }
+    return bytes;
+  };
   return {
     manifest,
-    blobs,
+    readBlob,
     blobEntries,
     manifestBytes: manifestBytes.length,
     originalManifestBytes: manifestBytes,
@@ -2264,11 +2438,14 @@ function historicalManifestSummary(
     const charge =
       Buffer.byteLength(key) + Buffer.byteLength(canonical(summary));
     if (
-      context.summaries.size >= options.maxFiles ||
-      context.summaryBytes + charge > verificationMetadataBudget(options)
+      context.summaries.size + context.content.size >= options.maxFiles ||
+      context.summaryBytes + context.contentBytes + charge >
+        verificationMetadataBudget(options)
     ) {
       context.summaries.clear();
       context.summaryBytes = 0;
+      context.content.clear();
+      context.contentBytes = 0;
     }
     if (charge <= verificationMetadataBudget(options)) {
       context.summaries.set(key, summary);
@@ -3535,12 +3712,50 @@ async function freshArchiveOwned(
     };
     // Retained cancellation/abandonment witnesses must be actual ancestor packets,
     // rather than manually shaped manifest text in the current body store.
+    const { parseQueueRecord, assertQueueOperationReferenceBodies } =
+      await import("./project-queue-state.js");
+    const readQueueOriginal = (ref: ContentRef) => {
+      const bytes = archive.readBlob(ref);
+      if (!bytes)
+        throw new Error(
+          "Queue operation original is absent from the verified archive",
+        );
+      return bytes;
+    };
     for (const file of archive.manifest.files.filter((file) =>
       /^project-queue-history\/[a-f0-9-]{36}\.json$/.test(file.path),
     )) {
-      const record = JSON.parse(
-        archive.blobs.get(file.ref.digest)!.toString("utf8"),
+      const record = parseQueueRecord(
+        readQueueOriginal(file.ref),
+        config.repository,
+        file.path.slice("project-queue-history/".length, -".json".length),
       );
+      if (record.kind === "project-queue-operation") {
+        assertQueueOperationReferenceBodies(record, readQueueOriginal);
+        const retired = record.retiredWithdrawal?.retiredClaim;
+        if (retired) {
+          const claim = JSON.parse(readQueueOriginal(retired).toString("utf8"));
+          if (
+            claim.kind === "project-queue-owner" &&
+            claim.settled?.abandonment
+          ) {
+            const proof = claim.settled.abandonment;
+            await verifyReservationPrefix(
+              {
+                kind: "pre-snapshot",
+                objective: claim.objective,
+                claimId: claim.id,
+              },
+              {
+                checkpoints: proof.checkpoints,
+                generations: proof.generations,
+                originalClaim: proof.originalClaim,
+              },
+            );
+          }
+        }
+        continue;
+      }
       if (
         record.kind === "project-queue-owner" &&
         record.settled?.abandonment
@@ -3564,6 +3779,10 @@ async function freshArchiveOwned(
           ? record.settled?.cancellation
           : undefined;
       if (proof?.lineage?.kind !== "verified-first-run") continue;
+      if (!record.settled?.runId)
+        throw new Error(
+          "Retained queue cancellation has no original run identity",
+        );
       const verified = verifyLineage({
         objective: record.objective,
         claimId: record.id,
@@ -3622,6 +3841,8 @@ async function freshArchiveOwned(
       context.reservationPrefixBytes = 0;
       context.summaries.clear();
       context.summaryBytes = 0;
+      context.content.clear();
+      context.contentBytes = 0;
       rmSync(directory, { recursive: true, force: true });
       delete context.directory;
     }
@@ -3637,12 +3858,16 @@ async function freshArchiveOwned(
         context.lineageBytes = 0;
         context.reservationPrefixBytes = 0;
         context.summaryBytes = 0;
+        context.content.clear();
+        context.contentBytes = 0;
         delete context.objects;
       }
     }
     if (context && settled) {
       context.summaries.clear();
       context.summaryBytes = 0;
+      context.content.clear();
+      context.contentBytes = 0;
       context.lineages.clear();
       context.lineageBytes = 0;
       context.reservationPrefixes.clear();
@@ -3694,7 +3919,7 @@ export async function readVerifiedRecoveryCheckpoint(
       : {}),
     async readVerifiedBlob(ref) {
       assertRef(ref);
-      const bytes = archive.blobs.get(ref.digest);
+      const bytes = archive.readBlob(ref);
       if (!bytes || bytes.length !== ref.bytes || hash(bytes) !== ref.digest)
         throw new Error(
           "Requested body is absent from verified archive closure",

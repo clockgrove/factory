@@ -2229,9 +2229,12 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       const originalSpawn = childProcess.spawn;
       const originalExec = childProcess.execFileSync;
       const suffixPackets = [];
+      const bodyPackets = [];
       let suffixShows = 0;
       childProcess.execFileSync = function (file, args, options) {
         if (file === "git") {
+          if (args.includes("--batch") && typeof options?.input === "string")
+            bodyPackets.push(options.input);
           if (
             args.includes("--batch-check") &&
             typeof options?.input === "string" &&
@@ -2332,6 +2335,16 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
             (event) => event.metadata.metadataBytes <= 8 * 1024 * 1024,
           ),
         );
+        assert(
+          pressureEvents.some(
+            (event) =>
+              event.metadata.phase === "queue-originals" &&
+              event.outcome === "completed" &&
+              event.metadata.queueSupportEligible === false &&
+              event.metadata.semanticBodyFallback === true,
+          ),
+          "evicted row summaries retain the strict complete-body fallback",
+        );
         const publicationWindows = [];
         const publicationEventsSince = (offset) =>
           readFileSync(diagnosticPath(repository, 0))
@@ -2428,7 +2441,10 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         // The following changed payload uses a real newly retained opaque body,
         // without inventing another provider observation or changing a run.
         const nextSource = content.putBytes(
-          Buffer.from("Actual second retained checkpoint source"),
+          Buffer.concat([
+            Buffer.from("Actual unrelated retained checkpoint source\n"),
+            Buffer.alloc(2 * 1024 * 1024, 0x61),
+          ]),
           { mediaType: "text/plain" },
         );
         retainedCheckpointSources.push(nextSource);
@@ -2451,10 +2467,42 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           readFileSync(protocolPath, "utf8"),
           new RegExp(`have ${advanced.commitSha}\\b`),
         );
+        const unrelatedOid = execFileSync(
+          "git",
+          [
+            "--git-dir",
+            remote,
+            "rev-parse",
+            `${nextCheckpoint.lastAcknowledged.commitSha}:blobs/${nextSource.digest}`,
+          ],
+          { encoding: "utf8" },
+        ).trim();
+        const warmedPacketOffset = bodyPackets.length;
+        const warmedDiagnosticOffset = statSync(
+          diagnosticPath(repository, 0),
+        ).size;
         assert.equal(
           (await readVerifiedRecoveryCheckpoint(config)).commitSha,
           nextCheckpoint.lastAcknowledged.commitSha,
         );
+        assert(
+          bodyPackets
+            .slice(warmedPacketOffset)
+            .every((packet) => !packet.split("\n").includes(unrelatedOid)),
+          "warm queue support requests exclude the unrelated authenticated large body",
+        );
+        const warmedEvents = publicationEventsSince(warmedDiagnosticOffset);
+        assert(
+          warmedEvents.some(
+            (event) =>
+              event.metadata.phase === "queue-originals" &&
+              event.outcome === "completed" &&
+              event.metadata.queueSupportEligible === true &&
+              event.metadata.semanticBodyFallback === false &&
+              event.metadata.semanticBodyBytes < nextSource.bytes,
+          ),
+        );
+
         for (const commit of [
           advanced.commitSha,
           nextCheckpoint.lastAcknowledged.commitSha,

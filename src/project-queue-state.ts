@@ -2410,14 +2410,12 @@ export function assertQueueOperationReferenceBodies(
     if (typeof json(source.ref) !== "string")
       throw new Error("Original source must retain its complete text");
 }
-/** Pure immutable record/reference facts only; current queue authority is never memoized. */
-export function checkpointQueueRecordReferences(
+/** Authenticate the literal producer source before looking up derived references. */
+function queueRecordReferenceSource(
   repository: string,
   path: string,
   source: { ref: ContentRef; bytes: Uint8Array },
-  readReference: (reference: ContentRef) => Uint8Array,
-  cache?: { store: LocalContentStore; reader: "local" | "archive" },
-): { record: QueueRecord; contentRefs: ContentRef[] } {
+) {
   const match = /^project-queue-history\/([a-f0-9-]{36})\.json$/.exec(path);
   if (
     !match ||
@@ -2432,11 +2430,6 @@ export function checkpointQueueRecordReferences(
     repository,
     match[1]!,
   );
-  const concrete =
-    cache &&
-    (cache.reader === "local" || cache.reader === "archive") &&
-    Object.getPrototypeOf(cache.store) === LocalContentStore.prototype &&
-    cache.store.readBytes === LocalContentStore.prototype.readBytes;
   const signature = JSON.stringify([
     "project-queue-record-references",
     repository,
@@ -2445,6 +2438,55 @@ export function checkpointQueueRecordReferences(
     record.id,
     [source.ref.digest, source.ref.bytes, source.ref.mediaType],
   ]);
+  return { record, signature };
+}
+/** Fetch requests only: the actual reader and all validators still authenticate them. */
+export function cachedQueueRecordOriginals(
+  repository: string,
+  path: string,
+  source: { ref: ContentRef; bytes: Uint8Array },
+  store: LocalContentStore,
+): ContentRef[] | undefined {
+  const { signature } = queueRecordReferenceSource(repository, path, source);
+  if (
+    Object.getPrototypeOf(store) !== LocalContentStore.prototype ||
+    store.readBytes !== LocalContentStore.prototype.readBytes
+  )
+    return undefined;
+  const cached = LocalContentStore.prototype.checkpointReferences.call(
+    store,
+    signature,
+  );
+  if (!cached) return undefined;
+  const requested = new Map<string, ContentRef>();
+  for (const reference of [...cached.contentRefs, ...cached.originals]) {
+    const key = JSON.stringify([
+      reference.digest,
+      reference.bytes,
+      reference.mediaType,
+    ]);
+    requested.set(key, structuredClone(reference));
+  }
+  return [...requested.values()];
+}
+/** Pure immutable record/reference facts only; current queue authority is never memoized. */
+export function checkpointQueueRecordReferences(
+  repository: string,
+  path: string,
+  source: { ref: ContentRef; bytes: Uint8Array },
+  readReference: (reference: ContentRef) => Uint8Array,
+  cache?: { store: LocalContentStore; reader: "local" | "archive" },
+): { record: QueueRecord; contentRefs: ContentRef[] } {
+  const { record, signature } = queueRecordReferenceSource(
+    repository,
+    path,
+    source,
+  );
+  const concrete =
+    cache &&
+    (cache.reader === "local" || cache.reader === "archive") &&
+    Object.getPrototypeOf(cache.store) === LocalContentStore.prototype &&
+    cache.store.readBytes === LocalContentStore.prototype.readBytes;
   const cached =
     concrete &&
     LocalContentStore.prototype.checkpointReferences.call(

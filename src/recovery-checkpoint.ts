@@ -2790,6 +2790,7 @@ function readArchive(
   manifest: RecoveryCheckpointManifest;
   readBlob(ref: ContentRef): Buffer | undefined;
   prefetch(refs: ContentRef[]): void;
+  semanticBodyReads: { refs: number; bytes: number; fallback: boolean };
   blobEntries: { ref: ContentRef; oid: string }[];
   manifestBytes: number;
   originalManifestBytes: Buffer;
@@ -2881,6 +2882,7 @@ function readArchive(
   const byDigest = new Map(
     blobEntries.map((entry) => [entry.ref.digest, entry]),
   );
+  const semanticBodyReads = { refs: 0, bytes: 0, fallback: false };
   const prefetch = (requested: ContentRef[]) => {
     const selected = new Map<string, { ref: ContentRef; oid: string }>();
     for (const ref of requested) {
@@ -2896,6 +2898,11 @@ function readArchive(
     const loaded = readRecoveryCheckpointBodies(directory, options, [
       ...selected.values(),
     ]);
+    semanticBodyReads.refs += selected.size;
+    semanticBodyReads.bytes += [...selected.values()].reduce(
+      (sum, entry) => sum + entry.ref.bytes,
+      0,
+    );
     assertMaterial();
     for (const [digest, bytes] of loaded) verified.set(digest, bytes);
   };
@@ -2923,6 +2930,7 @@ function readArchive(
       // A consumer outside the queue's declared proof roots needs another part
       // of this packet. Materialize remaining bodies once in the original
       // per-read bounded map, rather than fork Git once per semantic reference.
+      semanticBodyReads.fallback = true;
       prefetch(refs);
       bytes = verified.get(ref.digest)!;
     }
@@ -2932,6 +2940,7 @@ function readArchive(
     manifest,
     readBlob,
     prefetch,
+    semanticBodyReads,
     blobEntries,
     manifestBytes: manifestBytes.length,
     originalManifestBytes: manifestBytes,
@@ -4305,6 +4314,11 @@ async function freshArchiveOwnedStrict(
   let settled = true;
   let hintUsed = false;
   let observedTip: string | undefined;
+  let semanticBodyReads:
+    | { refs: number; bytes: number; fallback: boolean }
+    | undefined;
+  let queueSupportRows: number | undefined;
+  let queueSupportEligible: boolean | undefined;
   const observed = checkpointObservation(
     config,
     "recovery-checkpoint-archive",
@@ -4317,6 +4331,15 @@ async function freshArchiveOwnedStrict(
       referenceEntries: context?.content.size ?? 0,
       metadataBytes: context ? verificationMetadataBytes(context) : 0,
       objectsRetained: Boolean(context?.objects),
+      ...(queueSupportRows !== undefined ? { queueSupportRows } : {}),
+      ...(queueSupportEligible !== undefined ? { queueSupportEligible } : {}),
+      ...(semanticBodyReads
+        ? {
+            semanticBodyRefs: semanticBodyReads.refs,
+            semanticBodyBytes: semanticBodyReads.bytes,
+            semanticBodyFallback: semanticBodyReads.fallback,
+          }
+        : {}),
     }),
   );
   observed.start("prior-material");
@@ -4428,6 +4451,7 @@ async function freshArchiveOwnedStrict(
       commitSha: commit,
       remoteTip: tip,
     };
+    semanticBodyReads = archive.semanticBodyReads;
     let observation: QueueAncestryObservation | undefined;
     const suffixes = new Map<string, QueueAncestryObservation>();
     const verifyLineage = (request: QueueOwnerLineageRequest) => {
@@ -4586,8 +4610,11 @@ async function freshArchiveOwnedStrict(
     };
     // Retained cancellation/abandonment witnesses must be actual ancestor packets,
     // rather than manually shaped manifest text in the current body store.
-    const { checkpointQueueRecordReferences, assertQueueCommandHistory } =
-      await import("./project-queue-state.js");
+    const {
+      checkpointQueueRecordReferences,
+      cachedQueueRecordOriginals,
+      assertQueueCommandHistory,
+    } = await import("./project-queue-state.js");
     const readQueueOriginal = (ref: ContentRef) => {
       const bytes = archive.readBlob(ref);
       if (!bytes)
@@ -4615,12 +4642,29 @@ async function freshArchiveOwnedStrict(
         : undefined;
     // This store carries bounded metadata only. Every supporting original is
     // authenticated through the actual fetched Git reader, never local hydration.
-    const records = queueFiles.map(
-      (file) =>
+    const sources = queueFiles.map((file) => {
+      const source = { ref: file.ref, bytes: readQueueOriginal(file.ref) };
+      const originals = cache
+        ? cachedQueueRecordOriginals(
+            config.repository,
+            file.path,
+            source,
+            cache.store,
+          )
+        : undefined;
+      return { file, source, originals };
+    });
+    queueSupportRows = sources.filter((entry) => entry.originals).length;
+    queueSupportEligible =
+      Boolean(cache) && queueSupportRows === sources.length;
+    if (queueSupportEligible)
+      archive.prefetch(sources.flatMap((entry) => entry.originals!));
+    const records = sources.map(
+      ({ file, source }) =>
         checkpointQueueRecordReferences(
           config.repository,
           file.path,
-          { ref: file.ref, bytes: readQueueOriginal(file.ref) },
+          source,
           readQueueOriginal,
           cache,
         ).record,

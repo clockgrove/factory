@@ -2057,6 +2057,23 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         writeFileSync(sourcePath, sourceOriginal);
       }
       await buildClosure();
+      // An unchanged retained body cannot hide a changed accounting source
+      // original after its producer projection was verified and reused.
+      const accountingFile = reusedClosure.files.find((file) =>
+        file.path.startsWith("accounting/"),
+      );
+      assert(accountingFile);
+      const accountingPath = join(state, accountingFile.path);
+      const accountingOriginal = readFileSync(accountingPath);
+      const accountingAltered = Buffer.from(accountingOriginal);
+      accountingAltered[0] ^= 1;
+      try {
+        writeFileSync(accountingPath, accountingAltered);
+        await assert.rejects(buildClosure(), /immutable identity/);
+      } finally {
+        writeFileSync(accountingPath, accountingOriginal);
+      }
+      await buildClosure();
       assert.deepEqual(verifierDirectories().length, 1);
       firstVerifier = verifierDirectories()[0];
       const directory = join(state, "recovery", firstVerifier);

@@ -371,6 +371,11 @@ const scopes = new AsyncLocalStorage<{
     bodies: Map<string, { ref: ContentRef; bytes?: Buffer }>;
     pendingReferences: Map<string, string>;
     pendingReferenceBytes: number;
+    sourceOriginals: Map<string, string>;
+    sourceInventories: Map<
+      string,
+      { kind: "accounting" | "memory" | "learning"; names: string[] }
+    >;
     bytes: number;
     closed: boolean;
     ended: boolean;
@@ -1232,10 +1237,23 @@ export async function withRecoveryCheckpointClosureReads(
   build: () => Promise<RecoveryCheckpointClosure>,
   localOnly: boolean,
 ): Promise<RecoveryCheckpointClosure> {
-  const options = settings(config);
   const inherited = scopes.getStore();
-  const scope = inherited ?? { config, buildClosure: build };
-  if (!localOnly || !options || (inherited && inherited.config !== config))
+  return withFiniteCheckpointReads(
+    config,
+    build,
+    localOnly,
+    inherited ?? { config, buildClosure: build },
+  );
+}
+
+async function withFiniteCheckpointReads<T>(
+  config: FactoryConfig,
+  build: () => Promise<T>,
+  localOnly: boolean,
+  scope: NonNullable<ReturnType<typeof scopes.getStore>>,
+): Promise<T> {
+  const options = settings(config);
+  if (!localOnly || !options || scope.config !== config)
     return scopes.run({ ...scope, closureReads: undefined }, build);
   assertProcessActive();
   const phase = {
@@ -1249,6 +1267,11 @@ export async function withRecoveryCheckpointClosureReads(
     bodies: new Map<string, { ref: ContentRef; bytes?: Buffer }>(),
     pendingReferences: new Map<string, string>(),
     pendingReferenceBytes: 0,
+    sourceOriginals: new Map<string, string>(),
+    sourceInventories: new Map<
+      string,
+      { kind: "accounting" | "memory" | "learning"; names: string[] }
+    >(),
     bytes: 0,
     closed: false,
     ended: false,
@@ -1269,6 +1292,19 @@ export async function withRecoveryCheckpointClosureReads(
       // Semantic and verification-only reads share this final boundary. Every original is
       // freshly opened and checked before this closure can reach publication.
       phase.closed = true;
+      for (const [directory, inventory] of phase.sourceInventories)
+        if (
+          JSON.stringify(originalNames(directory, inventory.kind)) !==
+          JSON.stringify(inventory.names)
+        )
+          throw new Error(
+            "Checkpoint producer source inventory changed during its build",
+          );
+      for (const [path, fingerprint] of phase.sourceOriginals)
+        if (originalFingerprint(path) !== fingerprint)
+          throw new Error(
+            "Checkpoint producer source original changed during its build",
+          );
       const store = new LocalContentStore(phase.root);
       for (const { ref } of phase.bodies.values()) {
         assertProcessActive();
@@ -1307,6 +1343,8 @@ export async function withRecoveryCheckpointClosureReads(
           phase.pendingReferences.size;
       }
       phase.pendingReferences.clear();
+      phase.sourceOriginals.clear();
+      phase.sourceInventories.clear();
       phase.pendingReferenceBytes = 0;
       phase.bytes = 0;
     }
@@ -1404,7 +1442,111 @@ export function retainCheckpointClosureBytes(
 
 export type RecoveryCheckpointReferenceSummary = ContinuationReferences & {
   originals: ContentRef[];
+  files?: RecoveryCheckpointFile[];
+  typedGitObjects?: ContinuationReferences["gitObjects"];
+  orderAt?: string;
 };
+
+function originalNames(
+  directory: string,
+  kind: "accounting" | "memory" | "learning",
+): string[] {
+  if (!existsSync(directory)) return [];
+  const stat = lstatSync(directory);
+  if (
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    stat.uid !== process.getuid?.() ||
+    stat.mode & 0o077 ||
+    realpathSync(directory) !== resolve(directory)
+  )
+    throw new Error(
+      "Checkpoint producer originals require an owned private directory",
+    );
+  return readdirSync(directory)
+    .filter((name) =>
+      kind === "learning"
+        ? name.endsWith(".json") && !name.endsWith(".draft.json")
+        : /^[a-f0-9]{64}\.json$/.test(name),
+    )
+    .sort();
+}
+
+function originalFingerprint(path: string): string {
+  if (realpathSync(dirname(path)) !== resolve(dirname(path)))
+    throw new Error(
+      "Checkpoint producer original parent resolves through a link",
+    );
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd, { bigint: true });
+    const current = lstatSync(path, { bigint: true });
+    const identity = (stat: typeof opened) =>
+      JSON.stringify(
+        [
+          stat.dev,
+          stat.ino,
+          stat.mode,
+          stat.uid,
+          stat.size,
+          stat.mtimeNs,
+          stat.ctimeNs,
+        ].map(String),
+      );
+    if (
+      !opened.isFile() ||
+      opened.uid !== BigInt(process.getuid!()) ||
+      opened.mode & 0o077n ||
+      current.isSymbolicLink() ||
+      !current.isFile() ||
+      identity(opened) !== identity(current)
+    )
+      throw new Error(
+        "Checkpoint producer original is not an exact owned private file",
+      );
+    return identity(opened);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Source fingerprints are derived read witnesses, never continuation authority. */
+export function checkpointOriginalInventory(
+  directories: string[],
+  kind: "accounting" | "memory" | "learning",
+): { path: string; fingerprint: string }[] | undefined {
+  const active = activeClosureBinding();
+  if (!active?.scope.verification || active.phase.closed) return undefined;
+  const { phase } = active;
+  const files: { path: string; fingerprint: string }[] = [];
+  try {
+    for (const directory of directories) {
+      if (!resolve(directory).startsWith(`${dirname(phase.root)}/`))
+        return undefined;
+      const names = originalNames(directory, kind);
+      for (const name of names) {
+        const path = join(directory, name);
+        files.push({ path, fingerprint: originalFingerprint(path) });
+      }
+      if (phase.sourceOriginals.size + files.length > phase.options.maxFiles)
+        return undefined;
+      phase.sourceInventories.set(directory, { kind, names });
+    }
+    for (const file of files)
+      phase.sourceOriginals.set(file.path, file.fingerprint);
+    return files;
+  } catch {
+    // Existing producer owns its original refusal or historical availability.
+    return undefined;
+  }
+}
+
+/** Actual original reads of the normal first memory producer in this build. */
+export function checkpointClosureOriginals(): ContentRef[] | undefined {
+  const active = activeClosureBinding();
+  if (!active?.scope.verification || active.phase.closed) return undefined;
+  return [...active.phase.bodies.values()].map(({ ref }) => ({ ...ref }));
+}
 
 export function cachedRecoveryCheckpointReferences(
   root: string,
@@ -2625,10 +2767,15 @@ function readArchive(
     const entry = byDigest.get(ref.digest);
     if (!entry || entry.ref.bytes !== ref.bytes) return undefined;
     if (context) {
+      const active = activeClosureBinding();
+      const capturedKey =
+        active?.scope.verification === context && active.scope.config === config
+          ? active.phase.key
+          : verificationKey(config, options);
       if (
         context.closed ||
         context.quarantined ||
-        context.key !== verificationKey(config, options) ||
+        context.key !== capturedKey ||
         !context.objects
       )
         throw new Error(
@@ -3821,6 +3968,31 @@ async function freshArchiveOwned(
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   context?: QueueVerificationContext,
 ) {
+  const scope = scopes.getStore();
+  const read = () =>
+    freshArchiveOwnedStrict(
+      config,
+      options,
+      expectedCommit,
+      inspectHistory,
+      lineageRequest,
+      observeCapacity,
+      context,
+    );
+  return scope?.verification && context === scope.verification
+    ? withFiniteCheckpointReads(config, read, true, scope)
+    : read();
+}
+
+async function freshArchiveOwnedStrict(
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+  expectedCommit?: string,
+  inspectHistory = false,
+  lineageRequest?: QueueOwnerLineageRequest | QueueReservationLineageRequest,
+  observeCapacity?: (capacity: QueueLineageCapacity) => void,
+  context?: QueueVerificationContext,
+) {
   const directory =
     context?.directory ??
     join(paths(config.repository).root, `verify-${randomUUID()}.git`);
@@ -4732,7 +4904,14 @@ async function publishCheckpoint(
       // Every current original remains present, private and exactly verified.
       // An immutable opened-file witness avoids materializing bytes merely to
       // discard them after an unchanged-payload comparison or base reuse.
-      for (const ref of refs) store.verifyPrivateBytes(ref);
+      await withRecoveryCheckpointClosureReads(
+        config,
+        async () => {
+          for (const ref of refs) store.verifyPrivateBytes(ref);
+          return closure;
+        },
+        true,
+      );
       if (
         input.reason === "explicit" &&
         record.lastAcknowledged &&

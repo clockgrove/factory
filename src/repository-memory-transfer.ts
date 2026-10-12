@@ -12,6 +12,7 @@ import {
   type DreamInputCheckpoint,
   decodeLearningOriginal,
   installLearningOriginal,
+  LEARNING_ORIGINAL_KINDS,
   type LearningOriginal,
   learningOriginals,
   validateDreamInputOriginal,
@@ -21,6 +22,10 @@ import type {
   RecoveryCheckpointClosure,
   RecoveryCheckpointFile,
   RecoveryCheckpointGap,
+} from "./recovery-checkpoint.js";
+import {
+  checkpointOriginalInventory,
+  checkpointClosureOriginals,
 } from "./recovery-checkpoint.js";
 import type { RecoveryGitObject } from "./recovery-checkpoint-closure.js";
 import {
@@ -199,6 +204,79 @@ async function memoryBodyReferences(
 
 /** Exact originals for the single recovery archive, without transport or lifecycle effects. */
 export async function buildMemoryLearningClosure(
+  selection: MemoryLearningSelection,
+): Promise<MemoryLearningClosure> {
+  assertAccess(selection.repository, selection.access);
+  const root = selection.root ?? stateRoot(selection.repository);
+  const store = new LocalContentStore(join(root, "content"));
+  const priorOriginals = checkpointClosureOriginals();
+  const bindings = checkpointOriginalInventory(
+    [join(root, "memory", "records")],
+    "memory",
+  );
+  const includeLearning =
+    selection.includeLearning ?? Boolean(selection.learning);
+  const learning =
+    includeLearning && selection.access.visibility.includes("private")
+      ? checkpointOriginalInventory(
+          LEARNING_ORIGINAL_KINDS.map((kind) => join(root, "learning", kind)),
+          "learning",
+        )
+      : [];
+  const signature =
+    priorOriginals?.length === 0 &&
+    !selection.scope &&
+    bindings &&
+    learning &&
+    JSON.stringify(["memory-learning-producer", selection, bindings, learning]);
+  const cached = signature ? store.checkpointReferences(signature) : undefined;
+  if (cached?.files && cached.typedGitObjects) {
+    for (const ref of [...cached.contentRefs, ...cached.originals])
+      store.verifyPrivateBytes(ref);
+    return {
+      files: cached.files,
+      contentRefs: cached.contentRefs,
+      gitObjects: cached.gitObjects.map((object) => ({
+        commitSha: object.sha,
+        role: object.role,
+      })),
+      typedGitObjects: cached.typedGitObjects,
+      gaps: cached.gaps,
+    };
+  }
+  const result = await buildMemoryLearningClosureLocal(selection);
+  if (
+    signature &&
+    result.gaps.length === 0 &&
+    signature ===
+      JSON.stringify([
+        "memory-learning-producer",
+        selection,
+        bindings,
+        learning,
+      ])
+  )
+    store.retainCheckpointReferences(signature, {
+      files: result.files,
+      contentRefs: result.contentRefs,
+      gitObjects: (result.gitObjects ?? []).map((object) => ({
+        sha: object.commitSha,
+        kind: "commit",
+        role: object.role,
+      })),
+      typedGitObjects: result.typedGitObjects,
+      gaps: result.gaps as import("./recovery-checkpoint-closure.js").RecoveryClosureGap[],
+      originals: (checkpointClosureOriginals() ?? []).filter(
+        (ref) =>
+          !result.contentRefs.some(
+            (retained) => refIdentity(retained) === refIdentity(ref),
+          ),
+      ),
+    });
+  return result;
+}
+
+async function buildMemoryLearningClosureLocal(
   selection: MemoryLearningSelection,
 ): Promise<MemoryLearningClosure> {
   assertAccess(selection.repository, selection.access);

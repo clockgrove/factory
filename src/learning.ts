@@ -1025,7 +1025,7 @@ function secrets(config: FactoryConfig): string[] {
   ];
 }
 
-const LEARNING_ORIGINAL_KINDS = [
+export const LEARNING_ORIGINAL_KINDS = [
   "episodes",
   "snapshots",
   "proposals",

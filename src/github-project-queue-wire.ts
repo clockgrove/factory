@@ -38,9 +38,10 @@ export const BINDING = `query FactoryQueueBinding($project:ID!,$metadata:ID!,$or
 }`;
 const ISSUE_CONTENT =
   "__typename id number title body state repository { nameWithOwner }";
-export const TARGET = `query FactoryQueueTarget($item:ID!,$objective:Int!,$includeIssue:Boolean!,$owner:String!,$name:String!,$project:ID!,$metadata:ID!,$order:ID!) {
+export const TARGET = `query FactoryQueueTarget($item:ID!,$objective:Int!,$includeIssue:Boolean!,$owner:String!,$name:String!,$project:ID!,$metadata:ID!,$order:ID!,$control:ID!,$includeControl:Boolean!) {
   ${BINDING.slice(BINDING.indexOf("{") + 1, BINDING.lastIndexOf("}"))}
   node(id:$item) { __typename ... on ProjectV2Item { ${CARD} } }
+  control:node(id:$control) @include(if:$includeControl) { __typename ... on ProjectV2Item { ${CARD} } }
   repository(owner:$owner,name:$name) {
     nameWithOwner issue(number:$objective) @include(if:$includeIssue) { ${ISSUE_CONTENT} }
   }

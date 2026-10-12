@@ -151,6 +151,8 @@ function help(): void {
       "      Permanently stop an authenticated failed pre-snapshot reservation and preserve its unaccepted evidence",
       "  handoff --objective N --retired-withdrawal-evidence ABSOLUTE_PRIVATE_FILE",
       "      Permanently exclude an authenticated stopped uncertain withdrawal; preserve its unknown result",
+      "  handoff --objective N --retired-admission-evidence ABSOLUTE_PRIVATE_FILE",
+      "      Permanently exclude an authenticated stopped uncertain admission; preserve all originals and allocated order",
     ].join("\n"),
   );
 }
@@ -208,9 +210,10 @@ async function queueCommand(args: string[], path: string): Promise<void> {
       throw new Error(
         "queue remove requires Objective numbers: queue remove N",
       );
-    let record: unknown;
-    for (const id of numbers)
-      record = await composeIntake(config).intakeControl("dequeue", id);
+    const record = await composeIntake(config).intakeControl(
+      "dequeue",
+      numbers,
+    );
     console.log(JSON.stringify(record, null, 2));
   } else if (
     action === "list" ||
@@ -483,13 +486,19 @@ async function dispatchMain(): Promise<void> {
   const requireApplication = (): ReturnType<typeof compose> =>
     (application ??= compose(config));
   if (command === "handoff") {
-    const failedReservationPath = option(args, "failed-reservation-evidence");
-    const retiredWithdrawalPath = option(args, "retired-withdrawal-evidence");
-    if (!!failedReservationPath === !!retiredWithdrawalPath)
+    const evidenceOptions = [
+      ["failed-reservation-evidence", "failedReservationEvidence"],
+      ["retired-withdrawal-evidence", "retiredWithdrawalEvidence"],
+      ["retired-admission-evidence", "retiredAdmissionEvidence"],
+    ] as const;
+    const selected = evidenceOptions
+      .map(([flag, key]) => ({ key, path: option(args, flag) }))
+      .filter((value) => value.path !== undefined);
+    if (selected.length !== 1)
       throw new Error(
-        "handoff requires exactly one of --failed-reservation-evidence or --retired-withdrawal-evidence ABSOLUTE_PRIVATE_FILE",
+        "handoff requires exactly one private evidence file: --failed-reservation-evidence, --retired-withdrawal-evidence or --retired-admission-evidence",
       );
-    const evidencePath = failedReservationPath ?? retiredWithdrawalPath!;
+    const evidencePath = selected[0]!.path!;
     if (!isAbsolute(evidencePath))
       throw new Error(
         "Handoff evidence requires an absolute private file path",
@@ -519,9 +528,7 @@ async function dispatchMain(): Promise<void> {
         objective,
         action: "handoff",
         input: {
-          ...(failedReservationPath
-            ? { failedReservationEvidence: evidence }
-            : { retiredWithdrawalEvidence: evidence }),
+          [selected[0]!.key]: evidence,
           actor: operatorName(),
         },
       },

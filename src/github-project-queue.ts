@@ -11,6 +11,8 @@ import type {
   ProjectQueueSnapshot,
   ProjectQueueWriteReceipt,
   ProjectQueueWriteRequest,
+  ProjectQueuePlannedEffect,
+  ProjectQueuePlannedEffectInput,
 } from "./contracts.js";
 import { GitHubProjectQueueGraphqlError } from "./github-client.js";
 import type { ProjectGraphQL } from "./github-project.js";
@@ -91,7 +93,10 @@ export function assertProjectQueueBinding(
 type IntentBase = ProjectQueueAction &
   Omit<ProjectQueueIntent, "action" | "request">;
 
-function mutationRequest(intent: IntentBase) {
+function mutationRequest(
+  intent: ProjectQueueAction &
+    Pick<ProjectQueueIntent, "binding" | "requestId" | "fieldId">,
+) {
   const input =
     intent.action === "ensure-card"
       ? {
@@ -112,6 +117,281 @@ function mutationRequest(intent: IntentBase) {
   return {
     query: intent.action === "ensure-card" ? ADD : UPDATE,
     variables: { input },
+  };
+}
+
+const requestId = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value);
+
+function plannedMutationRequest(
+  binding: ProjectQueueBinding,
+  effect: ProjectQueuePlannedEffectInput,
+) {
+  const input =
+    effect.action === "ensure-card"
+      ? {
+          clientMutationId: effect.requestId,
+          projectId: binding.projectId,
+          contentId: effect.issueNodeId,
+        }
+      : {
+          clientMutationId: effect.requestId,
+          projectId: binding.projectId,
+          itemId:
+            "itemId" in effect.target
+              ? effect.target.itemId
+              : { resultOf: effect.target.resultOf },
+          fieldId: effect.fieldId,
+          value:
+            effect.action === "set-order"
+              ? { number: effect.order }
+              : { text: effect.metadata },
+        };
+  return {
+    query: effect.action === "ensure-card" ? ADD : UPDATE,
+    variables: { input },
+  };
+}
+
+function assertPlannedTarget(value: unknown): void {
+  const target = object(value);
+  only(target, ["itemId", "metadata", "order", "issueNodeId", "objective"]);
+  if (
+    !nodeId(target.itemId) ||
+    !(target.metadata === null || typeof target.metadata === "string") ||
+    (target.order !== undefined &&
+      target.order !== null &&
+      !orderValue(target.order)) ||
+    (target.issueNodeId === undefined
+      ? target.objective !== undefined
+      : !nodeId(target.issueNodeId) || !positiveInteger(target.objective))
+  )
+    throw new Error("Invalid declared Project queue previous target");
+}
+
+/** Fixed command actions and exact wire bytes, including explicit receipt dependencies. */
+export function assertProjectQueuePlannedEffect(
+  value: unknown,
+  binding: ProjectQueueBinding,
+): asserts value is ProjectQueuePlannedEffect {
+  assertProjectQueueBinding(binding);
+  const effect = object(value);
+  only(effect, [
+    "operationId",
+    "requestId",
+    "actorId",
+    "expectedIssue",
+    "prior",
+    "control",
+    "request",
+    "action",
+    ...(effect.action === "ensure-card"
+      ? ["issueNodeId"]
+      : effect.action === "set-order"
+        ? ["target", "fieldId", "order"]
+        : effect.action === "set-metadata"
+          ? ["target", "fieldId", "metadata"]
+          : []),
+  ]);
+  if (
+    !requestId(effect.operationId) ||
+    !requestId(effect.requestId) ||
+    !positiveInteger(effect.actorId)
+  )
+    throw new Error("Invalid declared Project queue effect identity");
+  if (effect.expectedIssue !== undefined) {
+    const issue = object(effect.expectedIssue);
+    only(issue, ["issueNodeId", "objective", "bodyDigest"]);
+    if (
+      !nodeId(issue.issueNodeId) ||
+      !positiveInteger(issue.objective) ||
+      typeof issue.bodyDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(issue.bodyDigest)
+    )
+      throw new Error("Invalid declared Project queue Issue binding");
+  }
+  const prior = object(effect.prior);
+  if (Object.hasOwn(prior, "target")) {
+    only(prior, ["target"]);
+    if (prior.target !== null) assertPlannedTarget(prior.target);
+  } else {
+    only(prior, ["resultOf"]);
+    if (!requestId(prior.resultOf) || prior.resultOf === effect.requestId)
+      throw new Error("Invalid declared previous-response dependency");
+  }
+  const control = object(effect.control);
+  if (Object.hasOwn(control, "metadata")) {
+    only(control, ["metadata"]);
+    if (control.metadata !== null && typeof control.metadata !== "string")
+      throw new Error("Invalid declared Project queue control");
+  } else {
+    only(control, ["resultOf"]);
+    if (!requestId(control.resultOf) || control.resultOf === effect.requestId)
+      throw new Error("Invalid declared control-response dependency");
+  }
+  if (effect.action === "ensure-card") {
+    if (
+      !nodeId(effect.issueNodeId) ||
+      !effect.expectedIssue ||
+      object(effect.expectedIssue).issueNodeId !== effect.issueNodeId ||
+      !Object.hasOwn(prior, "target")
+    )
+      throw new Error("Invalid declared Project queue Issue admission");
+  } else if (
+    effect.action === "set-order" ||
+    effect.action === "set-metadata"
+  ) {
+    if (Object.hasOwn(prior, "target") && prior.target === null)
+      throw new Error(
+        "Declared field update requires its previous target proof",
+      );
+    const target = object(effect.target);
+    if (Object.hasOwn(target, "itemId")) {
+      only(target, ["itemId"]);
+      if (!nodeId(target.itemId))
+        throw new Error("Invalid declared Project queue item target");
+      if (
+        Object.hasOwn(prior, "target") &&
+        object(prior.target).itemId !== target.itemId
+      )
+        throw new Error(
+          "Declared target differs from its previous target proof",
+        );
+    } else {
+      only(target, ["resultOf"]);
+      if (!requestId(target.resultOf) || target.resultOf === effect.requestId)
+        throw new Error("Invalid declared generated-card dependency");
+    }
+    if (
+      effect.action === "set-order"
+        ? effect.fieldId !== binding.orderFieldId ||
+          !positiveInteger(effect.order) ||
+          target.itemId === binding.controlItemId
+        : effect.fieldId !== binding.metadataFieldId ||
+          typeof effect.metadata !== "string"
+    )
+      throw new Error("Invalid declared Project queue field update");
+  } else throw new Error("Unsupported declared Project queue action");
+  if (
+    !same(
+      effect.request,
+      plannedMutationRequest(binding, value as ProjectQueuePlannedEffect),
+    )
+  )
+    throw new Error(
+      "Declared Project queue effect differs from fixed wire bytes",
+    );
+}
+
+export function createProjectQueuePlannedEffect(
+  binding: ProjectQueueBinding,
+  input: ProjectQueuePlannedEffectInput,
+): ProjectQueuePlannedEffect {
+  const effect = {
+    ...structuredClone(input),
+    request: plannedMutationRequest(binding, input),
+  };
+  assertProjectQueuePlannedEffect(effect, binding);
+  return structuredClone(effect);
+}
+
+/** Hydration consumes actual authenticated originals, never a later confirmation read. */
+export function resolveProjectQueuePlannedEffect(
+  binding: ProjectQueueBinding,
+  effect: ProjectQueuePlannedEffect,
+  receipts: ProjectQueueWriteReceipt[],
+): {
+  action: ProjectQueueAction;
+  request: ProjectQueueIntent["request"];
+  expectedTarget?: ProjectQueueExpectedTarget;
+  controlMetadata: string | null;
+} {
+  assertProjectQueuePlannedEffect(effect, binding);
+  const originals = new Map<string, ProjectQueueWriteReceipt>();
+  for (const receipt of receipts) {
+    assertProjectQueueWriteReceipt(receipt);
+    if (
+      !same(receipt.intent.binding, binding) ||
+      receipt.intent.actorId !== effect.actorId ||
+      originals.has(receipt.intent.requestId) ||
+      receipt.intent.requestId === effect.requestId
+    )
+      throw new Error(
+        "Declared dependency differs from original Project response",
+      );
+    originals.set(receipt.intent.requestId, receipt);
+  }
+  const original = (id: string) => {
+    const receipt = originals.get(id);
+    if (!receipt)
+      throw new Error(
+        "Declared Project queue dependency has no original response",
+      );
+    return receipt;
+  };
+  const actualPrior =
+    "target" in effect.prior
+      ? effect.prior.target
+      : projectQueueReceiptTarget(original(effect.prior.resultOf));
+  const prior = actualPrior && {
+    itemId: actualPrior.itemId,
+    metadata: actualPrior.metadata,
+    ...(actualPrior.order === undefined ? {} : { order: actualPrior.order }),
+    ...(actualPrior.issueNodeId === undefined
+      ? {}
+      : {
+          issueNodeId: actualPrior.issueNodeId,
+          objective: actualPrior.objective,
+        }),
+  };
+  const controlMetadata =
+    "metadata" in effect.control
+      ? effect.control.metadata
+      : (() => {
+          const receipt = original(effect.control.resultOf);
+          if (
+            receipt.intent.action !== "set-metadata" ||
+            receipt.itemId !== binding.controlItemId
+          )
+            throw new Error(
+              "Control dependency is not its original control response",
+            );
+          return projectQueueReceiptTarget(receipt).metadata;
+        })();
+  let action: ProjectQueueAction;
+  if (effect.action === "ensure-card")
+    action = { action: effect.action, issueNodeId: effect.issueNodeId };
+  else {
+    const itemId =
+      "itemId" in effect.target
+        ? effect.target.itemId
+        : (() => {
+            const receipt = original(effect.target.resultOf);
+            if (receipt.intent.action !== "ensure-card")
+              throw new Error(
+                "Generated card requires its original ensure response",
+              );
+            return receipt.itemId;
+          })();
+    if (!prior || prior.itemId !== itemId)
+      throw new Error("Declared field update lacks its exact previous target");
+    action =
+      effect.action === "set-order"
+        ? { action: effect.action, itemId, order: effect.order }
+        : { action: effect.action, itemId, metadata: effect.metadata };
+  }
+  const request = mutationRequest({
+    ...action,
+    binding,
+    requestId: effect.requestId,
+    ...(effect.action === "ensure-card" ? {} : { fieldId: effect.fieldId }),
+  });
+  return {
+    action,
+    request,
+    controlMetadata,
+    ...(prior ? { expectedTarget: structuredClone(prior) } : {}),
   };
 }
 
@@ -802,6 +1082,8 @@ async function readTarget(
         project: request.binding.projectId,
         metadata: request.binding.metadataFieldId,
         order: request.binding.orderFieldId,
+        control: request.binding.controlItemId,
+        includeControl: request.plannedEffect !== undefined,
       },
       true,
     ),
@@ -810,6 +1092,20 @@ async function readTarget(
   const card = cardIdentity(data.node, request.binding);
   if (card.__typename !== "ProjectV2Item" || card.id !== itemId)
     throw new Error("Project queue mutation target changed identity");
+  let controlMetadata: string | null | undefined;
+  if (request.plannedEffect) {
+    const control = cardIdentity(data.control, request.binding);
+    if (
+      control.__typename !== "ProjectV2Item" ||
+      control.id !== request.binding.controlItemId ||
+      control.isArchived ||
+      !["Issue", "DraftIssue"].includes(
+        String(object(control.content).__typename),
+      )
+    )
+      throw new Error("Declared Project queue control is unavailable");
+    controlMetadata = inspectedFields(control, request.binding).metadata;
+  }
   const repositoryValue = object(data.repository);
   if (repositoryValue.nameWithOwner !== request.binding.repository)
     throw new Error(
@@ -843,7 +1139,7 @@ async function readTarget(
       String(identity.id),
     );
   }
-  return { access, card, issue };
+  return { access, card, issue, controlMetadata };
 }
 
 function expectedIssue(issue: ObjectValue, request: ProjectQueueWriteRequest) {
@@ -1145,6 +1441,12 @@ export async function projectQueueWriteOnGitHub(
     ...(request.observation
       ? { observation: structuredClone(request.observation) }
       : {}),
+    ...(request.plannedEffect
+      ? { plannedEffect: structuredClone(request.plannedEffect) }
+      : {}),
+    ...(request.dependencyReceipts
+      ? { dependencyReceipts: structuredClone(request.dependencyReceipts) }
+      : {}),
   };
   assertProcessActive();
   assertProjectQueueBinding(request.binding, repository);
@@ -1152,6 +1454,44 @@ export async function projectQueueWriteOnGitHub(
     throw new Error("A submitted Project queue effect permits no replay");
   if (typeof request.beforeWrite !== "function")
     throw new Error("Project queue mutation lacks durable owner admission");
+  if (!request.plannedEffect && request.dependencyReceipts)
+    throw new Error(
+      "Project response dependencies lack a declared command step",
+    );
+  const declared = request.plannedEffect
+    ? resolveProjectQueuePlannedEffect(
+        request.binding,
+        request.plannedEffect,
+        request.dependencyReceipts ?? [],
+      )
+    : undefined;
+  if (declared) {
+    if (
+      request.requestId !== request.plannedEffect!.requestId ||
+      !same(request.expectedIssue, request.plannedEffect!.expectedIssue) ||
+      (request.expectedTarget &&
+        !same(
+          {
+            itemId: request.expectedTarget.itemId,
+            metadata: request.expectedTarget.metadata,
+            ...(request.expectedTarget.order === undefined
+              ? {}
+              : { order: request.expectedTarget.order }),
+            ...(request.expectedTarget.issueNodeId === undefined
+              ? {}
+              : {
+                  issueNodeId: request.expectedTarget.issueNodeId,
+                  objective: request.expectedTarget.objective,
+                }),
+          },
+          declared.expectedTarget,
+        ))
+    )
+      throw new Error(
+        "Project queue write differs from its frozen command declaration",
+      );
+    request.expectedTarget = declared.expectedTarget;
+  }
   const operationScope = currentObservation(
     repository,
     request.binding,
@@ -1267,6 +1607,14 @@ export async function projectQueueWriteOnGitHub(
             itemId: request.itemId,
             metadata: request.metadata,
           };
+  if (
+    declared &&
+    (!same(action, declared.action) ||
+      access.actorId !== request.plannedEffect!.actorId)
+  )
+    throw new Error(
+      "Project queue action or actor differs from declared command",
+    );
   const base = {
     binding: structuredClone(request.binding),
     requestId: request.requestId,
@@ -1287,11 +1635,25 @@ export async function projectQueueWriteOnGitHub(
     request: mutationRequest(base),
   } as ProjectQueueIntent;
   assertProjectQueueIntent(intent, request.binding);
+  if (declared && !same(intent.request, declared.request))
+    throw new Error(
+      "Realized Project queue request differs from declared wire bytes",
+    );
   let currentIssue: ObjectValue | undefined;
-  const refreshInspection = (current: ProjectQueueInspection) => {
+  const refreshInspection = (
+    current: ProjectQueueInspection,
+    freshControl = false,
+  ) => {
     const issue = current.issue;
     const expected = request.expectedIssue!;
     if (
+      (declared &&
+        request.action === "ensure-card" &&
+        !declared.expectedTarget &&
+        current.target !== undefined) ||
+      (freshControl &&
+        declared &&
+        current.control.metadata !== declared.controlMetadata) ||
       current.actorId !== access.actorId ||
       current.owner.toLowerCase() !== access.owner.toLowerCase() ||
       !issue ||
@@ -1331,6 +1693,7 @@ export async function projectQueueWriteOnGitHub(
   const refreshTarget = (target: Awaited<ReturnType<typeof readTarget>>) => {
     assertProcessActive();
     if (
+      (declared && target.controlMetadata !== declared.controlMetadata) ||
       target.access.actorId !== access.actorId ||
       target.access.owner.toLowerCase() !== access.owner.toLowerCase()
     )
@@ -1378,6 +1741,7 @@ export async function projectQueueWriteOnGitHub(
       inspection.target.itemId,
     );
     if (
+      (declared && target.controlMetadata !== declared.controlMetadata) ||
       target.access.actorId !== access.actorId ||
       target.access.owner.toLowerCase() !== access.owner.toLowerCase()
     )
@@ -1410,7 +1774,7 @@ export async function projectQueueWriteOnGitHub(
       graphql,
       { objective: request.expectedIssue!.objective },
     );
-    refreshInspection(current);
+    refreshInspection(current, true);
     if (current.target || !same(current.membership, inspection!.membership))
       throw new Error(
         "Project card membership changed before sole admission dispatch",

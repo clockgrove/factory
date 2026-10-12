@@ -108,7 +108,7 @@ export interface FactoryApplication {
   ): Promise<QueueCommandAcknowledgment>;
   intakeControl(
     action: Parameters<typeof intakeControl>[1],
-    objective?: number,
+    objective?: Parameters<typeof intakeControl>[2],
   ): Promise<unknown>;
   watchIntake(): Promise<QueueCommandAcknowledgment>;
   ensureProjectObjective(

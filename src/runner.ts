@@ -68,6 +68,7 @@ import {
   settleFailedProjectQueueReservation,
   abandonFailedProjectQueueReservation,
   retireUnknownProjectWithdrawal,
+  retireUnknownProjectAdmission,
   settleStoppedProjectQueueRun,
 } from "./project-queue-state.js";
 import { objectiveCandidate } from "./qa.js";
@@ -291,7 +292,8 @@ async function controlObjectiveUnscoped(
   if (
     request.action === "handoff" &&
     (request.input?.failedReservationEvidence !== undefined ||
-      request.input?.retiredWithdrawalEvidence !== undefined)
+      request.input?.retiredWithdrawalEvidence !== undefined ||
+      request.input?.retiredAdmissionEvidence !== undefined)
   ) {
     if (
       !github ||
@@ -299,16 +301,28 @@ async function controlObjectiveUnscoped(
       !request.input.actor
     )
       throw new Error(
-        "Failed reservation disposition requires its explicit local operator and genuine Project gateway",
+        "Stopped operator disposition requires its explicit local operator and genuine Project gateway",
       );
     if (
-      request.input.failedReservationEvidence !== undefined &&
-      request.input.retiredWithdrawalEvidence !== undefined
+      [
+        request.input.failedReservationEvidence,
+        request.input.retiredWithdrawalEvidence,
+        request.input.retiredAdmissionEvidence,
+      ].filter((value) => value !== undefined).length !== 1
     )
       throw new Error("Choose one exact stopped operator disposition");
     const lockPath = installationLockPath(config.repository),
       lock = acquireInstallationLock(config.repository, request.objective);
     try {
+      if (request.input.retiredAdmissionEvidence !== undefined)
+        return await retireUnknownProjectAdmission(
+          config,
+          github,
+          request.objective,
+          request.input.retiredAdmissionEvidence,
+          request.input.actor,
+          lock,
+        );
       if (request.input.retiredWithdrawalEvidence !== undefined)
         return await retireUnknownProjectWithdrawal(
           config,

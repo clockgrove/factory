@@ -37,10 +37,14 @@ import type {
   ProjectQueueExpectedTarget,
   ProjectQueueSnapshot,
   ProjectQueueWriteReceipt,
+  ProjectQueuePlannedEffect,
 } from "./contracts.js";
 import {
   assertProjectQueueIntent,
   assertProjectQueueWriteReceipt,
+  assertProjectQueuePlannedEffect,
+  resolveProjectQueuePlannedEffect,
+  projectQueueReceiptTarget,
 } from "./github-project-queue.js";
 import {
   awaitCheckpointAdmission,
@@ -73,6 +77,7 @@ import { objectiveWorkflowRecipeSelector } from "./workflow-recipes.js";
 import { isExecutionState, isPreparationState } from "./state.js";
 import {
   assertProcessActive,
+  currentProcessDeadlineAt,
   hasUnresolvedSubprocesses,
   linuxProcessIdentity,
   ownIdentity,
@@ -169,6 +174,12 @@ interface RetiredWithdrawalProof {
   sourceModules: { path: string; ref: ContentRef }[];
   observedTarget: ContentRef;
 }
+type RetiredAdmissionProof = Omit<
+  RetiredWithdrawalProof,
+  "retiredClaim" | "claimReferences" | "previousAdmission" | "previousResponse"
+> & {
+  knownResponses: ContentRef[];
+};
 export interface RetiredWithdrawalEvidence {
   schemaVersion: 1;
   kind: "operator-retired-withdrawal-unknown";
@@ -187,6 +198,12 @@ export interface RetiredWithdrawalEvidence {
     physicalClosure: OperatorOriginal;
   };
 }
+export type RetiredAdmissionEvidence = Omit<
+  RetiredWithdrawalEvidence,
+  "kind"
+> & {
+  kind: "operator-retired-admission-unknown";
+};
 export interface QueueOperation {
   schemaVersion: 1;
   kind: "project-queue-operation";
@@ -215,6 +232,33 @@ export interface QueueOperation {
   beforeEffectFailure?: QueueBeforeEffectFailure;
   /** Explicit operator retirement preserves UNKNOWN remote submission forever. */
   retiredWithdrawal?: RetiredWithdrawalProof;
+  /** The original partial admission and its last unknown field remain permanently unaccepted. */
+  retiredAdmission?: RetiredAdmissionProof;
+  /** All members use the first existing operation as their immutable command owner. */
+  commandId?: string;
+  commandRecipe?: QueueCommandRecipe;
+}
+type QueueOperationHeader = Omit<
+  QueueOperation,
+  | "effects"
+  | "completed"
+  | "beforeEffectFailure"
+  | "retiredWithdrawal"
+  | "retiredAdmission"
+  | "commandId"
+  | "commandRecipe"
+>;
+export interface QueueCommandRecipe {
+  schemaVersion: 1;
+  id: string;
+  configDigest: string;
+  deadlineAt: string | null;
+  operations: QueueOperationHeader[];
+  effects: ProjectQueuePlannedEffect[];
+}
+export interface QueueCommand {
+  operations: QueueOperation[];
+  recipe: QueueCommandRecipe;
 }
 export interface QueueOwnerClaim {
   schemaVersion: 1;
@@ -951,6 +995,9 @@ export function parseQueueRecord(
       "completed",
       "beforeEffectFailure",
       "retiredWithdrawal",
+      "retiredAdmission",
+      "commandId",
+      "commandRecipe",
     ]);
     if (
       row.kind !== "project-queue-operation" ||
@@ -1013,6 +1060,25 @@ export function parseQueueRecord(
       )
         throw new Error("Project queue metadata differs from producer receipt");
     }
+    if (row.commandId !== undefined && !uuid(row.commandId))
+      throw new Error("Invalid queue command owner identity");
+    if (row.commandRecipe !== undefined) {
+      if (row.commandId !== id)
+        throw new Error(
+          "Only the original first operation owns its command recipe",
+        );
+      assertCommandRecipe(row.commandRecipe, repository, id);
+      const header = row.commandRecipe.operations.find(
+        (value) => value.id === id,
+      );
+      if (
+        JSON.stringify(header) !==
+        JSON.stringify(commandHeader(row as unknown as QueueOperation))
+      )
+        throw new Error(
+          "Command owner differs from its frozen operation header",
+        );
+    }
     const seen = new Set<string>();
     for (const raw of row.effects) {
       const effect = object(raw);
@@ -1063,6 +1129,7 @@ export function parseQueueRecord(
       if (
         row.completed ||
         row.beforeEffectFailure ||
+        row.commandId ||
         row.action !== "withdraw" ||
         row.effects.length !== 1 ||
         object(row.effects[0]).receipt ||
@@ -1108,6 +1175,74 @@ export function parseQueueRecord(
         paths.add(source.path);
       }
     }
+    if (row.retiredAdmission !== undefined) {
+      const proof = object(row.retiredAdmission);
+      only(proof, [
+        "schemaVersion",
+        "at",
+        "originalOperation",
+        "knownResponses",
+        "operatorDecision",
+        "ownerObservation",
+        "installedPlan",
+        "callerFailure",
+        "sourceProtocolReview",
+        "physicalClosure",
+        "sourceInventory",
+        "sourceModules",
+        "observedTarget",
+      ]);
+      if (
+        row.completed ||
+        row.beforeEffectFailure ||
+        row.retiredWithdrawal ||
+        row.commandId ||
+        row.action !== "admit" ||
+        row.previousReceiptId !== null ||
+        row.effects.length !== 3 ||
+        proof.schemaVersion !== 1 ||
+        !date(proof.at) ||
+        Date.parse(proof.at) < Date.parse(String(row.at)) ||
+        !Array.isArray(proof.knownResponses) ||
+        proof.knownResponses.length !== 2 ||
+        !proof.knownResponses.every(ref) ||
+        !Array.isArray(proof.sourceModules) ||
+        object(row.effects[0]).receipt === undefined ||
+        object(row.effects[1]).receipt === undefined ||
+        object(row.effects[2]).receipt !== undefined ||
+        row.effects.some((raw) => object(raw).rejectedOriginal !== undefined)
+      )
+        throw new Error(
+          "Only the exact legacy partial admission with two original responses and one unknown final field may retire",
+        );
+      for (const key of [
+        "originalOperation",
+        "operatorDecision",
+        "ownerObservation",
+        "installedPlan",
+        "callerFailure",
+        "sourceProtocolReview",
+        "physicalClosure",
+        "sourceInventory",
+        "observedTarget",
+      ])
+        if (!ref(proof[key]))
+          throw new Error("Retired admission lacks its retained original");
+      const paths = new Set();
+      for (const raw of proof.sourceModules) {
+        const source = object(raw);
+        only(source, ["path", "ref"]);
+        if (
+          typeof source.path !== "string" ||
+          !source.path.startsWith("dist/") ||
+          source.path.includes("..") ||
+          paths.has(source.path) ||
+          !ref(source.ref)
+        )
+          throw new Error("Retired admission source is ambiguous");
+        paths.add(source.path);
+      }
+    }
     if (row.beforeEffectFailure !== undefined) {
       const proof = object(row.beforeEffectFailure);
       only(proof, [
@@ -1120,6 +1255,7 @@ export function parseQueueRecord(
       ]);
       if (
         row.completed ||
+        row.commandId ||
         row.effects.length !== 1 ||
         object(row.effects[0]).receipt ||
         object(row.effects[0]).rejectedOriginal ||
@@ -1207,6 +1343,7 @@ function save(record: QueueRecord): void {
         completed: oldCompleted,
         beforeEffectFailure: oldFailure,
         retiredWithdrawal: oldRetirement,
+        retiredAdmission: oldAdmissionRetirement,
         ...oldBinding
       } = previous;
       const {
@@ -1214,6 +1351,7 @@ function save(record: QueueRecord): void {
         completed: newCompleted,
         beforeEffectFailure: newFailure,
         retiredWithdrawal: newRetirement,
+        retiredAdmission: newAdmissionRetirement,
         ...newBinding
       } = record;
       if (
@@ -1225,6 +1363,11 @@ function save(record: QueueRecord): void {
           JSON.stringify(oldEffects) !== JSON.stringify(newEffects)) ||
         (oldRetirement &&
           (JSON.stringify(oldRetirement) !== JSON.stringify(newRetirement) ||
+            JSON.stringify(oldEffects) !== JSON.stringify(newEffects) ||
+            newCompleted)) ||
+        (oldAdmissionRetirement &&
+          (JSON.stringify(oldAdmissionRetirement) !==
+            JSON.stringify(newAdmissionRetirement) ||
             JSON.stringify(oldEffects) !== JSON.stringify(newEffects) ||
             newCompleted)) ||
         newEffects.length < oldEffects.length
@@ -1758,6 +1901,7 @@ export function queueOperationReferences(
 ): ContentRef[] {
   const failure = operation.beforeEffectFailure,
     retirement = operation.retiredWithdrawal;
+  const admission = operation.retiredAdmission;
   return [
     ...(failure
       ? [
@@ -1765,6 +1909,21 @@ export function queueOperationReferences(
           failure.error,
           failure.checkpoint,
           ...failure.sources.map((row) => row.ref),
+        ]
+      : []),
+    ...(admission
+      ? [
+          admission.originalOperation,
+          ...admission.knownResponses,
+          admission.operatorDecision,
+          admission.ownerObservation,
+          admission.installedPlan,
+          admission.callerFailure,
+          admission.sourceProtocolReview,
+          admission.physicalClosure,
+          admission.sourceInventory,
+          ...admission.sourceModules.map((row) => row.ref),
+          admission.observedTarget,
         ]
       : []),
     ...(retirement
@@ -1801,12 +1960,6 @@ function assertRetiredWithdrawalReferenceBodies(
     )
       throw new Error("Retirement original bytes changed");
     return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  };
-  const text = (reference: ContentRef) => {
-    const value = json(reference);
-    if (typeof value !== "string")
-      throw new Error("Retirement original text missing");
-    return value;
   };
   const original = parseQueueRecord(
       Buffer.from(readReference(proof.originalOperation)),
@@ -1885,30 +2038,76 @@ function assertRetiredWithdrawalReferenceBodies(
     ...last.receipt,
     original: json(proof.previousResponse),
   });
+  assertRetiredOperatorOriginals(operation, proof, readReference, {
+    admission: false,
+    intent,
+    priorMetadata: previous.metadata!,
+    claimId: claim.id,
+    deadlineAt: claim.deadlineAt,
+  });
+}
+function assertRetiredOperatorOriginals(
+  operation: QueueOperation,
+  proof: RetiredWithdrawalProof | RetiredAdmissionProof,
+  readReference: (ref: ContentRef) => Uint8Array,
+  context: {
+    admission: boolean;
+    intent: ProjectQueueIntent;
+    priorMetadata: string | null;
+    claimId?: string;
+    deadlineAt: string | null;
+  },
+): void {
+  const intent = context.intent;
+  if (intent.action !== "set-metadata")
+    throw new Error("Retirement only covers its final unknown field");
+  const json = (reference: ContentRef) => {
+    const bytes = Buffer.from(readReference(reference));
+    if (
+      bytes.length !== reference.bytes ||
+      createHash("sha256").update(bytes).digest("hex") !== reference.digest
+    )
+      throw new Error("Retirement original bytes changed");
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  };
+  const text = (reference: ContentRef) => {
+    const value = json(reference);
+    if (typeof value !== "string")
+      throw new Error("Retirement original text missing");
+    return value;
+  };
   const decision = object(json(proof.operatorDecision)),
     ownerObservation = object(JSON.parse(text(proof.ownerObservation))),
     ready = object(ownerObservation.ready),
     owner = object(ready.owner),
     plan = object(JSON.parse(text(proof.installedPlan))),
     closure = object(JSON.parse(text(proof.physicalClosure))),
-    closedOwner = object(closure.ownedController),
+    closedOwner = object(
+      context.admission ? closure.physicalAfter : closure.ownedController,
+    ),
+    caller = context.admission
+      ? object(JSON.parse(text(proof.callerFailure)))
+      : {},
     review = object(JSON.parse(text(proof.sourceProtocolReview))),
     inventory = JSON.parse(text(proof.sourceInventory));
   if (
-    decision.kind !== "explicit-operator-retired-withdrawal-unknown" ||
+    decision.kind !==
+      (context.admission
+        ? "explicit-operator-retired-admission-unknown"
+        : "explicit-operator-retired-withdrawal-unknown") ||
     typeof decision.actor !== "string" ||
     !decision.actor ||
     decision.repository !== operation.repository ||
     decision.operationId !== operation.id ||
-    decision.claimId !== claim.id ||
-    decision.objective !== claim.objective ||
-    decision.bodyDigest !== claim.bodyDigest ||
+    decision.claimId !== context.claimId ||
+    decision.objective !== operation.objective ||
+    decision.bodyDigest !== operation.bodyDigest ||
     decision.authorityDigest !== operation.authorityDigest ||
-    decision.previousReceiptId !== previous.id ||
+    decision.previousReceiptId !== operation.previousReceiptId ||
     decision.requestId !== intent.requestId ||
     decision.remoteSubmission !== "unknown" ||
     decision.originalOwnerTokenIdentity !== "unavailable" ||
-    decision.originalDeadlineAt !== claim.deadlineAt ||
+    decision.originalDeadlineAt !== context.deadlineAt ||
     JSON.stringify(decision.originalOwner) !==
       JSON.stringify({
         pid: owner.pid,
@@ -1936,27 +2135,58 @@ function assertRetiredWithdrawalReferenceBodies(
     plan.configDigest !== decision.originalConfigDigest ||
     object(plan.installedOwnInventory).sha256 !==
       queueDigest(text(proof.sourceInventory)) ||
-    closure.namespace !== plan.namespace ||
-    closedOwner.pid !== owner.pid ||
-    closedOwner.startTime !== owner.startTime ||
-    closedOwner.ceased !== true ||
-    closedOwner.processGroupAbsent !== true ||
-    closedOwner.cgroupEmptyOrAbsent !== true ||
-    closedOwner.installationAndObjectiveLeasesClear !== true
+    (context.admission
+      ? closure.passed !== true ||
+        object(closure.installedPlan).sha256 !==
+          queueDigest(text(proof.installedPlan)) ||
+        JSON.stringify(object(object(closure.coldReadiness).ready).owner) !==
+          JSON.stringify(owner) ||
+        closedOwner.originalOwnerCeased !== true ||
+        closedOwner.originalGroupAbsent !== true ||
+        closedOwner.cgroupEmptyOrAbsent !== true ||
+        closedOwner.installationOwner !== null ||
+        !Array.isArray(closedOwner.objectiveOwners) ||
+        closedOwner.objectiveOwners.length !== 0 ||
+        !Array.isArray(closedOwner.scopedProcesses) ||
+        closedOwner.scopedProcesses.length !== 0 ||
+        object(closedOwner.properties).MainPID !== "0" ||
+        !["inactive", "failed"].includes(
+          String(object(closedOwner.properties).ActiveState),
+        ) ||
+        object(caller.partialAdmission).operationId !== operation.id ||
+        object(caller.addRPC).submission !== "unknown" ||
+        !uuid(object(caller.addRPC).requestId) ||
+        !Number.isSafeInteger(object(caller.addRPC).deadlineAt) ||
+        new Date(Number(object(caller.addRPC).deadlineAt)).toISOString() !==
+          context.deadlineAt ||
+        decision.originalRPC !== object(caller.addRPC).requestId
+      : closure.namespace !== plan.namespace ||
+        closedOwner.pid !== owner.pid ||
+        closedOwner.startTime !== owner.startTime ||
+        closedOwner.ceased !== true ||
+        closedOwner.processGroupAbsent !== true ||
+        closedOwner.cgroupEmptyOrAbsent !== true ||
+        closedOwner.installationAndObjectiveLeasesClear !== true)
   )
     throw new Error(
       "Known original supervisor/source/cessation facts are unavailable",
     );
   if (
     review.schemaVersion !== 1 ||
-    review.kind !== "operator-retired-withdrawal-source-review" ||
-    review.sourceProtocol !== "single-withdrawal-field-unknown-v1" ||
+    review.kind !==
+      (context.admission
+        ? "operator-retired-admission-source-review"
+        : "operator-retired-withdrawal-source-review") ||
+    review.sourceProtocol !==
+      (context.admission
+        ? "legacy-two-responses-final-admission-field-unknown-v1"
+        : "single-withdrawal-field-unknown-v1") ||
     review.repository !== operation.repository ||
     review.operationId !== operation.id ||
     review.requestId !== intent.requestId ||
-    review.claimId !== claim.id ||
-    review.previousReceiptId !== previous.id ||
-    review.bodyDigest !== claim.bodyDigest ||
+    review.claimId !== context.claimId ||
+    review.previousReceiptId !== operation.previousReceiptId ||
+    review.bodyDigest !== operation.bodyDigest ||
     review.authorityDigest !== operation.authorityDigest ||
     review.configDigest !== decision.originalConfigDigest ||
     review.inventorySha256 !== queueDigest(text(proof.sourceInventory)) ||
@@ -2016,8 +2246,8 @@ function assertRetiredWithdrawalReferenceBodies(
     target.repository !== operation.repository ||
     target.order !== operation.order ||
     target.archived !== false ||
-    ![previous.metadata, operation.metadata].includes(
-      String(target.metadata),
+    ![context.priorMetadata, operation.metadata].includes(
+      target.metadata as string | null,
     ) ||
     control.itemId !== operation.binding.controlItemId ||
     parseQueueMetadata(String(control.metadata)).kind !== "control" ||
@@ -2027,11 +2257,116 @@ function assertRetiredWithdrawalReferenceBodies(
       "Retirement lacks its exact current literal mapping and paused control observation",
     );
 }
+function assertRetiredAdmissionReferenceBodies(
+  operation: QueueOperation,
+  readReference: (ref: ContentRef) => Uint8Array,
+): void {
+  const proof = operation.retiredAdmission;
+  if (!proof) return;
+  const originalBytes = Buffer.from(readReference(proof.originalOperation));
+  if (
+    originalBytes.length !== proof.originalOperation.bytes ||
+    createHash("sha256").update(originalBytes).digest("hex") !==
+      proof.originalOperation.digest
+  )
+    throw new Error("Retired admission original changed");
+  const original = parseQueueRecord(
+      originalBytes,
+      operation.repository,
+      operation.id,
+    ),
+    { retiredAdmission: _proof, ...binding } = operation;
+  if (
+    original.kind !== "project-queue-operation" ||
+    original.retiredAdmission ||
+    original.retiredWithdrawal ||
+    original.beforeEffectFailure ||
+    JSON.stringify(original) !== JSON.stringify(binding)
+  )
+    throw new Error("Retirement cannot change original partial admission");
+  const [ensure, order, unknown] = operation.effects,
+    metadata = operation.metadata
+      ? parseQueueMetadata(operation.metadata)
+      : undefined;
+  if (
+    !ensure?.receipt ||
+    !order?.receipt ||
+    !ensure.original ||
+    !order.original ||
+    !unknown ||
+    unknown.receipt ||
+    unknown.rejectedOriginal ||
+    ensure.intent.action !== "ensure-card" ||
+    ensure.intent.issueNodeId !== operation.issueNodeId ||
+    order.intent.action !== "set-order" ||
+    order.intent.itemId !== ensure.receipt.itemId ||
+    order.intent.order !== operation.order ||
+    order.intent.fieldId !== operation.binding.orderFieldId ||
+    unknown.intent.action !== "set-metadata" ||
+    unknown.intent.itemId !== order.receipt.itemId ||
+    unknown.intent.fieldId !== operation.binding.metadataFieldId ||
+    unknown.intent.metadata !== operation.metadata ||
+    metadata?.kind !== "admission" ||
+    metadata.state !== "queued" ||
+    ensure.intent.actorId !== unknown.intent.actorId ||
+    order.intent.actorId !== unknown.intent.actorId ||
+    JSON.stringify(proof.knownResponses) !==
+      JSON.stringify([ensure.original, order.original])
+  )
+    throw new Error(
+      "Retirement requires two genuine ordered responses and only the unknown final admission field",
+    );
+  const receipts = [ensure, order].map((effect) => {
+    const bytes = Buffer.from(readReference(effect.original!));
+    if (
+      bytes.length !== effect.original!.bytes ||
+      createHash("sha256").update(bytes).digest("hex") !==
+        effect.original!.digest
+    )
+      throw new Error("Known admission response changed");
+    const receipt = {
+      ...effect.receipt!,
+      original: JSON.parse(bytes.toString("utf8")),
+    };
+    assertProjectQueueWriteReceipt(receipt);
+    return receipt;
+  });
+  const prior = projectQueueReceiptTarget(receipts[1]!);
+  if (
+    !("objective" in prior) ||
+    prior.objective !== operation.objective ||
+    prior.issueNodeId !== operation.issueNodeId ||
+    prior.order !== operation.order ||
+    prior.metadata !== null ||
+    receipts[0]!.kind !== "response"
+  )
+    throw new Error(
+      "Known admission mapping differs from the actual order response",
+    );
+  const caller = object(
+      JSON.parse(
+        JSON.parse(
+          Buffer.from(readReference(proof.callerFailure)).toString("utf8"),
+        ),
+      ),
+    ),
+    rpc = object(caller.addRPC);
+  if (!Number.isSafeInteger(rpc.deadlineAt))
+    throw new Error("Original caller deadline unavailable");
+  assertRetiredOperatorOriginals(operation, proof, readReference, {
+    admission: true,
+    intent: unknown.intent,
+    priorMetadata: prior.metadata,
+    deadlineAt: new Date(Number(rpc.deadlineAt)).toISOString(),
+  });
+}
+
 export function assertQueueOperationReferenceBodies(
   operation: QueueOperation,
   readReference: (ref: ContentRef) => Uint8Array,
 ): void {
   assertRetiredWithdrawalReferenceBodies(operation, readReference);
+  assertRetiredAdmissionReferenceBodies(operation, readReference);
   const proof = operation.beforeEffectFailure;
   if (!proof) return;
   const json = (reference: ContentRef) => {
@@ -2267,7 +2602,7 @@ export interface VerifiedRetiredQueueEntry {
   admissionId: string;
   order: number;
   operationId: string;
-  currentMetadata: string;
+  currentMetadata: string | null;
   state: "retired-remote-uncertain";
   remoteSubmission: "unknown";
 }
@@ -2279,7 +2614,7 @@ function retiredQueueEntry(
   const retired = history.filter(
     (row): row is QueueOperation =>
       row.kind === "project-queue-operation" &&
-      !!row.retiredWithdrawal &&
+      !!(row.retiredWithdrawal || row.retiredAdmission) &&
       row.objective === card.objective,
   );
   if (retired.length > 1)
@@ -2291,9 +2626,10 @@ function retiredQueueEntry(
         row.kind === "project-queue-operation" &&
         row.id === operation.previousReceiptId,
     ),
-    intent = operation.effects[0]!.intent;
+    intent = operation.effects[operation.retiredAdmission ? 2 : 0]!.intent,
+    priorMetadata = operation.retiredAdmission ? null : previous?.metadata;
   if (
-    !previous?.metadata ||
+    priorMetadata === undefined ||
     intent.action !== "set-metadata" ||
     JSON.stringify(operation.binding) !==
       JSON.stringify(config.queue?.project) ||
@@ -2301,16 +2637,16 @@ function retiredQueueEntry(
     card.itemId !== intent.itemId ||
     card.issueNodeId !== operation.issueNodeId ||
     card.order !== operation.order ||
-    ![previous.metadata, operation.metadata].includes(
-      card.metadata ?? undefined,
-    )
+    ![priorMetadata, operation.metadata].includes(card.metadata)
   )
     throw new Error(
       "Retired uncertain card differs from its exact preserved mapping",
     );
-  const metadata = parseQueueMetadata(previous.metadata);
+  const metadata = parseQueueMetadata(
+    operation.retiredAdmission ? operation.metadata! : previous!.metadata!,
+  );
   if (metadata.kind !== "admission")
-    throw new Error("Retired mapping lacks originaladmission");
+    throw new Error("Retired mapping lacks its original admission");
   return {
     objective: card.objective,
     itemId: card.itemId,
@@ -2318,7 +2654,7 @@ function retiredQueueEntry(
     admissionId: metadata.admissionId,
     order: card.order!,
     operationId: operation.id,
-    currentMetadata: card.metadata!,
+    currentMetadata: card.metadata,
     state: "retired-remote-uncertain",
     remoteSubmission: "unknown",
   };
@@ -2329,6 +2665,29 @@ export interface VerifiedQueueObservation {
   control: Extract<QueueMetadata, { kind: "control" }>;
   entries: VerifiedQueueEntry[];
   retiredEntries: VerifiedRetiredQueueEntry[];
+}
+function completedQueueOperation(
+  operation: QueueOperation,
+  history: QueueRecord[],
+): boolean {
+  if (!operation.completed) return false;
+  if (!operation.commandId) return true;
+  const owner = history.find(
+    (row): row is QueueOperation =>
+      row.kind === "project-queue-operation" && row.id === operation.commandId,
+  );
+  return (
+    !!owner?.commandRecipe &&
+    owner.commandRecipe.operations.every((header) =>
+      history.some(
+        (row) =>
+          row.kind === "project-queue-operation" &&
+          row.id === header.id &&
+          row.commandId === owner.id &&
+          row.completed,
+      ),
+    )
+  );
 }
 function producer(
   config: FactoryConfig,
@@ -2346,7 +2705,7 @@ function producer(
   );
   if (
     !record ||
-    !record.completed ||
+    !completedQueueOperation(record, history) ||
     record.scope !== scope ||
     record.metadata !== text ||
     (!historical &&
@@ -2363,7 +2722,8 @@ function producer(
         entry.scope === scope &&
         entry.previousReceiptId === record.id &&
         !entry.beforeEffectFailure &&
-        !entry.retiredWithdrawal,
+        !entry.retiredWithdrawal &&
+        !entry.retiredAdmission,
     )
   )
     throw new Error(
@@ -2396,7 +2756,8 @@ function assertQueueHistorySettled(history: QueueRecord[]): void {
         entry.kind === "project-queue-operation" &&
         !entry.completed &&
         !entry.beforeEffectFailure &&
-        !entry.retiredWithdrawal,
+        !entry.retiredWithdrawal &&
+        !entry.retiredAdmission,
     )
   )
     throw new Error(
@@ -2580,7 +2941,7 @@ export function retainedQueueEntry(
     history.some(
       (row) =>
         row.kind === "project-queue-operation" &&
-        row.retiredWithdrawal &&
+        (row.retiredWithdrawal || row.retiredAdmission) &&
         row.objective === objective,
     )
   )
@@ -2597,7 +2958,8 @@ export function retainedQueueEntry(
           next.scope === record.scope &&
           next.previousReceiptId === record.id &&
           !next.beforeEffectFailure &&
-          !next.retiredWithdrawal,
+          !next.retiredWithdrawal &&
+          !next.retiredAdmission,
       ),
   );
   if (candidates.length > 1)
@@ -2629,20 +2991,24 @@ export function retainedQueueEntry(
     historical,
   );
 }
-/** Retained successful admissions reserve their order even after withdrawal/archive. */
+/** Authenticated successful, uncertain and retired allocations are never recycled. */
 export function nextProjectQueueOrder(history: QueueRecord[]): number {
-  const maximum = Math.max(
-    0,
-    ...history.flatMap((record) =>
-      record.kind === "project-queue-operation" &&
-      record.action === "admit" &&
-      record.completed &&
-      Number.isSafeInteger(record.order)
-        ? [record.order!]
-        : [],
-    ),
+  const allocated = history.flatMap((record) =>
+    record.kind === "project-queue-operation"
+      ? [
+          ...(record.completed && Number.isSafeInteger(record.order)
+            ? [record.order!]
+            : []),
+          ...record.effects.flatMap((effect) =>
+            effect.intent.action === "set-order" ? [effect.intent.order] : [],
+          ),
+          ...(record.commandRecipe?.effects.flatMap((effect) =>
+            effect.action === "set-order" ? [effect.order] : [],
+          ) ?? []),
+        ]
+      : [],
   );
-  const next = maximum + 1;
+  const next = Math.max(0, ...allocated) + 1;
   if (!Number.isSafeInteger(next))
     throw new Error("Project order exhausted its exact integer range");
   return next;
@@ -2724,6 +3090,510 @@ export function createQueueOperation(
     effects: [],
   };
 }
+function commandHeader(operation: QueueOperation): QueueOperationHeader {
+  const {
+    effects: _effects,
+    completed: _completed,
+    beforeEffectFailure: _failure,
+    retiredWithdrawal: _retirement,
+    retiredAdmission: _admissionRetirement,
+    commandId: _command,
+    commandRecipe: _recipe,
+    ...header
+  } = operation;
+  return header;
+}
+function assertCommandRecipe(
+  value: unknown,
+  repository: string,
+  ownerId: string,
+): asserts value is QueueCommandRecipe {
+  const recipe = object(value);
+  only(recipe, [
+    "schemaVersion",
+    "id",
+    "configDigest",
+    "deadlineAt",
+    "operations",
+    "effects",
+  ]);
+  if (
+    recipe.schemaVersion !== 1 ||
+    recipe.id !== ownerId ||
+    !digest(recipe.configDigest) ||
+    !(recipe.deadlineAt === null || date(recipe.deadlineAt)) ||
+    !Array.isArray(recipe.operations) ||
+    !recipe.operations.length ||
+    !Array.isArray(recipe.effects) ||
+    !recipe.effects.length
+  )
+    throw new Error("Invalid complete Project queue command recipe");
+  const operations = new Map<string, QueueOperation>();
+  for (const raw of recipe.operations) {
+    const header = object(raw);
+    const parsed = parseQueueRecord(
+      Buffer.from(JSON.stringify({ ...header, effects: [] })),
+      repository,
+      String(header.id),
+    );
+    if (
+      parsed.kind !== "project-queue-operation" ||
+      operations.has(parsed.id) ||
+      JSON.stringify(commandHeader(parsed)) !== JSON.stringify(header)
+    )
+      throw new Error("Command operation headers must be complete and unique");
+    operations.set(parsed.id, parsed);
+  }
+  if ([...operations.keys()][0] !== ownerId)
+    throw new Error("Command owner must be its first declared operation");
+  const first = operations.get(ownerId)!;
+  if (
+    [...operations.values()].some(
+      (operation) =>
+        operation.authorityDigest !== first.authorityDigest ||
+        JSON.stringify(operation.binding) !== JSON.stringify(first.binding),
+    )
+  )
+    throw new Error("Command configuration and field bindings differ");
+  const previous = new Map<string, ProjectQueuePlannedEffect>(),
+    counts = new Map<string, number>();
+  let actor: number | undefined;
+  for (const raw of recipe.effects) {
+    assertProjectQueuePlannedEffect(raw, first.binding);
+    const step = raw,
+      operation = operations.get(step.operationId);
+    if (
+      !operation ||
+      previous.has(step.requestId) ||
+      (actor !== undefined && actor !== step.actorId)
+    )
+      throw new Error("Command effect identity, operation or actor differs");
+    actor = step.actorId;
+    const sameOperation = (id: string) => {
+      const dependency = previous.get(id);
+      if (!dependency || dependency.operationId !== step.operationId)
+        throw new Error(
+          "Command target dependency must precede it in the same operation",
+        );
+      return dependency;
+    };
+    if (
+      step.action !== "ensure-card" &&
+      "resultOf" in step.target &&
+      sameOperation(step.target.resultOf).action !== "ensure-card"
+    )
+      throw new Error(
+        "Generated card identity requires its declared earlier ensure original",
+      );
+    if ("resultOf" in step.prior) {
+      const dependency = sameOperation(step.prior.resultOf);
+      const earlier = [...previous.values()]
+        .filter((v) => v.operationId === step.operationId)
+        .at(-1);
+      if (dependency !== earlier)
+        throw new Error(
+          "Target proof must be the immediately preceding actual original",
+        );
+    }
+    if ("resultOf" in step.control) {
+      const dependency = previous.get(step.control.resultOf);
+      if (
+        !dependency ||
+        dependency.action !== "set-metadata" ||
+        !("itemId" in dependency.target) ||
+        dependency.target.itemId !== first.binding.controlItemId
+      )
+        throw new Error(
+          "Control dependency must be its declared earlier control original",
+        );
+    }
+    if (["admit", "roadmap"].includes(operation.action)) {
+      if (
+        JSON.stringify(step.expectedIssue) !==
+        JSON.stringify({
+          issueNodeId: operation.issueNodeId,
+          objective: operation.objective,
+          bodyDigest: operation.bodyDigest,
+        })
+      )
+        throw new Error(
+          "Command admission requires its exact approved Issue body",
+        );
+    } else if (step.expectedIssue !== undefined)
+      throw new Error("Unexpected admission authority in command effect");
+    if (
+      (step.action === "ensure-card" &&
+        step.issueNodeId !== operation.issueNodeId) ||
+      (step.action === "set-order" &&
+        (step.order !== operation.order ||
+          step.fieldId !== first.binding.orderFieldId)) ||
+      (step.action === "set-metadata" &&
+        (step.metadata !== operation.metadata ||
+          step.fieldId !== first.binding.metadataFieldId)) ||
+      (operation.action === "control" &&
+        (step.action !== "set-metadata" ||
+          !("itemId" in step.target) ||
+          step.target.itemId !== first.binding.controlItemId)) ||
+      (operation.action === "withdraw" && step.action !== "set-metadata")
+    )
+      throw new Error(
+        "Command effect differs from its immutable operation header",
+      );
+    counts.set(operation.id, (counts.get(operation.id) ?? 0) + 1);
+    if (counts.get(operation.id)! > 3)
+      throw new Error("Command exceeds its existing operation effect schema");
+    previous.set(step.requestId, step);
+  }
+  for (const operation of operations.values()) {
+    const steps = [...previous.values()].filter(
+      (step) => step.operationId === operation.id,
+    );
+    const actions =
+      operation.action === "admit"
+        ? ["ensure-card", "set-order", "set-metadata"]
+        : operation.action === "roadmap"
+          ? ["ensure-card"]
+          : ["set-metadata"];
+    if (
+      JSON.stringify(steps.map((step) => step.action)) !==
+      JSON.stringify(actions)
+    )
+      throw new Error(
+        "Command must declare every admission effect and operation",
+      );
+  }
+}
+/** Cross-record original facts; incomplete recipes never grant dispatch authority. */
+export function assertQueueCommandHistory(
+  history: QueueRecord[],
+  readReference: (reference: ContentRef) => Uint8Array,
+): void {
+  const operations = new Map(
+    history
+      .filter(
+        (row): row is QueueOperation => row.kind === "project-queue-operation",
+      )
+      .map((row) => [row.id, row]),
+  );
+  for (const row of operations.values()) {
+    if (!row.commandId) continue;
+    const owner = operations.get(row.commandId);
+    if (!owner?.commandRecipe)
+      throw new Error("Command member lacks its exact original recipe owner");
+    assertCommandRecipe(owner.commandRecipe, owner.repository, owner.id);
+    const recipe = owner.commandRecipe,
+      members = recipe.operations.map((header) => operations.get(header.id));
+    if (
+      members.some(
+        (member, index) =>
+          member &&
+          (member.commandId !== owner.id ||
+            JSON.stringify(commandHeader(member)) !==
+              JSON.stringify(recipe.operations[index])),
+      )
+    )
+      throw new Error("Command member changed its frozen original header");
+    if (
+      row.id !== owner.id &&
+      !recipe.operations.some((header) => header.id === row.id)
+    )
+      throw new Error(
+        "Operation was appended to a previously declared command",
+      );
+    if (row.id !== owner.id) continue;
+    for (const member of members) {
+      if (!member) continue;
+      const declared = recipe.effects.filter(
+        (step) => step.operationId === member.id,
+      );
+      if (
+        member.effects.length > declared.length ||
+        member.effects.some(
+          (effect, index) =>
+            effect.intent.requestId !== declared[index]?.requestId,
+        )
+      )
+        throw new Error(
+          "Retained command effects changed their declared order",
+        );
+    }
+    const receipts: ProjectQueueWriteReceipt[] = [];
+    let pending = false;
+    for (const step of recipe.effects) {
+      const operation = operations.get(step.operationId),
+        effect = operation?.effects.find(
+          (v) => v.intent.requestId === step.requestId,
+        );
+      if (!effect) {
+        pending = true;
+        continue;
+      }
+      if (pending)
+        throw new Error(
+          "Command effect skipped an unresolved earlier declaration",
+        );
+      const concrete = resolveProjectQueuePlannedEffect(
+        owner.binding,
+        step,
+        receipts,
+      );
+      if (
+        effect.intent.actorId !== step.actorId ||
+        JSON.stringify(effect.intent.request) !==
+          JSON.stringify(concrete.request) ||
+        Object.entries(concrete.action).some(
+          ([key, value]) => object(effect.intent)[key] !== value,
+        )
+      )
+        throw new Error(
+          "Concrete Project intent differs from its exact declared recipe",
+        );
+      if (!effect.receipt || !effect.original) {
+        pending = true;
+        continue;
+      }
+      const bytes = readReference(effect.original);
+      if (
+        bytes.byteLength !== effect.original.bytes ||
+        createHash("sha256").update(bytes).digest("hex") !==
+          effect.original.digest
+      )
+        throw new Error("Command response original changed its exact bytes");
+      const receipt = {
+        ...effect.receipt,
+        original: JSON.parse(Buffer.from(bytes).toString("utf8")),
+      };
+      assertProjectQueueWriteReceipt(receipt);
+      receipts.push(receipt);
+    }
+    for (const member of members)
+      if (
+        member &&
+        member.effects.some(
+          (effect) =>
+            !recipe.effects.some(
+              (step) =>
+                step.operationId === member.id &&
+                step.requestId === effect.intent.requestId,
+            ),
+        )
+      )
+        throw new Error("Undeclared effect was appended to a command");
+    if (
+      members.some((member) => member?.completed) &&
+      (pending || members.some((member) => !member))
+    )
+      throw new Error(
+        "Command completion requires every declared original response",
+      );
+  }
+}
+const queueCommandOwners = new WeakMap<
+  QueueCommand,
+  {
+    recipe: string;
+    admitted: boolean;
+    index: number;
+    receipts: ProjectQueueWriteReceipt[];
+    stopped: boolean;
+  }
+>();
+export function createQueueCommand(
+  config: FactoryConfig,
+  input: {
+    operations: QueueOperation[];
+    effects: ProjectQueuePlannedEffect[];
+    deadlineAt: string | null;
+  },
+): QueueCommand {
+  assertProcessActive();
+  requireProjectQueueEffects(config);
+  if (
+    !input.operations.length ||
+    input.operations.some(
+      (operation) =>
+        operation.effects.length ||
+        operation.completed ||
+        operation.commandId ||
+        operation.beforeEffectFailure ||
+        operation.retiredWithdrawal ||
+        operation.retiredAdmission ||
+        operation.repository !== config.repository ||
+        operation.authorityDigest !== factoryAuthorityDigest(config) ||
+        JSON.stringify(operation.binding) !==
+          JSON.stringify(config.queue?.project) ||
+        existsSync(
+          join(
+            stateRoot(config.repository),
+            "project-queue-history",
+            operation.id + ".json",
+          ),
+        ),
+    )
+  )
+    throw new Error(
+      "Only fresh complete operations can declare a new command; historical recipes cannot replay",
+    );
+  if (input.deadlineAt !== (currentProcessDeadlineAt() ?? null))
+    throw new Error(
+      "Command must retain its original armed deadline, including an undeclared deadline",
+    );
+  const recipe: QueueCommandRecipe = {
+    schemaVersion: 1,
+    id: input.operations[0]!.id,
+    configDigest: factoryConfigDigest(config),
+    deadlineAt: input.deadlineAt,
+    operations: input.operations.map((operation) =>
+      structuredClone(commandHeader(operation)),
+    ),
+    effects: structuredClone(input.effects),
+  };
+  assertCommandRecipe(recipe, config.repository, recipe.id);
+  for (const operation of input.operations) operation.commandId = recipe.id;
+  input.operations[0]!.commandRecipe = recipe;
+  for (const operation of input.operations) save(operation);
+  const command = { operations: input.operations, recipe };
+  queueCommandOwners.set(command, {
+    recipe: JSON.stringify(recipe),
+    admitted: false,
+    index: 0,
+    receipts: [],
+    stopped: false,
+  });
+  return command;
+}
+function ownQueueCommand(config: FactoryConfig, command: QueueCommand) {
+  assertProcessActive();
+  const owner = queueCommandOwners.get(command);
+  if (
+    !owner ||
+    owner.stopped ||
+    owner.recipe !== JSON.stringify(command.recipe) ||
+    command.recipe.configDigest !== factoryConfigDigest(config) ||
+    command.recipe.deadlineAt !== (currentProcessDeadlineAt() ?? null)
+  )
+    throw new Error(
+      "Original creating command, configuration and deadline are required; never replay a historical recipe",
+    );
+  if (
+    command.operations.length !== command.recipe.operations.length ||
+    command.operations.some(
+      (operation, index) =>
+        operation.id !== command.recipe.operations[index]?.id ||
+        operation.commandId !== command.recipe.id,
+    )
+  )
+    throw new Error(
+      "Live command must retain every original operation in its declared order",
+    );
+  for (const operation of command.operations) {
+    const original = parseQueueRecord(
+      privateBytes(
+        join(
+          stateRoot(config.repository),
+          "project-queue-history",
+          operation.id + ".json",
+        ),
+      ),
+      config.repository,
+      operation.id,
+    );
+    if (
+      original.kind !== "project-queue-operation" ||
+      JSON.stringify(original) !== JSON.stringify(operation)
+    )
+      throw new Error(
+        "Current command differs from its original retained operation",
+      );
+  }
+  const store = new LocalContentStore(
+    join(stateRoot(config.repository), "content"),
+  );
+  assertQueueCommandHistory(command.operations, (ref) => store.readBytes(ref));
+  return owner;
+}
+export async function admitQueueCommand(
+  config: FactoryConfig,
+  command: QueueCommand,
+): Promise<void> {
+  const owner = ownQueueCommand(config, command);
+  if (owner.admitted || owner.index)
+    throw new Error("Command admission cannot replay");
+  try {
+    await awaitCheckpointAdmission(config.repository, "before-effect");
+    assertProcessActive();
+    owner.admitted = true;
+  } catch (error) {
+    owner.stopped = true;
+    throw error;
+  }
+}
+export async function performQueueCommandEffect(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  command: QueueCommand,
+  index: number,
+  observation?: ProjectQueueInspection | ProjectQueueWriteReceipt,
+): Promise<ProjectQueueWriteReceipt> {
+  const owner = ownQueueCommand(config, command);
+  if (
+    !owner.admitted ||
+    index !== owner.index ||
+    !command.recipe.effects[index]
+  )
+    throw new Error(
+      "Only the next already acknowledged declared effect may execute",
+    );
+  const step = command.recipe.effects[index]!,
+    operation = command.operations.find((v) => v.id === step.operationId)!;
+  const concrete = resolveProjectQueuePlannedEffect(
+    operation.binding,
+    step,
+    owner.receipts,
+  );
+  try {
+    const receipt = await performQueueEffect(
+      config,
+      github,
+      operation,
+      concrete.action,
+      concrete.expectedTarget,
+      observation,
+      { command, index },
+    );
+    owner.receipts.push(structuredClone(receipt));
+    owner.index++;
+    return receipt;
+  } catch (error) {
+    owner.stopped = true;
+    throw error;
+  }
+}
+export async function completeQueueCommand(
+  config: FactoryConfig,
+  command: QueueCommand,
+): Promise<void> {
+  const owner = ownQueueCommand(config, command);
+  if (
+    !owner.admitted ||
+    owner.index !== command.recipe.effects.length ||
+    command.operations.some((operation) =>
+      operation.effects.some(
+        (effect) =>
+          !effect.receipt || !effect.original || effect.rejectedOriginal,
+      ),
+    )
+  )
+    throw new Error(
+      "Terminal command acknowledgment requires every declared fulfilled original",
+    );
+  owner.stopped = true;
+  for (const operation of command.operations) {
+    operation.completed = true;
+    save(operation);
+  }
+  await awaitCheckpointAdmission(config.repository, "explicit");
+}
 export async function performQueueEffect(
   config: FactoryConfig,
   github: GitHubGateway,
@@ -2731,6 +3601,7 @@ export async function performQueueEffect(
   action: ProjectQueueAction,
   expectedTarget?: ProjectQueueExpectedTarget,
   observation?: ProjectQueueInspection | ProjectQueueWriteReceipt,
+  commandEffect?: { command: QueueCommand; index: number },
 ): Promise<ProjectQueueWriteReceipt> {
   requireProjectQueueEffects(config);
   // A permanent local retirement is a refusal, never cached admission authority.
@@ -2753,7 +3624,7 @@ export async function performQueueEffect(
       );
       if (
         row.kind === "project-queue-operation" &&
-        row.retiredWithdrawal &&
+        (row.retiredWithdrawal || row.retiredAdmission) &&
         row.objective === operation.objective
       )
         throw new Error(
@@ -2772,13 +3643,27 @@ export async function performQueueEffect(
     operation.completed ||
     operation.beforeEffectFailure ||
     operation.retiredWithdrawal ||
+    operation.retiredAdmission ||
     !github.projectQueueWrite ||
     operation.effects.some((effect) => !effect.receipt)
   )
     throw new Error(
       "Project queue write is unavailable or held by an unknown prior effect",
     );
-  const requestId = randomUUID();
+  const commandOwner =
+    commandEffect && ownQueueCommand(config, commandEffect.command);
+  const planned = commandEffect?.command.recipe.effects[commandEffect.index];
+  if (
+    operation.commandId &&
+    (!planned ||
+      !commandOwner?.admitted ||
+      commandOwner.index !== commandEffect?.index ||
+      planned.operationId !== operation.id)
+  )
+    throw new Error(
+      "Grouped effects require the actual admitted creating command",
+    );
+  const requestId = planned?.requestId ?? randomUUID();
   const store = new LocalContentStore(
     join(stateRoot(config.repository), "content"),
   );
@@ -2788,6 +3673,9 @@ export async function performQueueEffect(
       ...action,
       binding: operation.binding,
       requestId,
+      ...(planned
+        ? { plannedEffect: planned, dependencyReceipts: commandOwner!.receipts }
+        : {}),
       ...(expectedTarget ? { expectedTarget } : {}),
       ...(observation ? { observation } : {}),
       ...(["admit", "roadmap"].includes(operation.action) &&
@@ -2813,7 +3701,26 @@ export async function performQueueEffect(
         operation.effects.push(retained);
         save(operation);
         try {
-          await awaitCheckpointAdmission(config.repository, "before-effect");
+          if (planned) {
+            const concrete = resolveProjectQueuePlannedEffect(
+              operation.binding,
+              planned,
+              commandOwner!.receipts,
+            );
+            if (
+              intent.actorId !== planned.actorId ||
+              JSON.stringify(intent.request) !==
+                JSON.stringify(concrete.request) ||
+              Object.entries(concrete.action).some(
+                ([key, value]) => object(intent)[key] !== value,
+              )
+            )
+              throw new Error(
+                "Adapter intent differs from its acknowledged command recipe",
+              );
+            assertProcessActive();
+          } else
+            await awaitCheckpointAdmission(config.repository, "before-effect");
         } catch (error) {
           if (
             isCheckpointAdmissionFailure(error) &&
@@ -2913,8 +3820,8 @@ export async function performQueueEffect(
       mediaType: "application/json",
     });
     retained.receipt = receipt;
-    // The next intent barrier includes this original response; terminal completion
-    // acknowledges the final response and completed operation together.
+    // Retain every original locally. Group completion acknowledges all declared
+    // responses together; standalone operations retain their next intent barrier.
     save(operation);
     return returned;
   } catch (error) {
@@ -2938,8 +3845,15 @@ export async function completeQueueOperation(
   config: FactoryConfig,
   operation: QueueOperation,
 ): Promise<void> {
-  if (operation.beforeEffectFailure || operation.retiredWithdrawal)
-    throw new Error("Permanently failed operation cannot complete or replay");
+  if (
+    operation.commandId ||
+    operation.beforeEffectFailure ||
+    operation.retiredWithdrawal ||
+    operation.retiredAdmission
+  )
+    throw new Error(
+      "Grouped or permanently failed operation cannot complete or replay independently",
+    );
   operation.completed = true;
   save(operation);
   await awaitCheckpointAdmission(config.repository, "explicit");
@@ -2967,7 +3881,7 @@ export async function claimProjectQueueRun(
     observed.history.some(
       (row) =>
         row.kind === "project-queue-operation" &&
-        row.retiredWithdrawal &&
+        (row.retiredWithdrawal || row.retiredAdmission) &&
         row.objective === objective,
     )
   )
@@ -3518,13 +4432,50 @@ export async function abandonFailedProjectQueueReservation(
   };
 }
 /** Explicit operator retirement; a synchronous remote field outcome remains UNKNOWN. */
-export async function retireUnknownProjectWithdrawal(
+export function retireUnknownProjectWithdrawal(
   config: FactoryConfig,
   github: GitHubGateway,
   objective: number,
   evidenceValue: unknown,
   actor: string,
   lock: ControllerLock,
+) {
+  return retireUnknownProjectOperation(
+    config,
+    github,
+    objective,
+    evidenceValue,
+    actor,
+    lock,
+    false,
+  );
+}
+export function retireUnknownProjectAdmission(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objective: number,
+  evidenceValue: unknown,
+  actor: string,
+  lock: ControllerLock,
+) {
+  return retireUnknownProjectOperation(
+    config,
+    github,
+    objective,
+    evidenceValue,
+    actor,
+    lock,
+    true,
+  );
+}
+async function retireUnknownProjectOperation(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objective: number,
+  evidenceValue: unknown,
+  actor: string,
+  lock: ControllerLock,
+  admission: boolean,
 ): Promise<{
   retiredUnaccepted: true;
   objective: number;
@@ -3586,7 +4537,10 @@ export async function retireUnknownProjectWithdrawal(
   ]);
   if (
     raw.schemaVersion !== 1 ||
-    raw.kind !== "operator-retired-withdrawal-unknown" ||
+    raw.kind !==
+      (admission
+        ? "operator-retired-admission-unknown"
+        : "operator-retired-withdrawal-unknown") ||
     !uuid(raw.operationId)
   )
     throw new Error(
@@ -3615,7 +4569,9 @@ export async function retireUnknownProjectWithdrawal(
     ...Object.values(originals),
   ])
     assertReservationOperatorOriginal(descriptor);
-  const evidence = raw as unknown as RetiredWithdrawalEvidence,
+  const evidence = raw as unknown as
+      | RetiredWithdrawalEvidence
+      | RetiredAdmissionEvidence,
     configBytes = privateBytes(evidence.originalInstallation.configPath),
     originalConfig = validateConfig(JSON.parse(configBytes.toString("utf8")));
   if (
@@ -3631,18 +4587,19 @@ export async function retireUnknownProjectWithdrawal(
         row.kind === "project-queue-operation" &&
         !row.completed &&
         !row.beforeEffectFailure &&
-        !row.retiredWithdrawal,
+        !(row.retiredWithdrawal || row.retiredAdmission),
     ),
     operation = unresolved.find((row) => row.id === evidence.operationId);
   if (
     unresolved.length !== 1 ||
     !operation ||
-    operation.action !== "withdraw" ||
+    operation.commandId ||
+    operation.action !== (admission ? "admit" : "withdraw") ||
     operation.objective !== objective ||
     operation.authorityDigest !== factoryAuthorityDigest(config) ||
-    operation.effects.length !== 1 ||
-    operation.effects[0]!.receipt ||
-    operation.effects[0]!.rejectedOriginal ||
+    operation.effects.length !== (admission ? 3 : 1) ||
+    (!admission && operation.effects[0]!.receipt) ||
+    operation.effects.some((effect) => effect.rejectedOriginal) ||
     history.some((row) => row.kind === "project-queue-owner" && !row.settled)
   )
     throw new Error("Other partial effects or active owners remain held");
@@ -3658,20 +4615,77 @@ export async function retireUnknownProjectWithdrawal(
         row.kind === "project-queue-operation" &&
         row.id === operation.previousReceiptId,
     );
-  const intent = operation.effects[0]!.intent;
+  const intent = operation.effects[admission ? 2 : 0]!.intent;
+  let priorMetadata: string | null,
+    originalDeadlineAt: string | null,
+    originalRPC: string | undefined;
+  if (admission) {
+    const [ensure, order] = operation.effects;
+    if (
+      operation.commandId ||
+      operation.previousReceiptId !== null ||
+      !ensure?.receipt ||
+      !order?.receipt ||
+      !ensure.original ||
+      !order.original ||
+      ensure.intent.action !== "ensure-card" ||
+      ensure.intent.issueNodeId !== operation.issueNodeId ||
+      order.intent.action !== "set-order" ||
+      order.intent.itemId !== ensure.receipt.itemId ||
+      order.intent.order !== operation.order ||
+      order.intent.fieldId !== operation.binding.orderFieldId ||
+      intent.action !== "set-metadata" ||
+      intent.itemId !== order.receipt.itemId ||
+      intent.fieldId !== operation.binding.metadataFieldId ||
+      intent.metadata !== operation.metadata ||
+      operation.effects[2]!.receipt ||
+      ensure.intent.actorId !== intent.actorId ||
+      order.intent.actorId !== intent.actorId ||
+      history.some(
+        (row) =>
+          row.kind === "project-queue-owner" && row.objective === objective,
+      )
+    )
+      throw new Error(
+        "Only a never-run legacy admission with two real responses and one unknown final metadata effect may retire",
+      );
+    const content = new LocalContentStore(
+      join(stateRoot(config.repository), "content"),
+    );
+    const receipt = {
+      ...order.receipt,
+      original: JSON.parse(content.readBytes(order.original).toString("utf8")),
+    };
+    assertProjectQueueWriteReceipt(receipt);
+    const target = projectQueueReceiptTarget(receipt);
+    if (
+      !("objective" in target) ||
+      target.objective !== objective ||
+      target.issueNodeId !== operation.issueNodeId ||
+      target.metadata !== null ||
+      ensure.receipt.kind !== "response"
+    )
+      throw new Error("Original known card mapping differs");
+    priorMetadata = target.metadata;
+    originalDeadlineAt = null;
+  } else {
+    priorMetadata = previous?.metadata ?? null;
+    originalDeadlineAt = claim?.deadlineAt ?? null;
+  }
   if (
-    !claim?.settled?.abandonment ||
-    claim.runBinding ||
-    claim.priorRunId ||
-    !previous?.completed ||
-    previous.action !== "admit" ||
-    intent.action !== "set-metadata" ||
-    intent.fieldId !== operation.binding.metadataFieldId ||
-    intent.metadata !== operation.metadata ||
-    !operation.issueNodeId ||
-    !operation.metadata ||
-    !previous.metadata ||
-    !previous.effects.at(-1)?.original
+    !admission &&
+    (!claim?.settled?.abandonment ||
+      claim.runBinding ||
+      claim.priorRunId ||
+      !previous?.completed ||
+      previous.action !== "admit" ||
+      intent.action !== "set-metadata" ||
+      intent.fieldId !== operation.binding.metadataFieldId ||
+      intent.metadata !== operation.metadata ||
+      !operation.issueNodeId ||
+      !operation.metadata ||
+      !previous.metadata ||
+      !previous.effects.at(-1)?.original)
   )
     throw new Error(
       "Retirement is restricted to one exact withdrawal of an already permanently abandoned admission",
@@ -3756,6 +4770,29 @@ export async function retireUnknownProjectWithdrawal(
   if (!Array.isArray(review.modules))
     throw new Error("Original scoped protocol review is missing");
   const archive = await readVerifiedRecoveryCheckpoint(config);
+  if (admission) {
+    if (
+      archive.manifest.files.some(
+        (file) =>
+          file.path.startsWith(`objectives/${objective}/`) &&
+          ["continuation", "objective-preparation"].includes(file.kind),
+      )
+    )
+      throw new Error("Historical canonical work requires its own lifecycle");
+    for (const file of archive.manifest.files.filter((file) =>
+      /^accounting\/[a-f0-9]{64}\.json$/.test(file.path),
+    ))
+      if (
+        decodeAccountingRecord(
+          config.repository,
+          file.path,
+          await archive.readVerifiedBlob(file.ref),
+        ).binding.objective === objective
+      )
+        throw new Error(
+          "Provider or execution admission cannot retire as an unknown queue field",
+        );
+  }
   if (
     archive.commitSha !== archive.remoteTip ||
     archive.manifest.gaps.length ||
@@ -3773,8 +4810,8 @@ export async function retireUnknownProjectWithdrawal(
     return file.ref;
   };
   const originalOperation = originalRef(operation.id),
-    retiredClaim = originalRef(claim.id),
-    previousAdmission = originalRef(previous.id);
+    retiredClaim = !admission ? originalRef(claim!.id) : undefined,
+    previousAdmission = !admission ? originalRef(previous!.id) : undefined;
   const localOriginal = privateBytes(
     join(
       stateRoot(config.repository),
@@ -3794,7 +4831,8 @@ export async function retireUnknownProjectWithdrawal(
     throw new Error("Genuine bounded Project inspection unavailable");
   assertProcessActive();
   const inspection = await github.projectQueueInspect(operation.binding, {
-      itemId: intent.itemId,
+      itemId: intent.action === "set-metadata" ? intent.itemId : undefined,
+      ...(admission ? { objective } : {}),
     }),
     target = inspection.target;
   const control = verifiedControl(
@@ -3806,14 +4844,21 @@ export async function retireUnknownProjectWithdrawal(
   );
   if (
     control.mode !== "paused" ||
+    (admission &&
+      (!inspection.issue ||
+        inspection.issue.state !== "open" ||
+        inspection.issue.issueNodeId !== operation.issueNodeId ||
+        inspection.issue.repository !== config.repository ||
+        queueDigest(inspection.issue.body) !== operation.bodyDigest)) ||
     !target ||
     target.archived ||
-    target.itemId !== intent.itemId ||
+    target.itemId !==
+      (intent.action === "set-metadata" ? intent.itemId : undefined) ||
     target.issueNodeId !== operation.issueNodeId ||
     target.objective !== objective ||
     target.repository !== config.repository ||
     target.order !== operation.order ||
-    ![previous.metadata, operation.metadata].includes(target.metadata ?? "")
+    ![priorMetadata, operation.metadata].includes(target.metadata)
   )
     throw new Error(
       "Current target is not the exact paused original or requested withdrawal mapping",
@@ -3823,10 +4868,14 @@ export async function retireUnknownProjectWithdrawal(
   );
   const refs = [
     originalOperation,
-    retiredClaim,
-    previousAdmission,
-    previous.effects.at(-1)!.original!,
-    ...queueOwnerReferences(claim),
+    ...(admission
+      ? operation.effects.slice(0, 2).map((effect) => effect.original!)
+      : [
+          retiredClaim!,
+          previousAdmission!,
+          previous!.effects.at(-1)!.original!,
+          ...queueOwnerReferences(claim!),
+        ]),
   ];
   for (const reference of refs)
     retainProjectQueueOriginal(
@@ -3841,17 +4890,33 @@ export async function retireUnknownProjectWithdrawal(
       ),
       { mediaType: "application/json" },
     );
+  if (admission) {
+    const caller = object(
+        JSON.parse(originalBytes.callerFailure.toString("utf8")),
+      ),
+      rpc = object(caller.addRPC);
+    if (
+      !Number.isSafeInteger(rpc.deadlineAt) ||
+      !uuid(rpc.requestId) ||
+      rpc.submission !== "unknown"
+    )
+      throw new Error("Exact original caller clock/submission missing");
+    originalDeadlineAt = new Date(Number(rpc.deadlineAt)).toISOString();
+    originalRPC = rpc.requestId;
+  }
   const decision = {
     schemaVersion: 1,
-    kind: "explicit-operator-retired-withdrawal-unknown",
+    kind: admission
+      ? "explicit-operator-retired-admission-unknown"
+      : "explicit-operator-retired-withdrawal-unknown",
     actor,
     repository: config.repository,
     objective,
     operationId: operation.id,
-    claimId: claim.id,
-    previousReceiptId: previous.id,
+    ...(!admission ? { claimId: claim!.id } : { originalRPC }),
+    previousReceiptId: operation.previousReceiptId,
     requestId: intent.requestId,
-    bodyDigest: claim.bodyDigest,
+    bodyDigest: operation.bodyDigest,
     authorityDigest: operation.authorityDigest,
     originalConfigDigest: factoryConfigDigest(config),
     originalCli: evidence.originalInstallation.cli,
@@ -3862,18 +4927,14 @@ export async function retireUnknownProjectWithdrawal(
       namespace: plan.namespace,
     },
     originalOwnerTokenIdentity: "unavailable",
-    originalDeadlineAt: claim.deadlineAt,
+    originalDeadlineAt,
     remoteSubmission: "unknown",
     currentRegisteredCommand: command,
   };
-  operation.retiredWithdrawal = {
-    schemaVersion: 1,
+  const commonProof = {
+    schemaVersion: 1 as const,
     at: new Date().toISOString(),
     originalOperation,
-    retiredClaim,
-    claimReferences: queueOwnerReferences(claim),
-    previousAdmission,
-    previousResponse: previous.effects.at(-1)!.original!,
     operatorDecision: store.putBytes(Buffer.from(JSON.stringify(decision)), {
       mediaType: "application/json",
     }),
@@ -3892,6 +4953,21 @@ export async function retireUnknownProjectWithdrawal(
       mediaType: "application/json",
     }),
   };
+  if (admission)
+    operation.retiredAdmission = {
+      ...commonProof,
+      knownResponses: operation.effects
+        .slice(0, 2)
+        .map((effect) => effect.original!),
+    };
+  else
+    operation.retiredWithdrawal = {
+      ...commonProof,
+      retiredClaim: retiredClaim!,
+      claimReferences: queueOwnerReferences(claim!),
+      previousAdmission: previousAdmission!,
+      previousResponse: previous!.effects.at(-1)!.original!,
+    };
   assertQueueOperationReferenceBodies(operation, (reference) =>
     store.readBytes(reference),
   );

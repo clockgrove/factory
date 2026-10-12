@@ -14,6 +14,9 @@ import type {
   GitHubGateway,
   ProjectQueueExpectedTarget,
   ProjectQueueInspection,
+  ProjectQueuePlannedEffect,
+  ProjectQueuePlannedAction,
+  ProjectQueueWriteReceipt,
 } from "./contracts.js";
 import {
   type ControlRequest,
@@ -27,7 +30,10 @@ import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { attachedFault } from "./fault.js";
 import { RealGitHubGateway } from "./github.js";
 import { gitHubTransportOf } from "./github-client.js";
-import { projectQueueReceiptTarget } from "./github-project-queue.js";
+import {
+  createProjectQueuePlannedEffect,
+  projectQueueReceiptTarget,
+} from "./github-project-queue.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import {
   currentProcessSignal,
@@ -39,7 +45,9 @@ import {
   withProcessCancellation,
 } from "./process.js";
 import {
-  completeQueueOperation,
+  admitQueueCommand,
+  completeQueueCommand,
+  createQueueCommand,
   createQueueOperation,
   observeProjectQueue,
   retainedQueueEntry,
@@ -47,10 +55,11 @@ import {
   verifyQueueInspection,
   type VerifiedQueueInspection,
   parseQueueMetadata,
-  performQueueEffect,
+  performQueueCommandEffect,
   type QueueMetadata,
   type QueueMode,
   type QueueOperation,
+  type QueueRecord,
   queueDigest,
   readQueueHistory,
   requireProjectQueueEffects,
@@ -356,6 +365,7 @@ async function mutationSnapshot(
   github: GitHubGateway,
   objective?: number,
   includeIssue = false,
+  preparedHistory?: QueueRecord[],
 ): Promise<VerifiedQueueInspection> {
   const binding = requireProjectQueueEffects(config);
   if (!github.projectQueueInspect)
@@ -365,8 +375,9 @@ async function mutationSnapshot(
   // This preparation reads current archive/Project authority. A clean original
   // acknowledgment need not rebuild local closure before those reads; dirty or
   // unresolved publication still completes before the distinct effect intent.
-  await awaitCheckpointAdmission(config.repository, "before-effect");
-  const history = await readQueueHistory(config);
+  if (!preparedHistory)
+    await awaitCheckpointAdmission(config.repository, "before-effect");
+  const history = preparedHistory ?? (await readQueueHistory(config));
   const retained =
     objective === undefined
       ? undefined
@@ -470,17 +481,61 @@ async function projectControlRequest(
   });
   return { handled: true, result: completed.result };
 }
-async function writeControl(
+interface PreparedQueueCommand {
+  operations: QueueOperation[];
+  effects: ProjectQueuePlannedEffect[];
+  observations: Map<string, ProjectQueueInspection>;
+}
+const preparedCommand = (): PreparedQueueCommand => ({
+  operations: [],
+  effects: [],
+  observations: new Map(),
+});
+function planEffect(
   config: FactoryConfig,
-  github: GitHubGateway,
+  plan: PreparedQueueCommand,
+  operation: QueueOperation,
+  current: VerifiedQueueInspection,
+  action: ProjectQueuePlannedAction,
+  prior: ProjectQueuePlannedEffect["prior"],
+  control: ProjectQueuePlannedEffect["control"],
+): ProjectQueuePlannedEffect {
+  assertProcessActive();
+  const effect = createProjectQueuePlannedEffect(
+    requireProjectQueueEffects(config),
+    {
+      ...action,
+      operationId: operation.id,
+      requestId: randomUUID(),
+      actorId: current.inspection.actorId,
+      prior,
+      control,
+      ...(["admit", "roadmap"].includes(operation.action)
+        ? {
+            expectedIssue: {
+              issueNodeId: operation.issueNodeId!,
+              objective: operation.objective!,
+              bodyDigest: operation.bodyDigest!,
+            },
+          }
+        : {}),
+    },
+  );
+  if (!plan.operations.includes(operation)) plan.operations.push(operation);
+  plan.effects.push(effect);
+  plan.observations.set(effect.requestId, current.inspection);
+  return effect;
+}
+function planControl(
+  config: FactoryConfig,
+  plan: PreparedQueueCommand,
+  current: VerifiedQueueInspection,
   mode: QueueMode,
   watch?: boolean,
   approval: QueueOperation["approval"] = { kind: "queue-command" },
-  prepared?: VerifiedQueueInspection,
-): Promise<VerifiedQueueInspection> {
-  const current = prepared ?? (await mutationSnapshot(config, github));
-  const previous = current.control;
-  const watching = watch ?? previous?.watch ?? false;
+): ProjectQueuePlannedEffect | undefined {
+  const previous = current.control,
+    watching = watch ?? previous?.watch ?? false;
   if (
     previous?.mode === mode &&
     previous.watch === watching &&
@@ -490,8 +545,7 @@ async function writeControl(
         record.authorityDigest === factoryAuthorityDigest(config),
     )
   )
-    return current;
-  assertProcessActive();
+    return;
   const operation = createQueueOperation(config, {
     action: "control",
     scope: "control",
@@ -505,38 +559,133 @@ async function writeControl(
     mode,
     watch: watching,
   } satisfies QueueMetadata);
-  const receipt = await performQueueEffect(
+  return planEffect(
     config,
-    github,
+    plan,
     operation,
+    current,
     {
       action: "set-metadata",
-      itemId: current.inspection.control.itemId,
+      target: { itemId: current.inspection.control.itemId },
+      fieldId: operation.binding.metadataFieldId,
       metadata: operation.metadata,
     },
     {
-      itemId: current.inspection.control.itemId,
-      metadata: current.inspection.control.metadata,
+      target: {
+        itemId: current.inspection.control.itemId,
+        metadata: current.inspection.control.metadata,
+      },
     },
-    current.inspection,
+    { metadata: current.inspection.control.metadata },
   );
-  await completeQueueOperation(config, operation);
-  const actual = projectQueueReceiptTarget(receipt);
-  const metadata = actual.metadata && parseQueueMetadata(actual.metadata);
-  if (!metadata || metadata.kind !== "control")
-    throw new Error(
-      "Actual control response lacks its completed control metadata",
+}
+async function executePreparedCommand(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  plan: PreparedQueueCommand,
+): Promise<ProjectQueueWriteReceipt[]> {
+  if (!plan.effects.length) return [];
+  const deadlineAt = currentProcessDeadlineAt() ?? null;
+  const command = createQueueCommand(config, {
+    operations: plan.operations,
+    effects: plan.effects,
+    deadlineAt,
+  });
+  await admitQueueCommand(config, command);
+  const receipts: ProjectQueueWriteReceipt[] = [];
+  for (const [index, effect] of plan.effects.entries()) {
+    assertProcessActive();
+    const dependencyId =
+      "resultOf" in effect.prior ? effect.prior.resultOf : undefined;
+    const observation = dependencyId
+      ? receipts.find((receipt) => receipt.intent.requestId === dependencyId)
+      : plan.observations.get(effect.requestId);
+    if (!observation)
+      throw new Error(
+        "Frozen queue command lacks its exact preceding observation",
+      );
+    receipts.push(
+      await performQueueCommandEffect(
+        config,
+        github,
+        command,
+        index,
+        observation,
+      ),
     );
-  return {
-    ...current,
-    control: metadata,
-    uninitializedControl: false,
-    inspection: {
-      ...current.inspection,
-      observedAt: receipt.observedAt,
-      control: { itemId: actual.itemId, metadata: actual.metadata },
-    },
-  };
+  }
+  await completeQueueCommand(config, command);
+  return receipts;
+}
+function acknowledgedControl(
+  current: VerifiedQueueInspection,
+  effect: ProjectQueuePlannedEffect | undefined,
+  receipts: ProjectQueueWriteReceipt[],
+): VerifiedQueueInspection {
+  if (!effect) return current;
+  const receipt = receipts.find(
+    (value) => value.intent.requestId === effect.requestId,
+  );
+  if (!receipt)
+    throw new Error("Completed command lacks its actual control response");
+  const target = projectQueueReceiptTarget(receipt);
+  const metadata = target.metadata && parseQueueMetadata(target.metadata);
+  if (!metadata || metadata.kind !== "control")
+    throw new Error("Actual control response lacks completed control metadata");
+  return { ...current, control: metadata, uninitializedControl: false };
+}
+async function writeControl(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  mode: QueueMode,
+  watch?: boolean,
+  approval: QueueOperation["approval"] = { kind: "queue-command" },
+  prepared?: VerifiedQueueInspection,
+): Promise<VerifiedQueueInspection> {
+  const current = prepared ?? (await mutationSnapshot(config, github));
+  const plan = preparedCommand(),
+    effect = planControl(config, plan, current, mode, watch, approval);
+  return acknowledgedControl(
+    current,
+    effect,
+    await executePreparedCommand(config, github, plan),
+  );
+}
+/** Freeze all target observations against one current authenticated history before effects. */
+async function commandTargets(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objectives: number[],
+  includeIssue: boolean,
+): Promise<VerifiedQueueInspection[]> {
+  validateObjectives(objectives);
+  await awaitCheckpointAdmission(config.repository, "before-effect");
+  const history = await readQueueHistory(config),
+    targets: VerifiedQueueInspection[] = [];
+  for (const objective of objectives) {
+    const target = await mutationSnapshot(
+      config,
+      github,
+      objective,
+      includeIssue,
+      history,
+    );
+    const first = targets[0]?.inspection;
+    if (
+      first &&
+      (target.inspection.actorId !== first.actorId ||
+        target.inspection.owner !== first.owner ||
+        JSON.stringify(target.inspection.control) !==
+          JSON.stringify(first.control) ||
+        JSON.stringify(target.inspection.binding) !==
+          JSON.stringify(first.binding))
+    )
+      throw new Error(
+        "Project command authority changed while freezing all requested targets",
+      );
+    targets.push(target);
+  }
+  return targets;
 }
 export interface QueueCommandAcknowledgment {
   queueProtocol: "project-queue-v1";
@@ -615,36 +764,29 @@ async function enqueueMutation(
   options: EnqueueOptions,
   cached?: IntakeAuthorization,
 ): Promise<QueueCommandAcknowledgment> {
-  validateObjectives(objectives);
   checkRequiredEnvironment(config);
+  const observed = await commandTargets(config, github, objectives, true),
+    first = observed[0]!;
+  if (first.control?.mode === "draining")
+    throw new Error(
+      "The queue is draining; use `factory queue resume` before adding work",
+    );
+  const plan = preparedCommand();
+  const controlEffect = planControl(
+    config,
+    plan,
+    first,
+    first.control?.mode ?? "running",
+  );
+  const control = controlEffect
+    ? { resultOf: controlEffect.requestId }
+    : { metadata: first.inspection.control.metadata };
   const targets: QueueCommandAcknowledgment["targets"] = [];
-  let current: VerifiedQueueInspection | undefined;
-  for (const objective of objectives) {
-    assertProcessActive();
-    current = await mutationSnapshot(config, github, objective, true);
-    if (
-      !current.control ||
-      !current.history.some(
-        (record) =>
-          record.id === current!.control?.receiptId &&
-          record.authorityDigest === factoryAuthorityDigest(config),
-      )
-    ) {
-      await writeControl(
-        config,
-        github,
-        current.control?.mode ?? "running",
-        undefined,
-        undefined,
-        current,
-      );
-      current = await mutationSnapshot(config, github, objective, true);
-    }
-    if (current.control?.mode === "draining")
-      throw new Error(
-        "The queue is draining; use `factory queue resume` before adding work",
-      );
-    const issue = current.inspection.issue;
+  const completions: { objective: number; requestId: string }[] = [];
+  let nextOrder: number | undefined;
+  for (const [index, current] of observed.entries()) {
+    const objective = objectives[index]!,
+      issue = current.inspection.issue;
     if (!issue || issue.objective !== objective || issue.state !== "open")
       throw new Error(
         `Objective #${objective} must be an authenticated open Issue with its exact node identity`,
@@ -687,8 +829,11 @@ async function enqueueMutation(
       throw new Error(
         "Objective has an unresolved or foreign owner; admission changes are held",
       );
-    const order = previous?.order ?? nextProjectQueueOrder(current.history);
-    assertProcessActive();
+    const order =
+      previous?.order ?? nextOrder ?? nextProjectQueueOrder(first.history);
+    if (!previous) nextOrder = order + 1;
+    if (!Number.isSafeInteger(order))
+      throw new Error("Project order exhausted its exact integer range");
     const operation = createQueueOperation(config, {
       action: "admit",
       scope: issue.issueNodeId,
@@ -706,45 +851,72 @@ async function enqueueMutation(
       receiptId: operation.id,
       state: "queued",
     } satisfies QueueMetadata);
-    const ensured = await performQueueEffect(
+    const ensured = planEffect(
       config,
-      github,
+      plan,
       operation,
+      current,
       { action: "ensure-card", issueNodeId: issue.issueNodeId },
-      targetProof(current.inspection),
-      current.inspection,
+      { target: targetProof(current.inspection) ?? null },
+      control,
     );
-    const ordered = await performQueueEffect(
+    const ordered = planEffect(
       config,
-      github,
+      plan,
       operation,
-      { action: "set-order", itemId: ensured.itemId, order },
-      projectQueueReceiptTarget(ensured),
-      ensured,
+      current,
+      {
+        action: "set-order",
+        target: { resultOf: ensured.requestId },
+        fieldId: operation.binding.orderFieldId,
+        order,
+      },
+      { resultOf: ensured.requestId },
+      control,
     );
-    const admitted = await performQueueEffect(
+    const admitted = planEffect(
       config,
-      github,
+      plan,
       operation,
+      current,
       {
         action: "set-metadata",
-        itemId: ordered.itemId,
+        target: { resultOf: ensured.requestId },
+        fieldId: operation.binding.metadataFieldId,
         metadata: operation.metadata,
       },
-      projectQueueReceiptTarget(ordered),
-      ordered,
+      { resultOf: ordered.requestId },
+      control,
     );
-    await completeQueueOperation(config, operation);
-    const target = projectQueueReceiptTarget(admitted);
+    completions.push({ objective, requestId: admitted.requestId });
+  }
+  const receipts = await executePreparedCommand(config, github, plan);
+  for (const completion of completions) {
+    const receipt = receipts.find(
+      (value) => value.intent.requestId === completion.requestId,
+    );
+    if (!receipt)
+      throw new Error(
+        "Completed admission lacks its exact final original response",
+      );
     targets.push({
-      objective,
-      itemId: target.itemId,
+      objective: completion.objective,
+      itemId: receipt.itemId,
       state: "queued",
-      observedAt: admitted.observedAt,
+      observedAt: receipt.observedAt,
     });
   }
-  if (!current) throw new Error("No Objective command target was observed");
-  return commandAcknowledgment(config, "enqueue", current, targets, cached);
+  targets.sort(
+    (left, right) =>
+      objectives.indexOf(left.objective) - objectives.indexOf(right.objective),
+  );
+  return commandAcknowledgment(
+    config,
+    "enqueue",
+    acknowledgedControl(first, controlEffect, receipts),
+    targets,
+    cached,
+  );
 }
 export async function enqueueIntake(
   config: FactoryConfig,
@@ -804,91 +976,97 @@ async function ensureProjectObjectiveOwned(
   provenance?: ProjectPublicationProvenance,
   cached?: IntakeAuthorization,
 ): Promise<QueueCommandAcknowledgment> {
-  return projectMutation(config, github, () =>
-    ensureProjectObjectiveMutation(
-      config,
-      github,
-      objective,
-      provenance,
-      cached,
-    ),
+  return ensureProjectObjectivesOwned(
+    config,
+    github,
+    [objective],
+    provenance,
+    cached,
   );
 }
-async function ensureProjectObjectiveMutation(
+async function ensureProjectObjectivesOwned(
   config: FactoryConfig,
   github: GitHubGateway,
-  objective: number,
+  objectives: number[],
   provenance?: ProjectPublicationProvenance,
   cached?: IntakeAuthorization,
 ): Promise<QueueCommandAcknowledgment> {
-  let current = await mutationSnapshot(config, github, objective, true);
-  if (
-    !current.control ||
-    !current.history.some(
-      (record) =>
-        record.id === current.control?.receiptId &&
-        record.authorityDigest === factoryAuthorityDigest(config),
-    )
-  ) {
-    await writeControl(
-      config,
-      github,
-      current.control?.mode ?? "running",
-      undefined,
-      undefined,
-      current,
-    );
-    current = await mutationSnapshot(config, github, objective, true);
-  }
-  const issue = current.inspection.issue;
-  if (!issue || issue.objective !== objective)
-    throw new Error(
-      "Project publication requires authenticated Issue identity",
-    );
-  const bodyDigest = queueDigest(issue.body);
-  if (provenance?.bodyDigest && provenance.bodyDigest !== bodyDigest)
-    throw new Error(
-      "Published contents changed before Project card publication",
-    );
-  assertProcessActive();
-  const operation = createQueueOperation(config, {
-    action: "roadmap",
-    scope: `roadmap:${issue.issueNodeId}`,
-    previousReceiptId: null,
-    approval: provenance
-      ? {
-          kind: "proposal",
-          proposalId: provenance.proposalId,
-          approvalDigest: provenance.approvalDigest,
-        }
-      : { kind: "queue-command" },
-    objective,
-    issueNodeId: issue.issueNodeId,
-    bodyDigest,
-  });
-  const receipt = await performQueueEffect(
-    config,
-    github,
-    operation,
-    { action: "ensure-card", issueNodeId: issue.issueNodeId },
-    targetProof(current.inspection),
-    current.inspection,
-  );
-  await completeQueueOperation(config, operation);
-  return commandAcknowledgment(
-    config,
-    "roadmap",
-    current,
-    [
-      {
+  return projectMutation(config, github, async () => {
+    const observed = await commandTargets(config, github, objectives, true),
+      first = observed[0]!;
+    const plan = preparedCommand(),
+      controlEffect = planControl(
+        config,
+        plan,
+        first,
+        first.control?.mode ?? "running",
+      );
+    const control = controlEffect
+      ? { resultOf: controlEffect.requestId }
+      : { metadata: first.inspection.control.metadata };
+    const completions: { objective: number; requestId: string }[] = [];
+    for (const [index, current] of observed.entries()) {
+      const objective = objectives[index]!,
+        issue = current.inspection.issue;
+      if (!issue || issue.objective !== objective)
+        throw new Error(
+          "Project publication requires authenticated Issue identity",
+        );
+      const bodyDigest = queueDigest(issue.body);
+      if (provenance?.bodyDigest && provenance.bodyDigest !== bodyDigest)
+        throw new Error(
+          "Published contents changed before Project card publication",
+        );
+      const operation = createQueueOperation(config, {
+        action: "roadmap",
+        scope: `roadmap:${issue.issueNodeId}`,
+        previousReceiptId: null,
+        approval: provenance
+          ? {
+              kind: "proposal",
+              proposalId: provenance.proposalId,
+              approvalDigest: provenance.approvalDigest,
+            }
+          : { kind: "queue-command" },
         objective,
+        issueNodeId: issue.issueNodeId,
+        bodyDigest,
+      });
+      const ensured = planEffect(
+        config,
+        plan,
+        operation,
+        current,
+        { action: "ensure-card", issueNodeId: issue.issueNodeId },
+        { target: targetProof(current.inspection) ?? null },
+        control,
+      );
+      completions.push({ objective, requestId: ensured.requestId });
+    }
+    const receipts = await executePreparedCommand(config, github, plan);
+    const targets = completions.map((completion) => {
+      const receipt = receipts.find(
+        (value) => value.intent.requestId === completion.requestId,
+      );
+      if (!receipt)
+        throw new Error(
+          "Completed roadmap publication lacks its actual original response",
+        );
+      return {
+        objective: completion.objective,
         itemId: receipt.itemId,
-        state: "roadmap",
+        state: "roadmap" as const,
         observedAt: receipt.observedAt,
-      },
-    ],
-    cached,
-  );
+      };
+    });
+    return commandAcknowledgment(
+      config,
+      "roadmap",
+      acknowledgedControl(first, controlEffect, receipts),
+      targets,
+      cached,
+    );
+  });
 }
 export async function watchIntake(
   config: FactoryConfig,
@@ -921,7 +1099,7 @@ async function applyControl(
   config: FactoryConfig,
   github: GitHubGateway,
   action: string,
-  objective?: number,
+  objective?: number | number[],
   cached?: IntakeAuthorization,
 ): Promise<QueueCommandAcknowledgment> {
   const task = () =>
@@ -940,7 +1118,7 @@ async function applyControlOwned(
   config: FactoryConfig,
   github: GitHubGateway,
   action: string,
-  objective?: number,
+  objective?: number | number[],
   cached?: IntakeAuthorization,
 ): Promise<QueueCommandAcknowledgment> {
   return projectMutation(config, github, () =>
@@ -951,75 +1129,93 @@ async function applyControlMutation(
   config: FactoryConfig,
   github: GitHubGateway,
   action: string,
-  objective?: number,
+  objective?: number | number[],
   cached?: IntakeAuthorization,
 ): Promise<QueueCommandAcknowledgment> {
-  const current = await mutationSnapshot(config, github, objective);
   if (action === "dequeue") {
-    const entry = current.entry;
-    if (!entry || entry.objective !== objective || entry.state !== "queued")
-      throw new Error(`Objective #${objective} is not admitted`);
-    const state = readContinuation(config.repository, entry.objective);
-    if (
-      (state && !terminal(state)) ||
-      current.history.some(
-        (record) =>
-          record.kind === "project-queue-owner" &&
-          record.objective === entry.objective &&
-          !record.settled,
+    const objectives = Array.isArray(objective) ? objective : [objective!];
+    const observed = await commandTargets(config, github, objectives, false),
+      first = observed[0]!;
+    const plan = preparedCommand(),
+      completions: { objective: number; requestId: string }[] = [];
+    for (const [index, current] of observed.entries()) {
+      const entry = current.entry;
+      if (
+        !entry ||
+        entry.objective !== objectives[index] ||
+        entry.state !== "queued"
       )
-    )
-      throw new Error(
-        `Objective #${objective} has unfinished owned work; use supported cancellation before removal`,
-      );
-    assertProcessActive();
-    const operation = createQueueOperation(config, {
-      action: "withdraw",
-      scope: entry.issueNodeId,
-      previousReceiptId: entry.receiptId,
-      approval: { kind: "queue-command" },
-      objective: entry.objective,
-      issueNodeId: entry.issueNodeId,
-      bodyDigest: entry.bodyDigest,
-      order: entry.order,
-    });
-    operation.metadata = JSON.stringify({
-      schemaVersion: 1,
-      kind: "admission",
-      admissionId: entry.admissionId,
-      receiptId: operation.id,
-      state: "withdrawn",
-    } satisfies QueueMetadata);
-    const receipt = await performQueueEffect(
-      config,
-      github,
-      operation,
-      {
-        action: "set-metadata",
-        itemId: entry.itemId,
-        metadata: operation.metadata,
-      },
-      targetProof(current.inspection),
-      current.inspection,
-    );
-    await completeQueueOperation(config, operation);
-    return commandAcknowledgment(
-      config,
-      action,
-      current,
-      [
+        throw new Error(`Objective #${objectives[index]} is not admitted`);
+      const state = readContinuation(config.repository, entry.objective);
+      if (
+        (state && !terminal(state)) ||
+        current.history.some(
+          (record) =>
+            record.kind === "project-queue-owner" &&
+            record.objective === entry.objective &&
+            !record.settled,
+        )
+      )
+        throw new Error(
+          `Objective #${entry.objective} has unfinished owned work; use supported cancellation before removal`,
+        );
+      const operation = createQueueOperation(config, {
+        action: "withdraw",
+        scope: entry.issueNodeId,
+        previousReceiptId: entry.receiptId,
+        approval: { kind: "queue-command" },
+        objective: entry.objective,
+        issueNodeId: entry.issueNodeId,
+        bodyDigest: entry.bodyDigest,
+        order: entry.order,
+      });
+      operation.metadata = JSON.stringify({
+        schemaVersion: 1,
+        kind: "admission",
+        admissionId: entry.admissionId,
+        receiptId: operation.id,
+        state: "withdrawn",
+      } satisfies QueueMetadata);
+      const withdrawn = planEffect(
+        config,
+        plan,
+        operation,
+        current,
         {
-          objective: entry.objective,
-          itemId: receipt.itemId,
-          state: "withdrawn",
-          observedAt: receipt.observedAt,
+          action: "set-metadata",
+          target: { itemId: entry.itemId },
+          fieldId: operation.binding.metadataFieldId,
+          metadata: operation.metadata,
         },
-      ],
-      cached,
-    );
+        { target: targetProof(current.inspection) ?? null },
+        { metadata: first.inspection.control.metadata },
+      );
+      completions.push({
+        objective: entry.objective,
+        requestId: withdrawn.requestId,
+      });
+    }
+    const receipts = await executePreparedCommand(config, github, plan);
+    const targets = completions.map((completion) => {
+      const receipt = receipts.find(
+        (value) => value.intent.requestId === completion.requestId,
+      );
+      if (!receipt)
+        throw new Error(
+          "Completed withdrawal lacks its actual original response",
+        );
+      return {
+        objective: completion.objective,
+        itemId: receipt.itemId,
+        state: "withdrawn" as const,
+        observedAt: receipt.observedAt,
+      };
+    });
+    return commandAcknowledgment(config, action, first, targets, cached);
   }
   if (!["pause", "resume", "drain", "handoff"].includes(action))
     throw new Error("Unsupported queue action");
+  const current = await mutationSnapshot(config, github);
   const completed = await writeControl(
     config,
     github,
@@ -1037,7 +1233,7 @@ async function applyControlMutation(
 export async function intakeControl(
   config: FactoryConfig,
   action: "status" | "sync" | "pause" | "resume" | "drain" | "dequeue",
-  objective?: number,
+  objective?: number | number[],
   github: GitHubGateway = defaultGateway(config),
 ): Promise<unknown> {
   if (action !== "status" && action !== "sync")
@@ -1049,7 +1245,7 @@ export async function intakeControl(
 async function intakeControlCommand(
   config: FactoryConfig,
   action: "status" | "sync" | "pause" | "resume" | "drain" | "dequeue",
-  objective: number | undefined,
+  objective: number | number[] | undefined,
   github: GitHubGateway,
 ): Promise<unknown> {
   if (action === "sync") return readIntake(config, { github });
@@ -1071,7 +1267,13 @@ async function intakeControlCommand(
         : await projectControlRequest(
             config,
             action,
-            objective ? { objective } : undefined,
+            action === "dequeue"
+              ? {
+                  objectives: Array.isArray(objective)
+                    ? objective
+                    : [objective!],
+                }
+              : undefined,
           );
   } catch (error) {
     if (action !== "status" || !(error instanceof ForegroundControllerError))
@@ -1317,24 +1519,13 @@ async function runIntakeOwned(
         throw new Error("The local service is draining");
       const ids = request.input?.objectives as number[];
       if (request.input?.roadmapOnly) {
-        validateObjectives(ids);
-        let completed: QueueCommandAcknowledgment | undefined;
-        const targets: QueueCommandAcknowledgment["targets"] = [];
-        for (const id of ids) {
-          completed = await ensureProjectObjectiveOwned(
-            config,
-            services.github,
-            id,
-            request.input?.provenance as
-              | ProjectPublicationProvenance
-              | undefined,
-            record,
-          );
-          targets.push(...completed.targets);
-        }
-        if (!completed)
-          throw new Error("No Project publication target was observed");
-        acknowledgment = { ...completed, targets };
+        acknowledgment = await ensureProjectObjectivesOwned(
+          config,
+          services.github,
+          ids,
+          request.input?.provenance as ProjectPublicationProvenance | undefined,
+          record,
+        );
       } else {
         acknowledgment = await enqueueOwned(
           config,
@@ -1371,7 +1562,9 @@ async function runIntakeOwned(
           config,
           services.github,
           request.action,
-          Number(request.input?.objective) || undefined,
+          request.action === "dequeue"
+            ? (request.input?.objectives as number[])
+            : undefined,
           record,
         );
       } catch (error) {

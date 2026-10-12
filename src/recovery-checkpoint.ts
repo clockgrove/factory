@@ -394,6 +394,14 @@ interface HistoricalManifestSummary {
   sequence: number;
   files: readonly RecoveryCheckpointFile[];
 }
+interface VerifiedBaseIdentity {
+  commitSha: string;
+  payloadDigest: string;
+  sequence: number;
+  verificationKey: string;
+  materialFingerprint: string;
+  blobEntries: { ref: ContentRef; oid: string }[];
+}
 interface QueueVerificationContext {
   key: string;
   directory?: string;
@@ -408,6 +416,8 @@ interface QueueVerificationContext {
   objects?: Map<string, string>;
   objectBytes: number;
   negotiationTip?: string;
+  baseIdentity?: VerifiedBaseIdentity;
+  baseIdentityBytes?: number;
   lineages: Map<string, CachedQueueLineage>;
   lineageBytes: number;
   reservationPrefixes: Map<string, string>;
@@ -1253,6 +1263,8 @@ export function withQueueControlVerification<T>(
       verification.reservationPrefixes.clear();
       delete verification.objects;
       delete verification.negotiationTip;
+      delete verification.baseIdentity;
+      delete verification.baseIdentityBytes;
     }
     if (failed) throw failure;
     assertCaptured(verification, true);
@@ -1675,7 +1687,8 @@ function verificationMetadataBytes(context: QueueVerificationContext): number {
     context.reservationPrefixBytes +
     context.pendingReferenceBytes +
     (context.objects ? context.objectBytes : 0) +
-    negotiationTipCharge(context.negotiationTip)
+    negotiationTipCharge(context.negotiationTip) +
+    (context.baseIdentityBytes ?? 0)
   );
 }
 
@@ -1730,6 +1743,8 @@ function clearRebuildableVerificationMetadata(
   context.summaryBytes = 0;
   context.content.clear();
   context.contentBytes = 0;
+  delete context.baseIdentity;
+  delete context.baseIdentityBytes;
 }
 
 function retainContentVerification(
@@ -4078,6 +4093,116 @@ async function freshArchive(
     release();
   }
 }
+function verifierMaterialFingerprint(objects: Map<string, string>): string {
+  return hash(canonical([...objects]));
+}
+/** Only a completed independent read plus its actual ACK supplies a reusable base. */
+function retainVerifiedBaseIdentity(
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+  archive: {
+    commitSha: string;
+    remoteTip: string;
+    payloadDigest: string;
+    manifest: RecoveryCheckpointManifest;
+    blobEntries: { ref: ContentRef; oid: string }[];
+  },
+  acknowledgment: CheckpointJournal["lastAcknowledged"],
+): void {
+  const context = scopes.getStore()?.verification;
+  if (
+    !context?.objects ||
+    !context.directory ||
+    !acknowledgment ||
+    context.closed ||
+    context.quarantined ||
+    context.key !== verificationKey(config, options) ||
+    archive.commitSha !== archive.remoteTip ||
+    archive.commitSha !== acknowledgment.commitSha ||
+    archive.payloadDigest !== acknowledgment.payloadDigest ||
+    archive.manifest.sequence !== acknowledgment.sequence
+  )
+    return;
+  try {
+    assertProcessActive();
+  } catch {
+    return;
+  }
+  const identity: VerifiedBaseIdentity = {
+    commitSha: archive.commitSha,
+    payloadDigest: archive.payloadDigest,
+    sequence: archive.manifest.sequence,
+    verificationKey: context.key,
+    materialFingerprint: verifierMaterialFingerprint(context.objects),
+    blobEntries: archive.blobEntries.map(({ ref, oid }) => ({
+      ref: { ...ref },
+      oid,
+    })),
+  };
+  const charge =
+    Buffer.byteLength("verified-base-identity") +
+    Buffer.byteLength(canonical(identity));
+  if (
+    !reserveVerificationMetadata(
+      context,
+      options,
+      charge,
+      context.baseIdentityBytes ?? 0,
+    )
+  )
+    return;
+  context.baseIdentity = identity;
+  context.baseIdentityBytes = charge;
+}
+async function verifiedBaseIdentity(
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+  base: string,
+  acknowledgment: NonNullable<CheckpointJournal["lastAcknowledged"]>,
+): Promise<VerifiedBaseIdentity | undefined> {
+  const context = scopes.getStore()?.verification;
+  if (!context) return undefined;
+  const previous = context.serial;
+  let release!: () => void;
+  context.serial = new Promise<void>((done) => {
+    release = done;
+  });
+  await previous;
+  try {
+    const identity = context.baseIdentity;
+    if (!context.objects || !context.directory || !identity) return undefined;
+    assertProcessActive();
+    if (
+      context.closed ||
+      context.quarantined ||
+      context.key !== verificationKey(config, options) ||
+      identity.verificationKey !== context.key
+    )
+      throw new Error(
+        "Verified checkpoint base belongs to a different or closed owner",
+      );
+    if (
+      identity.commitSha !== base ||
+      identity.commitSha !== acknowledgment.commitSha ||
+      identity.payloadDigest !== acknowledgment.payloadDigest ||
+      identity.sequence !== acknowledgment.sequence
+    )
+      return undefined;
+    assertRemoteOnlyVerifier(context.directory, options);
+    assertVerifierUnchanged(
+      scanVerifierObjects(context.directory, options),
+      context.objects,
+    );
+    if (
+      identity.materialFingerprint !==
+      verifierMaterialFingerprint(context.objects)
+    )
+      return undefined;
+    return structuredClone(identity);
+  } finally {
+    release();
+  }
+}
 async function freshArchiveOwned(
   config: FactoryConfig,
   options: GitPersistenceConfig,
@@ -4137,6 +4262,13 @@ async function freshArchiveOwned(
         "Queue verifier binding changed before retaining its tip",
       );
     retainVerifiedNegotiationTip(context, options, result.remoteTip);
+    let acknowledgment: CheckpointJournal["lastAcknowledged"];
+    try {
+      acknowledgment = journal(config, options).lastAcknowledged;
+    } catch {
+      // A read/restore still succeeds when no trustworthy local ACK is available.
+    }
+    retainVerifiedBaseIdentity(config, options, result, acknowledgment);
   }
   return result;
 }
@@ -4256,7 +4388,11 @@ async function freshArchiveOwnedStrict(
         verificationMetadataBudget(options);
       context.objects = fits ? objects : undefined;
       context.objectBytes = fits ? objectBytes : 0;
-      if (!context.objects) delete context.negotiationTip;
+      if (!context.objects) {
+        delete context.negotiationTip;
+        delete context.baseIdentity;
+        delete context.baseIdentityBytes;
+      }
     }
     if (context && context.key !== verificationKey(config, options))
       throw new Error(
@@ -4434,9 +4570,8 @@ async function freshArchiveOwnedStrict(
     };
     // Retained cancellation/abandonment witnesses must be actual ancestor packets,
     // rather than manually shaped manifest text in the current body store.
-    const { checkpointQueueRecordReferences } = await import(
-      "./project-queue-state.js"
-    );
+    const { checkpointQueueRecordReferences, assertQueueCommandHistory } =
+      await import("./project-queue-state.js");
     const readQueueOriginal = (ref: ContentRef) => {
       const bytes = archive.readBlob(ref);
       if (!bytes)
@@ -4476,6 +4611,7 @@ async function freshArchiveOwnedStrict(
     );
     if (new Set(records.map((record) => record.id)).size !== records.length)
       throw new Error("Duplicate archived Project queue receipt");
+    assertQueueCommandHistory(records, readQueueOriginal);
     observed.start("queue-ancestry");
     for (const record of records) {
       if (record.kind === "project-queue-operation") {
@@ -4621,6 +4757,8 @@ async function freshArchiveOwnedStrict(
         context.contentBytes = 0;
         delete context.objects;
         delete context.negotiationTip;
+        delete context.baseIdentity;
+        delete context.baseIdentityBytes;
       }
     }
     if (context && settled) {
@@ -4634,6 +4772,8 @@ async function freshArchiveOwnedStrict(
       context.reservationPrefixBytes = 0;
       delete context.objects;
       delete context.negotiationTip;
+      delete context.baseIdentity;
+      delete context.baseIdentityBytes;
       context.quarantined = true;
       try {
         rmSync(directory, { recursive: true, force: true });
@@ -5083,7 +5223,13 @@ async function publishCheckpoint(
           throw new Error(
             "Observed checkpoint differs from retained attempted payload",
           );
-        acknowledge(config, options, previous);
+        const acknowledged = acknowledge(config, options, previous);
+        retainVerifiedBaseIdentity(
+          config,
+          options,
+          recovered,
+          acknowledged.lastAcknowledged,
+        );
         record = journal(config, options);
         if (
           record.sequence === record.acknowledgedSequence ||
@@ -5244,8 +5390,27 @@ async function publishCheckpoint(
           );
         // Only the independently fetched remote-only verifier grants reusable
         // base identities. The publisher directory is never that witness.
-        verifiedBaseEntries = (await freshArchive(config, options, base))
-          .blobEntries;
+        const identity = await verifiedBaseIdentity(
+          config,
+          options,
+          base,
+          record.lastAcknowledged,
+        );
+        const baseObservation = checkpointObservation(
+          config,
+          "recovery-checkpoint-publication-base",
+          () => ({ base, reused: Boolean(identity) }),
+        );
+        baseObservation.start("independent-base-identity");
+        try {
+          verifiedBaseEntries =
+            identity?.blobEntries ??
+            (await freshArchive(config, options, base)).blobEntries;
+          baseObservation.complete();
+        } catch (error) {
+          baseObservation.fail(error);
+          throw error;
+        }
       } else if (record.lastAcknowledged)
         throw new CheckpointConflict(
           "Acknowledged archive ref is missing; no branch recreation is admitted",
@@ -5259,9 +5424,10 @@ async function publishCheckpoint(
       )
         .toString("utf8")
         .trim();
-      // Reuse only identities fully authenticated by this publication's fresh
-      // base fetch. Current local bytes were independently checked above, and
-      // the complete collection remains bounded before selecting new bodies.
+      // Only an independent base verification supplies these identities. An
+      // owned witness also reauthenticates its exact material and ACK; the
+      // publisher fetch supplies objects without becoming that authority.
+      // Current local originals and the complete collection were checked above.
       const verifiedBase = new Map(
         verifiedBaseEntries.map((entry) => [entry.ref.digest, entry]),
       );
@@ -5388,7 +5554,14 @@ async function publishCheckpoint(
           "Independent remote payload differs from submitted checkpoint",
         );
       const submitted = journal(config, options).attempts.at(-1)!;
-      return acknowledge(config, options, submitted);
+      const acknowledged = acknowledge(config, options, submitted);
+      retainVerifiedBaseIdentity(
+        config,
+        options,
+        verified,
+        acknowledged.lastAcknowledged,
+      );
+      return acknowledged;
     } catch (error) {
       try {
         mutate(config, options, (record) => {

@@ -2330,10 +2330,25 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
             (event) => event.metadata.metadataBytes <= 8 * 1024 * 1024,
           ),
         );
+        const publicationWindows = [];
+        const publicationEventsSince = (offset) =>
+          readFileSync(diagnosticPath(repository, 0))
+            .subarray(offset)
+            .toString("utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+        const publicationObservationOffset = statSync(
+          diagnosticPath(repository, 0),
+        ).size;
         saveState(statePath(repository, 1), cancelled);
         await synchronizeRecoveryCheckpoint(config, {
           reason: "explicit",
           buildClosure,
+        });
+        publicationWindows.push({
+          base: pressured.commitSha,
+          events: publicationEventsSince(publicationObservationOffset),
         });
         const advanced = await readVerifiedRecoveryCheckpoint(config);
         assert.notEqual(advanced.commitSha, restoredRead.commitSha);
@@ -2370,9 +2385,16 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           { mediaType: "text/plain" },
         );
         retainedCheckpointSources.push(nextSource);
+        const nextPublicationOffset = statSync(
+          diagnosticPath(repository, 0),
+        ).size;
         const nextCheckpoint = await synchronizeRecoveryCheckpoint(config, {
           reason: "explicit",
           buildClosure,
+        });
+        publicationWindows.push({
+          base: advanced.commitSha,
+          events: publicationEventsSince(nextPublicationOffset),
         });
         assert.notEqual(
           nextCheckpoint.lastAcknowledged.commitSha,
@@ -2401,6 +2423,40 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line));
+        for (const { base, events: publicationEvents } of publicationWindows) {
+          const baseStart = publicationEvents.findIndex(
+            (event) =>
+              event.operation === "recovery-checkpoint-publication-base" &&
+              event.outcome === "started" &&
+              event.metadata.base === base,
+          );
+          const baseCompleted = publicationEvents.findIndex(
+            (event, index) =>
+              index > baseStart &&
+              event.operation === "recovery-checkpoint-publication-base" &&
+              event.outcome === "completed" &&
+              event.metadata.base === base &&
+              event.metadata.reused === true,
+          );
+          assert(
+            baseStart >= 0 && baseCompleted > baseStart,
+            "actual publication reuses its independent acknowledged base",
+          );
+          // Explicit clean-journal synchronization first authenticates the old
+          // ACK to discover unmarked source changes. The publisher must reuse
+          // that proof, while its new candidate still gets a fresh full ACK.
+          assert(
+            !publicationEvents
+              .slice(baseStart, baseCompleted + 1)
+              .some(
+                (event) =>
+                  event.operation === "recovery-checkpoint-verify" &&
+                  event.outcome === "started" &&
+                  event.metadata.selectedCommit === base,
+              ),
+            "the publisher does not fetch and decode its authenticated base again",
+          );
+        }
         const fetches = checkpointEvents.filter(
           (event) =>
             event.operation === "recovery-checkpoint-archive" &&

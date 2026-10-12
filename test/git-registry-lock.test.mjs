@@ -18,6 +18,8 @@ import { factoryAuthorityDigest, stateRoot } from "../dist/config.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import {
   acquireObjectiveLock,
+  acquireInstallationLock,
+  installationLockPath,
   objectiveLockPath,
   releaseControllerLock,
   statePath,
@@ -27,6 +29,14 @@ import {
   settleFailedProjectQueueReservation,
   readQueueHistory,
   retainedQueueEntry,
+  createQueueOperation,
+  createQueueCommand,
+  admitQueueCommand,
+  completeQueueCommand,
+  performQueueCommandEffect,
+  assertQueueCommandHistory,
+  nextProjectQueueOrder,
+  retireUnknownProjectAdmission,
 } from "../dist/project-queue-state.js";
 import {
   readVerifiedRecoveryCheckpoint,
@@ -35,6 +45,7 @@ import {
   markCheckpointDirty,
   awaitCheckpointAdmission,
 } from "../dist/recovery-checkpoint.js";
+import { createProjectQueuePlannedEffect } from "../dist/github-project-queue.js";
 import { UPDATE } from "../dist/github-project-queue-wire.js";
 import { buildRecoveryCheckpointClosure } from "../dist/recovery-checkpoint-closure.js";
 
@@ -175,6 +186,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
   };
   const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
   const lock = acquireObjectiveLock(repository, 1);
+  let lockReleased = false;
   try {
     // This is an original reservation/storage test, not a fabricated remote
     // admission or a claim that any provider or GitHub write ran.
@@ -413,8 +425,357 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       restoredHistory.find((row) => row.id === operationId).retiredWithdrawal,
       undefined,
     );
+
+    // Freeze a whole multi-target removal as real local records, then archive it
+    // through the real Git checkpoint. No remote response or completion is invented.
+    await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
+      const removals = [2, 3].map((objective) => {
+        const operation = createQueueOperation(config, {
+          action: "withdraw",
+          scope: `I_${objective}`,
+          previousReceiptId: randomUUID(),
+          approval: { kind: "queue-command" },
+          objective,
+          issueNodeId: `I_${objective}`,
+          bodyDigest: hash(`body ${objective}`),
+          order: objective,
+        });
+        operation.metadata = JSON.stringify({
+          schemaVersion: 1,
+          kind: "admission",
+          admissionId: randomUUID(),
+          receiptId: operation.id,
+          state: "withdrawn",
+        });
+        return operation;
+      });
+      const removalEffects = removals.map((operation) =>
+        createProjectQueuePlannedEffect(binding, {
+          operationId: operation.id,
+          requestId: randomUUID(),
+          actorId: 1,
+          action: "set-metadata",
+          target: { itemId: `PVTI_${operation.objective}` },
+          fieldId: binding.metadataFieldId,
+          metadata: operation.metadata,
+          prior: {
+            target: { itemId: `PVTI_${operation.objective}`, metadata: null },
+          },
+          control: { metadata: null },
+        }),
+      );
+      let command;
+      await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
+        command = createQueueCommand(config, {
+          operations: removals,
+          effects: removalEffects,
+          deadlineAt: null,
+        });
+        await admitQueueCommand(config, command);
+        await assert.rejects(
+          completeQueueCommand(config, command),
+          /every declared fulfilled original/,
+        );
+        await assert.rejects(
+          admitQueueCommand(config, structuredClone(command)),
+          /Original creating command/,
+        );
+        await assert.rejects(
+          performQueueCommandEffect(config, {}, command, 1),
+          /Only the next/,
+        );
+        await assert.rejects(
+          admitQueueCommand(config, command),
+          /cannot replay/,
+        );
+      });
+      const commandArchive = await readVerifiedRecoveryCheckpoint(config);
+      for (const operation of removals) {
+        const file = commandArchive.manifest.files.find(
+          (entry) =>
+            entry.path === `project-queue-history/${operation.id}.json`,
+        );
+        assert.ok(file);
+        assert.deepEqual(
+          Buffer.from(await commandArchive.readVerifiedBlob(file.ref)),
+          await readFile(join(history, `${operation.id}.json`)),
+        );
+        assert.equal(operation.completed, undefined);
+        assert.deepEqual(operation.effects, []);
+      }
+      const records = structuredClone(removals);
+      assert.doesNotThrow(() =>
+        assertQueueCommandHistory(records, () =>
+          assert.fail("intent-only command has no response originals"),
+        ),
+      );
+      const refuses = (change, pattern) => {
+        const changed = structuredClone(records);
+        change(changed);
+        assert.throws(
+          () =>
+            assertQueueCommandHistory(changed, () =>
+              assert.fail("no response original should be requested"),
+            ),
+          pattern,
+        );
+      };
+      refuses((rows) => {
+        rows[1].bodyDigest = hash("changed approved body");
+      }, /frozen original header/);
+      refuses((rows) => {
+        rows[1].commandId = randomUUID();
+      }, /frozen original header/);
+      refuses((rows) => {
+        rows[0].commandRecipe.effects.pop();
+      }, /every admission effect/);
+      refuses((rows) => {
+        rows[0].completed = true;
+      }, /every declared original response/);
+      refuses((rows) => {
+        rows[0].commandRecipe.effects[1].requestId =
+          rows[0].commandRecipe.effects[0].requestId;
+        rows[0].commandRecipe.effects[1].request.variables.input.clientMutationId =
+          rows[0].commandRecipe.effects[0].requestId;
+      }, /identity.*differs/);
+      refuses((rows) => {
+        rows[0].commandRecipe.effects[1].actorId = 2;
+      }, /actor differs/);
+
+      // Test the admission and roadmap schemas with pure public wire contracts;
+      // these declarations make no claim that a GitHub effect has occurred.
+      const admission = createQueueOperation(config, {
+        action: "admit",
+        scope: "I_new",
+        previousReceiptId: null,
+        approval: { kind: "queue-command" },
+        objective: 4,
+        issueNodeId: "I_new",
+        bodyDigest: hash("new approved body"),
+        order: 9,
+      });
+      admission.metadata = JSON.stringify({
+        schemaVersion: 1,
+        kind: "admission",
+        admissionId: randomUUID(),
+        receiptId: admission.id,
+        state: "queued",
+      });
+      const common = {
+        operationId: admission.id,
+        actorId: 1,
+        expectedIssue: {
+          issueNodeId: admission.issueNodeId,
+          objective: admission.objective,
+          bodyDigest: admission.bodyDigest,
+        },
+        control: { metadata: null },
+      };
+      const ensured = createProjectQueuePlannedEffect(binding, {
+        ...common,
+        requestId: randomUUID(),
+        action: "ensure-card",
+        issueNodeId: admission.issueNodeId,
+        prior: { target: null },
+      });
+      const ordered = createProjectQueuePlannedEffect(binding, {
+        ...common,
+        requestId: randomUUID(),
+        action: "set-order",
+        target: { resultOf: ensured.requestId },
+        fieldId: binding.orderFieldId,
+        order: 9,
+        prior: { resultOf: ensured.requestId },
+      });
+      const final = createProjectQueuePlannedEffect(binding, {
+        ...common,
+        requestId: randomUUID(),
+        action: "set-metadata",
+        target: { resultOf: ensured.requestId },
+        fieldId: binding.metadataFieldId,
+        metadata: admission.metadata,
+        prior: { resultOf: ordered.requestId },
+      });
+      const admissionPlan = {
+        operations: [admission],
+        effects: [ensured, ordered, final],
+        deadlineAt: null,
+      };
+      assert.throws(
+        () =>
+          createQueueCommand(config, {
+            ...admissionPlan,
+            effects: [ordered, ensured, final],
+          }),
+        /dependency must precede/,
+      );
+      assert.throws(
+        () =>
+          createQueueCommand(config, {
+            ...admissionPlan,
+            effects: [ensured, final],
+          }),
+        /dependency must precede/,
+      );
+      assert.throws(
+        () =>
+          createQueueCommand(config, {
+            ...admissionPlan,
+            deadlineAt: new Date().toISOString(),
+          }),
+        /original armed deadline/,
+      );
+      const wrongBody = structuredClone(admissionPlan);
+      wrongBody.effects[0].expectedIssue.bodyDigest = hash("changed body");
+      assert.throws(
+        () => createQueueCommand(config, wrongBody),
+        /exact approved Issue body/,
+      );
+      const wrongPrior = structuredClone(admissionPlan);
+      wrongPrior.effects[2].prior.resultOf = ensured.requestId;
+      assert.throws(
+        () => createQueueCommand(config, wrongPrior),
+        /immediately preceding/,
+      );
+      await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
+        const planned = createQueueCommand(config, admissionPlan);
+        assert.equal(nextProjectQueueOrder([admission]), 10);
+        await admitQueueCommand(config, planned);
+        await assert.rejects(
+          completeQueueCommand(config, planned),
+          /every declared fulfilled original/,
+        );
+      });
+      const controlOperation = createQueueOperation(config, {
+        action: "control",
+        scope: "control",
+        previousReceiptId: null,
+        approval: { kind: "background-setup" },
+      });
+      controlOperation.metadata = JSON.stringify({
+        schemaVersion: 1,
+        kind: "control",
+        receiptId: controlOperation.id,
+        mode: "paused",
+        watch: true,
+      });
+      const controlStep = createProjectQueuePlannedEffect(binding, {
+        operationId: controlOperation.id,
+        requestId: randomUUID(),
+        actorId: 1,
+        action: "set-metadata",
+        target: { itemId: binding.controlItemId },
+        fieldId: binding.metadataFieldId,
+        metadata: controlOperation.metadata,
+        prior: { target: { itemId: binding.controlItemId, metadata: null } },
+        control: { metadata: null },
+      });
+      const roadmap = createQueueOperation(config, {
+        action: "roadmap",
+        scope: "roadmap:I_roadmap",
+        previousReceiptId: null,
+        approval: { kind: "queue-command" },
+        objective: 5,
+        issueNodeId: "I_roadmap",
+        bodyDigest: hash("roadmap body"),
+      });
+      const roadmapStep = createProjectQueuePlannedEffect(binding, {
+        operationId: roadmap.id,
+        requestId: randomUUID(),
+        actorId: 1,
+        action: "ensure-card",
+        issueNodeId: roadmap.issueNodeId,
+        expectedIssue: {
+          issueNodeId: roadmap.issueNodeId,
+          objective: roadmap.objective,
+          bodyDigest: roadmap.bodyDigest,
+        },
+        prior: { target: null },
+        control: { resultOf: controlStep.requestId },
+      });
+      const controlPlan = {
+        operations: [controlOperation, roadmap],
+        effects: [controlStep, roadmapStep],
+        deadlineAt: null,
+      };
+      assert.throws(
+        () =>
+          createQueueCommand(config, {
+            ...controlPlan,
+            effects: [roadmapStep, controlStep],
+          }),
+        /declared earlier control original/,
+      );
+      const controlCommand = createQueueCommand(config, controlPlan);
+      await admitQueueCommand(config, controlCommand);
+      await assert.rejects(
+        completeQueueCommand(config, controlCommand),
+        /every declared fulfilled original/,
+      );
+      const groupedHistory = await readQueueHistory(config);
+      assert.equal(nextProjectQueueOrder(groupedHistory), 10);
+      assert.equal(
+        groupedHistory.find((row) => row.id === admission.id).retiredAdmission,
+        undefined,
+      );
+      // Unknown legacy effects and grouped recipes cannot be silently reclassified
+      // as the narrowly authorized, two-response legacy admission disposition.
+      assert.throws(
+        () => acquireInstallationLock(repository, 4),
+        /already owns Objective #1/,
+      );
+      releaseControllerLock(objectiveLockPath(repository, 1), lock);
+      lockReleased = true;
+      const maintenanceLock = acquireInstallationLock(repository, 4);
+      try {
+        await assert.rejects(
+          retireUnknownProjectAdmission(
+            config,
+            {},
+            4,
+            {},
+            "Fixture",
+            maintenanceLock,
+          ),
+          /Explicit unknown.*evidence/,
+        );
+        await assert.rejects(
+          retireUnknownProjectAdmission(
+            { ...config, planning: { kind: "unsupported" } },
+            {},
+            4,
+            {},
+            "Fixture",
+            maintenanceLock,
+          ),
+          /unknown provider resource protocols/,
+        );
+        await assert.rejects(
+          retireUnknownProjectAdmission(config, {}, 4, {}, "Fixture", {
+            ...maintenanceLock,
+            token: "foreign",
+          }),
+          /exclusive stopped installation lease/,
+        );
+      } finally {
+        releaseControllerLock(
+          installationLockPath(repository),
+          maintenanceLock,
+        );
+      }
+      assert.deepEqual(
+        await readFile(join(history, `${operationId}.json`)),
+        unknownBytes,
+      );
+      assert.equal(
+        (await readQueueHistory(config)).find((row) => row.id === admission.id)
+          .completed,
+        undefined,
+      );
+    });
   } finally {
-    releaseControllerLock(objectiveLockPath(repository, 1), lock);
+    if (!lockReleased)
+      releaseControllerLock(objectiveLockPath(repository, 1), lock);
     await rm(directory, { recursive: true, force: true });
     await rm(stateRoot(repository), { recursive: true, force: true });
   }

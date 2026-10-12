@@ -2182,7 +2182,12 @@ export async function abandonFailedProjectQueueReservation(
   if (
     !actor ||
     config.execution.kind !== "local" ||
-    config.execution.harness?.kind !== "codex-sdk" ||
+    (config.execution.profiles
+      ? !Object.keys(config.execution.profiles).length ||
+        Object.values(config.execution.profiles).some(
+          (profile) => profile.harness.kind !== "codex-sdk",
+        )
+      : config.execution.harness?.kind !== "codex-sdk") ||
     config.planning.kind !== "codex-sdk"
   )
     throw new Error(

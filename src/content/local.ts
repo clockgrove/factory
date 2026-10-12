@@ -107,12 +107,16 @@ export class LocalContentStore implements ContentStore {
     return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   }
 
-  private descriptorIdentity(fd: number, ref: ContentRef): string {
+  private descriptorIdentity(
+    fd: number,
+    ref: ContentRef,
+    privateOnly = true,
+  ): string {
     const stat = fstatSync(fd, { bigint: true });
     if (
       !stat.isFile() ||
-      stat.uid !== BigInt(process.getuid!()) ||
-      stat.mode & 0o077n
+      (privateOnly &&
+        (stat.uid !== BigInt(process.getuid!()) || stat.mode & 0o077n))
     )
       throw new Error("Content object must be an owned private regular file");
     if (stat.size !== BigInt(ref.bytes))
@@ -183,8 +187,12 @@ export class LocalContentStore implements ContentStore {
     }
   }
 
-  private synchronizeObject(fd: number, ref: ContentRef): void {
-    const identity = this.descriptorIdentity(fd, ref);
+  private synchronizeObject(
+    fd: number,
+    ref: ContentRef,
+    privateOnly = true,
+  ): void {
+    const identity = this.descriptorIdentity(fd, ref, privateOnly);
     fsyncSync(fd);
     const directory = openSync(
       dirname(this.path(ref)),
@@ -192,17 +200,13 @@ export class LocalContentStore implements ContentStore {
     );
     try {
       const stat = fstatSync(directory);
-      if (
-        !stat.isDirectory() ||
-        stat.uid !== process.getuid?.() ||
-        stat.mode & 0o077
-      )
-        throw new Error("Content object directory must be owned and private");
+      if (!stat.isDirectory())
+        throw new Error("Content object parent is not a directory");
       fsyncSync(directory);
     } finally {
       closeSync(directory);
     }
-    if (this.descriptorIdentity(fd, ref) !== identity)
+    if (this.descriptorIdentity(fd, ref, privateOnly) !== identity)
       throw new Error("Content object changed during durable retention");
   }
 
@@ -266,14 +270,16 @@ export class LocalContentStore implements ContentStore {
       }
       const retained = this.openObject(ref);
       try {
-        const identity = this.descriptorIdentity(retained, ref);
+        const identity = this.descriptorIdentity(retained, ref, false);
         // One streamed digest read authenticates the final linked object. Bind
         // it to the same opened file, then make that link durable at its producer.
         await this.verify(ref);
-        if (this.descriptorIdentity(retained, ref) !== identity)
+        if (this.descriptorIdentity(retained, ref, false) !== identity)
           throw new Error("Content object changed during streamed retention");
-        this.synchronizeObject(retained, ref);
-        retainCheckpointContentVerification(this.root, ref, identity);
+        this.synchronizeObject(retained, ref, false);
+        const current = fstatSync(retained);
+        if (current.uid === process.getuid?.() && !(current.mode & 0o077))
+          retainCheckpointContentVerification(this.root, ref, identity);
       } finally {
         closeSync(retained);
       }

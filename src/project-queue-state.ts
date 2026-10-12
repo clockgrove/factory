@@ -1290,7 +1290,7 @@ function save(record: QueueRecord): void {
     kind: "project-queue-receipt",
   });
 }
-function queueOwnerReferences(record: QueueOwnerClaim): ContentRef[] {
+export function queueOwnerReferences(record: QueueOwnerClaim): ContentRef[] {
   const refs = [
     ...(record.runBinding ? [record.runBinding.initialSnapshot] : []),
     ...(record.settled?.reservationFailure

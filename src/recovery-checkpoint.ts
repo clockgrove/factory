@@ -2208,6 +2208,7 @@ function readArchive(
 ): {
   manifest: RecoveryCheckpointManifest;
   readBlob(ref: ContentRef): Buffer | undefined;
+  prefetch(refs: ContentRef[]): void;
   blobEntries: { ref: ContentRef; oid: string }[];
   manifestBytes: number;
   originalManifestBytes: Buffer;
@@ -2262,6 +2263,23 @@ function readArchive(
   }));
   const candidate = scopes.getStore()?.verification;
   const context = candidate?.objects ? candidate : undefined;
+  const assertMaterial = () => {
+    if (!context) return;
+    if (
+      context.closed ||
+      context.quarantined ||
+      context.key !== verificationKey(config, options) ||
+      !context.objects
+    )
+      throw new Error(
+        "Checkpoint body reader has a closed or uncertain verifier",
+      );
+    assertRemoteOnlyVerifier(directory, options);
+    assertVerifierUnchanged(
+      scanVerifierObjects(directory, options),
+      context.objects,
+    );
+  };
   const key = (entry: { ref: ContentRef; oid: string }) =>
     canonical(["remote", entry.oid, entry.ref]);
   const unverified = context
@@ -2269,7 +2287,9 @@ function readArchive(
         (entry) => context.content.get(key(entry)) !== "verified",
       )
     : blobEntries;
+  if (unverified.length) assertMaterial();
   const verified = readRecoveryCheckpointBodies(directory, options, unverified);
+  if (unverified.length) assertMaterial();
   if (context) {
     for (const entry of unverified)
       retainContentVerification(context, options, key(entry), "verified");
@@ -2280,6 +2300,24 @@ function readArchive(
   const byDigest = new Map(
     blobEntries.map((entry) => [entry.ref.digest, entry]),
   );
+  const prefetch = (requested: ContentRef[]) => {
+    const selected = new Map<string, { ref: ContentRef; oid: string }>();
+    for (const ref of requested) {
+      const entry = byDigest.get(ref.digest);
+      if (!entry || entry.ref.bytes !== ref.bytes)
+        throw new Error(
+          "Requested semantic body is absent from its verified archive",
+        );
+      if (!verified.has(ref.digest)) selected.set(ref.digest, entry);
+    }
+    if (!selected.size) return;
+    assertMaterial();
+    const loaded = readRecoveryCheckpointBodies(directory, options, [
+      ...selected.values(),
+    ]);
+    assertMaterial();
+    for (const [digest, bytes] of loaded) verified.set(digest, bytes);
+  };
   const readBlob = (ref: ContentRef): Buffer | undefined => {
     const entry = byDigest.get(ref.digest);
     if (!entry || entry.ref.bytes !== ref.bytes) return undefined;
@@ -2293,24 +2331,21 @@ function readArchive(
         throw new Error(
           "Checkpoint body reader has a closed or uncertain verifier",
         );
-      assertRemoteOnlyVerifier(directory, options);
-      assertVerifierUnchanged(
-        scanVerifierObjects(directory, options),
-        context.objects,
-      );
     }
     let bytes = verified.get(ref.digest);
     if (!bytes) {
-      bytes = readRecoveryCheckpointBodies(directory, options, [entry]).get(
-        ref.digest,
-      )!;
-      verified.set(ref.digest, bytes);
+      // A consumer outside the queue's declared proof roots needs another part
+      // of this packet. Materialize remaining bodies once in the original
+      // per-read bounded map, rather than fork Git once per semantic reference.
+      prefetch(refs);
+      bytes = verified.get(ref.digest)!;
     }
     return bytes;
   };
   return {
     manifest,
     readBlob,
+    prefetch,
     blobEntries,
     manifestBytes: manifestBytes.length,
     originalManifestBytes: manifestBytes,
@@ -3712,8 +3747,12 @@ async function freshArchiveOwned(
     };
     // Retained cancellation/abandonment witnesses must be actual ancestor packets,
     // rather than manually shaped manifest text in the current body store.
-    const { parseQueueRecord, assertQueueOperationReferenceBodies } =
-      await import("./project-queue-state.js");
+    const {
+      parseQueueRecord,
+      assertQueueOperationReferenceBodies,
+      queueOperationReferences,
+      queueOwnerReferences,
+    } = await import("./project-queue-state.js");
     const readQueueOriginal = (ref: ContentRef) => {
       const bytes = archive.readBlob(ref);
       if (!bytes)
@@ -3722,14 +3761,32 @@ async function freshArchiveOwned(
         );
       return bytes;
     };
-    for (const file of archive.manifest.files.filter((file) =>
+    const queueFiles = archive.manifest.files.filter((file) =>
       /^project-queue-history\/[a-f0-9-]{36}\.json$/.test(file.path),
-    )) {
-      const record = parseQueueRecord(
+    );
+    archive.prefetch(queueFiles.map((file) => file.ref));
+    const records = queueFiles.map((file) =>
+      parseQueueRecord(
         readQueueOriginal(file.ref),
         config.repository,
         file.path.slice("project-queue-history/".length, -".json".length),
-      );
+      ),
+    );
+    archive.prefetch(
+      records.flatMap((record) =>
+        record.kind === "project-queue-owner"
+          ? queueOwnerReferences(record)
+          : [
+              ...queueOperationReferences(record),
+              ...record.effects.flatMap((effect) =>
+                [effect.original, effect.rejectedOriginal].filter(
+                  (ref): ref is ContentRef => ref !== undefined,
+                ),
+              ),
+            ],
+      ),
+    );
+    for (const record of records) {
       if (record.kind === "project-queue-operation") {
         assertQueueOperationReferenceBodies(record, readQueueOriginal);
         const retired = record.retiredWithdrawal?.retiredClaim;
@@ -3828,6 +3885,13 @@ async function freshArchiveOwned(
       throw new Error(
         "Queue verifier admitted binding changed during archive verification",
       );
+    if (context?.objects) {
+      assertRemoteOnlyVerifier(directory, options);
+      assertVerifierUnchanged(
+        scanVerifierObjects(directory, options),
+        context.objects,
+      );
+    }
     if (observation && observation.key !== verificationKey(config, options))
       throw new Error(
         "Queue ancestry observation binding changed during archive verification",

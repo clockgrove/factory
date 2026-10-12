@@ -2174,6 +2174,27 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       const advanced = await readVerifiedRecoveryCheckpoint(config);
       assert.notEqual(advanced.commitSha, restoredRead.commitSha);
       assert.equal(verifierDirectories().length, 1);
+      // Observe the real producer after the changed candidate is independently
+      // acknowledged. Local/remote facts for one body share the byte budget;
+      // they do not consume separate archive file slots.
+      const originalReferences =
+        LocalContentStore.prototype.checkpointReferences;
+      let accountingReuse = 0;
+      LocalContentStore.prototype.checkpointReferences = function (
+        description,
+      ) {
+        const result = Reflect.apply(originalReferences, this, [description]);
+        if (JSON.parse(description)[0] === "accounting-original" && result)
+          accountingReuse++;
+        return result;
+      };
+      try {
+        const afterAdvanced = await buildClosure();
+        assert(accountingReuse > 0);
+        assert.deepEqual(await buildClosure(), afterAdvanced);
+      } finally {
+        LocalContentStore.prototype.checkpointReferences = originalReferences;
+      }
     },
   );
   assert.deepEqual(verifierDirectories(), []);

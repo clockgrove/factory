@@ -1367,7 +1367,8 @@ export async function projectQueueWriteOnGitHub(
         "Project queue content admission cannot target the control card",
       );
   };
-  if (inspection) refreshInspection(inspection);
+  if (inspection && request.action === "ensure-card")
+    refreshInspection(inspection);
   else if (initialTarget) refreshTarget(initialTarget);
   if (request.action === "ensure-card" && inspection?.target) {
     const target = await readTarget(

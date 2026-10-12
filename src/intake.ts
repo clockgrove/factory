@@ -61,6 +61,7 @@ import {
   awaitCheckpointAdmission,
   acceptForwardedCheckpointCompletion,
   bindRecoveryCheckpointControllerScope,
+  checkpointRetentionGaps,
   gitPersistenceStatus,
   readVerifiedRecoveryCheckpoint,
   withRecoveryCheckpointCommandOperation,
@@ -1496,6 +1497,17 @@ async function runIntakeOwned(
       )
         throw new Error(
           "Cold controller preparation differs from the acknowledged current archive tip",
+        );
+      // Prime actual local originals and Git roots in the same cold owner scope.
+      // Required gaps hold readiness exactly as they hold checkpoint publication.
+      const closure = await buildRecoveryCheckpointClosure({ config });
+      assertProcessActive();
+      if (
+        closure.gaps.some((gap) => gap.required !== false) ||
+        checkpointRetentionGaps(config.repository).length
+      )
+        throw new Error(
+          "Cold controller local checkpoint closure retains required unavailable originals; readiness is held",
         );
     }
     record = view(config, await observeProjectQueue(config, services.github));

@@ -29,6 +29,7 @@ import {
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import type { ContentRef } from "./contracts.js";
+import { DiagnosticEmitter } from "./diagnostics.js";
 import { attachFault, decision } from "./fault.js";
 import {
   assertProcessActive,
@@ -42,6 +43,7 @@ import {
   withCheckpointPublication,
 } from "./process.js";
 import type { QueueRecord } from "./project-queue-state.js";
+import { serviceLoginSecrets } from "./provider-credentials.js";
 import type { ContinuationReferences } from "./recovery-checkpoint-closure.js";
 import type { ControllerLock } from "./state-store.js";
 
@@ -298,8 +300,11 @@ export class CheckpointAdmissionFailure extends Error {
       | "before-effect"
       | "settled"
       | "explicit" = "before-effect",
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, cause === undefined ? undefined : { cause });
+    if (cause instanceof Error && cause.stack)
+      this.stack += `\nCaused by: ${cause.stack}`;
     this.knownNotDispatched = boundary === "before-effect";
     attachFault(
       this,
@@ -314,6 +319,66 @@ export function markCheckpointEffectDispatched(
   error: CheckpointAdmissionFailure,
 ): void {
   error.knownNotDispatched = false;
+}
+/** Correlated local observations only; never checkpoint or lifecycle authority. */
+function checkpointObservation(
+  config: FactoryConfig,
+  operation: string,
+  metadata: () => Record<string, string | number | boolean>,
+) {
+  let emitter: DiagnosticEmitter | undefined;
+  let operationAttemptId: string | undefined;
+  try {
+    operationAttemptId = randomUUID();
+    emitter = new DiagnosticEmitter(config.repository, 0, [
+      ...(config.policy?.allowedSecretNames ?? [])
+        .map((name) => process.env[name])
+        .filter((value): value is string => Boolean(value)),
+      ...serviceLoginSecrets(),
+      ...(config.gitPersistence ? [config.gitPersistence.remote] : []),
+    ]);
+  } catch {
+    // Observation setup is also outside lifecycle and checkpoint authority.
+  }
+  let phase: string | undefined;
+  let startedAt = 0;
+  const emit = (
+    outcome: "started" | "completed" | "failed",
+    error?: unknown,
+  ) => {
+    try {
+      emitter?.emit({
+        operation,
+        operationAttemptId,
+        outcome,
+        ...(outcome === "started"
+          ? {}
+          : { durationMs: performance.now() - startedAt }),
+        metadata: { ...metadata(), phase: phase! },
+        ...(error === undefined
+          ? {}
+          : { detail: error instanceof Error ? error.stack : String(error) }),
+      });
+    } catch {
+      // Diagnostics cannot change synchronization or its original error.
+    }
+  };
+  return {
+    start(next: string) {
+      if (phase) emit("completed");
+      phase = next;
+      startedAt = performance.now();
+      emit("started");
+    },
+    complete() {
+      if (phase) emit("completed");
+      phase = undefined;
+    },
+    fail(error: unknown) {
+      if (phase) emit("failed", error);
+      phase = undefined;
+    },
+  };
 }
 class CheckpointConflict extends Error {}
 class CheckpointRestoreRequired extends Error {}
@@ -4017,6 +4082,19 @@ async function freshArchiveOwned(
   context?: QueueVerificationContext,
 ) {
   const scope = scopes.getStore();
+  const observed = checkpointObservation(
+    config,
+    "recovery-checkpoint-verify",
+    () => ({
+      owned: Boolean(context),
+      selectedCommit: expectedCommit ?? "current-tip",
+      objectsRetained: Boolean(context?.objects),
+      negotiationTipRetained: Boolean(context?.negotiationTip),
+      lineageEntries: context?.lineages.size ?? 0,
+      metadataBytes: context ? verificationMetadataBytes(context) : 0,
+    }),
+  );
+  observed.start("archive-and-final-validation");
   const read = () =>
     freshArchiveOwnedStrict(
       config,
@@ -4027,10 +4105,19 @@ async function freshArchiveOwned(
       observeCapacity,
       context,
     );
-  const result =
-    scope?.verification && context === scope.verification
-      ? await withFiniteCheckpointReads(config, read, true, scope)
-      : await read();
+  const result = await (async () => {
+    try {
+      const result =
+        scope?.verification && context === scope.verification
+          ? await withFiniteCheckpointReads(config, read, true, scope)
+          : await read();
+      observed.complete();
+      return result;
+    } catch (error) {
+      observed.fail(error);
+      throw error;
+    }
+  })();
   if (context?.objects && scope?.verification === context) {
     // Only a fully completed independent read may seed the next transport's
     // common-history hint. It supplies no archive or publication authority.
@@ -4062,6 +4149,23 @@ async function freshArchiveOwnedStrict(
     join(paths(config.repository).root, `verify-${randomUUID()}.git`);
   if (context) context.directory = directory;
   let settled = true;
+  let hintUsed = false;
+  let observedTip: string | undefined;
+  const observed = checkpointObservation(
+    config,
+    "recovery-checkpoint-archive",
+    () => ({
+      owned: Boolean(context),
+      selectedCommit: expectedCommit ?? observedTip ?? "unobserved",
+      remoteTip: observedTip ?? "unobserved",
+      negotiationHintArgument: hintUsed,
+      lineageEntries: context?.lineages.size ?? 0,
+      referenceEntries: context?.content.size ?? 0,
+      metadataBytes: context ? verificationMetadataBytes(context) : 0,
+      objectsRetained: Boolean(context?.objects),
+    }),
+  );
+  observed.start("prior-material");
   try {
     initializeGit(directory, options);
     if (context) chmodSync(directory, 0o700);
@@ -4073,12 +4177,16 @@ async function freshArchiveOwnedStrict(
         priorObjects,
       );
     const negotiationTip = priorObjects ? context?.negotiationTip : undefined;
+    hintUsed = Boolean(negotiationTip);
+    observed.start("remote-tip");
     const tip = await remoteTip(directory, options);
+    observedTip = tip;
     if (!tip) throw new Error("Configured Git archive ref has no checkpoint");
     if (context && context.key !== verificationKey(config, options))
       throw new Error(
         "Queue verifier admitted binding changed during remote observation",
       );
+    observed.start("fetch");
     await gitRemote(directory, options, [
       "-c",
       "gc.auto=0",
@@ -4097,6 +4205,7 @@ async function freshArchiveOwnedStrict(
     ]);
     if (context && context.key !== verificationKey(config, options))
       throw new Error("Queue verifier admitted binding changed during fetch");
+    observed.start("fetched-material");
     const fetched = git(directory, options, ["rev-parse", "FETCH_HEAD"])
       .toString("utf8")
       .trim();
@@ -4109,6 +4218,7 @@ async function freshArchiveOwnedStrict(
       if (!priorObjects || !objects) {
         // Authenticate the original complete cache once. Later strict fetches
         // authenticate additions; altered/missing prior material refuses reuse.
+        observed.start("strict-fsck");
         await gitRemote(directory, options, [
           "fsck",
           "--full",
@@ -4118,6 +4228,7 @@ async function freshArchiveOwnedStrict(
           tip,
         ]);
       }
+      observed.start("material-retention");
       const objectBytes = objects
         ? [...objects].reduce(
             (sum, [key, value]) =>
@@ -4145,6 +4256,7 @@ async function freshArchiveOwnedStrict(
       throw new Error(
         "Queue verifier admitted binding changed during object verification",
       );
+    observed.start("archive-inventory");
     const commit = expectedCommit ?? tip;
     if (expectedCommit)
       git(directory, options, [
@@ -4327,6 +4439,7 @@ async function freshArchiveOwnedStrict(
     for (const file of queueFiles)
       if (file.visibility !== "private" || file.kind !== "historical")
         throw new Error("Project queue receipt has an invalid archive scope");
+    observed.start("queue-originals");
     archive.prefetch(queueFiles.map((file) => file.ref));
     const cache =
       context && activeClosureBinding()?.scope.verification === context
@@ -4351,6 +4464,7 @@ async function freshArchiveOwnedStrict(
     );
     if (new Set(records.map((record) => record.id)).size !== records.length)
       throw new Error("Duplicate archived Project queue receipt");
+    observed.start("queue-ancestry");
     for (const record of records) {
       if (record.kind === "project-queue-operation") {
         const retired = record.retiredWithdrawal?.retiredClaim;
@@ -4420,6 +4534,7 @@ async function freshArchiveOwnedStrict(
         );
       if (lineageRequest?.claimId === record.id) lineage = verified;
     }
+    observed.start("requested-lineage");
     const reservation =
       lineageRequest && "kind" in lineageRequest
         ? await queueReservationLineage(
@@ -4446,6 +4561,7 @@ async function freshArchiveOwnedStrict(
           }
         : {}),
     };
+    observed.start("final-material");
     if (context && context.key !== verificationKey(config, options))
       throw new Error(
         "Queue verifier admitted binding changed during archive verification",
@@ -4475,8 +4591,10 @@ async function freshArchiveOwnedStrict(
       rmSync(directory, { recursive: true, force: true });
       delete context.directory;
     }
+    observed.complete();
     return result;
   } catch (error) {
+    observed.fail(error);
     if (error instanceof UnsettledSubprocessError) {
       settled = false;
       if (context) {
@@ -4882,6 +5000,7 @@ export async function synchronizeRecoveryCheckpoint(
       throw new CheckpointAdmissionFailure(
         error instanceof Error ? error.message : "Checkpoint admission failed",
         input.reason,
+        error,
       );
     }
   });
@@ -5212,6 +5331,15 @@ async function publishCheckpoint(
         active.transportOutcome = "unknown";
         active.submittedAt = new Date().toISOString();
       });
+      const submittedObservation = checkpointObservation(
+        config,
+        "recovery-checkpoint-submission",
+        () => ({
+          sequence: attempt.sequence,
+          candidate: attempt.candidate,
+        }),
+      );
+      submittedObservation.start("push");
       try {
         await gitRemote(p.git, options, [
           "push",
@@ -5220,7 +5348,8 @@ async function publishCheckpoint(
           options.remote,
           `${candidate}:${options.ref}`,
         ]);
-      } catch {
+      } catch (error) {
+        submittedObservation.fail(error);
         mutate(config, options, (current) => {
           current.attempts.at(-1)!.status = "unknown";
           current.error =
@@ -5233,7 +5362,15 @@ async function publishCheckpoint(
       mutate(config, options, (current) => {
         current.attempts.at(-1)!.transportOutcome = "response-success";
       });
-      const verified = await freshArchive(config, options, candidate);
+      submittedObservation.start("independent-candidate-ack");
+      let verified;
+      try {
+        verified = await freshArchive(config, options, candidate);
+        submittedObservation.complete();
+      } catch (error) {
+        submittedObservation.fail(error);
+        throw error;
+      }
       if (verified.payloadDigest !== attempt.payloadDigest)
         throw new Error(
           "Independent remote payload differs from submitted checkpoint",
@@ -5268,6 +5405,7 @@ async function publishCheckpoint(
           ? error.message
           : "Recovery checkpoint is not remotely acknowledged",
         input.reason,
+        error,
       );
     }
   });

@@ -54,6 +54,7 @@ import { LocalContentStore } from "../dist/content/local.js";
 import { linearDeliveryUnits } from "../dist/delivery/plan.js";
 import {
   DiagnosticEmitter,
+  diagnosticPath,
   readUsageSummaryEvents,
   summarizeDiagnosticUsage,
 } from "../dist/diagnostics.js";
@@ -1005,7 +1006,15 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         reason: "explicit",
         buildClosure,
       }),
-      /digest verification|failed exact verification/,
+      (error) => {
+        assert.match(
+          error.message,
+          /digest verification|failed exact verification/,
+        );
+        assert(error.cause instanceof Error);
+        assert(error.stack.includes(error.cause.stack));
+        return true;
+      },
     );
     const failedRevalidation = gitPersistenceStatus(config);
     assert.equal(failedRevalidation.status, "failed");
@@ -2275,6 +2284,40 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
             suffixPackets.some((packet) => packet.includes(`${commit}:blobs/`)),
           );
         assert.equal(suffixShows, 0);
+        const checkpointEvents = readFileSync(
+          diagnosticPath(repository, 0),
+          "utf8",
+        )
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        const fetches = checkpointEvents.filter(
+          (event) =>
+            event.operation === "recovery-checkpoint-archive" &&
+            event.metadata.phase === "fetch" &&
+            event.outcome === "completed",
+        );
+        for (const commit of [
+          advanced.commitSha,
+          nextCheckpoint.lastAcknowledged.commitSha,
+        ])
+          assert(
+            fetches.some(
+              (event) =>
+                event.metadata.selectedCommit === commit &&
+                event.metadata.negotiationHintArgument === true &&
+                event.durationMs >= 0,
+            ),
+          );
+        assert(
+          checkpointEvents.some(
+            (event) =>
+              event.operation === "recovery-checkpoint-submission" &&
+              event.metadata.phase === "independent-candidate-ack" &&
+              event.metadata.candidate === advanced.commitSha &&
+              event.outcome === "completed",
+          ),
+        );
       } finally {
         childProcess.spawn = originalSpawn;
         childProcess.execFileSync = originalExec;

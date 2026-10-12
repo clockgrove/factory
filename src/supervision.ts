@@ -503,20 +503,46 @@ function hasOwner(config: FactoryConfig): boolean {
     current && current.startTime === owner?.startTime && current.state !== "Z",
   );
 }
+function checkIntakeLocalServiceState(
+  config: FactoryConfig,
+  configPath: string,
+  intake: IntakeAuthorization | undefined,
+): IntakeAuthorization {
+  assertRestoredInstallationDispatchReady(config);
+  if (!intake?.watch)
+    throw new Error(
+      `The background service is not set up; run \`${setupCommand(configPath, requiredProviderCredentials(config))}\``,
+    );
+  for (const id of intake.objectives)
+    checkObjectiveServiceState(config, id, configPath);
+  return intake;
+}
+/** The owned controller already authenticated this complete current observation. */
+export function checkPreparedIntakeServiceState(
+  config: FactoryConfig,
+  configPath: string,
+  intake: IntakeAuthorization,
+): void {
+  if (!intake.complete)
+    throw new Error(
+      "A complete current Project observation is required before background readiness",
+    );
+  checkIntakeLocalServiceState(config, configPath, intake);
+  if (intake.mode === "draining")
+    throw new Error(
+      `The queue is draining; run \`factory queue resume --config ${word(configPath)}\`, then \`${supervisorCommand("start", configPath)}\``,
+    );
+}
 export async function checkIntakeServiceState(
   config: FactoryConfig,
   configPath: string,
 ): Promise<IntakeAuthorization> {
   assertRestoredInstallationDispatchReady(config);
-  const intake = await readIntake(config);
-  assertRestoredInstallationDispatchReady(config);
-  if (!intake?.watch)
-    throw new Error(
-      "The background service is not set up; run `factory setup --background`",
-    );
-  for (const id of intake.objectives)
-    checkObjectiveServiceState(config, id, configPath);
-  return intake;
+  return checkIntakeLocalServiceState(
+    config,
+    configPath,
+    await readIntake(config),
+  );
 }
 
 /**
@@ -767,17 +793,12 @@ export async function supervise(
       );
     for (const { name, file } of value.credentials ?? [])
       validateCredentialFile(config, name, file);
-    // Refuse retained state this installation cannot continue here, with its
-    // remedy, instead of starting a service that exits with it in the log.
-    const intake = await checkIntakeServiceState(config, configPath);
+    // The actual lease-owning controller authenticates archive, Project and
+    // retained Objective state once before readiness or model dispatch.
+    assertRestoredInstallationDispatchReady(config);
     if (hasOwner(config) && inspect("is-active", name) !== "active")
       throw new Error(
         "An existing foreground owner must hand off before service start",
-      );
-    // A stopped service leaves its queue draining, and a draining queue ends the service at once.
-    if (!hasOwner(config) && intake.mode === "draining")
-      throw new Error(
-        "The queue is draining, so a started service would exit at once; run `factory queue resume`, then `factory supervisor start`",
       );
     systemctl("start", name);
     const outcome = await verifyServiceOwner(config, name);

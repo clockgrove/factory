@@ -76,7 +76,7 @@ import {
   renderServiceStatus,
   renderStatusText,
 } from "./status-summary.js";
-import { checkIntakeServiceState, supervise } from "./supervision.js";
+import { supervise } from "./supervision.js";
 import { runWorkflowRecipePreview } from "./workflow-recipes-cli.js";
 
 /** Whether a live controller owns this Objective; null when a lock is unreadable. */
@@ -309,8 +309,11 @@ async function supervisorCommand(args: string[], path: string): Promise<void> {
         : [],
     );
     loadServiceLoginCredentials(config, loaded);
-    await checkIntakeServiceState(config, path);
-    reportIntake(await compose(config, loaded).runIntake());
+    reportIntake(
+      await compose(config, loaded).runIntake({
+        backgroundConfigurationPath: path,
+      }),
+    );
     return;
   }
   if (

@@ -77,8 +77,10 @@ import {
   runObjective,
 } from "./runner.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
+import { checkPreparedIntakeServiceState } from "./supervision.js";
 import {
   acquireInstallationLock,
+  assertRestoredInstallationDispatchReady,
   readContinuation,
   releaseControllerLock,
   retargetControllerLock,
@@ -1134,18 +1136,23 @@ async function resolveBase(
       "Compilation checkout diverges from authenticated default head",
     );
 }
+export interface IntakeStartupOptions {
+  backgroundConfigurationPath?: string;
+}
 export function runIntake(
   config: FactoryConfig,
   services: ApplicationServices,
+  options: IntakeStartupOptions = {},
 ): Promise<IntakeAuthorization> {
   return withRecoveryCheckpointControllerVerification(
     { config, buildClosure: () => buildRecoveryCheckpointClosure({ config }) },
-    () => runIntakeOwned(config, services),
+    () => runIntakeOwned(config, services, options),
   );
 }
 async function runIntakeOwned(
   config: FactoryConfig,
   services: ApplicationServices,
+  options: IntakeStartupOptions,
 ): Promise<IntakeAuthorization> {
   requireProjectQueueEffects(config);
   let record = view(config);
@@ -1467,6 +1474,7 @@ async function runIntakeOwned(
   process.on("SIGTERM", onHandoff);
   try {
     retargetControllerLock(lockPath, lock, 0);
+    assertRestoredInstallationDispatchReady(config);
     // Cold preparation owns the existing lease and exposes no readiness or
     // dispatch until the controller's remote-only verifier is authenticated.
     // An installation without an acknowledged archive keeps its initial path.
@@ -1488,6 +1496,12 @@ async function runIntakeOwned(
         );
     }
     record = view(config, await observeProjectQueue(config, services.github));
+    if (options.backgroundConfigurationPath)
+      checkPreparedIntakeServiceState(
+        config,
+        options.backgroundConfigurationPath,
+        record,
+      );
     server = await serveControl(
       config.repository,
       lock,

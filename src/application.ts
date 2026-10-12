@@ -47,6 +47,7 @@ import {
   enqueueIntake,
   ensureProjectObjective,
   type IntakeAuthorization,
+  type IntakeStartupOptions,
   type QueueCommandAcknowledgment,
   intakeControl,
   runIntake,
@@ -114,7 +115,7 @@ export interface FactoryApplication {
     objective: number,
     provenance?: Parameters<typeof ensureProjectObjective>[3],
   ): Promise<unknown>;
-  runIntake(): Promise<IntakeAuthorization>;
+  runIntake(options?: IntakeStartupOptions): Promise<IntakeAuthorization>;
   proposeAmendment(
     objective: number,
     proposal: import("./graph-amendments.js").AmendmentProposal,
@@ -268,7 +269,8 @@ export function createApplication(
     watchIntake: () => watchIntake(config, services.github),
     ensureProjectObjective: (objective, provenance) =>
       ensureProjectObjective(config, services.github, objective, provenance),
-    runIntake: () => checkpoint.async(() => runIntake(config, services)),
+    runIntake: (options) =>
+      checkpoint.async(() => runIntake(config, services, options)),
     planObjective: (objective) => {
       if (config.gitPersistence?.scope === "private-history")
         return Promise.reject(

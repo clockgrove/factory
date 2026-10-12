@@ -51,6 +51,7 @@ import {
   acquireObjectiveLock,
   installationLockPath,
   objectiveLockPath,
+  readControllerOwner,
   releaseControllerLock,
   statePath,
 } from "../dist/state-store.js";
@@ -223,8 +224,18 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       original = Buffer.from(`${JSON.stringify(claim)}\n`);
     await writeFile(path, original, { mode: 0o600 });
     const error = new Error("original before-effect failure");
-    const buildClosure = () =>
-      buildRecoveryCheckpointClosure({ config, scope: "private-history" });
+    const maintenanceBuildOwners = [];
+    let observingMaintenance = false;
+    const buildClosure = () => {
+      if (observingMaintenance)
+        maintenanceBuildOwners.push(
+          readControllerOwner(installationLockPath(repository)),
+        );
+      return buildRecoveryCheckpointClosure({
+        config,
+        scope: "private-history",
+      });
+    };
     await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
       const historical = structuredClone(claim);
       delete historical.ownerProcess;
@@ -795,39 +806,51 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         path: `project-queue-history/${operationId}.json`,
         kind: "historical",
       });
-      await assert.rejects(
-        controlObjective(
-          config,
-          {
-            objective: 4,
-            action: "handoff",
-            input: {
-              actor: "Fixture",
-              retiredAdmissionEvidence: {
-                schemaVersion: 1,
-                kind: "operator-retired-admission-unknown",
-                operationId: randomUUID(),
-                originalInstallation: {
-                  cli: process.execPath,
-                  configPath,
-                  configSha256: hash(configBytes),
-                  ownFileInventory: refusedOriginal,
+      observingMaintenance = true;
+      try {
+        await assert.rejects(
+          controlObjective(
+            config,
+            {
+              objective: 4,
+              action: "handoff",
+              input: {
+                actor: "Fixture",
+                retiredAdmissionEvidence: {
+                  schemaVersion: 1,
+                  kind: "operator-retired-admission-unknown",
+                  operationId: randomUUID(),
+                  originalInstallation: {
+                    cli: process.execPath,
+                    configPath,
+                    configSha256: hash(configBytes),
+                    ownFileInventory: refusedOriginal,
+                  },
+                  originals: Object.fromEntries(
+                    [
+                      "ownerObservation",
+                      "installedPlan",
+                      "callerFailure",
+                      "sourceProtocolReview",
+                      "physicalClosure",
+                    ].map((name) => [name, refusedOriginal]),
+                  ),
                 },
-                originals: Object.fromEntries(
-                  [
-                    "ownerObservation",
-                    "installedPlan",
-                    "callerFailure",
-                    "sourceProtocolReview",
-                    "physicalClosure",
-                  ].map((name) => [name, refusedOriginal]),
-                ),
               },
             },
-          },
-          {},
+            {},
+          ),
+          /Other partial effects or active owners remain held/,
+        );
+      } finally {
+        observingMaintenance = false;
+      }
+      assert(maintenanceBuildOwners.length > 0);
+      assert(
+        maintenanceBuildOwners.every(
+          (owner) => owner?.pid === process.pid && owner.objective === 4,
         ),
-        /Other partial effects or active owners remain held/,
+        "terminal error settlement retains the exclusive installation lease",
       );
       const maintenanceEvents = (await readFile(diagnosticPath(repository, 0)))
         .subarray(maintenanceOffset)

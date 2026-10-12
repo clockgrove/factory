@@ -285,66 +285,74 @@ function modeChangeResult(
   };
 }
 
-async function controlObjectiveUnscoped(
+/** A stopped disposition owns verification and settlement until lease release. */
+async function stoppedOperatorHandoff(
   config: FactoryConfig,
   request: ControlRequest,
   github?: GitHubGateway,
 ): Promise<unknown> {
+  const input = request.input;
+  if (!input || !github || typeof input.actor !== "string" || !input.actor)
+    throw new Error(
+      "Stopped operator disposition requires its explicit local operator and genuine Project gateway",
+    );
   if (
-    request.action === "handoff" &&
-    (request.input?.failedReservationEvidence !== undefined ||
-      request.input?.retiredWithdrawalEvidence !== undefined ||
-      request.input?.retiredAdmissionEvidence !== undefined)
-  ) {
-    if (
-      !github ||
-      typeof request.input.actor !== "string" ||
-      !request.input.actor
-    )
-      throw new Error(
-        "Stopped operator disposition requires its explicit local operator and genuine Project gateway",
-      );
-    if (
-      [
-        request.input.failedReservationEvidence,
-        request.input.retiredWithdrawalEvidence,
-        request.input.retiredAdmissionEvidence,
-      ].filter((value) => value !== undefined).length !== 1
-    )
-      throw new Error("Choose one exact stopped operator disposition");
-    const lockPath = installationLockPath(config.repository),
-      lock = acquireInstallationLock(config.repository, request.objective);
-    try {
-      if (request.input.retiredAdmissionEvidence !== undefined)
-        return await retireUnknownProjectAdmission(
-          config,
-          github,
-          request.objective,
-          request.input.retiredAdmissionEvidence,
-          request.input.actor,
-          lock,
-        );
-      if (request.input.retiredWithdrawalEvidence !== undefined)
-        return await retireUnknownProjectWithdrawal(
-          config,
-          github,
-          request.objective,
-          request.input.retiredWithdrawalEvidence,
-          request.input.actor,
-          lock,
-        );
-      return await abandonFailedProjectQueueReservation(
+    [
+      input.failedReservationEvidence,
+      input.retiredWithdrawalEvidence,
+      input.retiredAdmissionEvidence,
+    ].filter((value) => value !== undefined).length !== 1
+  )
+    throw new Error("Choose one exact stopped operator disposition");
+  const actor = input.actor;
+  const lockPath = installationLockPath(config.repository),
+    lock = acquireInstallationLock(config.repository, request.objective);
+  try {
+    return await withQueueControlVerification(
+      {
         config,
-        github,
-        request.objective,
-        request.input.failedReservationEvidence,
-        request.input.actor,
-        lock,
-      );
-    } finally {
-      releaseControllerLock(lockPath, lock);
-    }
+        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+      },
+      () =>
+        checkpointController(config, async () => {
+          if (input.retiredAdmissionEvidence !== undefined)
+            return await retireUnknownProjectAdmission(
+              config,
+              github,
+              request.objective,
+              input.retiredAdmissionEvidence,
+              actor,
+              lock,
+            );
+          if (input.retiredWithdrawalEvidence !== undefined)
+            return await retireUnknownProjectWithdrawal(
+              config,
+              github,
+              request.objective,
+              input.retiredWithdrawalEvidence,
+              actor,
+              lock,
+            );
+          return await abandonFailedProjectQueueReservation(
+            config,
+            github,
+            request.objective,
+            input.failedReservationEvidence,
+            actor,
+            lock,
+          );
+        }),
+    );
+  } finally {
+    releaseControllerLock(lockPath, lock);
   }
+}
+
+async function controlObjectiveUnscoped(
+  config: FactoryConfig,
+  request: ControlRequest,
+  _github?: GitHubGateway,
+): Promise<unknown> {
   const retained = readContinuation(config.repository, request.objective);
   if (retained && request.action !== "status")
     assertRestoredContinuationReady(retained, config);
@@ -2159,29 +2167,19 @@ export function decideObjective(
 export function controlObjective(
   ...args: Parameters<typeof controlObjectiveUnscoped>
 ): ReturnType<typeof controlObjectiveUnscoped> {
-  const [config, request] = args;
-  const control = () =>
-    checkpointController(
-      config,
-      () => controlObjectiveUnscoped(...args),
-      undefined,
-    );
+  const [config, request, github] = args;
   if (
     request.action === "handoff" &&
     (request.input?.failedReservationEvidence !== undefined ||
       request.input?.retiredWithdrawalEvidence !== undefined ||
       request.input?.retiredAdmissionEvidence !== undefined)
   )
-    // Admission creates no effects: actual maintenance retains its exclusive
-    // installation lease, and the verifier outlives terminal/error settlement.
-    return withQueueControlVerification(
-      {
-        config,
-        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
-      },
-      control,
-    );
-  return control();
+    return stoppedOperatorHandoff(config, request, github);
+  return checkpointController(
+    config,
+    () => controlObjectiveUnscoped(...args),
+    undefined,
+  );
 }
 
 export function runObjective(

@@ -26,6 +26,7 @@ import type {
 import {
   checkpointClosureBytes,
   checkpointContentVerified,
+  deferCheckpointClosureVerification,
   retainCheckpointClosureBytes,
   retainCheckpointContentVerification,
 } from "../recovery-checkpoint.js";
@@ -199,6 +200,13 @@ export class LocalContentStore implements ContentStore {
 
   /** Authenticate a private original without allocating already verified bytes. */
   verifyPrivateBytes(ref: ContentRef): void {
+    if (
+      Object.getPrototypeOf(this) === LocalContentStore.prototype &&
+      this.verifyPrivateBytes ===
+        LocalContentStore.prototype.verifyPrivateBytes &&
+      deferCheckpointClosureVerification(this.root, ref)
+    )
+      return;
     const fd = this.openObject(ref);
     try {
       this.verifyDescriptor(fd, ref);

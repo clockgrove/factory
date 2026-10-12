@@ -365,7 +365,7 @@ const scopes = new AsyncLocalStorage<{
     root: string;
     key: string;
     options: GitPersistenceConfig;
-    bodies: Map<string, { ref: ContentRef; bytes: Buffer }>;
+    bodies: Map<string, { ref: ContentRef; bytes?: Buffer }>;
     bytes: number;
     closed: boolean;
     ended: boolean;
@@ -1239,7 +1239,7 @@ export async function withRecoveryCheckpointClosureReads(
     root: join(stateRoot(config.repository), "content"),
     key: verificationKey(config, options),
     options: { ...options },
-    bodies: new Map<string, { ref: ContentRef; bytes: Buffer }>(),
+    bodies: new Map<string, { ref: ContentRef; bytes?: Buffer }>(),
     bytes: 0,
     closed: false,
     ended: false,
@@ -1257,7 +1257,7 @@ export async function withRecoveryCheckpointClosureReads(
         throw new Error(
           "Checkpoint closure configuration changed during its build",
         );
-      // Cache hits defer only duplicate semantic reads. Every original is
+      // Semantic and verification-only reads share this final boundary. Every original is
       // freshly opened and checked before this closure can reach publication.
       phase.closed = true;
       const store = new LocalContentStore(phase.root);
@@ -1323,7 +1323,27 @@ export function checkpointClosureBytes(
   if (!phase) return undefined;
   assertRef(ref);
   const body = phase.bodies.get(canonical([resolve(root), ref]));
-  return body && Buffer.from(body.bytes);
+  return body?.bytes && Buffer.from(body.bytes);
+}
+
+/** Verification-only reads settle once at this build's strict final boundary. */
+export function deferCheckpointClosureVerification(
+  root: string,
+  ref: ContentRef,
+): boolean {
+  const phase = closureReadPhase(root);
+  if (!phase) return false;
+  assertRef(ref);
+  const key = canonical([resolve(root), ref]);
+  if (phase.bodies.has(key)) return true;
+  if (
+    phase.bodies.size >= phase.options.maxFiles ||
+    phase.bytes + ref.bytes > phase.options.maxBytes
+  )
+    return false;
+  phase.bodies.set(key, { ref: { ...ref } });
+  phase.bytes += ref.bytes;
+  return true;
 }
 
 export function retainCheckpointClosureBytes(
@@ -1337,7 +1357,11 @@ export function retainCheckpointClosureBytes(
   if (bytes.length !== ref.bytes || hash(bytes) !== ref.digest)
     throw new Error("Checkpoint closure body failed exact digest verification");
   const key = canonical([resolve(root), ref]);
-  if (phase.bodies.has(key)) return;
+  const prior = phase.bodies.get(key);
+  if (prior) {
+    prior.bytes ??= Buffer.from(bytes);
+    return;
+  }
   if (
     phase.bodies.size >= phase.options.maxFiles ||
     phase.bytes + bytes.length > phase.options.maxBytes

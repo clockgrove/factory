@@ -735,23 +735,29 @@ export function readAccountingRecords(
   repository: string,
   objective?: number,
 ): AccountingRecord[] {
+  return readAccountingOriginals(repository)
+    .map(({ record }) => record)
+    .filter(
+      (record) =>
+        objective === undefined || record.binding.objective === objective,
+    );
+}
+function readAccountingOriginals(
+  repository: string,
+): { record: AccountingRecord; bytes: Buffer }[] {
   if (!existsSync(root(repository))) return [];
   privateDirectory(repository);
   return readdirSync(root(repository))
     .filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
     .sort()
-    .map((name) =>
-      decodeAccountingRecord(
-        repository,
-        `accounting/${name}`,
-        privateBytes(join(root(repository), name)),
-      ),
-    )
-    .filter(
-      (record) =>
-        objective === undefined || record.binding.objective === objective,
-    )
-    .sort((left, right) => left.at.localeCompare(right.at));
+    .map((name) => {
+      const bytes = privateBytes(join(root(repository), name));
+      return {
+        record: decodeAccountingRecord(repository, `accounting/${name}`, bytes),
+        bytes,
+      };
+    })
+    .sort((left, right) => left.record.at.localeCompare(right.record.at));
 }
 export function accountingPersistenceClosure(
   repository: string,
@@ -802,9 +808,8 @@ export function accountingPersistenceClosure(
         required: true,
       });
   const store = new LocalContentStore(join(stateRoot(repository), "content"));
-  for (const record of readAccountingRecords(repository)) {
-    const bytes = Buffer.from(`${canonical(record)}\n`),
-      ref = store.putBytes(bytes, { mediaType: "application/json" }),
+  for (const { record, bytes } of readAccountingOriginals(repository)) {
+    const ref = store.putBytes(bytes, { mediaType: "application/json" }),
       path = `accounting/${ref.digest}.json`;
     files.push({ kind: "historical", path, ref, visibility: "private" });
     contentRefs.set(canonical(ref), ref);
@@ -1085,7 +1090,7 @@ export async function assertAccountingSealContent(
   runId: string,
   seal: AccountingSeal,
   readBytes: (ref: ContentRef) => Uint8Array | Promise<Uint8Array>,
-): Promise<void> {
+): Promise<readonly AccountingRecord[]> {
   assertAccountingSealBinding(repository, objective, runId, seal);
   const records = await Promise.all(
     seal.records.map(async (ref) => {
@@ -1102,4 +1107,5 @@ export async function assertAccountingSealContent(
     }),
   );
   assertSealRecords(repository, objective, runId, seal, records);
+  return records;
 }

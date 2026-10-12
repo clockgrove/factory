@@ -2004,7 +2004,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           withRecoveryCheckpointClosureReads(
             config,
             async () => {
-              assert.deepEqual(content.readBytes(cachedRef), originalContent);
+              content.verifyPrivateBytes(cachedRef);
               rmSync(cachedPath);
               return bodyClosure;
             },

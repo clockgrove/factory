@@ -13,7 +13,6 @@ import {
   type AccountingSeal,
   assertAccountingSealBinding,
   assertAccountingSealContent,
-  decodeAccountingRecord,
 } from "./accounting.js";
 import type { FactoryConfig } from "./config.js";
 import { stateRoot } from "./config.js";
@@ -815,19 +814,14 @@ async function verifyDescription(
       gaps.push(...(value.gaps as RecoveryClosureGap[]));
     } else if (root.kind === "accounting") {
       const seal = root.accounting!;
-      await assertAccountingSealContent(
+      const records = await assertAccountingSealContent(
         seal.repository,
         seal.objective,
         seal.runId,
         seal,
         (ref) => readReference(source, ref, knownStore),
       );
-      for (const ref of seal.records) {
-        const record = decodeAccountingRecord(
-          seal.repository,
-          `accounting/${ref.digest}.json`,
-          await readReference(source, ref, knownStore),
-        );
+      for (const record of records) {
         if (record.kind === "interaction") {
           const payload = record.capture.content.reference?.payload;
           if (payload) add(payload);

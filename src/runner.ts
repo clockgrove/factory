@@ -59,22 +59,23 @@ import {
   withProcessCancellation,
 } from "./process.js";
 import {
-  assertProjectQueueRunLive,
-  claimProjectQueueRun,
-  bindProjectQueueRun,
-  settleCancelledProjectQueueRun,
-  type QueueOwnerClaim,
-  settleProjectQueueRun,
-  settleFailedProjectQueueReservation,
   abandonFailedProjectQueueReservation,
-  retireUnknownProjectWithdrawal,
+  assertProjectQueueRunLive,
+  bindProjectQueueRun,
+  claimProjectQueueRun,
+  type QueueOwnerClaim,
   retireUnknownProjectAdmission,
+  retireUnknownProjectWithdrawal,
+  settleCancelledProjectQueueRun,
+  settleFailedProjectQueueReservation,
+  settleProjectQueueRun,
   settleStoppedProjectQueueRun,
 } from "./project-queue-state.js";
 import { objectiveCandidate } from "./qa.js";
 import {
   awaitCheckpointAdmission,
   isCheckpointAdmissionFailure,
+  withQueueControlVerification,
   withRecoveryCheckpointScope,
 } from "./recovery-checkpoint.js";
 import { buildRecoveryCheckpointClosure } from "./recovery-checkpoint-closure.js";
@@ -112,8 +113,8 @@ import {
   setCoordinatorMode,
 } from "./state.js";
 import {
-  acquireObjectiveLock,
   acquireInstallationLock,
+  acquireObjectiveLock,
   assertRestoredContinuationReady,
   assertRestoredInstallationDispatchReady,
   type ControllerLock,
@@ -2158,11 +2159,29 @@ export function decideObjective(
 export function controlObjective(
   ...args: Parameters<typeof controlObjectiveUnscoped>
 ): ReturnType<typeof controlObjectiveUnscoped> {
-  return checkpointController(
-    args[0],
-    () => controlObjectiveUnscoped(...args),
-    undefined,
-  );
+  const [config, request] = args;
+  const control = () =>
+    checkpointController(
+      config,
+      () => controlObjectiveUnscoped(...args),
+      undefined,
+    );
+  if (
+    request.action === "handoff" &&
+    (request.input?.failedReservationEvidence !== undefined ||
+      request.input?.retiredWithdrawalEvidence !== undefined ||
+      request.input?.retiredAdmissionEvidence !== undefined)
+  )
+    // Admission creates no effects: actual maintenance retains its exclusive
+    // installation lease, and the verifier outlives terminal/error settlement.
+    return withQueueControlVerification(
+      {
+        config,
+        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+      },
+      control,
+    );
+  return control();
 }
 
 export function runObjective(

@@ -2,52 +2,58 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { existsSync, readlinkSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  factoryAuthorityDigest,
+  stateRoot,
+  validateConfig,
+} from "../dist/config.js";
+import { LocalContentStore } from "../dist/content/local.js";
+import { diagnosticPath } from "../dist/diagnostics.js";
+import { createProjectQueuePlannedEffect } from "../dist/github-project-queue.js";
+import { UPDATE } from "../dist/github-project-queue-wire.js";
+import {
+  ownIdentity,
+  subprocessAsync,
   withCheckpointPublication,
   withProcessCancellation,
   withRegistryFiles,
-  ownIdentity,
-  subprocessAsync,
 } from "../dist/process.js";
-import { factoryAuthorityDigest, stateRoot } from "../dist/config.js";
-import { LocalContentStore } from "../dist/content/local.js";
 import {
-  acquireObjectiveLock,
+  admitQueueCommand,
+  assertQueueCommandHistory,
+  authenticateQueueOwnerReferences,
+  completeQueueCommand,
+  createQueueCommand,
+  createQueueOperation,
+  nextProjectQueueOrder,
+  performQueueCommandEffect,
+  readQueueHistory,
+  retainedQueueEntry,
+  retireUnknownProjectAdmission,
+  settleFailedProjectQueueReservation,
+} from "../dist/project-queue-state.js";
+import {
+  awaitCheckpointAdmission,
+  markCheckpointDirty,
+  readVerifiedRecoveryCheckpoint,
+  withRecoveryCheckpointControllerVerification,
+  withRecoveryCheckpointScope,
+} from "../dist/recovery-checkpoint.js";
+import { buildRecoveryCheckpointClosure } from "../dist/recovery-checkpoint-closure.js";
+import { controlObjective } from "../dist/runner.js";
+import {
   acquireInstallationLock,
+  acquireObjectiveLock,
   installationLockPath,
   objectiveLockPath,
   releaseControllerLock,
   statePath,
 } from "../dist/state-store.js";
-import {
-  authenticateQueueOwnerReferences,
-  settleFailedProjectQueueReservation,
-  readQueueHistory,
-  retainedQueueEntry,
-  createQueueOperation,
-  createQueueCommand,
-  admitQueueCommand,
-  completeQueueCommand,
-  performQueueCommandEffect,
-  assertQueueCommandHistory,
-  nextProjectQueueOrder,
-  retireUnknownProjectAdmission,
-} from "../dist/project-queue-state.js";
-import {
-  readVerifiedRecoveryCheckpoint,
-  withRecoveryCheckpointScope,
-  withRecoveryCheckpointControllerVerification,
-  markCheckpointDirty,
-  awaitCheckpointAdmission,
-} from "../dist/recovery-checkpoint.js";
-import { createProjectQueuePlannedEffect } from "../dist/github-project-queue.js";
-import { UPDATE } from "../dist/github-project-queue-wire.js";
-import { buildRecoveryCheckpointClosure } from "../dist/recovery-checkpoint-closure.js";
 
 const processUrl = new URL("../dist/process.js", import.meta.url).href;
 
@@ -139,6 +145,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
   const git = (...args) =>
     execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8" }).trim();
   git("init", "-b", "main");
+  git("remote", "add", "origin", `https://github.com/${repository}.git`);
   git(
     "-c",
     "user.name=Fixture",
@@ -164,6 +171,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
     delivery: { kind: "regular" },
     policy: { network: "off", allowedSecretNames: [] },
     queue: {
+      pollSeconds: 1,
       project: {
         repository,
         projectId: "PVT_storage",
@@ -184,6 +192,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       coalesceMs: 0,
     },
   };
+  validateConfig(config);
   const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
   const lock = acquireObjectiveLock(repository, 1);
   let lockReleased = false;
@@ -763,6 +772,84 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           maintenanceLock,
         );
       }
+      // Exercise the real stopped-controller entry and its error settlement.
+      // These deliberately incomplete descriptors claim no operator observation,
+      // provider response or permission to retire any of the preserved intents.
+      const configPath = join(directory, "maintenance-config.json"),
+        configBytes = Buffer.from(JSON.stringify(config)),
+        refusedProofPath = join(directory, "not-an-operator-proof.json"),
+        refusedProofBytes = Buffer.from("{}\n");
+      await writeFile(configPath, configBytes, { mode: 0o600 });
+      await writeFile(refusedProofPath, refusedProofBytes, { mode: 0o600 });
+      const refusedOriginal = {
+        path: refusedProofPath,
+        sha256: hash(refusedProofBytes),
+        bytes: refusedProofBytes.length,
+      };
+      const maintenanceOffset = (await readFile(diagnosticPath(repository, 0)))
+        .length;
+      // An actual rewritten retained original makes error settlement durable;
+      // the old unknown intent itself remains byte-for-byte unchanged.
+      await writeFile(join(history, `${operationId}.json`), unknownBytes);
+      markCheckpointDirty(repository, {
+        path: `project-queue-history/${operationId}.json`,
+        kind: "historical",
+      });
+      await assert.rejects(
+        controlObjective(
+          config,
+          {
+            objective: 4,
+            action: "handoff",
+            input: {
+              actor: "Fixture",
+              retiredAdmissionEvidence: {
+                schemaVersion: 1,
+                kind: "operator-retired-admission-unknown",
+                operationId: randomUUID(),
+                originalInstallation: {
+                  cli: process.execPath,
+                  configPath,
+                  configSha256: hash(configBytes),
+                  ownFileInventory: refusedOriginal,
+                },
+                originals: Object.fromEntries(
+                  [
+                    "ownerObservation",
+                    "installedPlan",
+                    "callerFailure",
+                    "sourceProtocolReview",
+                    "physicalClosure",
+                  ].map((name) => [name, refusedOriginal]),
+                ),
+              },
+            },
+          },
+          {},
+        ),
+        /Other partial effects or active owners remain held/,
+      );
+      const maintenanceEvents = (await readFile(diagnosticPath(repository, 0)))
+        .subarray(maintenanceOffset)
+        .toString("utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const maintenanceReads = maintenanceEvents.filter(
+        (event) =>
+          event.operation === "recovery-checkpoint-verify" &&
+          event.outcome === "started",
+      );
+      assert(maintenanceReads.length >= 2);
+      assert(maintenanceReads.every((event) => event.metadata.owned === true));
+      assert.equal(maintenanceReads[0].metadata.objectsRetained, false);
+      assert(
+        maintenanceReads
+          .slice(1)
+          .every((event) => event.metadata.objectsRetained),
+        "terminal error settlement reuses the same authenticated verifier",
+      );
+      assert.equal(existsSync(installationLockPath(repository)), false);
       assert.deepEqual(
         await readFile(join(history, `${operationId}.json`)),
         unknownBytes,

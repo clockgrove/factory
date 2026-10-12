@@ -14,7 +14,10 @@ import {
 } from "../dist/config.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { diagnosticPath } from "../dist/diagnostics.js";
-import { createProjectQueuePlannedEffect } from "../dist/github-project-queue.js";
+import {
+  createProjectQueuePlannedEffect,
+  resolveProjectQueuePlannedEffect,
+} from "../dist/github-project-queue.js";
 import { UPDATE } from "../dist/github-project-queue-wire.js";
 import {
   ownIdentity,
@@ -26,11 +29,13 @@ import {
 import {
   admitQueueCommand,
   assertQueueCommandHistory,
+  assertQueueOperationReferenceBodies,
   authenticateQueueOwnerReferences,
   completeQueueCommand,
   createQueueCommand,
   createQueueOperation,
   nextProjectQueueOrder,
+  parseQueueRecord,
   performQueueCommandEffect,
   readQueueHistory,
   retainedQueueEntry,
@@ -666,6 +671,383 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           /every declared fulfilled original/,
         );
       });
+      // Preserve the three-action legacy declaration above, and archive the new
+      // compound declaration as real local intent only: no remote result exists.
+      const compoundAdmission = createQueueOperation(config, {
+        action: "admit",
+        scope: "I_compound",
+        previousReceiptId: null,
+        approval: { kind: "queue-command" },
+        objective: 6,
+        issueNodeId: "I_compound",
+        bodyDigest: hash("compound approved body"),
+        order: 17,
+      });
+      compoundAdmission.metadata = JSON.stringify({
+        schemaVersion: 1,
+        kind: "admission",
+        admissionId: randomUUID(),
+        receiptId: compoundAdmission.id,
+        state: "queued",
+      });
+      const compoundCommon = {
+        operationId: compoundAdmission.id,
+        actorId: 1,
+        expectedIssue: {
+          issueNodeId: compoundAdmission.issueNodeId,
+          objective: compoundAdmission.objective,
+          bodyDigest: compoundAdmission.bodyDigest,
+        },
+        control: { metadata: null },
+      };
+      const compoundEnsure = createProjectQueuePlannedEffect(binding, {
+        ...compoundCommon,
+        requestId: randomUUID(),
+        action: "ensure-card",
+        issueNodeId: compoundAdmission.issueNodeId,
+        prior: { target: null },
+      });
+      const compoundFields = createProjectQueuePlannedEffect(binding, {
+        ...compoundCommon,
+        requestId: randomUUID(),
+        action: "set-admission-fields",
+        target: { resultOf: compoundEnsure.requestId },
+        orderFieldId: binding.orderFieldId,
+        metadataFieldId: binding.metadataFieldId,
+        order: compoundAdmission.order,
+        metadata: compoundAdmission.metadata,
+        prior: { resultOf: compoundEnsure.requestId },
+      });
+      const compoundPlan = {
+        operations: [compoundAdmission],
+        effects: [compoundEnsure, compoundFields],
+        deadlineAt: null,
+      };
+      for (const change of [
+        (value) => {
+          value.orderFieldId = binding.metadataFieldId;
+        },
+        (value) => {
+          value.metadataFieldId = binding.orderFieldId;
+        },
+        (value) => {
+          value.target.resultOf = randomUUID();
+        },
+        (value) => {
+          value.expectedIssue = undefined;
+        },
+      ]) {
+        const changed = structuredClone(compoundFields);
+        change(changed);
+        assert.throws(() => createProjectQueuePlannedEffect(binding, changed));
+      }
+      for (const change of [
+        (plan) => {
+          plan.effects.pop();
+        },
+        (plan) => {
+          plan.effects.reverse();
+        },
+        (plan) => {
+          plan.effects[1].order++;
+        },
+        (plan) => {
+          plan.effects[1].metadata = admission.metadata;
+        },
+        (plan) => {
+          plan.effects[1].expectedIssue.bodyDigest = hash("other body");
+        },
+        (plan) => {
+          plan.effects[1].prior.resultOf = randomUUID();
+        },
+        (plan) => {
+          plan.effects.push(structuredClone(plan.effects[1]));
+        },
+      ]) {
+        const changed = structuredClone(compoundPlan);
+        change(changed);
+        assert.throws(() => createQueueCommand(config, changed));
+      }
+      const compoundCommand = createQueueCommand(config, compoundPlan);
+      assert.deepEqual(
+        compoundAdmission.commandRecipe.effects.map((v) => v.action),
+        ["ensure-card", "set-admission-fields"],
+      );
+      assert.equal(nextProjectQueueOrder([compoundAdmission]), 18);
+      await admitQueueCommand(config, compoundCommand);
+      await assert.rejects(
+        completeQueueCommand(config, compoundCommand),
+        /every declared fulfilled original/,
+      );
+      await assert.rejects(
+        performQueueCommandEffect(config, {}, compoundCommand, 1),
+        /Only the next/,
+      );
+      await assert.rejects(
+        admitQueueCommand(config, compoundCommand),
+        /cannot replay/,
+      );
+      const interrupted = structuredClone(compoundAdmission);
+      interrupted.completed = true;
+      assert.throws(
+        () =>
+          assertQueueCommandHistory([interrupted], () =>
+            assert.fail("an interrupted declaration has no originals"),
+          ),
+        /every declared original response/,
+      );
+      // Pure decoder coverage below uses explicit synthetic API originals only
+      // in memory. They are never archived or called installed qualification.
+      const originals = new Map();
+      const originalRef = (value) => {
+        const bytes = Buffer.from(JSON.stringify(value));
+        const ref = {
+          digest: hash(bytes),
+          bytes: bytes.length,
+          mediaType: "application/json",
+        };
+        originals.set(ref.digest, bytes);
+        return ref;
+      };
+      const readOriginal = (ref) => originals.get(ref.digest);
+      const card = (order = null, metadata = null) => ({
+        id: "PVTI_compound",
+        isArchived: false,
+        project: { id: binding.projectId },
+        content: {
+          __typename: "Issue",
+          id: compoundAdmission.issueNodeId,
+          number: compoundAdmission.objective,
+          repository: { nameWithOwner: repository },
+        },
+        fieldValues: {
+          nodes: [
+            ...(order === null
+              ? []
+              : [
+                  {
+                    __typename: "ProjectV2ItemFieldNumberValue",
+                    field: { id: binding.orderFieldId },
+                    number: order,
+                  },
+                ]),
+            ...(metadata === null
+              ? []
+              : [
+                  {
+                    __typename: "ProjectV2ItemFieldTextValue",
+                    field: { id: binding.metadataFieldId },
+                    text: metadata,
+                  },
+                ]),
+          ],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      });
+      const concreteIntent = (step, receipts) => {
+        const resolved = resolveProjectQueuePlannedEffect(
+          binding,
+          step,
+          receipts,
+        );
+        return {
+          ...resolved.action,
+          binding,
+          actorId: step.actorId,
+          requestId: step.requestId,
+          observedAt: new Date().toISOString(),
+          request: resolved.request,
+        };
+      };
+      const ensureIntent = concreteIntent(compoundEnsure, []);
+      const ensureOriginal = {
+        addProjectV2ItemById: {
+          clientMutationId: ensureIntent.requestId,
+          item: card(),
+        },
+      };
+      const ensureReceipt = {
+        intent: ensureIntent,
+        itemId: "PVTI_compound",
+        observedAt: ensureIntent.observedAt,
+        kind: "response",
+        original: ensureOriginal,
+      };
+      const fieldsIntent = concreteIntent(compoundFields, [ensureReceipt]);
+      assert.deepEqual(fieldsIntent.request.variables, {
+        orderInput: {
+          clientMutationId: `${fieldsIntent.requestId}:order`,
+          projectId: binding.projectId,
+          itemId: "PVTI_compound",
+          fieldId: binding.orderFieldId,
+          value: { number: 17 },
+        },
+        metadataInput: {
+          clientMutationId: `${fieldsIntent.requestId}:metadata`,
+          projectId: binding.projectId,
+          itemId: "PVTI_compound",
+          fieldId: binding.metadataFieldId,
+          value: { text: compoundAdmission.metadata },
+        },
+      });
+      assert(
+        fieldsIntent.request.query.indexOf(
+          "order: updateProjectV2ItemFieldValue",
+        ) <
+          fieldsIntent.request.query.indexOf(
+            "admission: updateProjectV2ItemFieldValue",
+          ),
+      );
+      const fieldsOriginal = {
+        order: {
+          clientMutationId: `${fieldsIntent.requestId}:order`,
+          projectV2Item: card(compoundAdmission.order),
+        },
+        admission: {
+          clientMutationId: `${fieldsIntent.requestId}:metadata`,
+          projectV2Item: card(
+            compoundAdmission.order,
+            compoundAdmission.metadata,
+          ),
+        },
+      };
+      const synthetic = structuredClone(compoundAdmission);
+      synthetic.effects = [
+        {
+          intent: ensureIntent,
+          receipt: {
+            intent: ensureIntent,
+            itemId: "PVTI_compound",
+            observedAt: ensureIntent.observedAt,
+            kind: "response",
+          },
+          original: originalRef(ensureOriginal),
+        },
+        {
+          intent: fieldsIntent,
+          receipt: {
+            intent: fieldsIntent,
+            itemId: "PVTI_compound",
+            observedAt: fieldsIntent.observedAt,
+            kind: "response",
+          },
+          original: originalRef(fieldsOriginal),
+        },
+      ];
+      synthetic.completed = true;
+      assert.doesNotThrow(() =>
+        assertQueueCommandHistory([synthetic], readOriginal),
+      );
+      const stripped = structuredClone(synthetic);
+      delete stripped.commandId;
+      delete stripped.commandRecipe;
+      assert.throws(
+        () =>
+          parseQueueRecord(
+            Buffer.from(JSON.stringify(stripped)),
+            repository,
+            stripped.id,
+          ),
+        /declared command membership/,
+      );
+      assert.throws(
+        () => assertQueueCommandHistory([stripped], readOriginal),
+        /declared command membership/,
+      );
+      assert.throws(
+        () => retainedQueueEntry(config, [stripped], 6),
+        /exact authenticated explicit producer receipt/,
+      );
+      assert.equal(retainedQueueEntry(config, [synthetic], 6).order, 17);
+      for (const change of [
+        (value) => {
+          delete value.admission;
+        },
+        (value) => {
+          value.order.clientMutationId = fieldsIntent.requestId;
+        },
+        (value) => {
+          value.admission.projectV2Item.id = "PVTI_other";
+        },
+        (value) => {
+          value.order.projectV2Item.isArchived = true;
+        },
+        (value) => {
+          value.admission.projectV2Item.fieldValues.pageInfo.hasNextPage = true;
+        },
+        (value) => {
+          value.admission.projectV2Item.fieldValues.nodes.pop();
+        },
+        (value) => {
+          value.admission.projectV2Item.fieldValues.nodes[0].number++;
+        },
+        (value) => {
+          value.order.projectV2Item.content.number++;
+          value.admission.projectV2Item.content.number++;
+        },
+        (value) => {
+          value.errors = [{ message: "second write failed" }];
+        },
+      ]) {
+        const changedOriginal = structuredClone(fieldsOriginal);
+        change(changedOriginal);
+        const changed = structuredClone(synthetic);
+        changed.effects[1].original = originalRef(changedOriginal);
+        assert.throws(() => assertQueueCommandHistory([changed], readOriginal));
+      }
+      const partial = structuredClone(synthetic);
+      delete partial.completed;
+      delete partial.effects[1].receipt;
+      delete partial.effects[1].original;
+      partial.effects[1].rejectedOriginal = originalRef({
+        data: { order: fieldsOriginal.order },
+        errors: [{ message: "metadata write failed" }],
+      });
+      assert.doesNotThrow(() =>
+        assertQueueCommandHistory([partial], readOriginal),
+      );
+      assert.equal(nextProjectQueueOrder([partial]), 18);
+      assert.throws(
+        () => retainedQueueEntry(config, [partial], 6),
+        /partial or unknown/,
+      );
+      partial.completed = true;
+      assert.throws(
+        () => assertQueueCommandHistory([partial], readOriginal),
+        /every declared original response/,
+      );
+      // The old operator disposition accepts only its original three-action
+      // legacy shape; a partial compound record cannot acquire that authority.
+      const refusedRetirement = structuredClone(partial);
+      delete refusedRetirement.completed;
+      refusedRetirement.retiredAdmission = {
+        originalOperation: originalRef(refusedRetirement),
+      };
+      assert.throws(
+        () =>
+          assertQueueOperationReferenceBodies(refusedRetirement, readOriginal),
+        /two genuine ordered responses/,
+      );
+      assert.equal(
+        originals.get(partial.effects[1].rejectedOriginal.digest).toString(),
+        JSON.stringify({
+          data: { order: fieldsOriginal.order },
+          errors: [{ message: "metadata write failed" }],
+        }),
+      );
+      const compoundArchive = await readVerifiedRecoveryCheckpoint(config);
+      const compoundFile = compoundArchive.manifest.files.find(
+        (file) =>
+          file.path === `project-queue-history/${compoundAdmission.id}.json`,
+      );
+      assert.ok(compoundFile);
+      assert.deepEqual(
+        Buffer.from(await compoundArchive.readVerifiedBlob(compoundFile.ref)),
+        await readFile(join(history, `${compoundAdmission.id}.json`)),
+      );
+      assert.equal(compoundAdmission.completed, undefined);
+      assert.equal(compoundAdmission.retiredAdmission, undefined);
+      assert.deepEqual(compoundAdmission.effects, []);
       const controlOperation = createQueueOperation(config, {
         action: "control",
         scope: "control",
@@ -733,7 +1115,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         /every declared fulfilled original/,
       );
       const groupedHistory = await readQueueHistory(config);
-      assert.equal(nextProjectQueueOrder(groupedHistory), 10);
+      assert.equal(nextProjectQueueOrder(groupedHistory), 18);
       assert.equal(
         groupedHistory.find((row) => row.id === admission.id).retiredAdmission,
         undefined,

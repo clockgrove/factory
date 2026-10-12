@@ -133,7 +133,7 @@ export interface IntakeAuthorization {
   };
 }
 export const DEFAULT_QUEUE_POLL_SECONDS = 30;
-export const QUEUE_COMMAND_TIMEOUT_MS = 10_000;
+export const QUEUE_COMMAND_TIMEOUT_MS = 30_000;
 const commandScopes = new AsyncLocalStorage<{
   deadlineAt: number;
   onAcknowledgment?: (value: unknown) => void;
@@ -860,32 +860,20 @@ async function enqueueMutation(
       { target: targetProof(current.inspection) ?? null },
       control,
     );
-    const ordered = planEffect(
-      config,
-      plan,
-      operation,
-      current,
-      {
-        action: "set-order",
-        target: { resultOf: ensured.requestId },
-        fieldId: operation.binding.orderFieldId,
-        order,
-      },
-      { resultOf: ensured.requestId },
-      control,
-    );
     const admitted = planEffect(
       config,
       plan,
       operation,
       current,
       {
-        action: "set-metadata",
+        action: "set-admission-fields",
         target: { resultOf: ensured.requestId },
-        fieldId: operation.binding.metadataFieldId,
+        orderFieldId: operation.binding.orderFieldId,
+        metadataFieldId: operation.binding.metadataFieldId,
+        order,
         metadata: operation.metadata,
       },
-      { resultOf: ordered.requestId },
+      { resultOf: ensured.requestId },
       control,
     );
     completions.push({ objective, requestId: admitted.requestId });

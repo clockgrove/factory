@@ -22,6 +22,7 @@ import {
   ADD,
   INSPECT,
   UPDATE,
+  SET_ADMISSION_FIELDS,
   ITEMS,
   FIELD_BINDING,
   TARGET,
@@ -97,6 +98,26 @@ function mutationRequest(
   intent: ProjectQueueAction &
     Pick<ProjectQueueIntent, "binding" | "requestId" | "fieldId">,
 ) {
+  if (intent.action === "set-admission-fields")
+    return {
+      query: SET_ADMISSION_FIELDS,
+      variables: {
+        orderInput: {
+          clientMutationId: `${intent.requestId}:order`,
+          projectId: intent.binding.projectId,
+          itemId: intent.itemId,
+          fieldId: intent.binding.orderFieldId,
+          value: { number: intent.order },
+        },
+        metadataInput: {
+          clientMutationId: `${intent.requestId}:metadata`,
+          projectId: intent.binding.projectId,
+          itemId: intent.itemId,
+          fieldId: intent.binding.metadataFieldId,
+          value: { text: intent.metadata },
+        },
+      },
+    };
   const input =
     intent.action === "ensure-card"
       ? {
@@ -128,6 +149,31 @@ function plannedMutationRequest(
   binding: ProjectQueueBinding,
   effect: ProjectQueuePlannedEffectInput,
 ) {
+  if (effect.action === "set-admission-fields") {
+    const itemId =
+      "itemId" in effect.target
+        ? effect.target.itemId
+        : { resultOf: effect.target.resultOf };
+    return {
+      query: SET_ADMISSION_FIELDS,
+      variables: {
+        orderInput: {
+          clientMutationId: `${effect.requestId}:order`,
+          projectId: binding.projectId,
+          itemId,
+          fieldId: effect.orderFieldId,
+          value: { number: effect.order },
+        },
+        metadataInput: {
+          clientMutationId: `${effect.requestId}:metadata`,
+          projectId: binding.projectId,
+          itemId,
+          fieldId: effect.metadataFieldId,
+          value: { text: effect.metadata },
+        },
+      },
+    };
+  }
   const input =
     effect.action === "ensure-card"
       ? {
@@ -192,7 +238,9 @@ export function assertProjectQueuePlannedEffect(
         ? ["target", "fieldId", "order"]
         : effect.action === "set-metadata"
           ? ["target", "fieldId", "metadata"]
-          : []),
+          : effect.action === "set-admission-fields"
+            ? ["target", "orderFieldId", "metadataFieldId", "order", "metadata"]
+            : []),
   ]);
   if (
     !requestId(effect.operationId) ||
@@ -240,7 +288,8 @@ export function assertProjectQueuePlannedEffect(
       throw new Error("Invalid declared Project queue Issue admission");
   } else if (
     effect.action === "set-order" ||
-    effect.action === "set-metadata"
+    effect.action === "set-metadata" ||
+    effect.action === "set-admission-fields"
   ) {
     if (Object.hasOwn(prior, "target") && prior.target === null)
       throw new Error(
@@ -264,12 +313,28 @@ export function assertProjectQueuePlannedEffect(
         throw new Error("Invalid declared generated-card dependency");
     }
     if (
+      effect.action === "set-admission-fields" &&
+      (!Object.hasOwn(target, "resultOf") ||
+        !Object.hasOwn(prior, "resultOf") ||
+        target.resultOf !== prior.resultOf)
+    )
+      throw new Error(
+        "Compound admission requires its same earlier ensure original for target and prior proof",
+      );
+    if (
       effect.action === "set-order"
         ? effect.fieldId !== binding.orderFieldId ||
           !positiveInteger(effect.order) ||
           target.itemId === binding.controlItemId
-        : effect.fieldId !== binding.metadataFieldId ||
-          typeof effect.metadata !== "string"
+        : effect.action === "set-metadata"
+          ? effect.fieldId !== binding.metadataFieldId ||
+            typeof effect.metadata !== "string"
+          : effect.orderFieldId !== binding.orderFieldId ||
+            effect.metadataFieldId !== binding.metadataFieldId ||
+            !positiveInteger(effect.order) ||
+            typeof effect.metadata !== "string" ||
+            !effect.expectedIssue ||
+            target.itemId === binding.controlItemId
     )
       throw new Error("Invalid declared Project queue field update");
   } else throw new Error("Unsupported declared Project queue action");
@@ -379,13 +444,23 @@ export function resolveProjectQueuePlannedEffect(
     action =
       effect.action === "set-order"
         ? { action: effect.action, itemId, order: effect.order }
-        : { action: effect.action, itemId, metadata: effect.metadata };
+        : effect.action === "set-admission-fields"
+          ? {
+              action: effect.action,
+              itemId,
+              order: effect.order,
+              metadata: effect.metadata,
+            }
+          : { action: effect.action, itemId, metadata: effect.metadata };
   }
   const request = mutationRequest({
     ...action,
     binding,
     requestId: effect.requestId,
-    ...(effect.action === "ensure-card" ? {} : { fieldId: effect.fieldId }),
+    ...(effect.action === "ensure-card" ||
+    effect.action === "set-admission-fields"
+      ? {}
+      : { fieldId: effect.fieldId }),
   });
   return {
     action,
@@ -416,7 +491,9 @@ export function assertProjectQueueIntent(
         ? ["itemId", "order"]
         : action === "set-metadata"
           ? ["itemId", "metadata"]
-          : []),
+          : action === "set-admission-fields"
+            ? ["itemId", "order", "metadata"]
+            : []),
   ]);
   assertProjectQueueBinding(intent.binding);
   if (
@@ -447,6 +524,15 @@ export function assertProjectQueueIntent(
       intent.fieldId !== intent.binding.metadataFieldId
     )
       throw new Error("Invalid Project queue metadata target");
+  } else if (action === "set-admission-fields") {
+    if (
+      !nodeId(intent.itemId) ||
+      intent.itemId === intent.binding.controlItemId ||
+      !positiveInteger(intent.order) ||
+      typeof intent.metadata !== "string" ||
+      intent.fieldId !== undefined
+    )
+      throw new Error("Invalid Project queue compound admission target");
   } else throw new Error("Unsupported Project queue action");
   const typed = value as ProjectQueueIntent;
   if (!same(typed.request, mutationRequest(typed)))
@@ -594,6 +680,41 @@ export function assertProjectQueueWriteReceipt(
   if (receipt.kind !== "response")
     throw new Error("Project queue mutation lacks an original response");
   const original = object(receipt.original);
+  if (intent.action === "set-admission-fields") {
+    only(original, ["order", "admission"]);
+    let contentIdentity: ObjectValue | undefined;
+    for (const [alias, identity] of [
+      ["order", "order"],
+      ["admission", "metadata"],
+    ] as const) {
+      const response = object(original[alias]);
+      if (response.clientMutationId !== `${intent.requestId}:${identity}`)
+        throw new Error(
+          "Compound Project response has another subrequest identity",
+        );
+      const card = targetCard(response.projectV2Item, intent);
+      const content = object(card.content);
+      if (contentIdentity && !same(contentIdentity, content))
+        throw new Error(
+          "Compound Project response changed its Issue identity between aliases",
+        );
+      contentIdentity = content;
+      if (card.id !== receipt.itemId)
+        throw new Error("Compound Project response has another card identity");
+      const page = connection(card.fieldValues);
+      if (page.hasNextPage)
+        throw new Error("Compound Project response is truncated");
+      const fields = fieldValues(page.nodes, intent.binding);
+      if (
+        fields.order !== intent.order ||
+        (alias === "admission" && fields.metadata !== intent.metadata)
+      )
+        throw new Error(
+          "Compound Project original does not contain both requested admission values",
+        );
+    }
+    return;
+  }
   const key =
     intent.action === "ensure-card"
       ? "addProjectV2ItemById"
@@ -1204,7 +1325,9 @@ export function projectQueueReceiptTarget(
             object(receipt.original)[
               intent.action === "ensure-card"
                 ? "addProjectV2ItemById"
-                : "updateProjectV2ItemFieldValue"
+                : intent.action === "set-admission-fields"
+                  ? "admission"
+                  : "updateProjectV2ItemFieldValue"
             ],
           )[intent.action === "ensure-card" ? "item" : "projectV2Item"],
         );
@@ -1458,6 +1581,13 @@ export async function projectQueueWriteOnGitHub(
     throw new Error(
       "Project response dependencies lack a declared command step",
     );
+  if (
+    request.action === "set-admission-fields" &&
+    (!request.plannedEffect || !request.expectedIssue)
+  )
+    throw new Error(
+      "Compound admission requires its exact declared command and current Issue contents",
+    );
   const declared = request.plannedEffect
     ? resolveProjectQueuePlannedEffect(
         request.binding,
@@ -1602,11 +1732,18 @@ export async function projectQueueWriteOnGitHub(
             itemId: request.itemId,
             order: request.order,
           }
-        : {
-            action: request.action,
-            itemId: request.itemId,
-            metadata: request.metadata,
-          };
+        : request.action === "set-admission-fields"
+          ? {
+              action: request.action,
+              itemId: request.itemId,
+              order: request.order,
+              metadata: request.metadata,
+            }
+          : {
+              action: request.action,
+              itemId: request.itemId,
+              metadata: request.metadata,
+            };
   if (
     declared &&
     (!same(action, declared.action) ||
@@ -1621,7 +1758,8 @@ export async function projectQueueWriteOnGitHub(
     actorId: access.actorId,
     observedAt: new Date(time.now()).toISOString(),
     ...action,
-    ...(request.action === "ensure-card"
+    ...(request.action === "ensure-card" ||
+    request.action === "set-admission-fields"
       ? {}
       : {
           fieldId:
@@ -1801,7 +1939,9 @@ export async function projectQueueWriteOnGitHub(
     const key =
       admitted.action === "ensure-card"
         ? "addProjectV2ItemById"
-        : "updateProjectV2ItemFieldValue";
+        : admitted.action === "set-admission-fields"
+          ? "admission"
+          : "updateProjectV2ItemFieldValue";
     const response = object(object(original)[key]);
     const card = object(
       response[admitted.action === "ensure-card" ? "item" : "projectV2Item"],

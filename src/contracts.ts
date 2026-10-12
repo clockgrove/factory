@@ -1386,7 +1386,13 @@ export interface ProjectQueueExpectedTarget {
 export type ProjectQueueAction =
   | { action: "ensure-card"; issueNodeId: string }
   | { action: "set-order"; itemId: string; order: number }
-  | { action: "set-metadata"; itemId: string; metadata: string };
+  | { action: "set-metadata"; itemId: string; metadata: string }
+  | {
+      action: "set-admission-fields";
+      itemId: string;
+      order: number;
+      metadata: string;
+    };
 export type ProjectQueueIntent = ProjectQueueAction & {
   binding: ProjectQueueBinding;
   requestId: string;
@@ -1413,6 +1419,14 @@ export type ProjectQueuePlannedAction =
       target: ProjectQueueItemSelector;
       fieldId: string;
       metadata: string;
+    }
+  | {
+      action: "set-admission-fields";
+      target: ProjectQueueItemSelector;
+      orderFieldId: string;
+      metadataFieldId: string;
+      order: number;
+      metadata: string;
     };
 export type ProjectQueuePlannedEffectInput = ProjectQueuePlannedAction & {
   operationId: string;
@@ -1430,7 +1444,7 @@ export type ProjectQueuePlannedEffectInput = ProjectQueuePlannedAction & {
 };
 /** Immutable command obligation; it grants no permission to replay an effect. */
 export type ProjectQueuePlannedEffect = ProjectQueuePlannedEffectInput & {
-  /** Only input.itemId may contain the explicit resultOf selector. */
+  /** Only declared itemId inputs may contain the explicit resultOf selector. */
   request: { query: string; variables: Record<string, unknown> };
 };
 export type ProjectQueueWriteRequest = ProjectQueueAction & {

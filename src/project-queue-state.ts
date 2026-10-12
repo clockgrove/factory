@@ -1086,6 +1086,13 @@ export function parseQueueRecord(
       assertProjectQueueIntent(effect.intent);
       const intent = effect.intent as ProjectQueueIntent;
       if (
+        intent.action === "set-admission-fields" &&
+        (!row.commandId || row.action !== "admit")
+      )
+        throw new Error(
+          "Compound admission requires its declared command membership",
+        );
+      if (
         JSON.stringify(intent.binding) !== JSON.stringify(binding) ||
         seen.has(intent.requestId)
       )
@@ -2713,7 +2720,10 @@ function completedQueueOperation(
   history: QueueRecord[],
 ): boolean {
   if (!operation.completed) return false;
-  if (!operation.commandId) return true;
+  if (!operation.commandId)
+    return !operation.effects.some(
+      (effect) => effect.intent.action === "set-admission-fields",
+    );
   const owner = history.find(
     (row): row is QueueOperation =>
       row.kind === "project-queue-operation" && row.id === operation.commandId,
@@ -2773,7 +2783,11 @@ function producer(
     );
   const last = record.effects.at(-1);
   if (
-    last?.intent.action !== "set-metadata" ||
+    !last ||
+    (last.intent.action !== "set-metadata" &&
+      (last.intent.action !== "set-admission-fields" ||
+        record.action !== "admit" ||
+        last.intent.order !== record.order)) ||
     last.intent.itemId !== itemId ||
     last.intent.metadata !== text ||
     last.receipt?.kind !== "response"
@@ -3013,7 +3027,10 @@ export function retainedQueueEntry(
     !record.metadata ||
     !record.issueNodeId ||
     !last ||
-    last.intent.action !== "set-metadata" ||
+    (last.intent.action !== "set-metadata" &&
+      (last.intent.action !== "set-admission-fields" ||
+        record.action !== "admit" ||
+        last.intent.order !== record.order)) ||
     !last.intent.itemId ||
     last.receipt?.kind !== "response"
   )
@@ -3042,10 +3059,16 @@ export function nextProjectQueueOrder(history: QueueRecord[]): number {
             ? [record.order!]
             : []),
           ...record.effects.flatMap((effect) =>
-            effect.intent.action === "set-order" ? [effect.intent.order] : [],
+            effect.intent.action === "set-order" ||
+            effect.intent.action === "set-admission-fields"
+              ? [effect.intent.order]
+              : [],
           ),
           ...(record.commandRecipe?.effects.flatMap((effect) =>
-            effect.action === "set-order" ? [effect.order] : [],
+            effect.action === "set-order" ||
+            effect.action === "set-admission-fields"
+              ? [effect.order]
+              : [],
           ) ?? []),
         ]
       : [],
@@ -3272,6 +3295,12 @@ function assertCommandRecipe(
       (step.action === "set-metadata" &&
         (step.metadata !== operation.metadata ||
           step.fieldId !== first.binding.metadataFieldId)) ||
+      (step.action === "set-admission-fields" &&
+        (operation.action !== "admit" ||
+          step.order !== operation.order ||
+          step.metadata !== operation.metadata ||
+          step.orderFieldId !== first.binding.orderFieldId ||
+          step.metadataFieldId !== first.binding.metadataFieldId)) ||
       (operation.action === "control" &&
         (step.action !== "set-metadata" ||
           !("itemId" in step.target) ||
@@ -3290,16 +3319,16 @@ function assertCommandRecipe(
     const steps = [...previous.values()].filter(
       (step) => step.operationId === operation.id,
     );
+    const actualActions = steps.map((step) => step.action);
     const actions =
       operation.action === "admit"
-        ? ["ensure-card", "set-order", "set-metadata"]
+        ? actualActions.includes("set-admission-fields")
+          ? ["ensure-card", "set-admission-fields"]
+          : ["ensure-card", "set-order", "set-metadata"]
         : operation.action === "roadmap"
           ? ["ensure-card"]
           : ["set-metadata"];
-    if (
-      JSON.stringify(steps.map((step) => step.action)) !==
-      JSON.stringify(actions)
-    )
+    if (JSON.stringify(actualActions) !== JSON.stringify(actions))
       throw new Error(
         "Command must declare every admission effect and operation",
       );
@@ -3318,7 +3347,17 @@ export function assertQueueCommandHistory(
       .map((row) => [row.id, row]),
   );
   for (const row of operations.values()) {
-    if (!row.commandId) continue;
+    if (!row.commandId) {
+      if (
+        row.effects.some(
+          (effect) => effect.intent.action === "set-admission-fields",
+        )
+      )
+        throw new Error(
+          "Compound admission requires its declared command membership",
+        );
+      continue;
+    }
     const owner = operations.get(row.commandId);
     if (!owner?.commandRecipe)
       throw new Error("Command member lacks its exact original recipe owner");
@@ -3406,6 +3445,16 @@ export function assertQueueCommandHistory(
         original: JSON.parse(Buffer.from(bytes).toString("utf8")),
       };
       assertProjectQueueWriteReceipt(receipt);
+      if (step.action === "set-admission-fields") {
+        const target = projectQueueReceiptTarget(receipt);
+        if (
+          target.issueNodeId !== step.expectedIssue?.issueNodeId ||
+          target.objective !== step.expectedIssue?.objective
+        )
+          throw new Error(
+            "Compound admission original differs from its approved Issue identity",
+          );
+      }
       receipts.push(receipt);
     }
     for (const member of members)

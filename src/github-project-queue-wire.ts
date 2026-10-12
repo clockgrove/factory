@@ -23,6 +23,15 @@ export const UPDATE = `mutation FactoryQueueSetField($input:UpdateProjectV2ItemF
     clientMutationId projectV2Item { ${CARD} }
   }
 }`;
+/** Fixed sequential field updates; partial responses never imply a transaction. */
+export const SET_ADMISSION_FIELDS = `mutation FactoryQueueSetAdmissionFields($orderInput:UpdateProjectV2ItemFieldValueInput!,$metadataInput:UpdateProjectV2ItemFieldValueInput!) {
+  order: updateProjectV2ItemFieldValue(input:$orderInput) {
+    clientMutationId projectV2Item { ${CARD} }
+  }
+  admission: updateProjectV2ItemFieldValue(input:$metadataInput) {
+    clientMutationId projectV2Item { ${CARD} }
+  }
+}`;
 export const BINDING = `query FactoryQueueBinding($project:ID!,$metadata:ID!,$order:ID!) {
   viewer { databaseId }
   project:node(id:$project) { __typename ... on ProjectV2 {
@@ -128,4 +137,8 @@ export function isProjectQueueReadQuery(query: string): boolean {
   const count = Number(match?.[1]);
   return count <= 100 && count >= 1 && query === issueBatchQuery(count);
 }
-export const QUEUE_WRITE_QUERIES = Object.freeze([ADD, UPDATE]);
+export const QUEUE_WRITE_QUERIES = Object.freeze([
+  ADD,
+  UPDATE,
+  SET_ADMISSION_FIELDS,
+]);

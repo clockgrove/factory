@@ -338,6 +338,7 @@ interface QueueVerificationContext {
   pendingReferenceBytes: number;
   pendingReferenceEntries: number;
   objects?: Map<string, string>;
+  objectBytes: number;
   lineages: Map<string, CachedQueueLineage>;
   lineageBytes: number;
   reservationPrefixes: Map<string, string>;
@@ -1155,6 +1156,7 @@ export function withQueueControlVerification<T>(
       lineageBytes: 0,
       reservationPrefixes: new Map(),
       reservationPrefixBytes: 0,
+      objectBytes: 0,
     };
     let result: T | undefined;
     let failure: unknown;
@@ -1592,30 +1594,61 @@ export function retainRecoveryCheckpointReferences(
   ]);
   const value = JSON.stringify(summary);
   const charge = Buffer.byteLength(key) + Buffer.byteLength(value);
-  if (charge > verificationMetadataBudget(phase.options)) return;
   if (phase.pendingReferences.has(key) || context.content.has(key)) return;
-  if (
-    context.summaries.size +
-      context.content.size +
-      context.pendingReferenceEntries >=
-      phase.options.maxFiles ||
-    context.summaryBytes +
-      context.contentBytes +
-      context.pendingReferenceBytes +
-      charge >
-      verificationMetadataBudget(phase.options)
-  )
-    clearContentVerification(context);
-  if (
-    context.pendingReferenceBytes + charge >
-      verificationMetadataBudget(phase.options) ||
-    context.pendingReferenceEntries >= phase.options.maxFiles
-  )
-    return;
+  if (!reserveVerificationMetadata(context, phase.options, charge)) return;
   phase.pendingReferences.set(key, value);
   phase.pendingReferenceBytes += charge;
   context.pendingReferenceBytes += charge;
   context.pendingReferenceEntries++;
+}
+
+function verificationMetadataBytes(context: QueueVerificationContext): number {
+  return (
+    context.summaryBytes +
+    context.contentBytes +
+    context.lineageBytes +
+    context.reservationPrefixBytes +
+    context.pendingReferenceBytes +
+    (context.objects ? context.objectBytes : 0)
+  );
+}
+
+function verificationMetadataEntries(
+  context: QueueVerificationContext,
+): number {
+  return (
+    context.summaries.size +
+    context.content.size +
+    context.lineages.size +
+    context.reservationPrefixes.size +
+    context.pendingReferenceEntries +
+    (context.objects?.size ?? 0)
+  );
+}
+
+function reserveVerificationMetadata(
+  context: QueueVerificationContext,
+  options: GitPersistenceConfig,
+  charge: number,
+  priorCharge = 0,
+  replacement = false,
+): boolean {
+  const budget = verificationMetadataBudget(options);
+  if (charge > budget) return false;
+  if (
+    verificationMetadataBytes(context) - priorCharge + charge > budget ||
+    verificationMetadataEntries(context) + (replacement ? 0 : 1) >
+      options.maxFiles
+  ) {
+    clearContentVerification(context);
+    priorCharge = 0;
+    replacement = false;
+  }
+  return (
+    verificationMetadataBytes(context) - priorCharge + charge <= budget &&
+    verificationMetadataEntries(context) + (replacement ? 0 : 1) <=
+      options.maxFiles
+  );
 }
 
 function clearContentVerification(context: QueueVerificationContext): void {
@@ -1623,13 +1656,10 @@ function clearContentVerification(context: QueueVerificationContext): void {
   context.summaryBytes = 0;
   context.content.clear();
   context.contentBytes = 0;
-  const phase = scopes.getStore()?.closureReads;
-  if (phase?.verification === context) {
-    context.pendingReferenceBytes -= phase.pendingReferenceBytes;
-    context.pendingReferenceEntries -= phase.pendingReferences.size;
-    phase.pendingReferences.clear();
-    phase.pendingReferenceBytes = 0;
-  }
+  context.lineages.clear();
+  context.lineageBytes = 0;
+  context.reservationPrefixes.clear();
+  context.reservationPrefixBytes = 0;
 }
 
 function retainContentVerification(
@@ -1639,23 +1669,17 @@ function retainContentVerification(
   identity: string,
 ): void {
   const charge = Buffer.byteLength(key) + Buffer.byteLength(identity);
-  if (charge > verificationMetadataBudget(options)) return;
+  const prior = context.content.get(key);
+  const priorCharge =
+    prior === undefined ? 0 : Buffer.byteLength(key) + Buffer.byteLength(prior);
   if (
-    context.summaries.size +
-      context.content.size +
-      context.pendingReferenceEntries >=
-      options.maxFiles ||
-    context.summaryBytes +
-      context.contentBytes +
-      context.pendingReferenceBytes +
-      charge >
-      verificationMetadataBudget(options)
-  )
-    clearContentVerification(context);
-  if (
-    context.pendingReferenceBytes + charge >
-      verificationMetadataBudget(options) ||
-    context.pendingReferenceEntries >= options.maxFiles
+    !reserveVerificationMetadata(
+      context,
+      options,
+      charge,
+      priorCharge,
+      prior !== undefined,
+    )
   )
     return;
   const previous = context.content.get(key);
@@ -2870,9 +2894,9 @@ function verificationKey(
   });
 }
 function verificationMetadataBudget(options: GitPersistenceConfig): number {
-  // Three bounded metadata collections share at most 8 MiB, within the
-  // existing archive allowance. No full manifests/bodies survive a read.
-  return Math.floor(Math.min(options.maxBytes, 8 * 1024 * 1024) / 3);
+  // One encoded metadata pool shares the existing 8 MiB allowance.
+  // Material fingerprints and pending facts count; no body bytes survive a read.
+  return Math.min(options.maxBytes, 8 * 1024 * 1024);
 }
 function historicalManifestSummary(
   bytes: Buffer,
@@ -2922,23 +2946,23 @@ function historicalManifestSummary(
   ) {
     const charge =
       Buffer.byteLength(key) + Buffer.byteLength(canonical(summary));
+    const prior = context.summaries.get(key);
+    const priorCharge = prior
+      ? Buffer.byteLength(key) + Buffer.byteLength(canonical(prior))
+      : 0;
     if (
-      context.summaries.size +
-        context.content.size +
-        context.pendingReferenceEntries >=
-        options.maxFiles ||
-      context.summaryBytes +
-        context.contentBytes +
-        context.pendingReferenceBytes +
-        charge >
-        verificationMetadataBudget(options)
-    )
-      clearContentVerification(context);
-    if (
-      charge + context.pendingReferenceBytes <=
-        verificationMetadataBudget(options) &&
-      context.pendingReferenceEntries < options.maxFiles
+      reserveVerificationMetadata(
+        context,
+        options,
+        charge,
+        priorCharge,
+        Boolean(prior),
+      )
     ) {
+      const previous = context.summaries.get(key);
+      if (previous)
+        context.summaryBytes -=
+          Buffer.byteLength(key) + Buffer.byteLength(canonical(previous));
       context.summaries.set(key, summary);
       context.summaryBytes += charge;
     }
@@ -3097,7 +3121,7 @@ function observeQueueAncestry(
   const descriptions = new Map<string, QueueBodyDescription>();
   let memoBytes = 0;
   const budget = Math.min(
-    verificationMetadataBudget(options),
+    Math.floor(verificationMetadataBudget(options) / 3),
     Math.max(0, options.maxBytes - manifestTransportBytes),
   );
   const retain = (charge: number) => {
@@ -3801,18 +3825,20 @@ function retainQueueLineage(
   entry: CachedQueueLineage,
 ): void {
   const charge = Buffer.byteLength(key) + Buffer.byteLength(canonical(entry));
-  if (charge > verificationMetadataBudget(options)) return;
+  const previous = context.lineages.get(key);
+  const priorCharge = previous
+    ? Buffer.byteLength(key) + Buffer.byteLength(canonical(previous))
+    : 0;
   if (
-    context.lineages.size + context.reservationPrefixes.size >=
-      options.maxFiles ||
-    context.lineageBytes + context.reservationPrefixBytes + charge >
-      verificationMetadataBudget(options)
-  ) {
-    context.lineages.clear();
-    context.lineageBytes = 0;
-    context.reservationPrefixes.clear();
-    context.reservationPrefixBytes = 0;
-  }
+    !reserveVerificationMetadata(
+      context,
+      options,
+      charge,
+      priorCharge,
+      Boolean(previous),
+    )
+  )
+    return;
   const prior = context.lineages.get(key);
   if (prior)
     context.lineageBytes -=
@@ -3844,7 +3870,7 @@ function scanVerifierObjects(
       stat.ctimeNs,
     ].join(":");
     charge += Buffer.byteLength(name) + Buffer.byteLength(identity);
-    if (charge <= verificationMetadataBudget(options))
+    if (charge <= Math.floor(verificationMetadataBudget(options) / 3))
       files.set(name, identity);
     if (stat.isDirectory()) {
       for (const child of readdirSync(path).sort())
@@ -3853,7 +3879,10 @@ function scanVerifierObjects(
     else throw new Error("Queue verifier has unsupported object storage");
   };
   visit(join(directory, "objects"));
-  if (charge > verificationMetadataBudget(options) || bytes > options.maxBytes)
+  if (
+    charge > Math.floor(verificationMetadataBudget(options) / 3) ||
+    bytes > options.maxBytes
+  )
     return undefined; // Optional cache miss, never a new archive/read allowance.
   return files;
 }
@@ -4052,7 +4081,31 @@ async function freshArchiveOwnedStrict(
           tip,
         ]);
       }
-      context.objects = objects;
+      const objectBytes = objects
+        ? [...objects].reduce(
+            (sum, [key, value]) =>
+              sum + Buffer.byteLength(key) + Buffer.byteLength(value),
+            0,
+          )
+        : 0;
+      if (
+        verificationMetadataBytes(context) -
+          (context.objects ? context.objectBytes : 0) +
+          objectBytes >
+          verificationMetadataBudget(options) ||
+        verificationMetadataEntries(context) -
+          (context.objects?.size ?? 0) +
+          (objects?.size ?? 0) >
+          options.maxFiles
+      )
+        clearContentVerification(context);
+      const fits =
+        context.pendingReferenceBytes + objectBytes <=
+          verificationMetadataBudget(options) &&
+        context.pendingReferenceEntries + (objects?.size ?? 0) <=
+          options.maxFiles;
+      context.objects = fits ? objects : undefined;
+      context.objectBytes = fits ? objectBytes : 0;
     }
     if (context && context.key !== verificationKey(config, options))
       throw new Error(
@@ -4205,18 +4258,19 @@ async function freshArchiveOwnedStrict(
         );
       if (context?.objects) {
         const charge = Buffer.byteLength(key) + Buffer.byteLength(tip);
+        const prior = context.reservationPrefixes.get(key);
+        const priorCharge = prior
+          ? Buffer.byteLength(key) + Buffer.byteLength(prior)
+          : 0;
         if (
-          context.lineageBytes + context.reservationPrefixBytes + charge >
-            verificationMetadataBudget(options) ||
-          context.lineages.size + context.reservationPrefixes.size >=
-            options.maxFiles
+          reserveVerificationMetadata(
+            context,
+            options,
+            charge,
+            priorCharge,
+            Boolean(prior),
+          )
         ) {
-          context.lineages.clear();
-          context.lineageBytes = 0;
-          context.reservationPrefixes.clear();
-          context.reservationPrefixBytes = 0;
-        }
-        if (charge <= verificationMetadataBudget(options)) {
           const previous = context.reservationPrefixes.get(key);
           if (previous)
             context.reservationPrefixBytes -=

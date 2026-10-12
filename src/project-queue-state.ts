@@ -4,22 +4,27 @@ import {
   constants,
   existsSync,
   fsyncSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
+  readlinkSync,
   readFileSync,
   realpathSync,
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   type FactoryConfig,
+  factoryConfigDigest,
+  validateConfig,
   factoryAuthorityDigest,
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
+import { decodeAccountingRecord } from "./accounting.js";
 import type {
   ContentRef,
   GitHubGateway,
@@ -39,8 +44,10 @@ import {
   hasPrivateCheckpointScope,
   markCheckpointDirty,
   type RecoveryCheckpointClosure,
+  type RecoveryCheckpointBinding,
   readVerifiedRecoveryCheckpoint,
   type QueueCheckpointWitness,
+  type VerifiedQueueReservationLineage,
 } from "./recovery-checkpoint.js";
 import type { ContinuationState } from "./state.js";
 import {
@@ -48,6 +55,7 @@ import {
   continuationConfigurationMatches,
   parsePortableContinuation,
   readControllerOwner,
+  readContinuation,
   objectiveLockPath,
   installationLockPath,
   statePath,
@@ -55,8 +63,16 @@ import {
   type ControllerLock,
 } from "./state-store.js";
 import { canHandoff } from "./runner/ownership.js";
+import { objectiveWorkflowRecipeSelector } from "./workflow-recipes.js";
 import { isExecutionState, isPreparationState } from "./state.js";
-import { linuxProcessIdentity } from "./process.js";
+import {
+  assertProcessActive,
+  hasUnresolvedSubprocesses,
+  linuxProcessIdentity,
+  ownIdentity,
+  processGroupExists,
+  subprocessAsync,
+} from "./process.js";
 
 export const queueDigest = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
@@ -157,6 +173,8 @@ export interface QueueOwnerClaim {
   objective: number;
   bodyDigest: string;
   ownerTokenDigest: string;
+  /** Original creating controller; unavailable in historical claims. */
+  ownerProcess?: { pid: number; startTime: string; namespace: string };
   at: string;
   deadlineAt: string | null;
   priorRunId?: string;
@@ -164,10 +182,272 @@ export interface QueueOwnerClaim {
   settled?: {
     at: string;
     runId?: string;
-    disposition: "quiescent";
+    disposition: "quiescent" | "abandoned-unaccepted";
     cancellation?: QueueCancellationProof;
     handoff?: QueueStoppedHandoffProof;
+    reservationFailure?: {
+      schemaVersion: 1;
+      originalClaim: ContentRef;
+      failure: ContentRef;
+    };
+    abandonment?: QueueReservationAbandonmentProof;
   };
+}
+
+/** Explicit operator evidence, never an inferred historical controller receipt. */
+export interface QueueReservationAbandonmentProof {
+  schemaVersion: 1;
+  originalClaim: ContentRef;
+  operatorDecision: ContentRef;
+  ownerObservation: ContentRef;
+  sourceInventory: ContentRef;
+  sourceProtocolReview: ContentRef;
+  sourceModules: { path: string; ref: ContentRef }[];
+  failureObservation: ContentRef;
+  checkpoints: VerifiedQueueReservationLineage["checkpoints"];
+  generations: QueueCheckpointWitness[];
+  lineageOriginals: ContentRef[];
+  originalProducerIdentity: "recorded" | "unavailable";
+}
+
+interface OperatorOriginal {
+  path: string;
+  sha256: string;
+  bytes: number;
+}
+export interface FailedReservationOwnerEvidence {
+  schemaVersion: 1;
+  kind: "operator-observed-pre-snapshot-failure";
+  claimId: string;
+  originalInstallation: {
+    cli: string;
+    configPath: string;
+    configSha256: string;
+    ownFileInventory: OperatorOriginal;
+  };
+  originals: {
+    ownerObservation: OperatorOriginal;
+    sourceProtocolReview: OperatorOriginal;
+    failureObservation: OperatorOriginal;
+  };
+  sourceProtocol: "canonical-snapshot-before-provider-v1";
+}
+
+function assertReservationOperatorOriginal(
+  value: unknown,
+): asserts value is OperatorOriginal {
+  const row = object(value);
+  only(row, ["path", "sha256", "bytes"]);
+  if (
+    typeof row.path !== "string" ||
+    !isAbsolute(row.path) ||
+    !digest(row.sha256) ||
+    !Number.isSafeInteger(row.bytes) ||
+    Number(row.bytes) < 1
+  )
+    throw new Error(
+      "Reservation recovery requires a complete private original",
+    );
+}
+function readReservationOperatorOriginal(value: OperatorOriginal): Buffer {
+  assertReservationOperatorOriginal(value);
+  const bytes = privateBytes(value.path);
+  if (
+    bytes.length !== value.bytes ||
+    createHash("sha256").update(bytes).digest("hex") !== value.sha256
+  )
+    throw new Error("Reservation operator original bytes changed");
+  new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return bytes;
+}
+/** This maintenance contract supports one unambiguous registered supervisor argv. */
+function reservationSupervisorCommand(
+  unit: string,
+  cli: string,
+  configPath: string,
+): {
+  node: string;
+  argv: string;
+} {
+  if (
+    [cli, configPath].some(
+      (path) => !isAbsolute(path) || /[\s;{}"\\]/.test(path),
+    )
+  )
+    throw new Error("Original supervisor paths are ambiguous or unsupported");
+  const executions = unit
+    .split("\n")
+    .filter((line) => line.startsWith("ExecStart="));
+  const execution =
+    executions.length === 1
+      ? executions[0]!.match(
+          /^ExecStart=\{ path=([^ ;{}]+) ; argv\[\]=([^;]+) ; ignore_errors=no ;/,
+        )
+      : undefined;
+  const node = execution?.[1],
+    argv = execution?.[2];
+  if (
+    !node ||
+    !isAbsolute(node) ||
+    /[\s"\\]/.test(node) ||
+    argv !== `${node} ${cli} supervisor serve --config ${configPath}`
+  )
+    throw new Error(
+      "Original service must bind the exact registered supervisor, CLI and configuration",
+    );
+  return { node, argv };
+}
+function reservationGuardHolder(
+  text: string,
+  ownerPid: number,
+  repository: string,
+): number {
+  const prefix = `node[${ownerPid}]: Factory: Factory's lock guard ${join(stateRoot(repository), "recovery", ".publication.guard")} is held by process `;
+  const lines = text.split("\n").filter((line) => line.includes(prefix));
+  const suffix =
+    lines.length === 1
+      ? lines[0]!.slice(lines[0]!.indexOf(prefix) + prefix.length)
+      : "";
+  const pid = /^\d+$/.test(suffix) ? Number(suffix) : 0;
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid === ownerPid)
+    throw new Error(
+      "The uniquely attributable original publication guard holder is unavailable",
+    );
+  return pid;
+}
+function reservationObservedOwner(
+  raw: unknown,
+  claim: QueueOwnerClaim,
+  cli: string,
+  configPath: string,
+): {
+  pid: number;
+  startTime: string;
+  namespace: string;
+  tokenDigest: string;
+  cgroup: string;
+  command: { node: string; argv: string };
+} {
+  const observation = object(raw),
+    owner = object(observation.owner);
+  if (
+    !Number.isSafeInteger(owner.pid) ||
+    Number(owner.pid) < 1 ||
+    typeof owner.startTime !== "string" ||
+    !/^\d+$/.test(owner.startTime) ||
+    !uuid(owner.token) ||
+    queueDigest(owner.token) !== claim.ownerTokenDigest ||
+    typeof observation.namespace !== "string" ||
+    !/^pid:\[\d+\]$/.test(observation.namespace) ||
+    !date(observation.recordedAt) ||
+    Date.parse(String(observation.recordedAt)) > Date.parse(claim.at) ||
+    typeof observation.unit !== "string" ||
+    !observation.unit.includes(`MainPID=${owner.pid}\n`)
+  )
+    throw new Error(
+      "Original operator observation does not bind the actual claim owner and installed runtime",
+    );
+  const command = reservationSupervisorCommand(
+    observation.unit,
+    cli,
+    configPath,
+  );
+  const cgroup = observation.unit.match(/^ControlGroup=(.+)$/m)?.[1];
+  if (!cgroup || !cgroup.startsWith("/user.slice/") || cgroup.includes(".."))
+    throw new Error("Original service resource identity is unavailable");
+  const bound = {
+    pid: Number(owner.pid),
+    startTime: owner.startTime,
+    namespace: observation.namespace,
+  };
+  if (
+    claim.ownerProcess &&
+    JSON.stringify(bound) !== JSON.stringify(claim.ownerProcess)
+  )
+    throw new Error(
+      "Operator evidence differs from the recorded original producing process",
+    );
+  return { ...bound, tokenDigest: claim.ownerTokenDigest, cgroup, command };
+}
+function assertReservationSourceReview(
+  reviewValue: unknown,
+  inventoryValue: unknown,
+  inventoryDigest: string,
+  claim: QueueOwnerClaim,
+): void {
+  const review = object(reviewValue);
+  if (
+    review.schemaVersion !== 1 ||
+    review.kind !== "operator-source-protocol-review" ||
+    review.sourceProtocol !== "canonical-snapshot-before-provider-v1" ||
+    review.route !== "registered-supervisor-serve-runObjective" ||
+    review.workflowRecipe !== "absent" ||
+    review.repository !== claim.repository ||
+    review.objective !== claim.objective ||
+    review.claimId !== claim.id ||
+    review.bodyDigest !== claim.bodyDigest ||
+    review.authorityDigest !== claim.authorityDigest ||
+    review.inventorySha256 !== inventoryDigest ||
+    typeof review.reviewer !== "string" ||
+    !review.reviewer ||
+    !Array.isArray(review.modules) ||
+    !Array.isArray(inventoryValue)
+  )
+    throw new Error(
+      "Explicit operator source-protocol review does not bind the original claim, scenario and installed bytes",
+    );
+  const inventory = new Map<
+    string,
+    { path: string; sha256: string; bytes: number }
+  >();
+  for (const raw of inventoryValue) {
+    const row = object(raw);
+    only(row, ["path", "sha256", "bytes"]);
+    if (
+      typeof row.path !== "string" ||
+      isAbsolute(row.path) ||
+      row.path
+        .split("/")
+        .some((part) => !part || part === "." || part === "..") ||
+      !digest(row.sha256) ||
+      !Number.isSafeInteger(row.bytes) ||
+      Number(row.bytes) < 0 ||
+      inventory.has(row.path)
+    )
+      throw new Error("Original source inventory is incomplete or ambiguous");
+    inventory.set(
+      row.path,
+      row as unknown as { path: string; sha256: string; bytes: number },
+    );
+  }
+  const reviewed = new Set<string>();
+  for (const raw of review.modules) {
+    const module = object(raw),
+      row =
+        typeof module.path === "string"
+          ? inventory.get(module.path)
+          : undefined;
+    if (
+      !row ||
+      module.sha256 !== row.sha256 ||
+      module.bytes !== row.bytes ||
+      reviewed.has(row.path)
+    )
+      throw new Error(
+        "Protocol review differs from the complete original source inventory",
+      );
+    reviewed.add(row.path);
+  }
+  if (
+    [
+      "dist/project-queue-state.js",
+      "dist/runner.js",
+      "dist/runner/planning.js",
+    ].some((path) => !reviewed.has(path))
+  )
+    throw new Error(
+      "The original claim and canonical provider-admission protocol were not reviewed",
+    );
 }
 /** A new recovery owner proves only local cessation of the original stopped planning run. */
 export interface QueueStoppedHandoffProof {
@@ -294,6 +574,7 @@ export function parseQueueRecord(
       "objective",
       "bodyDigest",
       "ownerTokenDigest",
+      "ownerProcess",
       "at",
       "deadlineAt",
       "priorRunId",
@@ -311,6 +592,19 @@ export function parseQueueRecord(
       (row.priorRunId !== undefined && !uuid(row.priorRunId))
     )
       throw new Error("Invalid Project queue owner identity");
+    if (row.ownerProcess !== undefined) {
+      const owner = object(row.ownerProcess);
+      only(owner, ["pid", "startTime", "namespace"]);
+      if (
+        !Number.isSafeInteger(owner.pid) ||
+        Number(owner.pid) < 1 ||
+        typeof owner.startTime !== "string" ||
+        !/^\d+$/.test(owner.startTime) ||
+        typeof owner.namespace !== "string" ||
+        !/^pid:\[\d+\]$/.test(owner.namespace)
+      )
+        throw new Error("Invalid original Project controller identity");
+    }
     if (row.runBinding !== undefined) {
       const binding = object(row.runBinding);
       only(binding, ["schemaVersion", "runId", "initialSnapshot"]);
@@ -323,13 +617,116 @@ export function parseQueueRecord(
     }
     if (row.settled !== undefined) {
       const settled = object(row.settled);
-      only(settled, ["at", "runId", "disposition", "cancellation", "handoff"]);
+      only(settled, [
+        "at",
+        "runId",
+        "disposition",
+        "cancellation",
+        "handoff",
+        "reservationFailure",
+        "abandonment",
+      ]);
       if (
         !date(settled.at) ||
-        settled.disposition !== "quiescent" ||
+        !["quiescent", "abandoned-unaccepted"].includes(
+          String(settled.disposition),
+        ) ||
         (settled.runId !== undefined && !uuid(settled.runId))
       )
         throw new Error("Invalid Project queue owner settlement");
+      if (
+        (settled.disposition === "abandoned-unaccepted") !==
+        (settled.abandonment !== undefined)
+      )
+        throw new Error(
+          "Permanent reservation abandonment requires its explicit operator proof",
+        );
+      if (settled.abandonment !== undefined) {
+        const proof = object(settled.abandonment);
+        only(proof, [
+          "schemaVersion",
+          "originalClaim",
+          "operatorDecision",
+          "ownerObservation",
+          "sourceInventory",
+          "sourceProtocolReview",
+          "sourceModules",
+          "failureObservation",
+          "checkpoints",
+          "generations",
+          "lineageOriginals",
+          "originalProducerIdentity",
+        ]);
+        const checkpoints = object(proof.checkpoints);
+        only(checkpoints, ["before", "claimed", "current"]);
+        if (
+          proof.schemaVersion !== 1 ||
+          row.priorRunId !== undefined ||
+          row.runBinding !== undefined ||
+          settled.runId !== undefined ||
+          settled.handoff !== undefined ||
+          settled.cancellation !== undefined ||
+          settled.reservationFailure !== undefined ||
+          !["recorded", "unavailable"].includes(
+            String(proof.originalProducerIdentity),
+          ) ||
+          ![
+            proof.originalClaim,
+            proof.operatorDecision,
+            proof.ownerObservation,
+            proof.sourceInventory,
+            proof.sourceProtocolReview,
+            proof.failureObservation,
+          ].every(ref) ||
+          !Array.isArray(proof.generations) ||
+          !proof.generations.length ||
+          !Array.isArray(proof.lineageOriginals) ||
+          !proof.lineageOriginals.every(ref) ||
+          !Array.isArray(proof.sourceModules) ||
+          !proof.sourceModules.length ||
+          Date.parse(String(settled.at)) < Date.parse(String(row.at))
+        )
+          throw new Error(
+            "Invalid permanently unaccepted reservation disposition",
+          );
+        for (const raw of proof.sourceModules) {
+          const module = object(raw);
+          only(module, ["path", "ref"]);
+          if (typeof module.path !== "string" || !ref(module.ref))
+            throw new Error("Invalid original reviewed source body");
+        }
+        for (const raw of [
+          ...Object.values(checkpoints),
+          ...proof.generations,
+        ]) {
+          const witness = object(raw);
+          only(witness, ["commitSha", "manifest"]);
+          if (
+            !/^[a-f0-9]{40,64}$/.test(String(witness.commitSha)) ||
+            !ref(witness.manifest)
+          )
+            throw new Error("Invalid reservation ancestry original");
+        }
+      }
+      if (settled.reservationFailure !== undefined) {
+        const proof = object(settled.reservationFailure);
+        only(proof, ["schemaVersion", "originalClaim", "failure"]);
+        if (
+          proof.schemaVersion !== 1 ||
+          !ref(proof.originalClaim) ||
+          !ref(proof.failure) ||
+          !row.ownerProcess ||
+          row.priorRunId !== undefined ||
+          row.runBinding !== undefined ||
+          settled.runId !== undefined ||
+          settled.handoff !== undefined ||
+          settled.cancellation !== undefined ||
+          Date.parse(String(settled.at)) < Date.parse(String(row.at))
+        )
+          throw new Error(
+            "Invalid same-owner pre-snapshot reservation failure",
+          );
+      }
       if (settled.handoff !== undefined) {
         const proof = object(settled.handoff);
         only(proof, [
@@ -652,7 +1049,27 @@ function save(record: QueueRecord): void {
 function queueOwnerReferences(record: QueueOwnerClaim): ContentRef[] {
   const refs = [
     ...(record.runBinding ? [record.runBinding.initialSnapshot] : []),
+    ...(record.settled?.reservationFailure
+      ? [
+          record.settled.reservationFailure.originalClaim,
+          record.settled.reservationFailure.failure,
+        ]
+      : []),
   ];
+  const abandonment = record.settled?.abandonment;
+  if (abandonment)
+    refs.push(
+      abandonment.originalClaim,
+      abandonment.operatorDecision,
+      abandonment.ownerObservation,
+      abandonment.sourceInventory,
+      abandonment.sourceProtocolReview,
+      abandonment.failureObservation,
+      ...Object.values(abandonment.checkpoints).map((entry) => entry.manifest),
+      ...abandonment.generations.map((entry) => entry.manifest),
+      ...abandonment.lineageOriginals,
+      ...abandonment.sourceModules.map((entry) => entry.ref),
+    );
   const proof = record.settled?.cancellation;
   if (proof) {
     refs.push(
@@ -714,6 +1131,204 @@ function assertQueueOwnerReferenceBodies(
         "Project claim differs from its original run/body/deadline",
       );
   };
+  if (record.settled?.abandonment) {
+    const proof = record.settled.abandonment;
+    const original = parseQueueRecord(
+      bytes(proof.originalClaim),
+      record.repository,
+      record.id,
+    );
+    const { settled: ignored, ...binding } = record;
+    if (
+      original.kind !== "project-queue-owner" ||
+      original.settled ||
+      JSON.stringify(binding) !== JSON.stringify(original) ||
+      proof.originalProducerIdentity !==
+        (original.ownerProcess ? "recorded" : "unavailable")
+    )
+      throw new Error(
+        "Abandonment cannot reconstruct or change its original reservation",
+      );
+    const originalText = (ref: ContentRef) => {
+      const text = json(ref);
+      if (typeof text !== "string")
+        throw new Error("Operator original must retain exact text");
+      return text;
+    };
+    const decision = object(json(proof.operatorDecision));
+    if (
+      decision.schemaVersion !== 1 ||
+      decision.kind !== "explicit-operator-reservation-abandonment" ||
+      decision.repository !== record.repository ||
+      decision.objective !== record.objective ||
+      decision.claimId !== record.id ||
+      decision.bodyDigest !== record.bodyDigest ||
+      decision.authorityDigest !== record.authorityDigest ||
+      decision.originalDeadlineAt !== record.deadlineAt ||
+      typeof decision.actor !== "string" ||
+      !decision.actor ||
+      decision.originalProducerIdentity !== proof.originalProducerIdentity ||
+      decision.sourceProtocol !== "canonical-snapshot-before-provider-v1"
+    )
+      throw new Error(
+        "Permanent disposition requires its actual scoped operator decision",
+      );
+    const inventoryText = originalText(proof.sourceInventory),
+      inventory = JSON.parse(inventoryText);
+    const review = JSON.parse(originalText(proof.sourceProtocolReview));
+    assertReservationSourceReview(
+      review,
+      inventory,
+      queueDigest(inventoryText),
+      record,
+    );
+    const owner = reservationObservedOwner(
+      JSON.parse(originalText(proof.ownerObservation)),
+      record,
+      String(decision.originalCli),
+      String(decision.originalConfigPath),
+    );
+    if (JSON.stringify(owner) !== JSON.stringify(decision.originalOwner))
+      throw new Error(
+        "Operator disposition differs from its original token-bound owner observation",
+      );
+    const publisher = object(decision.originalPublisher);
+    if (
+      publisher.pid !==
+        reservationGuardHolder(
+          originalText(proof.failureObservation),
+          owner.pid,
+          record.repository,
+        ) ||
+      publisher.startTime !== "unavailable"
+    )
+      throw new Error(
+        "Original publication holder identity cannot be reconstructed or changed",
+      );
+    const rows = inventory as { path: string; sha256: string; bytes: number }[];
+    const sourceBodies = new Map<string, string>();
+    for (const module of proof.sourceModules) {
+      const text = originalText(module.ref),
+        row = rows.find((entry) => entry.path === module.path);
+      if (
+        !row ||
+        Buffer.byteLength(text) !== row.bytes ||
+        queueDigest(text) !== row.sha256 ||
+        sourceBodies.has(module.path)
+      )
+        throw new Error(
+          "Original reviewed source bytes are missing or changed",
+        );
+      sourceBodies.set(module.path, text);
+    }
+    if (
+      (review.modules as { path: string }[]).some(
+        (entry) => !sourceBodies.has(entry.path),
+      )
+    )
+      throw new Error(
+        "Protocol review lacks its underlying original source contents",
+      );
+    const manifests = [proof.checkpoints.before, ...proof.generations].map(
+      (witness) => {
+        const manifest = object(json(witness.manifest));
+        assertRecoveryCheckpointManifest(
+          manifest,
+          object(json(proof.checkpoints.current.manifest))
+            .binding as RecoveryCheckpointBinding,
+          {
+            maxBytes: Number.MAX_SAFE_INTEGER,
+            maxFiles: Number.MAX_SAFE_INTEGER,
+          },
+        );
+        if (
+          object(manifest.binding).repository !== record.repository ||
+          object(manifest.binding).scope !== "private-history"
+        )
+          throw new Error(
+            "Reservation ancestry differs from its private repository binding",
+          );
+        return manifest as unknown as RecoveryCheckpointClosure & {
+          sequence: number;
+          authority?: { authorityDigest: string };
+        };
+      },
+    );
+    if (
+      !sameContentRef(
+        proof.generations[0]!.manifest,
+        proof.checkpoints.claimed.manifest,
+      ) ||
+      !sameContentRef(
+        proof.generations.at(-1)!.manifest,
+        proof.checkpoints.current.manifest,
+      ) ||
+      proof.generations[0]!.commitSha !== proof.checkpoints.claimed.commitSha ||
+      proof.generations.at(-1)!.commitSha !==
+        proof.checkpoints.current.commitSha
+    )
+      throw new Error(
+        "Reservation ancestry endpoints differ from the complete retained generation sequence",
+      );
+    let previousSequence = -1;
+    for (const [index, manifest] of manifests.entries()) {
+      if (
+        manifest.sequence < previousSequence ||
+        manifest.gaps.some((gap) => gap.required) ||
+        manifest.files.some((file) =>
+          [
+            `objectives/${record.objective}/state.json`,
+            `objectives/${record.objective}/pre-state.json`,
+          ].includes(file.path),
+        )
+      )
+        throw new Error(
+          "A canonical or unavailable reservation history cannot be abandoned",
+        );
+      previousSequence = manifest.sequence;
+      const claimed = manifest.files.find(
+        (file) => file.path === `project-queue-history/${record.id}.json`,
+      );
+      if (
+        index === 0
+          ? !!claimed
+          : !claimed || !sameContentRef(claimed.ref, proof.originalClaim)
+      )
+        throw new Error(
+          "Reservation ancestry does not preserve the exact original unfinished claim",
+        );
+      for (const file of manifest.files.filter((file) =>
+        /^accounting\/[a-f0-9]{64}\.json$/.test(file.path),
+      ))
+        if (
+          decodeAccountingRecord(record.repository, file.path, bytes(file.ref))
+            .binding.objective === record.objective
+        )
+          throw new Error(
+            "Historical provider/effect admission cannot become a pre-snapshot abandonment",
+          );
+    }
+  }
+  if (record.settled?.reservationFailure) {
+    const proof = record.settled.reservationFailure;
+    const original = parseQueueRecord(
+      bytes(proof.originalClaim),
+      record.repository,
+      record.id,
+    );
+    const { settled: ignored, ...binding } = record;
+    if (
+      original.kind !== "project-queue-owner" ||
+      original.settled ||
+      JSON.stringify(binding) !== JSON.stringify(original)
+    )
+      throw new Error(
+        "Reservation failure differs from its exact original claim",
+      );
+    const failure = json(proof.failure);
+    if (typeof failure !== "string" || !failure)
+      throw new Error("Reservation failure requires its original error");
+  }
   if (record.runBinding)
     matches(
       snapshot(record.runBinding.initialSnapshot),
@@ -1218,6 +1833,13 @@ export async function performQueueEffect(
 ): Promise<ProjectQueueWriteReceipt> {
   requireProjectQueueEffects(config);
   if (
+    ["admit", "roadmap"].includes(operation.action) &&
+    (!operation.issueNodeId || !operation.objective || !operation.bodyDigest)
+  )
+    throw new Error(
+      "Project admission requires its complete current Issue identity",
+    );
+  if (
     !github.projectQueueWrite ||
     operation.effects.some((effect) => !effect.receipt)
   )
@@ -1234,6 +1856,18 @@ export async function performQueueEffect(
       ...action,
       binding: operation.binding,
       requestId,
+      ...(["admit", "roadmap"].includes(operation.action) &&
+      operation.issueNodeId &&
+      operation.objective &&
+      operation.bodyDigest
+        ? {
+            expectedIssue: {
+              issueNodeId: operation.issueNodeId,
+              objective: operation.objective,
+              bodyDigest: operation.bodyDigest,
+            },
+          }
+        : {}),
       beforeWrite: async (intent) => {
         assertProjectQueueIntent(intent);
         if (
@@ -1302,6 +1936,8 @@ export async function claimProjectQueueRun(
   snapshot?: ContinuationState,
 ): Promise<QueueOwnerClaim | undefined> {
   if (!config.queue?.project) return;
+  assertProcessActive();
+  const enteredAt = Date.now();
   requireProjectQueueEffects(config);
   if (snapshot) assertRestoredContinuationReady(snapshot, config);
   if (snapshot && !continuationConfigurationMatches(snapshot, config))
@@ -1361,7 +1997,7 @@ export async function claimProjectQueueRun(
         : config.queue?.objectiveDeadlineSeconds === undefined
           ? null
           : new Date(
-              Date.now() + config.queue.objectiveDeadlineSeconds * 1000,
+              enteredAt + config.queue.objectiveDeadlineSeconds * 1000,
             ).toISOString();
   if (
     snapshot &&
@@ -1386,14 +2022,493 @@ export async function claimProjectQueueRun(
     objective,
     bodyDigest: entry.bodyDigest,
     ownerTokenDigest: queueDigest(ownerToken),
+    ownerProcess: creatingClaimOwner(config, objective, ownerToken),
     at: new Date().toISOString(),
     deadlineAt,
     ...(snapshot ? { priorRunId: snapshot.runId } : {}),
   };
+  assertProcessActive();
   save(claim);
-  await awaitCheckpointAdmission(config.repository, "before-effect");
-  await assertProjectQueueRunLive(config, github, claim);
+  try {
+    await awaitCheckpointAdmission(config.repository, "before-effect");
+    await assertProjectQueueRunLive(config, github, claim);
+  } catch (error) {
+    if (!snapshot) {
+      try {
+        await settleFailedProjectQueueReservation(
+          config,
+          claim,
+          ownerToken,
+          error,
+        );
+      } catch (settlementError) {
+        throw new AggregateError(
+          [error, settlementError],
+          "Pre-snapshot Project admission and its same-owner settlement failed",
+          { cause: error },
+        );
+      }
+    }
+    throw error;
+  }
   return claim;
+}
+
+function creatingClaimOwner(
+  config: FactoryConfig,
+  objective: number,
+  token: string,
+): NonNullable<QueueOwnerClaim["ownerProcess"]> {
+  const identity = ownIdentity();
+  const owner = [
+    objectiveLockPath(config.repository, objective),
+    installationLockPath(config.repository),
+  ]
+    .map((path) => readControllerOwner(path))
+    .find((record) => record?.token === token);
+  if (
+    !owner ||
+    owner.pid !== identity.pid ||
+    owner.startTime !== identity.startTime ||
+    owner.objective !== objective
+  )
+    throw new Error(
+      "Project claim requires its actual creating controller lease",
+    );
+  return { ...identity, namespace: readlinkSync("/proc/self/ns/pid") };
+}
+
+/** The creating function has not returned to any provider/runner when this fails. */
+export async function settleFailedProjectQueueReservation(
+  config: FactoryConfig,
+  claim: QueueOwnerClaim,
+  ownerToken: string,
+  error: unknown,
+): Promise<void> {
+  requireProjectQueueEffects(config);
+  const owner = creatingClaimOwner(config, claim.objective, ownerToken);
+  if (
+    !claim.ownerProcess ||
+    JSON.stringify(owner) !== JSON.stringify(claim.ownerProcess) ||
+    claim.ownerTokenDigest !== queueDigest(ownerToken) ||
+    claim.authorityDigest !== factoryAuthorityDigest(config) ||
+    claim.priorRunId ||
+    claim.runBinding ||
+    claim.settled ||
+    readContinuation(config.repository, claim.objective) ||
+    hasUnresolvedSubprocesses()
+  )
+    throw new Error(
+      "Pre-snapshot settlement requires the same creating owner and settled resources; historical or started work remains held",
+    );
+  const path = join(
+    stateRoot(config.repository),
+    "project-queue-history",
+    `${claim.id}.json`,
+  );
+  const original = privateBytes(path);
+  if (
+    JSON.stringify(parseQueueRecord(original, claim.repository, claim.id)) !==
+    JSON.stringify(claim)
+  )
+    throw new Error(
+      "Pre-snapshot settlement differs from its retained original claim",
+    );
+  const store = new LocalContentStore(
+    join(stateRoot(config.repository), "content"),
+  );
+  const originalClaim = store.putBytes(original, {
+    mediaType: "application/json",
+  });
+  const failure = store.putBytes(
+    Buffer.from(
+      JSON.stringify(
+        error instanceof Error ? (error.stack ?? error.message) : String(error),
+      ),
+    ),
+    { mediaType: "application/json" },
+  );
+  claim.settled = {
+    at: new Date().toISOString(),
+    disposition: "quiescent",
+    reservationFailure: { schemaVersion: 1, originalClaim, failure },
+  };
+  save(claim);
+  await awaitCheckpointAdmission(config.repository, "explicit");
+}
+
+/** Permanently retire only a positively evidenced local pre-snapshot reservation. */
+export async function abandonFailedProjectQueueReservation(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objective: number,
+  evidenceValue: unknown,
+  actor: string,
+  lock: ControllerLock,
+): Promise<{
+  abandonedUnaccepted: true;
+  objective: number;
+  claimId: string;
+  canonicalRunId: null;
+  originalDeadlineAt: string | null;
+  originalProducerIdentity: "recorded" | "unavailable";
+}> {
+  requireProjectQueueEffects(config);
+  assertProcessActive();
+  if (
+    !actor ||
+    config.execution.kind !== "local" ||
+    config.execution.harness?.kind !== "codex-sdk" ||
+    config.planning.kind !== "codex-sdk"
+  )
+    throw new Error(
+      "Operator reservation abandonment supports only the proved local native protocol; unknown provider resources remain held",
+    );
+  const leasePath = installationLockPath(config.repository),
+    lease = readControllerOwner(leasePath),
+    identity = ownIdentity(),
+    held = fstatSync(lock.fd),
+    current = lstatSync(leasePath);
+  if (
+    !lease ||
+    lease.pid !== identity.pid ||
+    lease.startTime !== identity.startTime ||
+    lease.token !== lock.token ||
+    lease.objective !== objective ||
+    held.ino !== current.ino ||
+    held.dev !== current.dev
+  )
+    throw new Error(
+      "Reservation abandonment requires the actual exclusive installation lease",
+    );
+  if (
+    readContinuation(config.repository, objective) ||
+    existsSync(
+      join(
+        stateRoot(config.repository),
+        "objectives",
+        String(objective),
+        "pre-state.json",
+      ),
+    )
+  )
+    throw new Error(
+      "Started or unavailable continuation requires its own supported lifecycle",
+    );
+  const raw = object(evidenceValue);
+  only(raw, [
+    "schemaVersion",
+    "kind",
+    "claimId",
+    "originalInstallation",
+    "originals",
+    "sourceProtocol",
+  ]);
+  if (
+    raw.schemaVersion !== 1 ||
+    raw.kind !== "operator-observed-pre-snapshot-failure" ||
+    !uuid(raw.claimId) ||
+    raw.sourceProtocol !== "canonical-snapshot-before-provider-v1"
+  )
+    throw new Error(
+      "Historical reservation requires explicit scoped operator evidence, not an inactive PID",
+    );
+  const installation = object(raw.originalInstallation);
+  only(installation, ["cli", "configPath", "configSha256", "ownFileInventory"]);
+  const originals = object(raw.originals);
+  only(originals, [
+    "ownerObservation",
+    "sourceProtocolReview",
+    "failureObservation",
+  ]);
+  if (
+    typeof installation.cli !== "string" ||
+    !isAbsolute(installation.cli) ||
+    typeof installation.configPath !== "string" ||
+    !isAbsolute(installation.configPath) ||
+    !digest(installation.configSha256)
+  )
+    throw new Error(
+      "Original runtime and configuration binding is unavailable",
+    );
+  for (const descriptor of [
+    installation.ownFileInventory,
+    ...Object.values(originals),
+  ])
+    assertReservationOperatorOriginal(descriptor);
+  const evidence = raw as unknown as FailedReservationOwnerEvidence;
+  const originalConfigBytes = privateBytes(
+    evidence.originalInstallation.configPath,
+  );
+  const originalConfig = validateConfig(
+    JSON.parse(originalConfigBytes.toString("utf8")),
+  );
+  if (
+    createHash("sha256").update(originalConfigBytes).digest("hex") !==
+      evidence.originalInstallation.configSha256 ||
+    factoryAuthorityDigest(originalConfig) !== factoryAuthorityDigest(config) ||
+    factoryConfigDigest(originalConfig) !== factoryConfigDigest(config)
+  )
+    throw new Error(
+      "The original operator runtime configuration differs from the actual reservation authority",
+    );
+  const history = await readQueueHistory(config),
+    pending = history.filter(
+      (row): row is QueueOwnerClaim =>
+        row.kind === "project-queue-owner" && !row.settled,
+    );
+  const claim = pending.find(
+    (row) => row.id === evidence.claimId && row.objective === objective,
+  );
+  if (
+    pending.length !== 1 ||
+    !claim ||
+    claim.priorRunId ||
+    claim.runBinding ||
+    claim.authorityDigest !== factoryAuthorityDigest(config) ||
+    history.some(
+      (row) => row.kind === "project-queue-operation" && !row.completed,
+    )
+  )
+    throw new Error(
+      "Competing, started or uncertain external queue effects remain held",
+    );
+  const ownerBytes = readReservationOperatorOriginal(
+      evidence.originals.ownerObservation,
+    ),
+    inventoryBytes = readReservationOperatorOriginal(
+      evidence.originalInstallation.ownFileInventory,
+    ),
+    reviewBytes = readReservationOperatorOriginal(
+      evidence.originals.sourceProtocolReview,
+    ),
+    failureBytes = readReservationOperatorOriginal(
+      evidence.originals.failureObservation,
+    );
+  const originalOwner = reservationObservedOwner(
+    JSON.parse(ownerBytes.toString("utf8")),
+    claim,
+    evidence.originalInstallation.cli,
+    evidence.originalInstallation.configPath,
+  );
+  if (readlinkSync("/proc/self/ns/pid") !== originalOwner.namespace)
+    throw new Error(
+      "Original native resources require their actual original PID namespace",
+    );
+  const originalIdentity = linuxProcessIdentity(originalOwner.pid);
+  if (
+    (originalIdentity?.startTime === originalOwner.startTime &&
+      originalIdentity.state !== "Z") ||
+    processGroupExists(originalOwner.pid)
+  )
+    throw new Error(
+      "The original controller or native process group remains live or uncertain",
+    );
+  const { serviceName } = await import("./supervision.js"),
+    unitName = serviceName(config.repository);
+  if (!originalOwner.cgroup.endsWith(`/${unitName}`))
+    throw new Error("Original service installation identity differs");
+  const unit = await subprocessAsync("systemctl", [
+    "--user",
+    "show",
+    unitName,
+    "--property=ActiveState,SubState,MainPID,ControlGroup,ExecStart",
+    "--no-pager",
+  ]);
+  if (
+    unit.status === 0 &&
+    JSON.stringify(
+      reservationSupervisorCommand(
+        unit.stdout,
+        evidence.originalInstallation.cli,
+        evidence.originalInstallation.configPath,
+      ),
+    ) !== JSON.stringify(originalOwner.command)
+  )
+    throw new Error(
+      "Registered supervisor runtime/configuration changed after the original observation",
+    );
+  const group = `/sys/fs/cgroup${originalOwner.cgroup}/cgroup.procs`;
+  if (
+    unit.status !== 0 ||
+    !/ActiveState=(inactive|failed)\n/.test(unit.stdout) ||
+    !unit.stdout.includes("MainPID=0\n") ||
+    (existsSync(group) && readFileSync(group, "utf8").trim())
+  )
+    throw new Error(
+      "Original service cgroup resource cessation is not established",
+    );
+  const failureText = failureBytes.toString("utf8");
+  const publisherPid = reservationGuardHolder(
+    failureText,
+    originalOwner.pid,
+    config.repository,
+  );
+  if (linuxProcessIdentity(publisherPid) || processGroupExists(publisherPid))
+    throw new Error(
+      "The original publication guard holder or process group remains present or uncertain",
+    );
+  const inventory = JSON.parse(inventoryBytes.toString("utf8")),
+    review = JSON.parse(reviewBytes.toString("utf8"));
+  assertReservationSourceReview(
+    review,
+    inventory,
+    evidence.originalInstallation.ownFileInventory.sha256,
+    claim,
+  );
+  const moduleRoot = dirname(dirname(evidence.originalInstallation.cli));
+  if (join(moduleRoot, "dist", "cli.js") !== evidence.originalInstallation.cli)
+    throw new Error("Original installed controller entry is unsupported");
+  const actualFiles: string[] = [];
+  const walk = (directory: string, prefix = "") => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === "node_modules") continue;
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(join(directory, entry.name), path);
+      else if (entry.isFile()) actualFiles.push(path);
+      else
+        throw new Error(
+          "Original installed source contains an unsupported alias",
+        );
+    }
+  };
+  walk(moduleRoot);
+  const rows = inventory as { path: string; sha256: string; bytes: number }[];
+  if (
+    actualFiles.length !== rows.length ||
+    actualFiles.some((path) => !rows.some((row) => row.path === path))
+  )
+    throw new Error("Original installed source inventory is not complete");
+  const sourceBytes = new Map<string, Buffer>();
+  for (const row of rows) {
+    const path = join(moduleRoot, row.path);
+    if (realpathSync(path) !== resolve(path))
+      throw new Error("Original installed source resolves through an alias");
+    const data = readFileSync(path);
+    if (
+      data.length !== row.bytes ||
+      createHash("sha256").update(data).digest("hex") !== row.sha256
+    )
+      throw new Error("The original controller source bytes changed");
+    sourceBytes.set(row.path, data);
+  }
+  const archive = await readVerifiedRecoveryCheckpoint(config, undefined, {
+      kind: "pre-snapshot",
+      objective,
+      claimId: claim.id,
+    }),
+    lineage = archive.queueReservationLineage;
+  if (!lineage || hasUnresolvedSubprocesses())
+    throw new Error(
+      "Complete acknowledged pre-snapshot archive and settled verification resources are required",
+    );
+  const observed = await observeProjectQueue(config, github),
+    entry = observed.entries.find((row) => row.objective === objective),
+    card = observed.snapshot.cards.find(
+      (row) => row.objective === objective && !row.archived,
+    );
+  if (
+    observed.control.mode !== "paused" ||
+    !entry ||
+    entry.state !== "queued" ||
+    entry.admissionId !== claim.admissionId ||
+    entry.receiptId !== claim.receiptId ||
+    entry.bodyDigest !== claim.bodyDigest ||
+    card?.state !== "open" ||
+    queueDigest(card.body) !== claim.bodyDigest ||
+    objectiveWorkflowRecipeSelector(card.body) !== undefined
+  )
+    throw new Error(
+      "Current paused Project does not preserve the exact original admission and approved contents",
+    );
+  const store = new LocalContentStore(
+    join(stateRoot(config.repository), "content"),
+  );
+  for (const body of lineage.bodies)
+    retainProjectQueueOriginal(store, body.ref, body.bytes);
+  const originalClaimBytes = privateBytes(
+    join(
+      stateRoot(config.repository),
+      "project-queue-history",
+      `${claim.id}.json`,
+    ),
+  );
+  if (
+    !Buffer.from(await archive.readVerifiedBlob(lineage.originalClaim)).equals(
+      originalClaimBytes,
+    )
+  )
+    throw new Error(
+      "The actual local reservation differs from its acknowledged original",
+    );
+  const textOriginal = (bytes: Buffer) =>
+    store.putBytes(
+      Buffer.from(
+        JSON.stringify(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+      ),
+      { mediaType: "application/json" },
+    );
+  const originalProducerIdentity = claim.ownerProcess
+    ? "recorded"
+    : "unavailable";
+  const decision = {
+    schemaVersion: 1,
+    kind: "explicit-operator-reservation-abandonment",
+    actor,
+    repository: config.repository,
+    objective,
+    claimId: claim.id,
+    bodyDigest: claim.bodyDigest,
+    authorityDigest: claim.authorityDigest,
+    originalDeadlineAt: claim.deadlineAt,
+    originalProducerIdentity,
+    sourceProtocol: evidence.sourceProtocol,
+    originalCli: evidence.originalInstallation.cli,
+    originalConfigPath: evidence.originalInstallation.configPath,
+    originalOwner,
+    originalPublisher: { pid: publisherPid, startTime: "unavailable" },
+  };
+  const proof: QueueReservationAbandonmentProof = {
+    schemaVersion: 1,
+    originalClaim: lineage.originalClaim,
+    operatorDecision: store.putBytes(Buffer.from(JSON.stringify(decision)), {
+      mediaType: "application/json",
+    }),
+    ownerObservation: textOriginal(ownerBytes),
+    sourceInventory: textOriginal(inventoryBytes),
+    sourceProtocolReview: textOriginal(reviewBytes),
+    failureObservation: textOriginal(failureBytes),
+    sourceModules: (review.modules as { path: string }[]).map((row) => ({
+      path: row.path,
+      ref: textOriginal(sourceBytes.get(row.path)!),
+    })),
+    checkpoints: lineage.checkpoints,
+    generations: lineage.generations,
+    lineageOriginals: lineage.bodies.map((body) => body.ref),
+    originalProducerIdentity,
+  };
+  const disposition: QueueOwnerClaim = {
+    ...claim,
+    settled: {
+      at: new Date().toISOString(),
+      disposition: "abandoned-unaccepted",
+      abandonment: proof,
+    },
+  };
+  await authenticateQueueOwnerReferences(disposition, async (ref) =>
+    store.readBytes(ref),
+  );
+  assertProcessActive();
+  save(disposition);
+  await awaitCheckpointAdmission(config.repository, "explicit");
+  return {
+    abandonedUnaccepted: true,
+    objective,
+    claimId: claim.id,
+    canonicalRunId: null,
+    originalDeadlineAt: claim.deadlineAt,
+    originalProducerIdentity,
+  };
 }
 /** A fresh read can hold an actual owner; it never grants or releases ownership. */
 export async function assertProjectQueueRunLive(

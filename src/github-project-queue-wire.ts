@@ -36,6 +36,15 @@ export const BINDING = `query FactoryQueueBinding($project:ID!,$metadata:ID!,$or
     id dataType project { id }
   } }
 }`;
+const ISSUE_CONTENT =
+  "__typename id number title body state repository { nameWithOwner }";
+export const TARGET = `query FactoryQueueTarget($item:ID!,$objective:Int!,$includeIssue:Boolean!,$owner:String!,$name:String!,$project:ID!,$metadata:ID!,$order:ID!) {
+  ${BINDING.slice(BINDING.indexOf("{") + 1, BINDING.lastIndexOf("}"))}
+  node(id:$item) { __typename ... on ProjectV2Item { ${CARD} } }
+  repository(owner:$owner,name:$name) {
+    nameWithOwner issue(number:$objective) @include(if:$includeIssue) { ${ISSUE_CONTENT} }
+  }
+}`;
 export const ITEMS = `query FactoryQueueItems($project:ID!,$after:String) {
   node(id:$project) { __typename ... on ProjectV2 {
     id items(first:100,after:$after,archivedStates:[ARCHIVED,NOT_ARCHIVED]) {
@@ -50,16 +59,40 @@ export const FIELDS = `query FactoryQueueItemFields($item:ID!,$after:String) {
     }
   } }
 }`;
-export const ISSUE = `query FactoryQueueIssue($issue:ID!) {
+export const ISSUE_IDENTITY = `query FactoryQueueIssueIdentity($issue:ID!) {
   node(id:$issue) { __typename ... on Issue {
-    id number title body state repository { nameWithOwner }
+    id number repository { nameWithOwner }
   } }
 }`;
 
-export const QUEUE_READ_QUERIES = Object.freeze([
+/** Fixed repository-scoped shape, one alias per existing Project-page Issue. */
+export function issueBatchQuery(count: number): string {
+  if (!Number.isSafeInteger(count) || count < 1 || count > 100)
+    throw new Error("Project queue Issue batch must fit its observed page");
+  const variables = Array.from(
+    { length: count },
+    (_, index) => `$number${index}:Int!`,
+  ).join(",");
+  const selections = Array.from(
+    { length: count },
+    (_, index) =>
+      `issue${index}:issue(number:$number${index}) { ${ISSUE_CONTENT} }`,
+  ).join("\n");
+  return `query FactoryQueueIssues${count}($owner:String!,$name:String!,${variables}) {
+  repository(owner:$owner,name:$name) { nameWithOwner ${selections} }
+}`;
+}
+const QUEUE_READ_QUERIES = Object.freeze([
   BINDING,
   ITEMS,
   FIELDS,
-  ISSUE,
+  ISSUE_IDENTITY,
+  TARGET,
 ]);
+export function isProjectQueueReadQuery(query: string): boolean {
+  if (QUEUE_READ_QUERIES.includes(query)) return true;
+  const match = /^query FactoryQueueIssues([1-9][0-9]{0,2})\(/.exec(query);
+  const count = Number(match?.[1]);
+  return count <= 100 && count >= 1 && query === issueBatchQuery(count);
+}
 export const QUEUE_WRITE_QUERIES = Object.freeze([ADD, UPDATE]);

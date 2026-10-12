@@ -2,7 +2,7 @@ import { Octokit } from "@octokit/core";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as time from "./clock.js";
 import {
-  QUEUE_READ_QUERIES,
+  isProjectQueueReadQuery,
   QUEUE_WRITE_QUERIES,
 } from "./github-project-queue-wire.js";
 import {
@@ -13,6 +13,7 @@ import {
   type Fault,
 } from "./fault.js";
 import {
+  assertProcessActive,
   commandAsync,
   currentProcessSignal,
   withProcessCancellation,
@@ -668,7 +669,11 @@ export class GitHubClient {
     variables: Record<string, unknown>,
     readOnly: boolean,
   ): Promise<T> {
-    if (!(readOnly ? QUEUE_READ_QUERIES : QUEUE_WRITE_QUERIES).includes(query))
+    if (
+      !(readOnly
+        ? isProjectQueueReadQuery(query)
+        : QUEUE_WRITE_QUERIES.includes(query))
+    )
       throw new Error("Unsupported Project queue GraphQL operation");
     const response = await this.dispatch<{ errors?: unknown[]; data?: T }>(
       "POST",
@@ -913,6 +918,9 @@ export class GitHubClient {
           ...(signal ? [signal] : []),
           AbortSignal.timeout(budget),
         ]);
+      // A busy synchronous preparation can outlast the armed deadline before
+      // its timer runs. Recheck after queue/credential waits, before dispatch.
+      assertProcessActive();
       try {
         transport.dispatch = "sent";
         const response = await client.request(`${method} /${route}`, {

@@ -36,11 +36,20 @@ import {
   authenticateRejectedCollectionReceipt,
   type RejectedCollectionReceipt,
 } from "./execution/local.js";
-import { pinnedGit, pinnedGitEnvironment, subprocessAsync } from "./process.js";
-import { assertRecoveryCheckpointManifest } from "./recovery-checkpoint.js";
+import {
+  assertProcessActive,
+  pinnedGit,
+  pinnedGitEnvironment,
+  subprocessAsync,
+} from "./process.js";
 import type {
   RecoveryCheckpointClosure,
   RecoveryCheckpointFile,
+} from "./recovery-checkpoint.js";
+import {
+  assertRecoveryCheckpointManifest,
+  cachedRecoveryCheckpointGitPack,
+  retainRecoveryCheckpointGitPack,
 } from "./recovery-checkpoint.js";
 import type { RepositoryMemoryBinding } from "./repository-memory.js";
 import { decodeRepositoryMemoryManifest } from "./repository-memory.js";
@@ -1192,13 +1201,25 @@ export async function buildRecoveryCheckpointClosure(input: {
     const roots = [...objects.values()].sort((left, right) =>
       left.sha.localeCompare(right.sha),
     );
-    for (const entry of roots)
-      if (
-        pinnedGit(config.checkout, "cat-file", "-t", entry.sha) !== entry.kind
-      )
-        throw new Error(
-          "Required recovery Git object is missing or has another type",
-        );
+    const inventory = await subprocessAsync(
+      "git",
+      [
+        "-C",
+        config.checkout,
+        "cat-file",
+        "--batch-check=%(objectname) %(objecttype)",
+      ],
+      { env: pinnedGitEnvironment() },
+      `${roots.map((entry) => entry.sha).join("\n")}\n`,
+    );
+    if (
+      inventory.status !== 0 ||
+      inventory.stdout !==
+        `${roots.map((entry) => `${entry.sha} ${entry.kind}`).join("\n")}\n`
+    )
+      throw new Error(
+        "Required recovery Git object is missing or has another type",
+      );
     // Git finalizes its pack from the repository object directory by rename.
     // Keep our owned output on that filesystem, including linked worktrees.
     const objectDirectory = realpathSync(
@@ -1212,44 +1233,83 @@ export async function buildRecoveryCheckpointClosure(input: {
     );
     if (!lstatSync(objectDirectory).isDirectory())
       throw new Error("Recovery Git object storage is not a directory");
-    const temporary = mkdtempSync(
-      join(objectDirectory, "factory-checkpoint-objects-"),
-    );
-    try {
-      const packed = await subprocessAsync(
-        "git",
-        [
-          "-C",
-          config.checkout,
-          "pack-objects",
-          "--revs",
-          "--threads=1",
-          join(temporary, "objects"),
-        ],
-        { env: pinnedGitEnvironment() },
-        `${roots.map((entry) => entry.sha).join("\n")}\n`,
+    const identity = createHash("sha256").update(JSON.stringify(roots));
+    const inspect = (path: string, relativePath = "") => {
+      assertProcessActive();
+      const stat = lstatSync(path, { bigint: true });
+      if (stat.isSymbolicLink())
+        throw new Error("Recovery Git object cache contains a symlink");
+      identity.update(
+        JSON.stringify([
+          relativePath,
+          stat.dev.toString(),
+          stat.ino.toString(),
+          stat.mode.toString(),
+          ...(stat.isFile()
+            ? [
+                stat.size.toString(),
+                stat.mtimeNs.toString(),
+                stat.ctimeNs.toString(),
+              ]
+            : []),
+        ]),
       );
-      if (
-        packed.status !== 0 ||
-        !/^[a-f0-9]{40,64}$/.test(packed.stdout.trim())
-      )
-        throw new Error("Required recovery Git objects could not be packed");
-      const packPath = join(temporary, `objects-${packed.stdout.trim()}.pack`);
-      const ref = await retainBytes(
-        store,
-        readFileSync(packPath),
-        "application/x-git-packed-objects",
+      if (stat.isDirectory())
+        for (const name of readdirSync(path).sort())
+          inspect(join(path, name), `${relativePath}/${name}`);
+      else if (!stat.isFile())
+        throw new Error(
+          "Recovery Git object cache contains an unsupported entry",
+        );
+    };
+    inspect(objectDirectory);
+    const key = identity.digest("hex");
+    let ref = cachedRecoveryCheckpointGitPack(key);
+    if (ref) await readReference(reader, ref);
+    else {
+      const temporary = mkdtempSync(
+        join(objectDirectory, "factory-checkpoint-objects-"),
       );
-      refs.set(refKey(ref), ref);
-      files.push({
-        kind: "git-pack",
-        path: `git/objects-${ref.digest}.pack`,
-        ref,
-        visibility: scope === "private-history" ? "private" : "repository",
-      });
-    } finally {
-      rmSync(temporary, { recursive: true, force: true });
+      try {
+        const packed = await subprocessAsync(
+          "git",
+          [
+            "-C",
+            config.checkout,
+            "pack-objects",
+            "--revs",
+            "--threads=1",
+            join(temporary, "objects"),
+          ],
+          { env: pinnedGitEnvironment() },
+          `${roots.map((entry) => entry.sha).join("\n")}\n`,
+        );
+        if (
+          packed.status !== 0 ||
+          !/^[a-f0-9]{40,64}$/.test(packed.stdout.trim())
+        )
+          throw new Error("Required recovery Git objects could not be packed");
+        const packPath = join(
+          temporary,
+          `objects-${packed.stdout.trim()}.pack`,
+        );
+        ref = await retainBytes(
+          store,
+          readFileSync(packPath),
+          "application/x-git-packed-objects",
+        );
+      } finally {
+        rmSync(temporary, { recursive: true, force: true });
+      }
+      retainRecoveryCheckpointGitPack(key, ref!);
     }
+    refs.set(refKey(ref!), ref!);
+    files.push({
+      kind: "git-pack",
+      path: `git/objects-${ref!.digest}.pack`,
+      ref: ref!,
+      visibility: scope === "private-history" ? "private" : "repository",
+    });
   }
   for (const ref of refs.values()) {
     const bytes = await readReference(reader, ref);

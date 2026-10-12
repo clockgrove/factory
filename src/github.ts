@@ -42,6 +42,7 @@ import { projectStatusOnGitHub } from "./github-project.js";
 import {
   projectQueueReadOnGitHub,
   projectQueueWriteOnGitHub,
+  withProjectQueueObservationOnGitHub,
 } from "./github-project-queue.js";
 import { availableIssueType } from "./issue-type.js";
 
@@ -140,6 +141,18 @@ export class RealGitHubGateway implements GitHubGateway {
   ) {}
 
   private login?: string;
+
+  withProjectQueueObservation<T>(
+    binding: Parameters<NonNullable<GitHubGateway["projectQueueRead"]>>[0],
+    task: () => Promise<T>,
+  ): Promise<T> {
+    return withProjectQueueObservationOnGitHub(
+      this.repository,
+      binding,
+      this.queueGraphql,
+      task,
+    );
+  }
 
   projectQueueRead(
     binding: Parameters<NonNullable<GitHubGateway["projectQueueRead"]>>[0],

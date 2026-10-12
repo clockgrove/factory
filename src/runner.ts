@@ -65,6 +65,8 @@ import {
   settleCancelledProjectQueueRun,
   type QueueOwnerClaim,
   settleProjectQueueRun,
+  settleFailedProjectQueueReservation,
+  abandonFailedProjectQueueReservation,
   settleStoppedProjectQueueRun,
 } from "./project-queue-state.js";
 import { objectiveCandidate } from "./qa.js";
@@ -109,6 +111,7 @@ import {
 } from "./state.js";
 import {
   acquireObjectiveLock,
+  acquireInstallationLock,
   assertRestoredContinuationReady,
   assertRestoredInstallationDispatchReady,
   type ControllerLock,
@@ -282,7 +285,35 @@ function modeChangeResult(
 async function controlObjectiveUnscoped(
   config: FactoryConfig,
   request: ControlRequest,
+  github?: GitHubGateway,
 ): Promise<unknown> {
+  if (
+    request.action === "handoff" &&
+    request.input?.failedReservationEvidence !== undefined
+  ) {
+    if (
+      !github ||
+      typeof request.input.actor !== "string" ||
+      !request.input.actor
+    )
+      throw new Error(
+        "Failed reservation disposition requires its explicit local operator and genuine Project gateway",
+      );
+    const lockPath = installationLockPath(config.repository),
+      lock = acquireInstallationLock(config.repository, request.objective);
+    try {
+      return await abandonFailedProjectQueueReservation(
+        config,
+        github,
+        request.objective,
+        request.input.failedReservationEvidence,
+        request.input.actor,
+        lock,
+      );
+    } finally {
+      releaseControllerLock(lockPath, lock);
+    }
+  }
   const retained = readContinuation(config.repository, request.objective);
   if (retained && request.action !== "status")
     assertRestoredContinuationReady(retained, config);
@@ -496,7 +527,23 @@ async function runObjectiveOwned(
       ),
     };
   } catch (error) {
-    if (!options.ownerLock) releaseControllerLock(lockPath, lock);
+    try {
+      if (queueClaim && !snapshot)
+        await settleFailedProjectQueueReservation(
+          config,
+          queueClaim,
+          lock.token,
+          error,
+        );
+    } catch (settlementError) {
+      throw new AggregateError(
+        [error, settlementError],
+        "Pre-snapshot controller setup and its Project settlement failed",
+        { cause: error },
+      );
+    } finally {
+      if (!options.ownerLock) releaseControllerLock(lockPath, lock);
+    }
     throw error;
   }
   if (snapshot)

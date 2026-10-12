@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -12,6 +13,8 @@ import {
 import type { GitHubGateway } from "./contracts.js";
 import {
   type ControlRequest,
+  type ControlContext,
+  ControllerCommandIncompleteError,
   ForegroundControllerError,
   requestControl,
   serveControl,
@@ -20,7 +23,14 @@ import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { attachedFault } from "./fault.js";
 import { RealGitHubGateway } from "./github.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
-import { fetchHead, git, gitAsync } from "./process.js";
+import {
+  currentProcessSignal,
+  assertProcessActive,
+  fetchHead,
+  git,
+  gitAsync,
+  withProcessCancellation,
+} from "./process.js";
 import {
   completeQueueOperation,
   createQueueOperation,
@@ -38,6 +48,10 @@ import {
 } from "./project-queue-state.js";
 import {
   awaitCheckpointAdmission,
+  acceptForwardedCheckpointCompletion,
+  withRecoveryCheckpointCommandOperation,
+  withRecoveryCheckpointOperation,
+  withRecoveryCheckpointControllerVerification,
   withRecoveryCheckpointScope,
   withQueueControlVerification,
 } from "./recovery-checkpoint.js";
@@ -69,6 +83,10 @@ export interface IntakeAuthorization {
   bodyDigests: Record<string, string>;
   dequeued: number[];
   mode: QueueMode;
+  remoteObservation?: {
+    availability: "last-observed" | "unavailable";
+    observedAt: string | null;
+  };
   legacyLocalQueueIgnored?: true;
   observation?: {
     at: string;
@@ -80,6 +98,76 @@ export interface IntakeAuthorization {
   };
 }
 export const DEFAULT_QUEUE_POLL_SECONDS = 30;
+export const QUEUE_COMMAND_TIMEOUT_MS = 10_000;
+const commandScopes = new AsyncLocalStorage<{
+  deadlineAt: number;
+  onAcknowledgment?: (value: unknown) => void;
+}>();
+/** The deadline is armed at CLI entry and remains unchanged through IPC and admission. */
+export async function withIntakeCommandDeadline<T>(
+  deadlineAt: number,
+  task: () => Promise<T>,
+  onAcknowledgment?: (value: unknown) => void,
+): Promise<T> {
+  const parent = commandScopes.getStore();
+  if (parent) return task();
+  const cancellation = new AbortController();
+  const inherited = currentProcessSignal();
+  const signal = inherited
+    ? AbortSignal.any([inherited, cancellation.signal])
+    : cancellation.signal;
+  const timer = setTimeout(
+    () =>
+      cancellation.abort(
+        new ControllerCommandIncompleteError(undefined, "unknown", deadlineAt),
+      ),
+    Math.max(0, deadlineAt - Date.now()),
+  );
+  try {
+    signal.throwIfAborted();
+    if (Date.now() >= deadlineAt)
+      throw new ControllerCommandIncompleteError(
+        undefined,
+        "not-sent",
+        deadlineAt,
+      );
+    return await commandScopes.run({ deadlineAt, onAcknowledgment }, () =>
+      withProcessCancellation(
+        signal,
+        task,
+        undefined,
+        new Date(deadlineAt).toISOString(),
+      ),
+    );
+  } catch (error) {
+    if (
+      !(error instanceof ControllerCommandIncompleteError) &&
+      Date.now() >= deadlineAt
+    )
+      throw new ControllerCommandIncompleteError(
+        undefined,
+        "unknown",
+        deadlineAt,
+        error,
+      );
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function projectMutation<T>(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  task: () => Promise<T>,
+): Promise<T> {
+  assertProcessActive();
+  return github.withProjectQueueObservation
+    ? github.withProjectQueueObservation(
+        requireProjectQueueEffects(config),
+        task,
+      )
+    : task();
+}
 export const queuePollSeconds = (config: FactoryConfig): number =>
   config.queue?.pollSeconds ?? DEFAULT_QUEUE_POLL_SECONDS;
 const defaultGateway = (config: FactoryConfig): GitHubGateway =>
@@ -108,6 +196,10 @@ function view(
       .filter((entry) => entry.state === "withdrawn")
       .map((entry) => entry.objective),
     mode: observed?.control.mode ?? "paused",
+    remoteObservation: {
+      availability: observed ? "last-observed" : "unavailable",
+      observedAt: observed?.snapshot.observedAt ?? null,
+    },
     ...(observed?.control.watch ? { watch: true } : {}),
     ...(existsSync(join(stateRoot(config.repository), "intake.json"))
       ? { legacyLocalQueueIgnored: true }
@@ -184,10 +276,31 @@ function scoped<T>(config: FactoryConfig, task: () => Promise<T>): Promise<T> {
     task,
   );
 }
+function queueOperation<T>(
+  config: FactoryConfig,
+  task: () => Promise<T>,
+): Promise<T> {
+  if (!commandScopes.getStore())
+    return withIntakeCommandDeadline(
+      Date.now() + QUEUE_COMMAND_TIMEOUT_MS,
+      () => queueOperation(config, task),
+    );
+  return withRecoveryCheckpointOperation(
+    { config, buildClosure: () => buildRecoveryCheckpointClosure({ config }) },
+    task,
+    { forwardCompletedBarrier: true, queueControlVerification: true },
+  );
+}
 async function locked<T>(
   config: FactoryConfig,
   task: () => Promise<T>,
 ): Promise<T> {
+  if (!commandScopes.getStore())
+    return withIntakeCommandDeadline(
+      Date.now() + QUEUE_COMMAND_TIMEOUT_MS,
+      () => locked(config, task),
+    );
+  assertProcessActive();
   mkdirSync(stateRoot(config.repository), { recursive: true, mode: 0o700 });
   const lock = acquireInstallationLock(config.repository);
   try {
@@ -223,10 +336,16 @@ async function projectControlRequest(
   operation: "enqueue" | "watch" | "pause" | "resume" | "drain" | "dequeue",
   input?: Record<string, unknown>,
 ) {
-  const observed = await requestControl(config.repository, {
-    objective: 0,
-    action: "status",
-  });
+  const scope = commandScopes.getStore();
+  const deadlineAt = scope?.deadlineAt ?? Date.now() + QUEUE_COMMAND_TIMEOUT_MS;
+  const observed = await requestControl(
+    config.repository,
+    {
+      objective: 0,
+      action: "status",
+    },
+    { deadlineAt },
+  );
   if (!observed.handled) return observed;
   if (
     !observed.result ||
@@ -235,15 +354,19 @@ async function projectControlRequest(
     observed.result.queueProtocol !== "project-queue-v1"
   ) {
     if (operation === "pause" || operation === "drain")
-      return requestControl(config.repository, {
-        objective: 0,
-        action: operation,
-      });
+      return requestControl(
+        config.repository,
+        {
+          objective: 0,
+          action: operation,
+        },
+        { deadlineAt },
+      );
     throw new Error(
       "The existing service uses the retired local queue protocol; hand it off through factory supervisor stop, then set up the Project-bound installation. No admission was sent to that owner",
     );
   }
-  return requestControl(config.repository, {
+  const request: ControlRequest = {
     objective: 0,
     action: "project-queue",
     input: {
@@ -251,8 +374,33 @@ async function projectControlRequest(
       operation,
       protocol: "project-queue-v1",
       authorityDigest: factoryAuthorityDigest(config),
+      configDigest: factoryConfigDigest(config),
     },
+    command: { id: randomUUID(), deadlineAt },
+  };
+  const reply = await requestControl(config.repository, request, {
+    deadlineAt,
+    onAcknowledgment: scope?.onAcknowledgment,
   });
+  if (!reply.handled)
+    throw new ControllerCommandIncompleteError(
+      request.command!.id,
+      "unknown",
+      deadlineAt,
+    );
+  const completed = reply.result as
+    | { result?: unknown; checkpointCompletion?: unknown }
+    | undefined;
+  if (!completed || !("result" in completed) || !completed.checkpointCompletion)
+    throw new Error(
+      "Controller queue command lacks its exact completed checkpoint receipt; inspect retained status before another mutation",
+    );
+  acceptForwardedCheckpointCompletion(completed.checkpointCompletion, {
+    requestId: request.command!.id,
+    action: `project-queue:${operation}`,
+    inputDigest: queueDigest(JSON.stringify(request.input)),
+  });
+  return { handled: true, result: completed.result };
 }
 async function writeControl(
   config: FactoryConfig,
@@ -296,6 +444,7 @@ async function writeControl(
     throw new Error(
       "Project control was cleared after an earlier receipt; supported reconciliation is required",
     );
+  assertProcessActive();
   const operation = createQueueOperation(config, {
     action: "control",
     scope: "control",
@@ -331,6 +480,16 @@ async function enqueueOwned(
   objectives: number[],
   options: EnqueueOptions = {},
 ): Promise<IntakeAuthorization> {
+  return projectMutation(config, github, () =>
+    enqueueMutation(config, github, objectives, options),
+  );
+}
+async function enqueueMutation(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objectives: number[],
+  options: EnqueueOptions,
+): Promise<IntakeAuthorization> {
   validateObjectives(objectives);
   checkRequiredEnvironment(config);
   const initialized = await mutationSnapshot(config, github);
@@ -359,6 +518,7 @@ async function enqueueOwned(
     );
   }
   for (const objective of objectives) {
+    assertProcessActive();
     const observed = await observeProjectQueue(
       config,
       github,
@@ -411,6 +571,7 @@ async function enqueueOwned(
       Math.max(0, ...observed.entries.map((entry) => entry.order)) + 1;
     if (!Number.isSafeInteger(order))
       throw new Error("Project order exhausted its exact integer range");
+    assertProcessActive();
     const operation = createQueueOperation(config, {
       action: "admit",
       scope: issue.nodeId,
@@ -452,6 +613,16 @@ export async function enqueueIntake(
   objectives: number[],
   options: EnqueueOptions = {},
 ): Promise<IntakeAuthorization> {
+  return queueOperation(config, () =>
+    enqueueIntakeCommand(config, github, objectives, options),
+  );
+}
+async function enqueueIntakeCommand(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objectives: number[],
+  options: EnqueueOptions,
+): Promise<IntakeAuthorization> {
   const reply = await projectControlRequest(config, "enqueue", {
     objectives,
     ...options,
@@ -462,6 +633,16 @@ export async function enqueueIntake(
   );
 }
 export async function ensureProjectObjective(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objective: number,
+  provenance?: ProjectPublicationProvenance,
+): Promise<void> {
+  return queueOperation(config, () =>
+    ensureProjectObjectiveCommand(config, github, objective, provenance),
+  );
+}
+async function ensureProjectObjectiveCommand(
   config: FactoryConfig,
   github: GitHubGateway,
   objective: number,
@@ -483,6 +664,16 @@ async function ensureProjectObjectiveOwned(
   objective: number,
   provenance?: ProjectPublicationProvenance,
 ): Promise<void> {
+  return projectMutation(config, github, () =>
+    ensureProjectObjectiveMutation(config, github, objective, provenance),
+  );
+}
+async function ensureProjectObjectiveMutation(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objective: number,
+  provenance?: ProjectPublicationProvenance,
+): Promise<void> {
   await mutationSnapshot(config, github);
   const issue = await github.objective(objective);
   if (!issue.nodeId)
@@ -494,6 +685,7 @@ async function ensureProjectObjectiveOwned(
     throw new Error(
       "Published contents changed before Project card publication",
     );
+  assertProcessActive();
   const operation = createQueueOperation(config, {
     action: "roadmap",
     scope: `roadmap:${issue.nodeId}`,
@@ -519,25 +711,33 @@ export async function watchIntake(
   config: FactoryConfig,
   github: GitHubGateway = defaultGateway(config),
 ): Promise<IntakeAuthorization> {
+  return queueOperation(config, () => watchIntakeCommand(config, github));
+}
+async function watchIntakeCommand(
+  config: FactoryConfig,
+  github: GitHubGateway,
+): Promise<IntakeAuthorization> {
   const reply = await projectControlRequest(config, "watch");
   if (reply.handled) return reply.result as IntakeAuthorization;
-  return locked(config, async () => {
-    const prepared = await mutationSnapshot(config, github);
-    const { snapshot } = prepared;
-    const previous =
-      snapshot.control.metadata === null
-        ? undefined
-        : parseQueueMetadata(snapshot.control.metadata);
-    await writeControl(
-      config,
-      github,
-      previous?.kind === "control" ? previous.mode : "running",
-      true,
-      { kind: "background-setup" },
-      prepared,
-    );
-    return view(config, await observeProjectQueue(config, github));
-  });
+  return locked(config, () =>
+    projectMutation(config, github, async () => {
+      const prepared = await mutationSnapshot(config, github);
+      const { snapshot } = prepared;
+      const previous =
+        snapshot.control.metadata === null
+          ? undefined
+          : parseQueueMetadata(snapshot.control.metadata);
+      await writeControl(
+        config,
+        github,
+        previous?.kind === "control" ? previous.mode : "running",
+        true,
+        { kind: "background-setup" },
+        prepared,
+      );
+      return view(config, await observeProjectQueue(config, github));
+    }),
+  );
 }
 async function applyControl(
   config: FactoryConfig,
@@ -557,6 +757,16 @@ async function applyControl(
     : task();
 }
 async function applyControlOwned(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  action: string,
+  objective?: number,
+): Promise<IntakeAuthorization> {
+  return projectMutation(config, github, () =>
+    applyControlMutation(config, github, action, objective),
+  );
+}
+async function applyControlMutation(
   config: FactoryConfig,
   github: GitHubGateway,
   action: string,
@@ -590,6 +800,7 @@ async function applyControlOwned(
       throw new Error(
         `Objective #${objective} has unfinished owned work; use supported cancellation before removal`,
       );
+    assertProcessActive();
     const operation = createQueueOperation(config, {
       action: "withdraw",
       scope: entry.issueNodeId,
@@ -636,15 +847,34 @@ export async function intakeControl(
   objective?: number,
   github: GitHubGateway = defaultGateway(config),
 ): Promise<unknown> {
+  if (action !== "status" && action !== "sync")
+    return queueOperation(config, () =>
+      intakeControlCommand(config, action, objective, github),
+    );
+  return intakeControlCommand(config, action, objective, github);
+}
+async function intakeControlCommand(
+  config: FactoryConfig,
+  action: "status" | "sync" | "pause" | "resume" | "drain" | "dequeue",
+  objective: number | undefined,
+  github: GitHubGateway,
+): Promise<unknown> {
   if (action === "sync") return readIntake(config, { github });
   let reply: Awaited<ReturnType<typeof requestControl>>;
   try {
     reply =
       action === "status"
-        ? await requestControl(config.repository, {
-            objective: 0,
-            action: "status",
-          })
+        ? await requestControl(
+            config.repository,
+            {
+              objective: 0,
+              action: "status",
+            },
+            {
+              deadlineAt:
+                commandScopes.getStore()?.deadlineAt ?? Date.now() + 1000,
+            },
+          )
         : await projectControlRequest(
             config,
             action,
@@ -721,7 +951,10 @@ export function runIntake(
   config: FactoryConfig,
   services: ApplicationServices,
 ): Promise<IntakeAuthorization> {
-  return scoped(config, () => runIntakeOwned(config, services));
+  return withRecoveryCheckpointControllerVerification(
+    { config, buildClosure: () => buildRecoveryCheckpointClosure({ config }) },
+    () => runIntakeOwned(config, services),
+  );
 }
 async function runIntakeOwned(
   config: FactoryConfig,
@@ -739,8 +972,14 @@ async function runIntakeOwned(
   let handingOff = false;
   let localMode: QueueMode | undefined;
   let wake: (() => void) | undefined;
+  let wakePending = false;
+  const signalWake = () => {
+    wakePending = true;
+    wake?.();
+  };
   let heldUntil = 0;
   let controlTail: Promise<unknown> = Promise.resolve();
+  let pendingMutations = 0;
   const holdFor = (error: unknown) => {
     const fault = attachedFault(error);
     const at =
@@ -757,15 +996,18 @@ async function runIntakeOwned(
         objective: activeObjective,
         action: "handoff",
       }).catch(() => undefined);
-    wake?.();
+    signalWake();
   };
-  const handleOwned = async (request: ControlRequest): Promise<unknown> => {
+  const authenticateQueueRequest = (
+    request: ControlRequest,
+  ): ControlRequest => {
     if (request.action === "project-queue") {
       const operation = request.input?.operation;
       if (
         request.objective !== 0 ||
         request.input?.protocol !== "project-queue-v1" ||
         request.input?.authorityDigest !== factoryAuthorityDigest(config) ||
+        request.input?.configDigest !== factoryConfigDigest(config) ||
         typeof operation !== "string" ||
         !["enqueue", "watch", "pause", "resume", "drain", "dequeue"].includes(
           operation,
@@ -773,6 +1015,13 @@ async function runIntakeOwned(
       )
         throw new Error(
           "Project queue control protocol or authority binding differs",
+        );
+      if (
+        !request.command ||
+        request.command.deadlineAt > Date.now() + QUEUE_COMMAND_TIMEOUT_MS
+      )
+        throw new Error(
+          "Project queue command requires its original bounded request deadline",
         );
       request = { ...request, action: operation as ControlRequest["action"] };
     } else if (
@@ -782,6 +1031,15 @@ async function runIntakeOwned(
       throw new Error(
         "Queue mutations require the Project queue protocol; upgrade the caller before admission",
       );
+    return request;
+  };
+  const localStatus = () => ({
+    ...record,
+    activeObjective: activeObjective ?? null,
+    ...(localMode ? { localMode } : {}),
+    pendingMutations,
+  });
+  const handleOwned = async (request: ControlRequest): Promise<unknown> => {
     if (request.objective !== 0) {
       if (request.objective === activeObjective && objectiveControl)
         return objectiveControl(request);
@@ -797,24 +1055,10 @@ async function runIntakeOwned(
       );
     }
     if (request.action === "status") {
-      record =
-        (await readIntake(config, { github: services.github })) ??
-        view(config, undefined, "Project binding missing");
-      return {
-        ...record,
-        activeObjective: activeObjective ?? null,
-        ...(localMode ? { localMode } : {}),
-      };
+      return localStatus();
     }
     if (["pause", "drain", "handoff"].includes(request.action)) {
-      localMode = request.action === "pause" ? "paused" : "draining";
-      if (request.action === "handoff") handingOff = true;
-      if (activeObjective && objectiveControl)
-        await objectiveControl({
-          objective: activeObjective,
-          action: request.action,
-        });
-      wake?.();
+      signalWake();
     }
     if (request.action === "enqueue") {
       if (handingOff || localMode === "draining")
@@ -842,23 +1086,23 @@ async function runIntakeOwned(
             | undefined,
         });
     } else if (request.action === "watch") {
-      const prepared = await mutationSnapshot(config, services.github);
-      const observed = verifyQueueObservation(
-        config,
-        prepared.snapshot,
-        prepared.history,
-      );
-      await writeControl(
-        config,
-        services.github,
-        observed.control.mode,
-        true,
-        {
-          kind: "background-setup",
-        },
-        prepared,
-      );
-      record = view(config, await observeProjectQueue(config, services.github));
+      record = await projectMutation(config, services.github, async () => {
+        const prepared = await mutationSnapshot(config, services.github);
+        const observed = verifyQueueObservation(
+          config,
+          prepared.snapshot,
+          prepared.history,
+        );
+        await writeControl(
+          config,
+          services.github,
+          observed.control.mode,
+          true,
+          { kind: "background-setup" },
+          prepared,
+        );
+        return view(config, await observeProjectQueue(config, services.github));
+      });
     } else {
       try {
         record = await applyControl(
@@ -869,20 +1113,18 @@ async function runIntakeOwned(
         );
       } catch (error) {
         if (["pause", "drain", "handoff"].includes(request.action))
-          return {
+          record = {
             ...record,
             complete: false,
-            localMode,
             observation: {
               at: new Date().toISOString(),
               reasons: {},
-              error: `Local cessation requested; Project control remains unsynchronized: ${String(error)}`,
+              error: `Local new dispatch remains held; Project synchronization incomplete or unknown: ${String(error)}`,
             },
           };
         throw error;
       }
       if (request.action === "resume") {
-        localMode = undefined;
         if (activeObjective && objectiveControl)
           await objectiveControl({
             objective: activeObjective,
@@ -890,11 +1132,83 @@ async function runIntakeOwned(
           });
       }
     }
-    wake?.();
+    signalWake();
     return { ...record, activeObjective: activeObjective ?? null };
   };
-  const handle = (request: ControlRequest): Promise<unknown> => {
-    const result = controlTail.then(() => handleOwned(request));
+  const handle = (
+    original: ControlRequest,
+    context: ControlContext,
+  ): Promise<unknown> => {
+    const request = authenticateQueueRequest(original);
+    assertProcessActive();
+    let localCessation: Promise<{ error?: unknown }> | undefined;
+    // Token/live-owner authentication happens in serveControl; semantic authority
+    // is checked above before any local dispatch state changes.
+    if (request.action === "status") return handleOwned(request);
+    if (
+      request.objective === 0 &&
+      ["pause", "drain", "handoff"].includes(request.action)
+    ) {
+      localMode = request.action === "pause" ? "paused" : "draining";
+      if (request.action === "handoff") handingOff = true;
+      // The existing Objective handler sets its dispatch stop synchronously
+      // before its returned promise. Retain already admitted work, and await
+      // the same requested transition as part of this bounded command.
+      if (activeObjective && objectiveControl)
+        localCessation = objectiveControl({
+          objective: activeObjective,
+          action: request.action,
+        }).then(
+          () => ({}),
+          (error) => ({ error }),
+        );
+      signalWake();
+      context.acknowledge({
+        kind: "local-cessation-acknowledgment",
+        at: new Date().toISOString(),
+        newDispatch: "held",
+        admittedWork: "retained",
+        projectSynchronization: "pending",
+        physicalSettlement: "not-asserted",
+      });
+    }
+    pendingMutations++;
+    const result = controlTail
+      .then(async () => {
+        context.signal.throwIfAborted();
+        assertProcessActive();
+        const task = async () => {
+          const cessation = await localCessation;
+          if (cessation?.error) throw cessation.error;
+          return handleOwned(request);
+        };
+        const completed =
+          original.action === "project-queue"
+            ? await withRecoveryCheckpointCommandOperation(
+                {
+                  config,
+                  buildClosure: () =>
+                    buildRecoveryCheckpointClosure({ config }),
+                },
+                {
+                  requestId: original.command!.id,
+                  action: `project-queue:${request.action}`,
+                  inputDigest: queueDigest(JSON.stringify(original.input)),
+                },
+                task,
+              )
+            : await task();
+        context.signal.throwIfAborted();
+        assertProcessActive();
+        if (request.objective === 0 && request.action === "resume")
+          localMode = undefined;
+        signalWake();
+        return completed;
+      })
+      .finally(() => {
+        pendingMutations--;
+        signalWake();
+      });
     controlTail = result.catch(() => undefined);
     return result;
   };
@@ -914,7 +1228,12 @@ async function runIntakeOwned(
         record = view(config, undefined, error);
       }
       if (record.complete && record.mode === "draining") return record;
-      if (observed && record.mode === "running" && localMode !== "paused") {
+      if (
+        observed &&
+        record.mode === "running" &&
+        localMode !== "paused" &&
+        pendingMutations === 0
+      ) {
         const reasons: Record<string, string> = {};
         let selected: number | undefined;
         for (const entry of observed.entries.filter(
@@ -987,7 +1306,7 @@ async function runIntakeOwned(
           activeObjective = selected;
           retargetControllerLock(lockPath, lock, selected);
           try {
-            if (handingOff || localMode) continue;
+            if (handingOff || localMode || pendingMutations) continue;
             const result = await runObjective(config, selected, services, {
               ownerLock: lock,
               observeControl: async (handler) => {
@@ -1059,6 +1378,10 @@ async function runIntakeOwned(
         heldUntil,
         (handler) => {
           wake = handler;
+          if (handler && wakePending) {
+            wakePending = false;
+            handler();
+          }
         },
       );
     }

@@ -1294,12 +1294,38 @@ test("cancellation stops an owned shell and its process group", async () => {
               releaseRegistration = resolve;
             });
             let running;
+            let controlShell;
+            let continuedAfterDeadline = false;
             try {
               server = await serveControl(
                 config.repository,
                 lock,
-                async (request) => {
+                async (request, context) => {
                   assert.equal(request.objective, 1);
+                  if (request.action === "status")
+                    return readContinuation(config.repository, 1).coordinator;
+                  if (request.action === "pause") {
+                    context.acknowledge({
+                      kind: "local-cessation-acknowledgment",
+                      newDispatch: "held",
+                      admittedWork: "retained",
+                      projectSynchronization: "pending",
+                    });
+                    // Exercise the real IPC cancellation scope with an owned
+                    // subprocess, without a remote/provider stand-in.
+                    await subprocessAsync(
+                      "sh",
+                      ["-c", "echo $$; sleep 120"],
+                      {},
+                      undefined,
+                      (stream, chunk) => {
+                        if (stream === "stdout")
+                          controlShell = Number(chunk.toString().trim());
+                      },
+                    );
+                    continuedAfterDeadline = true;
+                    return "completed";
+                  }
                   assert.equal(request.action, "handoff");
                   pendingHandoff = true;
                   if (objectiveControl) await objectiveControl(request);
@@ -1324,6 +1350,100 @@ test("cancellation stops an owned shell and its process group", async () => {
                 (error) => error,
               );
               await entered;
+              const expiredRequestId = randomUUID();
+              const expiredAt = Date.now() - 1;
+              await assert.rejects(
+                () =>
+                  requestControl(
+                    config.repository,
+                    {
+                      objective: 1,
+                      action: "pause",
+                      command: { id: expiredRequestId, deadlineAt: expiredAt },
+                    },
+                    { deadlineAt: expiredAt },
+                  ),
+                (error) =>
+                  error.requestId === expiredRequestId &&
+                  error.submission === "not-sent",
+              );
+              assert.equal(controlShell, undefined);
+              const requestId = randomUUID();
+              const client = spawn(
+                process.execPath,
+                [
+                  "--input-type=module",
+                  "-e",
+                  `
+import { requestControl } from ${JSON.stringify(new URL("../dist/coordinator-control.js", import.meta.url).href)};
+const deadlineAt = Date.now() + 1500;
+try {
+  await requestControl(${JSON.stringify(config.repository)}, { objective: 1, action: 'pause', command: { id: ${JSON.stringify(requestId)}, deadlineAt } }, { deadlineAt, onAcknowledgment(value) { console.log(JSON.stringify({ acknowledgment: value })); } });
+  process.exitCode = 9;
+} catch (error) {
+  console.log(JSON.stringify({ incomplete: { requestId: error.requestId, submission: error.submission } }));
+  process.exitCode = error.submission === 'unknown' ? 0 : 8;
+}
+`,
+                ],
+                { env: process.env, stdio: ["ignore", "pipe", "pipe"] },
+              );
+              const clientExit = once(client, "close");
+              let clientOutput = "";
+              let acknowledge;
+              const acknowledged = new Promise((resolve) => {
+                acknowledge = resolve;
+              });
+              client.stdout.on("data", (chunk) => {
+                clientOutput += chunk.toString();
+                if (clientOutput.includes('"acknowledgment"')) acknowledge();
+              });
+              await Promise.race([
+                acknowledged,
+                clientExit.then(() => {
+                  throw new Error(
+                    `Control client exited before acknowledgment: ${clientOutput}`,
+                  );
+                }),
+              ]);
+              const statusStartedAt = Date.now();
+              assert.equal(
+                (
+                  await requestControl(
+                    config.repository,
+                    { objective: 1, action: "status" },
+                    { deadlineAt: Date.now() + 1000 },
+                  )
+                ).handled,
+                true,
+              );
+              assert(
+                Date.now() - statusStartedAt < 1000,
+                "Status remains independent of the ongoing mutation",
+              );
+              assert.equal((await clientExit)[0], 0);
+              const frames = clientOutput
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line));
+              assert.equal(
+                frames[0].acknowledgment.projectSynchronization,
+                "pending",
+              );
+              assert.deepEqual(frames.at(-1).incomplete, {
+                requestId,
+                submission: "unknown",
+              });
+              const closureDeadline = Date.now() + 5000;
+              while (
+                controlShell &&
+                processGroupExists(controlShell) &&
+                Date.now() < closureDeadline
+              )
+                await new Promise((resolve) => setTimeout(resolve, 10));
+              assert(controlShell > 0);
+              assert.equal(processGroupExists(controlShell), false);
+              assert.equal(continuedAfterDeadline, false);
               assert.equal(
                 (
                   await requestControl(config.repository, {

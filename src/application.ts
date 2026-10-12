@@ -261,22 +261,12 @@ export function createApplication(
   const checkpoint = checkpointOperations(config);
   return {
     enqueueIntake: (objectives, options) =>
-      checkpoint.async(() =>
-        enqueueIntake(config, services.github, objectives, options),
-      ),
+      enqueueIntake(config, services.github, objectives, options),
     intakeControl: (action, objective) =>
-      action === "status" || action === "sync"
-        ? intakeControl(config, action, objective, services.github)
-        : checkpoint.async(
-            () => intakeControl(config, action, objective, services.github),
-            ["pause", "resume", "drain"].includes(action),
-          ),
-    watchIntake: () =>
-      checkpoint.async(() => watchIntake(config, services.github)),
+      intakeControl(config, action, objective, services.github),
+    watchIntake: () => watchIntake(config, services.github),
     ensureProjectObjective: (objective, provenance) =>
-      checkpoint.async(() =>
-        ensureProjectObjective(config, services.github, objective, provenance),
-      ),
+      ensureProjectObjective(config, services.github, objective, provenance),
     runIntake: () => checkpoint.async(() => runIntake(config, services)),
     planObjective: (objective) => {
       if (config.gitPersistence?.scope === "private-history")
@@ -357,24 +347,14 @@ export function composeIntake(
     config.repository,
     new NativeStackDelivery(config.repository),
   );
-  const checkpoint = checkpointOperations(config);
   return {
     enqueueIntake: (objectives, options) =>
-      checkpoint.async(() =>
-        enqueueIntake(config, github, objectives, options),
-      ),
+      enqueueIntake(config, github, objectives, options),
     intakeControl: (action, objective) =>
-      action === "status" || action === "sync"
-        ? intakeControl(config, action, objective, github)
-        : checkpoint.async(
-            () => intakeControl(config, action, objective, github),
-            ["pause", "resume", "drain"].includes(action),
-          ),
-    watchIntake: () => checkpoint.async(() => watchIntake(config, github)),
+      intakeControl(config, action, objective, github),
+    watchIntake: () => watchIntake(config, github),
     ensureProjectObjective: (objective, provenance) =>
-      checkpoint.async(() =>
-        ensureProjectObjective(config, github, objective, provenance),
-      ),
+      ensureProjectObjective(config, github, objective, provenance),
   };
 }
 

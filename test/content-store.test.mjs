@@ -7,8 +7,8 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
@@ -18,72 +18,51 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { deflateSync } from "node:zlib";
 import test from "node:test";
-import { LocalContentStore } from "../dist/content/local.js";
-import { admitNativeReturn } from "../dist/compiler/native-return.js";
-import { retainPlanningNativeReturn } from "../dist/compiler/recovery.js";
-import {
-  linuxProcessIdentity,
-  withProcessCancellation,
-  currentProcessSignal,
-} from "../dist/process.js";
-import { withGitHubRequestBudget } from "../dist/github-client.js";
-import { analyzeInteractions } from "../dist/analysis.js";
-import { captureAssetSets } from "../dist/media.js";
+import { deflateSync } from "node:zlib";
 import {
   assertAccountingSealContent,
   buildAccountingSeal,
   readAccountingRecords,
 } from "../dist/accounting.js";
 import {
+  authenticateAdaptiveContextPacket,
+  buildAdaptiveContext,
+} from "../dist/adaptive-context.js";
+import { analyzeInteractions } from "../dist/analysis.js";
+import {
   CaptureWriter,
   readInteractionContent,
   readInteractionMetadata,
 } from "../dist/capture.js";
+import {
+  assertContextFactsResolved,
+  initializeContextLookup,
+  resolveContextRequests,
+} from "../dist/compiler/context.js";
+import { createPlanningContextResolver } from "../dist/compiler/context-runtime.js";
+import { admitNativeReturn } from "../dist/compiler/native-return.js";
+import { retainPlanningNativeReturn } from "../dist/compiler/recovery.js";
+import { hydrateWorkerInputSources } from "../dist/compiler/sources.js";
+import {
+  factoryAuthorityDigest,
+  factoryConfigDigest,
+  stateRoot,
+} from "../dist/config.js";
+import { LocalContentStore } from "../dist/content/local.js";
+import { linearDeliveryUnits } from "../dist/delivery/plan.js";
 import {
   DiagnosticEmitter,
   readUsageSummaryEvents,
   summarizeDiagnosticUsage,
 } from "../dist/diagnostics.js";
 import {
-  LocalRepositoryMemory,
-  retainPlanningSourceMemory,
-} from "../dist/repository-memory.js";
-import { createPlanningContextResolver } from "../dist/compiler/context-runtime.js";
-import { hydrateWorkerInputSources } from "../dist/compiler/sources.js";
-import {
-  assertContextFactsResolved,
-  initializeContextLookup,
-  resolveContextRequests,
-} from "../dist/compiler/context.js";
-import { resolveAutonomy } from "../dist/repair-policy.js";
-import { parseFactoryState } from "../dist/state.js";
-import {
-  readContinuation,
-  reconcileRestoredContinuation,
-  restoreRecoveryCheckpoint,
-  saveState,
-  statePath,
-} from "../dist/state-store.js";
-import {
-  authenticateWorkRouting,
-  assertWorkRoutingState,
-  settleWorkRouting,
-} from "../dist/runner/routing.js";
-import { objectiveReviewEvidence } from "../dist/result-evidence.js";
-import { objectiveCandidate } from "../dist/qa.js";
-import {
-  factoryAuthorityDigest,
-  factoryConfigDigest,
-  stateRoot,
-} from "../dist/config.js";
-import {
-  authenticateQueueOwnerReferences,
-  bindProjectQueueRun,
-  parseQueueRecord,
-  retainProjectQueueOriginal,
-} from "../dist/project-queue-state.js";
+  authenticateDiscoveryOutput,
+  discoverRepository,
+} from "../dist/discovery.js";
+import { withGitHubRequestBudget } from "../dist/github-client.js";
+import { graphDigest } from "../dist/graph-amendments.js";
+import { materializeGraphExpansion } from "../dist/graph-expansion.js";
 import {
   decidePlaybook,
   learningDigest,
@@ -94,33 +73,55 @@ import {
   retainLearningMemory,
   savePlaybookProposal,
 } from "../dist/learning.js";
+import { captureAssetSets } from "../dist/media.js";
+import {
+  currentProcessSignal,
+  linuxProcessIdentity,
+  withProcessCancellation,
+} from "../dist/process.js";
+import {
+  authenticateQueueOwnerReferences,
+  bindProjectQueueRun,
+  parseQueueRecord,
+  retainProjectQueueOriginal,
+} from "../dist/project-queue-state.js";
+import {
+  aggregateAcceptance,
+  assertCompletedCoverage,
+  assertExpansionCoverage,
+  coverageObligations,
+  objectiveCandidate,
+} from "../dist/qa.js";
+import {
+  acceptForwardedCheckpointCompletion,
+  gitPersistenceStatus,
+  inspectRecoveryCheckpoint,
+  readRecoveryCheckpointBodies,
+  readVerifiedRecoveryCheckpoint,
+  synchronizeRecoveryCheckpoint,
+  withRecoveryCheckpointCommandOperation,
+  withRecoveryCheckpointControllerVerification,
+  withRecoveryCheckpointOperation,
+  withRecoveryCheckpointScope,
+  writeRecoveryCheckpointBodies,
+} from "../dist/recovery-checkpoint.js";
 import {
   buildRecoveryCheckpointClosure,
   describeMemoryBodyReferences,
 } from "../dist/recovery-checkpoint-closure.js";
+import { resolveAutonomy } from "../dist/repair-policy.js";
 import {
-  gitPersistenceStatus,
-  inspectRecoveryCheckpoint,
-  readVerifiedRecoveryCheckpoint,
-  readRecoveryCheckpointBodies,
-  writeRecoveryCheckpointBodies,
-  synchronizeRecoveryCheckpoint,
-  withRecoveryCheckpointOperation,
-  withRecoveryCheckpointScope,
-} from "../dist/recovery-checkpoint.js";
+  LocalRepositoryMemory,
+  retainPlanningSourceMemory,
+} from "../dist/repository-memory.js";
 import { buildMemoryLearningClosure } from "../dist/repository-memory-transfer.js";
-import {
-  authenticateDiscoveryOutput,
-  discoverRepository,
-} from "../dist/discovery.js";
+import { objectiveReviewEvidence } from "../dist/result-evidence.js";
 import { selectedDiscoveryInputs } from "../dist/runner/discovery.js";
-import { linearDeliveryUnits } from "../dist/delivery/plan.js";
-import { materializeGraphExpansion } from "../dist/graph-expansion.js";
-import { graphDigest } from "../dist/graph-amendments.js";
 import {
-  authenticateAdaptiveContextPacket,
-  buildAdaptiveContext,
-} from "../dist/adaptive-context.js";
+  assertWorkRoutingState,
+  authenticateWorkRouting,
+  settleWorkRouting,
+} from "../dist/runner/routing.js";
 import {
   pendingItemBlocker,
   rankPending,
@@ -128,12 +129,14 @@ import {
   schedulingObservations,
   validateAndOrderGraph,
 } from "../dist/scheduler.js";
+import { parseFactoryState } from "../dist/state.js";
 import {
-  aggregateAcceptance,
-  assertCompletedCoverage,
-  assertExpansionCoverage,
-  coverageObligations,
-} from "../dist/qa.js";
+  readContinuation,
+  reconcileRestoredContinuation,
+  restoreRecoveryCheckpoint,
+  saveState,
+  statePath,
+} from "../dist/state-store.js";
 
 test("disk content survives storage and materialization, and corruption is refused", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-content-"));
@@ -1132,6 +1135,8 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     buildClosure,
   });
   const claimInitial = {
+    // The same real archive supplies a positive pre-snapshot witness before
+    // the workflow records its actual canonical continuation below.
     ...structuredClone(cancelled),
     objective: 2,
     runId: randomUUID(),
@@ -1143,13 +1148,43 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     },
   };
   delete claimInitial.cancelledAt;
+  const reserved = await readVerifiedRecoveryCheckpoint(config, undefined, {
+    kind: "pre-snapshot",
+    objective: claim.objective,
+    claimId: claim.id,
+  });
+  const reservation = reserved.queueReservationLineage;
+  assert(reservation);
+  assert.equal(reserved.queueOwnerLineage, undefined);
+  assert.equal(reservation.checkpoints.current.commitSha, reserved.commitSha);
+  assert.deepEqual(
+    reservation.generations.at(-1),
+    reservation.checkpoints.current,
+  );
+  assert.deepEqual(
+    Buffer.from(
+      reservation.bodies.find(
+        ({ ref }) => ref.digest === reservation.originalClaim.digest,
+      ).bytes,
+    ),
+    readFileSync(claimPath),
+  );
   saveState(statePath(repository, 2), claimInitial);
   const initialBytes = readFileSync(statePath(repository, 2));
   await synchronizeRecoveryCheckpoint(config, {
     reason: "explicit",
     buildClosure,
   });
+  await assert.rejects(
+    readVerifiedRecoveryCheckpoint(config, undefined, {
+      kind: "pre-snapshot",
+      objective: 2,
+      claimId: claim.id,
+    }),
+    /continuation/,
+  );
   const claimTerminal = {
+    // A started continuation can never be reshaped into an orphan reservation.
     ...structuredClone(claimInitial),
     cancelRequested: true,
     cancelledAt: new Date().toISOString(),
@@ -1787,15 +1822,15 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     firstCheckpoint.lastAcknowledged.commitSha,
     secondCheckpoint.lastAcknowledged.commitSha,
   ]);
-  // The finite queue scope owns one remote-only verifier. Concurrent reads
-  // serialize its fresh fetch/strict object check, with full lineage each time.
+  // The controller owns one remote-only verifier across separate commands.
+  // Current bytes stay checked; immutable witnesses reuse authenticated prefixes.
   const verifierDirectories = () =>
     readdirSync(join(state, "recovery"))
       .filter((name) => /^verify-.*\.git$/.test(name))
       .sort();
   assert.deepEqual(verifierDirectories(), []);
   let firstVerifier;
-  await withRecoveryCheckpointOperation(
+  await withRecoveryCheckpointControllerVerification(
     operationInput,
     async () => {
       const [left, right] = await Promise.all([
@@ -1838,13 +1873,40 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       try {
         await assert.rejects(
           readVerifiedRecoveryCheckpoint(config),
-          /Git archive transport command failed|Command failed/,
+          /Git archive transport command failed|Command failed|altered or missing/,
         );
       } finally {
         rmSync(corruptPath, { force: true });
       }
       const restoredRead = await readVerifiedRecoveryCheckpoint(config);
       assert.equal(restoredRead.commitSha, left.commitSha);
+      const reusedDirectory = verifierDirectories()[0];
+      await withRecoveryCheckpointOperation(
+        operationInput,
+        () => readVerifiedRecoveryCheckpoint(config),
+        { queueControlVerification: true },
+      );
+      assert.equal(verifierDirectories()[0], reusedDirectory);
+      const objectRoot = join(state, "recovery", reusedDirectory, "objects");
+      const cachedFiles = readdirSync(objectRoot).flatMap((name) =>
+        name === "pack" || /^[a-f0-9]{2}$/.test(name)
+          ? readdirSync(join(objectRoot, name))
+              .filter((file) =>
+                /(?:^[a-f0-9]{38,62}$|\.pack$|\.idx$)/.test(file),
+              )
+              .map((file) => join(objectRoot, name, file))
+          : [],
+      );
+      assert(cachedFiles.length > 0);
+      rmSync(cachedFiles[0]);
+      await assert.rejects(
+        readVerifiedRecoveryCheckpoint(config),
+        /altered or missing/,
+      );
+      assert.equal(
+        (await readVerifiedRecoveryCheckpoint(config)).commitSha,
+        restoredRead.commitSha,
+      );
       left.manifest.files.length = 0;
       assert.equal(restoredRead.manifest.files.length > 0, true);
       await assert.rejects(
@@ -1877,7 +1939,6 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       assert.notEqual(advanced.commitSha, restoredRead.commitSha);
       assert.equal(verifierDirectories().length, 1);
     },
-    { queueControlVerification: true },
   );
   assert.deepEqual(verifierDirectories(), []);
   await withRecoveryCheckpointOperation(
@@ -1895,6 +1956,94 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     await readVerifiedRecoveryCheckpoint(config);
     assert.deepEqual(verifierDirectories(), []);
   });
+  // A separate real Node owner completes the actual Git barrier. Forwarding
+  // tests concern that receipt only, and invent no GitHub/provider response.
+  const commandBinding = {
+    requestId: randomUUID(),
+    action: "project-queue:pause",
+    inputDigest: learningDigest("private storage command"),
+  };
+  const checkpointModule = new URL(
+    "../dist/recovery-checkpoint.js",
+    import.meta.url,
+  ).href;
+  const closureModule = new URL(
+    "../dist/recovery-checkpoint-closure.js",
+    import.meta.url,
+  ).href;
+  const stateModule = new URL("../dist/state-store.js", import.meta.url).href;
+  const producer = (advance = false) =>
+    JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+    import { withRecoveryCheckpointCommandOperation, gitPersistenceStatus } from ${JSON.stringify(checkpointModule)};
+    import { buildRecoveryCheckpointClosure } from ${JSON.stringify(closureModule)};
+    import { readContinuation, saveState, statePath } from ${JSON.stringify(stateModule)};
+    const config=${JSON.stringify(config)},request=${JSON.stringify(commandBinding)};
+    const completed=await withRecoveryCheckpointCommandOperation({config,buildClosure:()=>buildRecoveryCheckpointClosure({config})},request,async()=>{
+      ${advance ? "saveState(statePath(config.repository,1),readContinuation(config.repository,1));" : ""}
+      return gitPersistenceStatus(config);
+    });
+    process.stdout.write(JSON.stringify(completed));
+  `,
+        ],
+        { env: process.env, encoding: "utf8", timeout: 30_000 },
+      ),
+    );
+  operationClosureBuilds = 0;
+  let completedCommand;
+  await withRecoveryCheckpointOperation(
+    operationInput,
+    async () => {
+      completedCommand = producer();
+      const later = producer(true);
+      assert(
+        later.checkpointCompletion.acknowledgment.sequence >
+          completedCommand.checkpointCompletion.acknowledgment.sequence,
+      );
+      assert.throws(
+        () =>
+          acceptForwardedCheckpointCompletion(
+            completedCommand.checkpointCompletion,
+            {
+              ...commandBinding,
+              inputDigest: learningDigest("another request"),
+            },
+          ),
+        /differs/,
+      );
+      acceptForwardedCheckpointCompletion(
+        completedCommand.checkpointCompletion,
+        commandBinding,
+      );
+    },
+    { forwardCompletedBarrier: true },
+  );
+  assert.equal(
+    operationClosureBuilds,
+    0,
+    "later controller material cannot turn the forwarding caller into a publisher",
+  );
+  await withRecoveryCheckpointOperation(
+    operationInput,
+    async () => {
+      acceptForwardedCheckpointCompletion(
+        completedCommand.checkpointCompletion,
+        commandBinding,
+      );
+      saveState(statePath(repository, 1), cancelled);
+    },
+    { forwardCompletedBarrier: true },
+  );
+  assert.equal(
+    operationClosureBuilds,
+    1,
+    "this caller's later write still needs its own barrier",
+  );
   // A real receiving Git process updates the ref, then outlives the bounded
   // client wait. Reconciliation observes that exact publication without replay.
   const received = join(root, "received.txt");

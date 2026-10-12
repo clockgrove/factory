@@ -1372,6 +1372,12 @@ export type ProjectQueueIntent = ProjectQueueAction & {
 export type ProjectQueueWriteRequest = ProjectQueueAction & {
   binding: ProjectQueueBinding;
   requestId: string;
+  /** Current Issue contents required by admission/publication, never cached approval. */
+  expectedIssue?: {
+    issueNodeId: string;
+    objective: number;
+    bodyDigest: string;
+  };
   /** The owner durably retains this exact intent and admits it before transport. */
   beforeWrite(intent: ProjectQueueIntent): void | Promise<void>;
   /** A submitted prior effect permits no further mutation. */
@@ -1409,6 +1415,11 @@ export interface NamedCheckEvidence {
 export interface GitHubGateway {
   readonly effectAdmission?: "controller-checkpoint-v1";
   readonly projectionMutationAdmission?: "controller-checkpoint-v1";
+  /** One finite owned operation; reuse is private and never grants spending authority. */
+  withProjectQueueObservation?<T>(
+    binding: ProjectQueueBinding,
+    task: () => Promise<T>,
+  ): Promise<T>;
   projectQueueRead?(
     binding: ProjectQueueBinding,
   ): Promise<ProjectQueueSnapshot>;

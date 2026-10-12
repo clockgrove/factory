@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Fault, transient, withFault } from "./fault.js";
 import {
@@ -289,11 +289,13 @@ async function withRepositoryLock<T>(
   const lock = repositoryLocks.get(key) ?? new RepositoryLock();
   repositoryLocks.set(key, lock);
   const signal = currentProcessSignal();
+  assertProcessActive();
   const turn = lock.acquire(mode, signal);
   let held = false;
   try {
     await turn;
     held = true;
+    assertProcessActive();
     return await withRegistryFiles(key, mode, signal, run);
   } finally {
     if (held) lock.release(mode);
@@ -425,6 +427,8 @@ export async function withRegistryFiles<T>(
   signal: AbortSignal | undefined,
   run: () => Promise<T>,
 ): Promise<T> {
+  assertProcessActive();
+  signal?.throwIfAborted();
   const directory = registryLockDirectory(key);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const id = randomUUID();
@@ -459,7 +463,11 @@ export async function withRegistryFiles<T>(
     });
   try {
     for (;;) {
+      assertProcessActive();
+      signal?.throwIfAborted();
       const granted = guarded(() => {
+        assertProcessActive();
+        signal?.throwIfAborted();
         const writer = existsSync(join(directory, "writer"))
           ? holder("writer")
           : undefined;
@@ -479,10 +487,41 @@ export async function withRegistryFiles<T>(
     throw error;
   }
   try {
+    assertProcessActive();
+    signal?.throwIfAborted();
     return await run();
   } finally {
     release();
   }
+}
+
+/**
+ * Await one archive publisher across controllers, separately from Git's
+ * registry lock. The original guard remains a compatibility reservation:
+ * upgraded contenders wait on the async lock before taking it, and a live
+ * older publisher cannot be ignored or race the protected operation.
+ */
+export async function withCheckpointPublication<T>(
+  publicationGuard: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  assertProcessActive();
+  const directory = realpathSync(dirname(publicationGuard));
+  const guard = join(directory, basename(publicationGuard));
+  return withRepositoryLock(
+    `checkpoint-publication:${guard}`,
+    "exclusive",
+    async () => {
+      assertProcessActive();
+      takeGuard(guard);
+      try {
+        assertProcessActive();
+        return await run();
+      } finally {
+        releaseGuard(guard);
+      }
+    },
+  );
 }
 
 /**
@@ -1169,6 +1208,21 @@ export function currentProcessSignal(): AbortSignal | undefined {
   return processCancellation.getStore()?.signal;
 }
 
+/** Check the original armed boundary even before its timer can run. */
+export function assertProcessActive(): void {
+  const scope = processCancellation.getStore();
+  scope?.signal?.throwIfAborted();
+  if (
+    scope?.signal &&
+    scope.deadlineAt &&
+    Date.now() >= Date.parse(scope.deadlineAt)
+  )
+    throw new DOMException(
+      "The original process deadline elapsed",
+      "AbortError",
+    );
+}
+
 /** Does not install a timer or prove that a deadline has elapsed. */
 export function currentProcessDeadlineAt(): string | undefined {
   return processCancellation.getStore()?.deadlineAt;
@@ -1266,6 +1320,8 @@ export async function subprocessAsync(
     throw new Error(
       "Interactive subprocess cancellation grace must be 0–1000 ms",
     );
+  assertProcessActive();
+  signal?.throwIfAborted();
   const child = spawn(file, args, { ...spawnOptions, detached: true });
   let error: Error | undefined;
   let inputError: unknown;

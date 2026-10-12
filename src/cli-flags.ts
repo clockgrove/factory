@@ -74,6 +74,7 @@ const commandFlags: Record<string, string[]> = {
   drain: ["objective"],
   resume: ["objective"],
   cancel: ["objective"],
+  handoff: ["objective", "failed-reservation-evidence"],
   repair: ["objective", "proposal"],
   retry: ["objective", "item", "rereview"],
 };

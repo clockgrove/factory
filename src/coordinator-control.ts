@@ -2,6 +2,7 @@ import { chmodSync, closeSync, existsSync, openSync, rmSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { join } from "node:path";
 import { stateRoot } from "./config.js";
+import { currentProcessSignal, withProcessCancellation } from "./process.js";
 import {
   type ControllerLock,
   installationLockPath,
@@ -32,6 +33,27 @@ export interface ControlRequest {
     | "watch"
     | "project-queue";
   input?: Record<string, unknown>;
+  /** One finite caller operation; loss of its reply never authorizes replay. */
+  command?: { id: string; deadlineAt: number };
+}
+export interface ControlContext {
+  signal: AbortSignal;
+  deadlineAt?: number;
+  acknowledge(value: unknown): void;
+}
+export class ControllerCommandIncompleteError extends Error {
+  constructor(
+    readonly requestId: string | undefined,
+    readonly submission: "not-sent" | "unknown",
+    readonly deadlineAt: number | undefined,
+    cause?: unknown,
+  ) {
+    super(
+      `Controller command ${requestId ?? "unidentified"} is incomplete; submission ${submission}. Inspect retained status before another mutation`,
+      { cause },
+    );
+    this.name = "ControllerCommandIncompleteError";
+  }
 }
 export interface ControllerReadiness {
   protocol: "controller-readiness-v1";
@@ -52,7 +74,10 @@ export class ControllerReadinessPendingError extends Error {
 export async function serveControl(
   repository: string,
   lock: ControllerLock,
-  handle: (request: ControlRequest) => Promise<unknown>,
+  handle: (
+    request: ControlRequest,
+    context: ControlContext,
+  ) => Promise<unknown>,
   objective?: number,
 ): Promise<Server> {
   const directoryPath = objective
@@ -68,10 +93,82 @@ export async function serveControl(
       if (!body.includes("\n")) return;
       socket.removeAllListeners("data");
       void (async () => {
+        const cancellation = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let completed = false;
+        let admittedRequest: ControlRequest | undefined;
+        const disconnected = () => {
+          if (!completed)
+            cancellation.abort(
+              new Error(
+                "Controller command caller disconnected; outcome remains unknown",
+              ),
+            );
+        };
+        socket.once("close", disconnected);
         try {
           const request = JSON.parse(body.slice(0, body.indexOf("\n")));
+          admittedRequest = request;
           if (request.token !== lock.token)
             throw new Error("Controller owner changed");
+          const owner = liveControllerOwner(
+            objective
+              ? objectiveLockPath(repository, objective)
+              : installationLockPath(repository),
+          );
+          if (
+            !owner ||
+            owner.token !== lock.token ||
+            owner.pid !== process.pid ||
+            (!owner.intake && request.objective !== owner.objective)
+          )
+            throw new Error("Controller command owner changed");
+          if (
+            request.command &&
+            (typeof request.command.id !== "string" ||
+              !/^[a-f0-9-]{36}$/.test(request.command.id) ||
+              !Number.isFinite(request.command.deadlineAt) ||
+              Object.keys(request.command).some(
+                (key) => !["id", "deadlineAt"].includes(key),
+              ))
+          )
+            throw new Error("Invalid finite controller command binding");
+          const deadlineAt = request.command?.deadlineAt as number | undefined;
+          if (deadlineAt !== undefined) {
+            if (deadlineAt <= Date.now())
+              throw new ControllerCommandIncompleteError(
+                request.command.id,
+                "not-sent",
+                deadlineAt,
+              );
+            timer = setTimeout(
+              () =>
+                cancellation.abort(
+                  new ControllerCommandIncompleteError(
+                    request.command.id,
+                    "unknown",
+                    deadlineAt,
+                  ),
+                ),
+              Math.max(1, deadlineAt - Date.now()),
+            );
+          }
+          const context: ControlContext = {
+            signal: cancellation.signal,
+            deadlineAt,
+            acknowledge(value) {
+              cancellation.signal.throwIfAborted();
+              if (deadlineAt !== undefined && Date.now() >= deadlineAt)
+                throw new ControllerCommandIncompleteError(
+                  request.command.id,
+                  "unknown",
+                  deadlineAt,
+                );
+              socket.write(
+                `${JSON.stringify({ acknowledgment: value, requestId: request.command?.id, owner: { pid: owner.pid, startTime: owner.startTime } })}\n`,
+              );
+            },
+          };
           let result: unknown;
           if (request.action === "readiness") {
             const owner = liveControllerOwner(
@@ -95,12 +192,33 @@ export async function serveControl(
                 intake: owner.intake === true,
               },
             } satisfies ControllerReadiness;
-          } else result = await handle(request);
-          socket.end(`${JSON.stringify({ result })}\n`);
+          } else
+            result = await withProcessCancellation(
+              cancellation.signal,
+              () => handle(request, context),
+              undefined,
+              deadlineAt === undefined
+                ? undefined
+                : new Date(deadlineAt).toISOString(),
+            );
+          cancellation.signal.throwIfAborted();
+          if (deadlineAt !== undefined && Date.now() >= deadlineAt)
+            throw new ControllerCommandIncompleteError(
+              request.command.id,
+              "unknown",
+              deadlineAt,
+            );
+          completed = true;
+          socket.end(
+            `${JSON.stringify({ result, requestId: request.command?.id, owner: { pid: owner.pid, startTime: owner.startTime } })}\n`,
+          );
         } catch (error) {
           socket.end(
-            `${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n`,
+            `${JSON.stringify({ error: error instanceof Error ? error.message : String(error), ...(admittedRequest?.command && (cancellation.signal.aborted || Date.now() >= admittedRequest.command.deadlineAt) ? { incomplete: { requestId: admittedRequest.command.id, deadlineAt: admittedRequest.command.deadlineAt, submission: "unknown" } } : {}) })}\n`,
           );
+        } finally {
+          if (timer) clearTimeout(timer);
+          socket.off("close", disconnected);
         }
       })();
     });
@@ -155,10 +273,20 @@ export class ForegroundControllerError extends Error {
 export async function requestControl(
   repository: string,
   request: ControlRequest,
-  options?: { deadlineAt: number },
+  options?: { deadlineAt: number; onAcknowledgment?: (value: unknown) => void },
 ): Promise<{ handled: boolean; result?: unknown }> {
-  if (options && request.action !== "readiness")
-    throw new Error("Only read-only readiness supports a control deadline");
+  if (
+    options &&
+    (!Number.isFinite(options.deadlineAt) || options.deadlineAt <= Date.now())
+  ) {
+    if (request.action === "readiness")
+      throw new ControllerReadinessPendingError("deadline");
+    throw new ControllerCommandIncompleteError(
+      request.command?.id,
+      "not-sent",
+      options.deadlineAt,
+    );
+  }
   if (request.action === "readiness") {
     if (!options || !Number.isFinite(options.deadlineAt))
       throw new Error("Controller readiness requires an absolute deadline");
@@ -183,6 +311,8 @@ export async function requestControl(
   if (!owner) return { handled: false };
   const token = owner.token;
   const expectedOwner = owner;
+  const signal = currentProcessSignal();
+  signal?.throwIfAborted();
   const ownerPath = join(directoryPath, "controller.lock");
   return new Promise((resolve, reject) => {
     const directory = openSync(directoryPath, "r");
@@ -202,43 +332,127 @@ export async function requestControl(
       }
     };
     let settled = false;
+    let submitted = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (error?: unknown, result?: unknown) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       closeDirectory();
       socket.destroy();
       if (error) reject(error);
       else resolve({ handled: true, result });
     };
+    const incomplete = () =>
+      new ControllerCommandIncompleteError(
+        request.command?.id,
+        submitted ? "unknown" : "not-sent",
+        options?.deadlineAt,
+      );
+    const abort = () => finish(incomplete());
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
     if (options)
       timer = setTimeout(
-        () => finish(new ControllerReadinessPendingError("deadline")),
+        () =>
+          finish(
+            request.action === "readiness"
+              ? new ControllerReadinessPendingError("deadline")
+              : incomplete(),
+          ),
         Math.max(0, options.deadlineAt - Date.now()),
       );
     socket.once("connect", closeDirectory);
     socket.once("error", closeDirectory);
     let body = "";
     socket.setEncoding("utf8");
-    socket.on("connect", () =>
-      socket.write(`${JSON.stringify({ ...request, token })}\n`),
-    );
+    socket.on("connect", () => {
+      if (
+        settled ||
+        signal?.aborted ||
+        (options && Date.now() >= options.deadlineAt)
+      )
+        return finish(incomplete());
+      submitted = true;
+      socket.write(`${JSON.stringify({ ...request, token })}\n`);
+    });
+    const authenticateReply = (reply: {
+      owner?: { pid: number; startTime: string };
+      requestId?: string;
+    }) => {
+      const current = liveControllerOwner(ownerPath);
+      if (
+        !current ||
+        current.token !== token ||
+        current.pid !== expectedOwner.pid ||
+        current.startTime !== expectedOwner.startTime ||
+        reply.owner?.pid !== current.pid ||
+        reply.owner?.startTime !== current.startTime ||
+        reply.requestId !== request.command?.id
+      )
+        throw new Error(
+          "Controller response changed its live owner or command binding",
+        );
+    };
+    let terminalReply:
+      | {
+          result?: unknown;
+          error?: string;
+          incomplete?: {
+            requestId: string;
+            deadlineAt: number;
+            submission: string;
+          };
+          owner?: { pid: number; startTime: string };
+          requestId?: string;
+        }
+      | undefined;
     socket.on("data", (part) => {
       body += part;
+      try {
+        while (body.includes("\n")) {
+          const newline = body.indexOf("\n");
+          const frame = JSON.parse(body.slice(0, newline));
+          body = body.slice(newline + 1);
+          if (terminalReply)
+            throw new Error("Controller returned multiple terminal replies");
+          if ("acknowledgment" in frame) {
+            authenticateReply(frame);
+            options?.onAcknowledgment?.(frame.acknowledgment);
+          } else terminalReply = frame;
+        }
+      } catch (error) {
+        finish(error);
+      }
     });
     socket.on("error", (error: NodeJS.ErrnoException) =>
       finish(
         request.action === "readiness" &&
           ["ENOENT", "ECONNREFUSED"].includes(error.code ?? "")
           ? new ControllerReadinessPendingError("endpoint-unavailable")
-          : error,
+          : request.command
+            ? incomplete()
+            : error,
       ),
     );
     socket.on("end", () => {
       try {
-        const reply = JSON.parse(body);
+        const reply = terminalReply;
+        if (!reply || body.trim()) throw incomplete();
+        if (reply.incomplete) {
+          if (
+            reply.incomplete.requestId !== request.command?.id ||
+            reply.incomplete.deadlineAt !== request.command?.deadlineAt ||
+            reply.incomplete.submission !== "unknown"
+          )
+            throw new Error(
+              "Controller incomplete receipt changed its command binding",
+            );
+          throw incomplete();
+        }
         if (reply.error) throw new Error(reply.error);
+        authenticateReply(reply);
         if (request.action === "readiness") {
           const current = liveControllerOwner(ownerPath);
           const ready = reply.result as ControllerReadiness | undefined;
@@ -270,6 +484,9 @@ export async function requestControl(
       } catch (error) {
         finish(error);
       }
+    });
+    socket.on("close", () => {
+      if (!settled) finish(incomplete());
     });
   });
 }

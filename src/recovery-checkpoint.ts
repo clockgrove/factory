@@ -3172,18 +3172,20 @@ function observeQueueAncestry(
         `objectives/${request.objective}/pre-state.json`,
       ];
       const first = new Set<string>();
+      const chargedBodies = new Set<string>();
       const needed: { commit: string; ref: ContentRef; key: string }[] = [];
       let charge = 0;
       const select = (commit: string, ref: ContentRef) => {
-        if (first.has(ref.digest)) return true;
-        first.add(ref.digest);
         const key = originalKey(commit, ref);
+        const association = prefix ? key : ref.digest;
+        if (first.has(association)) return true;
+        first.add(association);
         if (originals.has(key)) return true;
         const source = `${commit}:blobs/${ref.digest}\n`;
         // Reserve raw batch framing and detached retained bytes as well as keys.
         // This optional pool does not change a query's logical original charge.
         charge +=
-          ref.bytes * 2 +
+          (chargedBodies.has(ref.digest) ? 0 : ref.bytes * 2) +
           Buffer.byteLength(key) +
           Buffer.byteLength(source) +
           2 * (64 + String(ref.bytes).length + 8);
@@ -3193,6 +3195,7 @@ function observeQueueAncestry(
           memoBytes + charge > budget
         )
           return false;
+        chargedBodies.add(ref.digest);
         needed.push({ commit, ref, key });
         return true;
       };
@@ -3209,6 +3212,14 @@ function observeQueueAncestry(
           /^project-queue-history\/[a-f0-9-]{36}\.json$/.test(file.path),
         ))
           if (!select(entry.commit, file.ref)) return;
+        if (prefix) {
+          // The authenticated prefix already contains before/claim/initial.
+          // Prefetch only new source associations; the suffix consumer still
+          // validates every claim, competing owner and exact continuation.
+          for (const state of states)
+            if (!select(entry.commit, state.ref)) return;
+          continue;
+        }
         if (!claim) {
           if (claimed || states.length) return;
           before = true;
@@ -3256,19 +3267,32 @@ function observeQueueAncestry(
         throw new Error(
           "Queue lineage original source inventory is incomplete",
         );
-      const selected = needed.map(({ ref }, index) => {
+      const selected = new Map<string, { ref: ContentRef; oid: string }>();
+      for (const [index, { ref }] of needed.entries()) {
         const match = /^([a-f0-9]{40,64}) blob ([0-9]+)$/.exec(
           metadata[index]!,
         );
         if (!match || Number(match[2]) !== ref.bytes)
           throw new Error("Queue lineage original source type or size differs");
-        return { ref, oid: match[1]! };
-      });
-      const loaded = readRecoveryCheckpointBodies(directory, options, selected);
+        const previous = selected.get(ref.digest);
+        if (
+          previous &&
+          (previous.oid !== match[1] || previous.ref.bytes !== ref.bytes)
+        )
+          throw new Error("Queue lineage original source identity differs");
+        selected.set(ref.digest, { ref, oid: match[1]! });
+      }
+      const loaded = readRecoveryCheckpointBodies(directory, options, [
+        ...selected.values(),
+      ]);
+      const detached = new Map<string, Buffer>();
       for (const { key, ref } of needed) {
-        const bytes = loaded.get(ref.digest)!;
-        if (retain(bytes.length + Buffer.byteLength(key)))
-          originals.set(key, Buffer.from(bytes));
+        const previous = detached.get(ref.digest);
+        const bytes = previous ?? Buffer.from(loaded.get(ref.digest)!);
+        if (retain((previous ? 0 : bytes.length) + Buffer.byteLength(key))) {
+          detached.set(ref.digest, bytes);
+          originals.set(key, bytes);
+        }
       }
     },
     readOriginal(commit, ref) {
@@ -3674,11 +3698,11 @@ function reuseQueueLineage(
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
 ): { lineage: VerifiedQueueOwnerLineage; cache: CachedQueueLineage } {
   const originals = new Map(cached.originals.map((ref) => [ref.digest, ref]));
+  observation?.prefetchOriginals(request);
   const read = (commit: string, ref: ContentRef) => {
-    const bytes = git(directory, options, [
-      "show",
-      `${commit}:blobs/${ref.digest}`,
-    ]);
+    const bytes = observation
+      ? observation.readOriginal(commit, ref)
+      : git(directory, options, ["show", `${commit}:blobs/${ref.digest}`]);
     if (bytes.length !== ref.bytes || hash(bytes) !== ref.digest)
       throw new Error("Queue lineage original failed exact verification");
     const existing = originals.get(ref.digest);

@@ -2175,6 +2175,26 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       );
       const protocolPath = join(root, "controller-negotiation.packet");
       const originalSpawn = childProcess.spawn;
+      const originalExec = childProcess.execFileSync;
+      const suffixPackets = [];
+      let suffixShows = 0;
+      childProcess.execFileSync = function (file, args, options) {
+        if (file === "git") {
+          if (
+            args.includes("--batch-check") &&
+            typeof options?.input === "string" &&
+            options.input.includes(":blobs/")
+          )
+            suffixPackets.push(options.input);
+          if (
+            args.includes("show") &&
+            args.some((arg) => arg.includes(":blobs/")) &&
+            new Error().stack.includes("reuseQueueLineage")
+          )
+            suffixShows++;
+        }
+        return Reflect.apply(originalExec, this, [file, args, options]);
+      };
       // Trace the real Git protocol; every command still uses the actual child.
       childProcess.spawn = function (file, args, options) {
         if (
@@ -2247,8 +2267,17 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           (await readVerifiedRecoveryCheckpoint(config)).commitSha,
           nextCheckpoint.lastAcknowledged.commitSha,
         );
+        for (const commit of [
+          advanced.commitSha,
+          nextCheckpoint.lastAcknowledged.commitSha,
+        ])
+          assert(
+            suffixPackets.some((packet) => packet.includes(`${commit}:blobs/`)),
+          );
+        assert.equal(suffixShows, 0);
       } finally {
         childProcess.spawn = originalSpawn;
+        childProcess.execFileSync = originalExec;
         syncBuiltinESMExports();
       }
     },

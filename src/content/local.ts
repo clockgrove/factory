@@ -24,7 +24,9 @@ import type {
   ContentStore,
 } from "../contracts.js";
 import {
+  checkpointClosureBytes,
   checkpointContentVerified,
+  retainCheckpointClosureBytes,
   retainCheckpointContentVerification,
 } from "../recovery-checkpoint.js";
 
@@ -230,9 +232,16 @@ export class LocalContentStore implements ContentStore {
 
   /** Exact complete bytes for synchronous controller retention and lookup. */
   readBytes(ref: ContentRef): Buffer {
+    const concrete =
+      Object.getPrototypeOf(this) === LocalContentStore.prototype &&
+      this.readBytes === LocalContentStore.prototype.readBytes;
+    const cached = concrete && checkpointClosureBytes(this.root, ref);
+    if (cached) return cached;
     const fd = this.openObject(ref);
     try {
-      return this.readDescriptor(fd, ref);
+      const bytes = this.readDescriptor(fd, ref);
+      if (concrete) retainCheckpointClosureBytes(this.root, ref, bytes);
+      return bytes;
     } finally {
       closeSync(fd);
     }

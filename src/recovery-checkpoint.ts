@@ -357,6 +357,14 @@ const scopes = new AsyncLocalStorage<{
     closed: boolean;
   };
   verification?: QueueVerificationContext;
+  closureReads?: {
+    root: string;
+    key: string;
+    options: GitPersistenceConfig;
+    bodies: Map<string, { ref: ContentRef; bytes: Buffer }>;
+    bytes: number;
+    closed: boolean;
+  };
 }>();
 export function hasPrivateCheckpointScope(): boolean {
   const scope = scopes.getStore();
@@ -1194,6 +1202,108 @@ function activeContentVerification() {
     return undefined;
   }
   return { context, options, scope };
+}
+
+/** Repeated semantic reads share bytes only within one local closure build. */
+export async function withRecoveryCheckpointClosureReads(
+  config: FactoryConfig,
+  build: () => Promise<RecoveryCheckpointClosure>,
+  localOnly: boolean,
+): Promise<RecoveryCheckpointClosure> {
+  const options = settings(config);
+  const inherited = scopes.getStore();
+  const scope = inherited ?? { config, buildClosure: build };
+  if (
+    !localOnly ||
+    !options ||
+    (inherited &&
+      factoryConfigDigest(inherited.config) !== factoryConfigDigest(config))
+  )
+    return scopes.run({ ...scope, closureReads: undefined }, build);
+  assertProcessActive();
+  const phase = {
+    root: join(stateRoot(config.repository), "content"),
+    key: verificationKey(config, options),
+    options: { ...options },
+    bodies: new Map<string, { ref: ContentRef; bytes: Buffer }>(),
+    bytes: 0,
+    closed: false,
+  };
+  return scopes.run({ ...scope, closureReads: phase }, async () => {
+    try {
+      const closure = await build();
+      assertProcessActive();
+      let current = settings(config);
+      if (!current || phase.key !== verificationKey(config, current))
+        throw new Error(
+          "Checkpoint closure configuration changed during its build",
+        );
+      // Cache hits defer only duplicate semantic reads. Every original is
+      // freshly opened and checked before this closure can reach publication.
+      phase.closed = true;
+      const store = new LocalContentStore(phase.root);
+      for (const { ref } of phase.bodies.values()) {
+        assertProcessActive();
+        store.verifyPrivateBytes(ref);
+      }
+      assertProcessActive();
+      current = settings(config);
+      if (!current || phase.key !== verificationKey(config, current))
+        throw new Error(
+          "Checkpoint closure configuration changed during verification",
+        );
+      return closure;
+    } finally {
+      phase.closed = true;
+      phase.bodies.clear();
+      phase.bytes = 0;
+    }
+  });
+}
+
+function closureReadPhase(root: string) {
+  const phase = scopes.getStore()?.closureReads;
+  if (!phase || phase.closed || resolve(root) !== phase.root) return undefined;
+  try {
+    assertProcessActive();
+  } catch {
+    return undefined;
+  }
+  // Keep the existing dynamic controller/configuration fence on semantic hits.
+  activeContentVerification();
+  return phase;
+}
+
+export function checkpointClosureBytes(
+  root: string,
+  ref: ContentRef,
+): Buffer | undefined {
+  const phase = closureReadPhase(root);
+  if (!phase) return undefined;
+  assertRef(ref);
+  const body = phase.bodies.get(canonical([resolve(root), ref]));
+  return body && Buffer.from(body.bytes);
+}
+
+export function retainCheckpointClosureBytes(
+  root: string,
+  ref: ContentRef,
+  bytes: Buffer,
+): void {
+  const phase = closureReadPhase(root);
+  if (!phase) return;
+  assertRef(ref);
+  if (bytes.length !== ref.bytes || hash(bytes) !== ref.digest)
+    throw new Error("Checkpoint closure body failed exact digest verification");
+  const key = canonical([resolve(root), ref]);
+  if (phase.bodies.has(key)) return;
+  if (
+    phase.bodies.size >= phase.options.maxFiles ||
+    phase.bytes + bytes.length > phase.options.maxBytes
+  )
+    return;
+  phase.bodies.set(key, { ref: { ...ref }, bytes: Buffer.from(bytes) });
+  phase.bytes += bytes.length;
 }
 function retainContentVerification(
   context: QueueVerificationContext,

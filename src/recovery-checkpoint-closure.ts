@@ -50,6 +50,7 @@ import {
   assertRecoveryCheckpointManifest,
   cachedRecoveryCheckpointGitPack,
   retainRecoveryCheckpointGitPack,
+  withRecoveryCheckpointClosureReads,
 } from "./recovery-checkpoint.js";
 import type { RepositoryMemoryBinding } from "./repository-memory.js";
 import { decodeRepositoryMemoryManifest } from "./repository-memory.js";
@@ -941,6 +942,18 @@ async function retainBytes(
 
 /** Capture only authenticated original roots; installations, owners and native homes are excluded. */
 export async function buildRecoveryCheckpointClosure(input: {
+  config: FactoryConfig;
+  scope?: "private-history" | "repository-knowledge";
+  store?: ContentStore;
+}): Promise<RecoveryCheckpointClosure> {
+  return withRecoveryCheckpointClosureReads(
+    input.config,
+    () => buildRecoveryCheckpointClosureLocal(input),
+    !input.store,
+  );
+}
+
+async function buildRecoveryCheckpointClosureLocal(input: {
   config: FactoryConfig;
   scope?: "private-history" | "repository-knowledge";
   store?: ContentStore;

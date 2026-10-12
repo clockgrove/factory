@@ -100,6 +100,7 @@ import {
   readRecoveryCheckpointBodies,
   readVerifiedRecoveryCheckpoint,
   synchronizeRecoveryCheckpoint,
+  withRecoveryCheckpointClosureReads,
   withRecoveryCheckpointCommandOperation,
   withRecoveryCheckpointControllerVerification,
   withRecoveryCheckpointOperation,
@@ -1931,6 +1932,58 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         cachedRef.digest,
       );
       const originalContent = content.readBytes(cachedRef);
+      const bodyClosure = {
+        files: [],
+        contentRefs: [cachedRef],
+        gaps: [],
+      };
+      await withRecoveryCheckpointClosureReads(
+        config,
+        async () => {
+          const first = content.readBytes(cachedRef);
+          first[0] ^= 1;
+          assert.deepEqual(content.readBytes(cachedRef), originalContent);
+          return bodyClosure;
+        },
+        true,
+      );
+      try {
+        await assert.rejects(
+          withRecoveryCheckpointClosureReads(
+            config,
+            async () => {
+              assert.deepEqual(content.readBytes(cachedRef), originalContent);
+              const changed = Buffer.from(originalContent);
+              changed[0] ^= 1;
+              writeFileSync(cachedPath, changed);
+              // A repeated semantic read may share its verified original;
+              // altered current bytes must still refuse the final boundary.
+              assert.deepEqual(content.readBytes(cachedRef), originalContent);
+              return bodyClosure;
+            },
+            true,
+          ),
+          /failed digest verification/,
+        );
+      } finally {
+        writeFileSync(cachedPath, originalContent);
+      }
+      try {
+        await assert.rejects(
+          withRecoveryCheckpointClosureReads(
+            config,
+            async () => {
+              assert.deepEqual(content.readBytes(cachedRef), originalContent);
+              rmSync(cachedPath);
+              return bodyClosure;
+            },
+            true,
+          ),
+          /ENOENT/,
+        );
+      } finally {
+        content.putBytes(originalContent, { mediaType: cachedRef.mediaType });
+      }
       assert.deepEqual(
         new LocalContentStore(join(state, "content")).readBytes(cachedRef),
         originalContent,

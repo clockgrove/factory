@@ -270,7 +270,7 @@ export function createApplication(
     ensureProjectObjective: (objective, provenance) =>
       ensureProjectObjective(config, services.github, objective, provenance),
     runIntake: (options) =>
-      checkpoint.async(() => runIntake(config, services, options)),
+      checkpoint.async(() => runIntake(config, services, options), true),
     planObjective: (objective) => {
       if (config.gitPersistence?.scope === "private-history")
         return Promise.reject(

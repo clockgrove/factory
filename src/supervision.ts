@@ -819,7 +819,8 @@ export async function supervise(
     // A failed unit is one that should be running: upgrading it, as when returning from a
     // package that refused the retained state, starts it again.
     const wasActive = ["active", "failed"].includes(inspect("is-active", name));
-    const beforeIntake = candidate ? await readIntake(config) : undefined;
+    const beforeIntake =
+      candidate && wasActive ? await readIntake(config) : undefined;
     const resumeIdleWatcher =
       wasActive &&
       beforeIntake?.watch &&

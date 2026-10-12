@@ -49,6 +49,8 @@ import {
 import {
   awaitCheckpointAdmission,
   acceptForwardedCheckpointCompletion,
+  gitPersistenceStatus,
+  readVerifiedRecoveryCheckpoint,
   withRecoveryCheckpointCommandOperation,
   withRecoveryCheckpointOperation,
   withRecoveryCheckpointControllerVerification,
@@ -961,7 +963,7 @@ async function runIntakeOwned(
   services: ApplicationServices,
 ): Promise<IntakeAuthorization> {
   requireProjectQueueEffects(config);
-  let record = view(config, await observeProjectQueue(config, services.github));
+  let record = view(config);
   const lockPath = join(stateRoot(config.repository), "controller.lock"),
     lock = acquireInstallationLock(config.repository);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
@@ -1215,6 +1217,27 @@ async function runIntakeOwned(
   process.on("SIGTERM", onHandoff);
   try {
     retargetControllerLock(lockPath, lock, 0);
+    // Cold preparation owns the existing lease and exposes no readiness or
+    // dispatch until the controller's remote-only verifier is authenticated.
+    // An installation without an acknowledged archive keeps its initial path.
+    const persistence = gitPersistenceStatus(config);
+    const acknowledged = persistence.lastAcknowledged;
+    if (persistence.scope === "private-history" && acknowledged) {
+      const verified = await readVerifiedRecoveryCheckpoint(
+        config,
+        acknowledged.commitSha,
+      );
+      if (
+        verified.commitSha !== acknowledged.commitSha ||
+        verified.remoteTip !== acknowledged.commitSha ||
+        verified.payloadDigest !== acknowledged.payloadDigest ||
+        verified.manifest.sequence !== acknowledged.sequence
+      )
+        throw new Error(
+          "Cold controller preparation differs from the acknowledged current archive tip",
+        );
+    }
+    record = view(config, await observeProjectQueue(config, services.github));
     server = await serveControl(config.repository, lock, handle);
     for (;;) {
       if (handingOff || localMode === "draining")

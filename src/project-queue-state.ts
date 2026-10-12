@@ -300,9 +300,9 @@ function reservationSupervisorCommand(
 function reservationGuardHolder(
   text: string,
   ownerPid: number,
-  repository: string,
+  guardPath: string,
 ): number {
-  const prefix = `node[${ownerPid}]: Factory: Factory's lock guard ${join(stateRoot(repository), "recovery", ".publication.guard")} is held by process `;
+  const prefix = `node[${ownerPid}]: Factory: Factory's lock guard ${guardPath} is held by process `;
   const lines = text.split("\n").filter((line) => line.includes(prefix));
   const suffix =
     lines.length === 1
@@ -327,6 +327,7 @@ function reservationObservedOwner(
   tokenDigest: string;
   cgroup: string;
   command: { node: string; argv: string };
+  guardPath: string;
 } {
   const observation = object(raw),
     owner = object(observation.owner);
@@ -352,6 +353,23 @@ function reservationObservedOwner(
     cli,
     configPath,
   );
+  const serviceBinding = object(object(observation.health).binding);
+  if (
+    serviceBinding.node !== command.node ||
+    serviceBinding.cli !== cli ||
+    serviceBinding.config !== configPath ||
+    typeof serviceBinding.stateHome !== "string" ||
+    !isAbsolute(serviceBinding.stateHome)
+  )
+    throw new Error("Original service state/runtime binding is unavailable");
+  const guardPath = resolve(
+    serviceBinding.stateHome,
+    "clockgrove-factory",
+    "repositories",
+    ...claim.repository.split("/"),
+    "recovery",
+    ".publication.guard",
+  );
   const cgroup = observation.unit.match(/^ControlGroup=(.+)$/m)?.[1];
   if (!cgroup || !cgroup.startsWith("/user.slice/") || cgroup.includes(".."))
     throw new Error("Original service resource identity is unavailable");
@@ -367,7 +385,13 @@ function reservationObservedOwner(
     throw new Error(
       "Operator evidence differs from the recorded original producing process",
     );
-  return { ...bound, tokenDigest: claim.ownerTokenDigest, cgroup, command };
+  return {
+    ...bound,
+    tokenDigest: claim.ownerTokenDigest,
+    cgroup,
+    command,
+    guardPath,
+  };
 }
 function assertReservationSourceReview(
   reviewValue: unknown,
@@ -1198,7 +1222,7 @@ function assertQueueOwnerReferenceBodies(
         reservationGuardHolder(
           originalText(proof.failureObservation),
           owner.pid,
-          record.repository,
+          owner.guardPath,
         ) ||
       publisher.startTime !== "unavailable"
     )
@@ -2291,6 +2315,13 @@ export async function abandonFailedProjectQueueReservation(
     evidence.originalInstallation.cli,
     evidence.originalInstallation.configPath,
   );
+  if (
+    originalOwner.guardPath !==
+    join(stateRoot(config.repository), "recovery", ".publication.guard")
+  )
+    throw new Error(
+      "Original publication guard differs from the actual installation",
+    );
   if (readlinkSync("/proc/self/ns/pid") !== originalOwner.namespace)
     throw new Error(
       "Original native resources require their actual original PID namespace",
@@ -2342,7 +2373,7 @@ export async function abandonFailedProjectQueueReservation(
   const publisherPid = reservationGuardHolder(
     failureText,
     originalOwner.pid,
-    config.repository,
+    originalOwner.guardPath,
   );
   if (linuxProcessIdentity(publisherPid) || processGroupExists(publisherPid))
     throw new Error(

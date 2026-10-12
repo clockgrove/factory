@@ -41,6 +41,7 @@ import {
   UnsettledSubprocessError,
   withCheckpointPublication,
 } from "./process.js";
+import type { ContinuationReferences } from "./recovery-checkpoint-closure.js";
 import type { ControllerLock } from "./state-store.js";
 
 export interface GitPersistenceConfig {
@@ -334,6 +335,8 @@ interface QueueVerificationContext {
   summaryBytes: number;
   content: Map<string, string>;
   contentBytes: number;
+  pendingReferenceBytes: number;
+  pendingReferenceEntries: number;
   objects?: Map<string, string>;
   lineages: Map<string, CachedQueueLineage>;
   lineageBytes: number;
@@ -366,6 +369,8 @@ const scopes = new AsyncLocalStorage<{
     key: string;
     options: GitPersistenceConfig;
     bodies: Map<string, { ref: ContentRef; bytes?: Buffer }>;
+    pendingReferences: Map<string, string>;
+    pendingReferenceBytes: number;
     bytes: number;
     closed: boolean;
     ended: boolean;
@@ -1139,6 +1144,8 @@ export function withQueueControlVerification<T>(
       summaryBytes: 0,
       content: new Map(),
       contentBytes: 0,
+      pendingReferenceBytes: 0,
+      pendingReferenceEntries: 0,
       lineages: new Map(),
       lineageBytes: 0,
       reservationPrefixes: new Map(),
@@ -1240,6 +1247,8 @@ export async function withRecoveryCheckpointClosureReads(
     key: verificationKey(config, options),
     options: { ...options },
     bodies: new Map<string, { ref: ContentRef; bytes?: Buffer }>(),
+    pendingReferences: new Map<string, string>(),
+    pendingReferenceBytes: 0,
     bytes: 0,
     closed: false,
     ended: false,
@@ -1272,11 +1281,33 @@ export async function withRecoveryCheckpointClosureReads(
         throw new Error(
           "Checkpoint closure configuration changed during verification",
         );
+      if (phase.verification)
+        for (const [key, value] of [...phase.pendingReferences]) {
+          if (!phase.pendingReferences.has(key)) continue;
+          phase.pendingReferences.delete(key);
+          const charge = Buffer.byteLength(key) + Buffer.byteLength(value);
+          phase.pendingReferenceBytes -= charge;
+          phase.verification.pendingReferenceBytes -= charge;
+          phase.verification.pendingReferenceEntries--;
+          retainContentVerification(
+            phase.verification,
+            phase.options,
+            key,
+            value,
+          );
+        }
       return closure;
     } finally {
       phase.closed = true;
       phase.ended = true;
       phase.bodies.clear();
+      if (phase.verification) {
+        phase.verification.pendingReferenceBytes -= phase.pendingReferenceBytes;
+        phase.verification.pendingReferenceEntries -=
+          phase.pendingReferences.size;
+      }
+      phase.pendingReferences.clear();
+      phase.pendingReferenceBytes = 0;
       phase.bytes = 0;
     }
   });
@@ -1370,6 +1401,95 @@ export function retainCheckpointClosureBytes(
   phase.bodies.set(key, { ref: { ...ref }, bytes: Buffer.from(bytes) });
   phase.bytes += bytes.length;
 }
+
+export type RecoveryCheckpointReferenceSummary = ContinuationReferences & {
+  originals: ContentRef[];
+};
+
+export function cachedRecoveryCheckpointReferences(
+  root: string,
+  description: string,
+): RecoveryCheckpointReferenceSummary | undefined {
+  const active = activeClosureBinding();
+  if (
+    !active?.scope.verification ||
+    active.phase.closed ||
+    resolve(root) !== active.phase.root
+  )
+    return undefined;
+  const key = canonical([
+    "reference-summary",
+    resolve(root),
+    hash(description),
+  ]);
+  const value =
+    active.phase.pendingReferences.get(key) ??
+    active.scope.verification.content.get(key);
+  return value && JSON.parse(value);
+}
+
+export function retainRecoveryCheckpointReferences(
+  root: string,
+  description: string,
+  summary: RecoveryCheckpointReferenceSummary,
+): void {
+  const active = activeClosureBinding();
+  const context = active?.scope.verification;
+  if (
+    !active ||
+    !context ||
+    active.phase.closed ||
+    resolve(root) !== active.phase.root
+  )
+    return;
+  const { phase } = active;
+  const key = canonical([
+    "reference-summary",
+    resolve(root),
+    hash(description),
+  ]);
+  const value = JSON.stringify(summary);
+  const charge = Buffer.byteLength(key) + Buffer.byteLength(value);
+  if (charge > verificationMetadataBudget(phase.options)) return;
+  if (phase.pendingReferences.has(key) || context.content.has(key)) return;
+  if (
+    context.summaries.size +
+      context.content.size +
+      context.pendingReferenceEntries >=
+      phase.options.maxFiles ||
+    context.summaryBytes +
+      context.contentBytes +
+      context.pendingReferenceBytes +
+      charge >
+      verificationMetadataBudget(phase.options)
+  )
+    clearContentVerification(context);
+  if (
+    context.pendingReferenceBytes + charge >
+      verificationMetadataBudget(phase.options) ||
+    context.pendingReferenceEntries >= phase.options.maxFiles
+  )
+    return;
+  phase.pendingReferences.set(key, value);
+  phase.pendingReferenceBytes += charge;
+  context.pendingReferenceBytes += charge;
+  context.pendingReferenceEntries++;
+}
+
+function clearContentVerification(context: QueueVerificationContext): void {
+  context.summaries.clear();
+  context.summaryBytes = 0;
+  context.content.clear();
+  context.contentBytes = 0;
+  const phase = scopes.getStore()?.closureReads;
+  if (phase?.verification === context) {
+    context.pendingReferenceBytes -= phase.pendingReferenceBytes;
+    context.pendingReferenceEntries -= phase.pendingReferences.size;
+    phase.pendingReferences.clear();
+    phase.pendingReferenceBytes = 0;
+  }
+}
+
 function retainContentVerification(
   context: QueueVerificationContext,
   options: GitPersistenceConfig,
@@ -1379,15 +1499,23 @@ function retainContentVerification(
   const charge = Buffer.byteLength(key) + Buffer.byteLength(identity);
   if (charge > verificationMetadataBudget(options)) return;
   if (
-    context.summaries.size + context.content.size >= options.maxFiles ||
-    context.summaryBytes + context.contentBytes + charge >
+    context.summaries.size +
+      context.content.size +
+      context.pendingReferenceEntries >=
+      options.maxFiles ||
+    context.summaryBytes +
+      context.contentBytes +
+      context.pendingReferenceBytes +
+      charge >
       verificationMetadataBudget(options)
-  ) {
-    context.summaries.clear();
-    context.summaryBytes = 0;
-    context.content.clear();
-    context.contentBytes = 0;
-  }
+  )
+    clearContentVerification(context);
+  if (
+    context.pendingReferenceBytes + charge >
+      verificationMetadataBudget(options) ||
+    context.pendingReferenceEntries >= options.maxFiles
+  )
+    return;
   const previous = context.content.get(key);
   if (previous)
     context.contentBytes -=
@@ -2648,16 +2776,22 @@ function historicalManifestSummary(
     const charge =
       Buffer.byteLength(key) + Buffer.byteLength(canonical(summary));
     if (
-      context.summaries.size + context.content.size >= options.maxFiles ||
-      context.summaryBytes + context.contentBytes + charge >
+      context.summaries.size +
+        context.content.size +
+        context.pendingReferenceEntries >=
+        options.maxFiles ||
+      context.summaryBytes +
+        context.contentBytes +
+        context.pendingReferenceBytes +
+        charge >
         verificationMetadataBudget(options)
+    )
+      clearContentVerification(context);
+    if (
+      charge + context.pendingReferenceBytes <=
+        verificationMetadataBudget(options) &&
+      context.pendingReferenceEntries < options.maxFiles
     ) {
-      context.summaries.clear();
-      context.summaryBytes = 0;
-      context.content.clear();
-      context.contentBytes = 0;
-    }
-    if (charge <= verificationMetadataBudget(options)) {
       context.summaries.set(key, summary);
       context.summaryBytes += charge;
     }

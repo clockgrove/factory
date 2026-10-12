@@ -24,11 +24,14 @@ import type {
   ContentStore,
 } from "../contracts.js";
 import {
+  cachedRecoveryCheckpointReferences,
   checkpointClosureBytes,
   checkpointContentVerified,
   deferCheckpointClosureVerification,
+  type RecoveryCheckpointReferenceSummary,
   retainCheckpointClosureBytes,
   retainCheckpointContentVerification,
+  retainRecoveryCheckpointReferences,
 } from "../recovery-checkpoint.js";
 
 function assertRef(ref: ContentRef): void {
@@ -253,6 +256,26 @@ export class LocalContentStore implements ContentStore {
     } finally {
       closeSync(fd);
     }
+  }
+
+  checkpointReferences(
+    description: string,
+  ): RecoveryCheckpointReferenceSummary | undefined {
+    return Object.getPrototypeOf(this) === LocalContentStore.prototype &&
+      this.readBytes === LocalContentStore.prototype.readBytes
+      ? cachedRecoveryCheckpointReferences(this.root, description)
+      : undefined;
+  }
+
+  retainCheckpointReferences(
+    description: string,
+    summary: RecoveryCheckpointReferenceSummary,
+  ): void {
+    if (
+      Object.getPrototypeOf(this) === LocalContentStore.prototype &&
+      this.readBytes === LocalContentStore.prototype.readBytes
+    )
+      retainRecoveryCheckpointReferences(this.root, description, summary);
   }
 
   async put(

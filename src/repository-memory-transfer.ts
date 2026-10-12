@@ -109,6 +109,7 @@ async function memoryBodyReferences(
   bytes: Uint8Array,
   readBytes: (ref: ContentRef) => Uint8Array | Promise<Uint8Array>,
   gitObjects?: RecoveryGitObject[],
+  localStore?: LocalContentStore,
 ): Promise<ContentRef[]> {
   if (role === "discovery-manifest" && record.kind === "discovery") {
     const manifest = decodeJSON(bytes);
@@ -185,12 +186,13 @@ async function memoryBodyReferences(
       return ref;
     });
   }
-  const { verifyMemoryBodyReferenceClosure } = await import(
-    "./recovery-checkpoint-closure.js"
-  );
-  const description = await verifyMemoryBodyReferenceClosure(role, bytes, {
-    readBytes,
-  });
+  const {
+    verifyMemoryBodyReferenceClosure,
+    verifyLocalMemoryBodyReferenceClosure,
+  } = await import("./recovery-checkpoint-closure.js");
+  const description = localStore
+    ? await verifyLocalMemoryBodyReferenceClosure(role, bytes, localStore)
+    : await verifyMemoryBodyReferenceClosure(role, bytes, { readBytes });
   gitObjects?.push(...description.gitObjects);
   return description.contentRefs;
 }
@@ -268,6 +270,7 @@ export async function buildMemoryLearningClosure(
         bytes,
         readBytes,
         typedGitObjects,
+        store,
       ))
         add(ref);
     }

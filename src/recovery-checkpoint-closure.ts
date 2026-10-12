@@ -721,6 +721,27 @@ async function verifyDescription(
   },
   knownStore?: LocalContentStore,
 ): Promise<ContinuationReferences> {
+  const concrete =
+    knownStore &&
+    source === knownStore &&
+    Object.getPrototypeOf(source) === LocalContentStore.prototype &&
+    knownStore.readBytes === LocalContentStore.prototype.readBytes;
+  const signature = concrete && JSON.stringify([description, bounds]);
+  const cached = signature && knownStore.checkpointReferences(signature);
+  if (cached) {
+    for (const ref of [...cached.contentRefs, ...cached.originals])
+      knownStore!.verifyPrivateBytes(ref);
+    return {
+      contentRefs: cached.contentRefs,
+      gitObjects: cached.gitObjects,
+      gaps: cached.gaps,
+    };
+  }
+  const originals = new Map<string, ContentRef>();
+  const read = (ref: ContentRef) => {
+    originals.set(refKey(ref), { ...ref });
+    return readReference(source, ref, knownStore);
+  };
   const refs = new Map(
     description.contentRefs.map((ref) => [refKey(ref), ref]),
   );
@@ -752,7 +773,7 @@ async function verifyDescription(
         : `${root.kind}:${refKey(root.ref)}:${JSON.stringify(root.identity ?? null)}`;
     if (visited.has(key)) continue;
     visited.add(key);
-    const bytes = await readReference(source, root.ref, knownStore);
+    const bytes = await read(root.ref);
     if (root.kind === "restoration-original") {
       const value = object(
         JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
@@ -819,7 +840,7 @@ async function verifyDescription(
         seal.objective,
         seal.runId,
         seal,
-        (ref) => readReference(source, ref, knownStore),
+        read,
       );
       for (const record of records) {
         if (record.kind === "interaction") {
@@ -834,12 +855,7 @@ async function verifyDescription(
       for (const body of record.bodies)
         if (body.ref) {
           add(body.ref);
-          merge(
-            memoryReferences(
-              body.role,
-              await readReference(source, body.ref, knownStore),
-            ),
-          );
+          merge(memoryReferences(body.role, await read(body.ref)));
         }
       for (const entry of record.sources) if (entry.ref) add(entry.ref);
     } else {
@@ -874,6 +890,7 @@ async function verifyDescription(
     }
   }
   for (const ref of refs.values()) {
+    originals.set(refKey(ref), { ...ref });
     if (
       knownStore &&
       source === knownStore &&
@@ -881,13 +898,21 @@ async function verifyDescription(
       knownStore.readBytes === LocalContentStore.prototype.readBytes
     )
       knownStore.verifyPrivateBytes(ref);
-    else await readReference(source, ref, knownStore);
+    else await read(ref);
   }
-  return {
+  const result = {
     contentRefs: [...refs.values()],
     gitObjects: [...objects.values()],
     gaps,
   };
+  if (signature)
+    knownStore!.retainCheckpointReferences(signature, {
+      ...result,
+      originals: [...originals]
+        .filter(([key]) => !refs.has(key))
+        .map(([, ref]) => ref),
+    });
+  return result;
 }
 /** Open only declared nested schemas; digest-looking opaque evidence never supplies reads. */
 export async function verifyContinuationReferenceClosure(
@@ -903,6 +928,20 @@ export async function verifyMemoryBodyReferenceClosure(
   source: ContentStore | RecoveryReferenceReader,
 ): Promise<ContinuationReferences> {
   return verifyDescription(memoryReferences(role, bytes), source);
+}
+
+/** The normal local memory producer owns this concrete store; imports stay strict. */
+export async function verifyLocalMemoryBodyReferenceClosure(
+  role: string,
+  bytes: Uint8Array,
+  store: LocalContentStore,
+): Promise<ContinuationReferences> {
+  return verifyDescription(
+    memoryReferences(role, bytes),
+    store,
+    undefined,
+    store,
+  );
 }
 
 function privateBytes(path: string, root: string): Buffer {

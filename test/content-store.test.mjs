@@ -2032,6 +2032,31 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       assert.throws(() => content.readBytes(cachedRef), /ENOENT/);
       content.putBytes(originalContent, { mediaType: cachedRef.mediaType });
       assert.deepEqual(content.readBytes(cachedRef), originalContent);
+      // Warm the real immutable description summaries, then require the next
+      // complete build to refuse changed supporting bytes despite that reuse.
+      await buildClosure();
+      const reusedClosure = await buildClosure();
+      assert(
+        reusedClosure.contentRefs.some(
+          (ref) => ref.digest === sourceRef.digest,
+        ),
+      );
+      const sourcePath = join(
+        state,
+        "content",
+        sourceRef.digest.slice(0, 2),
+        sourceRef.digest,
+      );
+      const sourceOriginal = content.readBytes(sourceRef);
+      const sourceAltered = Buffer.from(sourceOriginal);
+      sourceAltered[0] ^= 1;
+      try {
+        writeFileSync(sourcePath, sourceAltered);
+        await assert.rejects(buildClosure(), /failed digest verification/);
+      } finally {
+        writeFileSync(sourcePath, sourceOriginal);
+      }
+      await buildClosure();
       assert.deepEqual(verifierDirectories().length, 1);
       firstVerifier = verifierDirectories()[0];
       const directory = join(state, "recovery", firstVerifier);

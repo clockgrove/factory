@@ -31,6 +31,7 @@ import {
 import {
   readVerifiedRecoveryCheckpoint,
   withRecoveryCheckpointScope,
+  withRecoveryCheckpointControllerVerification,
   markCheckpointDirty,
   awaitCheckpointAdmission,
 } from "../dist/recovery-checkpoint.js";
@@ -263,6 +264,30 @@ test("the actual creating lease settles only a fresh failed reservation and arch
     await authenticateQueueOwnerReferences(claim, async (ref) =>
       store.readBytes(ref),
     );
+    await withRecoveryCheckpointControllerVerification(
+      { config, buildClosure },
+      async () => {
+        const verified = await buildClosure();
+        assert.deepEqual(await buildClosure(), verified);
+        const failurePath = join(
+          stateRoot(repository),
+          "content",
+          proof.failure.digest.slice(0, 2),
+          proof.failure.digest,
+        );
+        const failureBytes = await readFile(failurePath);
+        try {
+          await writeFile(
+            failurePath,
+            Buffer.concat([failureBytes, Buffer.from("x")]),
+          );
+          await assert.rejects(buildClosure(), /size|digest|exact|reference/i);
+        } finally {
+          await writeFile(failurePath, failureBytes);
+        }
+        assert.deepEqual(await buildClosure(), verified);
+      },
+    );
     const forged = structuredClone(claim);
     forged.deadlineAt = new Date(Date.now() + 120_000).toISOString();
     await assert.rejects(
@@ -355,6 +380,13 @@ test("the actual creating lease settles only a fresh failed reservation and arch
     const restoredHistory = await readQueueHistory(config);
     assert.deepEqual(
       restoredHistory.find((row) => row.id === operationId),
+      unknown,
+    );
+    const independent = await readQueueHistory(config);
+    independent.find((row) => row.id === operationId).completed =
+      new Date().toISOString();
+    assert.deepEqual(
+      (await readQueueHistory(config)).find((row) => row.id === operationId),
       unknown,
     );
     assert.throws(

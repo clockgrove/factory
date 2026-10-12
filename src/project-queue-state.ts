@@ -51,6 +51,7 @@ import {
   type RecoveryCheckpointClosure,
   type RecoveryCheckpointBinding,
   readVerifiedRecoveryCheckpoint,
+  readVerifiedProjectQueueHistory,
   type QueueCheckpointWitness,
   type VerifiedQueueReservationLineage,
 } from "./recovery-checkpoint.js";
@@ -655,7 +656,7 @@ export function retainProjectQueueOriginal(
     throw new Error("Project original retention differs");
   return reference;
 }
-type QueueRecord = QueueOperation | QueueOwnerClaim;
+export type QueueRecord = QueueOperation | QueueOwnerClaim;
 const ref = (value: unknown): value is ContentRef => {
   const row = object(value);
   only(row, ["digest", "bytes", "mediaType"]);
@@ -2074,19 +2075,117 @@ export function assertQueueOperationReferenceBodies(
     if (typeof json(source.ref) !== "string")
       throw new Error("Original source must retain its complete text");
 }
-async function authenticateQueueOperationReferences(
-  operation: QueueOperation,
-  readReference: (ref: ContentRef) => Promise<Uint8Array> | Uint8Array,
-): Promise<void> {
-  const bodies = new Map<string, Uint8Array>();
-  for (const reference of queueOperationReferences(operation))
-    bodies.set(reference.digest, await readReference(reference));
-  assertQueueOperationReferenceBodies(operation, (ref) => {
-    const bytes = bodies.get(ref.digest);
-    if (!bytes) throw new Error("Queue failure original missing");
+/** Pure immutable record/reference facts only; current queue authority is never memoized. */
+export function checkpointQueueRecordReferences(
+  repository: string,
+  path: string,
+  source: { ref: ContentRef; bytes: Uint8Array },
+  readReference: (reference: ContentRef) => Uint8Array,
+  cache?: { store: LocalContentStore; reader: "local" | "archive" },
+): { record: QueueRecord; contentRefs: ContentRef[] } {
+  const match = /^project-queue-history\/([a-f0-9-]{36})\.json$/.exec(path);
+  if (
+    !match ||
+    !ref(source.ref) ||
+    source.bytes.byteLength !== source.ref.bytes ||
+    createHash("sha256").update(source.bytes).digest("hex") !==
+      source.ref.digest
+  )
+    throw new Error("Project queue record differs from its exact source body");
+  const record = parseQueueRecord(
+    Buffer.from(source.bytes),
+    repository,
+    match[1]!,
+  );
+  const concrete =
+    cache &&
+    (cache.reader === "local" || cache.reader === "archive") &&
+    Object.getPrototypeOf(cache.store) === LocalContentStore.prototype &&
+    cache.store.readBytes === LocalContentStore.prototype.readBytes;
+  const signature = JSON.stringify([
+    "project-queue-record-references",
+    repository,
+    path,
+    record.kind,
+    record.id,
+    [source.ref.digest, source.ref.bytes, source.ref.mediaType],
+  ]);
+  const cached =
+    concrete &&
+    LocalContentStore.prototype.checkpointReferences.call(
+      cache.store,
+      signature,
+    );
+  const authenticatedBytes = (reference: ContentRef): Uint8Array => {
+    assertProcessActive();
+    const bytes = readReference(reference);
+    if (
+      bytes.byteLength !== reference.bytes ||
+      createHash("sha256").update(bytes).digest("hex") !== reference.digest
+    )
+      throw new Error(
+        "Project queue supporting original changed its exact bytes",
+      );
     return bytes;
-  });
+  };
+  if (cached) {
+    for (const reference of [...cached.contentRefs, ...cached.originals]) {
+      assertProcessActive();
+      if (cache!.reader === "local")
+        LocalContentStore.prototype.verifyPrivateBytes.call(
+          cache!.store,
+          reference,
+        );
+      else authenticatedBytes(reference);
+    }
+    return { record, contentRefs: cached.contentRefs };
+  }
+  const originals = new Map<string, ContentRef>();
+  const read = (reference: ContentRef): Uint8Array => {
+    const key = JSON.stringify([
+      reference.digest,
+      reference.bytes,
+      reference.mediaType,
+    ]);
+    if (!originals.has(key)) originals.set(key, structuredClone(reference));
+    return authenticatedBytes(reference);
+  };
+  const contentRefs = [source.ref];
+  if (record.kind === "project-queue-owner")
+    contentRefs.push(...assertQueueOwnerReferenceBodies(record, read));
+  else {
+    assertQueueOperationReferenceBodies(record, read);
+    contentRefs.push(...queueOperationReferences(record));
+    for (const effect of record.effects) {
+      if (effect.original) {
+        assertProjectQueueWriteReceipt({
+          ...effect.receipt,
+          original: JSON.parse(
+            Buffer.from(read(effect.original)).toString("utf8"),
+          ),
+        });
+        contentRefs.push(effect.original);
+      }
+      if (effect.rejectedOriginal) {
+        read(effect.rejectedOriginal);
+        contentRefs.push(effect.rejectedOriginal);
+      }
+    }
+  }
+  if (concrete)
+    LocalContentStore.prototype.retainCheckpointReferences.call(
+      cache.store,
+      signature,
+      {
+        contentRefs,
+        gitObjects: [],
+        gaps: [],
+        originals: [...originals.values()],
+      },
+    );
+  return { record, contentRefs };
 }
+
 export function projectQueuePersistenceClosure(
   config: FactoryConfig,
   root = stateRoot(config.repository),
@@ -2104,46 +2203,22 @@ export function projectQueuePersistenceClosure(
     if (!/^[a-f0-9-]{36}\.json$/.test(name))
       throw new Error("Unrecognized Project queue history file");
     const bytes = privateBytes(join(directory, name));
-    const record = parseQueueRecord(
-      bytes,
-      config.repository,
-      name.slice(0, -5),
-    );
     const body = store.putBytes(bytes, { mediaType: "application/json" });
+    const path = `project-queue-history/${name}`;
+    const references = checkpointQueueRecordReferences(
+      config.repository,
+      path,
+      { ref: body, bytes },
+      (reference) => store.readBytes(reference),
+      { store, reader: "local" },
+    );
     closure.files.push({
       kind: "historical",
-      path: `project-queue-history/${name}`,
+      path,
       ref: body,
       visibility: "private",
     });
-    closure.contentRefs.push(body);
-    if (record.kind === "project-queue-owner")
-      closure.contentRefs.push(
-        ...assertQueueOwnerReferenceBodies(record, (reference) =>
-          store.readBytes(reference),
-        ),
-      );
-    if (record.kind === "project-queue-operation") {
-      assertQueueOperationReferenceBodies(record, (ref) =>
-        store.readBytes(ref),
-      );
-      closure.contentRefs.push(...queueOperationReferences(record));
-      for (const effect of record.effects) {
-        if (effect.original) {
-          assertProjectQueueWriteReceipt({
-            ...effect.receipt,
-            original: JSON.parse(
-              store.readBytes(effect.original).toString("utf8"),
-            ),
-          });
-          closure.contentRefs.push(effect.original);
-        }
-        if (effect.rejectedOriginal) {
-          store.readBytes(effect.rejectedOriginal);
-          closure.contentRefs.push(effect.rejectedOriginal);
-        }
-      }
-    }
+    closure.contentRefs.push(...references.contentRefs);
   }
   return closure;
 }
@@ -2171,46 +2246,9 @@ export async function readQueueHistory(
     throw new Error(
       "Authenticated Project queue receipts require private-history Git persistence",
     );
-  const archive = await readVerifiedRecoveryCheckpoint(config);
-  const records: QueueRecord[] = [];
-  for (const file of archive.manifest.files) {
-    const match = /^project-queue-history\/([a-f0-9-]{36})\.json$/.exec(
-      file.path,
-    );
-    if (!match) continue;
-    if (file.visibility !== "private" || file.kind !== "historical")
-      throw new Error("Project queue receipt has an invalid archive scope");
-    const record = parseQueueRecord(
-      await archive.readVerifiedBlob(file.ref),
-      config.repository,
-      match[1]!,
-    );
-    if (record.kind === "project-queue-operation") {
-      await authenticateQueueOperationReferences(record, (reference) =>
-        archive.readVerifiedBlob(reference),
-      );
-      for (const effect of record.effects)
-        if (effect.original) {
-          assertProjectQueueWriteReceipt({
-            ...effect.receipt,
-            original: JSON.parse(
-              Buffer.from(
-                await archive.readVerifiedBlob(effect.original),
-              ).toString("utf8"),
-            ),
-          });
-        }
-    }
-    if (record.kind === "project-queue-owner")
-      await authenticateQueueOwnerReferences(record, (reference) =>
-        archive.readVerifiedBlob(reference),
-      );
-    if (records.some((previous) => previous.id === record.id))
-      throw new Error("Duplicate archived Project queue receipt");
-    records.push(record);
-  }
-  return records;
+  return readVerifiedProjectQueueHistory(config);
 }
+
 export interface VerifiedQueueEntry {
   objective: number;
   itemId: string;

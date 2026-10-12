@@ -41,6 +41,7 @@ import {
   UnsettledSubprocessError,
   withCheckpointPublication,
 } from "./process.js";
+import type { QueueRecord } from "./project-queue-state.js";
 import type { ContinuationReferences } from "./recovery-checkpoint-closure.js";
 import type { ControllerLock } from "./state-store.js";
 
@@ -4218,12 +4219,9 @@ async function freshArchiveOwnedStrict(
     };
     // Retained cancellation/abandonment witnesses must be actual ancestor packets,
     // rather than manually shaped manifest text in the current body store.
-    const {
-      parseQueueRecord,
-      assertQueueOperationReferenceBodies,
-      queueOperationReferences,
-      queueOwnerReferences,
-    } = await import("./project-queue-state.js");
+    const { checkpointQueueRecordReferences } = await import(
+      "./project-queue-state.js"
+    );
     const readQueueOriginal = (ref: ContentRef) => {
       const bytes = archive.readBlob(ref);
       if (!bytes)
@@ -4235,31 +4233,35 @@ async function freshArchiveOwnedStrict(
     const queueFiles = archive.manifest.files.filter((file) =>
       /^project-queue-history\/[a-f0-9-]{36}\.json$/.test(file.path),
     );
+    for (const file of queueFiles)
+      if (file.visibility !== "private" || file.kind !== "historical")
+        throw new Error("Project queue receipt has an invalid archive scope");
     archive.prefetch(queueFiles.map((file) => file.ref));
-    const records = queueFiles.map((file) =>
-      parseQueueRecord(
-        readQueueOriginal(file.ref),
-        config.repository,
-        file.path.slice("project-queue-history/".length, -".json".length),
-      ),
+    const cache =
+      context && activeClosureBinding()?.scope.verification === context
+        ? {
+            store: new LocalContentStore(
+              join(stateRoot(config.repository), "content"),
+            ),
+            reader: "archive" as const,
+          }
+        : undefined;
+    // This store carries bounded metadata only. Every supporting original is
+    // authenticated through the actual fetched Git reader, never local hydration.
+    const records = queueFiles.map(
+      (file) =>
+        checkpointQueueRecordReferences(
+          config.repository,
+          file.path,
+          { ref: file.ref, bytes: readQueueOriginal(file.ref) },
+          readQueueOriginal,
+          cache,
+        ).record,
     );
-    archive.prefetch(
-      records.flatMap((record) =>
-        record.kind === "project-queue-owner"
-          ? queueOwnerReferences(record)
-          : [
-              ...queueOperationReferences(record),
-              ...record.effects.flatMap((effect) =>
-                [effect.original, effect.rejectedOriginal].filter(
-                  (ref): ref is ContentRef => ref !== undefined,
-                ),
-              ),
-            ],
-      ),
-    );
+    if (new Set(records.map((record) => record.id)).size !== records.length)
+      throw new Error("Duplicate archived Project queue receipt");
     for (const record of records) {
       if (record.kind === "project-queue-operation") {
-        assertQueueOperationReferenceBodies(record, readQueueOriginal);
         const retired = record.retiredWithdrawal?.retiredClaim;
         if (retired) {
           const claim = JSON.parse(readQueueOriginal(retired).toString("utf8"));
@@ -4340,6 +4342,7 @@ async function freshArchiveOwnedStrict(
         : undefined;
     const result = {
       ...archive,
+      queueRecords: records,
       ...(lineage ? { queueOwnerLineage: lineage } : {}),
       ...(reservation ? { queueReservationLineage: reservation } : {}),
       ...(inspectHistory
@@ -4462,6 +4465,19 @@ export async function readVerifiedRecoveryCheckpoint(
       return Uint8Array.from(bytes);
     },
   };
+}
+/** Fresh archive records, after all original-body and actual ancestry checks. */
+export async function readVerifiedProjectQueueHistory(
+  config: FactoryConfig,
+): Promise<QueueRecord[]> {
+  const options = settings(config);
+  if (!options || options.scope !== "private-history")
+    throw new Error(
+      "Authenticated Project queue receipts require private-history Git persistence",
+    );
+  await verifyDestination(config, options);
+  const archive = await freshArchive(config, options);
+  return structuredClone(archive.queueRecords);
 }
 async function assertInstallationLease(
   repository: string,

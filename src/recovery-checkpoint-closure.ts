@@ -878,7 +878,16 @@ async function verifyDescription(
       });
     }
   }
-  for (const ref of refs.values()) await readReference(source, ref, knownStore);
+  for (const ref of refs.values()) {
+    if (
+      knownStore &&
+      source === knownStore &&
+      Object.getPrototypeOf(source) === LocalContentStore.prototype &&
+      knownStore.readBytes === LocalContentStore.prototype.readBytes
+    )
+      knownStore.verifyPrivateBytes(ref);
+    else await readReference(source, ref, knownStore);
+  }
   return {
     contentRefs: [...refs.values()],
     gitObjects: [...objects.values()],
@@ -1329,14 +1338,14 @@ export async function buildRecoveryCheckpointClosure(input: {
     });
   }
   for (const ref of refs.values()) {
-    const bytes = await readReference(
-      reader,
-      ref,
-      input.store ? undefined : store,
-    );
     // Existing local originals already occupy their durable content address.
     // Only a supplied import store needs to copy missing originals into it.
-    if (input.store) await retainBytes(store, bytes, ref.mediaType);
+    if (!input.store) {
+      store.verifyPrivateBytes(ref);
+      continue;
+    }
+    const bytes = await readReference(reader, ref);
+    await retainBytes(store, bytes, ref.mediaType);
   }
   return {
     files,

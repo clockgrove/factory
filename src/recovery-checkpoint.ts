@@ -4418,10 +4418,12 @@ async function publishCheckpoint(
       const store = new LocalContentStore(
         join(stateRoot(config.repository), "content"),
       );
-      const blobs = allRefs(manifest).map((ref) => ({
-        ref,
-        bytes: store.readBytes(ref),
-      }));
+      const refs = allRefs(manifest);
+      assertBodyBounds(refs, options);
+      // Every current original remains present, private and exactly verified.
+      // An immutable opened-file witness avoids materializing bytes merely to
+      // discard them after an unchanged-payload comparison or base reuse.
+      for (const ref of refs) store.verifyPrivateBytes(ref);
       if (
         input.reason === "explicit" &&
         record.lastAcknowledged &&
@@ -4515,20 +4517,20 @@ async function publishCheckpoint(
       // Reuse only identities fully authenticated by this publication's fresh
       // base fetch. Current local bytes were independently checked above, and
       // the complete collection remains bounded before selecting new bodies.
-      assertBodyBounds(
-        blobs.map(({ ref }) => ref),
-        options,
-      );
       const verifiedBase = new Map(
         verifiedBaseEntries.map((entry) => [entry.ref.digest, entry]),
       );
       const blobEntries: { ref: ContentRef; oid: string }[] = [];
-      const newBodies = blobs.filter(({ ref }) => {
+      const newRefs = refs.filter((ref) => {
         const prior = verifiedBase.get(ref.digest);
         if (!prior || canonical(prior.ref) !== canonical(ref)) return true;
         blobEntries.push({ ref, oid: prior.oid });
         return false;
       });
+      const newBodies = newRefs.map((ref) => ({
+        ref,
+        bytes: store.readBytes(ref),
+      }));
       blobEntries.push(
         ...writeRecoveryCheckpointBodies(p.git, options, newBodies),
       );

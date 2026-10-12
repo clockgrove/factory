@@ -361,7 +361,10 @@ async function mutationSnapshot(
     throw new Error(
       "GitHub gateway cannot inspect the current Project command target",
     );
-  await awaitCheckpointAdmission(config.repository, "explicit");
+  // This preparation reads current archive/Project authority. A clean original
+  // acknowledgment need not rebuild local closure before those reads; dirty or
+  // unresolved publication still completes before the distinct effect intent.
+  await awaitCheckpointAdmission(config.repository, "before-effect");
   const history = await readQueueHistory(config);
   const retained =
     objective === undefined

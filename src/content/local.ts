@@ -177,11 +177,29 @@ export class LocalContentStore implements ContentStore {
       throw error;
     }
     try {
-      const identity = this.descriptorIdentity(fd, ref);
-      if (!checkpointContentVerified(this.root, ref, identity))
-        this.readDescriptor(fd, ref);
+      this.verifyDescriptor(fd, ref);
       this.synchronizeObject(fd, ref);
       return true;
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  private verifyDescriptor(fd: number, ref: ContentRef): void {
+    const identity = this.descriptorIdentity(fd, ref);
+    if (!checkpointContentVerified(this.root, ref, identity))
+      this.readDescriptor(fd, ref);
+    else if (this.descriptorIdentity(fd, ref) !== identity)
+      throw new Error(
+        "Content object changed during exact reference verification",
+      );
+  }
+
+  /** Authenticate a private original without allocating already verified bytes. */
+  verifyPrivateBytes(ref: ContentRef): void {
+    const fd = this.openObject(ref);
+    try {
+      this.verifyDescriptor(fd, ref);
     } finally {
       closeSync(fd);
     }

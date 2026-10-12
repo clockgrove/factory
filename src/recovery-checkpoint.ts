@@ -358,12 +358,17 @@ const scopes = new AsyncLocalStorage<{
   };
   verification?: QueueVerificationContext;
   closureReads?: {
+    scope: object;
+    config: FactoryConfig;
+    verification?: QueueVerificationContext;
+    verificationKey?: string;
     root: string;
     key: string;
     options: GitPersistenceConfig;
     bodies: Map<string, { ref: ContentRef; bytes: Buffer }>;
     bytes: number;
     closed: boolean;
+    ended: boolean;
   };
 }>();
 export function hasPrivateCheckpointScope(): boolean {
@@ -1183,6 +1188,16 @@ export function withRecoveryCheckpointControllerVerification<T>(
 }
 function activeContentVerification() {
   const scope = scopes.getStore();
+  if (scope?.closureReads && !scope.closureReads.ended) {
+    const active = activeClosureBinding();
+    return active?.scope.verification
+      ? {
+          scope: active.scope,
+          context: active.scope.verification,
+          options: active.phase.options,
+        }
+      : undefined;
+  }
   const context = scope?.verification;
   const options = scope && settings(scope.config);
   if (!context || !scope || !options) return undefined;
@@ -1213,26 +1228,30 @@ export async function withRecoveryCheckpointClosureReads(
   const options = settings(config);
   const inherited = scopes.getStore();
   const scope = inherited ?? { config, buildClosure: build };
-  if (
-    !localOnly ||
-    !options ||
-    (inherited &&
-      factoryConfigDigest(inherited.config) !== factoryConfigDigest(config))
-  )
+  if (!localOnly || !options || (inherited && inherited.config !== config))
     return scopes.run({ ...scope, closureReads: undefined }, build);
   assertProcessActive();
   const phase = {
+    scope: scope as object,
+    config,
+    verification: scope.verification,
+    verificationKey: scope.verification?.key,
     root: join(stateRoot(config.repository), "content"),
     key: verificationKey(config, options),
     options: { ...options },
     bodies: new Map<string, { ref: ContentRef; bytes: Buffer }>(),
     bytes: 0,
     closed: false,
+    ended: false,
   };
-  return scopes.run({ ...scope, closureReads: phase }, async () => {
+  const frame = { ...scope, closureReads: phase };
+  phase.scope = frame;
+  return scopes.run(frame, async () => {
     try {
+      activeClosureBinding();
       const closure = await build();
       assertProcessActive();
+      activeClosureBinding();
       let current = settings(config);
       if (!current || phase.key !== verificationKey(config, current))
         throw new Error(
@@ -1247,6 +1266,7 @@ export async function withRecoveryCheckpointClosureReads(
         store.verifyPrivateBytes(ref);
       }
       assertProcessActive();
+      activeClosureBinding();
       current = settings(config);
       if (!current || phase.key !== verificationKey(config, current))
         throw new Error(
@@ -1255,23 +1275,44 @@ export async function withRecoveryCheckpointClosureReads(
       return closure;
     } finally {
       phase.closed = true;
+      phase.ended = true;
       phase.bodies.clear();
       phase.bytes = 0;
     }
   });
 }
 
-function closureReadPhase(root: string) {
-  const phase = scopes.getStore()?.closureReads;
-  if (!phase || phase.closed || resolve(root) !== phase.root) return undefined;
+function activeClosureBinding() {
+  const scope = scopes.getStore();
+  const phase = scope?.closureReads;
+  if (!scope || !phase || phase.ended) return undefined;
+  const context = scope.verification;
+  if (
+    scope !== phase.scope ||
+    scope.config !== phase.config ||
+    context !== phase.verification ||
+    (context &&
+      (context.closed ||
+        context.quarantined ||
+        context.key !== phase.verificationKey ||
+        context.key !== phase.key))
+  )
+    throw new Error(
+      "Checkpoint closure verification scope changed or is unavailable",
+    );
   try {
     assertProcessActive();
   } catch {
     return undefined;
   }
-  // Keep the existing dynamic controller/configuration fence on semantic hits.
-  activeContentVerification();
-  return phase;
+  return { scope, phase };
+}
+
+function closureReadPhase(root: string) {
+  const active = activeClosureBinding();
+  return active && !active.phase.closed && resolve(root) === active.phase.root
+    ? active.phase
+    : undefined;
 }
 
 export function checkpointClosureBytes(

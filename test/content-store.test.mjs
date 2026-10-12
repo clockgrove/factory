@@ -1947,6 +1947,37 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         },
         true,
       );
+      const originalMaxFiles = config.gitPersistence.maxFiles;
+      try {
+        config.gitPersistence.maxFiles++;
+        await assert.rejects(
+          withRecoveryCheckpointClosureReads(
+            config,
+            async () => bodyClosure,
+            true,
+          ),
+          /verification scope changed or is unavailable/,
+        );
+      } finally {
+        config.gitPersistence.maxFiles = originalMaxFiles;
+      }
+      try {
+        await assert.rejects(
+          withRecoveryCheckpointClosureReads(
+            config,
+            async () => {
+              assert.deepEqual(content.readBytes(cachedRef), originalContent);
+              config.gitPersistence.maxFiles++;
+              assert.deepEqual(content.readBytes(cachedRef), originalContent);
+              return bodyClosure;
+            },
+            true,
+          ),
+          /configuration changed during its build/,
+        );
+      } finally {
+        config.gitPersistence.maxFiles = originalMaxFiles;
+      }
       try {
         await assert.rejects(
           withRecoveryCheckpointClosureReads(

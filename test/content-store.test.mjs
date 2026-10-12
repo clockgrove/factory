@@ -808,11 +808,13 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     { mode: 0o600 },
   );
   const retainedCheckpointSources = [];
+  let returnedClosureMutation;
   const buildClosure = async () => {
     const actual = await buildRecoveryCheckpointClosure({
       config,
       scope: "private-history",
     });
+    returnedClosureMutation?.();
     return {
       ...actual,
       contentRefs: [...actual.contentRefs, ...retainedCheckpointSources],
@@ -2342,10 +2344,31 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           diagnosticPath(repository, 0),
         ).size;
         saveState(statePath(repository, 1), cancelled);
-        await synchronizeRecoveryCheckpoint(config, {
-          reason: "explicit",
-          buildClosure,
-        });
+        const originalVerifyDescriptor =
+          LocalContentStore.prototype.verifyDescriptor;
+        let finalOriginalVerifications = 0;
+        LocalContentStore.prototype.verifyDescriptor = function (fd, ref) {
+          if (
+            ref.digest === cachedRef.digest &&
+            new Error().stack.includes("LocalContentStore.verifyPrivateBytes")
+          )
+            finalOriginalVerifications++;
+          return Reflect.apply(originalVerifyDescriptor, this, [fd, ref]);
+        };
+        try {
+          await synchronizeRecoveryCheckpoint(config, {
+            reason: "explicit",
+            buildClosure,
+          });
+        } finally {
+          LocalContentStore.prototype.verifyDescriptor =
+            originalVerifyDescriptor;
+        }
+        assert.equal(
+          finalOriginalVerifications,
+          1,
+          "producer and publisher complete one fresh strict original union",
+        );
         publicationWindows.push({
           base: pressured.commitSha,
           events: publicationEventsSince(publicationObservationOffset),
@@ -2377,6 +2400,30 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         assert.match(
           readFileSync(protocolPath, "utf8"),
           new RegExp(`have ${restoredRead.commitSha}\\b`),
+        );
+        // A nested producer may return its semantic description; altered actual
+        // bytes still refuse the publication owner's final union before transport.
+        const beforeNestedFailure = gitPersistenceStatus(config);
+        returnedClosureMutation = () => {
+          const changed = Buffer.from(originalContent);
+          changed[0] ^= 1;
+          writeFileSync(cachedPath, changed);
+        };
+        try {
+          await assert.rejects(
+            synchronizeRecoveryCheckpoint(config, {
+              reason: "explicit",
+              buildClosure,
+            }),
+            /failed digest verification/,
+          );
+        } finally {
+          returnedClosureMutation = undefined;
+          writeFileSync(cachedPath, originalContent);
+        }
+        assert.deepEqual(
+          gitPersistenceStatus(config).lastAcknowledged,
+          beforeNestedFailure.lastAcknowledged,
         );
         // The following changed payload uses a real newly retained opaque body,
         // without inventing another provider observation or changing a run.

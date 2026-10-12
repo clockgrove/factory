@@ -441,6 +441,7 @@ const scopes = new AsyncLocalStorage<{
   };
   verification?: QueueVerificationContext;
   closureReads?: {
+    publicationLocal: boolean;
     scope: object;
     config: FactoryConfig;
     verification?: QueueVerificationContext;
@@ -1321,6 +1322,19 @@ export async function withRecoveryCheckpointClosureReads(
   localOnly: boolean,
 ): Promise<RecoveryCheckpointClosure> {
   const inherited = scopes.getStore();
+  if (
+    localOnly &&
+    inherited?.config === config &&
+    inherited.closureReads?.publicationLocal &&
+    !inherited.closureReads.closed &&
+    !inherited.closureReads.ended
+  ) {
+    // Only the local publication owner may defer a nested producer's final
+    // union. Remote archive readers still complete their own independent phase.
+    assertProcessActive();
+    activeClosureBinding();
+    return build();
+  }
   return withFiniteCheckpointReads(
     config,
     build,
@@ -1334,12 +1348,14 @@ async function withFiniteCheckpointReads<T>(
   build: () => Promise<T>,
   localOnly: boolean,
   scope: NonNullable<ReturnType<typeof scopes.getStore>>,
+  publicationLocal = false,
 ): Promise<T> {
   const options = settings(config);
   if (!localOnly || !options || scope.config !== config)
     return scopes.run({ ...scope, closureReads: undefined }, build);
   assertProcessActive();
   const phase = {
+    publicationLocal,
     scope: scope as object,
     config,
     verification: scope.verification,
@@ -5258,36 +5274,39 @@ async function publishCheckpoint(
       )
         return status(record, options);
       let sequence = record.sequence;
-      const closure = await buildScoped();
-      record = journal(config, options);
-      assertRetentionResolved(record);
-      const manifest: RecoveryCheckpointManifest = {
-        ...closure,
-        schemaVersion: 1,
-        binding: binding(config, options),
-        createdAt: new Date().toISOString(),
-        sequence,
-        ...(options.scope === "private-history"
-          ? { authority: checkpointAuthority(config) }
-          : {}),
-      };
-      assertManifest(manifest, manifest.binding, options);
-      const store = new LocalContentStore(
-        join(stateRoot(config.repository), "content"),
-      );
-      const refs = allRefs(manifest);
-      assertBodyBounds(refs, options);
-      // Every current original remains present, private and exactly verified.
-      // An immutable opened-file witness avoids materializing bytes merely to
-      // discard them after an unchanged-payload comparison or base reuse.
-      await withRecoveryCheckpointClosureReads(
+      const local = await withFiniteCheckpointReads(
         config,
         async () => {
+          const closure = await buildScoped();
+          const currentRecord = journal(config, options);
+          assertRetentionResolved(currentRecord);
+          const manifest: RecoveryCheckpointManifest = {
+            ...closure,
+            schemaVersion: 1,
+            binding: binding(config, options),
+            createdAt: new Date().toISOString(),
+            sequence,
+            ...(options.scope === "private-history"
+              ? { authority: checkpointAuthority(config) }
+              : {}),
+          };
+          assertManifest(manifest, manifest.binding, options);
+          const store = new LocalContentStore(
+            join(stateRoot(config.repository), "content"),
+          );
+          const refs = allRefs(manifest);
+          assertBodyBounds(refs, options);
+          // Producer originals and the complete publication collection share
+          // one fresh final union, before publisher transport can begin.
           for (const ref of refs) store.verifyPrivateBytes(ref);
-          return closure;
+          return { closure, manifest, refs, store, record: currentRecord };
         },
         true,
+        scopes.getStore() ?? { config, buildClosure: build },
+        true,
       );
+      const { closure, manifest, refs, store } = local;
+      record = local.record;
       if (
         input.reason === "explicit" &&
         record.lastAcknowledged &&

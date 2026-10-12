@@ -1695,6 +1695,7 @@ function retainVerifiedNegotiationTip(
       options,
       negotiationTipCharge(tip),
       negotiationTipCharge(context.negotiationTip),
+      true,
     )
   ) {
     delete context.negotiationTip;
@@ -1708,25 +1709,27 @@ function reserveVerificationMetadata(
   options: GitPersistenceConfig,
   charge: number,
   priorCharge = 0,
+  preservePrior = false,
 ): boolean {
   const budget = verificationMetadataBudget(options);
   if (charge > budget) return false;
   if (verificationMetadataBytes(context) - priorCharge + charge > budget) {
-    clearContentVerification(context);
-    priorCharge = 0;
+    clearRebuildableVerificationMetadata(context);
+    if (!preservePrior) priorCharge = 0;
   }
   return verificationMetadataBytes(context) - priorCharge + charge <= budget;
 }
 
-function clearContentVerification(context: QueueVerificationContext): void {
+function clearRebuildableVerificationMetadata(
+  context: QueueVerificationContext,
+): void {
+  // Ordinary body/producer facts can be rebuilt from freshly checked originals.
+  // Do not discard expensive authenticated ancestry when inserting those facts.
+  // If witnesses/material/pending alone leave no room, the insertion stays uncached.
   context.summaries.clear();
   context.summaryBytes = 0;
   context.content.clear();
   context.contentBytes = 0;
-  context.lineages.clear();
-  context.lineageBytes = 0;
-  context.reservationPrefixes.clear();
-  context.reservationPrefixBytes = 0;
 }
 
 function retainContentVerification(
@@ -3924,7 +3927,7 @@ function retainQueueLineage(
   const priorCharge = previous
     ? Buffer.byteLength(key) + Buffer.byteLength(canonical(previous))
     : 0;
-  if (!reserveVerificationMetadata(context, options, charge, priorCharge))
+  if (!reserveVerificationMetadata(context, options, charge, priorCharge, true))
     return;
   const prior = context.lineages.get(key);
   if (prior)
@@ -4245,11 +4248,11 @@ async function freshArchiveOwnedStrict(
           objectBytes >
         verificationMetadataBudget(options)
       )
-        clearContentVerification(context);
+        clearRebuildableVerificationMetadata(context);
       const fits =
-        context.pendingReferenceBytes +
-          objectBytes +
-          negotiationTipCharge(context.negotiationTip) <=
+        verificationMetadataBytes(context) -
+          (context.objects ? context.objectBytes : 0) +
+          objectBytes <=
         verificationMetadataBudget(options);
       context.objects = fits ? objects : undefined;
       context.objectBytes = fits ? objectBytes : 0;
@@ -4412,7 +4415,13 @@ async function freshArchiveOwnedStrict(
           ? Buffer.byteLength(key) + Buffer.byteLength(prior)
           : 0;
         if (
-          reserveVerificationMetadata(context, options, charge, priorCharge)
+          reserveVerificationMetadata(
+            context,
+            options,
+            charge,
+            priorCharge,
+            true,
+          )
         ) {
           const previous = context.reservationPrefixes.get(key);
           if (previous)

@@ -2261,6 +2261,75 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       };
       syncBuiltinESMExports();
       try {
+        // Storage-capacity pressure only: repeated metadata for this genuinely
+        // verified body supplies no provider, lifecycle or acceptance facts.
+        // Commit two individually bounded entries through the real finite phase;
+        // their combined charge exceeds the unchanged 8 MiB metadata pool.
+        const pressureSummary = {
+          contentRefs: Array(
+            Math.floor(
+              (5 * 1024 * 1024) /
+                (Buffer.byteLength(JSON.stringify(cachedRef)) + 1),
+            ),
+          ).fill(cachedRef),
+          gitObjects: [],
+          gaps: [],
+          originals: [cachedRef],
+        };
+        assert(
+          Buffer.byteLength(JSON.stringify(pressureSummary)) > 4 * 1024 * 1024,
+        );
+        for (const pressure of ["first", "second"])
+          await withRecoveryCheckpointClosureReads(
+            config,
+            async () => {
+              assert.deepEqual(content.readBytes(cachedRef), originalContent);
+              if (pressure === "second")
+                assert(
+                  content.checkpointReferences(
+                    JSON.stringify([
+                      "real-body-storage-capacity-pressure",
+                      "first",
+                      cachedRef,
+                    ]),
+                  ),
+                  "pressure crosses genuinely committed metadata",
+                );
+              content.retainCheckpointReferences(
+                JSON.stringify([
+                  "real-body-storage-capacity-pressure",
+                  pressure,
+                  cachedRef,
+                ]),
+                pressureSummary,
+              );
+              return bodyClosure;
+            },
+            true,
+          );
+        const pressureOffset = statSync(diagnosticPath(repository, 0)).size;
+        const pressured = await readVerifiedRecoveryCheckpoint(config);
+        assert.equal(pressured.commitSha, restoredRead.commitSha);
+        const pressureEvents = readFileSync(diagnosticPath(repository, 0))
+          .subarray(pressureOffset)
+          .toString("utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        const pressureStart = pressureEvents.find(
+          (event) =>
+            event.operation === "recovery-checkpoint-verify" &&
+            event.outcome === "started",
+        );
+        assert(
+          pressureStart.metadata.lineageEntries > 0,
+          "cheap metadata pressure preserves the independently validated ancestry",
+        );
+        assert(
+          pressureEvents.every(
+            (event) => event.metadata.metadataBytes <= 8 * 1024 * 1024,
+          ),
+        );
         saveState(statePath(repository, 1), cancelled);
         await synchronizeRecoveryCheckpoint(config, {
           reason: "explicit",
@@ -2341,7 +2410,16 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         for (const commit of [
           advanced.commitSha,
           nextCheckpoint.lastAcknowledged.commitSha,
-        ])
+        ]) {
+          assert(
+            checkpointEvents.some(
+              (event) =>
+                event.operation === "recovery-checkpoint-verify" &&
+                event.outcome === "started" &&
+                event.metadata.selectedCommit === commit &&
+                event.metadata.lineageEntries > 0,
+            ),
+          );
           assert(
             fetches.some(
               (event) =>
@@ -2350,6 +2428,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
                 event.durationMs >= 0,
             ),
           );
+        }
         assert(
           checkpointEvents.some(
             (event) =>

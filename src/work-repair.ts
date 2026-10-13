@@ -933,8 +933,8 @@ const EVIDENCE_READ_BYTES = 1_000_000;
  * The files of the failed result that it and its merged predecessors own, as
  * text: what a diagnosis needs to tell whose file is wrong. They are read from
  * the result tree, which holds the integrated predecessors' files. The failing
- * item's own files come first, so the budget never goes to a predecessor
- * before them.
+ * item's own files come first. Within each ownership group, literal paths in
+ * the retained current failure precede unrelated files in Git listing order.
  */
 export function diagnosisFiles(
   state: FactoryState,
@@ -943,6 +943,32 @@ export function diagnosisFiles(
 ): { path: string; heading: string; content: string; complete: boolean }[] {
   const treeSha = state.work[item.id]?.treeSha;
   if (!checkout || !treeSha) return [];
+  const work = state.work[item.id]!;
+  const failure = work.recovery?.failure;
+  assertFailedValidationRecord(
+    work.failedValidation,
+    state,
+    item.id,
+    work,
+    failure,
+  );
+  assertSemanticRefusalRecord(state, item.id, work, failure);
+  const refusal = failure?.semanticRefusal;
+  const failureText = [
+    failure?.detail ?? "",
+    ...(refusal?.source === "model"
+      ? refusal.evidence.map((entry) => entry.path)
+      : []),
+  ].join("\n");
+  // Match only paths actually listed in the retained candidate. Failure prose
+  // supplies presentation relevance, never new ownership or source authority.
+  const relevant = (path: string): boolean => {
+    if (!failure) return false;
+    const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?:^|[^\\w.\\-])${escaped}(?=$|[^\\w./\\-])`).test(
+      failureText,
+    );
+  };
   const predecessors = mergedPredecessors(state, item);
   const files: {
     path: string;
@@ -960,12 +986,17 @@ export function diagnosisFiles(
     const owned = listed
       .map((file) => ({
         ...file,
+        relevant: relevant(file.path),
         owner: ownsPath(file.path, item.ownedPaths)
           ? undefined
           : latestOwner(state, predecessors, file.path),
       }))
       .filter((file) => rank(file.path) === 0 || file.owner)
-      .sort((a, b) => rank(a.path) - rank(b.path));
+      .sort(
+        (a, b) =>
+          rank(a.path) - rank(b.path) ||
+          Number(b.relevant) - Number(a.relevant),
+      );
     for (const { path, size, owner } of owned) {
       // The budget is spent: nothing more is read.
       if (total >= EVIDENCE_TOTAL_BYTES) break;

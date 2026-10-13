@@ -83,6 +83,11 @@ test("independent prepared change is replayed on the observed integration head",
 
     git(root, "checkout", "--detach", base);
     writeFileSync(join(root, "right.txt"), "right\n");
+    writeFileSync(join(root, "aa-unrelated.txt"), "x".repeat(63_500));
+    const failedTest =
+      "// Candidate test context.\n".repeat(40) +
+      'console.error("z-failing.test.mjs:7: retained candidate failure"); process.exit(1);\n';
+    writeFileSync(join(root, "z-failing.test.mjs"), failedTest);
     writeFileSync(
       join(root, "large.txt"),
       "Unavailable in the bounded diagnosis.\n".repeat(3000),
@@ -133,7 +138,12 @@ test("independent prepared change is replayed on the observed integration head",
       nonGoals: ["No authority changes"],
       citations: [{ path: "OBJECTIVE" }, { path: "base.txt" }],
       dependencies: [],
-      ownedPaths: ["right.txt", "large.txt"],
+      ownedPaths: [
+        "right.txt",
+        "large.txt",
+        "aa-unrelated.txt",
+        "z-failing.test.mjs",
+      ],
       validation: [
         {
           command: "git diff --exit-code",
@@ -381,6 +391,97 @@ test("independent prepared change is replayed on the observed integration head",
       /canonical inputs/,
     );
     assert.equal(JSON.stringify({ state, sources, evidence }), before);
+    // The late-listed small test fits the existing budget, but only when its
+    // actual failed subprocess path precedes the unrelated 63.5 KB file.
+    const commandState = structuredClone(state);
+    commandState.configDigest = createHash("sha256")
+      .update("retained")
+      .digest("hex");
+    const commandItem = commandState.graph.items[0];
+    commandItem.validation = [
+      { command: "node z-failing.test.mjs", provenance: "source-declared" },
+    ];
+    const commandWork = commandState.work.right;
+    delete commandWork.recovery;
+    delete commandWork.validation;
+    commandWork.graphRevisionDigest = graphDigest(commandState.graph);
+    let actualFailure;
+    try {
+      await validateWorkItem(
+        root,
+        join(root, "failed-validation"),
+        commandItem,
+        replayed.changeRef,
+        replayed.treeSha,
+        base,
+      );
+      assert.fail("The candidate test must fail");
+    } catch (error) {
+      actualFailure = error;
+    }
+    recordWorkFailure(commandState, commandItem.id, actualFailure);
+    assert.equal(
+      commandWork.failedValidation.evidence.commands[0].passed,
+      false,
+    );
+    const commandEvidence = repairEvidence(
+      commandState,
+      commandItem,
+      diagnosisFiles(commandState, commandItem, root),
+    );
+    assert.equal(commandEvidence[2].path, "z-failing.test.mjs");
+    assert.equal(commandEvidence[2].content, failedTest);
+    assert.equal(commandEvidence[2].complete, true);
+    assert.equal(
+      commandEvidence.find((entry) => entry.path === "aa-unrelated.txt")
+        .complete,
+      false,
+    );
+    const commandRequest = workRepairDiagnosisRequest({
+      state: commandState,
+      item: commandItem,
+      evidence: commandEvidence,
+      sources,
+      checkout: root,
+    });
+    const commandCall = renderDiagnosisCall(commandRequest);
+    assert.ok(commandCall.prompt.includes(JSON.stringify(failedTest)));
+    assert.deepEqual(commandCall.schema.required, request.schema.required);
+    const commandAnswer = {
+      ...answer,
+      path: "z-failing.test.mjs",
+      evidenceIndices: [0, 1, 2],
+      commandAssessments: [{ commandIndex: 0, disposition: "owned-change" }],
+    };
+    assert.equal(
+      typeof actionableReadiness(
+        commandState,
+        commandItem,
+        commandAnswer,
+        commandEvidence,
+        root,
+        commandRequest.workRepairDiagnosis.evidenceIndices,
+      ),
+      "object",
+    );
+    assert.equal(
+      typeof actionableReadiness(
+        commandState,
+        commandItem,
+        { ...commandAnswer, evidenceIndices: [0, 1] },
+        commandEvidence,
+        root,
+        commandRequest.workRepairDiagnosis.evidenceIndices,
+      ),
+      "string",
+    );
+    // Presentation cannot silently bind a different failure or candidate.
+    const rebound = structuredClone(commandState);
+    rebound.work.right.treeSha = "0".repeat(40);
+    assert.throws(
+      () => diagnosisFiles(rebound, commandItem, root),
+      /capture|candidate|validation/i,
+    );
     await assert.rejects(() =>
       transplantIndependentChange(root, integrated, prepared, base),
     );

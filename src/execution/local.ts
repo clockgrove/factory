@@ -1,4 +1,3 @@
-import { assertWorkerSourceFiles } from "./harness-support.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -102,9 +101,10 @@ import { assertDurableValue } from "./checkpoint.js";
 import { ClaudeAgentSdkHarness } from "./claude.js";
 import { executionFault } from "./fault.js";
 import {
+  assertWorkerSourceFiles,
   materializeWorkerSources,
-  workerSourceDelivery,
   readWorkHandoff,
+  workerSourceDelivery,
 } from "./harness-support.js";
 import {
   checkStagedCandidate,
@@ -1512,6 +1512,22 @@ export async function collectWorktreeResult(
   return collected;
 }
 
+const retainedFailedUnavailable =
+  "\nRetained failed committed-result context is unavailable or could not be authenticated in this checkout. Do not infer prior source contents; unfinished uncommitted edits remain unavailable.";
+const retainedFailedAvailable = (
+  retained: NonNullable<ExecutionRequest["retainedFailedResult"]>,
+): string =>
+  `\nRetained failed committed result, verified reachable in this checkout: ${JSON.stringify(retained)}. This is unaccepted implementation context, not normative source, an accepted base or acceptance proof. You may inspect currently owned files from this exact Git tree and reuse their implementation in owned edits while making the diagnosed correction. Preserve the checkout's current accepted HEAD; do not checkout, reset or cherry-pick the failed commit. Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
+
+/** The worker brief suffixes the local driver may append for this request. */
+export function retainedFailedResultBriefs(
+  retainedResult: ExecutionRequest["retainedFailedResult"],
+): string[] {
+  return retainedResult
+    ? [retainedFailedAvailable(retainedResult), retainedFailedUnavailable]
+    : [""];
+}
+
 /** Render only authenticated local Git context, never an execution base or proof. */
 export function retainedFailedResultBrief(
   checkout: string,
@@ -1545,10 +1561,9 @@ export function retainedFailedResultBrief(
         throw new Error(
           "Retained failed Git result is not authenticated in this checkout",
         );
-      failedContext = `\nRetained failed committed result, verified reachable in this checkout: ${JSON.stringify(retained)}. This is unaccepted implementation context, not normative source, an accepted base or acceptance proof. You may inspect currently owned files from this exact Git tree and reuse their implementation in owned edits while making the diagnosed correction. Preserve the checkout's current accepted HEAD; do not checkout, reset or cherry-pick the failed commit. Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
+      failedContext = retainedFailedAvailable(retained);
     } catch {
-      failedContext =
-        "\nRetained failed committed-result context is unavailable or could not be authenticated in this checkout. Do not infer prior source contents; unfinished uncommitted edits remain unavailable.";
+      failedContext = retainedFailedUnavailable;
     }
   }
   return failedContext;

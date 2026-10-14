@@ -44,6 +44,7 @@ import {
   assertRejectedCollectionReceipt,
   authenticateRejectedCollectionReceipt,
   type RejectedCollectionReceipt,
+  retainedFailedResultBriefs,
 } from "./execution/local.js";
 import {
   assertProcessActive,
@@ -1069,7 +1070,14 @@ export function localWorkerReturn(
   if (
     originalRequest.attemptId !== identity ||
     originalRequest.worktree !== active.worktree ||
-    !isDeepStrictEqual(originalRequest.item, request.item) ||
+    // The local driver appends retained failed-result context to the brief.
+    !retainedFailedResultBriefs(request.retainedFailedResult).some(
+      (suffix) => originalRequest.item?.brief === request.item.brief + suffix,
+    ) ||
+    !isDeepStrictEqual(
+      { ...originalRequest.item, brief: request.item.brief },
+      request.item,
+    ) ||
     !isDeepStrictEqual(originalRequest.session, request.session)
   )
     throw new Error(

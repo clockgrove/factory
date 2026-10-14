@@ -423,7 +423,11 @@ export async function reviewAcceptance(args: {
           evidence: resolveReviewReferences(finding.evidenceIds, packet, false),
         };
         refused ??= semanticRefusalDetail(semanticRefusal);
-      } else if (semanticRefusal.source === "model") {
+      } else if (
+        semanticRefusal.source === "model" &&
+        criterion !== semanticRefusal.criterion &&
+        !semanticRefusal.others?.some((other) => other.criterion === criterion)
+      ) {
         // Report every refused criterion at once: a repair that sees only the
         // first fixes it and meets the next on its following attempt.
         const primary = semanticRefusalDetail(semanticRefusal);

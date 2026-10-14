@@ -205,16 +205,6 @@ test("independent prepared change is replayed on the observed integration head",
       source: "model",
       finding,
       evidence: references,
-      others: [
-        {
-          criterion: item.acceptance[1],
-          finding: {
-            ...finding,
-            criterionId: packet.criteria[1].id,
-            detail: "The candidate note drops its final newline.",
-          },
-        },
-      ],
     };
     const state = {
       repository: "integration/transplant",
@@ -237,15 +227,50 @@ test("independent prepared change is replayed on the observed integration head",
         },
       },
     };
+    // One review reports every refused criterion, so one repair sees them all;
+    // several refusals need the full diagnosis evidence, not the focused one.
+    const both = structuredClone(state);
+    const refusals = {
+      ...refusal,
+      others: [
+        {
+          criterion: item.acceptance[1],
+          finding: {
+            ...finding,
+            criterionId: packet.criteria[1].id,
+            detail: "The candidate note drops its final newline.",
+          },
+        },
+      ],
+    };
+    recordWorkFailure(
+      both,
+      item.id,
+      new SemanticAcceptanceFailure(semanticRefusalDetail(refusals), refusals),
+    );
+    assert.match(
+      both.work.right.recovery.failure.detail,
+      /required content: .*\n\nAcceptance criterion disproved: The right note keeps its final newline: /s,
+    );
+    const bothEvidence = repairEvidence(
+      both,
+      item,
+      diagnosisFiles(both, item, root),
+    );
+    assert.notEqual(
+      workRepairDiagnosisRequest({
+        state: both,
+        item,
+        evidence: bothEvidence,
+        sources,
+        checkout: root,
+      }).workRepairDiagnosis.mode,
+      "focused-semantic-refusal",
+    );
     recordWorkFailure(
       state,
       item.id,
       new SemanticAcceptanceFailure(semanticRefusalDetail(refusal), refusal),
-    );
-    // One review reports every refused criterion, so one repair sees them all.
-    assert.match(
-      state.work.right.recovery.failure.detail,
-      /required content: .*\n\nAcceptance criterion disproved: The right note keeps its final newline: /s,
     );
     const evidence = repairEvidence(
       state,

@@ -169,8 +169,14 @@ export function assertSemanticRefusalRecord(
           seen.has(other.criterion) ||
           !item.acceptance.includes(other.criterion) ||
           other.finding.verdict !== "refuse" ||
+          typeof other.finding.criterionId !== "string" ||
+          !other.finding.criterionId ||
           typeof other.finding.detail !== "string" ||
-          !other.finding.detail.trim()
+          !other.finding.detail.trim() ||
+          typeof other.finding.question !== "string" ||
+          !Array.isArray(other.finding.evidenceIds) ||
+          new Set(other.finding.evidenceIds).size !==
+            other.finding.evidenceIds.length
         )
           throw new Error("Semantic refusal has an invalid further refusal");
         seen.add(other.criterion);
@@ -194,7 +200,7 @@ export function assertSemanticRefusalRecord(
         throw new Error("Semantic refusal review reference is invalid");
     }
   } else if (value.source === "operator") {
-    if ("finding" in value || "evidence" in value)
+    if ("finding" in value || "evidence" in value || "others" in value)
       throw new Error("Semantic refusal has conflicting producers");
     const decision = value.decision;
     object(

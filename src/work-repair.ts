@@ -1,6 +1,9 @@
-import { Readable } from "node:stream";
-import { awaitCheckpointAdmission } from "./recovery-checkpoint.js";
 import { createHash, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
+import {
+  authenticateAdaptiveContextPacket,
+  buildAdaptiveContext,
+} from "./adaptive-context.js";
 import { blameDecision, cappedDiagnosis } from "./blame-decision.js";
 import {
   generatePlannerStructured,
@@ -8,23 +11,12 @@ import {
 } from "./compiler/planning.js";
 import { planningGraphView } from "./compiler/sources.js";
 import type {
-  ContentStore,
   ContentRef,
+  ContentStore,
   PlanningModel,
   PlanningRequest,
   WorkItem,
 } from "./contracts.js";
-import {
-  authenticateAdaptiveContextPacket,
-  buildAdaptiveContext,
-} from "./adaptive-context.js";
-import { completeObjectiveKnowledge } from "./objective-knowledge.js";
-import {
-  discoveryContextBodies,
-  discoveryContextSelections,
-  selectedDiscoveryInputs,
-  type SelectedDiscoveryInput,
-} from "./runner/discovery.js";
 import {
   CONTROLLER_CAPABILITIES_DIGEST,
   installedControllerCapabilities,
@@ -39,8 +31,10 @@ import {
 } from "./failed-validation.js";
 import { attachFault, faultOf, StepFault, transient } from "./fault.js";
 import { graphDigest, recordWorkerDiscovery } from "./graph-amendments.js";
+import { completeObjectiveKnowledge } from "./objective-knowledge.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { pinnedGitRaw } from "./process.js";
+import { awaitCheckpointAdmission } from "./recovery-checkpoint.js";
 import {
   archiveAttempt,
   chargeRepair,
@@ -55,6 +49,12 @@ import {
   repairScopes,
   validateCorrection,
 } from "./repair-policy.js";
+import {
+  discoveryContextBodies,
+  discoveryContextSelections,
+  type SelectedDiscoveryInput,
+  selectedDiscoveryInputs,
+} from "./runner/discovery.js";
 import {
   assertSemanticRefusalRecord,
   SemanticAcceptanceFailure,
@@ -1052,6 +1052,8 @@ function focusedDiagnosisSources(
     !checkout ||
     refusal?.source !== "model" ||
     refusal.finding.question.trim() ||
+    // Focusing keeps only the first refusal's evidence; several need it all.
+    refusal.others?.length ||
     work.step !== "validate" ||
     work.failedValidation ||
     item.dependencies.length ||

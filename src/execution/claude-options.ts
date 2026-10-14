@@ -1,3 +1,7 @@
+import { isAbsolute } from "node:path";
+import type { HookJSONOutput, Options } from "@anthropic-ai/claude-agent-sdk";
+import { validateToolConfigName } from "../config.js";
+import type { ClaudeWorkerInput } from "./claude.js";
 import {
   factoryMcpServerName,
   factoryMcpToolAllowed,
@@ -7,9 +11,12 @@ import {
   claudeResumeOptions,
   claudeSessionEnvironment,
 } from "./claude-session.js";
-import { isAbsolute } from "node:path";
-import type { HookJSONOutput, Options } from "@anthropic-ai/claude-agent-sdk";
-import type { ClaudeWorkerInput } from "./claude.js";
+import {
+  factoryValidationServerName,
+  factoryValidationToolAllowed,
+  factoryValidationToolName,
+  type PreparedClaudeValidation,
+} from "./claude-validation.js";
 import { pathInsideRoot } from "./harness-support.js";
 
 const systemPrompt = [
@@ -54,7 +61,13 @@ function claudeToolAllowed(
   toolInput: unknown,
   mcpServer: unknown,
   prepared?: PreparedClaudeEnvironment,
+  validation?: PreparedClaudeValidation,
 ): boolean {
+  if (toolName === factoryValidationToolName)
+    return (
+      !!validation?.isReady() &&
+      factoryValidationToolAllowed(input, toolName, toolInput, mcpServer)
+    );
   if (input.request.environment?.mcp) {
     // Readiness is an attempt-wide gate, including native reads and writes.
     if (!prepared?.isReady()) return false;
@@ -97,6 +110,7 @@ function preToolUseDecision(
     >[number]["hooks"][number]
   >[0],
   prepared?: PreparedClaudeEnvironment,
+  validation?: PreparedClaudeValidation,
 ): HookJSONOutput {
   const allowed =
     hookInput.hook_event_name === "PreToolUse" &&
@@ -106,6 +120,7 @@ function preToolUseDecision(
       hookInput.tool_input,
       hookInput.mcp_server,
       prepared,
+      validation,
     );
   return {
     hookSpecificOutput: {
@@ -122,6 +137,7 @@ export function claudeQueryOptions(
   environment: NodeJS.ProcessEnv,
   abortController: AbortController,
   prepared?: PreparedClaudeEnvironment,
+  validation?: PreparedClaudeValidation,
 ): Options {
   const { config, request } = input;
   return {
@@ -131,7 +147,8 @@ export function claudeQueryOptions(
     // Factory calls this reasoningEffort across all harnesses; the Claude SDK
     // names the equivalent provider option `effort`.
     effort: config.reasoningEffort,
-    tools: [...config.tools],
+    // Validate is Factory's own tool, served below, not an SDK built-in.
+    tools: config.tools.filter((tool) => tool !== validateToolConfigName),
     // Bare allowedTools bypass canUseTool in the Claude SDK. Keep Factory's
     // configured allow-list in the host policy below, never in this SDK field.
     allowedTools: [],
@@ -141,7 +158,8 @@ export function claudeQueryOptions(
       PreToolUse: [
         {
           hooks: [
-            async (hookInput) => preToolUseDecision(input, hookInput, prepared),
+            async (hookInput) =>
+              preToolUseDecision(input, hookInput, prepared, validation),
           ],
         },
       ],
@@ -154,6 +172,7 @@ export function claudeQueryOptions(
           toolInput,
           permission.mcpServer,
           prepared,
+          validation,
         )
       )
         return {
@@ -182,7 +201,10 @@ export function claudeQueryOptions(
         : environment),
       DISABLE_TELEMETRY: "1",
     },
-    mcpServers: prepared ? { [factoryMcpServerName]: prepared.server } : {},
+    mcpServers: {
+      ...(prepared && { [factoryMcpServerName]: prepared.server }),
+      ...(validation && { [factoryValidationServerName]: validation.server }),
+    },
     strictMcpConfig: true,
     agents: {},
     plugins: [],

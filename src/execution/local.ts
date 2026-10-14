@@ -1279,7 +1279,7 @@ export async function freezeRejectedCollection(args: {
   return receipt;
 }
 
-const FACTORY_EMAIL = "factory@users.noreply.github.com";
+export const FACTORY_EMAIL = "factory@users.noreply.github.com";
 const collectionMessage = (request: ExecutionRequest) =>
   `Factory: ${request.item.title}`;
 

@@ -36,6 +36,13 @@ import {
   claudeRawTokenUsage,
 } from "./claude-usage.js";
 import {
+  createFactoryValidationMcp,
+  factoryValidationServerName,
+  factoryValidationToolName,
+  type PreparedClaudeValidation,
+  workerValidationCommands,
+} from "./claude-validation.js";
+import {
   harnessFailure,
   privateProgress,
   readProducedAssets,
@@ -100,24 +107,33 @@ function assertInitialization(
     throw new Error(
       `Claude SDK selected reasoning effort ${String(message.effort)}, expected ${config.reasoningEffort}`,
     );
+  const validating = workerValidationCommands(input).length > 0;
   const configuredTools = new Set(config.tools);
   if (request.environment?.mcp) configuredTools.add(factoryMcpToolName);
+  if (validating) configuredTools.add(factoryValidationToolName);
   const unexpectedTool = message.tools.find(
     (tool) => !configuredTools.has(tool),
   );
   if (unexpectedTool)
     throw new Error(`Claude SDK exposed unconfigured tool ${unexpectedTool}`);
-  if (request.environment?.mcp) {
-    if (
-      message.mcp_servers.length !== 1 ||
-      message.mcp_servers[0]?.name !== factoryMcpServerName ||
-      message.mcp_servers[0]?.source !== "sdk"
-    )
-      throw new Error(
-        "Claude SDK initialized an unexpected profile MCP inventory",
-      );
-  } else if (message.mcp_servers.length)
-    throw new Error("Claude SDK initialized an unconfigured MCP server");
+  const expectedServers = [
+    ...(request.environment?.mcp ? [factoryMcpServerName] : []),
+    ...(validating ? [factoryValidationServerName] : []),
+  ];
+  if (
+    message.mcp_servers.length !== expectedServers.length ||
+    message.mcp_servers.some(
+      (server) =>
+        server.source !== "sdk" || !expectedServers.includes(server.name),
+    ) ||
+    new Set(message.mcp_servers.map((server) => server.name)).size !==
+      expectedServers.length
+  )
+    throw new Error(
+      expectedServers.length
+        ? "Claude SDK initialized an unexpected profile MCP inventory"
+        : "Claude SDK initialized an unconfigured MCP server",
+    );
   // Plugin, skill and agent lists describe runtime inventory, not permissions.
   // In the pinned runtime, init.skills lists user-invocable commands even when
   // skills: [] hides them from the model. Empty agents adds no custom agents;
@@ -163,6 +179,7 @@ async function main(): Promise<void> {
   );
   let providerCompleted = false;
   let prepared: PreparedClaudeEnvironment | undefined;
+  let validation: PreparedClaudeValidation | undefined;
   let events: AsyncIterator<SDKMessage> | undefined;
   let closeStarted = false;
   let progressLost = false;
@@ -222,6 +239,22 @@ async function main(): Promise<void> {
         }),
       );
     }
+    const validationCommands = workerValidationCommands(input);
+    if (validationCommands.length) {
+      validation = await turn.race(
+        createFactoryValidationMcp({
+          worktree: input.request.worktree,
+          commands: validationCommands,
+          config: input.config,
+        }).then(async (environment) => {
+          if (controller.signal.aborted) {
+            await environment.close();
+            throw new Error("Claude environment preparation interrupted");
+          }
+          return environment;
+        }),
+      );
+    }
     const rendered = renderWorkItemPrompt(input.request);
     const prompt = rendered.prompt;
     const options = claudeQueryOptions(
@@ -229,6 +262,7 @@ async function main(): Promise<void> {
       process.env,
       controller,
       prepared,
+      validation,
     );
     capture.request(
       prompt,
@@ -287,8 +321,22 @@ async function main(): Promise<void> {
         }
       if (message.type === "system" && message.subtype === "init") {
         assertInitialization(message, input);
-        if (prepared)
-          prepared.markReady(await turn.race(stream.mcpServerStatus()));
+        if (prepared || validation) {
+          const statuses = await turn.race(stream.mcpServerStatus());
+          prepared?.markReady(
+            statuses.filter((status) => status.name === factoryMcpServerName),
+          );
+          if (validation) {
+            const owned = statuses.filter(
+              (status) => status.name === factoryValidationServerName,
+            );
+            if (owned.length !== 1)
+              throw new Error(
+                "Factory validation MCP readiness verification failed",
+              );
+            validation.markReady(owned[0]!);
+          }
+        }
         if (
           input.session &&
           message.session_id !== input.session.data.nativeSessionId
@@ -308,6 +356,7 @@ async function main(): Promise<void> {
     closeStarted = true;
     await closeProviderEventStream(events, turn, true);
     if (prepared) await turn.race(prepared.close());
+    if (validation) await turn.race(validation.close());
     turn.finish();
     providerCompleted = true;
     capture.providerCompleted();
@@ -347,6 +396,7 @@ async function main(): Promise<void> {
       evidence: {
         harness: "claude-agent-sdk",
         ...(prepared && { environment: prepared.evidence() }),
+        ...(validation && { validation: validation.evidence() }),
         adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
         sessionId: result.session_id,
         configuredModel: input.config.model,
@@ -390,8 +440,9 @@ async function main(): Promise<void> {
   } finally {
     if (events && !closeStarted)
       void closeProviderEventStream(events, turn, false);
-    if (prepared) {
-      const closing = prepared.close();
+    for (const owned of [prepared, validation]) {
+      if (!owned) continue;
+      const closing = owned.close();
       if (!turn.signal.aborted) {
         try {
           await turn.race(closing);

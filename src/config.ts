@@ -1,9 +1,13 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import type { ProjectQueueBinding } from "./contracts.js";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import {
+  assertContextLookupBounds,
+  type ContextLookupBounds,
+} from "./compiler/context.js";
+import type { ProjectQueueBinding } from "./contracts.js";
 import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
 import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import {
@@ -15,20 +19,16 @@ import {
   originRepositories,
   validateLfsRouting,
 } from "./origin-binding.js";
+import {
+  assertGitPersistenceConfig,
+  type GitPersistenceConfig,
+} from "./recovery-checkpoint.js";
 import { type AutonomyConfig, resolveAutonomy } from "./repair-policy.js";
 import {
   assertReviewArtifactSelectors,
   type ReviewArtifactSelector,
 } from "./review-artifacts.js";
 import { refuseUnknownFields } from "./unknown-fields.js";
-import {
-  assertGitPersistenceConfig,
-  type GitPersistenceConfig,
-} from "./recovery-checkpoint.js";
-import {
-  assertContextLookupBounds,
-  type ContextLookupBounds,
-} from "./compiler/context.js";
 
 export type CodexReasoningEffort =
   | "minimal"
@@ -319,6 +319,8 @@ const claudeSettingSources = new Set<ClaudeSettingSource>([
   "local",
 ]);
 const claudeFileTools = new Set(["Read", "Edit", "Write", "Glob", "Grep"]);
+/** A Claude worker tool that runs only the item's declared validation. */
+export const validateToolConfigName = "Validate";
 const copilotFileTools = new Set([
   "view",
   "create",
@@ -1402,9 +1404,13 @@ export function validateLocalHarness(
     const tools = assertUniqueStrings(harness.tools, "execution.harness.tools");
     if (!tools.length)
       throw new Error("execution.harness.tools must name bounded SDK tools");
-    if (tools.some((tool) => !claudeFileTools.has(tool)))
+    if (
+      tools.some(
+        (tool) => !claudeFileTools.has(tool) && tool !== validateToolConfigName,
+      )
+    )
       throw new Error(
-        "execution.harness.tools supports only Read, Edit, Write, Glob, and Grep",
+        "execution.harness.tools supports only Read, Edit, Write, Glob, Grep, and Validate",
       );
     const allowedTools = assertUniqueStrings(
       harness.allowedTools,

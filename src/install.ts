@@ -72,7 +72,14 @@ function providerFromOptions(args: string[]): ProviderConfig {
     );
   const claudeTools = options(args, "claude-tool");
   const claudeAllowedTools = options(args, "claude-allow-tool");
-  const defaultClaudeTools = ["Read", "Edit", "Write", "Glob", "Grep"];
+  const defaultClaudeTools = [
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "Validate",
+  ];
   const copilotTools = options(args, "copilot-tool");
   const defaultCopilotTools = [
     "view",

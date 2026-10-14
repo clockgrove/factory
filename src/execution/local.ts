@@ -2576,7 +2576,14 @@ export class LocalExecutionDriver implements ExecutionDriver {
               ...handle,
               data: {
                 ...active,
-                result: JSON.parse(JSON.stringify(collected)),
+                // The stopped-run handoff authenticates this settled session.
+                result: JSON.parse(
+                  JSON.stringify(
+                    result.session
+                      ? { ...collected, session: result.session }
+                      : collected,
+                  ),
+                ),
               },
             });
             await context?.admitEffect?.("explicit");

@@ -2,16 +2,16 @@ import { isDeepStrictEqual } from "node:util";
 import { retainWorkerAccounting } from "../accounting.js";
 import type {
   AgentSessionRef,
-  ExecutionResult,
-  HarnessHandle,
   ExecutionContext,
   ExecutionHandle,
   ExecutionOrphan,
+  ExecutionResult,
+  HarnessHandle,
   WorkerUsageObservation,
 } from "../contracts.js";
 import type { DiagnosticEmitter } from "../diagnostics.js";
-import type { WorkState } from "../state.js";
 import { awaitCheckpointAdmission } from "../recovery-checkpoint.js";
+import type { WorkState } from "../state.js";
 
 /** A runner's driver context: checkpoints, plus usage and possible orphans recorded as diagnostics. */
 export function workerContext(
@@ -200,7 +200,9 @@ export function collectedLocalWorkerSessionSettled(
     execution?.provider !== "local" ||
     ref.scope.role !== "implementation" ||
     ref.status !== "ready" ||
-    ref.currentTurn !== undefined ||
+    (ref.currentTurn !== undefined &&
+      (ref.currentTurn.terminal !== "completed" ||
+        ref.currentTurn.resources !== "settled")) ||
     ref.executionIdentity !== execution.identity
   )
     return false;
@@ -214,12 +216,15 @@ export function collectedLocalWorkerSessionSettled(
     | {
         nativeEof?: unknown;
         workerSettled?: unknown;
+        settled?: unknown;
         worker?: unknown;
       }
     | undefined;
   return (
-    native?.nativeEof === true &&
-    native.workerSettled === true &&
+    // Codex and Copilot receipts mark EOF and worker settlement; Claude
+    // receipts mark one settled flag after native terminal verification.
+    ((native?.nativeEof === true && native.workerSettled === true) ||
+      native?.settled === true) &&
     ref.executionIdentity === original?.handle?.identity &&
     !!native.worker &&
     isDeepStrictEqual(native.worker, original?.handle?.data) &&

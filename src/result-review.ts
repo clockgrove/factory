@@ -38,6 +38,7 @@ import {
 import {
   SemanticAcceptanceFailure,
   type SemanticRefusalEvidence,
+  semanticRefusalDetail,
 } from "./semantic-refusal.js";
 import type { AcceptancePending } from "./state.js";
 import {
@@ -413,14 +414,26 @@ export async function reviewAcceptance(args: {
       continue;
     }
     if (finding.verdict === "refuse") {
-      semanticRefusal ??= {
-        treeSha: evidence.treeSha,
-        criterion,
-        source: "model",
-        finding: structuredClone(finding),
-        evidence: resolveReviewReferences(finding.evidenceIds, packet, false),
-      };
-      refused ??= `Acceptance criterion disproved: ${criterion}: ${finding.detail}`;
+      if (!semanticRefusal) {
+        semanticRefusal = {
+          treeSha: evidence.treeSha,
+          criterion,
+          source: "model",
+          finding: structuredClone(finding),
+          evidence: resolveReviewReferences(finding.evidenceIds, packet, false),
+        };
+        refused ??= semanticRefusalDetail(semanticRefusal);
+      } else if (semanticRefusal.source === "model") {
+        // Report every refused criterion at once: a repair that sees only the
+        // first fixes it and meets the next on its following attempt.
+        const primary = semanticRefusalDetail(semanticRefusal);
+        semanticRefusal.others = [
+          ...(semanticRefusal.others ?? []),
+          { criterion, finding: structuredClone(finding) },
+        ];
+        if (refused === primary)
+          refused = semanticRefusalDetail(semanticRefusal);
+      }
       continue;
     }
     questions.set(index, {

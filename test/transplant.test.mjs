@@ -3,8 +3,8 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
-  mkdtempSync,
   existsSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -13,12 +13,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { CodexPlanningTransport } from "../dist/compiler/codex-transport.js";
 import {
   renderCompilationCall,
   renderDiagnosisCall,
   renderGraphReviewCall,
 } from "../dist/compiler/model.js";
-import { CodexPlanningTransport } from "../dist/compiler/codex-transport.js";
 import { renderPlanningInstructions } from "../dist/compiler/planning.js";
 import {
   deliveredPlanningSources,
@@ -28,8 +28,8 @@ import {
 import {
   hydrateWorkerInputSources,
   planningGraphView,
-  reviewGraphView,
   planningSources,
+  reviewGraphView,
 } from "../dist/compiler/sources.js";
 import {
   CONTROLLER_CAPABILITIES_DIGEST,
@@ -49,7 +49,10 @@ import {
   renderReviewPacketChoices,
   reviewPacket,
 } from "../dist/review-evidence.js";
-import { SemanticAcceptanceFailure } from "../dist/semantic-refusal.js";
+import {
+  SemanticAcceptanceFailure,
+  semanticRefusalDetail,
+} from "../dist/semantic-refusal.js";
 import { validateWorkItem } from "../dist/validation.js";
 import {
   actionableReadiness,
@@ -134,7 +137,10 @@ test("independent prepared change is replayed on the observed integration head",
       id: "right",
       title: "Right note",
       goal: "Preserve the right-hand note",
-      acceptance: ["The right note preserves the required content"],
+      acceptance: [
+        "The right note preserves the required content",
+        "The right note keeps its final newline",
+      ],
       nonGoals: ["No authority changes"],
       citations: [{ path: "OBJECTIVE" }, { path: "base.txt" }],
       dependencies: [],
@@ -193,6 +199,23 @@ test("independent prepared change is replayed on the observed integration head",
       detail: "The exact candidate note needs an owned correction.",
       question: "",
     };
+    const refusal = {
+      treeSha: replayed.treeSha,
+      criterion: item.acceptance[0],
+      source: "model",
+      finding,
+      evidence: references,
+      others: [
+        {
+          criterion: item.acceptance[1],
+          finding: {
+            ...finding,
+            criterionId: packet.criteria[1].id,
+            detail: "The candidate note drops its final newline.",
+          },
+        },
+      ],
+    };
     const state = {
       repository: "integration/transplant",
       objective: 1,
@@ -217,16 +240,12 @@ test("independent prepared change is replayed on the observed integration head",
     recordWorkFailure(
       state,
       item.id,
-      new SemanticAcceptanceFailure(
-        `Acceptance criterion disproved: ${item.acceptance[0]}: ${finding.detail}`,
-        {
-          treeSha: replayed.treeSha,
-          criterion: item.acceptance[0],
-          source: "model",
-          finding,
-          evidence: references,
-        },
-      ),
+      new SemanticAcceptanceFailure(semanticRefusalDetail(refusal), refusal),
+    );
+    // One review reports every refused criterion, so one repair sees them all.
+    assert.match(
+      state.work.right.recovery.failure.detail,
+      /required content: .*\n\nAcceptance criterion disproved: The right note keeps its final newline: /s,
     );
     const evidence = repairEvidence(
       state,

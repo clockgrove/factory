@@ -1413,7 +1413,11 @@ async function withFiniteCheckpointReads<T>(
     sourceOriginals: new Map<string, string>(),
     sourceInventories: new Map<
       string,
-      { kind: "accounting" | "memory" | "learning"; names: string[] }
+      {
+        kind: "accounting" | "memory" | "learning";
+        names: string[];
+        authenticateAddition?: (path: string) => void;
+      }
     >(),
     bytes: 0,
     closed: false,
@@ -1435,20 +1439,49 @@ async function withFiniteCheckpointReads<T>(
       // Semantic and verification-only reads share this final boundary. Every original is
       // freshly opened and checked before this closure can reach publication.
       phase.closed = true;
-      for (const [directory, inventory] of phase.sourceInventories)
-        if (
-          JSON.stringify(originalNames(directory, inventory.kind)) !==
-          JSON.stringify(inventory.names)
-        )
-          throw new CheckpointProducerInventoryChanged(
+      // An immutable producer may admit later authenticated originals from
+      // another local process. They stay outside this closure and are marked
+      // dirty, so this build acknowledges only its captured subset.
+      const additions: { path: string; kind: "accounting" }[] = [];
+      for (const [directory, inventory] of phase.sourceInventories) {
+        const changed = () =>
+          new CheckpointProducerInventoryChanged(
             inventory.kind,
             relative(dirname(phase.root), directory),
           );
+        const names = originalNames(directory, inventory.kind);
+        const captured = new Set(inventory.names);
+        const added = names.filter((name) => !captured.has(name));
+        if (
+          names.length - added.length !== inventory.names.length ||
+          (added.length &&
+            (inventory.kind !== "accounting" ||
+              !inventory.authenticateAddition))
+        )
+          throw changed();
+        for (const name of added) {
+          const path = join(directory, name);
+          if (
+            phase.sourceOriginals.size + additions.length >=
+              phase.options.maxFiles ||
+            lstatSync(path).size > phase.options.maxBytes
+          )
+            throw changed();
+          try {
+            inventory.authenticateAddition!(path);
+          } catch {
+            throw changed();
+          }
+          additions.push({ path, kind: "accounting" });
+        }
+      }
       for (const [path, fingerprint] of phase.sourceOriginals)
         if (originalFingerprint(path) !== fingerprint)
           throw new Error(
             "Checkpoint producer source original changed during its build",
           );
+      for (const addition of additions)
+        markCheckpointDirty(config.repository, addition);
       const store = new LocalContentStore(phase.root);
       for (const { ref } of phase.bodies.values()) {
         assertProcessActive();
@@ -1655,6 +1688,7 @@ function originalFingerprint(path: string): string {
 export function checkpointOriginalInventory(
   directories: string[],
   kind: "accounting" | "memory" | "learning",
+  authenticateAddition?: (path: string) => void,
 ): { path: string; fingerprint: string }[] | undefined {
   const active = activeClosureBinding();
   if (!active?.scope.verification || active.phase.closed) return undefined;
@@ -1671,7 +1705,11 @@ export function checkpointOriginalInventory(
       }
       if (phase.sourceOriginals.size + files.length > phase.options.maxFiles)
         return undefined;
-      phase.sourceInventories.set(directory, { kind, names });
+      phase.sourceInventories.set(directory, {
+        kind,
+        names,
+        ...(authenticateAddition ? { authenticateAddition } : {}),
+      });
     }
     for (const file of files)
       phase.sourceOriginals.set(file.path, file.fingerprint);
@@ -5815,7 +5853,7 @@ async function publishCheckpoint(
             : journal(config, options);
           return status(current, options);
         }
-        let observedSequence = sequence;
+        let observedSequence: number | undefined;
         record = mutate(config, options, (current) => {
           if (current.sequence !== sequence) return;
           current.sequence++;
@@ -5828,6 +5866,9 @@ async function publishCheckpoint(
             kind: "historical",
           });
         });
+        // Later local material keeps the next sequence. This captured subset
+        // has no distinct sequence; the next ordinary publication carries both.
+        if (observedSequence === undefined) return status(record, options);
         sequence = observedSequence;
         manifest.sequence = sequence;
         assertManifest(manifest, manifest.binding, options);

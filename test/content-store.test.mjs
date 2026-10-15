@@ -26,6 +26,7 @@ import {
   assertAccountingSealContent,
   buildAccountingSeal,
   readAccountingRecords,
+  retainWorkerAccounting,
 } from "../dist/accounting.js";
 import {
   authenticateAdaptiveContextPacket,
@@ -6377,6 +6378,132 @@ test("stopped collection freezes a completed owned local return before restart a
     ),
   );
   assert.deepEqual(again, frozen);
+  // An actual local worker process appends immutable accounting outside the
+  // parent's checkpoint scope while the parent builds. The parent acknowledges
+  // only its captured subset; the later original stays pending until the next
+  // ordinary publication. Changed or malformed inventories still refuse.
+  const accountingRoot = join(privateRoot, "accounting");
+  const binding = {
+    repository,
+    objective: 1,
+    runId: state.runId,
+    itemId: item.id,
+    attemptId: identity,
+    configDigest: state.configDigest,
+  };
+  const usage = (invocationId) => ({
+    type: "completed",
+    invocationId,
+    phase: "implementation",
+    role: "worker",
+    providerAttempt: 1,
+    usageAvailable: false,
+  });
+  const accountingNames = () =>
+    existsSync(accountingRoot)
+      ? readdirSync(accountingRoot)
+          .filter((name) => /^[a-f0-9]{64}\.json$/.test(name))
+          .sort()
+      : [];
+  const appendFromWorker = (invocationId) => {
+    const before = new Set(accountingNames());
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { retainWorkerAccounting } from ${JSON.stringify(
+          new URL("../dist/accounting.js", import.meta.url).href,
+        )};retainWorkerAccounting(${JSON.stringify(binding)},${JSON.stringify(
+          usage(invocationId),
+        )});`,
+      ],
+      { stdio: "pipe", timeout: 10000 },
+    );
+    const added = accountingNames().filter((name) => !before.has(name));
+    assert.equal(added.length, 1);
+    return `accounting/${added[0]}`;
+  };
+  let duringBuild;
+  const racingBuild = async () => {
+    const built = await buildRecoveryCheckpointClosure({ config });
+    duringBuild?.();
+    return built;
+  };
+  const archivedAccounting = async () =>
+    (await readVerifiedRecoveryCheckpoint(config)).manifest.files
+      .map((file) => file.path)
+      .filter((path) => path.startsWith("accounting/"))
+      .sort();
+  // The controller's verification scope records the producer inventory.
+  const publish = (reason) =>
+    withRecoveryCheckpointControllerVerification(
+      { config, buildClosure: racingBuild },
+      () =>
+        synchronizeRecoveryCheckpoint(config, {
+          reason,
+          buildClosure: racingBuild,
+        }),
+    );
+  const quiet = appendFromWorker("quiet-before-build");
+  const malformed = join(accountingRoot, `${"a".repeat(64)}.json`);
+  duringBuild = () => writeFileSync(malformed, "{}\n", { mode: 0o600 });
+  await assert.rejects(
+    publish("explicit"),
+    /source inventory changed during its build: accounting/,
+  );
+  rmSync(malformed);
+  const quietBytes = readFileSync(join(privateRoot, quiet));
+  duringBuild = () => rmSync(join(privateRoot, quiet));
+  await assert.rejects(
+    publish("explicit"),
+    /source inventory changed during its build: accounting/,
+  );
+  writeFileSync(join(privateRoot, quiet), quietBytes, { mode: 0o600 });
+  // On a clean journal the explicit build has no sequence of its own below
+  // the later append: it reports pending without a duplicate-sequence ACK.
+  const priorAck = gitPersistenceStatus(config).lastAcknowledged;
+  let raced;
+  duringBuild = () => {
+    raced = appendFromWorker("concurrent-explicit");
+  };
+  const explicitRace = await publish("explicit");
+  assert.equal(explicitRace.pendingChanges, true);
+  assert.deepEqual(explicitRace.lastAcknowledged, priorAck);
+  // A parent producer write in its own scope dirties the journal; a worker
+  // append during that publication's build stays outside its manifest.
+  duringBuild = undefined;
+  withRecoveryCheckpointScope({ config, buildClosure: racingBuild }, () =>
+    retainWorkerAccounting(binding, usage("parent-scoped")),
+  );
+  const captured = accountingNames().map((name) => `accounting/${name}`);
+  let later;
+  duringBuild = () => {
+    later = appendFromWorker("concurrent-settled");
+  };
+  const subset = await publish("settled");
+  duringBuild = undefined;
+  assert.equal(subset.status, "pending");
+  assert.equal(subset.pendingChanges, true);
+  assert.equal(subset.protectedContinuation, false);
+  assert.notEqual(subset.lastAcknowledged.commitSha, priorAck.commitSha);
+  const subsetFiles = await archivedAccounting();
+  assert.deepEqual(subsetFiles, captured);
+  assert(subsetFiles.includes(quiet) && subsetFiles.includes(raced));
+  assert(!subsetFiles.includes(later));
+  const journal = JSON.parse(
+    readFileSync(join(privateRoot, "recovery", "checkpoint.json"), "utf8"),
+  );
+  assert(
+    journal.changed.some(
+      (entry) => entry.path === later && entry.kind === "accounting",
+    ),
+  );
+  assert(journal.sequence > journal.acknowledgedSequence);
+  const complete = await publish("settled");
+  assert.equal(complete.status, "acknowledged");
+  assert.equal(complete.pendingChanges, false);
+  assert((await archivedAccounting()).includes(later));
 });
 
 test("a worker-reported failure ends as its own work fault, not a missing wrapper return", async (t) => {

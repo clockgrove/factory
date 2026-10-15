@@ -15,7 +15,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { InteractionMetadata } from "./capture.js";
 import { stateRoot } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
@@ -812,6 +812,35 @@ function readAccountingOriginals(
     })
     .sort((left, right) => left.record.at.localeCompare(right.record.at));
 }
+/** The exact complete retained payload body an interaction original declares. */
+function retainedPayload(
+  record: AccountingRecord,
+  store: LocalContentStore,
+): ContentRef | undefined {
+  if (record.kind !== "interaction") return undefined;
+  const content = record.capture.content,
+    reference = content.reference,
+    payload = reference?.payload;
+  if (content.payloadRetention !== "retained") {
+    if (payload)
+      throw new Error("Accounting capture declares an unretained payload body");
+    return undefined;
+  }
+  if (
+    !payload ||
+    reference?.recordId !== record.capture.recordId ||
+    reference.invocationId !== record.capture.invocationId ||
+    reference.providerAttempt !== record.capture.providerAttempt ||
+    payload.digest !== content.retainedDigest ||
+    payload.bytes !== content.retainedBytes ||
+    payload.mediaType !== "text/plain; charset=utf-8"
+  )
+    throw new Error(
+      "Accounting capture payload differs from its exact retained identity",
+    );
+  store.readBytes(payload);
+  return payload;
+}
 export function accountingPersistenceClosure(
   repository: string,
 ): RecoveryCheckpointClosure {
@@ -864,6 +893,21 @@ export function accountingPersistenceClosure(
   const inventory = checkpointOriginalInventory(
     [root(repository)],
     "accounting",
+    // Another local producer may append later. Admit only its exact original.
+    (path) => {
+      const bytes = privateBytes(path);
+      const record = decodeAccountingRecord(
+        repository,
+        `accounting/${basename(path)}`,
+        bytes,
+      );
+      store.verifyPrivateBytes({
+        digest: digest(bytes),
+        bytes: bytes.length,
+        mediaType: "application/json",
+      });
+      retainedPayload(record, store);
+    },
   );
   const originals = inventory
     ? inventory.map((source) => ({ source }))
@@ -912,30 +956,8 @@ export function accountingPersistenceClosure(
       visibility: "private",
     };
     const recordRefs = [ref];
-    if (record.kind === "interaction") {
-      const content = record.capture.content,
-        reference = content.reference,
-        payload = reference?.payload;
-      if (content.payloadRetention === "retained") {
-        if (
-          !payload ||
-          reference?.recordId !== record.capture.recordId ||
-          reference.invocationId !== record.capture.invocationId ||
-          reference.providerAttempt !== record.capture.providerAttempt ||
-          payload.digest !== content.retainedDigest ||
-          payload.bytes !== content.retainedBytes ||
-          payload.mediaType !== "text/plain; charset=utf-8"
-        )
-          throw new Error(
-            "Accounting capture payload differs from its exact retained identity",
-          );
-        store.readBytes(payload);
-        recordRefs.push(payload);
-      } else if (payload)
-        throw new Error(
-          "Accounting capture declares an unretained payload body",
-        );
-    }
+    const payload = retainedPayload(record, store);
+    if (payload) recordRefs.push(payload);
     projected.push({ orderAt: record.at, files: [file], refs: recordRefs });
     if (signature)
       store.retainCheckpointReferences(signature, {

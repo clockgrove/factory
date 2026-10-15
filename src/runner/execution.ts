@@ -107,12 +107,20 @@ export function checkpointExecutionState(
   owner.recordSnapshot?.(state);
 }
 
-/** Draining finishes admitted work; a plain pause still stops its next step. */
+/**
+ * Draining finishes admitted work; a plain pause still stops its next step. A
+ * handoff whose items hold no effect in flight stops them at their next safe
+ * point (#1289); a plain drain keeps retrying them.
+ */
 export function workItemPauseSignal(
-  owner: Pick<LocalOwner, "snapshot" | "pause" | "workPause">,
+  owner: Pick<
+    LocalOwner,
+    "snapshot" | "pause" | "workPause" | "handoff" | "activeItems"
+  >,
 ): AbortSignal {
-  return owner.snapshot?.coordinator?.mode === "draining" &&
-    canHandoff(owner.snapshot)
+  return owner.handoff &&
+    owner.snapshot?.coordinator?.mode === "draining" &&
+    canHandoff(owner.snapshot, owner.activeItems)
     ? owner.pause.signal
     : owner.workPause.signal;
 }
@@ -168,6 +176,7 @@ export async function runObjectivePass(
   };
   owner.save = save;
   const active = new Map<string, Promise<void>>();
+  owner.activeItems = active;
   const {
     driver,
     github,
@@ -183,7 +192,7 @@ export async function runObjectivePass(
   // it); a drain that must still drive running items keeps them going.
   const objectiveSignal = () => owner.abort.signal;
   const objectivePause = () =>
-    owner.snapshot && !canHandoff(owner.snapshot)
+    owner.snapshot && !canHandoff(owner.snapshot, active)
       ? undefined
       : owner.pause.signal;
   /** Stop a pass the operator cancelled: a `cancelled` fault, never a failure. */
@@ -674,11 +683,12 @@ export async function runObjectivePass(
     if (
       owner.handoff &&
       (owner.snapshot
-        ? canHandoff(owner.snapshot)
+        ? canHandoff(owner.snapshot, active)
         : paused && !cancellationRequested())
     ) {
       // No item step may outlive ownership: a sibling sleeping between tries
       // stops at that safe point, and every active item settles first (#1268).
+      owner.handoffStopped = true;
       owner.workPause.abort(new Error("Coordinator handoff requested"));
       await Promise.allSettled(active.values());
       if (owner.snapshot?.coordinator) {

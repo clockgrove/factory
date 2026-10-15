@@ -675,12 +675,18 @@ async function runObjectiveOwned(
       owner.pause.abort(new Error("Coordinator handoff requested"));
       // Every running item is between tries or waiting in place, so its step
       // stops at that safe point too (#1268).
-      if (canHandoff(owner.snapshot))
+      if (canHandoff(owner.snapshot, owner.activeItems)) {
+        owner.handoffStopped = true;
         owner.workPause.abort(new Error("Coordinator handoff requested"));
+      }
     } else owner.initialMode = "draining";
   };
   const wait = async (observationDelay?: number) => {
-    if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
+    if (
+      owner.handoff &&
+      owner.snapshot &&
+      canHandoff(owner.snapshot, owner.activeItems)
+    )
       throw new CoordinatorHandoff();
     if (owner.changed) {
       owner.changed = false;
@@ -993,9 +999,16 @@ async function runObjectiveOwned(
         : undefined,
     )
       .catch((error: unknown) => {
-        // A worker return awaiting collection refuses publication until the
-        // controller collects it; the next tick tries again.
-        if (isCheckpointCollectionPending(error)) return;
+        // A worker return awaiting collection, or a producer inventory that
+        // changed while the closure was built, is transient: the next tick
+        // tries again (#1291), as the controller's own admission does.
+        if (
+          isCheckpointCollectionPending(error) ||
+          error instanceof CheckpointProducerInventoryChanged ||
+          (error instanceof Error &&
+            error.cause instanceof CheckpointProducerInventoryChanged)
+        )
+          return;
         if (isCheckpointAdmissionFailure(error)) {
           presentationHeld = true;
           process.stderr.write(
@@ -1361,7 +1374,7 @@ async function runObjectiveOwned(
           owner.snapshot &&
           (owner.snapshot.cancelledAt
             ? !cancelledContinuationResourceHold(owner.snapshot)
-            : canHandoff(owner.snapshot))
+            : canHandoff(owner.snapshot, owner.activeItems))
         ) {
           if (owner.snapshot.cancelledAt) {
             await cancelKnownWork(

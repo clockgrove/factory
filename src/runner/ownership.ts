@@ -60,24 +60,39 @@ export class CoordinatorHandoff extends Error {
 }
 
 /**
- * A running item between tries of its current step (for example, waiting for a
- * provider's limit to reset) with no live worker holds no effect in flight
- * (#1268). Its step has not started the next try: that try is still in the
- * future, or the coordinator is paused, which stops a step before its body, and
- * no paid call is in flight. A worker it ran has stopped, as the driver records
- * only after settling it. A handoff still waits for every active item to settle.
+ * A running item with no effect in flight (#1268, #1289). An item no step of
+ * this controller is running (`idle`) holds none unless a worker it started is
+ * still live or a paid call is in flight. An active item holds none only while
+ * it waits between tries of its current step: that try is still in the future,
+ * or the coordinator is paused, which stops a step before its body. A worker
+ * counts as stopped only once the driver records it after settling it. A
+ * handoff still waits for every active item to settle.
  */
 function betweenTries(
   state: FactoryState,
   id: string,
   work: FactoryState["work"][string],
+  idle: boolean,
 ): boolean {
   const record = work.step
     ? state.repeats?.[`item/${id}/${work.step}`]
     : undefined;
+  if (record?.inFlight) return false;
+  const data = work.execution?.data as
+    | { result?: unknown; stopped?: unknown }
+    | undefined;
+  const stopped =
+    work.execution?.provider === "local" &&
+    typeof data?.stopped === "string" &&
+    data.result === undefined;
+  if (idle)
+    return (
+      !work.execution ||
+      stopped ||
+      (work.execution.provider === "local" && data?.result !== undefined)
+    );
   if (
     !record?.faults ||
-    record.inFlight ||
     !record.nextAt ||
     !(
       Date.parse(record.nextAt) > time.now() ||
@@ -85,18 +100,17 @@ function betweenTries(
     )
   )
     return false;
-  const data = work.execution?.data as
-    | { result?: unknown; stopped?: unknown }
-    | undefined;
-  return (
-    !work.execution ||
-    (work.execution.provider === "local" &&
-      typeof data?.stopped === "string" &&
-      data.result === undefined)
-  );
+  return !work.execution || stopped;
 }
 
-export function canHandoff(state: ContinuationState): boolean {
+/**
+ * Whether ownership can be released now. `active` names the Work Items this
+ * controller is running a step for; an item outside it is idle (#1289).
+ */
+export function canHandoff(
+  state: ContinuationState,
+  active?: ReadonlyMap<string, unknown>,
+): boolean {
   if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
     return false;
   if (
@@ -130,7 +144,7 @@ export function canHandoff(state: ContinuationState): boolean {
       (work.status === "running" &&
         !isReadinessWait(state, id) &&
         !awaitsOperator(work.wait) &&
-        !betweenTries(state, id, work)) ||
+        !betweenTries(state, id, work, !!active && !active.has(id))) ||
       (work.status === "published" &&
         (!work.pullRequest || !work.changeRef || !work.treeSha)),
   );
@@ -150,6 +164,10 @@ export interface LocalOwner {
   pause: AbortController;
   /** Plain pause stops admitted Work Item retries; draining leaves them live. */
   workPause: AbortController;
+  /** A handoff stopped admitted work; `workPause` is never renewed after it. */
+  handoffStopped?: boolean;
+  /** The Work Items the current pass is running a step for. */
+  activeItems?: ReadonlyMap<string, unknown>;
   snapshot?: ContinuationState;
   lock: ControllerLock;
   abort: AbortController;
@@ -169,16 +187,29 @@ export interface LocalOwner {
 }
 /** Update the admitted-work signal from the coordinator's guarded mode. */
 export function synchronizeWorkItemPause(
-  owner: Pick<LocalOwner, "snapshot" | "pause" | "workPause" | "handoff">,
+  owner: Pick<
+    LocalOwner,
+    | "snapshot"
+    | "pause"
+    | "workPause"
+    | "handoff"
+    | "handoffStopped"
+    | "activeItems"
+  >,
 ): void {
   const mode = owner.snapshot?.coordinator?.mode;
   if (mode === "paused") owner.workPause.abort(new Error("Coordinator paused"));
   // A handoff stops admitted work at its next safe point once nothing it runs
-  // holds an effect in flight, and then never renews it (#1268). Until then a
-  // drain keeps driving running items toward that point.
-  else if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
-    owner.workPause.abort(new Error("Coordinator handoff requested"));
+  // holds an effect in flight, and then never renews it (#1268, #1289). Until
+  // then a drain keeps driving running items toward that point.
   else if (
+    owner.handoff &&
+    (owner.handoffStopped ||
+      (owner.snapshot && canHandoff(owner.snapshot, owner.activeItems)))
+  ) {
+    owner.handoffStopped = true;
+    owner.workPause.abort(new Error("Coordinator handoff requested"));
+  } else if (
     owner.workPause.signal.aborted &&
     (mode === "draining" ||
       (mode === "running" && !owner.handoff && !owner.pause.signal.aborted))

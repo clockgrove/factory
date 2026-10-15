@@ -339,7 +339,7 @@ export class CheckpointCollectionPending extends Error {
   }
 }
 /** Worker returns this process is collecting now, by attempt identity. */
-const activeCollections = new Map<string, number>();
+const activeCollections = new Map<string, { count: number; marker?: string }>();
 const COLLECTION_IDENTITY = /^[A-Za-z0-9_-]{1,160}$/;
 /** Where a running collection is announced to other controller processes. */
 function collectionMarker(repository: string, identity: string): string {
@@ -360,15 +360,17 @@ export async function trackCollection<T>(
   identity: string,
   task: () => Promise<T>,
 ): Promise<T> {
-  const count = activeCollections.get(identity) ?? 0;
-  activeCollections.set(identity, count + 1);
+  const entry = activeCollections.get(identity) ?? { count: 0 };
+  const first = entry.count === 0;
+  entry.count += 1;
+  activeCollections.set(identity, entry);
   // The marker only lets other processes wait; it never fails a collection.
-  let marker: string | undefined;
+  // The first tracker writes it and the last to finish removes it (#1289).
   try {
     const path = COLLECTION_IDENTITY.test(identity)
       ? collectionMarker(repository, identity)
       : undefined;
-    const self = path && !count ? linuxProcessIdentity(process.pid) : null;
+    const self = path && first ? linuxProcessIdentity(process.pid) : null;
     if (path && self) {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       const temporary = `${path}.${randomUUID()}.tmp`;
@@ -379,24 +381,23 @@ export async function trackCollection<T>(
           { flag: "wx", mode: 0o600 },
         );
         renameSync(temporary, path);
-        marker = path;
+        entry.marker = path;
       } finally {
         rmSync(temporary, { force: true });
       }
     }
   } catch {
-    marker = undefined;
+    // Other processes simply do not wait for this collection.
   }
   try {
     return await task();
   } finally {
-    const remaining = activeCollections.get(identity)! - 1;
-    if (remaining) activeCollections.set(identity, remaining);
-    else {
+    entry.count -= 1;
+    if (entry.count === 0) {
       activeCollections.delete(identity);
-      if (marker)
+      if (entry.marker)
         try {
-          rmSync(marker, { force: true });
+          rmSync(entry.marker, { force: true });
         } catch {
           // Harmless: once collected, no refusal names this return, and a
           // later reader ignores the marker after this process ends.

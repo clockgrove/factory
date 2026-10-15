@@ -329,7 +329,7 @@ export class CheckpointAdmissionFailure extends Error {
  * A completed local worker return is not yet frozen by its collector, so no
  * checkpoint can be published until collection. A collector freezes its own
  * return before it admits; another admission waits for an active collector in
- * this process (#1281), and presentation skips a tick.
+ * any controller process for the repository (#1281, #1285).
  */
 export class CheckpointCollectionPending extends Error {
   constructor(readonly paths: string[]) {
@@ -340,22 +340,55 @@ export class CheckpointCollectionPending extends Error {
 }
 /** Worker returns this process is collecting now, by attempt identity. */
 const activeCollections = new Map<string, number>();
-/** Mark a worker's collection as active while `task` runs. */
+const COLLECTION_IDENTITY = /^[A-Za-z0-9_-]{1,160}$/;
+/** Where a running collection is announced to other controller processes. */
+function collectionMarker(repository: string, identity: string): string {
+  return join(
+    stateRoot(repository),
+    "recovery",
+    "collections",
+    `${identity}.json`,
+  );
+}
+/**
+ * Mark a worker's collection as active while `task` runs: in this process,
+ * and for other controller processes of the repository through a private
+ * marker naming this live process. A marker whose process is gone is ignored.
+ */
 export async function trackCollection<T>(
+  repository: string,
   identity: string,
   task: () => Promise<T>,
 ): Promise<T> {
-  activeCollections.set(identity, (activeCollections.get(identity) ?? 0) + 1);
+  const count = activeCollections.get(identity) ?? 0;
+  activeCollections.set(identity, count + 1);
+  const marker = COLLECTION_IDENTITY.test(identity)
+    ? collectionMarker(repository, identity)
+    : undefined;
+  const self = linuxProcessIdentity(process.pid);
+  if (!count && marker && self) {
+    mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
+    const temporary = `${marker}.${randomUUID()}.tmp`;
+    writeFileSync(
+      temporary,
+      JSON.stringify({ pid: process.pid, startTime: self.startTime }),
+      { flag: "wx", mode: 0o600 },
+    );
+    renameSync(temporary, marker);
+  }
   try {
     return await task();
   } finally {
     const remaining = activeCollections.get(identity)! - 1;
     if (remaining) activeCollections.set(identity, remaining);
-    else activeCollections.delete(identity);
+    else {
+      activeCollections.delete(identity);
+      if (marker) rmSync(marker, { force: true });
+    }
   }
 }
-/** A pending return whose collector is running here will be frozen shortly. */
-function collectingHere(error: unknown): boolean {
+/** The uncollected worker returns a publication refusal names, if any. */
+function pendingCollection(error: unknown): string[] | undefined {
   const pending =
     error instanceof CheckpointCollectionPending
       ? error
@@ -363,11 +396,35 @@ function collectingHere(error: unknown): boolean {
           error.cause instanceof CheckpointCollectionPending
         ? error.cause
         : undefined;
-  return !!pending?.paths.some((path) =>
-    [...activeCollections.keys()].some(
-      (identity) => basename(path) === `${identity}.result.json`,
-    ),
-  );
+  return pending?.paths;
+}
+/**
+ * Whether a pending return's collector is running now, here or in another
+ * live controller process. A marker from a dead or unobservable process never
+ * counts: the refusal then stands, as it does with no collector at all.
+ */
+function collecting(repository: string, paths: string[]): boolean {
+  return paths.some((path) => {
+    const name = basename(path);
+    if (!name.endsWith(".result.json")) return false;
+    const identity = name.slice(0, -".result.json".length);
+    if (activeCollections.has(identity)) return true;
+    if (!COLLECTION_IDENTITY.test(identity)) return false;
+    try {
+      const owner = JSON.parse(
+        readFileSync(collectionMarker(repository, identity), "utf8"),
+      ) as { pid?: unknown; startTime?: unknown };
+      if (
+        !Number.isSafeInteger(owner.pid) ||
+        typeof owner.startTime !== "string"
+      )
+        return false;
+      const live = linuxProcessIdentity(owner.pid as number);
+      return live?.startTime === owner.startTime && live.state !== "Z";
+    } catch {
+      return false;
+    }
+  });
 }
 /** Safety bound on waiting for an active collector; then the refusal stands. */
 const COLLECTION_WAIT_MS = 5 * 60_000;
@@ -2413,10 +2470,24 @@ export async function awaitCheckpointAdmission(
       });
       break;
     } catch (error) {
-      // Another Work Item's collector is freezing its return: wait for it,
-      // outside the publication queue, instead of stopping for a decision.
-      if (!collectingHere(error) || Date.now() >= deadline) throw error;
-      await new Promise<void>((done) => setTimeout(done, 1000));
+      // Another Work Item's collector, in this or another controller process,
+      // is freezing its return: wait outside the publication queue instead of
+      // stopping for a decision. The closure cannot change before a pending
+      // collector finishes, so poll that cheaply and rebuild only afterwards.
+      const pending = pendingCollection(error);
+      if (
+        !pending ||
+        Date.now() >= deadline ||
+        !collecting(scope.config.repository, pending)
+      )
+        throw error;
+      do {
+        await new Promise<void>((done) => setTimeout(done, 1000));
+        assertProcessActive();
+      } while (
+        Date.now() < deadline &&
+        collecting(scope.config.repository, pending)
+      );
     }
   }
   const fingerprint = checkpointCompletionFingerprint(scope.config);

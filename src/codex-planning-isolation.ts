@@ -295,6 +295,18 @@ function toolchainDirectories(
       if (linked) roots.add(linked);
     }
   }
+  // Factory runs its own Node in the sandbox (the readiness probe and local
+  // worker helpers), so mount it like a PATH directory even when the PATH
+  // Factory was started with omits it, as an installed launcher does (#1269).
+  const runtime = real(dirname(process.execPath));
+  if (!within(runtime, workspace)) {
+    const mount = root(runtime);
+    if (!mount)
+      throw new Error(
+        `Factory's Node runtime at ${runtime} would show Codex workers your HOME, a login or Factory's own files. Install Node in a directory of its own.`,
+      );
+    roots.add(mount);
+  }
   return [...roots].filter(
     (mount) =>
       ![...roots].some((other) => other !== mount && within(mount, other)),

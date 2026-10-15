@@ -51,6 +51,7 @@ import {
 } from "../dist/github-project-queue.js";
 import { UPDATE } from "../dist/github-project-queue-wire.js";
 import {
+  linuxProcessIdentity,
   ownIdentity,
   subprocessAsync,
   withCheckpointPublication,
@@ -82,7 +83,6 @@ import {
   awaitCheckpointAdmission,
   gitPersistenceStatus,
   isCheckpointCollectionPending,
-  trackCollection,
   markCheckpointDirty,
   readVerifiedRecoveryCheckpoint,
   synchronizeRecoveryCheckpoint,
@@ -844,8 +844,38 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       store,
       "codex-sdk",
     );
-    // With its collector active here, another admission waits for the freeze
-    // and then publishes instead of stopping for a decision (#1281).
+    // A collector announces itself to other controller processes with a
+    // marker naming its live process. A marker whose process is gone is
+    // ignored, so the refusal stands; with a live collector, another admission
+    // waits for the freeze and then publishes instead of stopping (#1281, #1285).
+    const collections = join(stateRoot(repository), "recovery", "collections");
+    const marker = join(collections, `${attempt}.json`);
+    await mkdir(collections, { recursive: true, mode: 0o700 });
+    await writeFile(
+      marker,
+      JSON.stringify({ pid: worker.pid, startTime: "0" }),
+      {
+        mode: 0o600,
+      },
+    );
+    await assert.rejects(
+      withRecoveryCheckpointScope(
+        {
+          config,
+          buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+        },
+        () => awaitCheckpointAdmission(repository, "explicit"),
+      ),
+      (error) => isCheckpointCollectionPending(error),
+    );
+    await writeFile(
+      marker,
+      JSON.stringify({
+        pid: process.pid,
+        startTime: linuxProcessIdentity(process.pid).startTime,
+      }),
+      { mode: 0o600 },
+    );
     const admitted = withRecoveryCheckpointScope(
       {
         config,
@@ -853,14 +883,13 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       },
       () => awaitCheckpointAdmission(repository, "explicit"),
     );
-    await trackCollection(attempt, () =>
-      collectCompletedWorker(
-        config,
-        1,
-        { runId: state.runId, item: item.id, attempt },
-        driver,
-      ),
+    await collectCompletedWorker(
+      config,
+      1,
+      { runId: state.runId, item: item.id, attempt },
+      driver,
     );
+    await rm(marker);
     await admitted;
     const collected = readState(repository, 1),
       frozen = JSON.stringify(collected.work.local.execution.data.result),

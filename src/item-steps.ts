@@ -256,8 +256,10 @@ export async function executeItem(
         await driver.cancel(current, context());
         throw cancelledFault();
       }
-      const result = await trackCollection(current.identity, () =>
-        driver.collect(current, context()),
+      const result = await trackCollection(
+        state.repository,
+        current.identity,
+        () => driver.collect(current, context()),
       );
       ctx.progress();
       return result;

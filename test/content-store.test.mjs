@@ -4954,6 +4954,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
   );
   const wireGraph = {
     contextId: compilation.wire.data.contextId,
+    decisionRequired: null,
     requiredPreIntegrationChecks: [],
     expansions: [],
     conditions: [],

@@ -17,6 +17,7 @@ import {
   type PlanningRequest,
   type WorkGraph,
 } from "./contracts.js";
+import { PlannerDecision } from "./fault.js";
 import { ownsPath } from "./ownership.js";
 import { aggregateAcceptance } from "./qa.js";
 import { assertWorkItemFields, validValidationCommand } from "./scheduler.js";
@@ -81,7 +82,7 @@ const text: Schema = { type: "string" };
 
 /** Shared compilation/diagnosis meaning; no probe result or extra authority. */
 export const COMPILER_READINESS_GUIDANCE =
-  "Same-owner source-authorized setup followed by the unchanged real readiness probe uses available with empty preparedBy and ordered prerequisiteValidationIndices before probeValidationIndex. available describes that sequence for checking in the actual fresh checkout before implementation; it never claims the probe already passed or grants authority. prepare is exclusively preparation supplied by an actual declared dependency named in preparedBy, not a synonym for the owner's setup commands. Unknown runtime readiness alone does not require an operator decision when this authorized sequence can establish it. Correct a generated mismatch as planning-output only within permitted repair classes and recorded attempt limits; do not invent a dependency, waive the probe or claim readiness. Ask the operator for an actual missing source fact, permission, capability or human-owned choice.";
+  "Same-owner source-authorized setup followed by the unchanged real readiness probe uses available with empty preparedBy and ordered prerequisiteValidationIndices before probeValidationIndex. available describes that sequence for checking in the actual fresh checkout before implementation; it never claims the probe already passed or grants authority. prepare is exclusively preparation supplied by an actual declared dependency named in preparedBy, not a synonym for the owner's setup commands. Unknown runtime readiness alone does not require an operator decision when this authorized sequence can establish it. Correct a generated mismatch as planning-output only within permitted repair classes and recorded attempt limits; do not invent a dependency, waive the probe or claim readiness. Ask the operator for an actual missing source fact, permission, capability or human-owned choice through decisionRequired.";
 
 /** A transient model language: choices in, canonical controller facts out. */
 export function compilerWire(
@@ -291,7 +292,7 @@ export function compilerWire(
                 ? "The owner can run its authorized prerequisites followed by its probe before implementation; this choice does not claim readiness passed."
                 : readiness === "prepare"
                   ? "An actual declared dependency supplies preparation; same-owner prerequisite commands do not use prepare."
-                  : "A source-required prerequisite is missing; this blocks execution for a source decision.",
+                  : "A source-required external environment prerequisite is missing: name its authorized probe or prerequisite commands. It asks the operator to establish it. Use decisionRequired, not missing, when the Objective as written does not allow covering the criterion.",
           },
           probeValidationIndex:
             kind === "real"
@@ -484,6 +485,17 @@ export function compilerWire(
       },
     },
     coverage: coverageSchema,
+    decisionRequired: {
+      description:
+        "null when the graph covers every obligation. Otherwise the one obligation the Objective as written does not let you cover (for example, it needs a change the Objective forbids or a human-owned choice) and the concrete question the operator must answer; Factory asks it before using this graph.",
+      anyOf: [
+        { type: "null" },
+        strict({
+          obligationIndex: integer(obligations.length),
+          question: { ...text, minLength: 1, maxLength: 4096 },
+        }),
+      ],
+    },
   });
   if (request.contextLookup) {
     const template = structuredClone(itemSchema);
@@ -629,12 +641,31 @@ export function compilerWire(
           "items",
           "coverage",
           "requiredPreIntegrationChecks",
+          "decisionRequired",
           ...(request.contextLookup ? ["expansions", "conditions"] : []),
         ],
         "response",
       );
       if (wire.contextId !== contextId)
         throw new Error("Planner context identity differs from this request");
+      if (wire.decisionRequired !== null) {
+        const asked = object(wire.decisionRequired, "decision required");
+        keys(asked, ["obligationIndex", "question"], "decision required");
+        const obligation =
+          obligations[
+            index(asked.obligationIndex, obligations.length, "obligationIndex")
+          ]!;
+        if (
+          typeof asked.question !== "string" ||
+          !asked.question.trim() ||
+          asked.question.length > 4096
+        )
+          throw new Error("A required decision must state its question");
+        const criterion = obligation.source.text.replace(/\s+/g, " ").trim();
+        throw new PlannerDecision(
+          `${asked.question.trim()} (criterion: "${criterion.length > 160 ? `${criterion.slice(0, 157)}...` : criterion}")`,
+        );
+      }
       if (!Array.isArray(wire.items) || !wire.items.length)
         throw new Error("Planner requires at least one Work Item");
       if (

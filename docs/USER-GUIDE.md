@@ -557,9 +557,15 @@ Factory stops for a decision only when a human owns it. Show the operator the ex
 factory decide --objective N --outcome accept --answer "Specific answer" --reason "Evidence and authority"
 factory decide --objective N --outcome refuse --reason "Why"
 
+# The planner's question about a pending amendment: accept needs --answer and the next run
+# compiles the amendment with it; refuse rejects the amendment and gives back its planning revision
+factory decide --objective N --outcome accept --answer "Specific answer" --reason "Evidence and authority"
+
 # Result criterion: --item names a Work Item; omit it for final acceptance
 factory decide --objective N --item ITEM --outcome accept|refuse --reason "Reviewed evidence"
 ```
+
+A planner asks through a structured question when the Objective as written does not let it cover a criterion, for example when the criterion needs a change the Objective forbids. In initial planning that stops planning for the decision. During an amendment the amendment waits at its compilation with the question, without a rejection and without a new charge, and status names the command. Asking again before an answer calls no model. A coverage environment marked `missing` is reserved for an external prerequisite with an authorized probe or preparation, and it is asked the same way.
 
 Decisions read the exact plan or tree from state, apply only to that plan or tree, and never bypass branch protection. Refusing a Work Item result records a failed-result event for the existing bounded correction path; it never turns passing command receipts into failed ones. Automatic tree reviewers start with criteria and an evidence map, then search and read relevant current files or authenticated evidence on demand. Complete evidence stays available without requiring every body in the initial context; a path or prior passing verdict alone cannot support acceptance. Review excerpts can be truncated, and a truncated excerpt cannot auto-pass. Inspect the evidence and relevant exact-tree source before a human acceptance decision. `FACTORY_RESULT_REVIEW_TEXT_BUDGET_BYTES` bounds rendered review evidence; local raw comparison reads use the separate `FACTORY_RESULT_REVIEW_RAW_BUDGET_BYTES` limit, which defaults to 1 MiB. Increasing either budget does not supply missing evidence or semantic acceptance.
 

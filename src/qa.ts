@@ -7,7 +7,7 @@ import type {
   WorkItem,
 } from "./contracts.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
-import { decision, StepFault } from "./fault.js";
+import { PlannerDecision } from "./fault.js";
 import type { FactoryState } from "./state.js";
 
 /** The accepted graph determines whether this run qualifies existing bytes or delivers changes. */
@@ -173,22 +173,24 @@ function assertProofShape(entry: AcceptanceCoverage): void {
 }
 
 /**
- * A plan that declares a criterion's environment an external prerequisite it
- * cannot prepare (#1292). That is the planner's answer, not a defect: the
- * operator establishes the prerequisite outside Factory or corrects the plan.
+ * A plan that declares a criterion's environment missing asks the operator
+ * (#1292). With an authorized probe or preparation it names an external
+ * prerequisite to establish; with neither it is the planner saying it cannot
+ * cover the criterion as the Objective stands, which is a decision, not an
+ * environment fact.
  */
-export class MissingExternalPrerequisite extends StepFault {
-  constructor(entry: AcceptanceCoverage) {
-    const criterion = entry.source.text.replace(/\s+/g, " ").trim();
-    super(
-      decision(
-        `The plan declares a missing external prerequisite for criterion "${criterion.length > 120 ? `${criterion.slice(0, 117)}...` : criterion}" (${entry.environment.kind} environment, probe \`${entry.environment.probe}\`); establish it outside Factory or submit a corrected plan`,
-        `criterion ${entry.criterionId}`,
-        `owner ${entry.itemId}`,
-      ),
-    );
-    this.name = "MissingExternalPrerequisite";
-  }
+function missingEnvironmentDecision(
+  entry: AcceptanceCoverage,
+): PlannerDecision {
+  const criterion = entry.source.text.replace(/\s+/g, " ").trim();
+  const named =
+    criterion.length > 160 ? `${criterion.slice(0, 157)}...` : criterion;
+  const environment = entry.environment;
+  return new PlannerDecision(
+    environment.probe || environment.prerequisites?.length
+      ? `The plan needs an external prerequisite for criterion "${named}" (${environment.kind} environment, probe \`${environment.probe}\`). Establish it outside Factory, or say how the criterion should be covered.`
+      : `The plan cannot cover criterion "${named}" as the Objective stands. Say how it should be covered or what the Objective allows.`,
+  );
 }
 
 export function assertCoverageShape(graph: WorkGraph): void {
@@ -344,7 +346,7 @@ export function assertCoverageShape(graph: WorkGraph): void {
       previousPrerequisite = selected;
     }
     if (environment.readiness === "missing")
-      throw new MissingExternalPrerequisite(entry);
+      throw missingEnvironmentDecision(entry);
     if (
       environment.kind === "real" &&
       (!environment.probe ||

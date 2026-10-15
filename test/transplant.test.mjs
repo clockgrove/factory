@@ -1032,6 +1032,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     assert.deepEqual(view.coverage, currentGraph.coverage);
     const choices = {
       contextId: wire.data.contextId,
+      decisionRequired: null,
       requiredPreIntegrationChecks: [],
       items: currentGraph.items.map((item, index) => ({
         kind: "retained",

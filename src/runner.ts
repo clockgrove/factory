@@ -65,6 +65,7 @@ import {
   workerDiscoveryDigest,
   type AmendmentProposal,
   amendmentBlocksDispatch,
+  decideAmendment,
   graphDigest,
   submitAmendment,
 } from "./graph-amendments.js";
@@ -262,7 +263,14 @@ async function decideObjectiveUnscoped(
   input: DecisionInput,
   /** False when the live installation owner applies the decision itself. */
   forward = true,
-): Promise<"plan-accepted" | "plan-refused" | "result" | "result-open"> {
+): Promise<
+  | "plan-accepted"
+  | "plan-refused"
+  | "amendment-accepted"
+  | "amendment-refused"
+  | "result"
+  | "result-open"
+> {
   const state = readContinuation(config.repository, objective);
   if (!state)
     throw new Error(
@@ -296,6 +304,40 @@ async function decideObjectiveUnscoped(
       reason: input.reason,
     });
     return input.outcome === "accept" ? "plan-accepted" : "plan-refused";
+  }
+  // The planner's open question about the pending amendment (#1296).
+  const asked = isExecutionState(state)
+    ? state.pendingAmendment?.decisions?.at(-1)
+    : undefined;
+  if (asked && !asked.answer && !input.item && !input.criterion) {
+    // A live owner holds the amendment: it records the answer itself.
+    if (forward) {
+      const reply = await requestControl(config.repository, {
+        objective,
+        action: "decide",
+        input: { ...input },
+      });
+      if (reply.handled) {
+        if (
+          reply.result !== "amendment-accepted" &&
+          reply.result !== "amendment-refused"
+        )
+          throw new Error("The live owner returned no amendment decision");
+        return reply.result;
+      }
+    }
+    const lock = mutationLock(config, objective);
+    try {
+      const current = mutationState(config, objective);
+      if (!current) throw new Error("Objective has no Factory state");
+      decideAmendment(current, input);
+      saveState(statePath(config.repository, objective), current);
+    } finally {
+      releaseMutationLock(config, objective, lock);
+    }
+    return input.outcome === "accept"
+      ? "amendment-accepted"
+      : "amendment-refused";
   }
   if (input.answer)
     throw new Error(
@@ -982,6 +1024,24 @@ async function runObjectiveOwned(
           persist();
           wake();
           return "plan-accepted";
+        }
+        // The planner's open question about the pending amendment (#1296):
+        // the owner's snapshot holds it, so the answer lands there.
+        if (
+          request.action === "decide" &&
+          isExecutionState(owner.snapshot) &&
+          owner.snapshot.pendingAmendment?.decisions?.at(-1) &&
+          !owner.snapshot.pendingAmendment.decisions.at(-1)!.answer
+        ) {
+          const decision = parseDecisionInput(input);
+          if (!decision.item && !decision.criterion) {
+            decideAmendment(owner.snapshot, decision);
+            persist();
+            wake();
+            return decision.outcome === "accept"
+              ? "amendment-accepted"
+              : "amendment-refused";
+          }
         }
         if (request.action === "retry") {
           const retried = retryWorkItem(

@@ -135,7 +135,7 @@ function help(): void {
       "  status [--objective N] [--json]",
       "      With --objective: the phase and the exact next command. Without: the service and the queue",
       "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT] --reason TEXT",
-      "      Decide a plan (--answer is required to accept one) or a result criterion (--item names the Work Item; without it, the final acceptance)",
+      "      Decide a plan or a pending amendment's question (--answer is required to accept either) or a result criterion (--item names the Work Item; without it, the final acceptance)",
       "  retry --objective N [--item ITEM] [--rereview] [--review-artifacts FILE]",
       "      Answer a step's decision or configuration fix, end a provider usage-limit wait, start a failed Work Item's new attempt, or (--item --rereview) validate and review the same pending or settled command-failure result within resultRereviews limits",
       "  repair --objective N --proposal FILE",
@@ -448,11 +448,15 @@ async function decideCommand(
       ? `Accepted the plan for Objective #${objective}; run ${run} to continue`
       : decided === "plan-refused"
         ? `Refused and discarded the plan for Objective #${objective}; the next run plans again`
-        : `Recorded ${outcome} for the ${item ? `pending criterion of Work Item ${item}` : "pending final acceptance"}; ${
-            decided === "result-open"
-              ? `other criteria still wait: \`factory status --objective ${objective}\` lists each decision, then ${run} continues`
-              : `${run} continues it`
-          }`,
+        : decided === "amendment-accepted"
+          ? `Answered the amendment's question for Objective #${objective}; ${run} compiles it with your answer`
+          : decided === "amendment-refused"
+            ? `Refused the amendment for Objective #${objective} and gave back its planning revision; submit a corrected one with \`factory propose-amendment --objective ${objective} --proposal FILE\``
+            : `Recorded ${outcome} for the ${item ? `pending criterion of Work Item ${item}` : "pending final acceptance"}; ${
+                decided === "result-open"
+                  ? `other criteria still wait: \`factory status --objective ${objective}\` lists each decision, then ${run} continues`
+                  : `${run} continues it`
+              }`,
   );
 }
 

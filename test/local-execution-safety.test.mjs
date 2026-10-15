@@ -59,6 +59,7 @@ import {
 } from "../dist/discovery.js";
 import {
   applyPendingAmendment,
+  decideAmendment,
   graphDigest,
 } from "../dist/graph-amendments.js";
 import {
@@ -99,7 +100,7 @@ import {
   readWorkflowReflection,
   workflowStageObligations,
 } from "../dist/workflow-reflection.js";
-import { resolveAutonomy } from "../dist/repair-policy.js";
+import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
 import { materializeGraphExpansion } from "../dist/graph-expansion.js";
 import { authenticateExpansionInputs } from "../dist/runner/expansion.js";
 import { graphProjectionControl } from "../dist/graph-projection-control.js";
@@ -2210,6 +2211,69 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     assert.equal(continuedLegacy.pendingAmendment.phase, "ready");
     assert.equal(continuedLegacy.work.api.discoveryDisposition, "proposed");
     assert.equal(existsSync(join(root, "legacy-planner-homes")), false);
+    // A planner question holds the amendment at its compilation (#1296):
+    // asking again starts no provider process and spends no revision.
+    const asking = structuredClone(continuedLegacy);
+    asking.pendingAmendment.decisions = [
+      { question: "May the catalog membership assertion grow?" },
+    ];
+    const revisionsBefore = consumption(asking).planningRevisions;
+    await assert.rejects(
+      () =>
+        applyPendingAmendment({
+          state: asking,
+          config: { repository: legacy.repository, checkout },
+          body: git(checkout, "show", `${legacy.baseSha}:README.md`),
+          model: legacyModel,
+          save: () => saveState(legacyPath, asking),
+          cancelled: () => false,
+        }),
+      /May the catalog membership assertion grow\?.*factory decide --objective/,
+    );
+    assert.equal(asking.pendingAmendment.phase, "ready");
+    assert.equal(consumption(asking).planningRevisions, revisionsBefore);
+    assert.equal(existsSync(join(root, "legacy-planner-homes")), false);
+    const refusing = structuredClone(asking);
+    decideAmendment(asking, {
+      actor: "operator",
+      outcome: "accept",
+      answer: "Yes, only for the added components",
+      reason: "The Objective requires them",
+    });
+    saveState(legacyPath, asking);
+    const answered = parseFactoryState(
+      JSON.parse(readFileSync(legacyPath, "utf8")),
+      legacy.repository,
+      legacy.objective,
+    );
+    assert.equal(
+      answered.pendingAmendment.decisions[0].answer.answer,
+      "Yes, only for the added components",
+    );
+    assert.equal(answered.pendingAmendment.phase, "ready");
+    assert.throws(
+      () =>
+        decideAmendment(answered, {
+          actor: "operator",
+          outcome: "refuse",
+          reason: "Already answered",
+        }),
+      /No amendment decision is pending/,
+    );
+    refusing.charges = {
+      ...refusing.charges,
+      [`objective/amend/${refusing.pendingAmendment.id}`]: {
+        allowances: ["planningRevisions"],
+        scopes: ["$planning"],
+      },
+    };
+    decideAmendment(refusing, {
+      actor: "operator",
+      outcome: "refuse",
+      reason: "The Objective forbids this change",
+    });
+    assert.equal(refusing.pendingAmendment.phase, "rejected");
+    assert.equal(consumption(refusing).planningRevisions, revisionsBefore);
     await store.verify(loaded.work.schema.knowledge.recordRef);
     const current = objectiveKnowledgeView(
       loaded,

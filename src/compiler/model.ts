@@ -24,7 +24,13 @@ import {
   type ReviewImageInput,
   type ValidationCommandReceipt,
 } from "../contracts.js";
-import { attachedFault, attachFault, decision, transient } from "../fault.js";
+import {
+  attachedFault,
+  attachFault,
+  decision,
+  PlannerDecision,
+  transient,
+} from "../fault.js";
 import { readPinnedPlaybook } from "../learning.js";
 import { UnsettledSubprocessError } from "../process.js";
 import { promptJsonParts, renderPrompt } from "../prompt-bytes.js";
@@ -381,6 +387,7 @@ ${request.contextLookup ? "The admitted contextLookup packet supplies automatic 
 - Citations: choose the smallest complete, nonredundant sections by choiceIndex, preserving required interfaces, literals and facts. Do not choose a full section and an already included subsection. Workers receive these sections verbatim and a full checkout; the brief supplies decisions and required initial reads, not recopied sources. Distinguish supplied complete bytes from omitted repository/tooling bodies and fresh dependency implementations. Re-read only missing/current semantics, not known supplied bytes. Batch independent work only when no model decision intervenes; preserve command literals, quoting, prerequisites and exit gates. Keep required evidence/command temporary files, not scratch digest snapshots duplicating controller audits.
 - Package-manager metadata: only the structured Objective's exact Package manager update authorizes a version change; prose/model output does not. One implementation owner owns package.json and lockfile updates. Existing acceptance-script bodies and hooks stay fixed to the base/predecessor. An absent script needs an exact source-declared command and root package.json owner; never create lifecycle hooks or nested npm/pnpm invocations. Root installation is only exact source-declared \`pnpm install --frozen-lockfile --ignore-scripts\` or \`npm ci --ignore-scripts\`, before scripts. npm requires unchanged tracked package.json/package-lock.json and configuration, no workspaces, shrinkwrap override, mixed manager or manager update. Unsupported installation needs a source decision, not a wrapper or rewritten command.
 - Validation: preserve exact authorized commands. Every check must terminate with exit zero on success and clean up its owned resources. A bare service launch is not finite proof; startup/request/shutdown requires a finite source-authorized harness, not a brief promising cleanup. Missing finite-command authority needs a source decision, never dropped acceptance or rewritten literals. A source-declared command selects sourceIndex/lineIndex of one complete standalone command, not a JSON script body. Base-observed package scripts use their existing authorized npm/pnpm invocation and package.json source; other files need the base's standalone executable line. Newly authored commands are never base-observed. Item checks must pass in its actual pre-delivery checkout. Author sibling-dependent verification against settled interfaces but run it through authorized integrated commands, without premature item acceptance. Retain required real runtime, ordering and negative-control proof.
+- Decisions: set decisionRequired to null when every obligation is covered. When the Objective as written does not let you cover an obligation (it forbids a change the criterion needs, or a human-owned choice is open), set decisionRequired to that obligationIndex and the concrete question, and still return your best graph; Factory asks the operator before using it, and the answer arrives as an operator finding. Never encode such a decision as a missing environment.
 - Environment: default to local/available, null probe, empty prerequisiteValidationIndices and preparedBy unless sources require preparation/readiness. ${COMPILER_READINESS_GUIDANCE} A probe is an owner's exact command that can pass before implementation. Setup indices are unique, increasing and before the probe, with explicit source authority; null probe requires none. Never infer setup from names or use newly implemented behavior as readiness. Preflight, worker and fresh result/final checkouts each require their own authorized sequence; read-only QA uses its validator checkout once, not an extra preflight checkout. Ignored installs/historical receipts do not transfer, and setup is not semantic acceptance.
 - ${QA_EVIDENCE_GUIDANCE}
 - Item kinds: work implements; qa checks the integrated result read-only; aggregate depends on all children and omits acceptance. ${request.contextLookup ? "Discovery is a source-authorized read-only observation with explicit literal selectors, supported output schema and finite entry/byte/attempt allowances. A discovery item declares no commands, owned paths or coverage proof; typed observations are not implementation acceptance. Dependents select discoveryInputs by exact producerItemId, role and typed fields, with an actual dependency on that producer. Return empty discoveryInputs when none are needed. Inventory uses deterministic controller Git reads; semantic mode requires a configured eligible read-only native adapter, grants no command/provider/access authority and adds no PR." : ""} Children are aggregate hierarchy, not subtasks or implicit dependencies; schedulable components are separate items. Every QA owns an obligation and integrated QA depends transitively on every implementation. Add QA only for necessary evidence unavailable from final validation/review or source-required late CI, never duplicate final proof or invent a generic tests/docs stage. Consumers depend only on required changed outputs. Read-only nodes omit ownership, assets, candidate counts and execution profiles.
@@ -1098,6 +1105,8 @@ export class StructuredPlanningModel implements PlanningModel {
     try {
       return wire.decode(result) as T;
     } catch (error) {
+      // A required decision is the planner's answer for the operator.
+      if (error instanceof PlannerDecision) throw error;
       observeModelInvocation(request.invocation, {
         type: "response-invalid",
         failureClass: "semantic-validation",

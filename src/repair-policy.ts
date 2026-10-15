@@ -407,16 +407,19 @@ export function charge(
   };
 }
 /**
- * Give back the implementation repair a failure event used: no correction was
- * made for it. Any other allowance the event holds stays charged.
+ * Give back the allowance a failure event used (by default the implementation
+ * repair): no correction was made for it. Any other allowance the event holds
+ * stays charged.
  */
-export function releaseCharge(state: RepairLedger, event: string): void {
+export function releaseCharge(
+  state: RepairLedger,
+  event: string,
+  key: Allowance = "implementationRepairs",
+): void {
   const held = state.charges?.[event];
   if (!held) return;
   const { [event]: _released, ...others } = state.charges!;
-  const allowances = held.allowances.filter(
-    (key) => key !== "implementationRepairs",
-  );
+  const allowances = held.allowances.filter((entry) => entry !== key);
   state.charges = allowances.length
     ? { ...others, [event]: { ...held, allowances } }
     : others;

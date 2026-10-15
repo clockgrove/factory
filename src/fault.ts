@@ -65,6 +65,28 @@ export class StepFault extends Error {
   }
 }
 
+/**
+ * The planner's structured answer that a human must decide before the plan can
+ * continue (#1292, #1296): a question, never a refused or invalid plan.
+ */
+export class PlannerDecision extends StepFault {
+  constructor(readonly question: string) {
+    super(decision(question));
+    this.name = "PlannerDecision";
+  }
+}
+
+/** The planner decision this error carries, possibly wrapped. */
+export function plannerDecisionOf(error: unknown): PlannerDecision | undefined {
+  for (
+    let current: unknown = error, depth = 0;
+    current !== null && typeof current === "object" && depth < 8;
+    current = (current as { cause?: unknown }).cause, depth++
+  )
+    if (current instanceof PlannerDecision) return current;
+  return undefined;
+}
+
 /** The operator cancelled: the `cancelled` fault, never an unclassified error. */
 export function cancelledFault(detail = "Objective cancelled"): StepFault {
   return new StepFault({ kind: "cancelled", detail });

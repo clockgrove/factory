@@ -132,11 +132,18 @@ export interface FactoryApplication {
       reason: string;
     },
   ): Promise<PreparationState>;
-  /** Decide the saved plan or a pending result criterion, whichever the Objective's state holds. */
+  /** Decide the saved plan, the pending amendment's question or a pending result criterion, whichever the Objective's state holds. */
   decide(
     objective: number,
     input: import("./runner.js").DecisionInput,
-  ): Promise<"plan-accepted" | "plan-refused" | "result" | "result-open">;
+  ): Promise<
+    | "plan-accepted"
+    | "plan-refused"
+    | "amendment-accepted"
+    | "amendment-refused"
+    | "result"
+    | "result-open"
+  >;
   runObjective(
     objective: number,
     options?: { deadlineAt?: string },

@@ -23,7 +23,12 @@ import {
   CONTROLLER_CAPABILITIES_DIGEST,
   installedControllerCapabilities,
 } from "../controller-capabilities.js";
-import { attachedFault, decision, StepFault } from "../fault.js";
+import {
+  attachedFault,
+  decision,
+  plannerDecisionOf,
+  StepFault,
+} from "../fault.js";
 import { UnsettledSubprocessError } from "../process.js";
 import { awaitCheckpointAdmission } from "../recovery-checkpoint.js";
 import {
@@ -668,6 +673,14 @@ async function compilePlanAdmitted(
         record.phase = "stopped";
         save();
         throw new PlanningNeedsDecision(error.message);
+      }
+      // The planner asked a question the operator answers (#1296): planning
+      // stops for that decision instead of revising against the allowance.
+      const asked = plannerDecisionOf(error);
+      if (asked) {
+        record.phase = "stopped";
+        save();
+        throw new PlanningNeedsDecision(asked.question);
       }
       if (error instanceof PlanningContextResponse) {
         const lookup = record.contextLookup;

@@ -111,6 +111,7 @@ import {
   commandPassEvidence,
 } from "../dist/result-evidence.js";
 import { assertReviewArtifactSelectors } from "../dist/review-artifacts.js";
+import { assertRetainedReviewEvidence } from "../dist/validation-evidence.js";
 import {
   resolveReviewReferences,
   reviewPacket,
@@ -3370,6 +3371,23 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     });
     assert.equal(laterWork.recovery.failure.detail, laterWork.error);
     saveState(statePath(config.repository, 3), later);
+    // A passing review of the same section retains its literal body with the
+    // section heading, while the citation carries only its declared reference.
+    const passingIds = laterPacket.evidence.map((entry) => entry.id);
+    assertRetainedReviewEvidence({
+      criteria: [
+        {
+          criterion: later.graph.items[0].acceptance[0],
+          verdict: "pass",
+          evidence: resolveReviewReferences(passingIds, laterPacket, true),
+          detail: "The documented section is satisfied.",
+        },
+      ],
+      reviewEvidence: laterPacket.evidence.map((entry) =>
+        structuredClone(entry),
+      ),
+    });
+    assert.ok(laterPacket.evidence.some((entry) => entry.heading));
     const retryConfig = { ...config, delivery: { kind: "regular" } };
     assert.equal(retryWorkItem(retryConfig, 3, "local"), "attempt");
     const retried = readState(config.repository, 3).work.local;

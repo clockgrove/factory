@@ -106,7 +106,16 @@ export function assertRetainedReviewEvidence(
   for (const entry of value.reviewEvidence) {
     if (!entry || typeof entry.content !== "string")
       throw new Error("Retained review literal body is invalid");
-    const { content, reusableBody, ...reference } = entry;
+    const { content, reusableBody } = entry;
+    // A citation carries exactly its declared reference (#1254); a retained body
+    // keeps its input's other fields, such as a pinned source's heading.
+    const reference = {
+      id: entry.id,
+      origin: entry.origin,
+      path: entry.path,
+      digest: entry.digest,
+      complete: entry.complete,
+    };
     if (
       seen.has(entry.id) ||
       !isDeepStrictEqual(cited.get(entry.id), reference) ||

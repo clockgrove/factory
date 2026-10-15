@@ -346,6 +346,8 @@ export interface Outage {
   since: string;
   tries: number;
   last: Fault;
+  /** When the last fault said to try again, if it did. */
+  retryAt?: string;
   /** The run has lasted 24 hours of running time. */
   escalated: boolean;
 }
@@ -372,6 +374,8 @@ export function outageOf(
         since: faults.since,
         tries: faults.count,
         last: faults.last,
+        ...(faults.last.kind === "transient" &&
+          faults.last.retryAt && { retryAt: faults.last.retryAt }),
         escalated: faults.activeMs >= ESCALATE_AFTER_MS,
       };
   }

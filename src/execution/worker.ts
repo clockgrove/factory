@@ -25,6 +25,7 @@ import {
 import { codexInvocationUsage, codexRawTokenUsage } from "../usage.js";
 import {
   harnessFailure,
+  ProviderLimitError,
   ProviderStreamError,
   privateProgress,
   readProducedAssets,
@@ -47,6 +48,18 @@ interface WorkerInput {
     owner: string;
     resumeThreadId?: string;
   };
+}
+
+/**
+ * The Codex SDK's failure events carry only text, with no code, so the
+ * usage-limit stop is recognized by Codex's own wording here and nowhere
+ * else. That text names the reset only as local wall-clock time, so none is
+ * recorded.
+ */
+function codexUsageLimit(message: string): ProviderLimitError | undefined {
+  return /you've hit your usage limit/i.test(message)
+    ? new ProviderLimitError(message)
+    : undefined;
 }
 
 function progressEvent(
@@ -306,7 +319,7 @@ export async function runCodexWorker(
       );
       let finalResponse = "";
       let turnCompleted = false;
-      let streamError: ProviderStreamError | undefined;
+      let streamError: Error | undefined;
       const commandOffsets = new Map<string, number>();
       const events = streamed.events[Symbol.asyncIterator]();
       let closeStarted = false;
@@ -350,9 +363,14 @@ export async function runCodexWorker(
             observeUsage("progress");
           }
           if (event.type === "turn.failed")
-            throw new Error(event.error.message);
+            throw (
+              codexUsageLimit(event.error.message) ??
+              new Error(event.error.message)
+            );
           if (event.type === "error")
-            streamError = new ProviderStreamError(event.message);
+            streamError =
+              codexUsageLimit(event.message) ??
+              new ProviderStreamError(event.message);
           // Stream errors can precede a CLI-managed retry. Read through the
           // terminal turn and natural EOF to retain its usage and exit error.
         }

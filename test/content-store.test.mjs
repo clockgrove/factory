@@ -6379,7 +6379,8 @@ test("stopped collection freezes a completed owned local return before restart a
   assert.deepEqual(again, frozen);
 });
 
-test("a worker-reported failure ends as its own work fault, not a missing wrapper return", async (t) => {
+// A real finite process writes the failure result a provider stop produces.
+async function failedWorkerCollection(t, returned) {
   const { launchWorker, killGroup } = await import(
     "../dist/execution/worker-process.js"
   );
@@ -6456,10 +6457,9 @@ test("a worker-reported failure ends as its own work fault, not a missing wrappe
     worktree = join(workRoot, identity);
   await addWorktree(checkout, worktree, baseSha);
   const script = join(temporary, "failed-result.cjs");
-  // A real finite process that reports the failure a provider limit produces.
   writeFileSync(
     script,
-    `require('node:fs').writeFileSync(process.argv[3],JSON.stringify({state:'failed',error:'Provider session limit reached'}),{mode:0o600});`,
+    `require('node:fs').writeFileSync(process.argv[3],${JSON.stringify(JSON.stringify(returned))},{mode:0o600});`,
   );
   const harness = new CodexHarness(
     join(privateRoot, "credentials"),
@@ -6527,11 +6527,35 @@ test("a worker-reported failure ends as its own work fault, not a missing wrappe
     },
   );
   assert(failure, "collection of a failed worker must reject");
-  assert.equal(attachedFault(failure)?.kind, "work");
-  assert.match(failure.message, /Provider session limit reached/);
-  assert.doesNotMatch(failure.message, /wrapper return/);
   assert.match(work.execution.data.stopped, /Provider session limit reached/);
   assert.equal(work.execution.data.rejectedCollection, undefined);
   assert.equal(processGroupExists(worker.pid), false);
   assert.equal(existsSync(worktree), false);
+  return failure;
+}
+
+test("a worker-reported failure ends as its own work fault, not a missing wrapper return", async (t) => {
+  const { attachedFault } = await import("../dist/fault.js");
+  const failure = await failedWorkerCollection(t, {
+    state: "failed",
+    error: "Provider session limit reached",
+  });
+  assert.equal(attachedFault(failure)?.kind, "work");
+  assert.match(failure.message, /Provider session limit reached/);
+  assert.doesNotMatch(failure.message, /wrapper return/);
+});
+
+test("a worker stopped by a provider usage limit is transient with its reset time", async (t) => {
+  const { attachedFault } = await import("../dist/fault.js");
+  const retryAt = "2099-01-01T00:00:00.000Z";
+  const failure = await failedWorkerCollection(t, {
+    state: "failed",
+    error: "Provider session limit reached",
+    lost: true,
+    retryAt,
+  });
+  const fault = attachedFault(failure);
+  assert.equal(fault?.kind, "transient");
+  assert.equal(fault.retryAt, retryAt);
+  assert.equal(fault.outcomeUnknown, false);
 });

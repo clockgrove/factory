@@ -180,6 +180,7 @@ export function observeWorker(
       error?: string;
       authentication?: unknown;
       lost?: boolean;
+      retryAt?: string;
     };
     const authentication = parseAuthenticationRequest(result.authentication);
     return result.state === "complete"
@@ -188,6 +189,10 @@ export function observeWorker(
           state: "failed",
           detail: result.error,
           ...(result.lost === true && !authentication && { interrupted: true }),
+          ...(typeof result.retryAt === "string" &&
+            Number.isFinite(Date.parse(result.retryAt)) && {
+              retryAt: result.retryAt,
+            }),
           ...(authentication && { authentication }),
         };
   }

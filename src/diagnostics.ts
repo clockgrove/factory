@@ -119,6 +119,7 @@ function waitStatus(
           since: outage.since,
           tries: outage.tries,
           last: redactDiagnosticDetail(faultDetail(outage.last), secrets),
+          ...(outage.retryAt && { retryAt: outage.retryAt }),
           escalated: outage.escalated,
         }
       : null,

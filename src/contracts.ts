@@ -981,6 +981,8 @@ export interface HarnessObservation {
   state: "running" | "complete" | "failed" | "cancelled";
   /** Failed only because the worker ended without writing a result; repeat it. */
   interrupted?: boolean;
+  /** The provider's limit reset time (ISO 8601), when it gave one. */
+  retryAt?: string;
   detail?: string;
   /** Present when the attempt is paused on a developer-local login. */
   authentication?: AuthenticationRequest;

@@ -23,17 +23,23 @@ export function transportFailure(error: unknown): boolean {
  * The attempt ended and the driver confirmed nothing of it runs.
  * - A worker that stopped without a result is `transient`, not counted
  *   here: the next `find` returns undefined, and the execute step reports
- *   the lost run once with `ctx.paidLost`.
+ *   the lost run once with `ctx.paidLost`. A provider limit carries its
+ *   reset time as `retryAt`.
  * - A worker that failed with a result is `work`.
  */
 export function stoppedFault(
   detail: string,
   interrupted: boolean,
   cause?: unknown,
+  retryAt?: string,
 ): StepFault {
   return interrupted
     ? new StepFault(
-        transient(`The worker stopped without a result: ${detail}`, false),
+        transient(
+          `The worker stopped without a result: ${detail}`,
+          false,
+          retryAt,
+        ),
         { cause },
       )
     : workFault(detail, { cause });

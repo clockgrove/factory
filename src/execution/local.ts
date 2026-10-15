@@ -2784,6 +2784,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
           : String(collectionError),
         interrupted,
         collectionError,
+        observed.retryAt,
       );
     }
     return collected;

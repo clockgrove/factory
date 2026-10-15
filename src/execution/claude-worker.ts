@@ -44,6 +44,7 @@ import {
 } from "./claude-validation.js";
 import {
   harnessFailure,
+  ProviderLimitError,
   privateProgress,
   readProducedAssets,
   redact,
@@ -287,6 +288,8 @@ async function main(): Promise<void> {
     }
     const stream = query({ prompt, options });
     let result: SDKResultMessage | undefined;
+    // The SDK reports a reached usage or session limit as structure.
+    let limit: { retryAt?: string } | undefined;
     let initialization: SDKSystemMessage | undefined;
     events = stream[Symbol.asyncIterator]();
     for (;;) {
@@ -295,6 +298,18 @@ async function main(): Promise<void> {
       const message = next.value;
       turn.progress();
       if (message.type === "result") result = message;
+      if (message.type === "rate_limit_event") {
+        const { status, resetsAt } = message.rate_limit_info;
+        // The SDK gives the reset as Unix seconds.
+        limit =
+          status === "rejected"
+            ? {
+                ...(resetsAt !== undefined && {
+                  retryAt: new Date(resetsAt * 1000).toISOString(),
+                }),
+              }
+            : undefined;
+      }
       const observedUsage = usage.observe(message);
       capture.claude(
         message,
@@ -352,7 +367,10 @@ async function main(): Promise<void> {
       throw new Error("Claude SDK did not report its initialized session");
     if (!result) throw new Error("Claude SDK ended without a result");
     const error = resultError(result);
-    if (error) throw new Error(error);
+    if (error)
+      throw limit
+        ? new ProviderLimitError(error, limit.retryAt)
+        : new Error(error);
     closeStarted = true;
     await closeProviderEventStream(events, turn, true);
     if (prepared) await turn.race(prepared.close());

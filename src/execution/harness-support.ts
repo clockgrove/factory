@@ -156,6 +156,20 @@ export class ProviderStreamError extends Error {
 }
 
 /**
+ * The provider refused the turn because its usage or session limit is
+ * reached. `retryAt` is the reset time (ISO 8601) when the provider gave one.
+ */
+export class ProviderLimitError extends Error {
+  override readonly name = "ProviderLimitError";
+  constructor(
+    message: string,
+    readonly retryAt?: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * The provider turn broke after the model was reached (stream error, idle
  * timeout, stream ended early, transport failure): the paid run was lost,
  * it did not produce a wrong result.
@@ -163,6 +177,7 @@ export class ProviderStreamError extends Error {
 function lostTurn(error: unknown): boolean {
   return (
     error instanceof ProviderStreamError ||
+    error instanceof ProviderLimitError ||
     error instanceof ProviderTurnTimeoutError ||
     error instanceof ProviderTurnIncompleteError ||
     networkFailure(error)
@@ -178,12 +193,15 @@ export function harnessFailure(
   error: string;
   authentication?: { provider: string; command: string };
   lost?: true;
+  retryAt?: string;
 } {
   const authentication = authenticationFailure(provider, error);
   const failure = authentication ?? {
     state: "failed" as const,
     error: error instanceof Error ? error.message : String(error),
     ...(lostTurn(error) && { lost: true as const }),
+    ...(error instanceof ProviderLimitError &&
+      error.retryAt && { retryAt: error.retryAt }),
   };
   return { ...failure, error: redact(failure.error, secrets) };
 }

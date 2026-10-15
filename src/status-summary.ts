@@ -15,6 +15,8 @@ export interface OutageView {
   tries: number;
   /** Detail of the last fault. */
   last: string;
+  /** When the last fault said to try again (a provider limit's reset). */
+  retryAt?: string;
   /** 24 hours of running time: the operator may cancel. */
   escalated: boolean;
 }
@@ -291,7 +293,7 @@ const when = (time: string) => `${time.slice(0, 16).replace("T", " ")}Z`;
 
 /** "(step): since … (N tries, last: …)" for a step in a run of faults. */
 function outageText(outage: OutageView): string {
-  return `(${outage.step}): since ${when(outage.since)} (${outage.tries} ${outage.tries === 1 ? "try" : "tries"}, last: ${short(outage.last, 60)})`;
+  return `(${outage.step}): since ${when(outage.since)} (${outage.tries} ${outage.tries === 1 ? "try" : "tries"}, last: ${short(outage.last, 60)})${outage.retryAt ? `; retry after ${when(outage.retryAt)}` : ""}`;
 }
 
 /**

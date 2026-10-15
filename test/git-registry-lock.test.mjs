@@ -103,6 +103,7 @@ import { controlObjective, runObjective } from "../dist/runner.js";
 import {
   acquireInstallationLock,
   acquireObjectiveLock,
+  asInstallationOwner,
   installationLockPath,
   objectiveLockPath,
   readControllerOwner,
@@ -3006,6 +3007,20 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       lockReleased = true;
       const maintenanceLock = acquireInstallationLock(repository, 4);
       try {
+        // The live installation owner may lock a stopped Objective only while
+        // it decides that Objective itself (#1290); anyone else stays refused.
+        assert.throws(
+          () => acquireObjectiveLock(repository, 5),
+          /already owns this installation/,
+        );
+        const decided = await asInstallationOwner(maintenanceLock, async () =>
+          acquireObjectiveLock(repository, 5),
+        );
+        releaseControllerLock(objectiveLockPath(repository, 5), decided);
+        assert.throws(
+          () => acquireObjectiveLock(repository, 5),
+          /already owns this installation/,
+        );
         await assert.rejects(
           retireUnknownProjectAdmission(
             config,

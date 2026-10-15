@@ -438,7 +438,11 @@ async function decideCommand(
     answer: option(args, "answer"),
     reason,
   });
-  const run = `\`factory run --objective ${objective}\``;
+  // A live service recorded the decision itself; queue resume continues it.
+  const run = liveControllerOwner(installationLockPath(config.repository))
+    ?.intake
+    ? "`factory queue resume`"
+    : `\`factory run --objective ${objective}\``;
   console.log(
     decided === "plan-accepted"
       ? `Accepted the plan for Objective #${objective}; run ${run} to continue`

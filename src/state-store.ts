@@ -618,10 +618,32 @@ export function acquireInstallationLock(
   });
 }
 
+/** The installation lock this process holds while it decides a stopped Objective. */
+let installationMutation: ControllerLock | undefined;
+
+/**
+ * Run `task` as the live installation owner deciding one of its stopped
+ * Objectives (#1290): within it, that owner's own lock does not exclude the
+ * Objective's lock, so the service applies the decision itself.
+ */
+export async function asInstallationOwner<T>(
+  lock: ControllerLock,
+  task: () => Promise<T>,
+): Promise<T> {
+  if (installationMutation)
+    throw new Error("Another installation-owner decision is in progress");
+  installationMutation = lock;
+  try {
+    return await task();
+  } finally {
+    installationMutation = undefined;
+  }
+}
+
 /**
  * Own one Objective: refused while the installation has a live owner (the
- * service answers for every Objective). Owners of different Objectives run
- * side by side.
+ * service answers for every Objective), except that owner itself deciding
+ * a stopped Objective. Owners of different Objectives run side by side.
  */
 export function acquireObjectiveLock(
   repository: string,
@@ -638,8 +660,13 @@ export function acquireObjectiveLock(
     {
       guard: `${installation}.acquire`,
       owned: `Objective #${objective}`,
-      conflict: () =>
-        liveControllerOwner(installation) ? "this installation" : undefined,
+      conflict: () => {
+        const owner = liveControllerOwner(installation);
+        const self =
+          owner?.pid === process.pid &&
+          owner.token === installationMutation?.token;
+        return owner && !self ? "this installation" : undefined;
+      },
     },
   );
 }

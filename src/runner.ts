@@ -232,6 +232,8 @@ async function decideObjectiveUnscoped(
   objective: number,
   services: Pick<ApplicationServices, "github">,
   input: DecisionInput,
+  /** False when the live installation owner applies the decision itself. */
+  forward = true,
 ): Promise<"plan-accepted" | "plan-refused" | "result" | "result-open"> {
   const state = readContinuation(config.repository, objective);
   if (!state)
@@ -246,6 +248,19 @@ async function decideObjectiveUnscoped(
       );
     if (input.outcome === "accept" && !input.answer)
       throw new Error("Accepting a plan requires --answer to its question");
+    // A live service owns the installation: it applies the decision (#1290).
+    if (forward) {
+      const reply = await requestControl(config.repository, {
+        objective,
+        action: "decide",
+        input: { ...input },
+      });
+      if (reply.handled) {
+        if (reply.result !== "plan-accepted" && reply.result !== "plan-refused")
+          throw new Error("The live owner returned no plan decision");
+        return reply.result;
+      }
+    }
     await decidePlan(config, objective, services, {
       actor: input.actor,
       outcome: input.outcome,
@@ -265,11 +280,13 @@ async function decideObjectiveUnscoped(
     outcome: input.outcome,
     reason: input.reason,
   };
-  const reply = await requestControl(config.repository, {
-    objective,
-    action: "decide",
-    input: result,
-  });
+  const reply = forward
+    ? await requestControl(config.repository, {
+        objective,
+        action: "decide",
+        input: result,
+      })
+    : { handled: false };
   if (!reply.handled) decideResult(config, objective, result);
   // Criteria of the same review that still wait keep the Objective stopped.
   const after = readContinuation(config.repository, objective);

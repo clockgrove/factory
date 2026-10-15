@@ -144,7 +144,7 @@ export interface IntakeAuthorization {
   };
 }
 export const DEFAULT_QUEUE_POLL_SECONDS = 30;
-export const QUEUE_COMMAND_TIMEOUT_MS = 60_000;
+export const QUEUE_COMMAND_TIMEOUT_MS = 180_000;
 const commandScopes = new AsyncLocalStorage<{
   deadlineAt: number;
   onAcknowledgment?: (value: unknown) => void;
@@ -1819,6 +1819,12 @@ async function runIntakeOwned(
           "Cold controller local checkpoint closure retains required unavailable originals; readiness is held",
         );
     }
+    // Queue receipts are read only from the authenticated archive. This
+    // installation's own unacknowledged changes (for example a queue command
+    // whose deadline cut off its final checkpoint, reported as
+    // durability-pending) complete first, as before any queue command's read;
+    // otherwise its completed receipt looks partial and startup fails (#1298).
+    await awaitCheckpointAdmission(config.repository, "before-effect");
     record = view(config, await observeProjectQueue(config, services.github));
     if (options.backgroundConfigurationPath)
       checkPreparedIntakeServiceState(

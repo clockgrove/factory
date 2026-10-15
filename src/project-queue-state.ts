@@ -2817,17 +2817,30 @@ function producer(
       entry.kind === "project-queue-operation" &&
       entry.id === metadata.receiptId,
   );
+  // Each refusal names its cause and the operator's next step (#1298).
+  const refusal = (reason: string) =>
+    new Error(
+      `Project queue metadata lacks its exact authenticated explicit producer receipt: ${reason}`,
+    );
+  if (!record)
+    throw refusal(
+      `receipt ${metadata.receiptId} is absent from the authenticated archive; if a queue command reported durability-pending, run factory persistence sync`,
+    );
+  if (!completedQueueOperation(record, history))
+    throw refusal(
+      `receipt ${record.id} is not complete in the authenticated archive; if a queue command reported durability-pending, run factory persistence sync`,
+    );
   if (
-    !record ||
-    !completedQueueOperation(record, history) ||
     record.scope !== scope ||
     record.metadata !== text ||
-    (!historical &&
-      record.authorityDigest !== factoryAuthorityDigest(config)) ||
     JSON.stringify(record.binding) !== JSON.stringify(config.queue?.project)
   )
-    throw new Error(
-      "Project queue metadata lacks its exact authenticated explicit producer receipt",
+    throw refusal(
+      `receipt ${record.id} differs from the card or Project binding`,
+    );
+  if (!historical && record.authorityDigest !== factoryAuthorityDigest(config))
+    throw refusal(
+      `receipt ${record.id} was approved under a different queue authority (queued settings such as autonomy, provider or the Project binding changed); re-authorize with factory queue resume, and withdraw and re-add queued Objectives with factory queue remove N and factory queue add N`,
     );
   if (
     history.some(

@@ -97,6 +97,7 @@ import {
   awaitCheckpointAdmission,
   CheckpointProducerInventoryChanged,
   isCheckpointAdmissionFailure,
+  isCheckpointCollectionPending,
   withQueueControlVerification,
   withRecoveryCheckpointScope,
 } from "./recovery-checkpoint.js";
@@ -987,6 +988,9 @@ async function runObjectiveOwned(
         : undefined,
     )
       .catch((error: unknown) => {
+        // A worker return awaiting collection refuses publication until the
+        // controller collects it; the next tick tries again.
+        if (isCheckpointCollectionPending(error)) return;
         if (isCheckpointAdmissionFailure(error)) {
           presentationHeld = true;
           process.stderr.write(

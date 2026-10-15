@@ -319,6 +319,25 @@ export class CheckpointAdmissionFailure extends Error {
   }
 }
 /** A complete local producer inventory changed before strict closure verification. */
+/**
+ * A completed local worker return is not yet frozen by its collector, so no
+ * checkpoint can be published until collection: the controller collects before
+ * its own admissions, while a concurrent presentation admission waits a tick.
+ */
+export class CheckpointCollectionPending extends Error {
+  constructor(paths: string[]) {
+    super(
+      `Checkpoint manifest is incomplete until completed worker output is collected: ${paths.join(", ")}`,
+    );
+  }
+}
+export function isCheckpointCollectionPending(error: unknown): boolean {
+  return (
+    error instanceof CheckpointCollectionPending ||
+    (error instanceof CheckpointAdmissionFailure &&
+      error.cause instanceof CheckpointCollectionPending)
+  );
+}
 export class CheckpointProducerInventoryChanged extends Error {
   constructor(kind: "accounting" | "memory" | "learning", directory: string) {
     super(
@@ -5787,6 +5806,13 @@ async function publishCheckpoint(
               ? { authority: checkpointAuthority(config) }
               : {}),
           };
+          const uncollected = closure.gaps.filter(
+            (gap) => gap.required !== false && gap.availability === "transient",
+          );
+          if (uncollected.length)
+            throw new CheckpointCollectionPending(
+              uncollected.map((gap) => gap.path),
+            );
           assertManifest(manifest, manifest.binding, options);
           const store = new LocalContentStore(
             join(stateRoot(config.repository), "content"),

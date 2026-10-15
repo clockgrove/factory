@@ -81,6 +81,7 @@ import {
 import {
   awaitCheckpointAdmission,
   gitPersistenceStatus,
+  isCheckpointCollectionPending,
   markCheckpointDirty,
   readVerifiedRecoveryCheckpoint,
   synchronizeRecoveryCheckpoint,
@@ -820,18 +821,20 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
     while (!existsSync(worker.resultPath) && Date.now() < resultDeadline)
       await new Promise((resolve) => setTimeout(resolve, 10));
     assert(existsSync(worker.resultPath));
-    // A checkpoint between the worker's return and its collection is admitted:
-    // the uncollected output is a transient, optional gap (#1276).
+    // Between the worker's return and its collection, publication refuses with
+    // a typed pending-collection cause, which a concurrent presentation tick
+    // skips (#1276); the acknowledged checkpoint after collection follows below.
     saveState(path, state);
-    await withRecoveryCheckpointScope(
-      {
-        config,
-        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
-      },
-      () => awaitCheckpointAdmission(repository, "explicit"),
+    await assert.rejects(
+      withRecoveryCheckpointScope(
+        {
+          config,
+          buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+        },
+        () => awaitCheckpointAdmission(repository, "explicit"),
+      ),
+      (error) => isCheckpointCollectionPending(error),
     );
-    const window = gitPersistenceStatus(config);
-    assert.equal(window.sequence, window.acknowledgedSequence);
     const driver = new LocalExecutionDriver(
       checkout,
       workRoot,

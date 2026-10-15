@@ -168,6 +168,18 @@ export function recordWorkFailure(
         : "unavailable",
     decision: decisions[classification],
   };
+  // Retained evidence binds this failure only when its record validates. A
+  // binding that does not is left out, and the failure is still recorded:
+  // the previous attempt's record must never stay beside this error (#1254).
+  const binds = (check: () => void): boolean => {
+    try {
+      check();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let failedValidation: FailedValidationRecord | undefined;
   // Readiness probes also validate the accepted base before any result or
   // attempt exists. They cannot supply a failed result's candidate receipts.
   if (
@@ -191,22 +203,29 @@ export function recordWorkFailure(
       evidence: error.failedValidation,
     };
     failure.validationCaptureDigest = failedValidationDigest(retained);
-    assertFailedValidationRecord(retained, state, id, work, failure);
-    work.failedValidation = structuredClone(retained);
+    if (
+      binds(() =>
+        assertFailedValidationRecord(retained, state, id, work, failure),
+      )
+    )
+      failedValidation = retained;
+    else delete failure.validationCaptureDigest;
   }
   if (
     isolated &&
     work.step === "validate" &&
-    error instanceof SemanticAcceptanceFailure
+    error instanceof SemanticAcceptanceFailure &&
+    work.validation
   ) {
-    if (!work.validation)
-      throw new Error("Semantic refusal has no retained validation evidence");
     failure.semanticRefusal = {
       ...structuredClone(error.semanticRefusal),
       validationDigest: semanticValidationDigest(work.validation),
     };
-    assertSemanticRefusalRecord(state, id, work, failure);
+    if (!binds(() => assertSemanticRefusalRecord(state, id, work, failure)))
+      delete failure.semanticRefusal;
   }
+  if (failedValidation)
+    work.failedValidation = structuredClone(failedValidation);
   // A new failure starts a fresh record: an earlier correction belongs to
   // the attempt it corrected, which the history keeps.
   work.recovery = {

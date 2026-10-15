@@ -112,6 +112,10 @@ import {
 } from "../dist/result-evidence.js";
 import { assertReviewArtifactSelectors } from "../dist/review-artifacts.js";
 import {
+  resolveReviewReferences,
+  reviewPacket,
+} from "../dist/review-evidence.js";
+import {
   loadReviewArtifactObservations,
   loadReviewArtifacts,
   materializeReviewImages,
@@ -132,8 +136,13 @@ import {
   cancelObjective,
   decideResult,
   rereviewWorkItem,
+  retryWorkItem,
   runObjective,
 } from "../dist/runner.js";
+import {
+  SemanticAcceptanceFailure,
+  semanticRefusalDetail,
+} from "../dist/semantic-refusal.js";
 import { parseFactoryState, setCoordinatorMode } from "../dist/state.js";
 import {
   acquireInstallationLock,
@@ -3270,6 +3279,94 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       repaired.work.local.recovery.history[0].work.validation,
       evidence,
     );
+    // The repaired item's next attempt is refused by review for a pinned
+    // source section. That refusal replaces the earlier attempt's record,
+    // and `factory retry` then starts a new attempt (#1254).
+    const sectionSources = planningSources(
+      "## Sources\n- contract.md#Documentation\n",
+      commit,
+      checkout,
+    );
+    assert.ok(sectionSources.some((source) => source.heading));
+    const later = readState(config.repository, 3);
+    const laterWork = later.work.local;
+    Object.assign(laterWork, {
+      step: "validate",
+      attempt: "later-candidate",
+      baseSha: commit,
+      executionBaseSha: commit,
+      graphRevisionDigest: graphDigest(later.graph),
+      changeRef: commit,
+      treeSha,
+      validation: structuredClone(evidence),
+    });
+    const laterPacket = reviewPacket(
+      later.graph.items[0].acceptance,
+      sectionSources.map((source) => ({ ...source, origin: "source" })),
+    );
+    const laterFinding = {
+      criterionId: laterPacket.criteria[0].id,
+      verdict: "refuse",
+      evidenceIds: laterPacket.evidence.map((entry) => entry.id),
+      detail: "The documented section requires a marker the README omits.",
+      question: "",
+    };
+    const laterRefusal = {
+      treeSha,
+      criterion: later.graph.items[0].acceptance[0],
+      source: "model",
+      finding: laterFinding,
+      evidence: resolveReviewReferences(
+        laterFinding.evidenceIds,
+        laterPacket,
+        false,
+      ),
+    };
+    const reviewRefusal = new SemanticAcceptanceFailure(
+      semanticRefusalDetail(laterRefusal),
+      laterRefusal,
+    );
+    // The delivery runner fails the item with the error, then records it.
+    const recordLater = (state, error) => {
+      state.work.local.status = "failed";
+      state.work.local.error = error.message;
+      recordWorkFailure(state, "local", error);
+    };
+    const unbound = structuredClone(later);
+    recordLater(later, reviewRefusal);
+    assert.deepEqual(laterWork.recovery.failure.semanticRefusal, {
+      ...laterRefusal,
+      validationDigest:
+        laterWork.recovery.failure.semanticRefusal.validationDigest,
+    });
+    assert.equal(laterWork.recovery.failure.detail, laterWork.error);
+    saveState(statePath(config.repository, 3), later);
+    const retryConfig = { ...config, delivery: { kind: "regular" } };
+    assert.equal(retryWorkItem(retryConfig, 3, "local"), "attempt");
+    const retried = readState(config.repository, 3).work.local;
+    assert.equal(retried.status, "pending");
+    assert.equal(
+      retried.recovery.history.at(-1).work.attempt,
+      "later-candidate",
+    );
+    assert.deepEqual(
+      retried.recovery.history.at(-1).failure,
+      laterWork.recovery.failure,
+    );
+    // A refusal whose binding is rejected is still this attempt's failure:
+    // the earlier attempt's record never stays beside its error.
+    const misbound = new SemanticAcceptanceFailure(reviewRefusal.message, {
+      ...laterRefusal,
+      treeSha: "0".repeat(40),
+    });
+    recordLater(unbound, misbound);
+    assert.equal(unbound.work.local.recovery.failure.detail, misbound.message);
+    assert.equal(
+      unbound.work.local.recovery.failure.semanticRefusal,
+      undefined,
+    );
+    saveState(statePath(config.repository, 3), unbound);
+    assert.equal(retryWorkItem(retryConfig, 3, "local"), "attempt");
     assert.equal(git("rev-parse", "HEAD"), commit);
     // A real exclusive owner saves intent then exits before dispatch. The next
     // process reclaims ownership and loads the atomic snapshot, not diagnostics.

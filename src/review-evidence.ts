@@ -530,8 +530,15 @@ export function resolveReviewReferences(
       throw new ReviewProtocolError(
         "A passing review cannot rely on incomplete cited evidence",
       );
-    const { content: _content, reusableBody: _body, ...reference } = entry;
-    return reference;
+    // Exactly the declared reference: an input's other fields, such as a
+    // pinned source's heading, are not part of it (#1254).
+    return {
+      id: entry.id,
+      origin: entry.origin,
+      path: entry.path,
+      digest: entry.digest,
+      complete: entry.complete,
+    };
   });
 }
 function reviewResponse(response: unknown, packet: ReviewPacket): unknown[] {

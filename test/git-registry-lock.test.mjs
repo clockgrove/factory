@@ -1428,7 +1428,8 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
         assert.equal(incomplete.returned.operations[0].objective, 1);
         assert.equal(incomplete.returned.durability.pendingChanges, true);
         assert.notEqual(incomplete.returned.durability.status, "acknowledged");
-        assert.match(incomplete.message, /Do not repeat it/);
+        assert.equal(incomplete.returned.acknowledged, false);
+        assert.match(incomplete.message, /not acknowledged.*Do not repeat it/);
       } finally {
         await archiveHolder?.release();
         archiveHolder = undefined;

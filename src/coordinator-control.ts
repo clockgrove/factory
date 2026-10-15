@@ -50,6 +50,8 @@ export interface ControlContext {
 export interface ReturnedQueueCommand {
   commandId: string;
   operations: { id: string; action: string; objective?: number }[];
+  /** The journal shows no pending change and an acknowledgment when the deadline surfaced. */
+  acknowledged: boolean;
   /** The actual archive journal when the deadline surfaced, never a log. */
   durability: {
     status: string;

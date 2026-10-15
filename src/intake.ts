@@ -158,6 +158,7 @@ function returnedCommand(
     const acknowledged = status.lastAcknowledged;
     return {
       ...outcomes[0],
+      acknowledged: status.status === "acknowledged" && !status.pendingChanges,
       durability: {
         status: status.status,
         pendingChanges: status.pendingChanges,
@@ -243,7 +244,7 @@ export async function withIntakeCommandDeadline<T>(
         : undefined;
     if (returned) {
       incomplete.returned = returned;
-      incomplete.message = `Queue command ${returned.commandId} returned its Project effect (operations ${returned.operations.map((operation) => operation.id).join(", ")}) but its archive durability is not acknowledged before the deadline. Do not repeat it; run factory persistence status and factory persistence sync`;
+      incomplete.message = `Queue command ${returned.commandId} returned its Project effect (operations ${returned.operations.map((operation) => operation.id).join(", ")}) ${returned.acknowledged ? "and its archive acknowledgment is already recorded, but the deadline passed first. Do not repeat it" : "but its archive durability is not acknowledged before the deadline. Do not repeat it; run factory persistence status and factory persistence sync"}`;
     }
     throw incomplete;
   } finally {

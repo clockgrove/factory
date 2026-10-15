@@ -665,14 +665,17 @@ async function dispatchMain(): Promise<void> {
     return;
   }
   if (["pause", "drain", "resume"].includes(command)) {
-    console.log(
-      JSON.stringify(
-        await controlObjective(config, {
-          objective,
-          action: command as "pause" | "drain" | "resume",
-        }),
-      ),
-    );
+    const result = (await controlObjective(config, {
+      objective,
+      action: command as "pause" | "drain" | "resume",
+    })) as { hold?: { reason: string; next: string | null } } | undefined;
+    // A rejected amendment keeps the Objective paused: the resume or drain
+    // changed nothing, so say what does (#1297).
+    if (result?.hold)
+      throw new Error(
+        `Objective #${objective} stays paused: a rejected graph amendment holds it; ${result.hold.next ? `run ${result.hold.next}` : "submit a replacement or cancel"}`,
+      );
+    console.log(JSON.stringify(result));
     return;
   }
   if (command === "status") {

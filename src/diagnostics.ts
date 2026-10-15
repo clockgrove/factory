@@ -2352,6 +2352,7 @@ export function statusDocument(
       ? {
           id: state.pendingAmendment.id,
           phase: state.pendingAmendment.phase,
+          worker: state.pendingAmendment.proposal.worker?.itemId ?? null,
           expectedGraphDigest:
             state.pendingAmendment.proposal.expectedGraphDigest,
           failureDigest: state.pendingAmendment.error

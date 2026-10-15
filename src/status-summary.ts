@@ -203,6 +203,8 @@ export interface ExecutionStatusView extends WaitView {
     error: string | null;
     /** The planner's unanswered question about the amendment, if any. */
     question?: string | null;
+    /** The Work Item whose discovery this amendment proposes, if a worker proposed it. */
+    worker?: string | null;
     /** Why `factory propose-amendment` would refuse a replacement of a rejected amendment; null when it fits. */
     replacementRefusal?: Refusal | null;
   } | null;
@@ -468,6 +470,30 @@ function rejectedAmendment(
 }
 
 /**
+ * A worker's discovery the Objective is reviewing as an amendment: the run
+ * reviews and projects it (a paused or draining owner after resume), and no
+ * diagnosis of the item's failure runs meanwhile.
+ */
+function proposedDiscovery(
+  view: ExecutionStatusView,
+): StatusSummary | undefined {
+  const pending = view.pendingAmendment;
+  if (!pending?.worker || ["rejected", "backlog"].includes(pending.phase))
+    return undefined;
+  return {
+    phase: "waiting",
+    summary: `amendment for ${pending.worker}'s discovery is ${pending.phase}`,
+    nextAction:
+      view.runActive === true
+        ? ownerResume(view, "reviews and projects the amendment")
+        : {
+            command: run(view.objective),
+            reason: `${pending.worker} proposed a graph change: this reviews and projects it, then the item starts a new attempt`,
+          },
+  };
+}
+
+/**
  * What an owner that is already running does about work that is waiting on
  * it: nothing to name while it runs, but a paused or draining owner merges
  * nothing until it is resumed.
@@ -603,8 +629,17 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
           : `Answer the question below${thenRun(view)}`,
       },
     };
+  // A rejected amendment holds the Objective paused and blocks dispatch: no
+  // diagnosis, repair or retry proceeds until a replacement or cancel answers
+  // it, so it comes before them.
+  const rejected = rejectedAmendment(view);
+  if (rejected) return rejected;
   const status = (id: string) =>
     view.work.find((item) => item.id === id)?.status ?? "";
+  // A failed item whose discovery entered amendment has no diagnosis to run:
+  // the amendment answers it.
+  const proposed = proposedDiscovery(view);
+  if (proposed) return proposed;
   const diagnosing = Object.entries(view.repairs).find(
     ([id, repair]) => repair.phase === "diagnosing" && status(id) === "failed",
   );
@@ -655,8 +690,6 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
         },
       };
   }
-  const rejected = rejectedAmendment(view);
-  if (rejected) return rejected;
   return undefined;
 }
 
@@ -1501,6 +1534,7 @@ export interface ServiceStatusDocument {
     mode?: string;
     activeObjective?: number | null;
     observation?: { error?: string; needsDecision?: number };
+    remoteObservation?: { availability: "last-observed" | "unavailable" };
   };
 }
 
@@ -1552,21 +1586,30 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
   const queued = (queue.objectives ?? []).filter(
     (id) => !(queue.dequeued ?? []).includes(id),
   );
-  const parts = [
-    queue.mode ?? "running",
-    queued.length
-      ? `queued ${queued.map((id) => `#${id}`).join(", ")}`
-      : "empty",
-    ...(queue.activeObjective ? [`#${queue.activeObjective} running`] : []),
-  ];
-  lines.push(`Queue: ${parts.join("; ")}`);
-  if (queue.mode === "paused")
-    lines.push("  Paused; `factory queue resume` continues it");
-  else if (queue.mode === "draining")
+  // Without a Project observation the queue's mode and entries are unknown,
+  // not paused or empty, so no queue command is named from them (#1297).
+  if (queue.remoteObservation?.availability === "unavailable")
     lines.push(
-      "  Draining; `factory queue resume` continues it, then `factory supervisor start` if the service stopped",
+      `Queue: unknown; the Project observation is unavailable${queue.activeObjective ? `; #${queue.activeObjective} running` : ""}`,
     );
-  if (!queued.length) lines.push("  `factory queue add N` queues an Objective");
+  else {
+    const parts = [
+      queue.mode ?? "running",
+      queued.length
+        ? `queued ${queued.map((id) => `#${id}`).join(", ")}`
+        : "empty",
+      ...(queue.activeObjective ? [`#${queue.activeObjective} running`] : []),
+    ];
+    lines.push(`Queue: ${parts.join("; ")}`);
+    if (queue.mode === "paused")
+      lines.push("  Paused; `factory queue resume` continues it");
+    else if (queue.mode === "draining")
+      lines.push(
+        "  Draining; `factory queue resume` continues it, then `factory supervisor start` if the service stopped",
+      );
+    if (!queued.length)
+      lines.push("  `factory queue add N` queues an Objective");
+  }
   if (queue.observation?.error)
     lines.push(`  Last error: ${short(queue.observation.error, 160)}`);
   if (document.currentObjective)

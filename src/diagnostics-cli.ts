@@ -103,8 +103,11 @@ export async function runDiagnosticsCommand(
     const item = option(args, "logs");
     if (!item || item.startsWith("--"))
       throw new Error("diagnostics --logs requires ITEM");
-    const attempt = readState(config.repository, objective)?.work[item]
-      ?.attempt;
+    // A repair or retry archives the attempt before the next one is recorded;
+    // its log stays readable (#1297).
+    const work = readState(config.repository, objective)?.work[item];
+    const attempt =
+      work?.attempt ?? work?.recovery?.history?.at(-1)?.work.attempt;
     if (!attempt)
       throw new Error("--logs requires a Work Item with a recorded attempt");
     let lines = 0;

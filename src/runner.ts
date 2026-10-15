@@ -402,6 +402,38 @@ function modeChangeResult(
   };
 }
 
+/**
+ * A rejected amendment holds the Objective paused and blocks dispatch: only the
+ * command status names for it (a replacement, `factory cancel`, or the retry
+ * that clears another stop first) moves it on. Repair and retry refuse any
+ * other change, which would be recorded and then never run (#1297).
+ */
+function assertRejectionAllows(
+  config: FactoryConfig,
+  state: ContinuationState,
+  command: string,
+): void {
+  if (!rejectionHoldsPause(state)) return;
+  const next = continuationStatusDocument(
+    state,
+    config.repository,
+    state.objective,
+    config.delivery.kind,
+    [],
+    state.capacity.concurrency,
+    owners.has(ownerKey(config, state.objective)),
+    undefined,
+    factoryConfigDigest(config),
+  ).nextAction?.command;
+  if (next === command) return;
+  const reason =
+    (isExecutionState(state) && state.pendingAmendment?.error) ||
+    "the amendment was rejected";
+  throw new Error(
+    `Objective #${state.objective} is held by a rejected graph amendment (${reason.length > 200 ? `${reason.slice(0, 199)}…` : reason}); ${next ? `run ${next}` : "submit a replacement or cancel"}`,
+  );
+}
+
 /** A stopped disposition owns verification and settlement until lease release. */
 async function stoppedOperatorHandoff(
   config: FactoryConfig,
@@ -1764,6 +1796,11 @@ function retryStep(
       readContinuation(config.repository, objective);
     if (!state) throw new Error("Objective has no Factory state");
     assertRestoredContinuationReady(state, config);
+    assertRejectionAllows(
+      config,
+      state,
+      `factory retry --objective ${objective}${itemId === undefined ? "" : ` --item ${itemId}`}`,
+    );
     // A failed or cancelled item's attempt is over: retry starts a new one.
     const work =
       itemId === undefined || !("work" in state)
@@ -1970,6 +2007,11 @@ export function repairWorkItem(
       !continuationConfigurationMatches(state, config)
     )
       throw new Error("Objective is not available for diagnosed repair");
+    assertRejectionAllows(
+      config,
+      state,
+      `factory repair --objective ${objective} --proposal FILE`,
+    );
     if (
       input.correction.readiness ||
       input.correction.actor === "factory-controller"

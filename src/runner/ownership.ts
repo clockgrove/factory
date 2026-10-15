@@ -58,6 +58,37 @@ export class CoordinatorHandoff extends Error {
   }
 }
 
+/**
+ * A running item sleeping between tries of its current step (for example, until
+ * a provider's limit resets) with no live worker holds no effect in flight
+ * (#1268). Its next try is still in the future, so its step has not started the
+ * body; a worker it ran has stopped, as the driver records only after settling it.
+ */
+function betweenTries(
+  state: FactoryState,
+  id: string,
+  work: FactoryState["work"][string],
+): boolean {
+  const record = work.step
+    ? state.repeats?.[`item/${id}/${work.step}`]
+    : undefined;
+  if (
+    !record?.faults ||
+    !record.nextAt ||
+    !(Date.parse(record.nextAt) > Date.now())
+  )
+    return false;
+  const data = work.execution?.data as
+    | { result?: unknown; stopped?: unknown }
+    | undefined;
+  return (
+    !work.execution ||
+    (work.execution.provider === "local" &&
+      typeof data?.stopped === "string" &&
+      data.result === undefined)
+  );
+}
+
 export function canHandoff(state: ContinuationState): boolean {
   if (state.coordinator?.processes?.length || state.coordinator?.cancelError)
     return false;
@@ -91,7 +122,8 @@ export function canHandoff(state: ContinuationState): boolean {
       // An item waiting in place for the operator holds no effect in flight.
       (work.status === "running" &&
         !isReadinessWait(state, id) &&
-        !awaitsOperator(work.wait)) ||
+        !awaitsOperator(work.wait) &&
+        !betweenTries(state, id, work)) ||
       (work.status === "published" &&
         (!work.pullRequest || !work.changeRef || !work.treeSha)),
   );

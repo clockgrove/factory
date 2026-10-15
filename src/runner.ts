@@ -161,6 +161,7 @@ import {
   awaitsOperator,
   clearAllRepeats,
   clearRepeats,
+  endProviderLimitWaits,
   waitOf,
 } from "./step.js";
 import {
@@ -670,9 +671,13 @@ async function runObjectiveOwned(
   /** A handoff: stop at the next safe point and release ownership. */
   const releaseOwnership = () => {
     owner.handoff = true;
-    if (owner.snapshot)
+    if (owner.snapshot) {
       owner.pause.abort(new Error("Coordinator handoff requested"));
-    else owner.initialMode = "draining";
+      // Every running item is between tries or waiting in place, so its step
+      // stops at that safe point too (#1268).
+      if (canHandoff(owner.snapshot))
+        owner.workPause.abort(new Error("Coordinator handoff requested"));
+    } else owner.initialMode = "draining";
   };
   const wait = async (observationDelay?: number) => {
     if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
@@ -1599,7 +1604,20 @@ function retryStep(
       !!state.error &&
       !state.cancelRequested &&
       !state.cancelledAt;
-    if (!awaitsOperator(waitOf(state, scope)) && !stopped) return false;
+    if (!awaitsOperator(waitOf(state, scope)) && !stopped) {
+      // A provider's limit the operator says is lifted: try again now instead
+      // of at the provider's reset time (#1267).
+      if (!endProviderLimitWaits(state, scope)) return false;
+      saveState(statePath(config.repository, objective), state);
+      new DiagnosticEmitter(config.repository, objective).emit({
+        runId: state.runId,
+        ...(itemId === undefined ? {} : { itemId }),
+        operation: "step-retry",
+        outcome: "completed",
+        detail: "Provider limit wait ended by the operator",
+      });
+      return true;
+    }
     clearRepeats(state, scope);
     if (stopped) {
       delete state.error;

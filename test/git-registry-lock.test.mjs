@@ -635,6 +635,7 @@ async function watcherWorkflow(
     const { settleStoppedProjectQueueRun } = await import(
       "../dist/project-queue-state.js"
     );
+    const { linuxProcessIdentity } = await import("../dist/process.js");
     const baseSha = git("rev-parse", "HEAD"),
       attempt = randomUUID();
     const item = {
@@ -946,6 +947,30 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
           await assert.rejects(
             settleStoppedProjectQueueRun(config, foreign, refusalLock),
             /collected local results/,
+          );
+          // A worker that ended without a result is a ceased owner (#1268):
+          // the claim check accepts it, and settlement still refuses while
+          // its recorded process identity is alive.
+          const ceased = structuredClone(collected);
+          const ceasedData = ceased.work.local.execution.data;
+          delete ceasedData.result;
+          ceasedData.stopped = "The worker stopped without a result";
+          ceased.work.local.status = "running";
+          ceased.work.local.step = "execute";
+          // The driver records the ceased worker's session as unavailable.
+          for (const ref of Object.values(ceased.agentSessions ?? {}))
+            if (ref.executionIdentity === attempt) {
+              ref.status = "unavailable";
+              delete ref.currentTurn;
+            }
+          ceasedData.handle.data = {
+            ...ceasedData.handle.data,
+            pid: process.pid,
+            startTime: linuxProcessIdentity(process.pid).startTime,
+          };
+          await assert.rejects(
+            settleStoppedProjectQueueRun(config, ceased, refusalLock),
+            /remains active or uncertain/,
           );
         },
       );

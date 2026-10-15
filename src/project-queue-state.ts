@@ -640,6 +640,22 @@ function assertStoppedClaimState(state: ContinuationState): void {
         collectedLocalWorkerSessionSettled(execution, data.result.session)
       );
     };
+    // A worker that ended without a result (#1268): the driver records that
+    // it stopped only after settling its process group, so nothing remains to
+    // collect. Settlement below still proves its process identity is gone.
+    const ceased = (entry: (typeof work)[number]) => {
+      const execution = entry.execution;
+      const data = execution?.data as
+        | { result?: unknown; stopped?: unknown; rejectedCollection?: unknown }
+        | undefined;
+      return !!(
+        execution?.provider === "local" &&
+        execution.identity === entry.attempt &&
+        typeof data?.stopped === "string" &&
+        data.result === undefined &&
+        data.rejectedCollection === undefined
+      );
+    };
     if (
       state.restoration ||
       state.cancelRequested ||
@@ -648,13 +664,14 @@ function assertStoppedClaimState(state: ContinuationState): void {
       state.coordinator?.cancelError ||
       state.coordinator?.processes?.length ||
       restoredContinuationOwnershipHold(state, true) ||
-      !work.some(collected) ||
+      !work.some((entry) => collected(entry) || ceased(entry)) ||
       work.some(
         (entry) =>
           (entry.execution && entry.execution.provider !== "local") ||
           entry.status === "published" ||
           (entry.status === "running" &&
-            (entry.step !== "execute" || !collected(entry))),
+            (entry.step !== "execute" ||
+              (!collected(entry) && !ceased(entry)))),
       )
     )
       throw new Error(

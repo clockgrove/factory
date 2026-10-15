@@ -271,7 +271,11 @@ async function projectWorkItemProgress(
     ...(work.recovery?.failure && {
       failure: work.recovery.failure.classification,
     }),
-    coordinator: retained.coordinator?.mode,
+    // A pause, drain or restart concerns only items still in progress; a settled item's
+    // issue gets no comment for it.
+    ...(!["done", "failed", "cancelled"].includes(work.status) && {
+      coordinator: retained.coordinator?.mode,
+    }),
   };
   const flushCurrent = await publishProgress(args, live, {
     label: `Work Item ${id}`,
@@ -312,6 +316,14 @@ async function projectWorkItemProgress(
 }
 
 /**
+ * Comment streams whose publication failed with no intent outstanding, by presentation, for
+ * this process. The projection runs every 30 seconds for every Work Item; a refused or
+ * unavailable comment is tried again only when its presentation changes or the controller
+ * restarts, so presentation never spends the GitHub request budget delivery needs.
+ */
+const failedComments = new Map<string, string>();
+
+/**
  * Publish the target's current presentation once: an unresolved earlier intent is
  * reconciled read-only first, an unchanged presentation is skipped, and the bounded
  * history holds later writes. Returns whether a newer presentation must follow a
@@ -323,10 +335,15 @@ async function publishProgress(
   target: ProgressTarget,
 ): Promise<boolean> {
   const { config, github, save } = args;
+  const failedKey = `${config.repository}#${target.objective}:${target.runId}:${target.label}`;
+  let pending: GitHubProgressProjection["requests"][number] | undefined;
   try {
     const progress = target.read(live());
     const previous = progress?.requests.at(-1);
-    const pending = previous && !previous.comment ? previous : undefined;
+    pending = previous && !previous.comment ? previous : undefined;
+    if (!pending && failedComments.get(failedKey) === target.presentationDigest)
+      return false;
+    failedComments.delete(failedKey);
     // No heartbeat refreshes: timestamps never participate in semantic deduplication.
     if (!pending && previous?.presentationDigest === target.presentationDigest)
       return false;
@@ -401,6 +418,8 @@ async function publishProgress(
     const last = current.requests.at(-1);
     const failure =
       last && !last.comment ? "publication-unknown" : "projection-unavailable";
+    if (failure === "projection-unavailable" && !pending)
+      failedComments.set(failedKey, target.presentationDigest);
     // A repeated failure (for example, an issue GitHub refuses) is recorded once.
     if (existed && current.failure === failure) return false;
     current.failure = failure;

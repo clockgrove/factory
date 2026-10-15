@@ -196,6 +196,14 @@ async function projectGitHubProjectStatusUnscoped(args: Args): Promise<void> {
   }
 }
 
+/**
+ * Cards whose read failed with no write outstanding, by phase, for this process. The
+ * projection runs every 30 seconds for every Work Item; a card that is missing or
+ * unreadable is read again only when its phase changes or the controller restarts, so
+ * presentation never spends the GitHub request budget delivery and the queue need.
+ */
+const failedCards = new Map<string, string>();
+
 async function projectCard(
   args: Args,
   config: GitHubProjectStatusConfig,
@@ -210,6 +218,9 @@ async function projectCard(
   const previous = projection?.requests.at(-1);
   const pending =
     previous && !previous.response && !previous.notSent ? previous : undefined;
+  const failedKey = `${args.config.repository}#${args.objective}:${retained.runId}:${target.label}`;
+  if (!pending && failedCards.get(failedKey) === phase) return;
+  failedCards.delete(failedKey);
   // One exact later read is useful evidence. Further reads cannot settle the
   // original effect, so retain its timestamp and fence without polling forever.
   if (pending?.laterObservation) return;
@@ -341,6 +352,8 @@ async function projectCard(
       last && !last.response && !last.notSent
         ? "update-unknown"
         : "projection-unavailable";
+    if (failure === "projection-unavailable" && !pending)
+      failedCards.set(failedKey, phase);
     // A repeated read failure (for example, an issue with no card) is recorded once.
     if (existed && !notSent && current.failure === failure) return;
     current.failure = failure;

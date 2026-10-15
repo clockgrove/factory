@@ -362,19 +362,30 @@ export async function trackCollection<T>(
 ): Promise<T> {
   const count = activeCollections.get(identity) ?? 0;
   activeCollections.set(identity, count + 1);
-  const marker = COLLECTION_IDENTITY.test(identity)
-    ? collectionMarker(repository, identity)
-    : undefined;
-  const self = linuxProcessIdentity(process.pid);
-  if (!count && marker && self) {
-    mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
-    const temporary = `${marker}.${randomUUID()}.tmp`;
-    writeFileSync(
-      temporary,
-      JSON.stringify({ pid: process.pid, startTime: self.startTime }),
-      { flag: "wx", mode: 0o600 },
-    );
-    renameSync(temporary, marker);
+  // The marker only lets other processes wait; it never fails a collection.
+  let marker: string | undefined;
+  try {
+    const path = COLLECTION_IDENTITY.test(identity)
+      ? collectionMarker(repository, identity)
+      : undefined;
+    const self = path && !count ? linuxProcessIdentity(process.pid) : null;
+    if (path && self) {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      try {
+        writeFileSync(
+          temporary,
+          JSON.stringify({ pid: process.pid, startTime: self.startTime }),
+          { flag: "wx", mode: 0o600 },
+        );
+        renameSync(temporary, path);
+        marker = path;
+      } finally {
+        rmSync(temporary, { force: true });
+      }
+    }
+  } catch {
+    marker = undefined;
   }
   try {
     return await task();
@@ -383,7 +394,13 @@ export async function trackCollection<T>(
     if (remaining) activeCollections.set(identity, remaining);
     else {
       activeCollections.delete(identity);
-      if (marker) rmSync(marker, { force: true });
+      if (marker)
+        try {
+          rmSync(marker, { force: true });
+        } catch {
+          // Harmless: once collected, no refusal names this return, and a
+          // later reader ignores the marker after this process ends.
+        }
     }
   }
 }

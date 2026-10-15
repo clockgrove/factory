@@ -820,6 +820,18 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
     while (!existsSync(worker.resultPath) && Date.now() < resultDeadline)
       await new Promise((resolve) => setTimeout(resolve, 10));
     assert(existsSync(worker.resultPath));
+    // A checkpoint between the worker's return and its collection is admitted:
+    // the uncollected output is a transient, optional gap (#1276).
+    saveState(path, state);
+    await withRecoveryCheckpointScope(
+      {
+        config,
+        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+      },
+      () => awaitCheckpointAdmission(repository, "explicit"),
+    );
+    const window = gitPersistenceStatus(config);
+    assert.equal(window.sequence, window.acknowledgedSequence);
     const driver = new LocalExecutionDriver(
       checkout,
       workRoot,

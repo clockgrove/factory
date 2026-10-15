@@ -384,7 +384,18 @@ async function publishProgress(
           presentationDigest: target.presentationDigest,
         });
         save();
-        await awaitCheckpointAdmission(config.repository, "before-effect");
+        try {
+          await awaitCheckpointAdmission(config.repository, "before-effect");
+        } catch (error) {
+          // The POST follows this call, so nothing was sent: drop the intent
+          // instead of leaving it to read as an unknown publication.
+          const latest = target.read(live());
+          if (latest?.requests.at(-1)?.snapshotId === snapshotId) {
+            latest.requests.pop();
+            save();
+          }
+          throw error;
+        }
       },
     });
     const current = target.read(live());

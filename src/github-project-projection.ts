@@ -272,7 +272,21 @@ async function projectCard(
         current.requests.push(intent);
         delete current.observed;
         args.save();
-        await awaitCheckpointAdmission(args.config.repository, "before-effect");
+        try {
+          await awaitCheckpointAdmission(
+            args.config.repository,
+            "before-effect",
+          );
+        } catch (error) {
+          // The mutation follows this call, so nothing was sent: drop the
+          // intent instead of leaving it to read as an unknown update.
+          const latest = target.read(live());
+          if (latest?.requests.at(-1)?.requestId === intent.requestId) {
+            latest.requests.pop();
+            args.save();
+          }
+          throw error;
+        }
       },
     });
     const state = live();

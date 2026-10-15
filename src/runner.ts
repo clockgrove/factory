@@ -940,14 +940,16 @@ async function runObjectiveOwned(
   process.on("SIGTERM", handoff);
   process.on("SIGUSR1", cancel);
   let progressTask: Promise<void> | undefined;
-  let progressAdmissionFailure: unknown;
+  // Presentation never decides the controller's fate (#1276). When one of its
+  // checkpoint admissions fails, it stops for the rest of this run, so it adds
+  // no GitHub effect on unacknowledged durability; the controller's own
+  // admissions before its effects and at stop remain the durability authority.
+  let presentationHeld = false;
   const githubPresentation =
     progressOffered(config, services.github) ||
     projectStatusOffered(config, services.github);
   const projectProgress = (): Promise<void> => {
-    if (progressAdmissionFailure)
-      return Promise.reject(progressAdmissionFailure);
-    if (!githubPresentation) return Promise.resolve();
+    if (presentationHeld || !githubPresentation) return Promise.resolve();
     if (progressTask) return progressTask;
     const parentSignal = currentProcessSignal();
     const deadlines = [owner.deadlineAt, currentProcessDeadlineAt()].filter(
@@ -985,7 +987,13 @@ async function runObjectiveOwned(
         : undefined,
     )
       .catch((error: unknown) => {
-        if (isCheckpointAdmissionFailure(error)) throw error;
+        if (isCheckpointAdmissionFailure(error)) {
+          presentationHeld = true;
+          process.stderr.write(
+            `Factory GitHub progress for Objective #${objective} stopped for this run: a checkpoint admission failed (${error instanceof Error ? error.message : String(error)}). The run continues; inspect Factory status.\n`,
+          );
+          return;
+        }
         // A failed snapshot read/validation cannot authorize overwriting
         // disk from a remembered snapshot. Valid projection failures are
         // recorded inside the helper; unreadable state remains unreadable.
@@ -1002,10 +1010,7 @@ async function runObjectiveOwned(
   // publishes from complete validated snapshots under this same owner.
   const progressTimer = githubPresentation
     ? setInterval(() => {
-        void projectProgress().catch((error: unknown) => {
-          progressAdmissionFailure = error;
-          wake();
-        });
+        void projectProgress();
       }, 30_000)
     : undefined;
   const observePhoneDecision = async (): Promise<boolean> => {

@@ -71,8 +71,10 @@ function attemptItem(item: WorkItem, recovery?: WorkRecovery): WorkItem {
   const failure = recovery?.failure;
   const correction = recovery?.correction;
   if (!failure && !correction) return item;
+  // A new attempt starts from the base: the failed candidate is reachable only
+  // when the driver appends retained failed-result context (#1277).
   const previous = failure
-    ? `\nThe previous attempt failed. Do not repeat it: ${failure.detail}`
+    ? `\nThe previous attempt failed. Do not repeat it: ${failure.detail}\nThis attempt starts from a fresh checkout of the base. The previous attempt's files are not in it unless retained failed-result context below says its commit is reachable. Implement the Work Item completely, treating these findings as requirements.`
     : "";
   const repair = correction
     ? `\nDiagnosed repair: ${correction.diagnosis}\nRequired correction: ${correction.correction}`

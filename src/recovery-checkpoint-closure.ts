@@ -1404,9 +1404,14 @@ async function buildRecoveryCheckpointClosureLocal(input: {
                     active.result === undefined &&
                     rejected === undefined
                   )
+                    // Transient: the collector freezes it, and the next
+                    // checkpoint carries it. A checkpoint taken just before the
+                    // worker returned has no gap at all, so this one cannot be
+                    // required either (#1276).
                     gaps.push({
                       path: relative(root, resultPath),
-                      availability: "unavailable",
+                      availability: "transient",
+                      required: false,
                       reason:
                         "Authenticated completed worker output has not been frozen by its existing collector; source changes and staged bodies remain in the preserved owned checkout",
                     });

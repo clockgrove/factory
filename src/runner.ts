@@ -222,6 +222,34 @@ export interface DecisionInput {
   reason: string;
 }
 
+/** A forwarded `factory decide` request, checked before any state is read. */
+export function parseDecisionInput(value: unknown): DecisionInput {
+  const input = (value ?? {}) as Record<string, unknown>;
+  const optional = (key: string) => {
+    const field = input[key];
+    if (field !== undefined && typeof field !== "string")
+      throw new Error(`Forwarded decision field ${key} is invalid`);
+    return field as string | undefined;
+  };
+  if (
+    (input.outcome !== "accept" && input.outcome !== "refuse") ||
+    typeof input.actor !== "string" ||
+    typeof input.reason !== "string"
+  )
+    throw new Error("Forwarded decision lacks its outcome, actor or reason");
+  const item = optional("item");
+  const criterion = optional("criterion");
+  const answer = optional("answer");
+  return {
+    ...(item !== undefined && { item }),
+    ...(criterion !== undefined && { criterion }),
+    ...(answer !== undefined && { answer }),
+    actor: input.actor,
+    outcome: input.outcome,
+    reason: input.reason,
+  };
+}
+
 /**
  * `factory decide`: the Objective's state says what is decided. A saved plan is decided
  * as the plan (its digest read from state); anything else is a result criterion, for the
@@ -898,6 +926,63 @@ async function runObjectiveOwned(
             "Cancellation is in progress; inspect ownership before another action",
           );
         const input = request.input ?? {};
+        // A plan waiting under this live owner (a phone-eligible hold): the
+        // owner's snapshot is the state, so the decision lands there (#1290).
+        if (request.action === "decide" && isPreparationState(owner.snapshot)) {
+          const decision = parseDecisionInput(input);
+          const current = owner.snapshot;
+          if (decision.item || decision.criterion)
+            throw new Error(
+              "--item names a Work Item's result; a plan decision takes none",
+            );
+          // A refusal discards the preparation, which a live owner would
+          // write back; it needs the owner stopped first.
+          if (decision.outcome === "refuse")
+            throw new Error(
+              "Refusing a plan needs its owner stopped: hand off the owner, then decide",
+            );
+          if (!decision.answer)
+            throw new Error(
+              "Accepting a plan requires --answer to its question",
+            );
+          if (!current.plan)
+            throw new Error("Objective planning has not produced a plan yet");
+          if (current.plan.review.acceptable === false)
+            throw new Error(
+              "Factory cannot accept this plan; hand off the owner and refuse it to plan again",
+            );
+          const issue = await services.github.objective(objective);
+          const accepted = await resolvePlan(
+            current.plan,
+            objective,
+            issue.body,
+            current.baseSha,
+            config.checkout,
+            {
+              actor: decision.actor,
+              outcome: "accept",
+              answer: decision.answer,
+              reason: decision.reason,
+            },
+            current.restoration
+              ? current.configDigest
+              : factoryConfigDigest(config),
+          );
+          // Pause, handoff or another decision may have run during the awaits.
+          if (
+            owner.snapshot !== current ||
+            owner.handoff ||
+            owner.abort.signal.aborted
+          )
+            throw new Error(
+              "The owner's plan changed while deciding; inspect status and decide again",
+            );
+          current.plan = accepted;
+          delete current.coordinator.waitReason;
+          persist();
+          wake();
+          return "plan-accepted";
+        }
         if (request.action === "retry") {
           const retried = retryWorkItem(
             config,
@@ -2642,6 +2727,20 @@ export function decideObjective(
     () => decideObjectiveUnscoped(...args),
     undefined,
   );
+}
+
+/**
+ * The live installation owner deciding one of its stopped Objectives (#1290).
+ * Like a controller applying a forwarded decision, it saves the state and leaves
+ * publication to the owner's own admissions, so a held checkpoint failure stays held.
+ */
+export function decideStoppedObjective(
+  config: FactoryConfig,
+  objective: number,
+  services: Pick<ApplicationServices, "github">,
+  input: DecisionInput,
+): ReturnType<typeof decideObjectiveUnscoped> {
+  return decideObjectiveUnscoped(config, objective, services, input, false);
 }
 
 export function controlObjective(

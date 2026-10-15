@@ -89,8 +89,8 @@ import { checkRequiredEnvironment } from "./repair-policy.js";
 import {
   type ApplicationServices,
   CoordinatorHandoff,
-  type DecisionInput,
-  decideObjective,
+  decideStoppedObjective,
+  parseDecisionInput,
   runObjective,
 } from "./runner.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
@@ -1413,33 +1413,6 @@ export interface IntakeStartupOptions {
   /** Services for a queued Objective's frozen provider when it is not the service's own. */
   servicesFor?: (config: FactoryConfig) => ApplicationServices;
 }
-/** A forwarded `factory decide` request, checked before any state is read. */
-function decisionInput(value: unknown): DecisionInput {
-  const input = (value ?? {}) as Record<string, unknown>;
-  const optional = (key: string) => {
-    const field = input[key];
-    if (field !== undefined && typeof field !== "string")
-      throw new Error(`Forwarded decision field ${key} is invalid`);
-    return field as string | undefined;
-  };
-  if (
-    (input.outcome !== "accept" && input.outcome !== "refuse") ||
-    typeof input.actor !== "string" ||
-    typeof input.reason !== "string"
-  )
-    throw new Error("Forwarded decision lacks its outcome, actor or reason");
-  const item = optional("item");
-  const criterion = optional("criterion");
-  const answer = optional("answer");
-  return {
-    ...(item !== undefined && { item }),
-    ...(criterion !== undefined && { criterion }),
-    ...(answer !== undefined && { answer }),
-    actor: input.actor,
-    outcome: input.outcome,
-    reason: input.reason,
-  };
-}
 export function runIntake(
   config: FactoryConfig,
   services: ApplicationServices,
@@ -1599,33 +1572,43 @@ async function runIntakeOwned(
     if (request.objective !== 0) {
       if (request.objective === activeObjective && objectiveControl)
         return objectiveControl(request);
-      // A queued Objective stopped for a person: the service owns the
-      // installation, so it records the decision itself, on the provider the
-      // Objective froze. Pending control holds new dispatch meanwhile (#1290).
-      if (
-        request.action === "decide" &&
-        record.objectives.includes(request.objective)
-      ) {
-        const objectiveConfig = options.backgroundConfigurationPath
-          ? queuedObjectiveConfig(
-              config,
+      if (request.action === "decide") {
+        // The Objective's run registers its control late and clears it early;
+        // in those windows it may be writing state it has not saved yet.
+        if (request.objective === activeObjective)
+          throw new Error(
+            `Objective #${request.objective} is starting or settling under the service; retry the decision`,
+          );
+        // A queued Objective stopped for a person: the service owns the
+        // installation, so it records the decision itself, on the provider the
+        // Objective froze. This request is pending control, which holds new
+        // dispatch until it settles (#1290).
+        if (record.objectives.includes(request.objective)) {
+          const input = parseDecisionInput(request.input);
+          const objectiveConfig = options.backgroundConfigurationPath
+            ? queuedObjectiveConfig(
+                config,
+                request.objective,
+                options.backgroundConfigurationPath,
+              )
+            : config;
+          let objectiveServices = services;
+          if (objectiveConfig !== config) {
+            if (!options.servicesFor)
+              throw new Error(
+                `Objective #${request.objective} runs with another provider, and this service cannot compose it`,
+              );
+            objectiveServices = options.servicesFor(objectiveConfig);
+          }
+          return asInstallationOwner(lock, () =>
+            decideStoppedObjective(
+              objectiveConfig,
               request.objective,
-              options.backgroundConfigurationPath,
-            )
-          : config;
-        const objectiveServices =
-          objectiveConfig === config
-            ? services
-            : (options.servicesFor?.(objectiveConfig) ?? services);
-        return asInstallationOwner(lock, () =>
-          decideObjective(
-            objectiveConfig,
-            request.objective,
-            objectiveServices,
-            decisionInput(request.input),
-            false,
-          ),
-        );
+              objectiveServices,
+              input,
+            ),
+          );
+        }
       }
       const state = readContinuation(config.repository, request.objective);
       if (

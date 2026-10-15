@@ -48,6 +48,11 @@ import {
 } from "../dist/recovery-checkpoint-closure.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import {
+  proposalPersistenceReferences,
+  proposalSchema,
+  settleOrRefuseUnknownProviderSubmissions,
+} from "../dist/proposals.js";
+import {
   discoverRepository,
   authenticateDiscoveryOutput,
   readDiscoveryBody,
@@ -1491,6 +1496,69 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         );
         assert.equal(readFileSync(terminalPath, "utf8"), terminalBytes);
         assert.deepEqual(dreamSubmissionHolds(config.repository), []);
+        {
+          // A submission recorded before any dispatch checkpoint whose call
+          // only started and failed never left the host; one the dispatch
+          // checkpoint admitted stays an unknown submission.
+          const { checkpoint } = prepared;
+          const learning = join(stateRoot(config.repository), "learning");
+          const observation = (type) => ({
+            type,
+            invocationId: checkpoint.invocationId,
+            phase: "dream",
+            ordinal: 0,
+            providerAttempt: 1,
+            providerMaxAttempts: 1,
+            ...(type === "failed" && { usageAvailable: false }),
+          });
+          const submission = {
+            schemaVersion: 1,
+            id: checkpoint.id,
+            invocationId: checkpoint.invocationId,
+            checkpointDigest: prepared.checkpointDigest,
+            sourceDigest: checkpoint.inputPacketRef.digest,
+            configDigest: checkpoint.configDigest,
+            parent: checkpoint.parent,
+            providerAttempt: 1,
+            providerMaxAttempts: 1,
+            at: new Date().toISOString(),
+            outcome: "submitted-outcome-unobserved",
+            usage: "unavailable",
+            reconciliation: "not-exposed",
+          };
+          const submissionPath = join(
+            learning,
+            "submissions",
+            `${checkpoint.id}.json`,
+          );
+          const callPath = join(learning, "calls", `${checkpoint.id}.json`);
+          mkdirSync(join(learning, "calls"), { recursive: true, mode: 0o700 });
+          writeFileSync(
+            callPath,
+            JSON.stringify({
+              invocationId: checkpoint.invocationId,
+              phase: "dream",
+              sourceDigest: checkpoint.inputPacketRef.digest,
+              checkpointDigest: prepared.checkpointDigest,
+              observations: [observation("started"), observation("failed")],
+              outcome: "failed",
+            }),
+            { mode: 0o600 },
+          );
+          writeFileSync(submissionPath, JSON.stringify(submission), {
+            mode: 0o600,
+          });
+          assert.deepEqual(dreamSubmissionHolds(config.repository), []);
+          rmSync(submissionPath);
+          writeFileSync(
+            submissionPath,
+            JSON.stringify({ ...submission, dispatchAdmitted: true }),
+            { mode: 0o600 },
+          );
+          assert.equal(dreamSubmissionHolds(config.repository).length, 1);
+          rmSync(submissionPath);
+          rmSync(callPath);
+        }
         const closure = learningPersistenceClosure(config.repository);
         assert.ok(
           closure.records.some(
@@ -4231,4 +4299,117 @@ test("diagnosis dispatch intent follows complete admission before real process e
     Object.values(preparation.agentSessions)[0].currentTurn.terminal,
     undefined,
   );
+});
+
+test("proposal provider fences settle only attempts that never reached dispatch", async () => {
+  // Journals as retained after a provider call that failed with only a start
+  // and a failure. An attempt recorded before any dispatch checkpoint never
+  // left the host; one the dispatch checkpoint admitted, or one with provider
+  // evidence, stays unknown and keeps blocking later proposals.
+  const retain = (repository, { dispatchAdmitted, failure = {} }) => {
+    const proposalId = randomUUID();
+    const invocationId = randomUUID();
+    const binding = {
+      repository,
+      configDigest: "a".repeat(64),
+      baseSha: "b".repeat(40),
+      source: "docs/wave.md#One",
+      additionalSources: [],
+      sources: [
+        {
+          path: "docs/wave.md",
+          heading: "One",
+          content: "# One\nBuild it.\n",
+          purpose: "primary-wave",
+        },
+      ],
+    };
+    const input = new LocalContentStore(
+      join(stateRoot(repository), "content"),
+    ).putBytes(
+      Buffer.from(
+        JSON.stringify({
+          invocationId,
+          prompt: "Draft Objectives.",
+          schema: proposalSchema(1),
+          sourcePacket: JSON.stringify(binding.sources),
+        }),
+      ),
+      { mediaType: "application/json" },
+    );
+    const observation = (type, extra = {}) => ({
+      type,
+      invocationId,
+      phase: "propose",
+      ordinal: 0,
+      providerAttempt: 1,
+      providerMaxAttempts: 1,
+      ...extra,
+    });
+    const directory = join(stateRoot(repository), "proposals");
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const path = join(directory, `${proposalId}.json`);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        schemaVersion: 2,
+        binding,
+        observations: [
+          observation("started"),
+          observation("failed", { usageAvailable: false, ...failure }),
+        ],
+        issues: {},
+        generation: {
+          invocationId,
+          input,
+          attempts: [
+            {
+              providerAttempt: 1,
+              providerMaxAttempts: 1,
+              at: new Date().toISOString(),
+              ...(dispatchAdmitted && { dispatchAdmitted: true }),
+              outcome: "submitted-outcome-unobserved",
+            },
+          ],
+        },
+        pending: { kind: "provider", id: invocationId },
+      }),
+      { mode: 0o600 },
+    );
+    return () =>
+      proposalPersistenceReferences(
+        readFileSync(path),
+        repository,
+        proposalId,
+        (ref) =>
+          new LocalContentStore(
+            join(stateRoot(repository), "content"),
+          ).readBytes(ref),
+      ).journal;
+  };
+  const unknown = /remains unknown/;
+  const dispatched = "example/proposal-dispatched";
+  const dispatchedJournal = retain(dispatched, { dispatchAdmitted: true });
+  assert.throws(
+    () => settleOrRefuseUnknownProviderSubmissions(dispatched),
+    unknown,
+  );
+  assert.equal(dispatchedJournal().pending.kind, "provider");
+  const evidenced = "example/proposal-evidenced";
+  retain(evidenced, { failure: { providerThreadId: "thread-1" } });
+  assert.throws(
+    () => settleOrRefuseUnknownProviderSubmissions(evidenced),
+    unknown,
+  );
+  const undispatched = "example/proposal-undispatched";
+  const undispatchedJournal = retain(undispatched, {});
+  settleOrRefuseUnknownProviderSubmissions(undispatched);
+  const settled = undispatchedJournal();
+  assert.equal(settled.pending, undefined);
+  assert.equal(
+    settled.generation.attempts[0].outcome,
+    "failed-before-dispatch",
+  );
+  assert.equal(settled.observations.length, 2);
+  settleOrRefuseUnknownProviderSubmissions(undispatched);
 });

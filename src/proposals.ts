@@ -34,6 +34,7 @@ import type {
   ModelInvocationObservation,
 } from "./contracts.js";
 import { LocalContentStore } from "./content/local.js";
+import { failedWithoutProviderEvidence } from "./compiler/observation.js";
 import { DiagnosticEmitter } from "./diagnostics.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
@@ -99,7 +100,13 @@ interface ProposalState {
       providerAttempt: number;
       providerMaxAttempts: number;
       at: string;
-      outcome: "submitted-outcome-unobserved" | "completed" | "failed-settled";
+      /** Set when the dispatch checkpoint admitted this attempt; absent on attempts recorded before it. */
+      dispatchAdmitted?: true;
+      outcome:
+        | "submitted-outcome-unobserved"
+        | "completed"
+        | "failed-settled"
+        | "failed-before-dispatch";
     }[];
     returned?: ContentRef;
   };
@@ -334,12 +341,16 @@ export function proposalPersistenceReferences(
       throw new Error("Invalid proposal attempts");
     for (const [index, value] of generation.attempts.entries()) {
       const attempt = record(value, "attempt");
-      fields(attempt, [
-        "providerAttempt",
-        "providerMaxAttempts",
-        "at",
-        "outcome",
-      ]);
+      fields(
+        attempt,
+        ["providerAttempt", "providerMaxAttempts", "at", "outcome"],
+        ["dispatchAdmitted"],
+      );
+      if (
+        attempt.dispatchAdmitted !== undefined &&
+        attempt.dispatchAdmitted !== true
+      )
+        throw new Error("Invalid proposal dispatch admission");
       positive(attempt.providerAttempt);
       positive(attempt.providerMaxAttempts);
       timestamp(attempt.at);
@@ -365,9 +376,22 @@ export function proposalPersistenceReferences(
           "submitted-outcome-unobserved",
           "completed",
           "failed-settled",
+          "failed-before-dispatch",
         ].includes(String(attempt.outcome))
       )
         throw new Error("Invalid proposal charged attempt history");
+      if (
+        attempt.outcome === "failed-before-dispatch" &&
+        (attempt.dispatchAdmitted ||
+          !failedWithoutProviderEvidence(
+            journal.observations,
+            String(generation.invocationId),
+            attempt.providerAttempt as number,
+          ))
+      )
+        throw new Error(
+          "Proposal attempt settled before dispatch lacks its no-dispatch evidence",
+        );
       if (
         attempt.outcome === "completed" &&
         !journal.observations.some(
@@ -932,6 +956,49 @@ function outputPath(config: FactoryConfig, path: string | undefined): string {
     throw new Error("Proposal output must be outside the target checkout");
   return target;
 }
+/**
+ * A later proposal may start only when no retained provider submission remains
+ * unknown. An attempt recorded before any dispatch checkpoint whose only
+ * evidence is a start and a failure never left the host, so it settles here.
+ */
+export function settleOrRefuseUnknownProviderSubmissions(
+  repository: string,
+): void {
+  const directory = join(stateRoot(repository), "proposals");
+  if (!existsSync(directory)) return;
+  const store = new LocalContentStore(join(stateRoot(repository), "content"));
+  for (const name of readdirSync(directory).filter((name) =>
+    /^[0-9a-f-]{36}\.json$/.test(name),
+  )) {
+    const path = join(directory, name);
+    const retained = proposalPersistenceReferences(
+      privateOriginal(path),
+      repository,
+      name.slice(0, -5),
+      (ref) => store.readBytes(ref),
+    ).journal;
+    const unsent = retained.generation?.attempts.at(-1);
+    if (
+      retained.pending?.kind === "provider" &&
+      retained.pending.id === retained.generation?.invocationId &&
+      unsent?.outcome === "submitted-outcome-unobserved" &&
+      !unsent.dispatchAdmitted &&
+      failedWithoutProviderEvidence(
+        retained.observations,
+        retained.generation.invocationId,
+        unsent.providerAttempt,
+      )
+    ) {
+      unsent.outcome = "failed-before-dispatch";
+      delete retained.pending;
+      save(path, retained);
+    }
+    if (retained.pending?.kind === "provider")
+      throw new Error(
+        "A retained proposal provider submission remains unknown; inspect its original invocation before starting another proposal",
+      );
+  }
+}
 async function generate(
   config: FactoryConfig,
   args: string[],
@@ -942,26 +1009,7 @@ async function generate(
     throw new Error(
       "propose requires --source DOC#HEADING or --file FILE --approve SHA256",
     );
-  const retainedDirectory = join(stateRoot(config.repository), "proposals");
-  if (existsSync(retainedDirectory)) {
-    const retainedStore = new LocalContentStore(
-      join(stateRoot(config.repository), "content"),
-    );
-    for (const name of readdirSync(retainedDirectory).filter((name) =>
-      /^[0-9a-f-]{36}\.json$/.test(name),
-    )) {
-      const retained = proposalPersistenceReferences(
-        privateOriginal(join(retainedDirectory, name)),
-        config.repository,
-        name.slice(0, -5),
-        (ref) => retainedStore.readBytes(ref),
-      ).journal;
-      if (retained.pending?.kind === "provider")
-        throw new Error(
-          "A retained proposal provider submission remains unknown; inspect its original invocation before starting another proposal",
-        );
-    }
-  }
+  settleOrRefuseUnknownProviderSubmissions(config.repository);
   const proposalId = randomUUID();
   const path = journalPath(config, proposalId);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -1033,15 +1081,22 @@ async function generate(
         throw new Error(
           "Proposal provider admission differs from its existing native attempt allowance",
         );
+    },
+    // Only a call that reaches native dispatch may have left the host, so the
+    // charged attempt and its unknown-outcome fence are recorded here, not at
+    // attempt admission. A failure before this point settles as a plain failure.
+    beforeProviderDispatch: async () => {
       journal.generation!.attempts.push({
-        providerAttempt: providerAttempt!,
-        providerMaxAttempts: providerMaxAttempts!,
+        providerAttempt: invocation.providerAttempt!,
+        providerMaxAttempts: invocation.providerMaxAttempts!,
         at: new Date().toISOString(),
+        dispatchAdmitted: true,
         outcome: "submitted-outcome-unobserved",
       });
       journal.pending = { kind: "provider", id: invocationId };
       save(path, journal);
       await awaitCheckpointAdmission(config.repository, "before-effect");
+      return "admission-complete" as const;
     },
     observe: Object.assign(
       (observation: ModelInvocationObservation) => {

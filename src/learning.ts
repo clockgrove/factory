@@ -18,6 +18,7 @@ import {
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { option } from "./cli-flags.js";
 import { DEFAULT_CONTEXT_LOOKUP_BOUNDS } from "./compiler/context.js";
+import { failedWithoutProviderEvidence } from "./compiler/observation.js";
 import { objectiveComplete } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
 import {
@@ -1745,6 +1746,7 @@ export function dreamSubmissionHolds(repository: string): {
         parent: DreamInputCheckpoint["parent"];
         providerAttempt: number;
         providerMaxAttempts: number;
+        dispatchAdmitted?: true;
       };
       const checkpoint = readDreamCheckpoint(repository, {
         checkpointId: submitted.id,
@@ -1793,6 +1795,17 @@ export function dreamSubmissionHolds(repository: string): {
             (observation) =>
               ["completed", "response-invalid"].includes(observation.type) &&
               observation.providerAttempt === submitted.providerAttempt,
+          )
+        )
+          return [];
+        // A submission recorded before any dispatch checkpoint whose only
+        // evidence is a start and a failure never left the host.
+        if (
+          !submitted.dispatchAdmitted &&
+          failedWithoutProviderEvidence(
+            observations,
+            submitted.invocationId,
+            submitted.providerAttempt,
           )
         )
           return [];
@@ -2303,6 +2316,10 @@ async function dream(
         throw new Error(
           "Dream permits only its existing single native provider submission",
         );
+    },
+    // Only a call that reaches native dispatch may have left the host, so its
+    // unknown-outcome submission is recorded here, not at attempt admission.
+    beforeProviderDispatch: async () => {
       append(
         join(directory(config.repository, "submissions"), `${id}.json`),
         encoded({
@@ -2316,6 +2333,7 @@ async function dream(
           providerAttempt: invocation.providerAttempt,
           providerMaxAttempts: invocation.providerMaxAttempts,
           at: new Date().toISOString(),
+          dispatchAdmitted: true,
           outcome: "submitted-outcome-unobserved",
           usage: "unavailable",
           reconciliation: "not-exposed",
@@ -2323,6 +2341,7 @@ async function dream(
         config.repository,
       );
       await awaitCheckpointAdmission(config.repository, "before-effect");
+      return "admission-complete" as const;
     },
     observe: Object.assign(
       (observation: ModelInvocationObservation) => {

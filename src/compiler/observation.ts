@@ -41,3 +41,30 @@ export function observeModelInvocation(
     unavailable();
   }
 }
+
+/**
+ * Retained evidence that one provider attempt only started and failed, with
+ * no provider thread, response or usage. Callers pair it with the absence of a
+ * recorded dispatch before treating the attempt as never submitted.
+ */
+export function failedWithoutProviderEvidence(
+  observations: readonly ModelInvocationObservation[],
+  invocationId: string,
+  providerAttempt: number,
+): boolean {
+  const [started, failed, ...rest] = observations.filter(
+    (observation) =>
+      observation.invocationId === invocationId &&
+      observation.providerAttempt === providerAttempt,
+  );
+  return (
+    started?.type === "started" &&
+    failed?.type === "failed" &&
+    rest.length === 0 &&
+    !failed.usage &&
+    !failed.usageAvailable &&
+    failed.providerThreadId === undefined &&
+    failed.responseBytes === undefined &&
+    failed.responseDigest === undefined
+  );
+}

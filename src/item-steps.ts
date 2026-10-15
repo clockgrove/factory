@@ -14,7 +14,10 @@ import type {
 } from "./contracts.js";
 import type { DiagnosticEmitter } from "./diagnostics.js";
 import { isDeepStrictEqual } from "node:util";
-import { awaitCheckpointAdmission } from "./recovery-checkpoint.js";
+import {
+  awaitCheckpointAdmission,
+  trackCollection,
+} from "./recovery-checkpoint.js";
 import { workerContext } from "./execution/checkpoint.js";
 import { cancelledFault, faultOf, workFault } from "./fault.js";
 import { repeatKey, StepPaused, step } from "./step.js";
@@ -129,11 +132,11 @@ export async function executeItem(
   ): ref is AgentSessionRef =>
     Boolean(
       ref &&
-        ref.identity === args.session?.identity &&
-        ref.executionIdentity === executionIdentity &&
-        isDeepStrictEqual(ref.scope, args.session?.scope) &&
-        ref.scope.role === "implementation" &&
-        ref.scope.itemId === item.id,
+      ref.identity === args.session?.identity &&
+      ref.executionIdentity === executionIdentity &&
+      isDeepStrictEqual(ref.scope, args.session?.scope) &&
+      ref.scope.role === "implementation" &&
+      ref.scope.itemId === item.id,
     );
   const settleSession = (executionIdentity: string): void => {
     const retained = args.session?.retained;
@@ -253,7 +256,9 @@ export async function executeItem(
         await driver.cancel(current, context());
         throw cancelledFault();
       }
-      const result = await driver.collect(current, context());
+      const result = await trackCollection(current.identity, () =>
+        driver.collect(current, context()),
+      );
       ctx.progress();
       return result;
     },

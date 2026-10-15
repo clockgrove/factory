@@ -82,6 +82,7 @@ import {
   awaitCheckpointAdmission,
   gitPersistenceStatus,
   isCheckpointCollectionPending,
+  trackCollection,
   markCheckpointDirty,
   readVerifiedRecoveryCheckpoint,
   synchronizeRecoveryCheckpoint,
@@ -618,22 +619,17 @@ async function watcherWorkflow(
   controlMetadata = originalControl;
 
   if (collectedExecution) {
-    const { addWorktree, processGroupExists } = await import(
-      "../dist/process.js"
-    );
-    const { launchWorker, killGroup } = await import(
-      "../dist/execution/worker-process.js"
-    );
-    const { checkpointWorkerSession } = await import(
-      "../dist/execution/local.js"
-    );
+    const { addWorktree, processGroupExists } =
+      await import("../dist/process.js");
+    const { launchWorker, killGroup } =
+      await import("../dist/execution/worker-process.js");
+    const { checkpointWorkerSession } =
+      await import("../dist/execution/local.js");
     const { collectCompletedWorker } = await import("../dist/runner.js");
-    const { agentSessionContinuation } = await import(
-      "../dist/agent-session.js"
-    );
-    const { settleStoppedProjectQueueRun } = await import(
-      "../dist/project-queue-state.js"
-    );
+    const { agentSessionContinuation } =
+      await import("../dist/agent-session.js");
+    const { settleStoppedProjectQueueRun } =
+      await import("../dist/project-queue-state.js");
     const baseSha = git("rev-parse", "HEAD"),
       attempt = randomUUID();
     const item = {
@@ -843,12 +839,24 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       store,
       "codex-sdk",
     );
-    await collectCompletedWorker(
-      config,
-      1,
-      { runId: state.runId, item: item.id, attempt },
-      driver,
+    // With its collector active here, another admission waits for the freeze
+    // and then publishes instead of stopping for a decision (#1281).
+    const admitted = withRecoveryCheckpointScope(
+      {
+        config,
+        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+      },
+      () => awaitCheckpointAdmission(repository, "explicit"),
     );
+    await trackCollection(attempt, () =>
+      collectCompletedWorker(
+        config,
+        1,
+        { runId: state.runId, item: item.id, attempt },
+        driver,
+      ),
+    );
+    await admitted;
     const collected = readState(repository, 1),
       frozen = JSON.stringify(collected.work.local.execution.data.result),
       allowances = JSON.stringify(collected.autonomy);

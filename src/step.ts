@@ -578,8 +578,8 @@ async function repeat<T>(
         stopWaiting();
         // `factory retry` can end a provider-limit wait (#1267).
         const retried = new AbortController();
-        let sleepers = retrySleepers.get(state);
-        if (!sleepers) retrySleepers.set(state, (sleepers = new Set()));
+        const sleepers = retrySleepers.get(state) ?? new Set();
+        retrySleepers.set(state, sleepers);
         sleepers.add(retried);
         try {
           await clock

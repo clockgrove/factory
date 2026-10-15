@@ -1,4 +1,4 @@
-import type { FactoryConfig } from "./config.js";
+import { type FactoryConfig, githubProgressSettings } from "./config.js";
 import { continuationConfigurationMatches } from "./state-store.js";
 import type { PlanCandidate } from "./compiler.js";
 import { progressDigest } from "./github-progress-state.js";
@@ -59,7 +59,7 @@ export function phonePlanEligible(
   const plan = state.plan;
   return (
     !!config.githubManagement?.decisions &&
-    config.githubManagement.progress?.includeQuestions === true &&
+    githubProgressSettings(config)?.includeQuestions === true &&
     continuationConfigurationMatches(state, config) &&
     (!state.restoration || state.restoration.status === "reconciled") &&
     state.coordinator.mode === "running" &&

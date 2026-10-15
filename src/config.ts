@@ -257,15 +257,20 @@ export interface FactoryConfig {
   };
   /** Explicit validation image/text proof selection; omission retains no artifacts. */
   reviewArtifacts?: ReviewArtifactSelector[];
-  /** Explicit disclosure opt-in; omission publishes no operational summary. */
+  /**
+   * GitHub presentation. Progress comments and Project status are on by default (see
+   * `githubProgressSettings` and `githubProjectStatusSettings`); `{ enabled: false }` opts out.
+   */
   githubManagement?: {
     decisions?: { enabled: true; actorIds: number[] };
-    projectStatus?: GitHubProjectStatusConfig;
-    progress?: {
-      enabled: true;
-      repository: string;
-      includeQuestions: boolean;
-    };
+    projectStatus?: GitHubProjectStatusConfig | { enabled: false };
+    progress?:
+      | {
+          enabled: true;
+          repository: string;
+          includeQuestions: boolean;
+        }
+      | { enabled: false };
   };
   scheduling?: SchedulingConfig;
   /** Limits on unattended repair and amendment; omitted fields use bounded defaults. */
@@ -732,19 +737,24 @@ export function validateConfig(value: unknown): FactoryConfig {
       ["progress", "decisions", "projectStatus"],
       "githubManagement",
     );
+    const optedOut = (setting: unknown): boolean =>
+      !!setting &&
+      typeof setting === "object" &&
+      !Array.isArray(setting) &&
+      Object.keys(setting).length === 1 &&
+      (setting as { enabled?: unknown }).enabled === false;
     if (
-      !value.githubManagement.progress &&
-      !value.githubManagement.projectStatus
+      value.githubManagement.projectStatus !== undefined &&
+      !optedOut(value.githubManagement.projectStatus)
     )
-      throw new Error(
-        "GitHub management requires an explicit progress or Project opt-in",
-      );
-    if (value.githubManagement.projectStatus !== undefined)
       assertGitHubProjectStatusConfig(
         value.githubManagement.projectStatus,
         value.repository,
       );
-    if (value.githubManagement.progress !== undefined) {
+    if (
+      value.githubManagement.progress !== undefined &&
+      !optedOut(value.githubManagement.progress)
+    ) {
       assertObject(
         value.githubManagement.progress,
         "githubManagement.progress",
@@ -1035,6 +1045,7 @@ export function validateConfig(value: unknown): FactoryConfig {
       )?.projectStatus;
       if (
         status &&
+        !("enabled" in status) &&
         status.projectId === project.projectId &&
         [project.metadataFieldId, project.orderFieldId].includes(status.fieldId)
       )
@@ -1180,6 +1191,77 @@ export function validateCapacity(value: Capacity): Capacity {
   return value;
 }
 
+/** Progress comments: on by default for the target; `{ enabled: false }` opts out. */
+export function githubProgressSettings(
+  config: FactoryConfig,
+):
+  | { repository: string; includeQuestions: boolean; explicit: boolean }
+  | undefined {
+  const setting = config.githubManagement?.progress;
+  if (setting?.enabled === false) return undefined;
+  return setting
+    ? {
+        repository: setting.repository,
+        includeQuestions: setting.includeQuestions,
+        explicit: true,
+      }
+    : {
+        repository: config.repository,
+        includeQuestions: false,
+        explicit: false,
+      };
+}
+
+/**
+ * Project Status: the explicit field and options, else by default the queue's Project,
+ * whose single-select Status field and options are discovered by name. `{ enabled: false }`
+ * opts out; no explicit setting and no queue Project means no Project status.
+ */
+export type ProjectStatusSettings =
+  | { kind: "explicit"; config: GitHubProjectStatusConfig }
+  | {
+      kind: "discover";
+      repository: string;
+      projectId: string;
+      /** Queue scheduling fields; the discovered Status field must differ. */
+      reservedFieldIds: string[];
+    };
+export function githubProjectStatusSettings(
+  config: FactoryConfig,
+): ProjectStatusSettings | undefined {
+  const setting = config.githubManagement?.projectStatus;
+  if (setting && "enabled" in setting) return undefined;
+  if (setting) return { kind: "explicit", config: setting };
+  const project = config.queue?.project;
+  return project
+    ? {
+        kind: "discover",
+        repository: config.repository,
+        projectId: project.projectId,
+        reservedFieldIds: [project.metadataFieldId, project.orderFieldId],
+      }
+    : undefined;
+}
+
+/**
+ * Progress and Project status only present the run, so they are left out of both digests:
+ * turning them on or off never strands a started Objective or a queue receipt. Key order is
+ * kept, so a configuration without them digests exactly as before.
+ */
+function withoutPresentation(config: FactoryConfig): FactoryConfig {
+  return Object.fromEntries(
+    Object.entries(config).flatMap(([key, value]) => {
+      if (key !== "githubManagement") return [[key, value]];
+      const {
+        progress: _progress,
+        projectStatus: _projectStatus,
+        ...bound
+      } = value as NonNullable<FactoryConfig["githubManagement"]>;
+      return Object.keys(bound).length ? [[key, bound]] : [];
+    }),
+  ) as FactoryConfig;
+}
+
 /**
  * Digest of every declared installation choice, including adapter config; an omitted
  * concurrency stays omitted, so the digest does not follow the host. Autonomy limits are
@@ -1193,7 +1275,7 @@ export function factoryConfigDigest(config: FactoryConfig): string {
     queue: _queue,
     queueProvider: _queueProvider,
     ...bound
-  } = config;
+  } = withoutPresentation(config);
   assertJsonValue(bound, "configuration");
   return createHash("sha256").update(JSON.stringify(bound)).digest("hex");
 }
@@ -1210,7 +1292,7 @@ export function factoryAuthorityDigest(config: FactoryConfig): string {
     autonomy,
     queueProvider,
     ...declared
-  } = config;
+  } = withoutPresentation(config);
   const { pollSeconds: _pollSeconds, ...queueAuthority } = queue ?? {};
   const bound = {
     ...declared,

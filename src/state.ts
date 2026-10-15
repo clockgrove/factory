@@ -213,6 +213,12 @@ export interface WorkState {
   wait?: Wait;
 }
 
+export interface WorkItemTracking {
+  issue: number;
+  progress?: import("./github-progress-state.js").GitHubProgressProjection;
+  projectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
+}
+
 export interface CoordinatorDisposition {
   mode: "running" | "paused" | "draining";
   phase: string;
@@ -391,6 +397,11 @@ export interface FactoryState {
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
   githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
   githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
+  /**
+   * Each Work Item's presentation on its own issue, by item id: progress comments and the
+   * card's Project Status. The issue is recorded, so a later graph revision cannot rebind it.
+   */
+  workItemTracking?: Record<string, WorkItemTracking>;
   /** New-run admission only. Absence does not prove historical non-submission. */
   publicationContract?: "exact-request-v1";
   /** Retained across WorkState replacement; never reconstructed from diagnostics. */
@@ -941,6 +952,39 @@ export function parseFactoryState(
     runId: state.runId as string,
     configDigest: state.configDigest as string,
   });
+  if (state.workItemTracking !== undefined) {
+    const tracking = state.workItemTracking;
+    if (!tracking || typeof tracking !== "object" || Array.isArray(tracking))
+      throw new Error("Invalid workItemTracking");
+    for (const [id, raw] of Object.entries(tracking)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw))
+        throw new Error("Invalid Work Item tracking");
+      const entry = raw as Record<string, unknown>;
+      if (
+        Object.keys(entry).some(
+          (key) => !["issue", "progress", "projectStatus"].includes(key),
+        ) ||
+        !Number.isSafeInteger(entry.issue) ||
+        (entry.issue as number) <= 0
+      )
+        throw new Error("Invalid Work Item tracking");
+      const context = {
+        repository,
+        objective,
+        runId: state.runId as string,
+        configDigest: state.configDigest as string,
+      };
+      const issue = entry.issue as number;
+      assertGitHubProgressProjection(entry.progress, {
+        ...context,
+        item: { id, issue },
+      });
+      assertGitHubProjectStatusProjection(entry.projectStatus, {
+        ...context,
+        issue,
+      });
+    }
+  }
   assertPublicationIntents(state as unknown as FactoryState);
   sha(state.configDigest, "configDigest", 64);
   if (state.sourcePacketDigest !== undefined)

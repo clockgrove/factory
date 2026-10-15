@@ -50,9 +50,15 @@ import {
   matchesPlanDecision,
   phonePlanEligible,
 } from "./github-plan-decisions.js";
-import { projectGitHubProgress } from "./github-progress-projection.js";
+import {
+  progressOffered,
+  projectGitHubProgress,
+} from "./github-progress-projection.js";
 import { progressDigest } from "./github-progress-state.js";
-import { projectGitHubProjectStatus } from "./github-project-projection.js";
+import {
+  projectGitHubProjectStatus,
+  projectStatusOffered,
+} from "./github-project-projection.js";
 import {
   type WorkerDiscoveryDecision,
   assertWorkerDiscoveryDisposition,
@@ -935,10 +941,13 @@ async function runObjectiveOwned(
   process.on("SIGUSR1", cancel);
   let progressTask: Promise<void> | undefined;
   let progressAdmissionFailure: unknown;
+  const githubPresentation =
+    progressOffered(config, services.github) ||
+    projectStatusOffered(config, services.github);
   const projectProgress = (): Promise<void> => {
     if (progressAdmissionFailure)
       return Promise.reject(progressAdmissionFailure);
-    if (!config.githubManagement) return Promise.resolve();
+    if (!githubPresentation) return Promise.resolve();
     if (progressTask) return progressTask;
     const parentSignal = currentProcessSignal();
     const deadlines = [owner.deadlineAt, currentProcessDeadlineAt()].filter(
@@ -991,7 +1000,7 @@ async function runObjectiveOwned(
   };
   // Coalesce state transitions. The helper ignores time-only changes and
   // publishes from complete validated snapshots under this same owner.
-  const progressTimer = config.githubManagement
+  const progressTimer = githubPresentation
     ? setInterval(() => {
         void projectProgress().catch((error: unknown) => {
           progressAdmissionFailure = error;

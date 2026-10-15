@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { FactoryConfig } from "./config.js";
+import { type FactoryConfig, githubProgressSettings } from "./config.js";
 import type { GitHubGateway } from "./contracts.js";
 import {
   continuationStatusDocument,
@@ -9,8 +9,13 @@ import { planDecisionTemplate } from "./github-plan-decisions.js";
 import {
   type GitHubProgressDecision,
   renderGitHubProgress,
+  renderWorkItemProgress,
 } from "./github-progress.js";
-import { progressDigest } from "./github-progress-state.js";
+import {
+  type GitHubProgressProjection,
+  PROGRESS_ITEM_ID,
+  progressDigest,
+} from "./github-progress-state.js";
 import {
   awaitCheckpointAdmission,
   isCheckpointAdmissionFailure,
@@ -24,9 +29,9 @@ import {
   continuationConfigurationMatches,
   readContinuation,
 } from "./state-store.js";
+import { outageOf } from "./step.js";
 
-/** Controlled checkpoint projection; no diagnostics are used as recovery input. */
-async function projectGitHubProgressUnscoped(args: {
+type Args = {
   config: FactoryConfig;
   objective: number;
   github: GitHubGateway;
@@ -35,9 +40,27 @@ async function projectGitHubProgressUnscoped(args: {
   /** Exact current owner observation, not inferred from the existence of a snapshot. */
   active: boolean;
   secrets: string[];
-}): Promise<void> {
-  const { config, objective, github, current, save } = args;
-  if (!config.githubManagement?.progress) return;
+};
+
+/** One comment stream: the Objective's own issue, or a Work Item's. */
+interface ProgressTarget {
+  label: string;
+  objective: number;
+  runId: string;
+  item?: { id: string; issue: number };
+  read: (state: ContinuationState) => GitHubProgressProjection | undefined;
+  ensure: (state: ContinuationState) => GitHubProgressProjection;
+  /** Public presentation only; timestamps never take part. */
+  presentationDigest: string;
+  important: boolean;
+  render: (snapshotId: string, observedAt: string) => string;
+}
+
+/** Controlled checkpoint projection; no diagnostics are used as recovery input. */
+async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
+  const { config, objective, github, current } = args;
+  const settings = githubProgressSettings(config);
+  if (!settings || !progressOffered(config, github)) return;
   const retained = readContinuation(config.repository, objective);
   if (!retained) return;
   assertRestoredContinuationReady(retained, args.config);
@@ -75,7 +98,7 @@ async function projectGitHubProgressUnscoped(args: {
       : {}),
   };
   const decisions: GitHubProgressDecision[] = [];
-  if (config.githubManagement.progress.includeQuestions) {
+  if (settings.includeQuestions) {
     if (
       isPreparationState(retained) &&
       retained.plan?.review.status === "needs-human"
@@ -123,7 +146,7 @@ async function projectGitHubProgressUnscoped(args: {
     snapshot.phase === "needs-plan-decision"
   )
     blockers.push(
-      config.githubManagement.progress.includeQuestions
+      settings.includeQuestions
         ? "A human-owned choice needs attention."
         : "A human-owned choice needs attention. Question disclosure is disabled; inspect local Factory status.",
     );
@@ -178,30 +201,24 @@ async function projectGitHubProgressUnscoped(args: {
       template,
     }),
   );
-  let flushCurrent = false;
-  try {
-    const progress = live().githubProgress;
-    const previous = progress?.requests.at(-1);
-    const pending = previous && !previous.comment ? previous : undefined;
-    // No heartbeat refreshes: timestamps never participate in semantic deduplication.
-    if (!pending && previous?.presentationDigest === presentationDigest) return;
-    const important = [
-      "complete",
-      "cancelled",
-      "needs-decision",
-      "needs-plan-decision",
-    ].includes(snapshot.phase);
-    if (!pending && (progress?.requests.length ?? 0) >= (important ? 64 : 62)) {
-      const state = live();
+  const important = [
+    "complete",
+    "cancelled",
+    "needs-decision",
+    "needs-plan-decision",
+  ].includes(snapshot.phase);
+  const flushCurrent = await publishProgress(args, live, {
+    label: `Objective #${objective}`,
+    objective,
+    runId: retained.runId,
+    read: (state) => state.githubProgress,
+    ensure: (state) => {
       state.githubProgress ??= { requests: [] };
-      state.githubProgress.failure = "history-exhausted";
-      save();
-      return;
-    }
-    const observedAt = pending?.observedAt ?? new Date().toISOString();
-    const snapshotId = pending?.snapshotId ?? randomUUID();
-    const body =
-      pending?.body ??
+      return state.githubProgress;
+    },
+    presentationDigest,
+    important,
+    render: (snapshotId, observedAt) =>
       renderGitHubProgress({
         repository: config.repository,
         runId: retained.runId,
@@ -214,38 +231,149 @@ async function projectGitHubProgressUnscoped(args: {
         blockers,
         decisions,
         ...(template ? { planDecisionTemplate: template } : {}),
-      });
+      }),
+  });
+  // Keep a fresh snapshot read outside the persistence catch: a corrupt or
+  // unreadable continuation must never be repaired from a remembered owner.
+  if (flushCurrent) return projectGitHubProgressUnscoped(args);
+  if (isExecutionState(retained))
+    for (const [id, issue] of Object.entries(retained.issueByItemId))
+      await projectWorkItemProgress(args, retained, live, id, issue);
+}
+
+/** One Work Item's transition comment on its own issue, from structured facts only. */
+async function projectWorkItemProgress(
+  args: Args,
+  retained: ContinuationState,
+  live: () => ContinuationState,
+  id: string,
+  issue: number,
+): Promise<void> {
+  if (!isExecutionState(retained) || !PROGRESS_ITEM_ID.test(id)) return;
+  const work = retained.work[id];
+  // An item that has not started has nothing to report yet.
+  if (!work || work.status === "pending" || work.status === "skipped") return;
+  const recorded = retained.workItemTracking?.[id]?.issue;
+  // A graph revision that rebinds the item to another issue ends its tracking.
+  if (recorded !== undefined && recorded !== issue) return;
+  const outage = outageOf(retained, { item: id });
+  const facts = {
+    status: work.status,
+    ...(work.step && { step: work.step }),
+    ...(work.attempt && { attempt: work.attempt }),
+    ...(work.pullRequest && { pullRequest: work.pullRequest }),
+    ...(outage && {
+      outage: {
+        step: outage.step,
+        ...(outage.retryAt && { retryAt: outage.retryAt }),
+      },
+    }),
+    ...(work.recovery?.failure && {
+      failure: work.recovery.failure.classification,
+    }),
+    coordinator: retained.coordinator?.mode,
+  };
+  const flushCurrent = await publishProgress(args, live, {
+    label: `Work Item ${id}`,
+    objective: args.objective,
+    runId: retained.runId,
+    item: { id, issue },
+    read: (state) =>
+      isExecutionState(state)
+        ? state.workItemTracking?.[id]?.progress
+        : undefined,
+    ensure: (state) => {
+      if (!isExecutionState(state))
+        throw new Error("Work Item tracking requires an executing Objective");
+      state.workItemTracking ??= {};
+      state.workItemTracking[id] ??= { issue };
+      const entry = state.workItemTracking[id];
+      entry.progress ??= { requests: [] };
+      return entry.progress;
+    },
+    presentationDigest: progressDigest(JSON.stringify(facts)),
+    important: ["done", "failed", "cancelled", "waiting"].includes(work.status),
+    render: (snapshotId, observedAt) =>
+      renderWorkItemProgress({
+        repository: args.config.repository,
+        objective: args.objective,
+        item: { id, issue },
+        runId: retained.runId,
+        snapshotId,
+        configDigest: retained.configDigest,
+        observedAt,
+        ...facts,
+      }),
+  });
+  if (flushCurrent) {
+    const fresh = readContinuation(args.config.repository, args.objective);
+    if (fresh) await projectWorkItemProgress(args, fresh, live, id, issue);
+  }
+}
+
+/**
+ * Publish the target's current presentation once: an unresolved earlier intent is
+ * reconciled read-only first, an unchanged presentation is skipped, and the bounded
+ * history holds later writes. Returns whether a newer presentation must follow a
+ * reconciled one.
+ */
+async function publishProgress(
+  args: Args,
+  live: () => ContinuationState,
+  target: ProgressTarget,
+): Promise<boolean> {
+  const { config, github, save } = args;
+  try {
+    const progress = target.read(live());
+    const previous = progress?.requests.at(-1);
+    const pending = previous && !previous.comment ? previous : undefined;
+    // No heartbeat refreshes: timestamps never participate in semantic deduplication.
+    if (!pending && previous?.presentationDigest === target.presentationDigest)
+      return false;
+    const bound = target.important ? 64 : 62;
+    if (!pending && (progress?.requests.length ?? 0) >= bound) {
+      const current = target.ensure(live());
+      if (current.failure !== "history-exhausted") {
+        current.failure = "history-exhausted";
+        save();
+      }
+      return false;
+    }
+    const observedAt = pending?.observedAt ?? new Date().toISOString();
+    const snapshotId = pending?.snapshotId ?? randomUUID();
+    const body = pending?.body ?? target.render(snapshotId, observedAt);
     if (!github.progressComment)
       throw new Error("GitHub progress projection is unavailable");
     const observed = await github.progressComment({
-      objective,
-      runId: retained.runId,
+      objective: target.objective,
+      ...(target.item && { item: target.item }),
+      runId: target.runId,
       snapshotId,
       body,
       pending,
       beforeWrite: async (actorId) => {
-        const state = live();
-        state.githubProgress ??= { requests: [] };
-        const last = state.githubProgress.requests.at(-1);
+        const current = target.ensure(live());
+        const last = current.requests.at(-1);
         if (last && !last.comment)
           throw new Error("Another progress publication remains pending");
-        if (state.githubProgress.requests.length >= (important ? 64 : 62))
+        if (current.requests.length >= bound)
           throw new Error("GitHub progress history is exhausted");
-        state.githubProgress.requests.push({
+        current.requests.push({
           snapshotId,
           body,
           bodyDigest: progressDigest(body),
           actorId,
           observedAt,
-          presentationDigest,
+          presentationDigest: target.presentationDigest,
         });
         save();
         await awaitCheckpointAdmission(config.repository, "before-effect");
       },
     });
-    const state = live();
-    const intent = state.githubProgress?.requests.at(-1);
+    const current = target.read(live());
+    const intent = current?.requests.at(-1);
     if (
+      !current ||
       !intent ||
       intent.snapshotId !== snapshotId ||
       intent.actorId !== observed.actorId ||
@@ -256,38 +384,50 @@ async function projectGitHubProgressUnscoped(args: {
         "GitHub progress observation differs from retained intent",
       );
     intent.comment = observed;
-    delete state.githubProgress!.failure;
+    delete current.failure;
     save();
     // Force acknowledgement before a reconciled snapshot can publish its successor.
     await awaitCheckpointAdmission(config.repository, "explicit");
     // A reconciled older snapshot may precede this checkpoint (including final
     // closure). Publish the current meaningful change once after settlement.
-    flushCurrent = Boolean(
-      pending && pending.presentationDigest !== presentationDigest,
+    return Boolean(
+      pending && pending.presentationDigest !== target.presentationDigest,
     );
   } catch (error) {
     if (isCheckpointAdmissionFailure(error)) throw error;
     const state = live();
-    state.githubProgress ??= { requests: [] };
-    const last = state.githubProgress.requests.at(-1);
-    state.githubProgress.failure =
+    const existed = target.read(state) !== undefined;
+    const current = target.ensure(state);
+    const last = current.requests.at(-1);
+    const failure =
       last && !last.comment ? "publication-unknown" : "projection-unavailable";
+    // A repeated failure (for example, an issue GitHub refuses) is recorded once.
+    if (existed && current.failure === failure) return false;
+    current.failure = failure;
     save();
     await awaitCheckpointAdmission(config.repository, "settled");
     process.stderr.write(
-      `Factory GitHub progress for Objective #${objective}: ${state.githubProgress.failure}; inspect Factory status.\n`,
+      `Factory GitHub progress for ${target.label}: ${failure}; inspect Factory status.\n`,
     );
+    return false;
   }
-  // Keep a fresh snapshot read outside the persistence catch: a corrupt or
-  // unreadable continuation must never be repaired from a remembered owner.
-  if (flushCurrent) await projectGitHubProgressUnscoped(args);
 }
 
 /** Direct callers use the same admitted repository scope as owned controllers. */
-export function projectGitHubProgress(
-  args: Parameters<typeof projectGitHubProgressUnscoped>[0],
-): Promise<void> {
-  if (!args.config.githubManagement?.progress) return Promise.resolve();
+/**
+ * Whether this run projects progress: explicitly configured, or on by default where the
+ * gateway can post comments.
+ */
+export function progressOffered(
+  config: FactoryConfig,
+  github: GitHubGateway,
+): boolean {
+  const settings = githubProgressSettings(config);
+  return !!settings && (settings.explicit || !!github.progressComment);
+}
+
+export function projectGitHubProgress(args: Args): Promise<void> {
+  if (!progressOffered(args.config, args.github)) return Promise.resolve();
   return withRecoveryCheckpointScope(
     {
       config: args.config,

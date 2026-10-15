@@ -29,6 +29,21 @@ export interface GitHubProgressProjection {
 export const progressDigest = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
 
+/** Work Item ids that can appear in a progress marker. */
+export const PROGRESS_ITEM_ID = /^[A-Za-z0-9._-]{1,128}$/;
+
+/** The first line of a progress comment: an Objective's, or one Work Item's on its issue. */
+export function progressMarker(binding: {
+  objective: number;
+  runId: string;
+  snapshotId: string;
+  item?: string;
+}): string {
+  return binding.item === undefined
+    ? `<!-- factory:progress;objective=${binding.objective};run=${binding.runId};snapshot=${binding.snapshotId} -->`
+    : `<!-- factory:item-progress;objective=${binding.objective};item=${binding.item};run=${binding.runId};snapshot=${binding.snapshotId} -->`;
+}
+
 export function assertGitHubProgressProjection(
   value: unknown,
   context: {
@@ -36,9 +51,18 @@ export function assertGitHubProgressProjection(
     objective: number;
     runId: string;
     configDigest: string;
+    /** A Work Item's progress on its own issue. */
+    item?: { id: string; issue: number };
   },
 ): void {
   if (value === undefined) return;
+  if (
+    context.item &&
+    (!PROGRESS_ITEM_ID.test(context.item.id) ||
+      !Number.isSafeInteger(context.item.issue) ||
+      context.item.issue <= 0)
+  )
+    throw new Error("Invalid Work Item progress binding");
   const object = (value: unknown): Record<string, unknown> => {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error("Invalid GitHub progress projection");
@@ -84,11 +108,16 @@ export function assertGitHubProgressProjection(
     )
       throw new Error("Invalid GitHub progress publication intent");
     snapshots.add(request.snapshotId);
-    const marker = `<!-- factory:progress;objective=${context.objective};run=${context.runId};snapshot=${request.snapshotId} -->`;
+    const marker = progressMarker({
+      objective: context.objective,
+      runId: context.runId,
+      snapshotId: request.snapshotId,
+      item: context.item?.id,
+    });
     if (
       !request.body.startsWith(`${marker}\n`) ||
       !request.body.includes(
-        `https://github.com/${context.repository}/issues/${context.objective})`,
+        `https://github.com/${context.repository}/issues/${context.item?.issue ?? context.objective})`,
       ) ||
       !request.body.includes(`configuration ${context.configDigest}`)
     )

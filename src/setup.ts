@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import { option, options } from "./cli-flags.js";
 import { composeIntake } from "./application.js";
 import {
+  githubProgressSettings,
+  githubProjectStatusSettings,
   hostSchedulingDefaults,
   readConfig,
   readConfigFile,
@@ -138,6 +140,20 @@ export async function setupTarget(
         "setup process environment; service worker environment not verified",
       guidance:
         "Keep credential values in the configured private files or controller environment, never in chat. Presence does not verify account access, billing, environment readiness or deployment approval.",
+    };
+    const progress = githubProgressSettings(config);
+    const projectStatus = githubProjectStatusSettings(config);
+    result.githubPresentation = {
+      progressComments: progress
+        ? `on${progress.explicit ? "" : " (default)"}: Factory comments on ${config.repository}'s Objective and Work Item issues when they change`
+        : "off",
+      projectStatus: !projectStatus
+        ? "off"
+        : projectStatus.kind === "explicit"
+          ? "on: the configured Project Status field"
+          : "on (default): the queue Project's Status field, options matched by name",
+      optOut:
+        'Set githubManagement.progress or githubManagement.projectStatus to {"enabled": false}; neither binds started Objectives.',
     };
     const host = {
       cpus: availableParallelism(),

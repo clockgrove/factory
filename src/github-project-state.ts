@@ -20,6 +20,8 @@ export interface ProjectStatusIntent {
   requestId: string;
   repository: string;
   objective: number;
+  /** The Work Item issue whose card this is; absent for the Objective's own card. */
+  issue?: number;
   runId: string;
   configDigest: string;
   projectId: string;
@@ -52,10 +54,17 @@ export interface GitHubProjectStatusProjection {
     optionId: string;
     observedAt: string;
   };
-  failure?: "update-unknown" | "projection-unavailable" | "history-exhausted";
+  /** `status-field-unavailable`: the default Project has no matching Status field or options. */
+  failure?:
+    | "update-unknown"
+    | "projection-unavailable"
+    | "history-exhausted"
+    | "status-field-unavailable";
 }
 export interface ProjectStatusRequest {
   objective: number;
+  /** A Work Item issue's card instead of the Objective's. */
+  issue?: number;
   runId: string;
   configDigest: string;
   config: GitHubProjectStatusConfig;
@@ -130,6 +139,8 @@ export function assertGitHubProjectStatusProjection(
     objective: number;
     runId: string;
     configDigest: string;
+    /** A Work Item card's issue; absent for the Objective card. */
+    issue?: number;
   },
 ): void {
   if (value === undefined) return;
@@ -164,6 +175,7 @@ export function assertGitHubProjectStatusProjection(
       "requestId",
       "repository",
       "objective",
+      "issue",
       "runId",
       "configDigest",
       "projectId",
@@ -183,6 +195,7 @@ export function assertGitHubProjectStatusProjection(
       seen.has(intent.requestId) ||
       intent.repository !== context.repository ||
       intent.objective !== context.objective ||
+      intent.issue !== context.issue ||
       intent.runId !== context.runId ||
       intent.configDigest !== context.configDigest ||
       !id(intent.projectId) ||
@@ -245,9 +258,50 @@ export function assertGitHubProjectStatusProjection(
   }
   if (
     state.failure !== undefined &&
-    !["update-unknown", "projection-unavailable", "history-exhausted"].includes(
-      String(state.failure),
-    )
+    ![
+      "update-unknown",
+      "projection-unavailable",
+      "history-exhausted",
+      "status-field-unavailable",
+    ].includes(String(state.failure))
   )
     throw new Error("Invalid GitHub Project status disposition");
+}
+
+/**
+ * Default Project Status options, matched by name without case: the first listed name the
+ * field has wins. The later names fit GitHub's default Todo / In Progress / Done board.
+ */
+export const STATUS_OPTION_NAMES: Record<ProjectPhase, readonly string[]> = {
+  planning: ["Planning", "In Progress"],
+  running: ["Running", "In Progress"],
+  review: ["In Review", "Review", "In Progress"],
+  "needs-human": ["Needs Human", "Blocked", "In Progress"],
+  stopped: ["Stopped", "Blocked", "Todo"],
+  accepted: ["Accepted", "Done"],
+};
+
+/** Each phase's option from a Status field's options, or undefined when one is missing. */
+export function discoveredStatusOptions(
+  options: readonly { id: string; name: string }[],
+): Record<ProjectPhase, string> | undefined {
+  const pick = (names: readonly string[]) =>
+    names
+      .map((name) =>
+        options.find(
+          (option) => option.name.trim().toLowerCase() === name.toLowerCase(),
+        ),
+      )
+      .find((option) => option !== undefined)?.id;
+  const chosen = Object.fromEntries(
+    PROJECT_PHASES.map((phase) => [phase, pick(STATUS_OPTION_NAMES[phase])]),
+  ) as Record<ProjectPhase, string | undefined>;
+  if (
+    PROJECT_PHASES.some((phase) => !chosen[phase]) ||
+    PROJECT_PHASES.some(
+      (phase) => phase !== "accepted" && chosen[phase] === chosen.accepted,
+    )
+  )
+    return undefined;
+  return chosen as Record<ProjectPhase, string>;
 }

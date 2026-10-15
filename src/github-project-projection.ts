@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { objectiveComplete } from "./completion.js";
-import type { FactoryConfig } from "./config.js";
+import { type FactoryConfig, githubProjectStatusSettings } from "./config.js";
 import type { GitHubGateway } from "./contracts.js";
 import { gitHubTransportOf } from "./github-client.js";
-import type { ProjectPhase } from "./github-project-state.js";
+import type {
+  GitHubProjectStatusConfig,
+  GitHubProjectStatusProjection,
+  ProjectPhase,
+} from "./github-project-state.js";
 import {
   awaitCheckpointAdmission,
   isCheckpointAdmissionFailure,
@@ -17,6 +21,7 @@ import {
   continuationConfigurationMatches,
   readContinuation,
 } from "./state-store.js";
+import { awaitsOperator } from "./step.js";
 
 /** Derived presentation only; a Project card never grants lifecycle authority. */
 export function projectPhase(state: ContinuationState): ProjectPhase {
@@ -45,16 +50,62 @@ export function projectPhase(state: ContinuationState): ProjectPhase {
   return "running";
 }
 
-/** Same controlled checkpoint and atomic continuation as other projections. */
-async function projectGitHubProjectStatusUnscoped(args: {
+/** A started Work Item's card phase; a pending or skipped item keeps its card as it is. */
+export function workItemProjectPhase(
+  state: ContinuationState,
+  id: string,
+): ProjectPhase | undefined {
+  if (!isExecutionState(state)) return undefined;
+  const work = state.work[id];
+  if (!work || work.status === "pending" || work.status === "skipped")
+    return undefined;
+  if (work.status === "done") return "accepted";
+  if (
+    work.status === "failed" ||
+    work.status === "cancelled" ||
+    state.cancelRequested ||
+    state.cancelledAt
+  )
+    return "stopped";
+  if (
+    work.status === "waiting" ||
+    work.acceptancePending ||
+    awaitsOperator(work.wait)
+  )
+    return "needs-human";
+  if (state.coordinator?.mode !== "running") return "stopped";
+  if (
+    work.status === "running" &&
+    (work.step === "approve-result" || work.step === "approve-asset")
+  )
+    return "review";
+  return "running";
+}
+
+type Args = {
   config: FactoryConfig;
   objective: number;
   github: GitHubGateway;
   current: () => ContinuationState | undefined;
   save: () => void;
-}): Promise<void> {
-  const config = args.config.githubManagement?.projectStatus;
-  if (!config) return;
+};
+
+/** One card: the Objective's own, or a Work Item's on its issue. */
+interface CardTarget {
+  label: string;
+  issue?: number;
+  phase: (state: ContinuationState) => ProjectPhase | undefined;
+  read: (state: ContinuationState) => GitHubProjectStatusProjection | undefined;
+  ensure: (state: ContinuationState) => GitHubProjectStatusProjection;
+}
+
+/** The default Project's discovered binding, read once per process; a gap is remembered too. */
+const discovered = new Map<string, GitHubProjectStatusConfig | null>();
+
+/** Same controlled checkpoint and atomic continuation as other projections. */
+async function projectGitHubProjectStatusUnscoped(args: Args): Promise<void> {
+  const settings = githubProjectStatusSettings(args.config);
+  if (!settings || !projectStatusOffered(args.config, args.github)) return;
   const retained = readContinuation(args.config.repository, args.objective);
   if (!retained) return;
   assertRestoredContinuationReady(retained, args.config);
@@ -69,16 +120,101 @@ async function projectGitHubProjectStatusUnscoped(args: {
       throw new Error("Project projection snapshot or configuration changed");
     return state;
   };
-  const phase = projectPhase(retained);
+  let config: GitHubProjectStatusConfig;
+  if (settings.kind === "explicit") config = settings.config;
+  else {
+    const key = `${settings.repository}|${settings.projectId}`;
+    if (!discovered.has(key)) {
+      try {
+        discovered.set(
+          key,
+          (await args.github.discoverProjectStatus!(settings)) ?? null,
+        );
+      } catch (error) {
+        if (isCheckpointAdmissionFailure(error)) throw error;
+        const state = live();
+        state.githubProjectStatus ??= { requests: [] };
+        if (state.githubProjectStatus.failure !== "projection-unavailable") {
+          state.githubProjectStatus.failure = "projection-unavailable";
+          args.save();
+          await awaitCheckpointAdmission(args.config.repository, "settled");
+        }
+        return;
+      }
+    }
+    const binding = discovered.get(key);
+    if (!binding) {
+      // Reported once; comments continue without Project status.
+      if (
+        retained.githubProjectStatus?.failure !== "status-field-unavailable"
+      ) {
+        const state = live();
+        state.githubProjectStatus ??= { requests: [] };
+        state.githubProjectStatus.failure = "status-field-unavailable";
+        args.save();
+        await awaitCheckpointAdmission(args.config.repository, "settled");
+        process.stderr.write(
+          `Factory Project status for Objective #${args.objective}: the queue Project has no Status field with the default options; posting comments only.\n`,
+        );
+      }
+      return;
+    }
+    config = binding;
+  }
+  await projectCard(args, config, retained, live, {
+    label: `Objective #${args.objective}`,
+    phase: projectPhase,
+    read: (state) => state.githubProjectStatus,
+    ensure: (state) => {
+      state.githubProjectStatus ??= { requests: [] };
+      return state.githubProjectStatus;
+    },
+  });
+  if (!isExecutionState(retained)) return;
+  for (const [id, issue] of Object.entries(retained.issueByItemId)) {
+    const recorded = retained.workItemTracking?.[id]?.issue;
+    // A graph revision that rebinds the item to another issue ends its tracking.
+    if (recorded !== undefined && recorded !== issue) continue;
+    await projectCard(args, config, retained, live, {
+      label: `Work Item ${id}`,
+      issue,
+      phase: (state) => workItemProjectPhase(state, id),
+      read: (state) =>
+        isExecutionState(state)
+          ? state.workItemTracking?.[id]?.projectStatus
+          : undefined,
+      ensure: (state) => {
+        if (!isExecutionState(state))
+          throw new Error("Work Item tracking requires an executing Objective");
+        state.workItemTracking ??= {};
+        state.workItemTracking[id] ??= { issue };
+        const entry = state.workItemTracking[id];
+        entry.projectStatus ??= { requests: [] };
+        return entry.projectStatus;
+      },
+    });
+  }
+}
+
+async function projectCard(
+  args: Args,
+  config: GitHubProjectStatusConfig,
+  retained: ContinuationState,
+  live: () => ContinuationState,
+  target: CardTarget,
+): Promise<void> {
+  const phase = target.phase(retained);
+  if (!phase) return;
   const optionId = config.options[phase];
-  const previous = retained.githubProjectStatus?.requests.at(-1);
+  const projection = target.read(retained);
+  const previous = projection?.requests.at(-1);
   const pending =
     previous && !previous.response && !previous.notSent ? previous : undefined;
   // One exact later read is useful evidence. Further reads cannot settle the
   // original effect, so retain its timestamp and fence without polling forever.
   if (pending?.laterObservation) return;
   // Known completed writes coalesce time-only changes; unknown writes read only.
-  const satisfaction = retained.githubProjectStatus?.observed;
+  const satisfaction = projection?.observed;
   if (
     !pending &&
     (previous?.response?.optionId === optionId ||
@@ -94,17 +230,15 @@ async function projectGitHubProjectStatusUnscoped(args: {
     const important = ["accepted", "needs-human", "stopped"].includes(phase);
     if (
       !pending &&
-      (retained.githubProjectStatus?.requests.length ?? 0) >=
-        (important ? 64 : 62)
+      (projection?.requests.length ?? 0) >= (important ? 64 : 62)
     ) {
-      const state = live();
-      state.githubProjectStatus ??= { requests: [] };
-      state.githubProjectStatus.failure = "history-exhausted";
+      target.ensure(live()).failure = "history-exhausted";
       args.save();
       return;
     }
     const observed = await args.github.projectStatus({
       objective: args.objective,
+      ...(target.issue !== undefined && { issue: target.issue }),
       runId: retained.runId,
       configDigest: retained.configDigest,
       config,
@@ -115,27 +249,26 @@ async function projectGitHubProjectStatusUnscoped(args: {
       beforeWrite: async (intent) => {
         const state = live();
         // Revalidate phase after awaited reads; do not publish a stale checkpoint.
-        if (projectPhase(state) !== phase)
+        if (target.phase(state) !== phase)
           throw new Error("Project lifecycle changed before update");
-        state.githubProjectStatus ??= { requests: [] };
-        const last = state.githubProjectStatus.requests.at(-1);
+        const current = target.ensure(state);
+        const last = current.requests.at(-1);
         if (
           (last && !last.response && !last.notSent) ||
-          state.githubProjectStatus.requests.length >= (important ? 64 : 62)
+          current.requests.length >= (important ? 64 : 62)
         )
           throw new Error("Project status update is held by retained history");
-        state.githubProjectStatus.requests.push(intent);
-        delete state.githubProjectStatus.observed;
+        current.requests.push(intent);
+        delete current.observed;
         args.save();
         await awaitCheckpointAdmission(args.config.repository, "before-effect");
       },
     });
     const state = live();
-    const intent = state.githubProjectStatus?.requests.at(-1);
     if (observed.kind === "unchanged") {
       // Read-only satisfaction requires no fabricated mutation receipt.
-      state.githubProjectStatus ??= { requests: [] };
-      state.githubProjectStatus.observed = {
+      const current = target.ensure(state);
+      current.observed = {
         projectId: config.projectId,
         fieldId: config.fieldId,
         itemId: observed.itemId,
@@ -143,11 +276,14 @@ async function projectGitHubProjectStatusUnscoped(args: {
         optionId,
         observedAt: observed.observedAt,
       };
-      delete state.githubProjectStatus.failure;
+      delete current.failure;
       args.save();
       return;
     }
+    const current = target.read(state);
+    const intent = current?.requests.at(-1);
     if (
+      !current ||
       !intent ||
       intent.requestId !== requestId ||
       intent.itemId !== observed.itemId ||
@@ -161,7 +297,7 @@ async function projectGitHubProjectStatusUnscoped(args: {
         optionId: observed.optionId,
         observedAt: observed.observedAt,
       };
-      state.githubProjectStatus!.failure = "update-unknown";
+      current.failure = "update-unknown";
     } else {
       if (intent.optionId !== observed.optionId)
         throw new Error("Project update option differs");
@@ -170,7 +306,7 @@ async function projectGitHubProjectStatusUnscoped(args: {
         optionId: observed.optionId,
         observedAt: observed.observedAt,
       };
-      delete state.githubProjectStatus!.failure;
+      delete current.failure;
     }
     args.save();
     // The exact original response must be durable before dependent work proceeds.
@@ -178,9 +314,11 @@ async function projectGitHubProjectStatusUnscoped(args: {
   } catch (error) {
     if (isCheckpointAdmissionFailure(error)) throw error;
     const state = live();
-    state.githubProjectStatus ??= { requests: [] };
-    const last = state.githubProjectStatus.requests.at(-1);
+    const existed = target.read(state) !== undefined;
+    const current = target.ensure(state);
+    const last = current.requests.at(-1);
     const transport = gitHubTransportOf(error);
+    let notSent = false;
     if (
       last &&
       last.requestId === requestId &&
@@ -190,30 +328,49 @@ async function projectGitHubProjectStatusUnscoped(args: {
       transport?.operation === "mutation" &&
       transport.dispatch === "not-sent" &&
       transport.outcome !== "completed"
-    )
+    ) {
       last.notSent = {
         operation: "mutation",
         dispatch: "not-sent",
         outcome: transport.outcome,
         category: transport.category,
       };
-    state.githubProjectStatus.failure =
+      notSent = true;
+    }
+    const failure =
       last && !last.response && !last.notSent
         ? "update-unknown"
         : "projection-unavailable";
+    // A repeated read failure (for example, an issue with no card) is recorded once.
+    if (existed && !notSent && current.failure === failure) return;
+    current.failure = failure;
     args.save();
     await awaitCheckpointAdmission(args.config.repository, "settled");
     process.stderr.write(
-      `Factory Project status for Objective #${args.objective}: ${state.githubProjectStatus.failure}; inspect Factory status.\n`,
+      `Factory Project status for ${target.label}: ${current.failure}; inspect Factory status.\n`,
     );
   }
 }
 
 /** Direct callers use the same admitted repository scope as owned controllers. */
-export function projectGitHubProjectStatus(
-  args: Parameters<typeof projectGitHubProjectStatusUnscoped>[0],
-): Promise<void> {
-  if (!args.config.githubManagement?.projectStatus) return Promise.resolve();
+/**
+ * Whether this run projects Project status: explicitly configured, or by default from the
+ * queue Project where the gateway can read and update it.
+ */
+export function projectStatusOffered(
+  config: FactoryConfig,
+  github: GitHubGateway,
+): boolean {
+  const settings = githubProjectStatusSettings(config);
+  return (
+    !!settings &&
+    (settings.kind === "explicit" ||
+      (!!github.projectStatus && !!github.discoverProjectStatus))
+  );
+}
+
+export function projectGitHubProjectStatus(args: Args): Promise<void> {
+  if (!projectStatusOffered(args.config, args.github)) return Promise.resolve();
   return withRecoveryCheckpointScope(
     {
       config: args.config,

@@ -821,25 +821,21 @@ Only an approved compact version enters subsequent Objective planning and review
 
 Use the current agent conversation for progress updates and human-owned questions. In Codex, the director reads the real retained question, asks you there, verifies the current Objective/configuration binding and records your actual answer through the supported [decision commands](#decisions). GitHub is the detailed view of Objectives, Work Items, dependencies, PRs, evidence and Project status. Ordinary operation does not require posting decision JSON on GitHub. During a background check-in, the agent can inspect pending questions; persistence does not by itself wake an inactive Codex conversation or provide push notifications.
 
-Operational summaries are disabled by default. Before starting an Objective, explicitly enable the target's progress disclosure in its existing private configuration:
+Progress comments are on by default. Factory posts a bounded stream of status snapshots on each admitted Objective issue in the configured target, and a short comment on each Work Item issue when that item changes. Question text is left out. To turn comments off, or to include questions, set the field in the existing private configuration:
 
 ```json
 {
   "githubManagement": {
-    "progress": {
-      "enabled": true,
-      "repository": "OWNER/REPOSITORY",
-      "includeQuestions": false
-    }
+    "progress": { "enabled": false }
   }
 }
 ```
 
-Add this field to the existing configuration; it is not a complete configuration file. The repository must match the configured target. This authorizes a bounded stream of public status snapshots on that target's admitted Objective issues. Set `includeQuestions: true` only when the actual planning/acceptance question text and its binding metadata are cleared for that issue's disclosure scope. Logs, prompts, source bodies and arbitrary exception text are excluded. Configuration changes remain subject to existing active-Objective binding rules.
+For question text, use `"progress": { "enabled": true, "repository": "OWNER/REPOSITORY", "includeQuestions": true }`, with the configured target as the repository. Set `includeQuestions: true` only when the actual planning/acceptance question text and its binding metadata are cleared for that issue's disclosure scope. Logs, prompts, source bodies and arbitrary exception text are always excluded. Progress and Project status settings are not part of the configuration digest, so changing them never strands a started Objective. `factory setup` reports both defaults.
 
-Snapshots show accepted deliveries and PR links, active work, the next action, blockers and enabled human questions. Long run/configuration/decision identities are expandable. Read the snapshot observation time and GitHub publication timestamp: an old comment is an old observation, not proof the controller is still running. The controller coalesces transitions, with a final checkpoint before releasing ownership; it does not post heartbeats. Up to 64 exact snapshot requests remain in the same atomic continuation, including unresolved requests. Unknown publication is reconciled read-only and never recreated from an empty lookup. Existing comments are never edited or overwritten.
+Objective snapshots show accepted deliveries and PR links, active work, the next action, blockers and enabled human questions. A Work Item comment shows its status and step, the current attempt, a provider outage and its next try, the last failure's class (never its detail), its pull request and whether Factory is paused or draining. Long run/configuration/decision identities are expandable. Read the snapshot observation time and GitHub publication timestamp: an old comment is an old observation, not proof the controller is still running. The controller coalesces transitions, with a final checkpoint before releasing ownership; it does not post heartbeats. Up to 64 exact snapshot requests remain in the same atomic continuation, including unresolved requests. Unknown publication is reconciled read-only and never recreated from an empty lookup. Existing comments are never edited or overwritten.
 
-`factory status --objective N` reports retained snapshot count, last observed publication and tracking failures such as `publication-unknown`, `projection-unavailable` or `history-exhausted`. These do not change substantive app acceptance or replay implementation/delivery. When tracking is degraded, inspect the exact local status before relying on stale GitHub presentation.
+`factory status --objective N` reports retained snapshot count, last observed publication and tracking failures such as `publication-unknown`, `projection-unavailable` or `history-exhausted`. A `GitHub Work Item tracking` line counts tracked items and comments and names any item whose comments or card failed. These do not change substantive app acceptance or replay implementation/delivery. When tracking is degraded, inspect the exact local status before relying on stale GitHub presentation.
 
 An optional experimental GitHub planning-answer pilot remains disabled by default; its live decision-consumption journey has not been qualified. To opt into that separate route, set `progress.includeQuestions: true` and add `"decisions": { "enabled": true, "actorIds": [YOUR_IMMUTABLE_NUMERIC_GITHUB_USER_ID] }` beside `progress`. This separately authorizes only one genuine, structurally acceptable pending planning question before issue projection. The Objective needs a finite whole-run deadline. Copy the filled JSON template from the progress details into a new comment on that Objective and replace only `answer` and `reason`. Factory authenticates the allowlisted human ID and exact unedited comment, rechecks the plan/control/deadline, and retains the answer and original question packet atomically. It does not accept Work Item results or final delivery, refuse a plan, retry work, cancel, merge or increase limits. Multiple questions, failures, stale or edited comments, unknown effects and intentional pauses stay on the local supported path. Never treat an agent-authored comment as human approval.
 
@@ -847,7 +843,9 @@ An enabled eligible phone hold retains the current controller without provider c
 
 For background intake, add `"objectiveDeadlineSeconds": 1500` to the configured Project queue to record an absolute whole-Objective deadline at first dispatch. Human waiting and host downtime count toward it. Restart or configuration changes never renew a saved deadline; configuration changes affect fresh Objectives only, and an already started uncapped Objective remains uncapped. A phone hold requires a finite deadline.
 
-An optional `githubManagement.projectStatus` can update the Objective's existing Project card independently of comments:
+Project status is on by default too. When `queue.project` names a Project, Factory keeps the Status field of the Objective's card and each started Work Item's card in step with the run. It finds the single-select field named Status and picks options by name: GitHub's default Todo / In Progress / Done board works as is, and a board with Planning, Running, In Review, Needs Human, Blocked, Stopped or Accepted options gets the finer phases. The full name order is in [GitHub management](GITHUB-MANAGEMENT.md#c-existing-project-status-projection). A missing field or option is reported once as `status-field-unavailable`, and comments continue. Set `"projectStatus": { "enabled": false }` to turn it off.
+
+To name the field and options yourself, or to use a Project other than the queue's, set `githubManagement.projectStatus` explicitly:
 
 ```json
 {
@@ -870,7 +868,7 @@ An optional `githubManagement.projectStatus` can update the Objective's existing
 }
 ```
 
-The Project must belong to the target repository owner, its field must be named Status and be single-select, and every option must exist. The accepted option must differ from all others. The Objective must already have one nonarchived Project card; The status projection never adds/deletes cards or touches other fields; separately configured queue admission can add cards and write its dedicated scheduling fields. The explicit opt-in makes this field Factory-managed, so concurrent human edits may be overwritten. Unknown update outcomes hold only this field permanently; one later read remains an observation, not mutation confirmation or permission to retry. `factory status` reports Project tracking failures separately from app acceptance. Accepted Project status follows actual accepted Objective closure.
+The Project must belong to the target repository owner, its field must be named Status and be single-select, and every option must exist. The accepted option must differ from all others. The Objective must already have one nonarchived Project card, and a Work Item's card is updated only when it has exactly one; The status projection never adds/deletes cards or touches other fields; separately configured queue admission can add cards and write its dedicated scheduling fields. The explicit opt-in makes this field Factory-managed, so concurrent human edits may be overwritten. Unknown update outcomes hold only this field permanently; one later read remains an observation, not mutation confirmation or permission to retry. `factory status` reports Project tracking failures separately from app acceptance. Accepted Project status follows actual accepted Objective closure.
 
 ## Git checkpoints
 

@@ -180,6 +180,16 @@ export function capacityLine(capacity: CapacityView): string {
 export interface ExecutionStatusView extends WaitView {
   githubProjectTracking?: NotStartedStatusView["githubProjectTracking"];
   githubProgress?: NotStartedStatusView["githubProgress"];
+  /** Work Item comments and cards; failures name the item and the stream. */
+  githubWorkItemTracking?: {
+    items: number;
+    comments: number;
+    failures: {
+      item: string;
+      stream: "progress" | "project";
+      failure: string;
+    }[];
+  } | null;
   objective: number;
   /** Set when the installation configuration differs from the one the Objective started under. */
   configurationChanged?: boolean;
@@ -1264,6 +1274,11 @@ export function renderStatusText(
   if (view.githubProjectTracking)
     lines.push(
       `GitHub Project tracking: ${view.githubProjectTracking.failure ?? "observed"}; ${view.githubProjectTracking.retainedUpdates} retained update requests${view.githubProjectTracking.observedAt ? `; last observed ${view.githubProjectTracking.observedAt}` : ""}${view.githubProjectTracking.unknownUpdate ? "; update outcome unknown; managed field held read-only" : ""}`,
+    );
+  const items = "githubWorkItemTracking" in view && view.githubWorkItemTracking;
+  if (items)
+    lines.push(
+      `GitHub Work Item tracking: ${items.items} item${items.items === 1 ? "" : "s"}, ${items.comments} comment${items.comments === 1 ? "" : "s"}${items.failures.map((entry) => `; ${entry.item} ${entry.stream}: ${entry.failure}`).join("")}`,
     );
   if (view.nextAction)
     lines.push(

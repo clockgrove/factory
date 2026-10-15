@@ -1554,14 +1554,23 @@ export interface GitHubGateway {
   projectStatus?(
     request: import("./github-project-state.js").ProjectStatusRequest,
   ): Promise<import("./github-project-state.js").ProjectStatusObservation>;
+  /** Read-only: the default Project's Status field and options by name, else undefined. */
+  discoverProjectStatus?(discovery: {
+    projectId: string;
+    reservedFieldIds: string[];
+  }): Promise<
+    import("./github-project-state.js").GitHubProjectStatusConfig | undefined
+  >;
   /** Actual GitHub human identities/edit facts, never comment-inferred authority. */
   planDecisionComments?(
     objective: number,
     actorIds: number[],
   ): Promise<import("./github-plan-decisions.js").GitHubDecisionComment[]>;
-  /** Owned Objective progress only; an unresolved prior write permits reads only. */
+  /** Owned Objective or Work Item progress; an unresolved prior write permits reads only. */
   progressComment?(request: {
     objective: number;
+    /** A Work Item's own issue instead of the Objective's. */
+    item?: { id: string; issue: number };
     runId: string;
     body: string;
     snapshotId: string;

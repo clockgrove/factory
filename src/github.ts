@@ -35,10 +35,15 @@ import {
 import type { GitHubDecisionComment } from "./github-plan-decisions.js";
 import { parsePlanDecision } from "./github-plan-decisions.js";
 import {
+  PROGRESS_ITEM_ID,
   type ProgressCommentIdentity,
   progressDigest,
+  progressMarker,
 } from "./github-progress-state.js";
-import { projectStatusOnGitHub } from "./github-project.js";
+import {
+  discoverProjectStatusOnGitHub,
+  projectStatusOnGitHub,
+} from "./github-project.js";
 import {
   projectQueueReadOnGitHub,
   projectQueueInspectOnGitHub,
@@ -207,23 +212,33 @@ export class RealGitHubGateway implements GitHubGateway {
       () => this.client.projectQueueGraphql<T>(query, variables, readOnly),
     );
 
+  private statusGraphql = <T>(
+    query: string,
+    variables: Record<string, unknown>,
+    readOnly: boolean,
+  ): Promise<T> =>
+    classifiedGitHubCall(
+      this.client,
+      this.repository,
+      { method: "POST", path: "graphql" },
+      () => this.client.projectStatusGraphql<T>(query, variables, readOnly),
+    );
+
   projectStatus(
     request: Parameters<NonNullable<GitHubGateway["projectStatus"]>>[0],
   ) {
-    return projectStatusOnGitHub(
+    return projectStatusOnGitHub(this.repository, request, this.statusGraphql);
+  }
+
+  discoverProjectStatus(
+    discovery: Parameters<
+      NonNullable<GitHubGateway["discoverProjectStatus"]>
+    >[0],
+  ) {
+    return discoverProjectStatusOnGitHub(
       this.repository,
-      request,
-      <T>(
-        query: string,
-        variables: Record<string, unknown>,
-        readOnly: boolean,
-      ) =>
-        classifiedGitHubCall(
-          this.client,
-          this.repository,
-          { method: "POST", path: "graphql" },
-          () => this.client.projectStatusGraphql<T>(query, variables, readOnly),
-        ),
+      discovery,
+      this.statusGraphql,
     );
   }
 
@@ -318,10 +333,20 @@ export class RealGitHubGateway implements GitHubGateway {
   async progressComment(
     request: Parameters<NonNullable<GitHubGateway["progressComment"]>>[0],
   ): Promise<ProgressCommentIdentity> {
-    const marker = `<!-- factory:progress;objective=${request.objective};run=${request.runId};snapshot=${request.snapshotId} -->`;
+    const marker = progressMarker({
+      objective: request.objective,
+      runId: request.runId,
+      snapshotId: request.snapshotId,
+      item: request.item?.id,
+    });
+    const issue = request.item?.issue ?? request.objective;
     if (
       !Number.isSafeInteger(request.objective) ||
       request.objective <= 0 ||
+      (request.item &&
+        (!PROGRESS_ITEM_ID.test(request.item.id) ||
+          !Number.isSafeInteger(request.item.issue) ||
+          request.item.issue <= 0)) ||
       !/^[a-zA-Z0-9-]{1,128}$/.test(request.runId) ||
       !/^[a-f0-9-]{36}$/.test(request.snapshotId) ||
       !request.body.startsWith(`${marker}\n`) ||
@@ -343,7 +368,7 @@ export class RealGitHubGateway implements GitHubGateway {
       typeof comment.created_at === "string" &&
       Number.isFinite(Date.parse(comment.created_at)) &&
       comment.issue_url ===
-        `https://api.github.com/repos/${this.repository}/issues/${request.objective}`;
+        `https://api.github.com/repos/${this.repository}/issues/${issue}`;
     const identity = (
       comment: Comment,
       actorId: number,
@@ -364,9 +389,7 @@ export class RealGitHubGateway implements GitHubGateway {
         throw new Error(
           "Retained progress request differs from unresolved exact intent",
         );
-      const comments = await this.pages<Comment>(
-        `issues/${request.objective}/comments`,
-      );
+      const comments = await this.pages<Comment>(`issues/${issue}/comments`);
       const exact = comments.filter((comment) =>
         matches(comment, pending.actorId),
       );
@@ -376,9 +399,7 @@ export class RealGitHubGateway implements GitHubGateway {
       );
     }
     const actor = await this.client.viewerIdentity();
-    const comments = await this.pages<Comment>(
-      `issues/${request.objective}/comments`,
-    );
+    const comments = await this.pages<Comment>(`issues/${issue}/comments`);
     if (comments.some((comment) => comment.body?.startsWith(marker)))
       throw new Error(
         "GitHub progress marker exists without a retained publication identity",
@@ -386,7 +407,7 @@ export class RealGitHubGateway implements GitHubGateway {
     await request.beforeWrite(actor.id);
     const comment = await this.api<Comment>(
       "POST",
-      `issues/${request.objective}/comments`,
+      `issues/${issue}/comments`,
       { body: request.body },
     );
     if (!matches(comment, actor.id))

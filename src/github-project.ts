@@ -1,8 +1,12 @@
 import type {
+  GitHubProjectStatusConfig,
   ProjectStatusObservation,
   ProjectStatusRequest,
 } from "./github-project-state.js";
-import { assertGitHubProjectStatusConfig } from "./github-project-state.js";
+import {
+  assertGitHubProjectStatusConfig,
+  discoveredStatusOptions,
+} from "./github-project-state.js";
 
 /** The adapter supplies the existing authenticated, classified GitHub transport. */
 export type ProjectGraphQL = <T>(
@@ -30,16 +34,79 @@ type Card = {
 };
 const CARD = `id isArchived project { id } content { __typename ... on Issue { number repository { nameWithOwner } } } fieldValues(first:100) { nodes { __typename ... on ProjectV2ItemFieldSingleSelectValue { optionId field { ... on ProjectV2SingleSelectField { id } } } } pageInfo { hasNextPage } }`;
 
-/** One existing Objective card, one configured field; never creates a card. */
+/**
+ * The default Project's Status binding: its one single-select field named Status, with an
+ * option for every phase by name. Undefined when the field or an option is missing; the
+ * caller reports that gap and keeps posting comments.
+ */
+export async function discoverProjectStatusOnGitHub(
+  repository: string,
+  discovery: { projectId: string; reservedFieldIds: string[] },
+  graphql: ProjectGraphQL,
+): Promise<GitHubProjectStatusConfig | undefined> {
+  const [owner] = repository.split("/");
+  const result = await graphql<{
+    project: {
+      __typename: string;
+      id: string;
+      owner: { login: string };
+      fields: {
+        nodes: ({
+          __typename: string;
+          id: string;
+          name: string;
+          dataType: string;
+          options?: { id: string; name: string }[];
+        } | null)[];
+        pageInfo: { hasNextPage: boolean };
+      };
+    } | null;
+  }>(
+    `query($project:ID!) { project:node(id:$project) { __typename ... on ProjectV2 { id owner { ... on Organization { login } ... on User { login } } fields(first:100) { nodes { __typename ... on ProjectV2FieldCommon { id name dataType } ... on ProjectV2SingleSelectField { options { id name } } } pageInfo { hasNextPage } } } } }`,
+    { project: discovery.projectId },
+    true,
+  );
+  const project = result.project;
+  if (
+    project?.__typename !== "ProjectV2" ||
+    project.id !== discovery.projectId ||
+    project.owner?.login.toLowerCase() !== owner?.toLowerCase() ||
+    project.fields?.pageInfo.hasNextPage !== false
+  )
+    throw new Error("Queue Project differs from its target or field inventory");
+  const fields = project.fields.nodes.filter(
+    (field) =>
+      field?.__typename === "ProjectV2SingleSelectField" &&
+      field.name === "Status" &&
+      field.dataType === "SINGLE_SELECT",
+  );
+  const field = fields.length === 1 ? fields[0]! : undefined;
+  if (!field || discovery.reservedFieldIds.includes(field.id)) return undefined;
+  const options = discoveredStatusOptions(field.options ?? []);
+  return options
+    ? {
+        repository,
+        projectId: discovery.projectId,
+        fieldId: field.id,
+        factoryManagedField: true,
+        options,
+      }
+    : undefined;
+}
+
+/** One existing Objective or Work Item card, one configured field; never creates a card. */
 export async function projectStatusOnGitHub(
   repository: string,
   request: ProjectStatusRequest,
   graphql: ProjectGraphQL,
 ): Promise<ProjectStatusObservation> {
   assertGitHubProjectStatusConfig(request.config, repository);
+  const issue = request.issue ?? request.objective;
   if (
     !Number.isSafeInteger(request.objective) ||
     request.objective <= 0 ||
+    !Number.isSafeInteger(issue) ||
+    issue <= 0 ||
     !/^[A-Za-z0-9-]{1,128}$/.test(request.runId) ||
     !/^[a-f0-9]{64}$/.test(request.configDigest) ||
     !/^[a-f0-9-]{36}$/.test(request.requestId) ||
@@ -92,12 +159,12 @@ export async function projectStatusOnGitHub(
       card.isArchived !== false ||
       card.project?.id !== request.config.projectId ||
       card.content?.__typename !== "Issue" ||
-      card.content.number !== request.objective ||
+      card.content.number !== issue ||
       card.content.repository?.nameWithOwner !== repository ||
       card.fieldValues?.pageInfo.hasNextPage !== false
     )
       throw new Error(
-        "Project card differs from its exact Objective or complete field observation",
+        "Project card differs from its exact issue or complete field observation",
       );
     const matches = card.fieldValues.nodes.filter(
       (value) => value?.field?.id === request.config.fieldId,
@@ -120,6 +187,7 @@ export async function projectStatusOnGitHub(
       pending.notSent ||
       pending.repository !== repository ||
       pending.objective !== request.objective ||
+      pending.issue !== request.issue ||
       pending.runId !== request.runId ||
       pending.configDigest !== request.configDigest ||
       pending.projectId !== request.config.projectId ||
@@ -163,16 +231,14 @@ export async function projectStatusOnGitHub(
       } | null;
     } = await graphql(
       `query($owner:String!,$name:String!,$objective:Int!,$after:String) { repository(owner:$owner,name:$name) { nameWithOwner issue(number:$objective) { number projectItems(first:100,after:$after,includeArchived:true) { nodes { ${CARD} } pageInfo { hasNextPage endCursor } } } } }`,
-      { owner, name, objective: request.objective, after },
+      { owner, name, objective: issue, after },
       true,
     );
     if (
       result.repository?.nameWithOwner !== repository ||
-      result.repository.issue?.number !== request.objective
+      result.repository.issue?.number !== issue
     )
-      throw new Error(
-        "Objective Project inventory repository or issue differs",
-      );
+      throw new Error("Project inventory repository or issue differs");
     const connection = result.repository.issue.projectItems;
     cards.push(
       ...connection.nodes.filter(
@@ -187,7 +253,7 @@ export async function projectStatusOnGitHub(
   }
   if (cards.length !== 1)
     throw new Error(
-      "Exactly one existing Objective card is required in the configured Project",
+      "Exactly one existing card for the issue is required in the configured Project",
     );
   const card = cards[0]!;
   const previousOptionId = readOption(card);
@@ -202,6 +268,7 @@ export async function projectStatusOnGitHub(
     requestId: request.requestId,
     repository,
     objective: request.objective,
+    ...(request.issue !== undefined && { issue: request.issue }),
     runId: request.runId,
     configDigest: request.configDigest,
     projectId: request.config.projectId,

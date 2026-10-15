@@ -1,3 +1,4 @@
+import { PROGRESS_ITEM_ID, progressMarker } from "./github-progress-state.js";
 import { summarizeStatus, type StatusView } from "./status-summary.js";
 
 /** Text explicitly cleared for the target issue's existing disclosure scope. */
@@ -79,7 +80,11 @@ export function renderGitHubProgress(input: GitHubProgressInput): string {
         ? "No active controller observed"
         : "Controller ownership unknown";
   const lines = [
-    `<!-- factory:progress;objective=${input.view.objective};run=${input.runId};snapshot=${input.snapshotId} -->`,
+    progressMarker({
+      objective: input.view.objective,
+      runId: input.runId,
+      snapshotId: input.snapshotId,
+    }),
     `### Factory progress · ${issueLink(input.repository, input.view.objective)}`,
     "",
     `**${compact(phase)}** · ${ownership}`,
@@ -141,4 +146,101 @@ export function renderGitHubProgress(input: GitHubProgressInput): string {
   if (Buffer.byteLength(body) > 24_000)
     throw new Error("GitHub progress exceeds its publication byte bound");
   return body;
+}
+
+/** One Work Item's public facts: structured fields only, never logs or exception text. */
+export interface WorkItemProgressInput {
+  repository: string;
+  objective: number;
+  item: { id: string; issue: number };
+  runId: string;
+  snapshotId: string;
+  configDigest: string;
+  observedAt: string;
+  status: import("./state.js").WorkStatus;
+  step?: import("./state.js").WorkStep;
+  /** The current attempt's identity. */
+  attempt?: string;
+  pullRequest?: number;
+  /** A provider outage the item's step is waiting out. */
+  outage?: { step: string; retryAt?: string };
+  /** The last failure's class, never its detail. */
+  failure?: string;
+  coordinator?: "running" | "paused" | "draining";
+}
+
+const WORK_HEADLINE: Record<string, string> = {
+  execute: "Executing",
+  validate: "Validating",
+  "approve-asset": "In review",
+  "approve-result": "In review",
+  deliver: "Delivering",
+};
+
+/** A short transition comment for a Work Item's own issue; no I/O and no authority. */
+export function renderWorkItemProgress(input: WorkItemProgressInput): string {
+  if (
+    !/^[\w.-]+\/[\w.-]+$/.test(input.repository) ||
+    !Number.isSafeInteger(input.objective) ||
+    input.objective <= 0 ||
+    !PROGRESS_ITEM_ID.test(input.item.id) ||
+    !Number.isSafeInteger(input.item.issue) ||
+    input.item.issue <= 0 ||
+    !/^[a-zA-Z0-9-]{1,128}$/.test(input.runId) ||
+    !/^[a-f0-9-]{36}$/.test(input.snapshotId) ||
+    !/^[a-f0-9]{64}$/.test(input.configDigest) ||
+    Number.isNaN(Date.parse(input.observedAt)) ||
+    (input.outage?.retryAt !== undefined &&
+      Number.isNaN(Date.parse(input.outage.retryAt)))
+  )
+    throw new Error(
+      "Work Item progress requires verified identity and observation times",
+    );
+  const headline =
+    input.status === "running"
+      ? (WORK_HEADLINE[input.step ?? ""] ?? "Running")
+      : input.status === "published"
+        ? "Pull request open"
+        : input.status === "waiting"
+          ? "Waiting for a human decision"
+          : input.status === "done"
+            ? "Accepted"
+            : input.status === "failed"
+              ? "Failed"
+              : input.status === "cancelled"
+                ? "Cancelled"
+                : compact(input.status);
+  const lines = [
+    progressMarker({
+      objective: input.objective,
+      runId: input.runId,
+      snapshotId: input.snapshotId,
+      item: input.item.id,
+    }),
+    `### Factory Work Item · ${issueLink(input.repository, input.item.issue)}`,
+    `Objective ${issueLink(input.repository, input.objective)} · item ${compact(input.item.id)}`,
+    "",
+    `**${headline}**${input.attempt ? ` · attempt ${compact(input.attempt.slice(0, 8))}` : ""}`,
+    ...(input.outage
+      ? [
+          `Waiting out a provider outage in ${compact(input.outage.step)}${input.outage.retryAt ? `; next try after ${compact(input.outage.retryAt)}` : ""}.`,
+        ]
+      : []),
+    ...(input.failure ? [`Last failure: ${compact(input.failure)}.`] : []),
+    ...(input.pullRequest
+      ? [`Pull request: ${pullLink(input.repository, input.pullRequest)}`]
+      : []),
+    ...(input.coordinator && input.coordinator !== "running"
+      ? [`Factory is ${input.coordinator}.`]
+      : []),
+    "",
+    `Observed ${compact(input.observedAt)}. Factory comments when this item changes; this is not a live heartbeat.`,
+    "",
+    "<details><summary>Run details</summary>",
+    "",
+    `Run ${compact(input.runId)} · configuration ${input.configDigest}`,
+    "",
+    "</details>",
+  ];
+  return lines.join("\n");
 }

@@ -2005,6 +2005,41 @@ function progressStatus(projection: GitHubProgressProjection | undefined) {
   };
 }
 
+function workItemTracking(tracking: FactoryState["workItemTracking"]) {
+  const entries = Object.entries(tracking ?? {});
+  if (!entries.length) return null;
+  return {
+    items: entries.length,
+    comments: entries.reduce(
+      (sum, [, entry]) =>
+        sum +
+        (entry.progress?.requests.filter((request) => request.comment).length ??
+          0),
+      0,
+    ),
+    failures: entries.flatMap(([item, entry]) => [
+      ...(entry.progress?.failure
+        ? [
+            {
+              item,
+              stream: "progress" as const,
+              failure: entry.progress.failure,
+            },
+          ]
+        : []),
+      ...(entry.projectStatus?.failure
+        ? [
+            {
+              item,
+              stream: "project" as const,
+              failure: entry.projectStatus.failure,
+            },
+          ]
+        : []),
+    ]),
+  };
+}
+
 /** Local status observes the existing snapshot, never opaque adapter receipts. */
 function sessionStatus(
   sessions: FactoryState["agentSessions"],
@@ -2290,6 +2325,7 @@ export function statusDocument(
     agentSessions: sessionStatus(state.agentSessions, secrets),
     githubProgress: progressStatus(state.githubProgress),
     githubProjectTracking: projectTracking(state.githubProjectStatus),
+    githubWorkItemTracking: workItemTracking(state.workItemTracking),
     // The Objective was started under another configuration: the run refuses
     // it (see runObjective), so no retry continues it.
     ...(installationConfigDigest !== undefined &&

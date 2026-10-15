@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -11,15 +11,28 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
+import {
+  agentSessionContinuation,
+  planningSessionInputDigest,
+} from "../dist/agent-session.js";
+import {
+  CODEX_SOURCE_READ_CONFIG,
+  createCodexHome,
+} from "../dist/codex-planning-isolation.js";
 import { CodexPlanningTransport } from "../dist/compiler/codex-transport.js";
 import {
   renderCompilationCall,
   renderDiagnosisCall,
   renderGraphReviewCall,
+  StructuredPlanningModel,
 } from "../dist/compiler/model.js";
-import { renderPlanningInstructions } from "../dist/compiler/planning.js";
+import {
+  generatePlannerStructured,
+  renderPlanningInstructions,
+} from "../dist/compiler/planning.js";
+import { structuredRequestDigest } from "../dist/compiler/transport.js";
 import {
   deliveredPlanningSources,
   materializePlanningSources,
@@ -1286,6 +1299,217 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(privateSources, { recursive: true, force: true });
+  }
+});
+
+test("settled planning conversation from an earlier source-read profile gets a fresh diagnosis", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-profile-update-"));
+  const sessions = mkdtempSync(join(tmpdir(), "factory-profile-sessions-"));
+  try {
+    git(root, "init", "-b", "main");
+    git(root, "config", "user.name", "Fixture");
+    git(root, "config", "user.email", "fixture@example.test");
+    writeFileSync(
+      join(root, "notes.md"),
+      "# Notes\n\nKeep the final newline.\n",
+    );
+    git(root, "add", ".");
+    git(root, "commit", "-m", "pin source");
+    const baseSha = git(root, "rev-parse", "HEAD");
+    const body =
+      "## Acceptance\n- Notes keep their newline.\n\n## Sources\n- notes.md\n";
+    const sources = planningSources(body, baseSha, root);
+    const state = {
+      schemaVersion: 18,
+      kind: "preparing",
+      repository: "factory-qualification/profile-update",
+      objective: 1,
+      runId: randomUUID(),
+      configDigest: "f".repeat(64),
+      baseSha,
+      objectiveBodyDigest: createHash("sha256").update(body).digest("hex"),
+      sourcePacketDigest: createHash("sha256")
+        .update(JSON.stringify(sources))
+        .digest("hex"),
+    };
+    const selection = { model: "gpt-6.1", reasoningEffort: "medium" };
+    const transport = new CodexPlanningTransport(
+      root,
+      selection,
+      selection,
+      undefined,
+      [],
+      sessions,
+    );
+    // The settled conversation was admitted before the current base
+    // instructions joined the source-read profile; only that line differs.
+    const legacyConfig = CODEX_SOURCE_READ_CONFIG.replace(
+      /^instructions =.*\n/m,
+      "",
+    );
+    assert.notEqual(legacyConfig, CODEX_SOURCE_READ_CONFIG);
+    const legacyDigest = createHash("sha256")
+      .update(
+        JSON.stringify([
+          selection,
+          transport.adapter,
+          "planner",
+          "read-only",
+          "never",
+          legacyConfig,
+          "pinned-source-read-v1",
+        ]),
+      )
+      .digest("hex");
+    const scope = {
+      repository: state.repository,
+      objective: 1,
+      runId: state.runId,
+      configDigest: state.configDigest,
+      role: "planning",
+      planningInputDigest: planningSessionInputDigest(state),
+    };
+    const identity = randomUUID();
+    const legacy = {
+      scope,
+      adapter: transport.adapter,
+      identity,
+      data: {
+        sessionRoot: join(resolve(sessions), identity),
+        threadId: randomUUID(),
+        selectionDigest: legacyDigest,
+        transport: "exec",
+        sourceReadProfile: "pinned-source-read-v1",
+        usage: { inputTokens: 11, outputTokens: 7 },
+      },
+      turn: 1,
+      currentTurn: {
+        invocationId: "compile-before-update",
+        requestDigest: "a".repeat(64),
+        dispatch: "submitted",
+        terminal: "completed",
+        resources: "settled",
+      },
+      status: "ready",
+    };
+    const legacyHome = createCodexHome({
+      root: legacy.data.sessionRoot,
+      owner: createHash("sha256")
+        .update(
+          JSON.stringify([scope, identity, transport.adapter, legacyDigest]),
+        )
+        .digest("hex"),
+      config: legacyConfig,
+    });
+    const legacyConfigPath = join(legacyHome.env.CODEX_HOME, "config.toml");
+    const legacyBytes = readFileSync(legacyConfigPath);
+    const key = JSON.stringify(["planning", null, scope.planningInputDigest]);
+    state.agentSessions = { [key]: structuredClone(legacy) };
+    const save = () => {};
+    const diagnosis = (invocation) => ({
+      purpose: "diagnosis",
+      objective: "Classify this planning failure from the supplied sources.",
+      baseSha,
+      sources,
+      controllerCapabilities: installedControllerCapabilities(),
+      controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["kind", "diagnosis", "correction"],
+        properties: {
+          kind: { type: "string" },
+          diagnosis: { type: "string" },
+          correction: { type: "string" },
+        },
+      },
+      invocation,
+    });
+    const untouched = JSON.stringify(state);
+    const continuation = () =>
+      agentSessionContinuation(state, "planning", undefined, save);
+    // Planning continuation, unresolved turns and unauthenticated owners keep
+    // refusing before any checkpoint, with a precise reason.
+    assert.throws(
+      () =>
+        transport.sourceDelivery({
+          ...diagnosis(),
+          purpose: undefined,
+          session: continuation(),
+        }),
+      /earlier source-read profile.*fresh conversation.*factory repair/,
+    );
+    const active = continuation();
+    active.retained = {
+      ...legacy,
+      status: "in-flight",
+      currentTurn: {
+        ...legacy.currentTurn,
+        terminal: undefined,
+        resources: "active",
+      },
+    };
+    assert.throws(
+      () => transport.sourceDelivery({ ...diagnosis(), session: active }),
+      /active, unknown or owned by another scope.*no turn is replayed/,
+    );
+    const foreign = continuation();
+    foreign.retained = {
+      ...legacy,
+      data: { ...legacy.data, selectionDigest: "0".repeat(64) },
+    };
+    assert.throws(
+      () => transport.sourceDelivery({ ...diagnosis(), session: foreign }),
+      /does not match its recorded owner/,
+    );
+    assert.equal(JSON.stringify(state), untouched);
+
+    // Automatic diagnosis retires the settled conversation unchanged and
+    // admits a fresh one with the complete pinned sources inline. It stops at
+    // the real pre-native admission, so no provider runs.
+    let admitted;
+    const request = diagnosis({
+      invocationId: "diagnosis-after-update",
+      phase: "diagnosis",
+      ordinal: 0,
+      beforeProviderDispatch: async () => {
+        admitted = structuredClone(state);
+        throw new Error("Stop before native dispatch");
+      },
+    });
+    await assert.rejects(
+      generatePlannerStructured(
+        new StructuredPlanningModel(transport),
+        state,
+        save,
+        request,
+      ),
+      /Stop before native dispatch/,
+    );
+    const fresh = admitted.agentSessions[key];
+    assert.notEqual(fresh.identity, identity);
+    assert.equal(fresh.turn, 1);
+    assert.equal(fresh.status, "in-flight");
+    assert.equal(fresh.currentTurn.dispatch, "submitted");
+    assert.equal(fresh.data.sourceReadProfile, "pinned-source-read-v1");
+    assert.notEqual(fresh.data.selectionDigest, legacyDigest);
+    assert.equal(fresh.data.sourceDelivery, null);
+    const inline = renderDiagnosisCall(request);
+    assert.ok(inline.prompt.includes("Keep the final newline."));
+    assert.equal(
+      fresh.currentTurn.requestDigest,
+      structuredRequestDigest(inline.prompt, request.schema),
+    );
+    const retired = [{ ...legacy, status: "unavailable" }];
+    assert.deepEqual(admitted.agentSessionHistory, retired);
+    assert.deepEqual(state.agentSessionHistory, retired);
+    assert.equal(state.agentSessions[key].identity, fresh.identity);
+    assert.equal(state.agentSessions[key].status, "released");
+    assert.equal(existsSync(fresh.data.sessionRoot), false);
+    assert.deepEqual(readFileSync(legacyConfigPath), legacyBytes);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(sessions, { recursive: true, force: true });
   }
 });
 

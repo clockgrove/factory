@@ -332,18 +332,34 @@ export class CodexPlanningTransport implements PlanningTransport {
     // Existing ready conversations retain exactly their original tool-free profile.
     if (data.sourceReadProfile === undefined) return undefined;
     if (
-      !this.sourceArtifacts ||
       continuation.scope.role !== "planning" ||
       retained.status !== "ready" ||
       retained.currentTurn?.resources !== "settled" ||
       retained.identity !== continuation.identity ||
-      !isDeepStrictEqual(retained.scope, continuation.scope) ||
-      data.selectionDigest !== this.selectionDigest("planner", false, true)
+      !isDeepStrictEqual(retained.scope, continuation.scope)
     )
       throw new Error(
-        "Planning source reads require a settled authenticated profile",
+        "Retained planner session is active, unknown or owned by another scope; planning source reads continue only a ready, settled session with matching ownership. Reconcile its existing owner; no turn is replayed or replaced.",
       );
     assertOwnedCodexHome(data.sessionRoot, this.sessionOwner(retained));
+    if (
+      !this.sourceArtifacts ||
+      data.selectionDigest !== this.selectionDigest("planner", false, true)
+    ) {
+      // A Factory update changed the read-only source-read profile. The settled
+      // old conversation keeps its home, history and usage; diagnosis starts a
+      // fresh conversation with the complete pinned sources inline.
+      if (request.purpose === "diagnosis" && !recover) {
+        continuation.checkpoint({
+          ...structuredClone(retained),
+          status: "unavailable",
+        });
+        return undefined;
+      }
+      throw new Error(
+        "Retained planner conversation uses an earlier source-read profile and cannot be continued. It stays settled with its history, usage and spent allowances; automatic diagnosis starts a fresh conversation. For a known Work Item failure, use `factory repair --objective N --proposal FILE`.",
+      );
+    }
     if (recover) {
       if (
         data.sourceRequestDigest !==

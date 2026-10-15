@@ -25,7 +25,7 @@ for (const name of Object.keys(process.env))
     /^(ANTHROPIC|OPENAI)_/.test(name)
   )
     delete process.env[name];
-// Agent-host markers select a provider; tests choose theirs explicitly.
+// Agent-host markers from the contributor's shell stay out of tests.
 delete process.env.CLAUDECODE;
 delete process.env.CODEX_THREAD_ID;
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));

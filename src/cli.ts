@@ -470,7 +470,7 @@ function providerSummary(config: FactoryConfig): string {
 /**
  * The provider a command runs with. Queue, service and persistence commands share the
  * service's default provider; Objective commands keep the provider the Objective froze;
- * new work follows --provider, then the calling agent host.
+ * new work follows --provider, else the default.
  */
 function selectedForCommand(
   command: string,
@@ -482,7 +482,7 @@ function selectedForCommand(
     (command === "status" && option(args, "objective") === undefined) ||
     (command === "diagnostics" && option(args, "scorecard") !== undefined)
   )
-    return readSelectedConfig(path, { host: false });
+    return readSelectedConfig(path);
   const objective = option(args, "objective");
   return readSelectedConfig(path, {
     objective:

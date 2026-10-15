@@ -59,10 +59,9 @@ Each command picks one provider:
 
 1. An Objective that has started keeps its provider. Its configuration digest is frozen, so resuming, deciding or retrying it from another host uses the same models. Editing that provider's settings strands the Objective until they are restored.
 2. `--provider NAME` on `run`, `propose`, `dream` or `recipe` chooses for new work.
-3. Otherwise the calling agent host chooses: Claude Code (`CLAUDECODE=1`) selects the provider that plans with `claude-agent-sdk`, Codex (`CODEX_THREAD_ID`) the one that plans with `codex-sdk`. If several match, the default wins, or `--provider` is required. A shell carrying both markers is ambiguous and needs `--provider`. A host with no matching provider stops with the setup command instead of falling back.
-4. Otherwise `defaultProvider`.
+3. Otherwise `defaultProvider`. The agent host running Factory never chooses, so overriding the default is always explicit.
 
-Queue, service and persistence commands always use `defaultProvider`, because the background service runs one provider for new work. Queue approvals and their receipts bind the default provider whichever provider a command runs, so switching hosts keeps the queue readable. Changing `defaultProvider` changes the queue's authority, like any other change to queued settings; do it only with an empty queue. `factory status --objective N` ends with the provider it used and why.
+Queue and persistence commands use `defaultProvider`, and so does the background service for new work. The service continues a queued Objective that has already started on the provider it froze, exactly as its foreground run would. Queue approvals and their receipts bind the default provider whichever provider a command runs, so switching hosts keeps the queue readable. Changing `defaultProvider` changes the queue's authority, like any other change to queued settings; do it only with an empty queue. `factory status --objective N` ends with the provider it used and why.
 
 Use only one controller at a time; Factory's controller lock already enforces that for each repository.
 

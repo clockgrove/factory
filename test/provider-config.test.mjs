@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,10 +12,13 @@ import {
   validateConfigFile,
 } from "../dist/config.js";
 import { addProvider, writeConfiguration } from "../dist/install.js";
+import { selectProvider } from "../dist/provider-selection.js";
+import { resolveAutonomy } from "../dist/repair-policy.js";
+import { saveState, statePath } from "../dist/state-store.js";
 import {
-  hostPlanningKind,
-  selectProvider,
-} from "../dist/provider-selection.js";
+  checkServiceState,
+  queuedObjectiveConfig,
+} from "../dist/supervision.js";
 
 /** A Git checkout whose origin is the configured repository. */
 function checkout(repository) {
@@ -129,35 +132,71 @@ test("queue authority binds the default provider whichever provider runs", () =>
   );
 });
 
-test("the calling agent host selects new work's provider", () => {
-  assert.equal(hostPlanningKind({ CLAUDECODE: "1" }), "claude-agent-sdk");
-  assert.equal(hostPlanningKind({ CODEX_THREAD_ID: "t" }), "codex-sdk");
-  assert.equal(hostPlanningKind({}), undefined);
-  assert.equal(
-    hostPlanningKind({ CLAUDECODE: "1", CODEX_THREAD_ID: "t" }),
-    "ambiguous",
-  );
+test("new work overrides the default provider only with --provider", () => {
   const pick = (options) => {
     const { provider, source } = selectProvider(file, options);
     return `${provider}/${source}`;
   };
-  assert.equal(pick({ env: { CLAUDECODE: "1" } }), "claude/host");
-  assert.equal(pick({ env: { CODEX_THREAD_ID: "t" } }), "codex/host");
-  assert.equal(pick({ env: {} }), "codex/default");
-  assert.equal(
-    pick({ env: { CLAUDECODE: "1" }, host: false }),
-    "codex/default",
+  assert.equal(pick({}), "codex/default");
+  assert.equal(pick({ flag: "claude" }), "claude/flag");
+  // An agent host's marker never switches the provider.
+  process.env.CLAUDECODE = "1";
+  try {
+    assert.equal(pick({}), "codex/default");
+  } finally {
+    delete process.env.CLAUDECODE;
+  }
+});
+
+test("the service continues a started Objective on the provider it froze", () => {
+  const path = join(
+    mkdtempSync(join(tmpdir(), "factory-provider-service-")),
+    "config.json",
   );
-  assert.equal(pick({ env: { CLAUDECODE: "1" }, flag: "codex" }), "codex/flag");
+  writeFileSync(path, JSON.stringify(file));
+  const started = (objective, configDigest) =>
+    saveState(statePath(file.repository, objective), {
+      schemaVersion: 18,
+      kind: "preparing",
+      repository: file.repository,
+      objective,
+      runId: `run-${objective}`,
+      configDigest,
+      baseSha: "b".repeat(40),
+      objectiveBodyDigest: "c".repeat(64),
+      coordinator: {
+        mode: "paused",
+        phase: "planning",
+        phaseStartedAt: new Date().toISOString(),
+      },
+      issueByItemId: {},
+      capacity: { concurrency: 1 },
+      autonomy: resolveAutonomy(),
+    });
+  const service = resolveProvider(file, "codex");
+  const claudeDigest = factoryConfigDigest(resolveProvider(file, "claude"));
+
+  started(7, claudeDigest);
+  const frozen = queuedObjectiveConfig(service, 7, path);
+  assert.equal(factoryConfigDigest(frozen), claudeDigest);
+  assert.equal(frozen.planning.kind, "claude-agent-sdk");
+  checkServiceState(frozen, 7, path);
   assert.throws(
-    () => pick({ env: { CLAUDECODE: "1", CODEX_THREAD_ID: "t" } }),
-    /choose a provider with --provider/,
+    () => checkServiceState(service, 7, path),
+    /different configuration binding/,
   );
-  const codexOnly = { ...file, providers: { codex } };
+
+  // A frozen configuration that no provider matches still refuses.
+  started(8, "d".repeat(64));
+  const unmatched = queuedObjectiveConfig(service, 8, path);
+  assert.equal(factoryConfigDigest(unmatched), factoryConfigDigest(service));
   assert.throws(
-    () => selectProvider(codexOnly, { env: { CLAUDECODE: "1" } }),
-    /no provider uses it; add one with factory setup/,
+    () => checkServiceState(unmatched, 8, path),
+    /different configuration binding/,
   );
+
+  // New work runs with the service's own provider.
+  assert.equal(queuedObjectiveConfig(service, 9, path), service);
 });
 
 test("setup adds a provider without changing the others", () => {

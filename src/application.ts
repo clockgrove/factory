@@ -525,6 +525,19 @@ function composeLocal(
   options: LocalHarnessCompositionOptions = {},
   profiles?: ReadonlyMap<string, LocalProfileRegistration>,
 ): FactoryApplication {
+  return createApplication(
+    config,
+    localServices(config, harness, adapterIdentity, options, profiles),
+  );
+}
+
+function localServices(
+  config: FactoryConfig,
+  harness: AgentHarness | undefined,
+  adapterIdentity: string,
+  options: LocalHarnessCompositionOptions = {},
+  profiles?: ReadonlyMap<string, LocalProfileRegistration>,
+): ApplicationServices {
   const root = stateRoot(config.repository);
   const contentStore = new LocalContentStore(join(root, "content"));
   const github =
@@ -547,14 +560,14 @@ function composeLocal(
       configDigest: factoryConfigDigest(config),
     },
   );
-  return createApplication(config, {
+  return {
     planningModel: options.planningModel ?? composePlanningModel(config),
     driver,
     github,
     delivery: new RegularDelivery(config.checkout, github),
     contentStore,
     reportRunStatus: (message) => console.error(message),
-  });
+  };
 }
 
 /**
@@ -609,6 +622,19 @@ export function composeWithLocalProfiles(
   options: LocalHarnessCompositionOptions = {},
 ): FactoryApplication {
   const config = cloneAndValidateConfig(input);
+  return composeLocal(
+    config,
+    undefined,
+    "profiles",
+    options,
+    localProfiles(config, registrations),
+  );
+}
+
+function localProfiles(
+  config: FactoryConfig,
+  registrations: Record<string, LocalHarnessRegistration>,
+): Map<string, LocalProfileRegistration> {
   if (config.execution.kind !== "local" || !config.execution.profiles)
     throw new Error("Local execution profiles are required");
   const profiles = new Map<string, LocalProfileRegistration>();
@@ -647,7 +673,7 @@ export function composeWithLocalProfiles(
       },
     });
   }
-  return composeLocal(config, undefined, "profiles", options, profiles);
+  return profiles;
 }
 
 function builtInHarness(
@@ -697,6 +723,25 @@ export function compose(
   /** Credential names a supervised service loaded through systemd. */
   serviceCredentials?: string[],
 ): FactoryApplication {
+  const { config, services } = composeServices(input, serviceCredentials);
+  const application = createApplication(config, services);
+  return {
+    ...application,
+    // The service continues a started Objective on the provider it froze.
+    runIntake: (options) =>
+      application.runIntake({
+        ...options,
+        servicesFor: (selected) =>
+          composeServices(selected, serviceCredentials).services,
+      }),
+  };
+}
+
+/** The production services for one resolved provider configuration. */
+function composeServices(
+  input: FactoryConfig,
+  serviceCredentials?: string[],
+): { config: FactoryConfig; services: ApplicationServices } {
   const config = cloneAndValidateConfig(input);
   const planningModel = composePlanningModel(config);
   const executionKey = () =>
@@ -730,22 +775,37 @@ export function compose(
             apiKey,
             config: validateOpenAIManagedConfig(config.execution.config),
           });
-    return createApplication(config, {
-      planningModel,
-      driver,
-      github,
-      delivery: new RegularDelivery(config.checkout, github),
-      contentStore,
-      reportRunStatus: (message) => console.error(message),
-    });
+    return {
+      config,
+      services: {
+        planningModel,
+        driver,
+        github,
+        delivery: new RegularDelivery(config.checkout, github),
+        contentStore,
+        reportRunStatus: (message) => console.error(message),
+      },
+    };
   }
   if (config.execution.profiles)
-    return composeWithLocalProfiles(config, {}, { planningModel });
+    return {
+      config,
+      services: localServices(
+        config,
+        undefined,
+        "profiles",
+        { planningModel },
+        localProfiles(config, {}),
+      ),
+    };
   const harness = config.execution.harness!;
-  return composeLocal(
+  return {
     config,
-    builtInHarness(config, harness),
-    harnessAdapterIdentity(harness),
-    { planningModel },
-  );
+    services: localServices(
+      config,
+      builtInHarness(config, harness),
+      harnessAdapterIdentity(harness),
+      { planningModel },
+    ),
+  };
 }

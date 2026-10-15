@@ -92,7 +92,10 @@ import {
   runObjective,
 } from "./runner.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
-import { checkPreparedIntakeServiceState } from "./supervision.js";
+import {
+  checkPreparedIntakeServiceState,
+  queuedObjectiveConfig,
+} from "./supervision.js";
 import {
   acquireInstallationLock,
   assertRestoredInstallationDispatchReady,
@@ -1404,6 +1407,8 @@ export async function resolveIntakeBase(
 }
 export interface IntakeStartupOptions {
   backgroundConfigurationPath?: string;
+  /** Services for a queued Objective's frozen provider when it is not the service's own. */
+  servicesFor?: (config: FactoryConfig) => ApplicationServices;
 }
 export function runIntake(
   config: FactoryConfig,
@@ -1911,21 +1916,41 @@ async function runIntakeOwned(
           retargetControllerLock(lockPath, lock, selected);
           try {
             if (handingOff || localMode || pendingMutations) continue;
-            const result = await runObjective(config, selected, services, {
-              ownerLock: lock,
-              observeControl: async (handler) => {
-                objectiveControl = handler;
-                if (handler && (handingOff || localMode))
-                  await handler({
-                    objective: selected,
-                    action: handingOff
-                      ? "handoff"
-                      : localMode === "paused"
-                        ? "pause"
-                        : "drain",
-                  });
+            const objectiveConfig = options.backgroundConfigurationPath
+              ? queuedObjectiveConfig(
+                  config,
+                  selected,
+                  options.backgroundConfigurationPath,
+                )
+              : config;
+            let objectiveServices = services;
+            if (objectiveConfig !== config) {
+              if (!options.servicesFor)
+                throw new Error(
+                  `Objective #${selected} runs with another provider, and this service cannot compose it`,
+                );
+              objectiveServices = options.servicesFor(objectiveConfig);
+            }
+            const result = await runObjective(
+              objectiveConfig,
+              selected,
+              objectiveServices,
+              {
+                ownerLock: lock,
+                observeControl: async (handler) => {
+                  objectiveControl = handler;
+                  if (handler && (handingOff || localMode))
+                    await handler({
+                      objective: selected,
+                      action: handingOff
+                        ? "handoff"
+                        : localMode === "paused"
+                          ? "pause"
+                          : "drain",
+                    });
+                },
               },
-            });
+            );
             if (!terminal(result)) {
               localMode = "paused";
               record.observation = {

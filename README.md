@@ -113,7 +113,7 @@ Open your target repository in Codex or Claude Code after loading the matching p
 
 > Use Factory to set up this repository with a concurrency limit of two. Do not start work.
 
-Factory's setup skill binds the checkout and reports the configuration. New work runs with the provider that matches the host you ask from, so the same repository can plan with Claude from Claude Code and with Codex from Codex; an Objective that has started keeps its provider. Add a second host's provider by asking that host to set it up. See [providers](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#providers).
+Factory's setup skill binds the checkout and reports the configuration. New work runs with the configured default provider; name another with `--provider NAME` when you mean to override it. An Objective that has started keeps its provider, including under the background service. Add a second provider with setup's `--provider NAME`. See [providers](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#providers).
 
 For background operation, ask:
 

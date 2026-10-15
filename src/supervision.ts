@@ -31,8 +31,10 @@ import {
   type FactoryConfig,
   factoryConfigDigest,
   readConfig,
+  readConfigFile,
   stateRoot,
 } from "./config.js";
+import { selectProvider } from "./provider-selection.js";
 import { objectiveComplete } from "./completion.js";
 import { canHandoff } from "./runner/ownership.js";
 import {
@@ -494,6 +496,20 @@ function checkObjectiveServiceState(
   }
   if (state) assertRestoredContinuationReady(state, config);
 }
+/**
+ * The configuration the service checks and runs a queued Objective with: a started
+ * Objective keeps the provider it froze, so it continues as its foreground run would;
+ * new work and a configuration no provider matches use the service's own.
+ */
+export function queuedObjectiveConfig(
+  config: FactoryConfig,
+  objective: number,
+  configPath: string,
+): FactoryConfig {
+  const state = readContinuation(config.repository, objective);
+  if (!state || continuationConfigurationMatches(state, config)) return config;
+  return selectProvider(readConfigFile(configPath), { objective }).config;
+}
 function hasOwner(config: FactoryConfig): boolean {
   const owner = readControllerOwner(
     join(stateRoot(config.repository), "controller.lock"),
@@ -514,7 +530,11 @@ function checkIntakeLocalServiceState(
       `The background service is not set up; run \`${setupCommand(configPath, requiredProviderCredentials(config))}\``,
     );
   for (const id of intake.objectives)
-    checkObjectiveServiceState(config, id, configPath);
+    checkObjectiveServiceState(
+      queuedObjectiveConfig(config, id, configPath),
+      id,
+      configPath,
+    );
   return intake;
 }
 /** The owned controller already authenticated this complete current observation. */

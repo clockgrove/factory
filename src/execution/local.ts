@@ -2684,6 +2684,26 @@ export class LocalExecutionDriver implements ExecutionDriver {
           const original = JSON.parse(bytes.toString("utf8")) as {
             state?: unknown;
           };
+          if (original.state === "failed") {
+            // The worker itself reported failure (provider limit, context
+            // exhaustion, crash): it produced no result to reject, so there
+            // is nothing to freeze. Record that it ceased and end the attempt
+            // with its own work fault, as the unbounded path does.
+            context?.checkpoint({
+              ...handle,
+              data: {
+                ...active,
+                stopped:
+                  collectionError instanceof Error
+                    ? collectionError.message
+                    : String(collectionError),
+              },
+            });
+            await context?.admitEffect?.("explicit");
+            this.active.delete(handle.identity);
+            await this.removeExecutionDirectory(active.worktree);
+            throw collectionError;
+          }
           if (original.state !== "complete")
             throw new Error(
               "Rejected collection has no completed original wrapper return",

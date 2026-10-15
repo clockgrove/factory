@@ -6378,3 +6378,160 @@ test("stopped collection freezes a completed owned local return before restart a
   );
   assert.deepEqual(again, frozen);
 });
+
+test("a worker-reported failure ends as its own work fault, not a missing wrapper return", async (t) => {
+  const { launchWorker, killGroup } = await import(
+    "../dist/execution/worker-process.js"
+  );
+  const { LocalExecutionDriver, CodexHarness } = await import(
+    "../dist/execution/local.js"
+  );
+  const { addWorktree, processGroupExists } = await import(
+    "../dist/process.js"
+  );
+  const { executionContext } = await import("../dist/execution/checkpoint.js");
+  const { attachedFault } = await import("../dist/fault.js");
+  const temporary = mkdtempSync(join(tmpdir(), "factory-failed-worker-"));
+  const repository = `fixture/failed-worker-${randomUUID()}`;
+  const privateRoot = stateRoot(repository),
+    checkout = join(temporary, "checkout");
+  mkdirSync(checkout);
+  mkdirSync(privateRoot, { recursive: true, mode: 0o700 });
+  const git = (...args) =>
+    execFileSync("git", ["-C", checkout, ...args], { encoding: "utf8" }).trim();
+  git("init", "-b", "main");
+  git("remote", "add", "origin", `https://github.com/${repository}.git`);
+  git("config", "user.name", "Fixture");
+  git("config", "user.email", "fixture@example.invalid");
+  writeFileSync(join(checkout, "README.md"), "# Original\n");
+  git("add", ".");
+  git("commit", "-m", "Original source");
+  const baseSha = git("rev-parse", "HEAD");
+  const remote = join(temporary, "archive.git");
+  execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" });
+  const selection = { model: "unused-local-check", reasoningEffort: "low" };
+  const config = {
+    schemaVersion: 1,
+    repository,
+    checkout,
+    planning: { kind: "codex-sdk", planner: selection, reviewer: selection },
+    execution: {
+      kind: "local",
+      concurrency: 1,
+      harness: { kind: "codex-sdk", ...selection },
+    },
+    delivery: { kind: "regular" },
+    policy: { network: "off", allowedSecretNames: [] },
+    gitPersistence: {
+      remote,
+      ref: "refs/heads/history",
+      visibility: "private",
+      scope: "private-history",
+      maxBytes: 16 * 1024 * 1024,
+      maxFiles: 4096,
+      timeoutMs: 3000,
+      coalesceMs: 0,
+    },
+  };
+  const identity = randomUUID();
+  const item = {
+    id: "local",
+    title: "Preserve source",
+    goal: "Preserve source",
+    brief: "A local process failure",
+    acceptance: ["Preserve source"],
+    dependencies: [],
+    ownedPaths: ["README.md"],
+    resources: [],
+    nonGoals: [],
+    validation: [],
+    citations: [],
+    sourceAssets: [],
+    expectedOutputRoles: [],
+    requiredLfsRoles: [],
+    minimumAssetSets: 0,
+  };
+  const request = { attemptId: identity, baseSha, item };
+  const workRoot = join(privateRoot, "worktrees"),
+    worktree = join(workRoot, identity);
+  await addWorktree(checkout, worktree, baseSha);
+  const script = join(temporary, "failed-result.cjs");
+  // A real finite process that reports the failure a provider limit produces.
+  writeFileSync(
+    script,
+    `require('node:fs').writeFileSync(process.argv[3],JSON.stringify({state:'failed',error:'Provider session limit reached'}),{mode:0o600});`,
+  );
+  const harness = new CodexHarness(
+    join(privateRoot, "credentials"),
+    "off",
+    selection,
+  );
+  const worker = await launchWorker({
+    root: join(privateRoot, "harness"),
+    identity,
+    input: { request: { ...request, worktree } },
+    script,
+    env: process.env,
+    label: "Local integration process",
+  });
+  t.after(async () => {
+    if (processGroupExists(worker.pid))
+      await killGroup(worker.pid, "Local integration process");
+    rmSync(temporary, { recursive: true, force: true });
+    rmSync(privateRoot, { recursive: true, force: true });
+  });
+  const work = {
+    status: "running",
+    step: "execute",
+    attempt: identity,
+    baseSha,
+    execution: {
+      provider: "local",
+      identity,
+      data: {
+        request: structuredClone(request),
+        worktree,
+        adapterIdentity: "codex-sdk",
+        handle: { identity, data: worker },
+      },
+    },
+  };
+  const driver = new LocalExecutionDriver(
+    checkout,
+    workRoot,
+    harness,
+    1,
+    new LocalContentStore(join(privateRoot, "content")),
+    "codex-sdk",
+  );
+  const handle = await driver.find(structuredClone(work.execution));
+  let failure;
+  await withRecoveryCheckpointScope(
+    {
+      config,
+      buildClosure: () => assert.fail("A failed worker freezes no closure"),
+    },
+    async () => {
+      try {
+        await driver.collect(
+          handle,
+          executionContext(
+            work,
+            () => {},
+            () => false,
+          ),
+        );
+      } catch (error) {
+        failure = error;
+      }
+    },
+  );
+  assert(failure, "collection of a failed worker must reject");
+  assert.equal(attachedFault(failure)?.kind, "work");
+  assert.match(failure.message, /Provider session limit reached/);
+  assert.doesNotMatch(failure.message, /wrapper return/);
+  assert.match(work.execution.data.stopped, /Provider session limit reached/);
+  assert.equal(work.execution.data.rejectedCollection, undefined);
+  assert.equal(processGroupExists(worker.pid), false);
+  assert.equal(existsSync(worktree), false);
+});

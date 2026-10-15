@@ -16,6 +16,7 @@ import {
 } from "../work-repair.js";
 import { workspacePackageAdditions } from "../workspace-membership.js";
 import {
+  AmendmentRejection,
   amendmentBlocksDispatch,
   applyPendingAmendment,
 } from "../graph-amendments.js";
@@ -785,6 +786,19 @@ export async function runObjectivePass(
                 step: "objective/coordinator",
               };
       saveState(path, current);
+      return current;
+    }
+    // A rejected graph amendment waits for the operator's replacement, which
+    // status names; it is not a run failure (#1292).
+    if (
+      error instanceof AmendmentRejection &&
+      current &&
+      isExecutionState(current) &&
+      current.pendingAmendment?.phase === "rejected" &&
+      !cancellationRequested()
+    ) {
+      await Promise.allSettled(active.values());
+      save(current);
       return current;
     }
     if (current && isExecutionState(current) && current.finalAcceptance) {

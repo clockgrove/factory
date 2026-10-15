@@ -7,6 +7,7 @@ import type {
   WorkItem,
 } from "./contracts.js";
 import { installedControllerCapabilities } from "./controller-capabilities.js";
+import { decision, StepFault } from "./fault.js";
 import type { FactoryState } from "./state.js";
 
 /** The accepted graph determines whether this run qualifies existing bytes or delivers changes. */
@@ -171,6 +172,25 @@ function assertProofShape(entry: AcceptanceCoverage): void {
     );
 }
 
+/**
+ * A plan that declares a criterion's environment an external prerequisite it
+ * cannot prepare (#1292). That is the planner's answer, not a defect: the
+ * operator establishes the prerequisite outside Factory or corrects the plan.
+ */
+export class MissingExternalPrerequisite extends StepFault {
+  constructor(entry: AcceptanceCoverage) {
+    const criterion = entry.source.text.replace(/\s+/g, " ").trim();
+    super(
+      decision(
+        `The plan declares a missing external prerequisite for criterion "${criterion.length > 120 ? `${criterion.slice(0, 117)}...` : criterion}" (${entry.environment.kind} environment, probe \`${entry.environment.probe}\`); establish it outside Factory or submit a corrected plan`,
+        `criterion ${entry.criterionId}`,
+        `owner ${entry.itemId}`,
+      ),
+    );
+    this.name = "MissingExternalPrerequisite";
+  }
+}
+
 export function assertCoverageShape(graph: WorkGraph): void {
   if (!Array.isArray(graph.coverage) || !graph.coverage.length)
     throw new Error("Acceptance coverage must be a nonempty collection");
@@ -324,9 +344,7 @@ export function assertCoverageShape(graph: WorkGraph): void {
       previousPrerequisite = selected;
     }
     if (environment.readiness === "missing")
-      throw new Error(
-        `Missing external prerequisite for criterion ${entry.criterionId}; source decision required`,
-      );
+      throw new MissingExternalPrerequisite(entry);
     if (
       environment.kind === "real" &&
       (!environment.probe ||

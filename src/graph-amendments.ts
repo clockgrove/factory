@@ -84,7 +84,11 @@ import {
 } from "./fault.js";
 import { preflightObjective } from "./local-preflight.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
-import { assertCoverageSources, coverageObligations } from "./qa.js";
+import {
+  assertCoverageSources,
+  coverageObligations,
+  MissingExternalPrerequisite,
+} from "./qa.js";
 import { amendmentImplementationEvidence } from "./result-evidence.js";
 import {
   assertReviewPacketBinding,
@@ -836,6 +840,21 @@ export function validateAmendment(
   }
 }
 
+/** The pending amendment's result was refused; the operator submits a replacement. */
+export class AmendmentRejection extends Error {
+  override readonly name = "AmendmentRejection";
+}
+
+function declaresMissingPrerequisite(error: unknown): boolean {
+  for (
+    let current: unknown = error, depth = 0;
+    current !== null && typeof current === "object" && depth < 8;
+    current = (current as { cause?: unknown }).cause, depth++
+  )
+    if (current instanceof MissingExternalPrerequisite) return true;
+  return false;
+}
+
 /**
  * Advance the pending amendment as the Objective's `amend` step: its compile
  * and review are paid calls, and a call that ended without a completed
@@ -1572,7 +1591,10 @@ async function advanceAmendment(args: {
     const fault = attachedFault(error);
     const refusedResult =
       fault?.kind === "work" ||
-      (!fault && calling === "compile" && compilationResponseObserved);
+      (!fault && calling === "compile" && compilationResponseObserved) ||
+      // The compiled graph declares a prerequisite it cannot prepare: an
+      // answered plan the operator replaces, never a retry of the same graph.
+      declaresMissingPrerequisite(error);
     if (!refusedResult) throw error;
     pending.rejectionStage = stage;
     pending.phase = "rejected";
@@ -1585,7 +1607,7 @@ async function advanceAmendment(args: {
     refreshBlameDecisions(state, graphDigest(state.graph));
     save();
     // The amendment's result is refused, whatever the call reported.
-    throw attachFault(new Error(pending.error, { cause: error }), {
+    throw attachFault(new AmendmentRejection(pending.error, { cause: error }), {
       kind: "work",
       evidence: { detail: pending.error || "Amendment rejected" },
     });

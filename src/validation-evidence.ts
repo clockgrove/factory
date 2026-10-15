@@ -70,6 +70,15 @@ export function assertValidationExecutionControl(value: unknown): void {
     );
 }
 
+/** The fields every review citation declares (#1254). */
+function declaredReference(value: object): Record<string, unknown> {
+  const { id, origin, path, digest, complete } = value as Record<
+    string,
+    unknown
+  >;
+  return { id, origin, path, digest, complete };
+}
+
 /** Retention never manufactures missing bodies or changes a citation's identity. */
 export function assertRetainedReviewEvidence(
   value: Pick<ValidationEvidence, "criteria" | "reviewEvidence">,
@@ -107,18 +116,25 @@ export function assertRetainedReviewEvidence(
     if (!entry || typeof entry.content !== "string")
       throw new Error("Retained review literal body is invalid");
     const { content, reusableBody } = entry;
-    // A citation carries exactly its declared reference (#1254); a retained body
-    // keeps its input's other fields, such as a pinned source's heading.
-    const reference = {
-      id: entry.id,
-      origin: entry.origin,
-      path: entry.path,
-      digest: entry.digest,
-      complete: entry.complete,
-    };
+    // A citation carries its declared reference (#1254); a retained body keeps
+    // its input's other fields, such as a pinned source's heading. A citation
+    // saved before #1254 also carries those fields, and they must match.
+    const citation = cited.get(entry.id) as Record<string, unknown> | undefined;
     if (
       seen.has(entry.id) ||
-      !isDeepStrictEqual(cited.get(entry.id), reference) ||
+      !citation ||
+      !isDeepStrictEqual(
+        declaredReference(citation),
+        declaredReference(entry),
+      ) ||
+      Object.keys(citation).some(
+        (key) =>
+          !(key in declaredReference(citation)) &&
+          !isDeepStrictEqual(
+            citation[key],
+            (entry as unknown as Record<string, unknown>)[key],
+          ),
+      ) ||
       entry.complete !== true ||
       Buffer.from(content).toString("utf8") !== content ||
       createHash("sha256").update(content).digest("hex") !== entry.digest

@@ -3388,6 +3388,35 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       ),
     });
     assert.ok(laterPacket.evidence.some((entry) => entry.heading));
+    // A passing review saved before #1254 cited the whole entry, heading
+    // included; that state still loads, and a differing heading does not.
+    const legacyCriteria = (bodies) => [
+      {
+        criterion: later.graph.items[0].acceptance[0],
+        verdict: "pass",
+        evidence: bodies.map(
+          ({ content: _content, reusableBody: _reusable, ...rest }) => rest,
+        ),
+        detail: "The documented section is satisfied.",
+      },
+    ];
+    const legacyBodies = laterPacket.evidence.map((entry) =>
+      structuredClone(entry),
+    );
+    assertRetainedReviewEvidence({
+      criteria: legacyCriteria(legacyBodies),
+      reviewEvidence: legacyBodies,
+    });
+    assert.throws(
+      () =>
+        assertRetainedReviewEvidence({
+          criteria: legacyCriteria(legacyBodies),
+          reviewEvidence: legacyBodies.map((entry) =>
+            entry.heading ? { ...entry, heading: `${entry.heading}!` } : entry,
+          ),
+        }),
+      /Retained review body differs from its complete citation/,
+    );
     const retryConfig = { ...config, delivery: { kind: "regular" } };
     assert.equal(retryWorkItem(retryConfig, 3, "local"), "attempt");
     const retried = readState(config.repository, 3).work.local;
@@ -4490,21 +4519,17 @@ test("explicit Codex tiers reach native exec, SDK and app-server without changin
   const { Codex } = await import("@openai/codex-sdk");
   const { CaptureWriter } = await import("../dist/capture.js");
   const { readAccountingRecords } = await import("../dist/accounting.js");
-  const { codexExecArguments, nativeCodexServiceTier } = await import(
-    "../dist/codex-exec.js"
-  );
+  const { codexExecArguments, nativeCodexServiceTier } =
+    await import("../dist/codex-exec.js");
   const { requestedCodexAppServerSettings, verifyCodexAppServerSettings } =
     await import("../dist/codex-app-server.js");
-  const { codexWorkerConfiguration } = await import(
-    "../dist/execution/worker.js"
-  );
+  const { codexWorkerConfiguration } =
+    await import("../dist/execution/worker.js");
   const { codexWorkerInput } = await import("../dist/execution/local.js");
-  const { CodexPlanningTransport } = await import(
-    "../dist/compiler/codex-transport.js"
-  );
-  const { codexRuntimeDirectory } = await import(
-    "../dist/codex-planning-isolation.js"
-  );
+  const { CodexPlanningTransport } =
+    await import("../dist/compiler/codex-transport.js");
+  const { codexRuntimeDirectory } =
+    await import("../dist/codex-planning-isolation.js");
   const { validateConfig } = await import("../dist/config.js");
   const root = mkdtempSync(join(tmpdir(), "factory-codex-service-tier-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

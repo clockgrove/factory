@@ -652,7 +652,24 @@ setTimeout(() => {
     // wrapper duration/identity/sizes, not the omitted argument/output bodies.
     const nativeToolResultLine =
       '2026-10-10T05:59:53.000000Z INFO codex_otel.trace_safe: event.name="codex.tool_result" tool_result_seq=7 tool_name="exec" tool_namespace="functions" call_id="call_preserved_native_tool" duration_ms=220 success="true" output_truncated=false arguments_length=582 output_length=24579 output_line_count=32 tool_origin="builtin" event.timestamp="2026-10-10T05:59:53.000Z" conversation.id="01a1382e-ff76-72f3-827a-e8fa81a1c338" app.version="0.160.0"';
-    const quiet = new ProviderTurnGuard(320);
+    // The 320 ms quiet guard starts at a same-stderr-stream receipt written
+    // after the finite 400-record burst, once the production parser has consumed
+    // the preceding bytes. Starting it before the spawn let CI load cancel the
+    // child while records were still in the pipe. A finite bound covers a
+    // child that never reaches the receipt.
+    const receiptMarker = "finite_burst_receipt=true\n";
+    const telemetryAbort = new AbortController();
+    let receiptTail = "";
+    let burstDrained;
+    let preparationTimer;
+    const burstReceipt = new Promise((resolve, reject) => {
+      burstDrained = resolve;
+      preparationTimer = setTimeout(() => {
+        telemetryAbort.abort();
+        reject(new Error("finite telemetry burst receipt was not observed"));
+      }, 30_000);
+    });
+    let quiet;
     let childClosed = false;
     const telemetryChild = subprocessAsync(
       process.execPath,
@@ -682,15 +699,20 @@ setTimeout(() => {
         const tool = ${JSON.stringify(nativeToolResultLine)};
         for (let i = 0; i < 400; i++) process.stderr.write(tool.replace('tool_result_seq=7', 'tool_result_seq=' + (i + 8)).replace('call_preserved_native_tool', 'call_bounded_native_' + i) + '\\n');
         // Aggregate observation counts survive exhausted projected detail.
-        process.stderr.write(lines[2] + '\\n');
+        process.stderr.write(lines[2] + ' finite_burst_receipt=true\\n');
       }, 120);
       setInterval(() => process.stderr.write(lines[1] + '\\n'), 25);
     `,
       ],
-      { signal: quiet.signal },
+      { signal: telemetryAbort.signal },
       "x".repeat(256 * 1024),
       (stream, chunk) => {
-        if (stream === "stderr") boundaryParser.chunk(chunk);
+        if (stream === "stderr") {
+          boundaryParser.chunk(chunk);
+          const seen = receiptTail + chunk.toString("latin1");
+          if (seen.includes(receiptMarker)) burstDrained();
+          receiptTail = seen.slice(-receiptMarker.length);
+        }
         if (stream === "stdout") {
           jsonBoundaries(JSON.parse(chunk.toString()));
           unsupportedJsonSeen = true;
@@ -704,7 +726,14 @@ setTimeout(() => {
     });
     // Install rejection handlers before waiting for a live receipt.
     const boundedTelemetry = assert.rejects(
-      quiet.race(settledTelemetry),
+      burstReceipt.then(() => {
+        clearTimeout(preparationTimer);
+        quiet = new ProviderTurnGuard(320);
+        quiet.signal.addEventListener("abort", () => telemetryAbort.abort(), {
+          once: true,
+        });
+        return quiet.race(settledTelemetry);
+      }),
       ProviderTurnTimeoutError,
     );
     const closedTelemetry = assert.rejects(

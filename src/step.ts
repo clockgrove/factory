@@ -305,12 +305,6 @@ export function clearWait(state: StepState, scope: StepScope): boolean {
   return true;
 }
 
-/**
- * The operator's retry: delete every repeat record of the scope (an item
- * runs one step at a time, so that is the waiting step) and the wait its
- * steps wrote, so the steps start fresh. A decision blocks only the step
- * that asked it. Returns whether anything was cleared; the caller saves.
- */
 /** Steps sleeping between tries, by the state whose records they read. */
 const retrySleepers = new WeakMap<object, Set<AbortController>>();
 
@@ -353,6 +347,12 @@ export function endProviderLimitWaits(
   return ended;
 }
 
+/**
+ * The operator's retry: delete every repeat record of the scope (an item
+ * runs one step at a time, so that is the waiting step) and the wait its
+ * steps wrote, so the steps start fresh. A decision blocks only the step
+ * that asked it. Returns whether anything was cleared; the caller saves.
+ */
 export function clearRepeats(state: StepState, scope: StepScope): boolean {
   let cleared = false;
   const holder = waitHolder(state, scope);

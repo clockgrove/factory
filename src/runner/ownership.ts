@@ -33,6 +33,7 @@ import {
   releaseControllerLock,
 } from "../state-store.js";
 import { awaitsOperator, type StepContext } from "../step.js";
+import * as time from "../clock.js";
 
 export interface ApplicationServices {
   planningModel: PlanningModel;
@@ -59,10 +60,12 @@ export class CoordinatorHandoff extends Error {
 }
 
 /**
- * A running item sleeping between tries of its current step (for example, until
- * a provider's limit resets) with no live worker holds no effect in flight
- * (#1268). Its next try is still in the future, so its step has not started the
- * body; a worker it ran has stopped, as the driver records only after settling it.
+ * A running item between tries of its current step (for example, waiting for a
+ * provider's limit to reset) with no live worker holds no effect in flight
+ * (#1268). Its step has not started the next try: that try is still in the
+ * future, or the coordinator is paused, which stops a step before its body, and
+ * no paid call is in flight. A worker it ran has stopped, as the driver records
+ * only after settling it. A handoff still waits for every active item to settle.
  */
 function betweenTries(
   state: FactoryState,
@@ -74,8 +77,12 @@ function betweenTries(
     : undefined;
   if (
     !record?.faults ||
+    record.inFlight ||
     !record.nextAt ||
-    !(Date.parse(record.nextAt) > Date.now())
+    !(
+      Date.parse(record.nextAt) > time.now() ||
+      state.coordinator?.mode === "paused"
+    )
   )
     return false;
   const data = work.execution?.data as
@@ -166,6 +173,11 @@ export function synchronizeWorkItemPause(
 ): void {
   const mode = owner.snapshot?.coordinator?.mode;
   if (mode === "paused") owner.workPause.abort(new Error("Coordinator paused"));
+  // A handoff stops admitted work at its next safe point once nothing it runs
+  // holds an effect in flight, and then never renews it (#1268). Until then a
+  // drain keeps driving running items toward that point.
+  else if (owner.handoff && owner.snapshot && canHandoff(owner.snapshot))
+    owner.workPause.abort(new Error("Coordinator handoff requested"));
   else if (
     owner.workPause.signal.aborted &&
     (mode === "draining" ||

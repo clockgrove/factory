@@ -677,6 +677,10 @@ export async function runObjectivePass(
         ? canHandoff(owner.snapshot)
         : paused && !cancellationRequested())
     ) {
+      // No item step may outlive ownership: a sibling sleeping between tries
+      // stops at that safe point, and every active item settles first (#1268).
+      owner.workPause.abort(new Error("Coordinator handoff requested"));
+      await Promise.allSettled(active.values());
       if (owner.snapshot?.coordinator) {
         setCoordinatorMode(owner.snapshot, "draining");
         saveState(path, owner.snapshot);

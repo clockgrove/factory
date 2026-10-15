@@ -132,11 +132,11 @@ export async function executeItem(
   ): ref is AgentSessionRef =>
     Boolean(
       ref &&
-      ref.identity === args.session?.identity &&
-      ref.executionIdentity === executionIdentity &&
-      isDeepStrictEqual(ref.scope, args.session?.scope) &&
-      ref.scope.role === "implementation" &&
-      ref.scope.itemId === item.id,
+        ref.identity === args.session?.identity &&
+        ref.executionIdentity === executionIdentity &&
+        isDeepStrictEqual(ref.scope, args.session?.scope) &&
+        ref.scope.role === "implementation" &&
+        ref.scope.itemId === item.id,
     );
   const settleSession = (executionIdentity: string): void => {
     const retained = args.session?.retained;

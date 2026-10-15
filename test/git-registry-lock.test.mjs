@@ -619,17 +619,22 @@ async function watcherWorkflow(
   controlMetadata = originalControl;
 
   if (collectedExecution) {
-    const { addWorktree, processGroupExists } =
-      await import("../dist/process.js");
-    const { launchWorker, killGroup } =
-      await import("../dist/execution/worker-process.js");
-    const { checkpointWorkerSession } =
-      await import("../dist/execution/local.js");
+    const { addWorktree, processGroupExists } = await import(
+      "../dist/process.js"
+    );
+    const { launchWorker, killGroup } = await import(
+      "../dist/execution/worker-process.js"
+    );
+    const { checkpointWorkerSession } = await import(
+      "../dist/execution/local.js"
+    );
     const { collectCompletedWorker } = await import("../dist/runner.js");
-    const { agentSessionContinuation } =
-      await import("../dist/agent-session.js");
-    const { settleStoppedProjectQueueRun } =
-      await import("../dist/project-queue-state.js");
+    const { agentSessionContinuation } = await import(
+      "../dist/agent-session.js"
+    );
+    const { settleStoppedProjectQueueRun } = await import(
+      "../dist/project-queue-state.js"
+    );
     const baseSha = git("rev-parse", "HEAD"),
       attempt = randomUUID();
     const item = {

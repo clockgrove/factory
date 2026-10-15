@@ -307,7 +307,9 @@ export class CheckpointAdmissionFailure extends Error {
   constructor(
     message: string,
     readonly boundary:
-      "before-effect" | "settled" | "explicit" = "before-effect",
+      | "before-effect"
+      | "settled"
+      | "explicit" = "before-effect",
     cause?: unknown,
   ) {
     super(message, cause === undefined ? undefined : { cause });
@@ -565,7 +567,8 @@ export function hasPrivateCheckpointScope(): boolean {
   return Boolean(scope && settings(scope.config)?.scope === "private-history");
 }
 export function privateCheckpointBounds():
-  { maxBytes: number; maxFiles: number; timeoutMs: number } | undefined {
+  | { maxBytes: number; maxFiles: number; timeoutMs: number }
+  | undefined {
   const scope = scopes.getStore();
   const options = scope ? settings(scope.config) : undefined;
   return options?.scope === "private-history"
@@ -2954,7 +2957,7 @@ export function readRecoveryCheckpointBodies(
     options,
   );
   const bodies = new Map<string, Buffer>();
-  for (let offset = 0; offset < entries.length;) {
+  for (let offset = 0; offset < entries.length; ) {
     let end = offset;
     let packetBytes = 0;
     while (end < entries.length) {
@@ -4788,7 +4791,8 @@ async function freshArchiveOwnedStrict(
   let hintUsed = false;
   let observedTip: string | undefined;
   let semanticBodyReads:
-    { refs: number; bytes: number; fallback: boolean } | undefined;
+    | { refs: number; bytes: number; fallback: boolean }
+    | undefined;
   let queueSupportRows: number | undefined;
   let queueSupportEligible: boolean | undefined;
   const observed = checkpointObservation(
@@ -5381,8 +5385,9 @@ async function assertInstallationLease(
   repository: string,
   lock: ControllerLock,
 ): Promise<void> {
-  const { installationLockPath, readControllerOwner } =
-    await import("./state-store.js");
+  const { installationLockPath, readControllerOwner } = await import(
+    "./state-store.js"
+  );
   const path = installationLockPath(repository);
   const owner = readControllerOwner(path);
   const processIdentity = linuxProcessIdentity(process.pid);
@@ -5731,8 +5736,9 @@ async function publishCheckpoint(
         scopes.getStore()?.buildClosure ??
         input.buildClosure ??
         (async () => {
-          const { buildRecoveryCheckpointClosure } =
-            await import("./recovery-checkpoint-closure.js");
+          const { buildRecoveryCheckpointClosure } = await import(
+            "./recovery-checkpoint-closure.js"
+          );
           return buildRecoveryCheckpointClosure({
             config,
             scope: options.scope,
@@ -5967,7 +5973,7 @@ async function publishCheckpoint(
       try {
         reusedParent = Boolean(
           knownIdentity &&
-          verifiedPublisherParent(config, options, p.git, knownIdentity),
+            verifiedPublisherParent(config, options, p.git, knownIdentity),
         );
         parentObservation.complete();
       } catch (error) {
@@ -6192,11 +6198,13 @@ async function publishCheckpoint(
     } catch (error) {
       try {
         mutate(config, options, (record) => {
-          if (!(
-            error instanceof CheckpointRestoreRequired &&
-            record.hold === "needs-restore" &&
-            record.error
-          ))
+          if (
+            !(
+              error instanceof CheckpointRestoreRequired &&
+              record.hold === "needs-restore" &&
+              record.error
+            )
+          )
             record.error =
               error instanceof Error
                 ? error.message

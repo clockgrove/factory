@@ -318,7 +318,6 @@ export class CheckpointAdmissionFailure extends Error {
     );
   }
 }
-/** A complete local producer inventory changed before strict closure verification. */
 /**
  * A completed local worker return is not yet frozen by its collector, so no
  * checkpoint can be published until collection: the controller collects before
@@ -338,6 +337,7 @@ export function isCheckpointCollectionPending(error: unknown): boolean {
       error.cause instanceof CheckpointCollectionPending)
   );
 }
+/** A complete local producer inventory changed before strict closure verification. */
 export class CheckpointProducerInventoryChanged extends Error {
   constructor(kind: "accounting" | "memory" | "learning", directory: string) {
     super(

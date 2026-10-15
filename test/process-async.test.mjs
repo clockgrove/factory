@@ -4519,17 +4519,21 @@ test("explicit Codex tiers reach native exec, SDK and app-server without changin
   const { Codex } = await import("@openai/codex-sdk");
   const { CaptureWriter } = await import("../dist/capture.js");
   const { readAccountingRecords } = await import("../dist/accounting.js");
-  const { codexExecArguments, nativeCodexServiceTier } =
-    await import("../dist/codex-exec.js");
+  const { codexExecArguments, nativeCodexServiceTier } = await import(
+    "../dist/codex-exec.js"
+  );
   const { requestedCodexAppServerSettings, verifyCodexAppServerSettings } =
     await import("../dist/codex-app-server.js");
-  const { codexWorkerConfiguration } =
-    await import("../dist/execution/worker.js");
+  const { codexWorkerConfiguration } = await import(
+    "../dist/execution/worker.js"
+  );
   const { codexWorkerInput } = await import("../dist/execution/local.js");
-  const { CodexPlanningTransport } =
-    await import("../dist/compiler/codex-transport.js");
-  const { codexRuntimeDirectory } =
-    await import("../dist/codex-planning-isolation.js");
+  const { CodexPlanningTransport } = await import(
+    "../dist/compiler/codex-transport.js"
+  );
+  const { codexRuntimeDirectory } = await import(
+    "../dist/codex-planning-isolation.js"
+  );
   const { validateConfig } = await import("../dist/config.js");
   const root = mkdtempSync(join(tmpdir(), "factory-codex-service-tier-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

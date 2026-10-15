@@ -669,9 +669,12 @@ export async function runNativeGraph(args: {
       }
       if (args.paused?.() && state.work[item.id]?.wait?.kind === "ci")
         return settlePrepared();
+      // An inline item is active while its step runs, so a handoff never
+      // counts it idle (#1289).
+      let inline: Promise<void> | undefined;
       try {
         if (item.kind === "discovery")
-          await runDiscoveryItem({
+          inline = runDiscoveryItem({
             config,
             state,
             item,
@@ -686,7 +689,7 @@ export async function runNativeGraph(args: {
             diagnostics: args.diagnostics,
           });
         else
-          await runQaItem({
+          inline = runQaItem({
             config,
             root,
             state,
@@ -703,6 +706,18 @@ export async function runNativeGraph(args: {
             pause: args.pause,
             phases,
           });
+        active.set(
+          item.id,
+          inline.then(
+            () => undefined,
+            () => undefined,
+          ),
+        );
+        try {
+          await inline;
+        } finally {
+          active.delete(item.id);
+        }
       } catch (error) {
         // A decision or a configuration fix is the item's wait (its step
         // saved it), and cancel stops it quietly: the unit keeps its place.

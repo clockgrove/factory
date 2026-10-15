@@ -123,6 +123,7 @@ import {
   reviewArtifactEvidence,
 } from "../dist/review-image-evidence.js";
 import {
+  objectiveStepPause,
   runObjectivePass,
   workItemPauseSignal,
 } from "../dist/runner/execution.js";
@@ -2343,6 +2344,10 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     synchronizeWorkItemPause(owner);
     assert.equal(owner.workPause.signal.aborted, false);
     assert.equal(workItemPauseSignal(owner), owner.workPause.signal);
+    // A plain drain keeps driving the paused item: no step of the new pass
+    // runs it yet, yet the Objective step does not stop (#1289).
+    assert.equal(canHandoff(state, new Map()), true);
+    assert.equal(objectiveStepPause(owner, new Map()), undefined);
     let settledTry = false;
     let nextPaidStarted = false;
     await assert.rejects(
@@ -2422,6 +2427,11 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     // already-aborted coordinator signal still blocks new item admission.
     owner.handoff = true;
     setCoordinatorMode(state, "draining");
+    // While a step of this pass runs the item, a handoff is not yet safe.
+    const running = new Map([["local", Promise.resolve()]]);
+    assert.equal(canHandoff(state, running), false);
+    assert.equal(objectiveStepPause(owner, running), undefined);
+    owner.activeItems = running;
     synchronizeWorkItemPause(owner);
     assert.equal(owner.workPause.signal.aborted, false);
     assert.equal(owner.pause.signal.aborted, true);

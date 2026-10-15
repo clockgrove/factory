@@ -1374,7 +1374,10 @@ async function runObjectiveOwned(
           owner.snapshot &&
           (owner.snapshot.cancelledAt
             ? !cancelledContinuationResourceHold(owner.snapshot)
-            : canHandoff(owner.snapshot, owner.activeItems))
+            : canHandoff(
+                owner.snapshot,
+                owner.handoff ? owner.activeItems : undefined,
+              ))
         ) {
           if (owner.snapshot.cancelledAt) {
             await cancelKnownWork(

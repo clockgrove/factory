@@ -125,6 +125,29 @@ export function workItemPauseSignal(
     : owner.workPause.signal;
 }
 
+/**
+ * The pause an Objective step honors. Pause, drain and handoff stop it waiting
+ * between tries only at a safe point (no running item depends on it); a drain
+ * that must still drive running items keeps it going. Only a handoff counts
+ * items no step of this pass runs (`active`) as idle (#1289): a plain drain
+ * never stops while an item is running.
+ */
+export function objectiveStepPause(
+  owner: Pick<LocalOwner, "snapshot" | "pause" | "handoff">,
+  active?: ReadonlyMap<string, unknown>,
+): AbortSignal | undefined {
+  const snapshot = owner.snapshot;
+  if (!snapshot) return owner.pause.signal;
+  if (owner.handoff)
+    return canHandoff(snapshot, active) ? owner.pause.signal : undefined;
+  if (
+    isExecutionState(snapshot) &&
+    Object.values(snapshot.work).some((work) => work.status === "running")
+  )
+    return undefined;
+  return canHandoff(snapshot) ? owner.pause.signal : undefined;
+}
+
 export async function runObjectivePass(
   config: FactoryConfig,
   objective: number,
@@ -187,14 +210,10 @@ export async function runObjectivePass(
   } = services;
   let stateForSignal: FactoryState | undefined;
   const cancellationRequested = () => Boolean(owner.snapshot?.cancelRequested);
-  // Cancel stops every step. Pause, drain and handoff stop an Objective step
-  // waiting between tries only at a safe point (no running item depends on
-  // it); a drain that must still drive running items keeps them going.
+  // Cancel stops every step; pause, drain and handoff stop an Objective step
+  // only at a safe point (see objectiveStepPause).
   const objectiveSignal = () => owner.abort.signal;
-  const objectivePause = () =>
-    owner.snapshot && !canHandoff(owner.snapshot, active)
-      ? undefined
-      : owner.pause.signal;
+  const objectivePause = () => objectiveStepPause(owner, active);
   /** Stop a pass the operator cancelled: a `cancelled` fault, never a failure. */
   const stopIfCancelled = () => {
     if (cancellationRequested())

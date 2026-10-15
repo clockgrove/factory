@@ -46,7 +46,23 @@ export interface ControlContext {
   deadlineAt?: number;
   acknowledge(value: unknown): void;
 }
+/** A queue command whose retained operations completed before its caller's deadline. */
+export interface ReturnedQueueCommand {
+  commandId: string;
+  operations: { id: string; action: string; objective?: number }[];
+  /** The actual archive journal when the deadline surfaced, never a log. */
+  durability: {
+    status: string;
+    pendingChanges: boolean;
+    unsyncedSince?: string;
+    attemptedTransportOutcome?: string;
+    lastAcknowledged?: { commitSha: string; sequence: number };
+    error?: string;
+  };
+}
 export class ControllerCommandIncompleteError extends Error {
+  /** Known returned Project effect; the caller still failed before durable acknowledgment. */
+  returned?: ReturnedQueueCommand;
   constructor(
     readonly requestId: string | undefined,
     readonly submission: "not-sent" | "unknown",

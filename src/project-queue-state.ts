@@ -3866,6 +3866,51 @@ export async function admitQueueCommand(
     throw error;
   }
 }
+/**
+ * What a creating command's own retained operations establish, read back from
+ * their authenticated private files. A completed command has every declared
+ * original response; archive durability is a separate fact.
+ */
+export function retainedQueueCommandOutcome(
+  config: FactoryConfig,
+  commandId: string,
+):
+  | {
+      commandId: string;
+      operations: { id: string; action: string; objective?: number }[];
+    }
+  | undefined {
+  const directory = join(stateRoot(config.repository), "project-queue-history");
+  const read = (id: string) => {
+    const record = parseQueueRecord(
+      privateBytes(join(directory, `${id}.json`)),
+      config.repository,
+      id,
+    );
+    if (record.kind !== "project-queue-operation")
+      throw new Error("Retained queue command member is not an operation");
+    return record;
+  };
+  const recipe = read(commandId).commandRecipe;
+  if (!recipe) return undefined;
+  const operations = recipe.operations.map((header) => read(header.id));
+  if (
+    operations.some(
+      (operation) => operation.commandId !== commandId || !operation.completed,
+    )
+  )
+    return undefined;
+  return {
+    commandId,
+    operations: operations.map((operation) => ({
+      id: operation.id,
+      action: operation.action,
+      ...(operation.objective === undefined
+        ? {}
+        : { objective: operation.objective }),
+    })),
+  };
+}
 export async function performQueueCommandEffect(
   config: FactoryConfig,
   github: GitHubGateway,

@@ -23,6 +23,7 @@ import {
   type ControlContext,
   ControllerCommandIncompleteError,
   ForegroundControllerError,
+  type ReturnedQueueCommand,
   requestControl,
   serveControl,
 } from "./coordinator-control.js";
@@ -64,6 +65,7 @@ import {
   queueDigest,
   readQueueHistory,
   requireProjectQueueEffects,
+  retainedQueueCommandOutcome,
   verifyQueueObservation,
   type VerifiedQueueObservation,
 } from "./project-queue-state.js";
@@ -140,7 +142,47 @@ export const QUEUE_COMMAND_TIMEOUT_MS = 60_000;
 const commandScopes = new AsyncLocalStorage<{
   deadlineAt: number;
   onAcknowledgment?: (value: unknown) => void;
+  /** Creating commands this caller declared, for deadline attribution. */
+  commands: { config: FactoryConfig; id: string }[];
 }>();
+/** A deadline after a command's retained completion is a pending-durability failure, not an unknown effect. */
+function returnedCommand(
+  commands: { config: FactoryConfig; id: string }[],
+): ReturnedQueueCommand | undefined {
+  try {
+    const outcomes = commands.map(({ config, id }) =>
+      retainedQueueCommandOutcome(config, id),
+    );
+    if (outcomes.length !== 1 || !outcomes[0]) return undefined;
+    const status = gitPersistenceStatus(commands[0]!.config);
+    const acknowledged = status.lastAcknowledged;
+    return {
+      ...outcomes[0],
+      durability: {
+        status: status.status,
+        pendingChanges: status.pendingChanges,
+        ...(status.unsyncedSince
+          ? { unsyncedSince: status.unsyncedSince }
+          : {}),
+        ...(status.attemptedTransportOutcome
+          ? { attemptedTransportOutcome: status.attemptedTransportOutcome }
+          : {}),
+        ...(acknowledged
+          ? {
+              lastAcknowledged: {
+                commitSha: acknowledged.commitSha,
+                sequence: acknowledged.sequence,
+              },
+            }
+          : {}),
+        ...(status.error ? { error: status.error } : {}),
+      },
+    };
+  } catch {
+    // Unreadable receipts leave the caller's unknown outcome unchanged.
+    return undefined;
+  }
+}
 /** The deadline is armed at CLI entry and remains unchanged through IPC and admission. */
 export async function withIntakeCommandDeadline<T>(
   deadlineAt: number,
@@ -154,6 +196,11 @@ export async function withIntakeCommandDeadline<T>(
   const signal = inherited
     ? AbortSignal.any([inherited, cancellation.signal])
     : cancellation.signal;
+  const scope = {
+    deadlineAt,
+    onAcknowledgment,
+    commands: [] as { config: FactoryConfig; id: string }[],
+  };
   const timer = setTimeout(
     () =>
       cancellation.abort(
@@ -169,7 +216,7 @@ export async function withIntakeCommandDeadline<T>(
         "not-sent",
         deadlineAt,
       );
-    return await commandScopes.run({ deadlineAt, onAcknowledgment }, () =>
+    return await commandScopes.run(scope, () =>
       withProcessCancellation(
         signal,
         task,
@@ -178,17 +225,27 @@ export async function withIntakeCommandDeadline<T>(
       ),
     );
   } catch (error) {
-    if (
-      !(error instanceof ControllerCommandIncompleteError) &&
-      Date.now() >= deadlineAt
-    )
-      throw new ControllerCommandIncompleteError(
-        undefined,
-        "unknown",
-        deadlineAt,
-        error,
-      );
-    throw error;
+    const incomplete =
+      error instanceof ControllerCommandIncompleteError
+        ? error
+        : Date.now() >= deadlineAt
+          ? new ControllerCommandIncompleteError(
+              undefined,
+              "unknown",
+              deadlineAt,
+              error,
+            )
+          : undefined;
+    if (!incomplete) throw error;
+    const returned =
+      !incomplete.requestId && scope.commands.length
+        ? returnedCommand(scope.commands)
+        : undefined;
+    if (returned) {
+      incomplete.returned = returned;
+      incomplete.message = `Queue command ${returned.commandId} returned its Project effect (operations ${returned.operations.map((operation) => operation.id).join(", ")}) but its archive durability is not acknowledged before the deadline. Do not repeat it; run factory persistence status and factory persistence sync`;
+    }
+    throw incomplete;
   } finally {
     clearTimeout(timer);
   }
@@ -594,6 +651,7 @@ async function executePreparedCommand(
     effects: plan.effects,
     deadlineAt,
   });
+  commandScopes.getStore()?.commands.push({ config, id: command.recipe.id });
   await admitQueueCommand(config, command);
   const receipts: ProjectQueueWriteReceipt[] = [];
   for (const [index, effect] of plan.effects.entries()) {

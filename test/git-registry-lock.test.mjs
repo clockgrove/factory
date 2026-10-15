@@ -36,10 +36,14 @@ import {
   runIntake,
   resolveIntakeBase,
   watchIntake,
+  withIntakeCommandDeadline,
 } from "../dist/intake.js";
 import { LocalRepositoryMemory } from "../dist/repository-memory.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
-import { requestControl } from "../dist/coordinator-control.js";
+import {
+  ControllerCommandIncompleteError,
+  requestControl,
+} from "../dist/coordinator-control.js";
 import { validateWorkItem } from "../dist/validation.js";
 import {
   createProjectQueuePlannedEffect,
@@ -79,6 +83,7 @@ import {
   gitPersistenceStatus,
   markCheckpointDirty,
   readVerifiedRecoveryCheckpoint,
+  synchronizeRecoveryCheckpoint,
   withRecoveryCheckpointControllerVerification,
   withRecoveryCheckpointScope,
 } from "../dist/recovery-checkpoint.js";
@@ -226,6 +231,8 @@ async function watcherWorkflow(
   };
   let reads = 0,
     writes = 0;
+  let holdArchiveAfterWrite = false,
+    archiveHolder;
   let indexReads = 0;
   let membershipVisible = true;
   let changeControlDuringRead = false;
@@ -474,6 +481,14 @@ async function watcherWorkflow(
         clientMutationId,
         projectV2Item: structuredClone(target),
       });
+      if (holdArchiveAfterWrite) {
+        holdArchiveAfterWrite = false;
+        archiveHolder = await holder(
+          join(stateRoot(repository), "recovery", ".publication.guard"),
+          "exclusive",
+          true,
+        );
+      }
       const original =
         intent.action === "ensure-card"
           ? {
@@ -1389,6 +1404,50 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       if (priorLocalOrigins === undefined)
         delete process.env.FACTORY_TEST_LOCAL_ORIGINS;
       else process.env.FACTORY_TEST_LOCAL_ORIGINS = priorLocalOrigins;
+    }
+    if (!preSnapshotFailure && !collectedExecution) {
+      // A foreground removal returns its Project effect, then another
+      // publisher holds the archive acknowledgment past the command deadline.
+      const writesBefore = writes;
+      holdArchiveAfterWrite = true;
+      const incomplete = await withIntakeCommandDeadline(
+        Date.now() + 4000,
+        () => intakeControl(config, "dequeue", [1], github),
+      ).then(
+        () =>
+          assert.fail("a held archive acknowledgment completed the command"),
+        (error) => error,
+      );
+      try {
+        assert(incomplete instanceof ControllerCommandIncompleteError);
+        assert.equal(incomplete.requestId, undefined);
+        assert.equal(writes, writesBefore + 1);
+        assert.equal(JSON.parse(card.metadata).state, "withdrawn");
+        assert.equal(incomplete.returned.operations.length, 1);
+        assert.equal(incomplete.returned.operations[0].action, "withdraw");
+        assert.equal(incomplete.returned.operations[0].objective, 1);
+        assert.equal(incomplete.returned.durability.pendingChanges, true);
+        assert.notEqual(incomplete.returned.durability.status, "acknowledged");
+        assert.match(incomplete.message, /Do not repeat it/);
+      } finally {
+        await archiveHolder?.release();
+        archiveHolder = undefined;
+      }
+      // The supported explicit synchronization acknowledges the retained bytes
+      // without replaying the returned mutation.
+      const acknowledged = await synchronizeRecoveryCheckpoint(config, {
+        reason: "explicit",
+      });
+      assert.equal(acknowledged.status, "acknowledged");
+      assert.equal(acknowledged.pendingChanges, false);
+      assert.equal(writes, writesBefore + 1);
+      assert(
+        (await readQueueHistory(config)).some(
+          (record) =>
+            record.id === incomplete.returned.operations[0].id &&
+            record.completed,
+        ),
+      );
     }
   } finally {
     LocalContentStore.prototype.checkpointReferences = originalReferences;

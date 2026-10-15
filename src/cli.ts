@@ -999,7 +999,24 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  if (error instanceof ControllerCommandIncompleteError)
+  if (error instanceof ControllerCommandIncompleteError && error.returned)
+    // The Project effect returned and its operations are retained; only the
+    // archive acknowledgment is outstanding. The caller still failed.
+    console.error(
+      JSON.stringify({
+        kind: "queue-command-durability-pending",
+        returnedEffect: {
+          commandId: error.returned.commandId,
+          operations: error.returned.operations,
+        },
+        deadlineAt: error.deadlineAt ?? null,
+        completion: "durability-pending",
+        durability: error.returned.durability,
+        nextAction:
+          "Do not repeat the queue command. Run factory persistence status, then factory persistence sync to acknowledge the retained bytes",
+      }),
+    );
+  else if (error instanceof ControllerCommandIncompleteError)
     console.error(
       JSON.stringify({
         kind: "queue-command-incomplete",

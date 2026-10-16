@@ -269,9 +269,18 @@ async function projectCard(
           current.requests.length >= (important ? 64 : 62)
         )
           throw new Error("Project status update is held by retained history");
+        const observed = current.observed;
         current.requests.push(intent);
         delete current.observed;
-        args.save();
+        try {
+          args.save();
+        } catch (error) {
+          // A refused save leaves nothing retained: restore the live state so
+          // every later save stays valid.
+          current.requests.pop();
+          if (observed) current.observed = observed;
+          throw error;
+        }
         try {
           await awaitCheckpointAdmission(
             args.config.repository,

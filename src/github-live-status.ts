@@ -241,11 +241,12 @@ async function editLiveStatus(
       if (target.read(state))
         throw new Error("A live status create is already recorded");
       target.write(state, { actorId });
-      args.save();
       try {
+        args.save();
         await awaitCheckpointAdmission(args.config.repository, "before-effect");
       } catch (error) {
-        // The POST follows this call, so nothing was sent.
+        // The POST follows this call, so nothing was sent. A refused save
+        // must not leave the record in the live state either.
         const latest = live();
         if (!target.item) delete latest.githubLiveStatus;
         else if (isExecutionState(latest))

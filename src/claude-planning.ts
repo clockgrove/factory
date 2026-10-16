@@ -148,13 +148,67 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/** An array the shared schema fixes to exactly this many entries. */
+function exactLength(schema: Record<string, unknown>): number | undefined {
+  const length = schema.maxItems;
+  return schema.type === "array" &&
+    typeof length === "number" &&
+    Number.isSafeInteger(length) &&
+    length > 0 &&
+    schema.minItems === length
+    ? length
+    : undefined;
+}
+
+const indexKeys = (length: number) =>
+  Array.from({ length }, (_, index) => String(index));
+
 /**
  * The shared planning schema in the Claude structured-output subset.
  * Unsupported constraints move into `description`, as the SDK's own
  * transform does, but `enum` and `const` discriminators stay enforced.
+ * The grammar enforces no array length above one, so an exact-length array
+ * becomes an object with one required key per index; claudeOutputValue
+ * turns it back into the canonical array before any Factory decoder sees it.
  */
 export function claudeOutputSchema(schema: unknown): unknown {
+  const indexed: Record<string, unknown> = {};
+  const result = claudeSchemaNode(schema, indexed);
+  if (isRecord(result) && Object.keys(indexed).length)
+    result.$defs = {
+      ...(isRecord(result.$defs) ? result.$defs : {}),
+      ...indexed,
+    };
+  return result;
+}
+
+function claudeSchemaNode(
+  schema: unknown,
+  indexed: Record<string, unknown>,
+): unknown {
   if (!isRecord(schema)) return schema;
+  const length = exactLength(schema);
+  if (length !== undefined) {
+    // One definition per array keeps the grammar the size of the original.
+    const name = `factoryIndexedEntry${Object.keys(indexed).length}`;
+    indexed[name] = {};
+    indexed[name] = claudeSchemaNode(schema.items, indexed);
+    const keys = indexKeys(length);
+    return {
+      type: "object",
+      description: [
+        schema.description,
+        `Exactly ${length} entries keyed "0" to "${length - 1}"; each key is that array position.`,
+      ]
+        .filter((part) => typeof part === "string" && part)
+        .join("\n\n"),
+      properties: Object.fromEntries(
+        keys.map((key) => [key, { $ref: `#/$defs/${name}` }]),
+      ),
+      required: keys,
+      additionalProperties: false,
+    };
+  }
   const result: Record<string, unknown> = {};
   const moved: string[] = [];
   for (const [key, value] of Object.entries(schema)) {
@@ -167,18 +221,85 @@ export function claudeOutputSchema(schema: unknown): unknown {
       result[key] = Object.fromEntries(
         Object.entries(value).map(([name, entry]) => [
           name,
-          claudeOutputSchema(entry),
+          claudeSchemaNode(entry, indexed),
         ]),
       );
     else if (SCHEMA_LISTS.has(key) && Array.isArray(value))
-      result[key] = value.map(claudeOutputSchema);
-    else if (key === "items") result[key] = claudeOutputSchema(value);
+      result[key] = value.map((entry) => claudeSchemaNode(entry, indexed));
+    else if (key === "items") result[key] = claudeSchemaNode(value, indexed);
     else result[key] = value;
   }
   if (moved.length)
     result.description = [result.description, `{${moved.join(", ")}}`]
       .filter((part) => typeof part === "string" && part)
       .join("\n\n");
+  return result;
+}
+
+function hasExactLength(schema: unknown): boolean {
+  if (!isRecord(schema)) return false;
+  if (exactLength(schema) !== undefined) return true;
+  return Object.entries(schema).some(([key, value]) =>
+    SCHEMA_MAPS.has(key) && isRecord(value)
+      ? Object.values(value).some(hasExactLength)
+      : SCHEMA_LISTS.has(key) && Array.isArray(value)
+        ? value.some(hasExactLength)
+        : key === "items" && hasExactLength(value),
+  );
+}
+
+/** A union branch whose single-value discriminators admit this object. */
+function admits(schema: unknown, value: Record<string, unknown>): boolean {
+  if (!isRecord(schema) || !isRecord(schema.properties)) return false;
+  return Object.entries(schema.properties).every(
+    ([key, property]) =>
+      !isRecord(property) ||
+      !Array.isArray(property.enum) ||
+      property.enum.includes(value[key]),
+  );
+}
+
+/**
+ * Undo claudeOutputSchema's index-keyed objects against the shared schema.
+ * Only an object with exactly the encoded keys becomes an array; anything
+ * else stays as returned, so the canonical decoder still rejects it.
+ */
+export function claudeOutputValue(schema: unknown, value: unknown): unknown {
+  if (!isRecord(schema) || !hasExactLength(schema)) return value;
+  const length = exactLength(schema);
+  if (length !== undefined) {
+    const keys = indexKeys(length);
+    if (
+      !isRecord(value) ||
+      Object.keys(value).length !== length ||
+      keys.some((key) => !Object.hasOwn(value, key))
+    )
+      return value;
+    return keys.map((key) => claudeOutputValue(schema.items, value[key]));
+  }
+  if (Array.isArray(value))
+    return value.map((entry) => claudeOutputValue(schema.items, entry));
+  if (!isRecord(value)) return value;
+  let result = value;
+  if (isRecord(schema.properties)) {
+    const properties = schema.properties;
+    result = Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        Object.hasOwn(properties, key)
+          ? claudeOutputValue(properties[key], entry)
+          : entry,
+      ]),
+    );
+  }
+  for (const list of SCHEMA_LISTS) {
+    const branches = schema[list];
+    if (!Array.isArray(branches)) continue;
+    const branch = branches.find(
+      (entry) => hasExactLength(entry) && admits(entry, result),
+    );
+    if (branch) result = claudeOutputValue(branch, result) as typeof result;
+  }
   return result;
 }
 
@@ -445,6 +566,9 @@ function structuredFault(
   return undefined;
 }
 
+/** Base of the complete request the retained conversation already holds. */
+type RequestBaseData = ClaudeOwnedSession["data"] & { requestBase?: string };
+
 interface SessionFacts {
   initialized: boolean;
   /** A real model message arrived, not only a runtime-synthesized one. */
@@ -612,6 +736,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     tree?: string;
     reviewImages?: ReviewImageInput[];
     session?: AgentSessionContinuation & { currentGraphDigest?: string };
+    continuation?: { base: string; prompt: string };
     sourcePacket?: string;
     beforeNativeDispatch?: NonNullable<
       ModelInvocationContext["beforeProviderDispatch"]
@@ -624,8 +749,16 @@ class ClaudePlanningTransport implements PlanningTransport {
     const selection = this.selection(args.role);
     const { model, reasoningEffort } = selection;
     const started = Date.now();
-    const continuation = this.sessionRoot ? args.session : undefined;
+    // A diagnosis carries its own complete request. Resuming the planner
+    // conversation would resend that whole history under another output
+    // schema, which shares no cache prefix, so it runs as a fresh session.
+    const continuation =
+      this.sessionRoot && invocation.phase !== "diagnosis"
+        ? args.session
+        : undefined;
     let owned: ClaudeOwnedSession | undefined;
+    let nativePrompt = args.prompt;
+    let compacted = false;
     if (continuation) {
       if (
         this.query ||
@@ -644,6 +777,16 @@ class ClaudePlanningTransport implements PlanningTransport {
         this.adapter,
         claudeDigest([selection, this.config, Boolean(args.tree)]),
       );
+      // The conversation holds an earlier complete request with this base:
+      // send only what changed. Forget the base until this turn completes.
+      const data = owned.data as RequestBaseData;
+      if (
+        owned.resume &&
+        args.continuation &&
+        data.requestBase === args.continuation.base
+      )
+        nativePrompt = args.continuation.prompt;
+      delete data.requestBase;
       owned.ref.currentTurn = {
         invocationId: invocation.invocationId,
         ...(args.deadlineAt ? { deadlineAt: args.deadlineAt } : {}),
@@ -758,7 +901,7 @@ class ClaudePlanningTransport implements PlanningTransport {
           continuation?.scope.repository,
           "before-effect",
         );
-      events = query({ prompt: args.prompt, options })[Symbol.asyncIterator]();
+      events = query({ prompt: nativePrompt, options })[Symbol.asyncIterator]();
       for (;;) {
         const next = await guard.race(events.next());
         if (next.done) break;
@@ -816,6 +959,8 @@ class ClaudePlanningTransport implements PlanningTransport {
               providerEvent: message.type,
             }),
           });
+        if (message.type === "system" && message.subtype === "compact_boundary")
+          compacted = true;
         if (message.type === "system" && message.subtype === "init") {
           assertPlanningInitialization(
             message,
@@ -853,7 +998,14 @@ class ClaudePlanningTransport implements PlanningTransport {
         throw new Error(
           "Claude planning result belongs to another native conversation",
         );
-      this.settle(result!, { state, invocation, usage, started, facts });
+      this.settle(result!, {
+        state,
+        invocation,
+        usage,
+        started,
+        facts,
+        schema: args.schema,
+      });
     } catch (error) {
       checkpointRejected = isCheckpointAdmissionFailure(error);
       if (isCheckpointAdmissionFailure(error) && nativeSpawnAttempted)
@@ -930,6 +1082,9 @@ class ClaudePlanningTransport implements PlanningTransport {
       if (owned && completed) {
         owned.data.nativeTerminal = true;
         owned.data.baseline = usage.boundary();
+        // A summary can drop the complete request a later delta relies on.
+        if (args.continuation && terminal === "completed" && !compacted)
+          (owned.data as RequestBaseData).requestBase = args.continuation.base;
         owned.ref.currentTurn = {
           ...owned.ref.currentTurn!,
           terminal,
@@ -1005,6 +1160,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       usage: ClaudeUsage;
       started: number;
       facts: SessionFacts;
+      schema: unknown;
     },
   ): void {
     const { state, invocation, facts } = context;
@@ -1103,7 +1259,9 @@ class ClaudePlanningTransport implements PlanningTransport {
       });
     if (failure !== undefined) throw new Error(failure);
     if (result.subtype === "success")
-      state.response = JSON.stringify(result.structured_output);
+      state.response = JSON.stringify(
+        claudeOutputValue(context.schema, result.structured_output),
+      );
   }
 }
 

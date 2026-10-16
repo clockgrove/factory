@@ -435,6 +435,11 @@ Examples (illustrations, not command or source authority):
     invocation: request.invocation,
     defaultPhase: "compile",
     session: request.session,
+    continuation: compilationContinuation(
+      [instructions, request.prerequisites, request.localExecutables],
+      data,
+      wire.schema,
+    ),
     planningSources: {
       baseSha: request.baseSha,
       sources: request.sources,
@@ -465,6 +470,24 @@ Examples (illustrations, not command or source authority):
     }),
   };
   return { wire, call };
+}
+
+/**
+ * A revision needs no second copy of the request: only the instructions
+ * (where corrections live) and the contextId change. The base digests the
+ * rest, so an adapter sends this prompt only to a conversation that already
+ * received the complete request with that base.
+ */
+function compilationContinuation(
+  rendered: unknown[],
+  data: { instructions: string; contextId: string } & Record<string, unknown>,
+  schema: unknown,
+): NonNullable<StructuredCall["continuation"]> {
+  const { instructions, contextId, ...unchanged } = data;
+  return {
+    base: digest(JSON.stringify([rendered, unchanged, schema])),
+    prompt: `Your earlier turn in this conversation received the complete compilation request. Answer that request again in full, with the instructions and contextId below replacing its earlier values; they supersede any earlier findings.\n${JSON.stringify({ instructions, contextId })}`,
+  };
 }
 
 /** The shared production review request; canonical graph and packet remain untouched. */
@@ -697,6 +720,12 @@ export class StructuredPlanningModel implements PlanningModel {
           authoritativePacket: args.sourcePacket ?? null,
           approvedAdvisory: playbook,
         }),
+        ...(args.continuation && {
+          continuation: {
+            ...args.continuation,
+            base: digest(JSON.stringify([args.continuation.base, playbook])),
+          },
+        }),
       };
     }
     return args;
@@ -919,6 +948,7 @@ export class StructuredPlanningModel implements PlanningModel {
         tree: args.tree,
         reviewImages: args.reviewImages,
         session: args.session,
+        ...(args.continuation && { continuation: args.continuation }),
         signal: stepCancellationSignal(),
         deadlineAt: args.deadlineAt,
       });

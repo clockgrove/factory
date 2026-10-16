@@ -140,6 +140,12 @@ export function compilerWire(
       ]),
     )
     .digest("hex");
+  // The decoder checks the identity. Keeping it out of the schema keeps the
+  // schema byte-stable across corrections, so a provider can reuse its cache.
+  const contextIdSchema: Schema = {
+    type: "string",
+    description: "Copy the contextId supplied with the compiler choices.",
+  };
   const itemSchema = strict({
     kind: text,
     id: {
@@ -392,7 +398,7 @@ export function compilerWire(
     "requiredLfsRoles",
   ];
   const schema = strict({
-    contextId: { type: "string", enum: [contextId] },
+    contextId: contextIdSchema,
     requiredPreIntegrationChecks: {
       type: "array",
       ...(checkNames.length ? {} : { maxItems: 0 }),
@@ -1151,7 +1157,7 @@ export function compilerWire(
   });
   return {
     schema: strict({
-      contextId: { type: "string", enum: [contextId] },
+      contextId: contextIdSchema,
       outcome: {
         anyOf: [
           strict({ kind: { type: "string", enum: ["graph"] }, graph: schema }),

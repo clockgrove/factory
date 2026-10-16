@@ -144,6 +144,7 @@ export interface PlanningTransport {
     tree?: string;
     reviewImages?: ReviewImageInput[];
     session?: AgentSessionContinuation;
+    continuation?: StructuredCall["continuation"];
     /** Optional caller deadline; the transport still proves owned process settlement. */
     signal?: AbortSignal;
     /** Admitted elapsed ceiling; native activity never renews it. */
@@ -173,6 +174,13 @@ export interface StructuredCall {
   tree?: string;
   reviewImages?: ReviewImageInput[];
   session?: AgentSessionContinuation;
+  /**
+   * The same request for a conversation that already holds it: `prompt`
+   * carries only what changed, and `base` digests everything else. An
+   * adapter may send `prompt` instead only after a completed turn of that
+   * conversation received the same base; `prompt` stays the logical request.
+   */
+  continuation?: { base: string; prompt: string };
 }
 
 export const CODEX_PLANNING_PROVIDER = "openai-codex-sdk";

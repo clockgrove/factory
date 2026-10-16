@@ -123,6 +123,8 @@ export interface PlanningRecoveryRecord {
     kind: RepairClass;
     diagnosis: string;
     correction: string;
+    /** The exact corrections a check or review supplied without a diagnosis. */
+    corrections?: PlanCorrection[];
     review?: PlanningReviewRecord;
   }[];
 }
@@ -388,8 +390,9 @@ async function compilePlanAdmitted(
     );
     return structuredClone(state.plan);
   }
-  let corrections: PlanCorrection[] = record.history.length
-    ? [{ source: "diagnosis", detail: record.history.at(-1)!.correction }]
+  const last = record.history.at(-1);
+  let corrections: PlanCorrection[] = last
+    ? (last.corrections ?? [{ source: "diagnosis", detail: last.correction }])
     : [];
   const invocationHooks = (
     id: string,
@@ -599,6 +602,8 @@ async function compilePlanAdmitted(
     let review: Awaited<ReturnType<typeof checkedPlanReview>> | undefined;
     let reviewing = false;
     let failure: string;
+    // Where the failure came from when it already states what to fix.
+    let stated: "check" | "review" | undefined;
     try {
       graph = await compileObjective(
         objective,
@@ -668,6 +673,7 @@ async function compilePlanAdmitted(
       // sees it as a fault of its paid call and re-asks within its bound
       // (paidPlanningModel); without a step it is kept for the operator.
       failure = JSON.stringify(review);
+      if (review.findings.length) stated = "review";
     } catch (error) {
       if (error instanceof MissingPlanningContext) {
         record.phase = "stopped";
@@ -763,6 +769,7 @@ async function compilePlanAdmitted(
           "Retained planning review compiled input cannot be validated; preserve its evidence and use supported cancellation before a corrected successor",
         );
       failure = error instanceof Error ? error.message : String(error);
+      if (answered) stated = "check";
     }
     const identity = failureDigest(failure);
     const unchanged = record.history.some(
@@ -818,6 +825,49 @@ async function compilePlanAdmitted(
     }
     if (context.stopped?.())
       throw new Error("Planning is paused or cancelled before diagnosis");
+    // A deterministic refusal or a review finding already says what is wrong,
+    // so it goes back to the planner as is; the planner asks the operator
+    // through decisionRequired when the fix needs a decision. A diagnosis
+    // still classifies other failures, and review findings when the
+    // configuration permits only some planning repair classes.
+    const direct =
+      record.invocation?.phase !== "diagnosis" &&
+      (stated === "check"
+        ? permitted.includes("planning-output")
+        : stated === "review" && permitted.length === 3);
+    if (direct) {
+      const stating: PlanCorrection[] =
+        stated === "check"
+          ? [{ source: "check", detail: failure }]
+          : review!.findings.map((finding) => ({
+              source: "review" as const,
+              detail: finding.detail,
+              question: finding.question,
+              evidence: finding.evidence,
+            }));
+      chargeRepair(state, event, "planning-output", ["$planning"]);
+      record.history.push({
+        failure: identity,
+        detail: failure,
+        invocations: structuredClone(record.invocations ?? []),
+        kind: "planning-output",
+        diagnosis:
+          stated === "check"
+            ? "A deterministic Factory check refused the compiled graph"
+            : "The independent plan review refused the compiled graph",
+        correction: stating.map((entry) => entry.detail).join("\n"),
+        corrections: structuredClone(stating),
+        ...(record.review ? { review: structuredClone(record.review) } : {}),
+      });
+      record.invocations = [];
+      corrections = stating;
+      delete record.response;
+      delete record.responseFailure;
+      delete record.review;
+      record.phase = "ready";
+      save();
+      continue;
+    }
     const diagnosisInvocation = invocation("diagnosis");
     const correctionDescriptions = {
       "planning-output":

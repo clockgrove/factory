@@ -314,8 +314,8 @@ export function recordSavedResultRefusal(
  * stated each gap against the exact candidate, so a diagnosis call would only
  * restate it. Undefined sends the failure to the diagnosis, which still makes
  * the decisions this cannot: a finding with a question may need an operator,
- * and an operator refusal, a command failure or a repeated failure needs a
- * new judgment. Built from the retained refusal alone, so it is rebuilt
+ * and an operator refusal, a command failure or a refusal after an earlier
+ * findings repair needs a new judgment. Built from the retained refusal alone, so it is rebuilt
  * identically after a restart.
  */
 export function reviewFindingsCorrection(
@@ -333,7 +333,13 @@ export function reviewFindingsCorrection(
     refusal?.source !== "model" ||
     failure.classification !== "implementation" ||
     // A diagnosis already asked for this failure is answered, not replaced.
-    work.recovery?.diagnosisInvocation
+    work.recovery?.diagnosisInvocation ||
+    // The shortcut is taken once per item: a refusal after a findings repair,
+    // however reworded, goes to the diagnosis with that history, which can
+    // decide blame, an operator question or a different correction.
+    work.recovery?.history?.some(
+      (entry) => entry.correction?.actor === REVIEW_FINDINGS_ACTOR,
+    )
   )
     return undefined;
   try {
@@ -387,7 +393,7 @@ export function reviewFindingsCorrection(
   try {
     validateCorrection(work, correction);
   } catch {
-    // The same findings after the same correction: a repeated failure.
+    // An unchanged repeat of a failed correction goes to the diagnosis.
     return undefined;
   }
   return correction;

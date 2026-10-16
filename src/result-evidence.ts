@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -604,8 +604,7 @@ export function resultChangePacket(
       : textBudgetOverride) ?? configuredResultReviewTextBudget();
   const textBudget =
     Number.isSafeInteger(configured) && configured >= 0 ? configured : 48_000;
-  let remaining = textBudget;
-  const patches = changes.map(({ path }) => {
+  const diffs = changes.map(({ path }) => {
     const lineStats = pinnedGit(
       checkout,
       "diff",
@@ -616,9 +615,8 @@ export function resultChangePacket(
       "--",
       path,
     );
-    if (remaining === 0)
-      return { path, lineStats, excerpt: "", truncated: true };
-    const limit = remaining;
+    if (textBudget === 0)
+      return { path, lineStats, output: Buffer.alloc(0), overflow: true };
     const result = spawnSync(
       "git",
       [
@@ -635,7 +633,7 @@ export function resultChangePacket(
         "--",
         path,
       ],
-      { env: pinnedGitEnvironment(), maxBuffer: limit },
+      { env: pinnedGitEnvironment(), maxBuffer: textBudget },
     );
     if (
       result.error &&
@@ -644,15 +642,37 @@ export function resultChangePacket(
       throw result.error;
     if (!result.error && result.status !== 0)
       throw new Error(`Cannot describe text change for ${path}`);
-    const output = result.stdout ?? Buffer.alloc(0);
-    const decoded = new StringDecoder("utf8").write(output.subarray(0, limit));
-    const excerpt = new StringDecoder("utf8").write(
-      Buffer.from(decoded).subarray(0, limit),
-    );
+    return {
+      path,
+      lineStats,
+      output: result.stdout ?? Buffer.alloc(0),
+      overflow: Boolean(result.error),
+    };
+  });
+  // Share the inline budget fairly, smallest patches first, so every changed
+  // file gets a slice and only the largest are cut (#1318). The complete
+  // patches are also written for the reviewer to read (materializeChangeEvidence).
+  const allotted = new Array<number>(diffs.length).fill(0);
+  let remaining = textBudget;
+  diffs
+    .map((diff, index) => ({
+      index,
+      size: diff.overflow ? Number.MAX_SAFE_INTEGER : diff.output.length,
+    }))
+    .sort((left, right) => left.size - right.size)
+    .forEach(({ index, size }, rank) => {
+      const share = Math.floor(remaining / (diffs.length - rank));
+      allotted[index] = Math.min(size, share);
+      remaining -= allotted[index]!;
+    });
+  remaining = textBudget;
+  const patches = diffs.map(({ path, lineStats, output, overflow }, index) => {
+    const limit = allotted[index]!;
+    const excerpt = new StringDecoder("utf8").write(output.subarray(0, limit));
     const truncated =
-      Boolean(result.error) ||
+      overflow ||
       output.length > limit ||
-      Buffer.byteLength(decoded) !== Math.min(output.length, limit);
+      Buffer.byteLength(excerpt) !== Math.min(output.length, limit);
     remaining -= Buffer.byteLength(excerpt, "utf8");
     return { path, lineStats, excerpt, truncated };
   });
@@ -845,38 +865,191 @@ export function materializeResultTree(
   checkout: string,
   treeSha: string,
   packet?: ReviewPacket,
+  change?: { baseSha: string; commitSha: string },
 ): { directory: string; reviewFiles?: ReviewBodyFile[]; remove(): void } {
   const root = mkdtempSync(join(tmpdir(), "factory-result-tree-"));
   const directory = join(root, packet ? "candidate" : "tree");
   const remove = () => rmSync(root, { recursive: true, force: true });
   try {
     mkdirSync(directory);
-    const env = {
-      ...pinnedGitEnvironment(),
-      GIT_INDEX_FILE: join(root, "index"),
-    };
-    for (const args of [
-      ["read-tree", treeSha],
-      ["--work-tree", directory, "checkout-index", "--all", "--force"],
-    ]) {
-      const result = spawnSync("git", ["-C", checkout, ...args], {
-        env,
-        maxBuffer: 1 << 20,
-      });
-      if (result.error) throw result.error;
-      if (result.status !== 0)
-        throw new Error(
-          `Cannot materialize exact result tree for independent review: ${result.stderr.toString("utf8")}`,
-        );
-    }
+    checkoutTree(checkout, treeSha, directory, join(root, "index"));
     if (!packet) return { directory, remove };
-    rmSync(join(root, "index"));
+    if (change)
+      materializeChangeEvidence(
+        checkout,
+        root,
+        change.baseSha,
+        change.commitSha,
+      );
     const reviewFiles = materializeReviewBodies(root, packet);
     return { directory: root, reviewFiles, remove };
   } catch (error) {
     remove();
     throw error;
   }
+}
+
+/** Check out all of `treeSha`, or only `paths`, through a throwaway index. */
+function checkoutTree(
+  checkout: string,
+  treeSha: string,
+  directory: string,
+  index: string,
+  paths?: readonly string[],
+): void {
+  const env = { ...pinnedGitEnvironment(), GIT_INDEX_FILE: index };
+  for (const args of [
+    ["read-tree", treeSha],
+    paths
+      ? ["--work-tree", directory, "checkout-index", "--force", "-z", "--stdin"]
+      : ["--work-tree", directory, "checkout-index", "--all", "--force"],
+  ]) {
+    const result = spawnSync("git", ["-C", checkout, ...args], {
+      env,
+      maxBuffer: 1 << 20,
+      ...(paths && args.includes("--stdin")
+        ? { input: paths.map((path) => `${path}\0`).join("") }
+        : {}),
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0)
+      throw new Error(
+        `Cannot materialize exact result tree for independent review: ${result.stderr.toString("utf8")}`,
+      );
+  }
+  rmSync(index, { force: true });
+}
+
+/** Largest complete per-file patch written for review; larger ones are marked incomplete. */
+const REVIEW_PATCH_FILE_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Give the reviewer the whole change, not a budgeted excerpt (#1318): the
+ * base-tree copy of every changed path that existed at the base under
+ * `base/`, each path's complete patch under `changes/`, and
+ * `changes/INDEX.json` naming them. Git alone decides the bytes.
+ */
+function materializeChangeEvidence(
+  checkout: string,
+  root: string,
+  baseSha: string,
+  commitSha: string,
+): void {
+  const changes = rawGitChanges(checkout, baseSha, commitSha);
+  const atBase = changes
+    .filter(({ oldMode }) => oldMode !== "000000" && oldMode !== "160000")
+    .map(({ path }) => path);
+  const base = join(root, "base");
+  mkdirSync(base);
+  if (atBase.length)
+    checkoutTree(checkout, baseSha, base, join(root, "base-index"), atBase);
+  const patches = join(root, "changes");
+  mkdirSync(patches);
+  const index = changes.map((entry) => {
+    const patchFile = `changes/${entry.path}.patch`;
+    const result = spawnSync(
+      "git",
+      [
+        "-C",
+        checkout,
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--no-color",
+        "--binary",
+        baseSha,
+        commitSha,
+        "--",
+        entry.path,
+      ],
+      { env: pinnedGitEnvironment(), maxBuffer: REVIEW_PATCH_FILE_BYTES },
+    );
+    if (
+      result.error &&
+      (result.error as NodeJS.ErrnoException).code !== "ENOBUFS"
+    )
+      throw result.error;
+    if (!result.error && result.status !== 0)
+      throw new Error(`Cannot describe text change for ${entry.path}`);
+    const complete = !result.error;
+    const target = join(root, patchFile);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, result.stdout ?? Buffer.alloc(0), { mode: 0o400 });
+    return {
+      path: entry.path,
+      status: entry.status,
+      oldMode: entry.oldMode,
+      newMode: entry.newMode,
+      baseFile: atBase.includes(entry.path) ? `base/${entry.path}` : null,
+      candidateFile:
+        entry.newMode === "000000" ? null : `candidate/${entry.path}`,
+      patchFile,
+      patchComplete: complete,
+    };
+  });
+  writeFileSync(
+    join(patches, "INDEX.json"),
+    JSON.stringify({
+      baseCommitSha: baseSha,
+      resultCommitSha: commitSha,
+      changes: index,
+    }),
+    { mode: 0o400 },
+  );
+}
+
+/** Every path changed between two commits, from `git diff --raw`. */
+function rawGitChanges(
+  checkout: string,
+  baseSha: string,
+  commit: string,
+): {
+  path: string;
+  status: string;
+  oldMode: string;
+  newMode: string;
+  oldObject: string;
+  newObject: string;
+}[] {
+  const raw = pinnedGitRaw(
+    checkout,
+    "diff",
+    "--raw",
+    "--no-renames",
+    "--abbrev=40",
+    "-z",
+    baseSha,
+    commit,
+    "--",
+  )
+    .toString("utf8")
+    .split("\0");
+  const changes = [];
+  for (let index = 0; index + 1 < raw.length && raw[index]; index += 2) {
+    const header = raw[index]!.match(
+      /^:(\d{6}) (\d{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) ([A-Z])$/,
+    );
+    const path = raw[index + 1]!;
+    // Written below the review root, so only traversal-safe relative paths.
+    if (
+      !header ||
+      !path ||
+      path.split("/").some((part) => !part || part === "." || part === "..")
+    )
+      throw new Error(
+        "Cannot describe exact result change for independent review",
+      );
+    changes.push({
+      path,
+      status: header[5]!,
+      oldMode: header[1]!,
+      newMode: header[2]!,
+      oldObject: header[3]!,
+      newObject: header[4]!,
+    });
+  }
+  return changes;
 }
 
 /** Observe complete raw bytes, not just equal Git object names or filtered checkout files. */

@@ -34,6 +34,11 @@ const manifest: ControllerCapabilitiesManifest = {
         "Factory captures complete candidate AssetSets in private staging and stops for explicit human whole-set selection. It then materializes only selected bytes to Work Item-owned destinations, enforces the target Git attributes for every required LFS role, scans the staged result, and verifies each committed LFS pointer against the captured SHA-256 digest and byte count.",
     },
     {
+      id: "review-artifact-capture",
+      statement:
+        "For a configured reviewArtifacts text selector, Factory runs the exact validation command with TMPDIR, TMP and TEMP set to a fresh controller-owned directory, accepts a stdout locator only when it names exactly one directory inside that directory, and refuses capture for stale or outside paths, files outside the located directory, invalid UTF-8/JSON, missing bodies and bodies over the declared byte bounds. It records the command, exact tree, declaring source digest and verified body identities before cleanup. A supplied capture therefore was written under this validation's own fresh temporary root; it does not by itself prove semantic acceptance.",
+    },
+    {
       id: "required-lfs-publication",
       statement:
         "Factory uploads required selected Git LFS objects for the exact validated result commit before publishing its Git branch or pull request.",

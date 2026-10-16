@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -536,13 +537,73 @@ test("controller Git ignores executable configuration shared by a worker worktre
     ],
   );
   const canonical = JSON.stringify(packet);
-  const tree = materializeResultTree(checkout, treeSha, packet);
+  const tree = materializeResultTree(checkout, treeSha, packet, {
+    baseSha,
+    commitSha: changeRef,
+  });
   try {
     assert.deepEqual(readdirSync(tree.directory).sort(), [
+      "base",
       "candidate",
+      "changes",
       "evidence",
       "pinned",
     ]);
+    // The reviewer reads the whole change, not a budgeted excerpt (#1318):
+    // each changed path's base copy and complete patch, listed in INDEX.json.
+    const changeIndex = JSON.parse(
+      readFileSync(join(tree.directory, "changes", "INDEX.json"), "utf8"),
+    );
+    assert.equal(changeIndex.baseCommitSha, baseSha);
+    assert.equal(changeIndex.resultCommitSha, changeRef);
+    const sourceChange = changeIndex.changes.find(
+      (entry) => entry.path === "source.ts",
+    );
+    assert.deepEqual(
+      {
+        baseFile: sourceChange.baseFile,
+        candidateFile: sourceChange.candidateFile,
+        patchFile: sourceChange.patchFile,
+        patchComplete: sourceChange.patchComplete,
+      },
+      {
+        baseFile: "base/source.ts",
+        candidateFile: "candidate/source.ts",
+        patchFile: "changes/source.ts.patch",
+        patchComplete: true,
+      },
+    );
+    assert.equal(
+      readFileSync(join(tree.directory, "base", "source.ts"), "utf8"),
+      baselineCode,
+    );
+    assert.equal(
+      readFileSync(join(tree.directory, "changes", "source.ts.patch"), "utf8"),
+      execFileSync(
+        "git",
+        [
+          "-C",
+          checkout,
+          "diff",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--no-renames",
+          "--no-color",
+          "--binary",
+          baseSha,
+          changeRef,
+          "--",
+          "source.ts",
+        ],
+        { encoding: "utf8" },
+      ),
+    );
+    for (const entry of changeIndex.changes) {
+      assert.equal(entry.patchComplete, true);
+      // The base copy exists (lstat also covers base symlinks).
+      if (entry.baseFile) lstatSync(join(tree.directory, entry.baseFile));
+      else assert.equal(entry.oldMode, "000000");
+    }
     assert.equal(
       readFileSync(join(tree.directory, "candidate", "notes.txt"), "utf8"),
       "changed\n",
@@ -607,6 +668,12 @@ test("controller Git ignores executable configuration shared by a worker worktre
     assert.ok(call.prompt.includes("candidate/"));
     assert.ok(call.prompt.includes("pinned/"));
     assert.ok(call.prompt.includes("evidence/"));
+    assert.ok(call.prompt.includes("changes/INDEX.json"));
+    assert.ok(call.prompt.includes("base/"));
+    assert.equal(
+      call.prompt.includes("omitted/truncated required contents"),
+      false,
+    );
     assert.equal(call.prompt.includes("complete mandatory read set"), false);
     assert.equal(call.prompt.includes(historicalBody), false);
     assert.equal(call.tree, tree.directory);

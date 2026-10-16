@@ -52,7 +52,7 @@ import {
 } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
 import {
-  checkpointBoundsExceeded,
+  onlyCheckpointBoundsExceeded,
   gitPersistenceStatus,
   inspectRecoveryCheckpoint,
   synchronizeRecoveryCheckpoint,
@@ -1053,7 +1053,7 @@ main().catch((error: unknown) => {
     `Factory: ${error instanceof Error ? error.message : String(error)}`,
   );
   // A configured archive limit names its fix (#1306).
-  const bounds = checkpointBoundsExceeded(error);
+  const bounds = onlyCheckpointBoundsExceeded(error);
   if (bounds) console.error(`Fix: ${bounds.fault.fix}`);
   // A held archive at service start or a configured archive limit needs the
   // operator, like a decision.

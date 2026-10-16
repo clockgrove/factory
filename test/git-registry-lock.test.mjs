@@ -2817,6 +2817,47 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           settlementState,
         ),
       );
+      // A configuration change that rewrites the queue authority strands a
+      // started Objective; its cancellation still settles against the
+      // authority its claim was admitted under (#1308), while the claim,
+      // admission and receipt chain stay bound.
+      const changedAuthority = {
+        ...config,
+        policy: {
+          ...config.policy,
+          network: config.policy.network === "off" ? "host" : "off",
+        },
+      };
+      assert.throws(
+        () =>
+          assertProjectQueueClaimAdmission(
+            changedAuthority,
+            [synthetic],
+            settlementClaim,
+            settlementState,
+          ),
+        /different queue authority/,
+      );
+      assert.doesNotThrow(() =>
+        assertProjectQueueClaimAdmission(
+          changedAuthority,
+          [synthetic],
+          settlementClaim,
+          settlementState,
+          { historical: true },
+        ),
+      );
+      assert.throws(
+        () =>
+          assertProjectQueueClaimAdmission(
+            changedAuthority,
+            [synthetic],
+            { ...settlementClaim, authorityDigest: "0".repeat(64) },
+            settlementState,
+            { historical: true },
+          ),
+        /original authenticated admission receipt/,
+      );
       for (const change of [
         (record) => {
           delete record.completed;

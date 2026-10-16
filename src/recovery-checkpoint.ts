@@ -261,7 +261,6 @@ interface QueueLineageCapacity {
   retainedOriginalBytes: number;
   chargedBytes: number;
   byteHeadroom: number;
-  commitHeadroom: number;
   manifestBufferHeadroom: number;
 }
 export interface RecoveryCheckpointStatus {
@@ -326,12 +325,14 @@ export class CheckpointAdmissionFailure extends Error {
     if (cause instanceof Error && cause.stack)
       this.stack += `\nCaused by: ${cause.stack}`;
     this.knownNotDispatched = boundary === "before-effect";
+    // A configured archive limit keeps its own prerequisite and fix (#1306).
     attachFault(
       this,
-      decision(
-        "Recovery checkpoint admission or retention is unavailable; preserve the retained owner and receipt",
-        `Checkpoint boundary: ${boundary}`,
-      ),
+      onlyCheckpointBoundsExceeded(cause)?.fault ??
+        decision(
+          "Recovery checkpoint admission or retention is unavailable; preserve the retained owner and receipt",
+          `Checkpoint boundary: ${boundary}`,
+        ),
     );
   }
 }
@@ -348,37 +349,65 @@ export class CheckpointAdmissionFailure extends Error {
  */
 export class CheckpointBoundsExceeded extends Error {
   readonly fault: { kind: "config"; detail: string; fix: string };
-  constructor(sizes: {
-    files: number;
-    maxFiles: number;
-    bytes: number;
-    maxBytes: number;
-  }) {
-    const over = [
-      sizes.files > sizes.maxFiles &&
-        `files=${sizes.files} > gitPersistence.maxFiles=${sizes.maxFiles}`,
-      sizes.bytes > sizes.maxBytes &&
-        `bytes=${sizes.bytes} > gitPersistence.maxBytes=${sizes.maxBytes}`,
-    ].filter(Boolean);
-    const detail = `The recovery checkpoint exceeds the configured archive limits: ${over.join(", ")}`;
+  /**
+   * `what` names the measured quantity and its configured limit; `limits` are the
+   * `gitPersistence` keys an operator raises to continue.
+   */
+  constructor(what: string, limits: ("maxFiles" | "maxBytes")[]) {
+    const detail = `The recovery checkpoint exceeds the configured archive limits: ${what}`;
     super(detail);
+    const keys = limits.map((key) => `gitPersistence.${key}`).join(" and ");
     this.fault = {
       kind: "config",
       detail,
-      fix: "Raise gitPersistence.maxFiles and/or gitPersistence.maxBytes in the installation configuration (operational limits; changing them never strands an Objective), then continue the run",
+      fix: `Raise ${keys} in the installation configuration (operational limits; changing them never strands an Objective), then continue the run`,
     };
   }
 }
-/** The configured-limit refusal in this error or the errors it wraps, if any. */
-export function checkpointBoundsExceeded(
+/** The materialized checkpoint's own file and byte charge against both limits. */
+function materializedBoundsExceeded(sizes: {
+  files: number;
+  maxFiles: number;
+  bytes: number;
+  maxBytes: number;
+}): CheckpointBoundsExceeded {
+  const over: ("maxFiles" | "maxBytes")[] = [];
+  const what: string[] = [];
+  if (sizes.files > sizes.maxFiles) {
+    over.push("maxFiles");
+    what.push(
+      `files=${sizes.files} > gitPersistence.maxFiles=${sizes.maxFiles}`,
+    );
+  }
+  if (sizes.bytes > sizes.maxBytes) {
+    over.push("maxBytes");
+    what.push(
+      `bytes=${sizes.bytes} > gitPersistence.maxBytes=${sizes.maxBytes}`,
+    );
+  }
+  return new CheckpointBoundsExceeded(what.join(", "), over);
+}
+/**
+ * The configured-limit refusal in this error or the errors it wraps, when it is the whole
+ * stop: at an aggregate, every error must be one, so the run waits for the operator. A stop
+ * that also carries a real failure is a failure, and its errors stay reported.
+ */
+export function onlyCheckpointBoundsExceeded(
   error: unknown,
 ): CheckpointBoundsExceeded | undefined {
   for (
     let current: unknown = error, depth = 0;
     current instanceof Error && depth < 8;
     current = current.cause, depth++
-  )
+  ) {
     if (current instanceof CheckpointBoundsExceeded) return current;
+    if (current instanceof AggregateError) {
+      const found = current.errors.map((entry) =>
+        onlyCheckpointBoundsExceeded(entry),
+      );
+      return found.length && found.every(Boolean) ? found[0] : undefined;
+    }
+  }
   return undefined;
 }
 export class CheckpointCollectionPending extends Error {
@@ -1062,11 +1091,13 @@ function journal(
       throw new Error("Invalid pending checkpoint mutation");
   }
   if (value.retentionGaps !== undefined) {
-    if (
-      !Array.isArray(value.retentionGaps) ||
-      value.retentionGaps.length > options.maxFiles
-    )
+    if (!Array.isArray(value.retentionGaps))
       throw new Error("Invalid required checkpoint retention gaps");
+    if (value.retentionGaps.length > options.maxFiles)
+      throw new CheckpointBoundsExceeded(
+        `retention gaps=${value.retentionGaps.length} > gitPersistence.maxFiles=${options.maxFiles}`,
+        ["maxFiles"],
+      );
     const identities = new Set<string>();
     for (const gap of value.retentionGaps) {
       keys(gap, ["kind", "path", "digest", "reason", "observedAt"]);
@@ -1328,8 +1359,9 @@ export function markAccountingGap(
   mutate(scope.config, scope.options, (record) => {
     if (record.retentionGaps?.some((gap) => gap.path === identity.path)) return;
     if ((record.retentionGaps?.length ?? 0) >= scope.options.maxFiles)
-      throw new Error(
-        "Required accounting retention gaps exceed admitted bound",
+      throw new CheckpointBoundsExceeded(
+        `retention gaps=${(record.retentionGaps?.length ?? 0) + 1} > gitPersistence.maxFiles=${scope.options.maxFiles}`,
+        ["maxFiles"],
       );
     record.sequence++;
     if (!Number.isSafeInteger(record.sequence))
@@ -1360,8 +1392,9 @@ export function resolveAccountingGap(
   const identity = accountingGapIdentity(repository, descriptor);
   const path = join(stateRoot(repository), identity.path);
   if (lstatSync(path).size > scope.options.maxBytes)
-    throw new Error(
-      "Accounting original exceeds admitted checkpoint byte bound",
+    throw new CheckpointBoundsExceeded(
+      `accounting original bytes=${lstatSync(path).size} > gitPersistence.maxBytes=${scope.options.maxBytes}`,
+      ["maxBytes"],
     );
   const bytes = privateFile(path);
   if (hash(bytes) !== identity.digest)
@@ -1427,7 +1460,10 @@ export function markCheckpointDirty(
     )
       record.changed.push(descriptor);
     if (record.changed.length > options.maxFiles)
-      throw new Error("Pending checkpoint file count exceeds admitted bound");
+      throw new CheckpointBoundsExceeded(
+        `pending files=${record.changed.length} > gitPersistence.maxFiles=${options.maxFiles}`,
+        ["maxFiles"],
+      );
   });
   if (scope.operation) scope.operation.localSequence = changed.sequence;
 }
@@ -3038,7 +3074,7 @@ function assertManifest(
     Buffer.byteLength(canonical(value)),
   );
   if (files > options.maxFiles || bytes > options.maxBytes)
-    throw new CheckpointBoundsExceeded({
+    throw materializedBoundsExceeded({
       files,
       maxFiles: options.maxFiles,
       bytes,
@@ -3122,12 +3158,16 @@ function assertBodyBounds(
   options: GitPersistenceConfig,
 ): void {
   for (const ref of refs) assertRef(ref);
-  if (
-    refs.length > options.maxFiles ||
-    new Set(refs.map((ref) => ref.digest)).size !== refs.length ||
-    refs.reduce((sum, ref) => sum + ref.bytes, 0) > options.maxBytes
-  )
-    throw new Error("Checkpoint body batch exceeds admitted bounds");
+  if (new Set(refs.map((ref) => ref.digest)).size !== refs.length)
+    throw new Error("Checkpoint body batch repeats a body");
+  const batchBytes = refs.reduce((sum, ref) => sum + ref.bytes, 0);
+  if (refs.length > options.maxFiles || batchBytes > options.maxBytes)
+    throw materializedBoundsExceeded({
+      files: refs.length,
+      maxFiles: options.maxFiles,
+      bytes: batchBytes,
+      maxBytes: options.maxBytes,
+    });
 }
 export function readRecoveryCheckpointBodies(
   directory: string,
@@ -3628,10 +3668,9 @@ function observeQueueAncestry(
     .split("\n");
   if (completeCommits.some((sha) => !/^[a-f0-9]{40,64}$/.test(sha)))
     throw new Error("Queue cancellation lineage commit inventory is invalid");
-  if (completeCommits.length > options.maxFiles)
-    throw new Error(
-      `Queue cancellation ancestry exceeds admitted commit bound: commits=${completeCommits.length}, maxFiles=${options.maxFiles}`,
-    );
+  // Commits are not checkpoint files: an append-only archive gains one per
+  // publication, so ancestry is bounded by the cumulative manifest and original
+  // bytes it reads against maxBytes, not by maxFiles (#1306).
   const prefixIndex = prefix ? completeCommits.indexOf(prefix.tip) : -1;
   if (prefix && (prefixIndex < 0 || prefixIndex + 1 !== prefix.commits))
     throw new Error(
@@ -3668,8 +3707,9 @@ function observeQueueAncestry(
     transportBytes + (prefix?.manifestTransportBytes ?? 0);
   const manifestBufferBytes = options.maxBytes + 65536;
   if (manifestTransportBytes > manifestBufferBytes)
-    throw new Error(
-      `Queue cancellation ancestry exceeds admitted manifest transport buffer: predictedBytes=${manifestTransportBytes}, bufferBytes=${manifestBufferBytes}, maxBytes=${options.maxBytes}, commits=${commits.length}; original body bytes not read`,
+    throw new CheckpointBoundsExceeded(
+      `cancellation ancestry manifest transport bytes=${manifestTransportBytes} > buffer=${manifestBufferBytes} (gitPersistence.maxBytes=${options.maxBytes} + 65536) over ${commits.length} commits`,
+      ["maxBytes"],
     );
   const batch = git(directory, options, ["cat-file", "--batch"], inventory);
   if (batch.length !== transportBytes)
@@ -3989,8 +4029,9 @@ function queueOwnerLineage(
       0,
     );
     if (manifestTransportBytes + retainedOriginalBytes > options.maxBytes)
-      throw new Error(
-        `Queue cancellation ancestry exceeds admitted cumulative byte bound: manifestTransportBytes=${manifestTransportBytes}, retainedOriginalBytes=${retainedOriginalBytes}, chargedBytes=${manifestTransportBytes + retainedOriginalBytes}, maxBytes=${options.maxBytes}, commits=${commits.length}`,
+      throw new CheckpointBoundsExceeded(
+        `cancellation ancestry bytes=${manifestTransportBytes + retainedOriginalBytes} (manifests ${manifestTransportBytes}, originals ${retainedOriginalBytes}) > gitPersistence.maxBytes=${options.maxBytes} over ${commits.length} commits`,
+        ["maxBytes"],
       );
     return bytes;
   };
@@ -4108,7 +4149,6 @@ function queueOwnerLineage(
     chargedBytes: manifestTransportBytes + retainedOriginalBytes,
     byteHeadroom:
       options.maxBytes - manifestTransportBytes - retainedOriginalBytes,
-    commitHeadroom: options.maxFiles - commits.length,
     manifestBufferHeadroom: manifestBufferBytes - manifestTransportBytes,
   });
   return {
@@ -4164,9 +4204,12 @@ async function queueReservationLineage(
     if (!bodies.has(ref.digest)) {
       charged += bytes.length;
       if (charged > options.maxBytes || bodies.size >= options.maxFiles)
-        throw new Error(
-          "Queue reservation witnesses exceed admitted archive bounds",
-        );
+        throw materializedBoundsExceeded({
+          files: bodies.size + 1,
+          maxFiles: options.maxFiles,
+          bytes: charged,
+          maxBytes: options.maxBytes,
+        });
       bodies.set(ref.digest, {
         ref: { ...ref },
         bytes: Uint8Array.from(bytes),
@@ -4379,8 +4422,9 @@ function reuseQueueLineage(
     observation?.manifestTransportBytes ?? cached.manifestTransportBytes;
   const commits = observation?.commits ?? cached.commits;
   if (manifestTransportBytes + retainedOriginalBytes > options.maxBytes)
-    throw new Error(
-      "Queue cancellation ancestry exceeds admitted cumulative byte bound",
+    throw new CheckpointBoundsExceeded(
+      `cancellation ancestry bytes=${manifestTransportBytes + retainedOriginalBytes} > gitPersistence.maxBytes=${options.maxBytes}`,
+      ["maxBytes"],
     );
   observeCapacity?.({
     commits,
@@ -4389,7 +4433,6 @@ function reuseQueueLineage(
     chargedBytes: manifestTransportBytes + retainedOriginalBytes,
     byteHeadroom:
       options.maxBytes - manifestTransportBytes - retainedOriginalBytes,
-    commitHeadroom: options.maxFiles - commits,
     manifestBufferHeadroom: options.maxBytes + 65536 - manifestTransportBytes,
   });
   const { proof } = cached;
@@ -5246,13 +5289,9 @@ async function freshArchiveOwnedStrict(
           .toString("utf8")
           .trim()
           .split("\n");
-        if (
-          commits.length > options.maxFiles ||
-          commits.some((commit) => !/^[a-f0-9]{40,64}$/.test(commit))
-        )
-          throw new Error(
-            "Queue reservation ancestor inventory exceeds its admitted bound",
-          );
+        // Commits are not checkpoint files; see observeQueueAncestry.
+        if (commits.some((commit) => !/^[a-f0-9]{40,64}$/.test(commit)))
+          throw new Error("Queue reservation ancestor inventory is invalid");
         if (commits.includes(cached)) return;
       }
       if (!observation)

@@ -70,7 +70,7 @@ import {
   type VerifiedQueueObservation,
 } from "./project-queue-state.js";
 import {
-  checkpointBoundsExceeded,
+  onlyCheckpointBoundsExceeded,
   awaitCheckpointAdmission,
   acceptForwardedCheckpointCompletion,
   bindRecoveryCheckpointControllerScope,
@@ -2046,7 +2046,7 @@ async function runIntakeOwned(
             };
             // A configured archive limit stops for the operator, who raises it
             // and continues (#1306): it needs a person, not a failure.
-            const bounds = checkpointBoundsExceeded(error);
+            const bounds = onlyCheckpointBoundsExceeded(error);
             if (bounds) {
               record.observation = {
                 ...record.observation,

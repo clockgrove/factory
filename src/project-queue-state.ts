@@ -2886,6 +2886,7 @@ function admissionEffect(
   config: FactoryConfig,
   history: QueueRecord[],
   admission: QueueOperation | undefined,
+  historical = false,
 ): QueueOperation["effects"][number] | undefined {
   const effect = admission?.effects.at(-1);
   if (
@@ -2903,6 +2904,7 @@ function admissionEffect(
       admission.metadata,
       admission.scope,
       effect.intent.itemId,
+      historical,
     ) !== admission ||
     !effect.original
   )
@@ -2927,7 +2929,12 @@ export function assertProjectQueueClaimAdmission(
   const metadata = admission?.metadata
     ? parseQueueMetadata(admission.metadata)
     : undefined;
-  const effect = admissionEffect(config, history, admission);
+  const effect = admissionEffect(
+    config,
+    history,
+    admission,
+    options.historical,
+  );
   if (
     (!options.historical &&
       claim.authorityDigest !== factoryAuthorityDigest(config)) ||

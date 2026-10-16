@@ -2119,10 +2119,6 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       config.gitPersistence.maxBytes - usage.chargedBytes,
     );
     assert.equal(
-      usage.commitHeadroom,
-      config.gitPersistence.maxFiles - usage.commits,
-    );
-    assert.equal(
       usage.manifestBufferHeadroom,
       config.gitPersistence.maxBytes + 65536 - usage.manifestTransportBytes,
     );

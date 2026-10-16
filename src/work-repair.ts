@@ -1437,15 +1437,37 @@ export async function diagnoseWorkRepair(args: {
                           throw new Error(
                             "Diagnosis dispatch differs from its current owner",
                           );
+                        // An earlier provider attempt of this invocation may
+                        // have dispatched; only this attempt's own intent is
+                        // withdrawn when its admission fails.
+                        const intended = !invocation.submitted;
                         invocation.submitted = true;
-                        save();
-                        if ([17, 19].includes(state.schemaVersion)) {
+                        try {
+                          save();
+                        } catch (error) {
+                          if (intended) invocation.submitted = false;
+                          throw error;
+                        }
+                        if (![17, 19].includes(state.schemaVersion)) return;
+                        try {
                           await awaitCheckpointAdmission(
                             state.repository,
                             "before-effect",
                           );
-                          return "admission-complete" as const;
+                        } catch (error) {
+                          // The native call follows this hook, so nothing was
+                          // sent: withdraw the intent instead of leaving a
+                          // submission no settlement can ever resolve.
+                          if (
+                            intended &&
+                            work.recovery?.diagnosisInvocation === invocation
+                          ) {
+                            invocation.submitted = false;
+                            save();
+                          }
+                          throw error;
                         }
+                        return "admission-complete" as const;
                       },
                     }
                   : {}),

@@ -47,6 +47,7 @@ import {
   buildRecoveryCheckpointClosure,
 } from "../dist/recovery-checkpoint-closure.js";
 import { LocalContentStore } from "../dist/content/local.js";
+import { retainStateMemory } from "../dist/repository-memory.js";
 import {
   proposalPersistenceReferences,
   proposalSchema,
@@ -675,6 +676,25 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       ),
     );
     assert(emitted.prompt.includes("one verification note per criterion"));
+    // Each note kind carries its own limits in the emitted schema.
+    const [learningShape, verificationShape] = workHandoffSchema(
+      3,
+      producer.acceptance.length,
+    ).properties.notes.items.oneOf;
+    assert.equal(learningShape.properties.summary.maxLength, 1024);
+    assert.equal(learningShape.properties.paths.maxItems, 8);
+    assert.equal(learningShape.properties.criterionIndex, undefined);
+    assert.equal(verificationShape.properties.summary.maxLength, 4096);
+    assert.deepEqual(
+      verificationShape.properties.criterionIndex.maximum,
+      producer.acceptance.length - 1,
+    );
+    assert(verificationShape.required.includes("criterionIndex"));
+    assert.equal(
+      workHandoffSchema(3, producer.acceptance.length).properties.notes
+        .maxItems,
+      16 + producer.acceptance.length,
+    );
     assert(emitted.prompt.includes('"peerIndex":0,"title":"api"'));
     const withoutPeers = renderWorkItemPrompt({
       item: producer,
@@ -699,6 +719,13 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         kind: "hypothesis",
         summary: "Unfinished broad change",
         paths: Array.from({ length: 9 }, (_, index) => `file-${index}.json`),
+        consumerIndices: [],
+      },
+      // Learnings keep their own limits even though verification notes are larger.
+      {
+        kind: "pitfall",
+        summary: "x".repeat(1500),
+        paths: ["schema.json"],
         consumerIndices: [],
       },
       // A verification map names one of this item's criteria, only for itself.
@@ -2438,6 +2465,33 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     assert.equal(ownReview[0].origin, "controller");
     const ownDeclaration = JSON.parse(ownReview[0].content);
     assert.equal(ownDeclaration.candidateCommitSha, result.changeRef);
+    // Repository memory keeps the learnings, never the verification map: not in
+    // its summary, its retained handoff body or its sources.
+    const memoryRoot = mkdtempSync(join(root, "memory-"));
+    const memoryStore = new LocalContentStore(join(memoryRoot, "content"));
+    const memoryRecords = retainStateMemory(
+      { ...loaded, memoryBindings: undefined },
+      memoryRoot,
+    ).map((binding) =>
+      JSON.parse(memoryStore.readBytes(binding.manifestRef).toString("utf8")),
+    );
+    const memoryHandoff = memoryRecords.find(
+      (record) => record.kind === "handoff",
+    );
+    assert(memoryHandoff);
+    assert.equal(memoryHandoff.summary.includes("verification"), false);
+    const memoryBody = JSON.parse(
+      memoryStore
+        .readBytes(
+          memoryHandoff.bodies.find((entry) => entry.role === "handoff").ref,
+        )
+        .toString("utf8"),
+    );
+    assert.equal(
+      memoryBody.notes.some((note) => note.kind === "verification"),
+      false,
+    );
+    assert.equal(memoryBody.notes.length, 2);
     // The item's own review receives its verification map; other workers
     // (the consumer views above) never do.
     const ownVerification = ownDeclaration.view.entries.find(

@@ -1635,24 +1635,44 @@ export function retainStateMemory(
       ];
       retain(answer);
     }
-    if (work.knowledge) {
+    // Verification maps index one result's review, not lasting memory: keep
+    // only the learnings, their own cited sources and a body without the map.
+    const learnings =
+      work.knowledge?.notes.filter((note) => note.kind !== "verification") ??
+      [];
+    if (work.knowledge && learnings.length) {
       const knowledge = work.knowledge;
+      const learningPaths = new Set(learnings.flatMap((note) => note.paths));
+      const sources = knowledge.sources.filter((source) =>
+        learningPaths.has(source.path),
+      );
       const handoff = base(itemId, work);
       handoff.kind = "handoff";
       handoff.authority = "advisory";
-      handoff.summary =
-        knowledge.notes
-          // Verification maps index one result's review, not lasting memory.
-          .filter((note) => note.kind !== "verification")
-          .map((note) => `${note.kind}: ${note.summary}`)
-          .join("\n") || "Retained Objective handoff";
+      handoff.summary = learnings
+        .map((note) => `${note.kind}: ${note.summary}`)
+        .join("\n");
       handoff.bodies = [
-        retained("handoff", knowledge.recordRef),
-        ...knowledge.sources.map((source) =>
+        body("handoff", {
+          repository: knowledge.repository,
+          objective: knowledge.objective,
+          runId: knowledge.runId,
+          itemId: knowledge.itemId,
+          attemptId: knowledge.attemptId,
+          commitSha: knowledge.commitSha,
+          treeSha: knowledge.treeSha,
+          notes: learnings,
+          sources: sources.map((source) => ({
+            path: source.path,
+            digest: source.ref.digest,
+          })),
+          originalRecordDigest: knowledge.recordRef.digest,
+        }),
+        ...sources.map((source) =>
           retained(`source:${source.path}`, source.ref),
         ),
       ];
-      handoff.sources = knowledge.sources.map((source) => ({
+      handoff.sources = sources.map((source) => ({
         identity: `repository:${source.path}`,
         complete:
           handoff.bodies.find((body) => body.role === `source:${source.path}`)
@@ -1661,8 +1681,8 @@ export function retainStateMemory(
       }));
       handoff.bindings = {
         treeSha: knowledge.treeSha,
-        selectors: [...new Set(knowledge.notes.flatMap((note) => note.paths))],
-        paths: knowledge.sources.map((source) => ({
+        selectors: [...learningPaths],
+        paths: sources.map((source) => ({
           path: source.path,
           digest: source.ref.digest,
         })),

@@ -67,8 +67,8 @@ const filePath = (value: unknown): value is string =>
  * acceptance criterion with its proof locations, so it gets more room.
  */
 const LEARNING_LIMIT = { notes: 16, summary: 1024, paths: 8 };
-const VERIFICATION_LIMIT = { notes: 32, summary: 4096, paths: 16 };
-const MAX_CRITERIA = 256;
+/** One verification note per acceptance criterion; the manifest size bounds the rest. */
+const VERIFICATION_LIMIT = { summary: 4096, paths: 16 };
 
 /** Reject malformed optional data; the controller never repairs model claims. */
 export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
@@ -78,12 +78,9 @@ export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
     typeof declaration !== "object" ||
     Array.isArray(value) ||
     Object.keys(declaration).some((key) => key !== "notes") ||
-    !Array.isArray(declaration.notes) ||
-    declaration.notes.length > LEARNING_LIMIT.notes + VERIFICATION_LIMIT.notes
+    !Array.isArray(declaration.notes)
   )
-    throw new Error(
-      `Handoff must be an object with at most ${LEARNING_LIMIT.notes} learning and ${VERIFICATION_LIMIT.notes} verification notes`,
-    );
+    throw new Error("Handoff must be an object with a notes array");
   const notes = declaration.notes.map((raw: unknown) => {
     const note = raw as WorkHandoffNote | null;
     const verification = note?.kind === "verification";
@@ -104,7 +101,6 @@ export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
       (verification
         ? !Number.isSafeInteger(note.criterionIndex) ||
           (note.criterionIndex as number) < 0 ||
-          (note.criterionIndex as number) >= MAX_CRITERIA ||
           note.consumers?.length !== 0
         : note.criterionIndex !== undefined) ||
       typeof note.summary !== "string" ||
@@ -139,7 +135,6 @@ export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
   const verifications = notes.filter((note) => note.kind === "verification");
   if (
     notes.length - verifications.length > LEARNING_LIMIT.notes ||
-    verifications.length > VERIFICATION_LIMIT.notes ||
     new Set(verifications.map((note) => note.criterionIndex)).size !==
       verifications.length
   )
@@ -152,8 +147,58 @@ export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
 /** Models choose recipients; the controller owns their identities. */
 export function workHandoffSchema(
   peerCount: number,
-  criterionCount = MAX_CRITERIA,
+  criterionCount: number,
 ): Record<string, unknown> {
+  const paths = (maxItems: number) => ({
+    type: "array",
+    maxItems,
+    uniqueItems: true,
+    items: { type: "string", minLength: 1, maxLength: 512 },
+  });
+  const learning = {
+    type: "object",
+    additionalProperties: false,
+    required: ["kind", "summary", "paths", "consumerIndices"],
+    properties: {
+      kind: { type: "string", enum: ["interface", "pitfall", "hypothesis"] },
+      summary: {
+        type: "string",
+        minLength: 1,
+        maxLength: LEARNING_LIMIT.summary,
+      },
+      paths: paths(LEARNING_LIMIT.paths),
+      consumerIndices: {
+        type: "array",
+        maxItems: peerCount === 0 ? 0 : 16,
+        uniqueItems: true,
+        items: {
+          type: "integer",
+          minimum: 0,
+          ...(peerCount > 0 ? { maximum: peerCount - 1 } : {}),
+        },
+      },
+    },
+  };
+  const verification = {
+    type: "object",
+    additionalProperties: false,
+    required: ["kind", "summary", "paths", "consumerIndices", "criterionIndex"],
+    properties: {
+      kind: { type: "string", const: "verification" },
+      summary: {
+        type: "string",
+        minLength: 1,
+        maxLength: VERIFICATION_LIMIT.summary,
+      },
+      paths: paths(VERIFICATION_LIMIT.paths),
+      criterionIndex: {
+        type: "integer",
+        minimum: 0,
+        maximum: criterionCount - 1,
+      },
+      consumerIndices: { type: "array", maxItems: 0 },
+    },
+  };
   return {
     type: "object",
     additionalProperties: false,
@@ -161,44 +206,9 @@ export function workHandoffSchema(
     properties: {
       notes: {
         type: "array",
-        maxItems: LEARNING_LIMIT.notes + VERIFICATION_LIMIT.notes,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "summary", "paths", "consumerIndices"],
-          properties: {
-            kind: {
-              type: "string",
-              enum: ["interface", "pitfall", "hypothesis", "verification"],
-            },
-            summary: {
-              type: "string",
-              minLength: 1,
-              maxLength: VERIFICATION_LIMIT.summary,
-            },
-            paths: {
-              type: "array",
-              maxItems: VERIFICATION_LIMIT.paths,
-              uniqueItems: true,
-              items: { type: "string", minLength: 1, maxLength: 512 },
-            },
-            criterionIndex: {
-              type: "integer",
-              minimum: 0,
-              maximum: Math.max(0, Math.min(criterionCount, MAX_CRITERIA) - 1),
-            },
-            consumerIndices: {
-              type: "array",
-              maxItems: peerCount === 0 ? 0 : 16,
-              uniqueItems: true,
-              items: {
-                type: "integer",
-                minimum: 0,
-                ...(peerCount > 0 ? { maximum: peerCount - 1 } : {}),
-              },
-            },
-          },
-        },
+        maxItems: LEARNING_LIMIT.notes + criterionCount,
+        items:
+          criterionCount > 0 ? { oneOf: [learning, verification] } : learning,
       },
     },
   };
@@ -208,7 +218,7 @@ export function workHandoffSchema(
 export function decodeWorkHandoffNotes(
   value: unknown,
   peers: readonly { id: string; title: string }[] = [],
-  criterionCount = MAX_CRITERIA,
+  criterionCount?: number,
 ): WorkHandoffNote[] {
   if (
     !peers.every(
@@ -229,10 +239,11 @@ export function decodeWorkHandoffNotes(
     Array.isArray(declaration) ||
     Object.keys(declaration).some((key) => key !== "notes") ||
     !Array.isArray(declaration.notes) ||
-    declaration.notes.length > LEARNING_LIMIT.notes + VERIFICATION_LIMIT.notes
+    (criterionCount !== undefined &&
+      declaration.notes.length > LEARNING_LIMIT.notes + criterionCount)
   )
     throw new Error(
-      `Handoff must be an object with at most ${LEARNING_LIMIT.notes} learning and ${VERIFICATION_LIMIT.notes} verification notes`,
+      `Handoff must be an object with at most ${LEARNING_LIMIT.notes} learning notes and one verification note per criterion`,
     );
   const notes = declaration.notes.map((raw) => {
     if (
@@ -255,7 +266,8 @@ export function decodeWorkHandoffNotes(
     if (
       criterionIndex !== undefined &&
       (!Number.isSafeInteger(criterionIndex) ||
-        (criterionIndex as number) >= criterionCount)
+        (criterionCount !== undefined &&
+          (criterionIndex as number) >= criterionCount))
     )
       throw new Error(
         "Handoff verification note names a criterion absent from this Work Item",

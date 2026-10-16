@@ -3237,6 +3237,7 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       question: "",
       evidenceIndices: [0, 1, fileIndex],
       commandAssessments: [],
+      requestedFiles: [],
     };
     const checkedReadiness = actionableReadiness(
       refusedState,

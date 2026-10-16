@@ -99,7 +99,7 @@ test("independent prepared change is replayed on the observed integration head",
 
     git(root, "checkout", "--detach", base);
     writeFileSync(join(root, "right.txt"), "right\n");
-    writeFileSync(join(root, "aa-unrelated.txt"), "x".repeat(63_500));
+    writeFileSync(join(root, "aa-unrelated.txt"), "x".repeat(127_500));
     const failedTest =
       "// Candidate test context.\n".repeat(40) +
       'console.error("z-failing.test.mjs:7: retained candidate failure"); process.exit(1);\n';
@@ -387,6 +387,7 @@ test("independent prepared change is replayed on the observed integration head",
       question: "",
       evidenceIndices: [0, 1, rightIndex],
       commandAssessments: [],
+      requestedFiles: [],
     };
     const canonicalReady = actionableReadiness(
       state,
@@ -421,6 +422,36 @@ test("independent prepared change is replayed on the observed integration head",
       ),
       "string",
     );
+    // A file an earlier answer named is read whole beyond the candidate
+    // bound, so the next ask has it instead of stopping for the operator.
+    const asked = structuredClone(state);
+    asked.work.right.recovery.diagnosisInvocation = {
+      id: "asked-again",
+      submitted: false,
+      rejected: [
+        {
+          id: "asked-first",
+          response: { ...answer, path: "large.txt", requestedFiles: [] },
+        },
+      ],
+    };
+    const askedEvidence = repairEvidence(
+      asked,
+      item,
+      diagnosisFiles(asked, item, root),
+    );
+    assert.equal(askedEvidence[2].path, "large.txt");
+    assert.equal(askedEvidence[2].complete, true);
+    assert.equal(
+      typeof actionableReadiness(
+        asked,
+        item,
+        { ...answer, path: "large.txt", evidenceIndices: [0, 1, 2] },
+        askedEvidence,
+        root,
+      ),
+      "object",
+    );
     const unmapped = structuredClone(state);
     unmapped.work.right.recovery.failure.semanticRefusal.evidence[1].path =
       'Exact Git change packet file "missing.txt"';
@@ -450,7 +481,7 @@ test("independent prepared change is replayed on the observed integration head",
     );
     assert.equal(JSON.stringify({ state, sources, evidence }), before);
     // The late-listed small test fits the existing budget, but only when its
-    // actual failed subprocess path precedes the unrelated 63.5 KB file.
+    // actual failed subprocess path precedes the unrelated 127.5 KB file.
     const commandState = structuredClone(state);
     commandState.configDigest = createHash("sha256")
       .update("retained")

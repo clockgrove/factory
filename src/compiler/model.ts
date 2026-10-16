@@ -289,7 +289,7 @@ export function renderDiagnosisCall(
       : "diagnosis and correction fields",
   );
   const evidenceGuidance = delivery
-    ? 'Candidate-file contents and their ownership/completeness are supplied in repairEvidence, not pinned command authority. Where source or evidence content is omitted, original source/evidence indices and canonical digests are preserved; omitted content, unavailable markers, identities and historical read-set metadata supply no missing semantics. Only delivered complete evidence may ground actionable output. If omitted facts are necessary, return readiness "operator-required" or "unknown" and a concrete question; never infer them from baseline bodies or receipts.'
+    ? 'Candidate-file contents and their ownership/completeness are supplied in repairEvidence, not pinned command authority. Where source or evidence content is omitted, original source/evidence indices and canonical digests are preserved; omitted content, unavailable markers, identities and historical read-set metadata supply no missing semantics. Only delivered complete evidence may ground actionable output. If an owned candidate file you need is omitted or incomplete, name its path in requestedFiles: Factory holds it, supplies it whole and asks again. If other omitted facts are necessary, return readiness "operator-required" or "unknown" and a concrete question; never infer them from baseline bodies or receipts.'
     : 'Missing source facts remain unavailable. If necessary facts, decisions or authority are missing, return kind "operator" and put the concrete question in correction; never infer missing facts from baseline bodies or receipts.';
   const rendered = renderPrompt([
     [

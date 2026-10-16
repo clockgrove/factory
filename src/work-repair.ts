@@ -62,7 +62,11 @@ import {
   SemanticAcceptanceFailure,
   semanticValidationDigest,
 } from "./semantic-refusal.js";
-import { assertWorkAdaptiveContext, type FactoryState } from "./state.js";
+import {
+  assertWorkAdaptiveContext,
+  type FactoryState,
+  type WorkState,
+} from "./state.js";
 import { clearRepeats, type StepClock, StepPaused, step } from "./step.js";
 
 /** The exact collected candidate exists, but settled local validation failed: a wrong result. */
@@ -498,6 +502,7 @@ const diagnosisSchema = {
     "question",
     "evidenceIndices",
     "commandAssessments",
+    "requestedFiles",
   ],
   properties: {
     diagnosis: { type: "string" },
@@ -539,6 +544,8 @@ const diagnosisSchema = {
         },
       },
     },
+    // Owned candidate files the answer needs whole that the request lacks.
+    requestedFiles: { type: "array", items: { type: "string" } },
   },
 };
 
@@ -556,6 +563,7 @@ type DiagnosisAnswer = {
     commandIndex: number;
     disposition: "owned-change" | "operator-required" | "unknown";
   }[];
+  requestedFiles?: string[];
 };
 const inputDigest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -1051,15 +1059,94 @@ function blamedPredecessor(
   };
 }
 
-const EVIDENCE_TOTAL_BYTES = 64_000;
-/** A larger blob is not read at all: it is not source a diagnosis can use. */
-const EVIDENCE_READ_BYTES = 1_000_000;
+const EVIDENCE_TOTAL_BYTES = 128_000;
+/**
+ * Files an earlier answer asked for and the change-packet files the review
+ * cites are read whole first, within their own bound. A larger blob is not
+ * read at all: it is not source a diagnosis can use.
+ */
+const EVIDENCE_NAMED_BYTES = 256_000;
+
+/**
+ * The owned files earlier answers to this failure named (`requestedFiles`,
+ * and a repair's `path`). Read from the retained answers, so the next request
+ * and the ready-correction check rebuild the same evidence.
+ */
+function requestedDiagnosisFiles(work: WorkState): Set<string> {
+  const paths = new Set<string>();
+  for (const { response } of work.recovery?.diagnosisInvocation?.rejected ??
+    []) {
+    if (!response || typeof response !== "object") continue;
+    const answer = response as Partial<DiagnosisAnswer>;
+    if (Array.isArray(answer.requestedFiles))
+      for (const path of answer.requestedFiles)
+        if (typeof path === "string") paths.add(path);
+    if (answer.decision === "repair" && typeof answer.path === "string")
+      paths.add(answer.path);
+  }
+  return paths;
+}
+
+/**
+ * The paths an answer needs whole that this request did not supply whole but
+ * Factory can: regular files of the failed result that the item or a merged
+ * predecessor owns, not asked for before. Asking again with them is a context
+ * retry, never an operator question.
+ */
+function heldCandidateRequests(
+  state: FactoryState,
+  item: WorkItem,
+  answer: DiagnosisAnswer,
+  evidence: ReturnType<typeof repairEvidence>,
+  checkout: string | undefined,
+): string[] {
+  const work = state.work[item.id]!;
+  if (!checkout || !work.treeSha) return [];
+  const asked = new Set([
+    ...(Array.isArray(answer.requestedFiles) ? answer.requestedFiles : []),
+    ...(answer.decision === "repair" ? [answer.path] : []),
+  ]);
+  const before = requestedDiagnosisFiles(work);
+  const predecessors = mergedPredecessors(state, item);
+  return [...asked].filter((path): path is string => {
+    if (
+      typeof path !== "string" ||
+      !validOwnershipPath(path) ||
+      path.endsWith("/") ||
+      before.has(path) ||
+      evidence.some(
+        (entry) =>
+          entry.kind === "candidate-file" &&
+          "path" in entry &&
+          entry.path === path &&
+          entry.complete,
+      ) ||
+      !(
+        ownsPath(path, item.ownedPaths) ||
+        latestOwner(state, predecessors, path)
+      )
+    )
+      return false;
+    try {
+      return treeFiles(checkout, work.treeSha!, path).some(
+        (file) => file.path === path && file.size <= EVIDENCE_NAMED_BYTES,
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
 /**
  * The files of the failed result that it and its merged predecessors own, as
  * text: what a diagnosis needs to tell whose file is wrong. They are read from
- * the result tree, which holds the integrated predecessors' files. The failing
- * item's own files come first. Within each ownership group, literal paths in
- * the retained current failure precede unrelated files in Git listing order.
+ * the result tree, which holds the integrated predecessors' files. Files an
+ * earlier answer asked for, then the change-packet files the review cites,
+ * come first, within their own bound. Then the failing item's own files, so
+ * the budget never goes to a predecessor before them; within each ownership
+ * group, other literal paths in the retained current failure, then the files
+ * this attempt changed, then the rest in Git listing order. A cited or changed file that does not fit is listed
+ * without its content, so the diagnosis can ask for it.
  */
 export function diagnosisFiles(
   state: FactoryState,
@@ -1079,12 +1166,25 @@ export function diagnosisFiles(
   );
   assertSemanticRefusalRecord(state, item.id, work, failure);
   const refusal = failure?.semanticRefusal;
+  const references =
+    refusal?.source === "model"
+      ? [
+          ...refusal.evidence,
+          ...(refusal.others ?? []).flatMap((other) => other.evidence ?? []),
+        ]
+      : [];
   const failureText = [
     failure?.detail ?? "",
-    ...(refusal?.source === "model"
-      ? refusal.evidence.map((entry) => entry.path)
-      : []),
+    ...references.map((entry) => entry.path),
   ].join("\n");
+  // The review's own references to exact change-packet files come first.
+  const cited = (path: string): boolean =>
+    references.some(
+      (reference) =>
+        reference.origin === "controller" &&
+        reference.path ===
+          `Exact Git change packet file ${JSON.stringify(path)}`,
+    );
   // Match only paths actually listed in the retained candidate. Failure prose
   // supplies presentation relevance, never new ownership or source authority.
   const relevant = (path: string): boolean => {
@@ -1094,6 +1194,28 @@ export function diagnosisFiles(
       failureText,
     );
   };
+  const requested = requestedDiagnosisFiles(work);
+  let changed = new Set<string>();
+  try {
+    if (work.baseSha)
+      changed = new Set(
+        pinnedGitRaw(
+          checkout,
+          "diff",
+          "--name-only",
+          "--no-renames",
+          "-z",
+          work.baseSha,
+          treeSha,
+          "--",
+        )
+          .toString("utf8")
+          .split("\0")
+          .filter(Boolean),
+      );
+  } catch {
+    // Without the result base, change order is unavailable; the files remain.
+  }
   const predecessors = mergedPredecessors(state, item);
   const files: {
     path: string;
@@ -1102,16 +1224,20 @@ export function diagnosisFiles(
     complete: boolean;
   }[] = [];
   let total = 0;
+  let namedTotal = 0;
+  // Listing what did not fit is bounded too.
+  let listedTotal = 0;
   try {
     const listed = treeFiles(checkout, treeSha);
-    // The failing item's files first, so the budget never goes to a
-    // predecessor before them.
     const rank = (path: string): number =>
       ownsPath(path, item.ownedPaths) ? 0 : 1;
     const owned = listed
       .map((file) => ({
         ...file,
+        requested: requested.has(file.path),
+        cited: cited(file.path),
         relevant: relevant(file.path),
+        changed: changed.has(file.path),
         owner: ownsPath(file.path, item.ownedPaths)
           ? undefined
           : latestOwner(state, predecessors, file.path),
@@ -1119,43 +1245,56 @@ export function diagnosisFiles(
       .filter((file) => rank(file.path) === 0 || file.owner)
       .sort(
         (a, b) =>
+          Number(b.requested) - Number(a.requested) ||
+          Number(b.cited) - Number(a.cited) ||
           rank(a.path) - rank(b.path) ||
-          Number(b.relevant) - Number(a.relevant),
+          Number(b.relevant) - Number(a.relevant) ||
+          Number(b.changed) - Number(a.changed),
       );
-    for (const { path, size, owner } of owned) {
-      // The budget is spent: nothing more is read.
-      if (total >= EVIDENCE_TOTAL_BYTES) break;
-      // Exact Git blob sizes are bytes. Prefer whole files within the existing
-      // total budget rather than prefixes that cannot establish readiness.
+    for (const file of owned) {
+      const { path, size, owner } = file;
+      const heading = owner
+        ? `owned by ${owner.item.id} (merged)`
+        : `owned by ${item.id} (the failing item)`;
+      // Exact Git blob sizes are bytes. Prefer whole files within the bound
+      // rather than prefixes that cannot establish readiness.
+      const named = file.requested || file.cited;
+      const fits = named
+        ? namedTotal + size <= EVIDENCE_NAMED_BYTES
+        : total + size <= EVIDENCE_TOTAL_BYTES;
+      if (!fits) {
+        // One file too large for what is left does not hide the smaller
+        // ones after it. A cited, changed or requested one is still listed.
+        const content = file.requested
+          ? `[unavailable: ${size} bytes exceed what is left of the ${EVIDENCE_NAMED_BYTES}-byte bound on named files]`
+          : size > EVIDENCE_NAMED_BYTES
+            ? `[unavailable: ${size} bytes exceed the ${EVIDENCE_NAMED_BYTES}-byte bound on named files]`
+            : `[omitted: ${size} bytes exceed what is left of the ${EVIDENCE_TOTAL_BYTES}-byte candidate bound; name it in requestedFiles to receive it]`;
+        if (
+          (named || file.relevant || file.changed) &&
+          listedTotal + content.length <= EVIDENCE_TOTAL_BYTES
+        ) {
+          listedTotal += content.length;
+          files.push({ path, heading, content, complete: false });
+        }
+        continue;
+      }
       let content: string;
       let complete = false;
-      if (size > EVIDENCE_READ_BYTES || total + size > EVIDENCE_TOTAL_BYTES) {
-        content =
-          "[unavailable: complete candidate exceeds diagnosis evidence budget]";
-      } else {
-        try {
-          content = new TextDecoder("utf-8", {
-            fatal: true,
-            ignoreBOM: true,
-          }).decode(pinnedGitRaw(checkout, "show", `${treeSha}:${path}`));
-          complete = true;
-        } catch {
-          content = "[unavailable: candidate is unreadable or not valid UTF-8]";
-        }
+      try {
+        content = new TextDecoder("utf-8", {
+          fatal: true,
+          ignoreBOM: true,
+        }).decode(pinnedGitRaw(checkout, "show", `${treeSha}:${path}`));
+        complete = true;
+      } catch {
+        content = "[unavailable: candidate is unreadable or not valid UTF-8]";
       }
-      // One file too large for what is left does not hide the smaller
-      // ones after it.
-      const bytes = Buffer.byteLength(content, "utf8");
-      if (total + bytes > EVIDENCE_TOTAL_BYTES) continue;
-      total += bytes;
-      files.push({
-        path,
-        heading: owner
-          ? `owned by ${owner.item.id} (merged)`
-          : `owned by ${item.id} (the failing item)`,
-        content,
-        complete,
-      });
+      // An unreadable file costs its marker, so markers stay bounded.
+      const bytes = complete ? size : content.length;
+      if (named) namedTotal += bytes;
+      else total += bytes;
+      files.push({ path, heading, content, complete });
     }
   } catch {
     // Evidence is best effort: the diagnosis still runs on the failure record.
@@ -1437,7 +1576,7 @@ export function workRepairDiagnosisRequest(args: {
       sourceIndices:
         focusedSources ?? itemSourceIndices(state, item, view, sources),
     },
-    objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return commandAssessments as [] when there are no failed commands. Include every required output field; commandAssessments must never be omitted. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished uncommitted edits are unavailable. A repair continues from the refused committed result when it is retained (its files are in the repair's working tree), otherwise from the accepted base.\n${JSON.stringify({ item: itemView, ...(focusedSources && { historicalWorkerInputs: { contentDelivery: "omitted", count: historicalInputs?.length ?? 0, digest: inputDigest(historicalInputs ?? []) } }), failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: visibleEvidence })}${inputBodies.length ? `\nWork Item input bodies. ${inputs.guidance} An input content {"block": LABEL} is the complete literal body in that block.\n${inputs.text}` : ""}${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}`,
+    objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return commandAssessments as [] when there are no failed commands. Include every required output field; commandAssessments must never be omitted. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. Candidate-file entries are the failed result's owned files: first the files an earlier answer asked for and the change-packet files the review cites, whole within ${EVIDENCE_NAMED_BYTES} bytes; then other files the failure names, the files this attempt changed and the rest, whole within ${EVIDENCE_TOTAL_BYTES} bytes; an entry with complete false is a file Factory holds but did not supply whole. Factory holds every owned file of the result: when your answer needs one this request does not supply whole, list its path in requestedFiles and Factory asks again with it supplied. Never ask the operator for candidate contents or other evidence Factory holds. Otherwise requestedFiles is []. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished uncommitted edits are unavailable. A repair continues from the refused committed result when it is retained (its files are in the repair's working tree), otherwise from the accepted base.\n${JSON.stringify({ item: itemView, ...(focusedSources && { historicalWorkerInputs: { contentDelivery: "omitted", count: historicalInputs?.length ?? 0, digest: inputDigest(historicalInputs ?? []) } }), failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: visibleEvidence })}${inputBodies.length ? `\nWork Item input bodies. ${inputs.guidance} An input content {"block": LABEL} is the complete literal body in that block.\n${inputs.text}` : ""}${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}`,
     baseSha: work.executionBaseSha ?? state.baseSha,
     sources,
     controllerCapabilities: installedControllerCapabilities(),
@@ -1861,6 +2000,20 @@ export async function diagnoseWorkRepair(args: {
               Array.isArray(response)
             )
               return "What concrete correction or operator prerequisite makes the original failure ready to proceed? The diagnosis is unavailable.";
+            // Evidence Factory holds is supplied, not asked of the operator:
+            // the files named here are read whole into the next request.
+            const held = heldCandidateRequests(
+              state,
+              item,
+              response,
+              evidence,
+              args.checkout,
+            );
+            if (held.length)
+              invalidDiagnosis(
+                `it needs ${held.join(", ")} whole, which this request did not supply; Factory holds ${held.length === 1 ? "it" : "them"} and repairEvidence now supplies ${held.length === 1 ? "it" : "them"}`,
+                response,
+              );
             if (response.decision === "predecessor") {
               try {
                 return {

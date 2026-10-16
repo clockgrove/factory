@@ -5,6 +5,7 @@ import {
   objectiveModelActivity,
   redactDiagnosticDetail,
 } from "./diagnostics.js";
+import { displayDateTime } from "./display-time.js";
 import { attachedFault } from "./fault.js";
 import {
   type GitHubProgressDecision,
@@ -32,6 +33,8 @@ import {
   formatTokens,
   type ItemActivity,
   itemActivities,
+  PROGRESS_QUIET_MS,
+  progressQuietMs,
   shortAge,
 } from "./worker-activity.js";
 
@@ -115,7 +118,8 @@ export async function projectLiveStatus(
   if (!githubProgressSettings(args.config) || !args.github.liveStatusComment)
     return;
   const now = Date.now();
-  const stamp = `<sub>Updated ${new Date(now).toISOString().slice(0, 16).replace("T", " ")}Z · edited in place while work runs</sub>`;
+  // Rendered time never enters a transition digest, so it forces no edit.
+  const stamp = `<sub>Updated ${displayDateTime(now)} · edited in place while work runs</sub>`;
   const targets: LiveTarget[] = [];
   const itemDigests: string[] = [];
   // Planning has no Work Item yet: the Objective's comment shows its step.
@@ -341,10 +345,11 @@ function workerLines(item: ItemActivity, now: number): string[] {
 
 /** How long ago an active item's worker last reported, for the Objective's list. */
 function workerAge(items: ItemActivity[], id: string, now: number): string {
-  const at = items.find((item) => item.id === id)?.activity?.lastEventAt;
-  if (!at) return "";
-  const last = now - Date.parse(at);
-  return ` · worker ${shortAge(last)} ago${last > STALE_MS ? " (stale)" : ""}`;
+  const activity = items.find((item) => item.id === id)?.activity;
+  if (!activity?.lastEventAt) return "";
+  const last = now - Date.parse(activity.lastEventAt);
+  const quiet = progressQuietMs(activity, now);
+  return ` · worker ${shortAge(last)} ago${last > STALE_MS ? " (stale)" : quiet !== undefined && quiet > PROGRESS_QUIET_MS ? ` · no progress for ${shortAge(quiet)}` : ""}`;
 }
 
 /** Planning's step, how long its phase has run and the planner's activity: structured facts only. */

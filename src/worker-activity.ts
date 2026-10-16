@@ -1,7 +1,10 @@
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { stateRoot } from "./config.js";
 import { privateRecords } from "./diagnostics.js";
+import { displayClock } from "./display-time.js";
+import { factoryValidationToolName } from "./execution/claude-validation.js";
+import { ownsPath } from "./ownership.js";
 import { pinnedGitRawWithin } from "./process.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
 
@@ -15,7 +18,13 @@ export interface WorkerToolEvent {
 /** What a worker's progress stream shows about its activity. Telemetry only. */
 export interface WorkerActivity {
   provider?: string;
+  startedAt?: string;
   lastEventAt?: string;
+  /**
+   * The latest structural progress: an edit of an owned path or a Factory
+   * validation call in the stream, or a changed owned file's modification.
+   */
+  lastProgressAt?: string;
   /** Model turns (Claude) or started tool steps (Codex). */
   turns: number;
   /** Output tokens so far, when reported. */
@@ -51,14 +60,24 @@ export function workerProgressPath(
 
 const CONTROL = /\p{Cc}/u;
 
+/** Claude tools that change a file's content. */
+const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+
+/** How long a worker may emit events without progress before it is called out. */
+export const PROGRESS_QUIET_MS = 15 * 60_000;
+
 const count = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 
-/** Summarize a worker's progress stream, or undefined when it has none. */
+/**
+ * Summarize a worker's progress stream, or undefined when it has none. With
+ * `owned`, only edits inside those ownership scopes count as progress.
+ */
 export function readWorkerActivity(
   repository: string,
   attempt: string,
   recentLimit = 8,
+  owned?: string[],
 ): WorkerActivity | undefined {
   const path = workerProgressPath(repository, attempt);
   if (!existsSync(path)) return undefined;
@@ -72,9 +91,14 @@ export function readWorkerActivity(
     activity.recent.push(event);
     if (activity.recent.length > recentLimit) activity.recent.shift();
   };
+  const edited = (target: unknown) =>
+    typeof target === "string" && (!owned || ownsPath(target, owned));
   for (const event of privateRecords(path)) {
     const at = typeof event.at === "string" ? event.at : undefined;
-    if (at) activity.lastEventAt = at;
+    if (at) {
+      activity.startedAt ??= at;
+      activity.lastEventAt = at;
+    }
     const operation = event.operation;
     if (operation === "worker-usage") {
       const usage = event.workerUsage as { provider?: unknown } | undefined;
@@ -101,12 +125,18 @@ export function readWorkerActivity(
       activity.compactions += 1;
     if (Array.isArray(event.tools) && at)
       for (const tool of event.tools as { tool?: unknown; target?: unknown }[])
-        if (typeof tool?.tool === "string")
+        if (typeof tool?.tool === "string") {
+          if (
+            tool.tool === factoryValidationToolName ||
+            (EDIT_TOOLS.includes(tool.tool) && edited(tool.target))
+          )
+            activity.lastProgressAt = at;
           remember({
             at,
             tool: tool.tool,
             ...(typeof tool.target === "string" && { target: tool.target }),
           });
+        }
     if (operation === "item.started" && typeof event.tool === "string" && at) {
       steps += 1;
       remember({
@@ -122,7 +152,10 @@ export function readWorkerActivity(
       at
     )
       for (const target of event.paths)
-        if (typeof target === "string") remember({ at, tool: "edit", target });
+        if (typeof target === "string") {
+          if (edited(target)) activity.lastProgressAt = at;
+          remember({ at, tool: "edit", target });
+        }
     if (operation === "turn.completed") {
       const usage = event.usage as Record<string, unknown> | undefined;
       if (usage) {
@@ -175,6 +208,24 @@ export function worktreeChanges(worktree: string): string[] | undefined {
   }
 }
 
+/** The latest modification of a changed owned file, or undefined. */
+function lastChangeAt(
+  worktree: string,
+  changes: string[],
+  owned: string[] | undefined,
+): string | undefined {
+  let latest = 0;
+  for (const path of changes) {
+    if (owned && !ownsPath(path, owned)) continue;
+    try {
+      latest = Math.max(latest, lstatSync(join(worktree, path)).mtimeMs);
+    } catch {
+      // A deleted path has no modification time.
+    }
+  }
+  return latest ? new Date(latest).toISOString() : undefined;
+}
+
 /** Each Work Item's state, with worker activity and checkout changes while it executes locally. */
 export function itemActivities(
   repository: string,
@@ -196,8 +247,11 @@ export function itemActivities(
       !ATTEMPT.test(work.attempt)
     )
       return item;
+    const owned = state.graph.items.find(
+      (entry) => entry.id === id,
+    )?.ownedPaths;
     try {
-      const activity = readWorkerActivity(repository, work.attempt);
+      const activity = readWorkerActivity(repository, work.attempt, 8, owned);
       if (activity) item.activity = activity;
     } catch {
       // Telemetry only: an unreadable stream leaves activity unknown.
@@ -210,6 +264,14 @@ export function itemActivities(
     ) {
       const changes = worktreeChanges(data.worktree);
       if (changes) item.changes = changes;
+      // Shell edits leave no tool target: a changed owned file's mtime shows them.
+      const changedAt = changes && lastChangeAt(data.worktree, changes, owned);
+      if (
+        item.activity &&
+        changedAt &&
+        changedAt > (item.activity.lastProgressAt ?? "")
+      )
+        item.activity.lastProgressAt = changedAt;
     }
     return item;
   });
@@ -239,8 +301,13 @@ export function activityLine(
 ): string | undefined {
   if (!activity?.lastEventAt) return undefined;
   const age = now - Date.parse(activity.lastEventAt);
+  const quiet = progressQuietMs(activity, now);
   return [
     `last worker activity ${shortAge(age)} ago${age > staleMs ? " (stale)" : ""}`,
+    // Events still flow, yet no owned file changed and nothing was validated.
+    ...(age <= staleMs && quiet !== undefined && quiet > PROGRESS_QUIET_MS
+      ? [`no progress for ${shortAge(quiet)}`]
+      : []),
     `${activity.turns} turns`,
     ...(activity.contextTokens !== undefined
       ? [`context ${formatTokens(activity.contextTokens)}`]
@@ -251,6 +318,29 @@ export function activityLine(
         ]
       : []),
   ].join(" · ");
+}
+
+/** Providers whose progress stream names edited files. */
+const REPORTS_EDITS = ["claude", "codex"];
+
+/**
+ * How long the worker has gone without progress in this attempt, from its
+ * start when it has made none, or undefined when nothing could show it.
+ */
+export function progressQuietMs(
+  activity: WorkerActivity,
+  now: number,
+): number | undefined {
+  if (
+    activity.lastProgressAt === undefined &&
+    !REPORTS_EDITS.includes(activity.provider ?? "")
+  )
+    return undefined;
+  const since = Math.max(
+    Date.parse(activity.lastProgressAt ?? "") || 0,
+    Date.parse(activity.startedAt ?? "") || 0,
+  );
+  return since ? now - since : undefined;
 }
 
 /** Recent tool calls such as `Read a.ts · Edit b.ts · Bash pnpm`. */
@@ -315,7 +405,7 @@ export function renderWorkerProgress(
   const lines: string[] = [];
   for (const event of privateRecords(path)) {
     const at =
-      typeof event.at === "string" ? event.at.slice(11, 19) : "--:--:--";
+      typeof event.at === "string" ? displayClock(event.at) : "--:--:--";
     if (Array.isArray(event.tools))
       lines.push(
         `${at} ${(event.tools as { tool?: unknown; target?: unknown }[])

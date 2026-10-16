@@ -10,6 +10,7 @@ import { isAbsolute, join } from "node:path";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
 import { itemActivities, renderWatch } from "./worker-activity.js";
+import { displayDateTime } from "./display-time.js";
 import {
   readSelectedConfig,
   type SelectedConfig,
@@ -412,7 +413,7 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
     if (queue.remoteObservation)
       console.log(
         queue.remoteObservation.availability === "last-observed"
-          ? `Project observation: last observed at ${queue.remoteObservation.observedAt}.`
+          ? `Project observation: last observed at ${queue.remoteObservation.observedAt ? displayDateTime(queue.remoteObservation.observedAt) : "an unknown time"}.`
           : "Project observation: unavailable; status grants no new admission.",
       );
     for (const entry of queue.retiredAdmissions ?? [])

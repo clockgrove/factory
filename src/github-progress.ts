@@ -1,3 +1,4 @@
+import { displayDateTime } from "./display-time.js";
 import { PROGRESS_ITEM_ID, progressMarker } from "./github-progress-state.js";
 import { summarizeStatus, type StatusView } from "./status-summary.js";
 
@@ -208,7 +209,7 @@ export function renderObjectiveNotification(
     }),
     ...objectiveStatusLines(input, { items: false }),
     "",
-    `<sub>Observed ${shortTime(input.observedAt)} · Factory keeps its Live status comment on this issue current</sub>`,
+    `<sub>Observed ${displayDateTime(input.observedAt)} · Factory keeps its Live status comment on this issue current</sub>`,
     "",
     ...runDetailsLines(input),
   ];
@@ -216,11 +217,6 @@ export function renderObjectiveNotification(
   if (Buffer.byteLength(body) > 24_000)
     throw new Error("GitHub progress exceeds its publication byte bound");
   return body;
-}
-
-/** A compact UTC time such as `2026-10-16 05:04Z`. */
-function shortTime(iso: string): string {
-  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
 }
 
 /** One Work Item's public facts: structured fields only, never logs or exception text. */
@@ -299,7 +295,7 @@ export function workItemStatusLines(input: WorkItemStatusInput): string[] {
     `Objective ${issueLink(input.repository, input.objective)}${input.attempt ? ` · attempt ${compact(input.attempt.slice(0, 8))}` : ""}`,
     ...(input.outage
       ? [
-          `Waiting out a provider outage in ${compact(input.outage.step)}${input.outage.retryAt ? `; next try after ${compact(input.outage.retryAt)}` : ""}.`,
+          `Waiting out a provider outage in ${compact(input.outage.step)}${input.outage.retryAt ? `; next try after ${displayDateTime(input.outage.retryAt)}` : ""}.`,
         ]
       : []),
     ...(input.failure ? [`Last failure: ${compact(input.failure)}.`] : []),
@@ -347,7 +343,7 @@ export function renderWorkItemNotification(
     }),
     ...workItemStatusLines(input),
     "",
-    `<sub>Observed ${shortTime(input.observedAt)} · Factory keeps its Live status comment on this issue current</sub>`,
+    `<sub>Observed ${displayDateTime(input.observedAt)} · Factory keeps its Live status comment on this issue current</sub>`,
     "",
     ...runDetailsLines(input),
   ].join("\n");

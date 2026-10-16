@@ -5,6 +5,7 @@
  */
 
 import { type Refusal, settlesFirst } from "./amendment-admission.js";
+import { displayDateTime } from "./display-time.js";
 import type { Wait } from "./fault.js";
 import type { PrerequisiteGuidance } from "./prerequisite-guidance.js";
 
@@ -334,11 +335,9 @@ interface ShownWait {
   escalated?: boolean;
 }
 
-const when = (time: string) => `${time.slice(0, 16).replace("T", " ")}Z`;
-
 /** "(step): since … (N tries, last: …)" for a step in a run of faults. */
 function outageText(outage: OutageView): string {
-  return `(${outage.step}): since ${when(outage.since)} (${outage.tries} ${outage.tries === 1 ? "try" : "tries"}, last: ${short(outage.last, 60)})${outage.retryAt ? `; retry after ${when(outage.retryAt)}` : ""}`;
+  return `(${outage.step}): since ${displayDateTime(outage.since)} (${outage.tries} ${outage.tries === 1 ? "try" : "tries"}, last: ${short(outage.last, 60)})${outage.retryAt ? `; retry after ${displayDateTime(outage.retryAt)}` : ""}`;
 }
 
 /**
@@ -1358,12 +1357,12 @@ export function renderStatusText(
       (entry) => entry.scope === "progress-publication",
     );
     lines.push(
-      `GitHub progress: ${awaiting ? "comment awaiting response" : (view.githubProgress.failure ?? "projected")}; ${view.githubProgress.snapshots} notification comments${view.githubProgress.lastObservedAt ? `; last observed ${view.githubProgress.lastObservedAt}` : ""}${view.githubProgress.lastComment ? `; comment ${view.githubProgress.lastComment}` : ""}${view.githubProgress.unresolved && !awaiting ? "; publication outcome unknown; reconciliation only" : ""}`,
+      `GitHub progress: ${awaiting ? "comment awaiting response" : (view.githubProgress.failure ?? "projected")}; ${view.githubProgress.snapshots} notification comments${view.githubProgress.lastObservedAt ? `; last observed ${displayDateTime(view.githubProgress.lastObservedAt)}` : ""}${view.githubProgress.lastComment ? `; comment ${view.githubProgress.lastComment}` : ""}${view.githubProgress.unresolved && !awaiting ? "; publication outcome unknown; reconciliation only" : ""}`,
     );
   }
   if (view.githubProjectTracking)
     lines.push(
-      `GitHub Project tracking: ${view.githubProjectTracking.failure ?? "observed"}; ${view.githubProjectTracking.retainedUpdates} retained update requests${view.githubProjectTracking.observedAt ? `; last observed ${view.githubProjectTracking.observedAt}` : ""}${view.githubProjectTracking.unknownUpdate ? "; update outcome unknown; managed field held read-only" : ""}`,
+      `GitHub Project tracking: ${view.githubProjectTracking.failure ?? "observed"}; ${view.githubProjectTracking.retainedUpdates} retained update requests${view.githubProjectTracking.observedAt ? `; last observed ${displayDateTime(view.githubProjectTracking.observedAt)}` : ""}${view.githubProjectTracking.unknownUpdate ? "; update outcome unknown; managed field held read-only" : ""}`,
     );
   const items = "githubWorkItemTracking" in view && view.githubWorkItemTracking;
   if (items)

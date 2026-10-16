@@ -29,7 +29,8 @@ export type SemanticRefusalEvidence = {
       others?: {
         criterion: string;
         finding: ReviewFinding;
-        evidence: ReviewEvidenceReference[];
+        /** Absent on refusals retained before each finding kept its own references. */
+        evidence?: ReviewEvidenceReference[];
       }[];
     }
   | { source: "operator"; decision: AcceptanceDecision }
@@ -182,15 +183,16 @@ export function assertSemanticRefusalRecord(
           !Array.isArray(other.finding.evidenceIds) ||
           new Set(other.finding.evidenceIds).size !==
             other.finding.evidenceIds.length ||
-          !Array.isArray(other.evidence) ||
-          !isDeepStrictEqual(
-            other.finding.evidenceIds,
-            other.evidence.map((entry) => entry.id),
-          )
+          (other.evidence !== undefined &&
+            (!Array.isArray(other.evidence) ||
+              !isDeepStrictEqual(
+                other.finding.evidenceIds,
+                other.evidence.map((entry) => entry.id),
+              )))
         )
           throw new Error("Semantic refusal has an invalid further refusal");
         seen.add(other.criterion);
-        references.push(...other.evidence);
+        if (other.evidence) references.push(...other.evidence);
       }
     }
     for (const reference of references) {

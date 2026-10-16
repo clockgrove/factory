@@ -353,7 +353,16 @@ export function reviewFindingsCorrection(
       finding: refusal.finding,
       evidence: refusal.evidence,
     },
-    ...(refusal.others ?? []),
+    // A refusal retained before each finding kept its own references
+    // resolves them from the first finding's, as that review recorded them.
+    ...(refusal.others ?? []).map((other) => ({
+      ...other,
+      evidence:
+        other.evidence ??
+        refusal.evidence.filter((entry) =>
+          other.finding.evidenceIds.includes(entry.id),
+        ),
+    })),
   ];
   if (
     refused.some(

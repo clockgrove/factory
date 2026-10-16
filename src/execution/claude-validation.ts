@@ -9,8 +9,10 @@ import {
   pinnedGitAsync,
   pinnedGitMagicAsync,
 } from "../process.js";
+import { workHandoffSchema } from "../objective-knowledge.js";
 import { validateTree } from "../validation.js";
 import { CandidateValidationFailure } from "../work-repair.js";
+import { readWorkHandoff } from "./harness-support.js";
 import { FACTORY_EMAIL, privateStagingExclusions } from "./local.js";
 
 export const factoryValidationServerName = "factory-validation";
@@ -25,6 +27,12 @@ interface ValidationEnvironmentInput {
   worktree: string;
   commands: readonly string[];
   config: { tools: readonly string[]; allowedTools: readonly string[] };
+  handoff: HandoffContext;
+}
+
+interface HandoffContext {
+  peers: readonly { id: string; title: string }[];
+  criterionCount: number;
 }
 
 export function validationAuthorized(input: {
@@ -180,6 +188,43 @@ export async function runDeclaredValidation(
   }
 }
 
+/**
+ * Decode .factory-handoff.json exactly as collection will, so the worker can
+ * repair a manifest that would otherwise reject its whole result.
+ */
+export function checkWorkHandoff(
+  worktree: string,
+  handoff: HandoffContext,
+): { passed: boolean; text?: string } {
+  try {
+    const notes = readWorkHandoff(
+      worktree,
+      handoff.peers,
+      handoff.criterionCount,
+    );
+    const criteria = handoff.criterionCount;
+    if (!notes)
+      return {
+        passed: true,
+        ...(criteria && {
+          text: `No .factory-handoff.json yet. Before you finish, record one verification note for each of the ${criteria} acceptance criteria there, using the schema in your instructions.`,
+        }),
+      };
+    const verified = notes.filter(
+      (note) => note.kind === "verification",
+    ).length;
+    return {
+      passed: true,
+      text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${criteria} acceptance criteria.`,
+    };
+  } catch (error) {
+    return {
+      passed: false,
+      text: `.factory-handoff.json would be rejected at collection, and your whole result with it. ${error instanceof Error ? error.message : String(error)}\nRewrite it to match this exact schema, then run validation again: ${JSON.stringify(workHandoffSchema(handoff.peers.length, handoff.criterionCount))}`,
+    };
+  }
+}
+
 /** One adapter-owned server that runs only the item's declared validation. */
 export async function createFactoryValidationMcp(
   input: ValidationEnvironmentInput,
@@ -202,22 +247,37 @@ export async function createFactoryValidationMcp(
     tools: [
       tool(
         "run_validation",
-        "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, and return the result. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review fixes: finish only after a run passes on your final files.",
+        "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.",
         {},
         async () => {
           const run = ++runs;
           const result = queue.then(async () => {
             if (!ready) throw new Error("Factory validation is not ready");
-            return runDeclaredValidation(input.worktree, input.commands, run);
+            const handoff = checkWorkHandoff(input.worktree, input.handoff);
+            const declared = await runDeclaredValidation(
+              input.worktree,
+              input.commands,
+              run,
+            );
+            return { declared, handoff };
           });
           queue = result.catch(() => undefined);
           try {
-            const { passed: ok, text, tree } = await result;
-            if (ok) {
-              passed += 1;
-              passedTrees.add(tree);
+            const { declared, handoff } = await result;
+            const parts = [declared.text];
+            if (handoff.text)
+              if (handoff.passed) parts.push(handoff.text);
+              else parts.unshift(handoff.text);
+            if (declared.passed && !handoff.passed)
+              parts.unshift("Validation failed. Fix this before you finish.");
+            if (declared.passed) {
+              // The handoff is outside the tree; evidence decodes its final bytes.
+              passedTrees.add(declared.tree);
+              if (handoff.passed) passed += 1;
             }
-            return { content: [{ type: "text" as const, text }] };
+            return {
+              content: [{ type: "text" as const, text: parts.join("\n\n") }],
+            };
           } catch (error) {
             return {
               isError: true,
@@ -256,14 +316,14 @@ export async function createFactoryValidationMcp(
       assertFactoryValidationReady(status);
       ready = true;
     },
-    /** After the turn: did a passing run cover the files the worker returns? */
+    /** After the turn: did a passing run cover the files the worker returns, with a handoff collection accepts? */
     evidence: async () => {
       let finalTreeValidated: boolean | undefined = false;
       if (passedTrees.size)
         try {
-          finalTreeValidated = passedTrees.has(
-            await workerFilesTree(input.worktree),
-          );
+          finalTreeValidated =
+            passedTrees.has(await workerFilesTree(input.worktree)) &&
+            checkWorkHandoff(input.worktree, input.handoff).passed;
         } catch {
           // Collection classifies an unstageable worktree itself.
           finalTreeValidated = undefined;

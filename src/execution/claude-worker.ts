@@ -320,6 +320,10 @@ async function main(): Promise<void> {
           worktree: input.request.worktree,
           commands: validationCommands,
           config: input.config,
+          handoff: {
+            peers: input.request.handoffPeers ?? [],
+            criterionCount: input.request.item.acceptance.length,
+          },
         }).then(async (environment) => {
           if (controller.signal.aborted) {
             await environment.close();

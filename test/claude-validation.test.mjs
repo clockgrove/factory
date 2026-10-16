@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  checkWorkHandoff,
   runDeclaredValidation,
   workerFilesTree,
 } from "../dist/execution/claude-validation.js";
@@ -71,4 +72,35 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   assert.notEqual(await workerFilesTree(worktree), passed.tree);
   assert.equal(readFileSync(join(worktree, "a.txt"), "utf8"), "changed\n");
   assert.equal(existsSync(`${worktree}.validation/1`), false);
+  // Validation decodes the handoff as collection will and names what is wrong.
+  const handoff = { peers: [], criterionCount: 1 };
+  writeFileSync(
+    join(worktree, ".factory-handoff.json"),
+    JSON.stringify({
+      summary: "done",
+      notes: [{ kind: "verification", criterionIndex: 0, text: "a.txt:1" }],
+    }),
+  );
+  const rejected = checkWorkHandoff(worktree, handoff);
+  assert.equal(rejected.passed, false);
+  assert.match(rejected.text, /unexpected top-level key "summary"/);
+  assert.match(
+    rejected.text,
+    /note 0: unexpected key "text"; missing key summary, paths, consumerIndices\n/,
+  );
+  writeFileSync(
+    join(worktree, ".factory-handoff.json"),
+    JSON.stringify({
+      notes: [
+        {
+          kind: "verification",
+          criterionIndex: 0,
+          summary: "changed: a.txt:1",
+          paths: ["a.txt"],
+          consumerIndices: [],
+        },
+      ],
+    }),
+  );
+  assert.equal(checkWorkHandoff(worktree, handoff).passed, true);
 });

@@ -82,81 +82,162 @@ export function maxHandoffSources(criterionCount: number): number {
   );
 }
 
+const noteKinds = ["interface", "pitfall", "hypothesis", "verification"];
+/** Name a key in an error without echoing more than a short bound of model text. */
+const keyName = (key: string) =>
+  JSON.stringify(key.length > 64 ? `${key.slice(0, 64)}…` : key);
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === "object" && !Array.isArray(value);
+
+/** Missing and unexpected keys, so a worker can repair the whole object at once. */
+function keyProblems(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): string[] {
+  const unexpected = Object.keys(value).filter(
+    (key) => !required.includes(key) && !optional.includes(key),
+  );
+  const missing = required.filter((key) => !Object.hasOwn(value, key));
+  return [
+    ...(unexpected.length
+      ? [`unexpected key ${unexpected.map(keyName).join(", ")}`]
+      : []),
+    ...(missing.length ? [`missing key ${missing.join(", ")}`] : []),
+  ];
+}
+
+/** Checks shared by the wire declaration and the controller's own record. */
+function noteFieldProblems(note: Record<string, unknown>): string[] {
+  const problems: string[] = [];
+  const verification = note.kind === "verification";
+  const limit = verification ? VERIFICATION_LIMIT : LEARNING_LIMIT;
+  if (Object.hasOwn(note, "kind") && !noteKinds.includes(note.kind as string))
+    problems.push(`kind must be one of ${noteKinds.join(", ")}`);
+  if (verification) {
+    if (
+      !Number.isSafeInteger(note.criterionIndex) ||
+      (note.criterionIndex as number) < 0
+    )
+      problems.push("a verification note needs an integer criterionIndex >= 0");
+  } else if (note.criterionIndex !== undefined)
+    problems.push("criterionIndex is allowed only on verification notes");
+  if (Object.hasOwn(note, "summary")) {
+    if (typeof note.summary !== "string" || !note.summary.trim())
+      problems.push("summary must be a non-empty string");
+    else if (note.summary.length > limit.summary)
+      problems.push(
+        `summary has ${note.summary.length} characters; at most ${limit.summary} for this kind`,
+      );
+  }
+  if (Object.hasOwn(note, "paths")) {
+    if (!Array.isArray(note.paths))
+      problems.push("paths must be an array of repository file paths");
+    else {
+      if (note.paths.length > limit.paths)
+        problems.push(
+          `paths has ${note.paths.length} entries; at most ${limit.paths} for this kind`,
+        );
+      const invalid = note.paths.findIndex((path) => !filePath(path));
+      if (invalid >= 0)
+        problems.push(
+          `paths[${invalid}] is not a literal repository file path (no directory, .git or .factory- staging path)`,
+        );
+      if (new Set(note.paths).size !== note.paths.length)
+        problems.push("paths has duplicate entries");
+    }
+  }
+  return problems;
+}
+
+/** Note-count limits over the notes that are objects. */
+function countProblems(notes: readonly Record<string, unknown>[]): string[] {
+  const problems: string[] = [];
+  const verifications = notes.filter((note) => note.kind === "verification");
+  const learning = notes.length - verifications.length;
+  if (learning > LEARNING_LIMIT.notes)
+    problems.push(
+      `${learning} learning notes; at most ${LEARNING_LIMIT.notes} are allowed`,
+    );
+  const criteria = verifications.map((note) => note.criterionIndex);
+  const repeated = criteria.filter(
+    (criterion, index) => criteria.indexOf(criterion) !== index,
+  );
+  if (repeated.length)
+    problems.push(
+      `more than one verification note for criterionIndex ${[...new Set(repeated)].map(String).join(", ")}; write exactly one per criterion`,
+    );
+  return problems;
+}
+
+/** One error naming every structural problem found, bounded for prompts and records. */
+function handoffError(problems: readonly string[]): Error {
+  const shown = problems.slice(0, 12);
+  return new Error(
+    `Handoff manifest is invalid:${shown.map((problem) => `\n- ${problem}`).join("")}${problems.length > shown.length ? `\n- and ${problems.length - shown.length} more` : ""}`,
+  );
+}
+
 /** Reject malformed optional data; the controller never repairs model claims. */
 export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
-  const declaration = value as { notes?: unknown } | null;
-  if (
-    !declaration ||
-    typeof declaration !== "object" ||
-    Array.isArray(value) ||
-    Object.keys(declaration).some((key) => key !== "notes") ||
-    !Array.isArray(declaration.notes)
-  )
-    throw new Error("Handoff must be an object with a notes array");
-  const notes = declaration.notes.map((raw: unknown) => {
-    const note = raw as WorkHandoffNote | null;
-    const verification = note?.kind === "verification";
-    const limit = verification ? VERIFICATION_LIMIT : LEARNING_LIMIT;
-    if (
-      !note ||
-      typeof note !== "object" ||
-      Array.isArray(note) ||
-      Object.keys(note).some(
-        (key) =>
-          !["kind", "summary", "paths", "consumers", "criterionIndex"].includes(
-            key,
-          ),
-      ) ||
-      !["interface", "pitfall", "hypothesis", "verification"].includes(
-        note.kind,
-      ) ||
-      (verification
-        ? !Number.isSafeInteger(note.criterionIndex) ||
-          (note.criterionIndex as number) < 0 ||
-          note.consumers?.length !== 0
-        : note.criterionIndex !== undefined) ||
-      typeof note.summary !== "string" ||
-      !note.summary.trim() ||
-      note.summary.length > limit.summary ||
-      !Array.isArray(note.paths) ||
-      note.paths.length > limit.paths ||
-      !note.paths.every(filePath) ||
-      new Set(note.paths).size !== note.paths.length ||
-      !Array.isArray(note.consumers) ||
-      note.consumers.length > 16 ||
-      !note.consumers.every(
-        (id) =>
-          typeof id === "string" &&
-          id.length > 0 &&
-          id.length <= 128 &&
-          !id.includes("\0"),
-      ) ||
-      new Set(note.consumers).size !== note.consumers.length
-    )
-      throw new Error(
-        "Handoff note has invalid kind, summary, source paths, consumers or criterion",
-      );
-    return {
-      kind: note.kind,
-      summary: note.summary,
-      paths: [...note.paths],
-      consumers: [...note.consumers],
-      ...(verification ? { criterionIndex: note.criterionIndex } : {}),
-    };
+  if (!isRecord(value))
+    throw handoffError(["the manifest must be an object with a notes array"]);
+  const problems = keyProblems(value, ["notes"], []);
+  if (!Array.isArray(value.notes))
+    throw handoffError([...problems, "notes must be an array"]);
+  const objects: Record<string, unknown>[] = [];
+  value.notes.forEach((raw: unknown, index) => {
+    if (!isRecord(raw)) {
+      problems.push(`note ${index} must be an object`);
+      return;
+    }
+    objects.push(raw);
+    const consumers = raw.consumers;
+    const noteProblems = [
+      ...keyProblems(
+        raw,
+        ["kind", "summary", "paths", "consumers"],
+        ["criterionIndex"],
+      ),
+      ...noteFieldProblems(raw),
+    ];
+    if (Object.hasOwn(raw, "consumers"))
+      if (
+        !Array.isArray(consumers) ||
+        consumers.length > 16 ||
+        !consumers.every(
+          (id) =>
+            typeof id === "string" &&
+            id.length > 0 &&
+            id.length <= 128 &&
+            !id.includes("\0"),
+        ) ||
+        new Set(consumers).size !== consumers.length
+      )
+        noteProblems.push(
+          "consumers must be at most 16 distinct Work Item identities",
+        );
+      else if (raw.kind === "verification" && consumers.length !== 0)
+        noteProblems.push("a verification note must have no consumers");
+    if (noteProblems.length)
+      problems.push(`note ${index}: ${noteProblems.join("; ")}`);
   });
+  problems.push(...countProblems(objects));
+  if (problems.length) throw handoffError(problems);
+  const notes = (value.notes as WorkHandoffNote[]).map((note) => ({
+    kind: note.kind,
+    summary: note.summary,
+    paths: [...note.paths],
+    consumers: [...note.consumers],
+    ...(note.kind === "verification"
+      ? { criterionIndex: note.criterionIndex }
+      : {}),
+  }));
   const verifications = notes.filter((note) => note.kind === "verification");
-  if (
-    notes.length - verifications.length > LEARNING_LIMIT.notes ||
-    new Set(verifications.map((note) => note.criterionIndex)).size !==
-      verifications.length
-  )
-    throw new Error(
-      `Handoff must hold at most ${LEARNING_LIMIT.notes} learning notes and one verification note per criterion`,
-    );
   if (citedPaths(notes) > maxHandoffSources(verifications.length))
-    throw new Error(
-      `Handoff cites more than ${maxHandoffSources(verifications.length)} distinct files`,
-    );
+    throw handoffError([
+      `notes cite more than ${maxHandoffSources(verifications.length)} distinct files`,
+    ]);
   return notes;
 }
 
@@ -252,76 +333,94 @@ export function decodeWorkHandoffNotes(
     new Set(peers.map((peer) => peer.id)).size !== peers.length
   )
     throw new Error("Handoff peer catalog differs from its admitted graph");
-  const declaration = value as { notes?: unknown } | null;
+  if (!isRecord(value))
+    throw handoffError([
+      "the manifest must be a JSON object whose only key is notes",
+    ]);
+  const extra = Object.keys(value).filter((key) => key !== "notes");
+  const problems = extra.length
+    ? [
+        `unexpected top-level key ${extra.map(keyName).join(", ")}; the only top-level key is notes`,
+      ]
+    : [];
+  if (!Array.isArray(value.notes))
+    throw handoffError([...problems, "notes must be an array of note objects"]);
   if (
-    !declaration ||
-    typeof declaration !== "object" ||
-    Array.isArray(declaration) ||
-    Object.keys(declaration).some((key) => key !== "notes") ||
-    !Array.isArray(declaration.notes) ||
-    (criterionCount !== undefined &&
-      declaration.notes.length > LEARNING_LIMIT.notes + criterionCount)
+    criterionCount !== undefined &&
+    value.notes.length > LEARNING_LIMIT.notes + criterionCount
   )
-    throw new Error(
-      `Handoff must be an object with at most ${LEARNING_LIMIT.notes} learning notes and one verification note per criterion`,
+    problems.push(
+      `${value.notes.length} notes; at most ${LEARNING_LIMIT.notes} learning notes plus one verification note for each of the ${criterionCount} criteria`,
     );
-  const notes = declaration.notes.map((raw) => {
+  const objects: Record<string, unknown>[] = [];
+  value.notes.forEach((raw: unknown, index) => {
+    if (!isRecord(raw)) {
+      problems.push(`note ${index} must be an object`);
+      return;
+    }
+    objects.push(raw);
+    const noteProblems = [
+      ...keyProblems(
+        raw,
+        ["kind", "summary", "paths", "consumerIndices"],
+        ["criterionIndex"],
+      ),
+      ...noteFieldProblems(raw),
+    ];
+    const criterionIndex = raw.criterionIndex;
     if (
-      !raw ||
-      typeof raw !== "object" ||
-      Array.isArray(raw) ||
-      Object.keys(raw).some(
-        (key) =>
-          ![
-            "kind",
-            "summary",
-            "paths",
-            "consumerIndices",
-            "criterionIndex",
-          ].includes(key),
-      )
+      Number.isSafeInteger(criterionIndex) &&
+      criterionCount !== undefined &&
+      (criterionIndex as number) >= criterionCount
     )
-      throw new Error("Handoff note differs from the indexed declaration");
-    const criterionIndex = (raw as { criterionIndex?: unknown }).criterionIndex;
-    if (
+      noteProblems.push(
+        `criterionIndex ${criterionIndex} names no acceptance criterion of this Work Item (it has ${criterionCount})`,
+      );
+    else if (
       criterionIndex !== undefined &&
-      (!Number.isSafeInteger(criterionIndex) ||
-        (criterionCount !== undefined &&
-          (criterionIndex as number) >= criterionCount))
+      !Number.isSafeInteger(criterionIndex)
     )
-      throw new Error(
-        "Handoff verification note names a criterion absent from this Work Item",
-      );
-    const note = raw as Record<string, unknown>,
-      indices = note.consumerIndices;
+      noteProblems.push("criterionIndex must be an integer");
+    const indices = raw.consumerIndices;
     if (
-      !Array.isArray(indices) ||
-      indices.length > 16 ||
-      new Set(indices).size !== indices.length ||
-      !indices.every(
-        (index) =>
-          Number.isSafeInteger(index) && index >= 0 && index < peers.length,
-      )
+      Object.hasOwn(raw, "consumerIndices") &&
+      (!Array.isArray(indices) ||
+        indices.length > 16 ||
+        new Set(indices).size !== indices.length ||
+        !indices.every(
+          (index) =>
+            Number.isSafeInteger(index) && index >= 0 && index < peers.length,
+        ))
     )
-      throw new Error(
-        "Handoff consumer index is absent from the admitted graph",
+      noteProblems.push(
+        peers.length
+          ? `consumerIndices must be at most 16 distinct integers from 0 to ${peers.length - 1}`
+          : "consumerIndices must be [] (this Work Item has no peers)",
       );
-    return {
-      kind: note.kind,
-      summary: note.summary,
-      paths: note.paths,
-      consumers: indices.map((index) => peers[index]!.id),
-      ...(criterionIndex === undefined ? {} : { criterionIndex }),
-    };
+    if (noteProblems.length)
+      problems.push(`note ${index}: ${noteProblems.join("; ")}`);
   });
+  problems.push(...countProblems(objects));
+  if (problems.length) throw handoffError(problems);
+  const notes = objects.map((note) => ({
+    kind: note.kind,
+    summary: note.summary,
+    paths: note.paths,
+    consumers: (note.consumerIndices as number[]).map(
+      (index) => peers[index]!.id,
+    ),
+    ...(note.criterionIndex === undefined
+      ? {}
+      : { criterionIndex: note.criterionIndex }),
+  }));
   const parsed = parseWorkHandoffNotes({ notes });
   if (
     criterionCount !== undefined &&
     citedPaths(parsed) > maxHandoffSources(criterionCount)
   )
-    throw new Error(
-      `Handoff cites more than ${maxHandoffSources(criterionCount)} distinct files`,
-    );
+    throw handoffError([
+      `notes cite more than ${maxHandoffSources(criterionCount)} distinct files`,
+    ]);
   return parsed;
 }
 

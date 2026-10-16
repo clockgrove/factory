@@ -4590,6 +4590,35 @@ function assertVerifierUnchanged(
       "Queue verifier contains altered or missing object material",
     );
 }
+/**
+ * The publisher is shared by every Factory process for this repository and is
+ * never a witness. Git freshens an object it is asked to write again by
+ * touching its file times (loose or packed) without rewriting it, so a file
+ * whose type, device, inode, mode and size are unchanged but whose times moved
+ * only invalidates the cached body facts: the caller then re-authenticates
+ * every byte it uses. Any other change or removal still refuses.
+ */
+function publisherMaterialCurrent(
+  current: Map<string, string> | undefined,
+  previous: Map<string, string>,
+): boolean {
+  if (!current) return false;
+  let unchanged = true;
+  for (const [path, identity] of previous) {
+    const stable = (value: string | undefined) =>
+      value
+        ?.split(":")
+        .slice(0, identity.startsWith("d:") ? 4 : 5)
+        .join(":");
+    const now = current.get(path);
+    if (stable(now) !== stable(identity))
+      throw new Error(
+        "Checkpoint publisher contains altered or missing object material",
+      );
+    if (!identity.startsWith("d:") && now !== identity) unchanged = false;
+  }
+  return unchanged;
+}
 function assertRemoteOnlyVerifier(
   directory: string,
   options: GitPersistenceConfig,
@@ -4788,8 +4817,13 @@ function verifiedPublisherParent(
   assertProcessActive();
   assertRemoteOnlyVerifier(directory, options);
   const material = scanVerifierObjects(directory, options);
-  const prior = context.publisherObjects;
-  if (prior) assertVerifierUnchanged(material, prior, true);
+  const cached = context.publisherObjects;
+  const prior =
+    cached && publisherMaterialCurrent(material, cached) ? cached : undefined;
+  if (!prior) {
+    delete context.publisherObjects;
+    delete context.publisherObjectBytes;
+  }
   // One bounded batch authenticates the selected commit, its two trees and
   // exact manifest. It neither scans ancestry nor grants remote authority.
   const packet = git(
@@ -4917,7 +4951,7 @@ function verifiedPublisherParent(
   }
   return true;
 }
-/** Git freshens existing loose trees it deterministically writes; rehash only those exact objects. */
+/** Git freshens existing trees it deterministically writes; rehash only those exact objects. */
 function refreshProducedPublisherTrees(
   directory: string,
   options: GitPersistenceConfig,
@@ -4946,7 +4980,12 @@ function refreshProducedPublisherTrees(
       throw new Error("Produced publisher tree failed exact integrity");
     prior.set(path, material.get(path)!);
   }
-  assertVerifierUnchanged(material, prior, true);
+  // Writing an existing body or manifest blob freshens it; the next parent
+  // check then re-authenticates every body instead of reusing these facts.
+  if (!publisherMaterialCurrent(material, prior)) {
+    delete context.publisherObjects;
+    delete context.publisherObjectBytes;
+  }
 }
 async function freshArchiveOwned(
   config: FactoryConfig,

@@ -1998,6 +1998,48 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           ownedBase.commitSha.slice(0, 2),
           ownedBase.commitSha.slice(2),
         );
+        // Git freshens an object it is asked to write again (this or another
+        // Factory process sharing the publisher). That only re-authenticates
+        // the parent's bodies; the warm publication still completes.
+        execFileSync(
+          "git",
+          [
+            `--git-dir=${publisher}`,
+            "hash-object",
+            "-w",
+            "-t",
+            "commit",
+            "--stdin",
+          ],
+          {
+            input: execFileSync("git", [
+              `--git-dir=${publisher}`,
+              "cat-file",
+              "commit",
+              ownedBase.commitSha,
+            ]),
+          },
+        );
+        const freshenedOffset = (await readFile(diagnosticPath(repository, 0)))
+          .length;
+        markCheckpointDirty(repository, {
+          path: `project-queue-history/${claim.id}.json`,
+          kind: "historical",
+        });
+        await awaitCheckpointAdmission(repository, "before-effect");
+        const freshenedParents = (await readFile(diagnosticPath(repository, 0)))
+          .subarray(freshenedOffset)
+          .toString("utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+          .filter(
+            (event) =>
+              event.outcome === "completed" &&
+              event.operation === "recovery-checkpoint-publication-parent",
+          );
+        assert.equal(freshenedParents.length, 1);
+        assert(freshenedParents[0].metadata.reused);
         const bytes = await readFile(objectPath),
           mode = (await stat(objectPath)).mode & 0o777;
         try {

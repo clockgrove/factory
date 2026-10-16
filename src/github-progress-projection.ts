@@ -391,7 +391,14 @@ async function publishProgress(
           observedAt,
           presentationDigest: target.presentationDigest,
         });
-        save();
+        try {
+          save();
+        } catch (error) {
+          // A refused save leaves nothing retained: drop the intent so the
+          // live state stays valid for every later save.
+          current.requests.pop();
+          throw error;
+        }
         try {
           await awaitCheckpointAdmission(config.repository, "before-effect");
         } catch (error) {

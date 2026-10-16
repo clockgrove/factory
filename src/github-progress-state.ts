@@ -114,10 +114,12 @@ export function assertGitHubProgressProjection(
       snapshotId: request.snapshotId,
       item: context.item?.id,
     });
+    // Objective and Work Item comments both link the Objective; the marker
+    // binds the item.
     if (
       !request.body.startsWith(`${marker}\n`) ||
       !request.body.includes(
-        `https://github.com/${context.repository}/issues/${context.item?.issue ?? context.objective})`,
+        `https://github.com/${context.repository}/issues/${context.objective})`,
       ) ||
       !request.body.includes(`configuration ${context.configDigest}`)
     )

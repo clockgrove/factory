@@ -1517,7 +1517,7 @@ const retainedFailedUnavailable =
 const retainedFailedAvailable = (
   retained: NonNullable<ExecutionRequest["retainedFailedResult"]>,
 ): string =>
-  `\nRetained failed committed result, verified reachable in this checkout: ${JSON.stringify(retained)}. This is unaccepted implementation context, not normative source, an accepted base or acceptance proof. You may inspect currently owned files from this exact Git tree and reuse their implementation in owned edits while making the diagnosed correction. Preserve the checkout's current accepted HEAD; do not checkout, reset or cherry-pick the failed commit. Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
+  `\nRetained failed committed result, verified in this checkout: ${JSON.stringify(retained)}. Its files are already in your working tree: this attempt continues from that result, as uncommitted changes on top of the accepted base HEAD. It is unaccepted implementation context, not normative source or acceptance proof. Fix exactly what the findings and any diagnosed correction refuse, and keep the rest. Do not checkout, reset or cherry-pick the failed commit or the base; your result is collected from this working tree as usual. Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
 
 /** The worker brief suffixes the local driver may append for this request. */
 export function retainedFailedResultBriefs(
@@ -2078,6 +2078,22 @@ export class LocalExecutionDriver implements ExecutionDriver {
         worktree,
         request.retainedFailedResult,
       );
+      // An authenticated refused candidate is the attempt's starting tree:
+      // its files land in the working tree and index while HEAD stays at the
+      // accepted base, so collection and ownership checks are unchanged (#1313).
+      const continuesCandidate = Boolean(
+        request.retainedFailedResult &&
+          failedContext &&
+          failedContext !== retainedFailedUnavailable,
+      );
+      if (continuesCandidate)
+        pinnedGit(
+          worktree,
+          "read-tree",
+          "-u",
+          "--reset",
+          request.retainedFailedResult!.treeSha,
+        );
       const admittedSession = checkpointWorkerSession(
         session,
         {
@@ -2096,19 +2112,22 @@ export class LocalExecutionDriver implements ExecutionDriver {
       );
       const workerRequest = { ...request };
       if (!admittedSession) delete workerRequest.session;
-      const workerReadiness = environmentReadiness
-        ? workerReadinessReceipt({
-            request,
-            workerIdentity: identity,
-            worktree,
-            validationRoot: join(
-              this.workRoot,
-              "environment-preflight",
-              identity,
-            ),
-            evidence: environmentReadiness,
-          })
-        : undefined;
+      // Readiness proved on the base tree does not carry to a continued
+      // candidate's working tree.
+      const workerReadiness =
+        environmentReadiness && !continuesCandidate
+          ? workerReadinessReceipt({
+              request,
+              workerIdentity: identity,
+              worktree,
+              validationRoot: join(
+                this.workRoot,
+                "environment-preflight",
+                identity,
+              ),
+              evidence: environmentReadiness,
+            })
+          : undefined;
       context?.observeReadinessOffer?.({
         workerIdentity: identity,
         status: workerReadiness?.commands.some((entry) => entry.reusable)

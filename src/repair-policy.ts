@@ -33,14 +33,14 @@ export type AutonomyConfig = Partial<
 export const defaultAutonomy: Autonomy = {
   allowances: {
     planningRevisions: 1,
-    implementationRepairs: 2,
+    implementationRepairs: 6,
     resultRereviews: 1,
   },
   repairClasses: [...repairClasses],
   repairPolicy: {
     perPath: {
       planningRevisions: 1,
-      implementationRepairs: 1,
+      implementationRepairs: 3,
       resultRereviews: 1,
     },
   },
@@ -251,6 +251,11 @@ export interface WorkRecovery {
   correction?: RepairCorrection;
   phase?: "diagnosing" | "ready" | "stopped";
   scopes?: string[];
+  /**
+   * The operator asked the next attempt to start from a fresh base instead of
+   * the refused candidate (`factory retry --fresh`).
+   */
+  freshBase?: true;
   history?: {
     at: string;
     diagnosisInvocation?: WorkRecovery["diagnosisInvocation"];
@@ -474,7 +479,8 @@ export function earlierHeads(work: WorkState): string[] {
   );
 }
 export function archiveAttempt(work: WorkState): WorkRecovery {
-  const recovery = work.recovery ?? {};
+  // A fresh-base request applies to the one attempt it was made for.
+  const { freshBase: _fresh, ...recovery } = work.recovery ?? {};
   const { recovery: _old, ...attempt } = work;
   return {
     ...recovery,
@@ -500,14 +506,20 @@ export function archiveAttempt(work: WorkState): WorkRecovery {
     ],
   };
 }
-/** Only the exact unpublished failed result archived with an admitted repair. */
+/**
+ * The exact unpublished failed result the next attempt continues from: a
+ * wrong result refused at validation, retried or repaired with an
+ * implementation correction. A planning correction changes the approach, so
+ * its attempt starts from the base.
+ */
 export function retainedFailedResultContext(
   prior: NonNullable<WorkRecovery["history"]>[number] | undefined,
 ): { attemptId: string; commitSha: string; treeSha: string } | undefined {
   const work = prior?.work;
   if (
     prior?.failure?.classification !== "implementation" ||
-    prior.correction?.kind !== "implementation" ||
+    (prior.correction !== undefined &&
+      prior.correction.kind !== "implementation") ||
     work?.status !== "failed" ||
     work.step !== "validate" ||
     work.pullRequest ||
@@ -739,6 +751,8 @@ export function assertRepairLedger(
       !["diagnosing", "ready", "stopped"].includes(recovery.phase)
     )
       throw new Error("Invalid repair circuit phase");
+    if (recovery.freshBase !== undefined && recovery.freshBase !== true)
+      throw new Error("Invalid fresh-base request");
     if (
       recovery.scopes &&
       (!Array.isArray(recovery.scopes) ||

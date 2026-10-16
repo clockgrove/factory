@@ -154,7 +154,11 @@ export interface FactoryApplication {
     input: Parameters<typeof collectCompletedWorker>[2],
   ): Promise<void>;
   /** Answer a step's decision or config fix, else retry a failed Work Item. */
-  retryWorkItem(objective: number, itemId?: string): "step" | "attempt";
+  retryWorkItem(
+    objective: number,
+    itemId?: string,
+    options?: { fresh?: boolean },
+  ): "step" | "attempt";
   repairWorkItem(
     objective: number,
     input: Parameters<typeof repairWorkItem>[2],
@@ -331,8 +335,8 @@ export function createApplication(
       ),
     repairWorkItem: (objective, input) =>
       checkpoint.local(() => repairWorkItem(config, objective, input)),
-    retryWorkItem: (objective, itemId) =>
-      checkpoint.local(() => retryWorkItem(config, objective, itemId)),
+    retryWorkItem: (objective, itemId, options) =>
+      checkpoint.local(() => retryWorkItem(config, objective, itemId, options)),
     rereviewWorkItem: (objective, input) =>
       checkpoint.local(() => rereviewWorkItem(config, objective, input)),
     declineWorkerDiscovery: (objective, input) =>

@@ -71,10 +71,10 @@ function attemptItem(item: WorkItem, recovery?: WorkRecovery): WorkItem {
   const failure = recovery?.failure;
   const correction = recovery?.correction;
   if (!failure && !correction) return item;
-  // A new attempt starts from the base: the failed candidate is reachable only
-  // when the driver appends retained failed-result context (#1277).
+  // A new attempt continues from the refused candidate only when the driver
+  // materializes it and appends retained failed-result context (#1277, #1313).
   const previous = failure
-    ? `\nThe previous attempt failed. Do not repeat it: ${failure.detail}\nThis attempt starts from a fresh checkout of the base. The previous attempt's files are not in it unless retained failed-result context below says its commit is reachable. Implement the Work Item completely, treating these findings as requirements.`
+    ? `\nThe previous attempt failed. Do not repeat it: ${failure.detail}\nIf the retained failed-result context below says the previous result's files are already in this checkout, this attempt continues from that result: fix exactly what these findings refuse and keep everything else. Otherwise it starts from a fresh checkout of the base without the previous files: implement the Work Item completely, treating these findings as requirements.`
     : "";
   const repair = correction
     ? `\nDiagnosed repair: ${correction.diagnosis}\nRequired correction: ${correction.correction}`
@@ -189,9 +189,11 @@ export async function runWorker(
       );
     }
   }
-  const retained = work.recovery?.correction
-    ? retainedFailedResultContext(work.recovery.history?.at(-1))
-    : undefined;
+  // A retried or repaired wrong result continues from its refused candidate,
+  // unless the operator asked for a fresh base (#1313).
+  const retained = work.recovery?.freshBase
+    ? undefined
+    : retainedFailedResultContext(work.recovery?.history?.at(-1));
   const readinessIndices = environmentValidationIndices(state.graph, item.id);
   if (readinessIndices.length && args.driver.freshCheckoutReadiness !== true)
     throw new Error(

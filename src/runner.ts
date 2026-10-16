@@ -1078,6 +1078,7 @@ async function runObjectiveOwned(
             config,
             objective,
             input.item === undefined ? undefined : String(input.item),
+            { fresh: input.fresh === true },
           );
           wake();
           return retried;
@@ -1872,8 +1873,11 @@ export function retryWorkItem(
   config: FactoryConfig,
   objective: number,
   itemId?: string,
+  options: { fresh?: boolean } = {},
 ): "step" | "attempt" {
-  if (retryStep(config, objective, itemId)) return "step";
+  if (!options.fresh && retryStep(config, objective, itemId)) return "step";
+  if (options.fresh && itemId === undefined)
+    throw new Error("retry --fresh needs --item");
   if (itemId === undefined)
     throw new Error(
       "No Objective step awaits a decision or configuration fix; name a Work Item with --item",
@@ -1972,7 +1976,11 @@ export function retryWorkItem(
       );
     // The new attempt starts without the old one's records or bound.
     clearRepeats(state, { item: itemId });
-    state.work[itemId] = { status: "pending", recovery: archiveAttempt(work) };
+    // The new attempt continues from the refused candidate unless the
+    // operator asks for a fresh base (#1313).
+    const recovery = archiveAttempt(work);
+    if (options.fresh) recovery.freshBase = true;
+    state.work[itemId] = { status: "pending", recovery };
     state.cancelRequested = false;
     delete state.cancelledAt;
     delete state.error;

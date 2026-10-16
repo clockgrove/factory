@@ -140,8 +140,8 @@ function help(): void {
       "      With --objective: the phase and the exact next command. Without: the service and the queue",
       "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT] --reason TEXT",
       "      Decide a plan or a pending amendment's question (--answer is required to accept either) or a result criterion (--item names the Work Item; without it, the final acceptance)",
-      "  retry --objective N [--item ITEM] [--rereview] [--review-artifacts FILE]",
-      "      Answer a step's decision or configuration fix, end a provider usage-limit wait, start a failed Work Item's new attempt, or (--item --rereview) validate and review the same pending or settled command-failure result within resultRereviews limits",
+      "  retry --objective N [--item ITEM [--fresh]] [--rereview] [--review-artifacts FILE]",
+      "      Answer a step's decision or configuration fix, end a provider usage-limit wait, start a failed Work Item's new attempt (continuing from its refused result; --fresh starts from the base), or (--item --rereview) validate and review the same pending or settled command-failure result within resultRereviews limits",
       "  repair --objective N --proposal FILE",
       "      Record a diagnosed correction for a failed Work Item",
       "  decline-discovery --objective N --decision FILE",
@@ -723,6 +723,8 @@ async function dispatchMain(): Promise<void> {
     const item = option(args, "item");
     if (args.includes("--rereview")) {
       if (!item) throw new Error("retry --rereview requires --item");
+      if (args.includes("--fresh"))
+        throw new Error("--fresh starts a new attempt; it cannot rereview");
       const selectionFile = option(args, "review-artifacts");
       if (
         args.includes("--review-artifacts") &&
@@ -750,14 +752,16 @@ async function dispatchMain(): Promise<void> {
     }
     if (option(args, "review-artifacts"))
       throw new Error("--review-artifacts requires --rereview");
+    const fresh = args.includes("--fresh");
+    if (fresh && !item) throw new Error("retry --fresh requires --item");
     const reply = await requestControl(config.repository, {
       objective,
       action: "retry",
-      input: item === undefined ? {} : { item },
+      input: item === undefined ? {} : { item, ...(fresh && { fresh: true }) },
     });
     const retried = reply.handled
       ? reply.result
-      : requireApplication().retryWorkItem(objective, item);
+      : requireApplication().retryWorkItem(objective, item, { fresh });
     console.log(
       retried === "step"
         ? `The ${item === undefined ? "Objective" : `Work Item ${item}`} step will run again; ${reply.handled ? "the active run continues it" : `factory run --objective ${objective} continues it`}`

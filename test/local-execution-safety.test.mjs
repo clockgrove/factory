@@ -2437,7 +2437,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
 
     // Exercise the stock prepared-request producer and its real strict atomic
     // checkpoint, holding before Codex starts; these are no provider responses.
-    const prepare = async (objectiveBody, policy) => {
+    const prepare = async (objectiveBody, policy, retainedFailedResult) => {
       const originalHead = git(checkout, "rev-parse", "HEAD");
       const preparedState = structuredClone(loaded);
       preparedState.schemaVersion = 17;
@@ -2449,6 +2449,38 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         baseSha: loaded.baseSha,
         startedAt: new Date().toISOString(),
       };
+      if (retainedFailedResult) {
+        // The archived refused attempt this new attempt continues from.
+        const detail =
+          "Acceptance criterion disproved: a required report field is missing.";
+        const failure = {
+          digest: createHash("sha256").update(detail).digest("hex"),
+          classification: "implementation",
+          detail,
+          at: new Date().toISOString(),
+          continuation: "new-attempt-from-accepted-base",
+          unfinishedEdits: "removed",
+          decision: "Start a new attempt",
+          event: "item/api/validate/0",
+        };
+        preparedState.work.api.recovery = {
+          failure,
+          history: [
+            {
+              at: failure.at,
+              work: {
+                status: "failed",
+                step: "validate",
+                attempt: retainedFailedResult.attemptId,
+                baseSha: loaded.baseSha,
+                changeRef: retainedFailedResult.commitSha,
+                treeSha: retainedFailedResult.treeSha,
+              },
+              failure,
+            },
+          ],
+        };
+      }
       const preparedFile = join(root, `prepared-${attempt}.json`);
       const work = preparedState.work.api;
       const context = executionContext(
@@ -2491,6 +2523,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
             baseSha: preparedState.baseSha,
             attemptId: attempt,
             objectiveBody,
+            ...(retainedFailedResult && { retainedFailedResult }),
             captureContext: {
               objective: 1,
               runId: preparedState.runId,
@@ -2515,18 +2548,44 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       assert.equal(work.execution.data.handle, undefined);
       assert.ok(work.execution.data.admissionBlockedAt);
       assert.equal(git(checkout, "rev-parse", "HEAD"), originalHead);
-      return work.execution.data.preparedHarnessRequest;
+      return work.execution.data;
     };
-    const absent = await prepare("## Package manager update\n_No response_\n");
+    const absent = (await prepare("## Package manager update\n_No response_\n"))
+      .preparedHarnessRequest;
     assert.equal(Object.hasOwn(absent, "packageManagerUpdate"), false);
     assert.equal(Object.hasOwn(absent.capture, "policy"), false);
     const policy = { enabled: false, maxBytesPerInvocation: 1024 };
-    const declared = await prepare(
-      "## Package manager update\n- `npm@10.1.0`\n",
-      policy,
-    );
+    const declared = (
+      await prepare("## Package manager update\n- `npm@10.1.0`\n", policy)
+    ).preparedHarnessRequest;
     assert.equal(declared.packageManagerUpdate, "npm@10.1.0");
     assert.deepEqual(declared.capture.policy, policy);
+    // A retried or repaired wrong result continues from its refused candidate
+    // (#1313): the candidate's tree is the working tree and index of the new
+    // attempt's checkout, HEAD stays at the accepted base, and the brief says so.
+    const refusedCandidate = {
+      attemptId: "refused-candidate",
+      commitSha: result.changeRef,
+      treeSha: git(checkout, "rev-parse", `${result.changeRef}^{tree}`),
+    };
+    const continued = await prepare(
+      "## Package manager update\n_No response_\n",
+      undefined,
+      refusedCandidate,
+    );
+    assert.equal(git(continued.worktree, "rev-parse", "HEAD"), loaded.baseSha);
+    assert.equal(
+      git(continued.worktree, "write-tree"),
+      refusedCandidate.treeSha,
+    );
+    assert.notEqual(
+      git(continued.worktree, "rev-parse", "HEAD^{tree}"),
+      refusedCandidate.treeSha,
+    );
+    assert.match(
+      continued.preparedHarnessRequest.item.brief,
+      /Its files are already in your working tree/,
+    );
 
     const save = () => saveState(snapshot, loaded);
     const session = agentSessionContinuation(

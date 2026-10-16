@@ -920,9 +920,9 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     ]) {
       const emitted = renderDiagnosisCall(diagnosisRequest, delivery);
       const graphView = JSON.parse(
-        emitted.prompt.split(
-          "Rejected canonical graph (null when unavailable):\n",
-        )[1],
+        emitted.prompt
+          .split("Rejected canonical graph (null when unavailable):\n")[1]
+          .split("\n")[0],
       );
       assert.deepEqual(graphView, planningGraphView(rejectedGraph, sources));
       for (const [index, item] of graphView.items.entries()) {

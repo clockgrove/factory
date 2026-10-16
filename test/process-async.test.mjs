@@ -3209,15 +3209,18 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       evidence: supplied,
       sources: pinnedSources,
     });
-    const unmatchedDiagnosis = JSON.parse(
-      unmatchedRequest.objective.slice(
-        unmatchedRequest.objective.lastIndexOf("\n{") + 1,
-      ),
-    );
-    assert.deepEqual(
-      unmatchedDiagnosis.item.inputSources[1],
-      unmatchedItem.inputSources[1],
-    );
+    const [unmatchedPayload, unmatchedBodies] = unmatchedRequest.objective
+      .slice(unmatchedRequest.objective.lastIndexOf("\n{") + 1)
+      .split("\nWork Item input bodies. ");
+    const unmatchedDiagnosis = JSON.parse(unmatchedPayload);
+    // An input no pinned source holds renders once as a literal block.
+    const { content: unmatchedContent, ...unmatchedIdentity } =
+      unmatchedItem.inputSources[1];
+    assert.deepEqual(unmatchedDiagnosis.item.inputSources[1], {
+      ...unmatchedIdentity,
+      content: { block: "input 0" },
+    });
+    assert.ok(unmatchedBodies.includes(` input 0>>>\n${unmatchedContent}\n`));
     assert.equal(JSON.stringify(refusedState), beforeDiagnosis);
     // A declared correction exercises the shared admission gate over actual
     // workflow evidence; it is not a generated or scripted provider response.

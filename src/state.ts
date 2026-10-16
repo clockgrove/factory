@@ -78,7 +78,7 @@ import {
 import {
   type Autonomy,
   assertRepairLedger,
-  retainedFailedResultContext,
+  retainedFailedResultFor,
   type WorkRecovery,
 } from "./repair-policy.js";
 import { assertSemanticRefusalRecord } from "./semantic-refusal.js";
@@ -1899,15 +1899,17 @@ export function parseFactoryState(
                 : undefined));
         if (!attemptGraph)
           throw new Error(`Work Item ${id} has no authenticated attempt graph`);
-        // Exactly the result the runtime continues from: the latest archived
-        // attempt, and none when the operator asked for a fresh base.
-        const recovery = item.recovery as WorkRecovery | undefined;
+        // Exactly the result dispatch continued from (#1313): the same rule,
+        // skipping this attempt's own archive entry (rereview archives it
+        // while its execution stays).
         if (
           request.retainedFailedResult !== undefined &&
-          (recovery?.freshBase ||
-            JSON.stringify(
-              retainedFailedResultContext(recovery?.history?.at(-1)),
-            ) !== JSON.stringify(request.retainedFailedResult))
+          JSON.stringify(
+            retainedFailedResultFor(
+              item.recovery as WorkRecovery | undefined,
+              typeof item.attempt === "string" ? item.attempt : undefined,
+            ),
+          ) !== JSON.stringify(request.retainedFailedResult)
         )
           throw new Error(
             `Work Item ${id} retained failed result differs from its archived repair`,

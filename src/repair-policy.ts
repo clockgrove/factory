@@ -536,6 +536,37 @@ export function retainedFailedResultContext(
   };
 }
 
+/**
+ * The refused result an attempt continues from (#1313): the latest archived
+ * attempt before `attempt` with a retained failed candidate. A no-change stop
+ * between them left no candidate, so the refused result before it still
+ * applies; anything else (a planning correction, a non-implementation
+ * failure) starts from the base, and so does an operator's fresh-base request.
+ * Dispatch, the local driver and the state validator all select through this.
+ */
+export function retainedFailedResultFor(
+  recovery: WorkRecovery | undefined,
+  attempt?: string,
+): { attemptId: string; commitSha: string; treeSha: string } | undefined {
+  if (!recovery || recovery.freshBase) return undefined;
+  const history = recovery.history ?? [];
+  for (let index = history.length - 1; index >= 0; index--) {
+    const prior = history[index]!;
+    // Rereview archives the current attempt while its execution stays.
+    if (attempt !== undefined && prior.work.attempt === attempt) continue;
+    const context = retainedFailedResultContext(prior);
+    if (context) return context;
+    const noChangeStop =
+      prior.failure?.classification === "implementation" &&
+      prior.work.step === "execute" &&
+      !prior.work.changeRef &&
+      (prior.correction === undefined ||
+        prior.correction.kind === "implementation");
+    if (!noChangeStop) return undefined;
+  }
+  return undefined;
+}
+
 export function validateCorrection(
   work: WorkState,
   correction: RepairCorrection,

@@ -101,7 +101,11 @@ import {
   readWorkflowReflection,
   workflowStageObligations,
 } from "../dist/workflow-reflection.js";
-import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
+import {
+  archiveAttempt,
+  consumption,
+  resolveAutonomy,
+} from "../dist/repair-policy.js";
 import { materializeGraphExpansion } from "../dist/graph-expansion.js";
 import { authenticateExpansionInputs } from "../dist/runner/expansion.js";
 import { graphProjectionControl } from "../dist/graph-projection-control.js";
@@ -2539,11 +2543,13 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
 
     // Exercise the stock prepared-request producer and its real strict atomic
     // checkpoint, holding before Codex starts; these are no provider responses.
+    let lastPrepared;
     const prepare = async (
       objectiveBody,
       policy,
       retainedFailedResult,
       executionBase = loaded.baseSha,
+      noChangeStop = false,
     ) => {
       const originalHead = git(checkout, "rev-parse", "HEAD");
       const preparedState = structuredClone(loaded);
@@ -2585,6 +2591,28 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
               },
               failure,
             },
+            // A no-change stop after it left no candidate (#1313).
+            ...(noChangeStop
+              ? [
+                  {
+                    at: failure.at,
+                    work: {
+                      status: "failed",
+                      step: "execute",
+                      attempt: "no-change-attempt",
+                      baseSha: loaded.baseSha,
+                    },
+                    failure: {
+                      ...failure,
+                      detail: "Worker produced no repository change",
+                      digest: createHash("sha256")
+                        .update("Worker produced no repository change")
+                        .digest("hex"),
+                      event: "item/api/execute/1",
+                    },
+                  },
+                ]
+              : []),
           ],
         };
       }
@@ -2655,6 +2683,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       assert.equal(work.execution.data.handle, undefined);
       assert.ok(work.execution.data.admissionBlockedAt);
       assert.equal(git(checkout, "rev-parse", "HEAD"), originalHead);
+      lastPrepared = { state: preparedState, file: preparedFile };
       return work.execution.data;
     };
     const absent = (await prepare("## Package manager update\n_No response_\n"))
@@ -2732,6 +2761,34 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         { evidence: { finalResponse: "Nothing left to change." } },
       ),
       /Worker produced no repository change/,
+    );
+    // Rereview archives the current attempt while its execution, and the
+    // retained result it continued from, stay: the state still saves.
+    {
+      const { state: rereviewed, file } = lastPrepared;
+      rereviewed.work.api.recovery = archiveAttempt(rereviewed.work.api);
+      saveState(file, rereviewed);
+      assert.equal(
+        parseFactoryState(
+          JSON.parse(readFileSync(file, "utf8")),
+          rereviewed.repository,
+          1,
+        ).work.api.execution.data.request.retainedFailedResult.commitSha,
+        refusedCandidate.commitSha,
+      );
+    }
+    // A no-change stop between the refusal and this attempt left no
+    // candidate: the attempt still continues from the refused result.
+    const afterNoChange = await prepare(
+      "## Package manager update\n_No response_\n",
+      undefined,
+      refusedCandidate,
+      loaded.baseSha,
+      true,
+    );
+    assert.equal(
+      git(afterNoChange.worktree, "write-tree"),
+      refusedCandidate.treeSha,
     );
     // A peer merged after the refusal: the candidate moves onto the new base
     // and keeps the peer's change instead of reverting it.

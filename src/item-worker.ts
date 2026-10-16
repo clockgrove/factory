@@ -41,10 +41,7 @@ import {
   reusableEnvironmentValidationIndices,
 } from "./qa.js";
 import { preflightItemEnvironment } from "./qa-execution.js";
-import {
-  retainedFailedResultContext,
-  type WorkRecovery,
-} from "./repair-policy.js";
+import { retainedFailedResultFor, type WorkRecovery } from "./repair-policy.js";
 import type { FactoryState } from "./state.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
@@ -191,9 +188,7 @@ export async function runWorker(
   }
   // A retried or repaired wrong result continues from its refused candidate,
   // unless the operator asked for a fresh base (#1313).
-  const retained = work.recovery?.freshBase
-    ? undefined
-    : retainedFailedResultContext(work.recovery?.history?.at(-1));
+  const retained = retainedFailedResultFor(work.recovery, work.attempt);
   const readinessIndices = environmentValidationIndices(state.graph, item.id);
   if (readinessIndices.length && args.driver.freshCheckoutReadiness !== true)
     throw new Error(
@@ -286,9 +281,13 @@ export async function runWorker(
   )
     ? agentSessionContinuation(state, "implementation", item.id, args.save)
     : undefined;
-  if (
+  if (work.recovery?.correction && !retained)
+    attemptedItem.brief += work.recovery.freshBase
+      ? "\nThe operator asked for a fresh base: this attempt starts from the accepted base without any earlier result's files."
+      : "\nNo earlier refused committed result applies to this repair (the earlier failures left no committed candidate, or the approach changed): this attempt starts from the accepted base without earlier files.";
+  else if (
     work.recovery?.correction &&
-    (!retained || args.driver.retainedFailedResultContext !== true)
+    args.driver.retainedFailedResultContext !== true
   )
     attemptedItem.brief +=
       "\nRetained failed committed-result context is unavailable for this repair through this execution driver; no prior source availability is implied.";

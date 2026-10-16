@@ -586,6 +586,11 @@ class ClaudePlanningTransport implements PlanningTransport {
     return role === "planner" ? this.config.planner : this.config.reviewer;
   }
 
+  /** No native effect separates the local session intent from the SDK launch. */
+  logicalDispatchAdmission(): "native-before-effect-v1" {
+    return "native-before-effect-v1";
+  }
+
   settings(role: PlanningRole, tree?: string): Record<string, unknown> {
     return {
       ...this.selection(role),
@@ -608,6 +613,9 @@ class ClaudePlanningTransport implements PlanningTransport {
     reviewImages?: ReviewImageInput[];
     session?: AgentSessionContinuation & { currentGraphDigest?: string };
     sourcePacket?: string;
+    beforeNativeDispatch?: NonNullable<
+      ModelInvocationContext["beforeProviderDispatch"]
+    >;
     signal?: AbortSignal;
     deadlineAt?: string;
   }): Promise<void> {
@@ -686,6 +694,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     let nativeSpawnAttempted = false;
     let streamClosed = false;
     let checkpointRejected = false;
+    let initialized: Promise<void> | undefined;
     const checkpoint = (status: AgentSessionRef["status"]) => {
       if (!owned || !continuation) return;
       owned.ref = { ...owned.ref, status, data: { ...owned.data } };
@@ -741,10 +750,14 @@ class ClaudePlanningTransport implements PlanningTransport {
       }
       assertProviderTurnDeadline(args.deadlineAt);
       abortController.signal.throwIfAborted();
-      await awaitCheckpointAdmission(
-        continuation?.scope.repository,
-        "before-effect",
-      );
+      // The controller callback admits the charged attempt, logical submission
+      // and this native session intent in one pre-effect checkpoint.
+      const admission = await args.beforeNativeDispatch?.();
+      if (admission !== "admission-complete")
+        await awaitCheckpointAdmission(
+          continuation?.scope.repository,
+          "before-effect",
+        );
       events = query({ prompt: args.prompt, options })[Symbol.asyncIterator]();
       for (;;) {
         const next = await guard.race(events.next());
@@ -816,10 +829,15 @@ class ClaudePlanningTransport implements PlanningTransport {
             );
           facts.initialized = true;
           checkpoint("in-flight");
-          await awaitCheckpointAdmission(
+          // Coalesced durability for the running session; it guards no effect,
+          // so the stream keeps draining and its outcome is awaited at the end.
+          initialized = awaitCheckpointAdmission(
             continuation?.scope.repository,
             "settled",
           );
+          initialized.catch(() => {
+            /* Rethrown when awaited after the stream closes. */
+          });
         }
         if (message.type === "result") {
           result = message;
@@ -829,6 +847,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       closeStarted = true;
       await closeProviderEventStream(events, guard, true);
       streamClosed = true;
+      await initialized;
       requireCompletedProviderTurn(result !== undefined);
       if (owned && result!.session_id !== owned.data.nativeSessionId)
         throw new Error(

@@ -415,11 +415,11 @@ async function publishProgress(
       );
     intent.comment = observed;
     delete current.failure;
+    // A successor comment's own pre-effect checkpoint publishes this response
+    // with its intent, so the successor never precedes this durable receipt.
     save();
-    // Force acknowledgement before a reconciled snapshot can publish its successor.
-    await awaitCheckpointAdmission(config.repository, "explicit");
-    // A reconciled older snapshot may precede this checkpoint (including final
-    // closure). Publish the current meaningful change once after settlement.
+    // A reconciled older snapshot may precede the current presentation
+    // (including final closure). Publish that meaningful change once next.
     return Boolean(
       pending && pending.presentationDigest !== target.presentationDigest,
     );

@@ -333,9 +333,10 @@ async function projectCard(
       };
       delete current.failure;
     }
+    // The response is saved locally. Every dependent GitHub effect, including
+    // this card's next update, publishes it within its own pre-effect
+    // checkpoint, so a separate publication here only repeats that barrier.
     args.save();
-    // The exact original response must be durable before dependent work proceeds.
-    await awaitCheckpointAdmission(args.config.repository, "explicit");
   } catch (error) {
     if (isCheckpointAdmissionFailure(error)) throw error;
     const state = live();

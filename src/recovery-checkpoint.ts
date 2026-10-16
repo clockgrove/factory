@@ -2105,14 +2105,14 @@ function clearRebuildableVerificationMetadata(
   context: QueueVerificationContext,
 ): void {
   // Ordinary body/producer facts can be rebuilt from freshly checked originals.
-  // Do not discard expensive authenticated ancestry when inserting those facts.
+  // Do not discard expensive authenticated ancestry or the verified base
+  // identity when inserting those facts: the base identity is what lets the
+  // next publication skip a second remote base fetch and full verification.
   // If witnesses/material/pending alone leave no room, the insertion stays uncached.
   context.summaries.clear();
   context.summaryBytes = 0;
   context.content.clear();
   context.contentBytes = 0;
-  delete context.baseIdentity;
-  delete context.baseIdentityBytes;
   delete context.publisherObjects;
   delete context.publisherObjectBytes;
   delete context.gitPack;
@@ -4716,9 +4716,14 @@ function retainVerifiedBaseIdentity(
       options,
       charge,
       context.baseIdentityBytes ?? 0,
+      true,
     )
-  )
+  ) {
+    // A stale identity never names this ACK; drop it rather than keep it.
+    delete context.baseIdentity;
+    delete context.baseIdentityBytes;
     return;
+  }
   context.baseIdentity = identity;
   context.baseIdentityBytes = charge;
 }

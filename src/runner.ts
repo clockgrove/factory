@@ -100,6 +100,7 @@ import {
   isCheckpointAdmissionFailure,
   isCheckpointCollectionPending,
   withQueueControlVerification,
+  withRecoveryCheckpointControllerVerification,
   withRecoveryCheckpointScope,
 } from "./recovery-checkpoint.js";
 import {
@@ -2872,10 +2873,25 @@ export function controlObjective(
 export function runObjective(
   ...args: Parameters<typeof runObjectiveUnscoped>
 ): ReturnType<typeof runObjectiveUnscoped> {
-  return checkpointController(
-    args[0],
-    () => runObjectiveUnscoped(...args),
-    args[2].contentStore,
+  const [config, , services] = args;
+  // The controller owns one bounded remote-only verifier for its lifetime (a
+  // queue service lends its own), so each independently verified ACK can be
+  // the next publication's base instead of being fetched and verified again.
+  return withRecoveryCheckpointControllerVerification(
+    {
+      config,
+      buildClosure: () =>
+        buildRecoveryCheckpointClosure({
+          config,
+          store: services.contentStore,
+        }),
+    },
+    () =>
+      checkpointController(
+        config,
+        () => runObjectiveUnscoped(...args),
+        services.contentStore,
+      ),
   );
 }
 

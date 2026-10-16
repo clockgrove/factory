@@ -1451,11 +1451,16 @@ export async function diagnoseWorkRepair(args: {
                   : {}),
                 ...([17, 19].includes(state.schemaVersion)
                   ? {
-                      beforeProviderAttempt: () =>
-                        awaitCheckpointAdmission(
-                          state.repository,
-                          "before-effect",
-                        ),
+                      // The declared dispatch hook above follows with no effect
+                      // between; it admits these attempt facts with its intent.
+                      ...(args.model.providerDispatchAdmission !==
+                        "after-attempt-admission-v1" && {
+                        beforeProviderAttempt: () =>
+                          awaitCheckpointAdmission(
+                            state.repository,
+                            "before-effect",
+                          ),
+                      }),
                       retainNativeReturn: async (
                         receipt: Parameters<
                           NonNullable<

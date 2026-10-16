@@ -74,6 +74,7 @@ import {
 import type { PreState } from "./state-store.js";
 import {
   type PendingDecisionView,
+  type PlanningStepView,
   type StatusView,
   shortPlanDigest,
   summarizeStatus,
@@ -588,6 +589,8 @@ export class DiagnosticEmitter {
     attemptId?: string;
   }): import("./contracts.js").ModelInvocationObserver {
     return this.guardModelObserver((observation) => {
+      if (!context.itemId)
+        noteModelActivity(`${this.repository}#${this.objective}`, observation);
       retainModelAccounting(
         {
           repository: this.repository,
@@ -2442,6 +2445,89 @@ export function statusDocument(
   return guidedStatus(state, view, secrets, guidanceContext);
 }
 
+/**
+ * The latest Objective-level model call (planning or Objective review) in
+ * this controller process: liveness telemetry for the live status comment
+ * only. It is never persisted and never recovery input.
+ */
+export interface ModelActivity {
+  phase: string;
+  startedAt: number;
+  lastEventAt: number;
+  events: number;
+  /** Set when the call returned or failed; a provider retry clears it. */
+  endedAt?: number;
+  outcome?: "returned" | "failed";
+  inputTokens?: number;
+  outputTokens?: number;
+}
+const modelActivities = new Map<
+  string,
+  ModelActivity & { invocationId: string }
+>();
+
+function noteModelActivity(
+  key: string,
+  observation: import("./contracts.js").ModelInvocationObservation,
+): void {
+  const now = Date.now();
+  let current = modelActivities.get(key);
+  if (current?.invocationId !== observation.invocationId) {
+    current = {
+      invocationId: observation.invocationId,
+      phase: observation.phase,
+      startedAt: now,
+      lastEventAt: now,
+      events: 0,
+    };
+    modelActivities.set(key, current);
+  }
+  current.lastEventAt = now;
+  if (["completed", "failed", "response-invalid"].includes(observation.type)) {
+    current.endedAt = now;
+    current.outcome = observation.type === "completed" ? "returned" : "failed";
+  } else {
+    current.events += observation.type === "progress" ? 1 : 0;
+    delete current.endedAt;
+    delete current.outcome;
+  }
+  if (observation.usage?.inputTokens !== undefined)
+    current.inputTokens = observation.usage.inputTokens;
+  if (observation.usage?.outputTokens !== undefined)
+    current.outputTokens = observation.usage.outputTokens;
+}
+
+export function objectiveModelActivity(
+  repository: string,
+  objective: number,
+): ModelActivity | undefined {
+  const current = modelActivities.get(`${repository}#${objective}`);
+  if (!current) return undefined;
+  const { invocationId: _id, ...activity } = current;
+  return activity;
+}
+
+/** The planner call now or last made, and projection's issue count: structured facts only. */
+function planningStepView(preparation: PreparationState): PlanningStepView {
+  const recovery = preparation.planningRecovery;
+  const plan = preparation.plan;
+  return {
+    call: plan
+      ? null
+      : (recovery?.invocation?.phase ??
+        recovery?.invocations?.at(-1)?.phase ??
+        null),
+    revision: recovery?.history.length ?? 0,
+    issues:
+      plan && preparation.coordinator.phase === "projection"
+        ? {
+            created: Object.keys(preparation.issueByItemId).length,
+            total: plan.graph.items.length,
+          }
+        : null,
+  };
+}
+
 /** Status of an Objective still planning; no executable graph exists yet. */
 export function preparationStatusDocument(
   preparation: PreparationState,
@@ -2507,6 +2593,7 @@ export function preparationStatusDocument(
       : null,
     planningStopped:
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
+    planningStep: planningStepView(preparation),
     issueByItemId: preparation.issueByItemId,
     projectionStarted: projectionStarted(preparation),
     cancelledAt: preparation.cancelledAt ?? null,

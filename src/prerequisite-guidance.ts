@@ -53,6 +53,12 @@ export interface PrerequisiteGuidance {
     owner: "present" | "absent" | "unknown";
   };
   entries: PrerequisiteGuidanceEntry[];
+  /**
+   * Requests the running controller has submitted and awaits now: ordinary
+   * in-flight work, not an unresolved effect. Without a live owner, or once a
+   * transport recorded an unknown outcome, the same record is an unknown-effect entry.
+   */
+  inFlight: { scope: string; detail: string }[];
   /** Structurally eligible only; current provider/host readiness remains unverified. */
   independentItems: string[];
   historicalEvidence: {
@@ -175,17 +181,27 @@ export function derivePrerequisiteGuidance(
         "The existing controller propagates the exact retained result through normal validation and completion",
       nextAction: continuation,
     });
-  const unknown = (scope: string, reason: string) =>
-    add({
-      scope,
-      owner: "controller",
-      kind: "unknown-effect",
-      reason,
-      readiness: "unknown",
-      completion:
-        "Settle the exact retained effect or resources through the existing lifecycle; read-only observations do not prove submission completed",
-      nextAction: observe,
-    });
+  // Only the running controller's own pending requests are in flight: a
+  // stopped, held, failed or terminal Objective leaves them unresolved.
+  const inFlight: PrerequisiteGuidance["inFlight"] = [];
+  const live =
+    owner === "present" &&
+    !held &&
+    !terminal &&
+    !(view.state === "preparing" ? view.error : view.state === "failed");
+  const unknown = (scope: string, reason: string, pending?: string) =>
+    live && pending
+      ? inFlight.push({ scope, detail: pending })
+      : add({
+          scope,
+          owner: "controller",
+          kind: "unknown-effect",
+          reason,
+          readiness: "unknown",
+          completion:
+            "Settle the exact retained effect or resources through the existing lifecycle; read-only observations do not prove submission completed",
+          nextAction: observe,
+        });
 
   // Current submitted effects take precedence over historical questions or success.
   for (const [key, session] of Object.entries(state?.agentSessions ?? {})) {
@@ -194,21 +210,27 @@ export function derivePrerequisiteGuidance(
       unknown(
         `session:${key}`,
         "The admitted native turn's resource settlement is unknown",
+        `${session.scope.role} model call ${turn.terminal ? "settling" : "starting"}`,
       );
   }
-  for (const intent of Object.values(state?.graphProjectionIntents ?? {}))
-    if (
-      intent.effects.some(
-        (effect) =>
-          !effect.observation ||
-          effect.observation.outcome === "unknown" ||
-          effect.observation.outcome === "reconciled",
-      )
-    )
+  for (const intent of Object.values(state?.graphProjectionIntents ?? {})) {
+    const recorded = intent.effects.some(
+      (effect) =>
+        effect.observation?.outcome === "unknown" ||
+        effect.observation?.outcome === "reconciled",
+    );
+    const awaiting = intent.effects.filter(
+      (effect) => !effect.observation,
+    ).length;
+    if (recorded || awaiting)
       unknown(
         `projection:${intent.graphDigest}`,
         "An original graph projection request has no settled transport outcome; preserve its exact request and read-only reconciliation fence",
+        recorded
+          ? undefined
+          : `GitHub Work Item issue request${awaiting === 1 ? "" : "s"} (${awaiting}) awaiting response`,
       );
+  }
   if (
     state?.githubProjectStatus?.requests.some(
       (request) => !request.response && !request.notSent,
@@ -217,11 +239,13 @@ export function derivePrerequisiteGuidance(
     unknown(
       "project-status",
       "A submitted Project field update remains unknown; subsequent observations do not authorize another update",
+      "GitHub Project field update awaiting response",
     );
   if (state?.githubProgress?.requests.some((request) => !request.comment))
     unknown(
       "progress-publication",
       "A progress comment publication remains unknown; this presentation fence grants no new publication and does not stop otherwise admitted work",
+      "GitHub progress comment awaiting response",
     );
 
   const decision = (scope: string, pending: PendingDecisionView) => {
@@ -562,6 +586,7 @@ export function derivePrerequisiteGuidance(
     binding,
     control: { mode, owner } as PrerequisiteGuidance["control"],
     entries: [...entries.values()],
+    inFlight,
     independentItems,
     historicalEvidence,
   };

@@ -137,6 +137,8 @@ export interface PreparingStatusView extends WaitView {
   } | null;
   /** Planning stopped for a decision before producing a reviewable plan. */
   planningStopped: boolean;
+  /** The planner call now or last made, and projection's issue count. */
+  planningStep?: PlanningStepView | null;
   /** Projection has started (an issue exists or the phase was entered): a plan can no longer be refused. */
   projectionStarted?: boolean;
   /** Set when the installation configuration differs from the one planning started under. */
@@ -145,6 +147,35 @@ export interface PreparingStatusView extends WaitView {
   changedSincePlanning?: boolean;
   cancelledAt: string | null;
   error?: string | null;
+}
+
+export interface PlanningStepView {
+  /** The planner call now or last made: compile, diagnosis or graph-review. */
+  call: string | null;
+  /** Corrected compiles so far; 0 while the first draft is made. */
+  revision: number;
+  /** Work Item issues recorded of the plan's items, while projection runs. */
+  issues: { created: number; total: number } | null;
+}
+
+const PLANNER_CALLS: Record<string, string> = {
+  compile: "compiling the plan",
+  diagnosis: "diagnosing a failed plan check",
+  "graph-review": "reviewing the plan graph",
+};
+
+/** What planning does now, from the coordinator phase and recorded planner calls only. */
+export function planningActivity(
+  phase: string,
+  step?: PlanningStepView | null,
+): string {
+  if (phase === "projection")
+    return `creating Work Item issues${step?.issues ? ` (${step.issues.created} of ${step.issues.total})` : ""}`;
+  if (phase !== "planning") return phase;
+  const doing =
+    (step?.call && PLANNER_CALLS[step.call]) ??
+    "compiling and reviewing the plan";
+  return step?.revision ? `${doing} (revision ${step.revision})` : doing;
 }
 
 export interface CapacityView {
@@ -1059,13 +1090,10 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
     };
   const waiting = objectiveWait(view);
   if (waiting) return waiting;
-  const phase = view.coordinator?.phase ?? "planning";
-  const doing =
-    phase === "projection"
-      ? "creating Work Item issues from the accepted plan"
-      : phase === "planning"
-        ? "compiling and reviewing the plan"
-        : phase;
+  const doing = planningActivity(
+    view.coordinator?.phase ?? "planning",
+    view.planningStep,
+  );
   return {
     phase: "planning",
     summary: view.coordinator?.waitReason
@@ -1305,6 +1333,14 @@ export function configurationCommand(command: string, path?: string): string {
     : command;
 }
 
+/** The running controller's own pending requests, as one detail line. */
+export function inFlightLine(view: WaitView): string | undefined {
+  const pending = view.prerequisiteGuidance?.inFlight;
+  return pending?.length
+    ? `In flight: ${pending.map((entry) => entry.detail).join("; ")}`
+    : undefined;
+}
+
 /** Text status: the summary line, the next command, then compact detail. */
 export function renderStatusText(
   view: StatusView & StatusSummary,
@@ -1313,6 +1349,8 @@ export function renderStatusText(
   const lines = [
     `Objective #${view.objective}: ${phaseLabel(view.phase)} — ${view.summary}`,
   ];
+  const pending = inFlightLine(view);
+  if (pending) lines.push(pending);
   if (view.githubProgress)
     lines.push(
       `GitHub progress: ${view.githubProgress.failure ?? "projected"}; ${view.githubProgress.snapshots} retained snapshots${view.githubProgress.lastObservedAt ? `; last observed ${view.githubProgress.lastObservedAt}` : ""}${view.githubProgress.lastComment ? `; comment ${view.githubProgress.lastComment}` : ""}${view.githubProgress.unresolved ? "; publication outcome unknown; reconciliation only" : ""}`,

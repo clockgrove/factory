@@ -65,7 +65,10 @@ import {
   type Wait,
 } from "./fault.js";
 import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
-import { assertGitHubProgressProjection } from "./github-progress-state.js";
+import {
+  assertGitHubProgressProjection,
+  assertLiveStatusRecord,
+} from "./github-progress-state.js";
 import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
 import {
   linuxProcessIdentity,
@@ -394,6 +397,7 @@ function parsePreparation(
   }
   assertGraphProjectionIntents(value);
   assertGitHubProgressProjection(value.githubProgress, value);
+  assertLiveStatusRecord(value.githubLiveStatus);
   assertGitHubPlanDecision(value.githubPlanDecision, value);
   assertGitHubProjectStatusProjection(value.githubProjectStatus, value);
   if (

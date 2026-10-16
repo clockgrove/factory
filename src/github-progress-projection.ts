@@ -240,7 +240,13 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
   if (isExecutionState(retained))
     for (const [id, issue] of Object.entries(retained.issueByItemId))
       await projectWorkItemProgress(args, retained, live, id, issue);
-  await projectLiveStatus(args, retained, live, snapshot.phase);
+  await projectLiveStatus(
+    args,
+    retained,
+    live,
+    snapshot.phase,
+    snapshot.state === "preparing" ? snapshot.planningStep : undefined,
+  );
 }
 
 /** One Work Item's transition comment on its own issue, from structured facts only. */

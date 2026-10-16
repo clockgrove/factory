@@ -83,6 +83,7 @@ import {
 } from "./state-store.js";
 import {
   configurationCommand,
+  inFlightLine,
   renderServiceStatus,
   renderStatusText,
 } from "./status-summary.js";
@@ -937,7 +938,9 @@ async function watchObjective(
           JSON.stringify({
             objective,
             state: document.state,
+            phase: document.phase,
             summary: document.summary,
+            inFlight: document.prerequisiteGuidance?.inFlight ?? [],
             observedAt: new Date().toISOString(),
             staleMinutes: staleMs / 60_000,
             items,
@@ -947,9 +950,12 @@ async function watchObjective(
       );
       return;
     }
-    const headline =
+    const pending = inFlightLine(document);
+    const headline = [
       renderStatusText(document, option(process.argv.slice(3), "config"))[0] ??
-      `Objective #${objective}`;
+        `Objective #${objective}`,
+      ...(pending ? [pending] : []),
+    ];
     for (const line of renderWatch(headline, items, Date.now(), staleMs))
       console.log(redactDiagnosticDetail(line, secrets));
   };

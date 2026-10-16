@@ -328,6 +328,9 @@ export function activateProjectedObjective(args: {
     ...(preparation.githubProgress
       ? { githubProgress: preparation.githubProgress }
       : {}),
+    ...(preparation.githubLiveStatus
+      ? { githubLiveStatus: preparation.githubLiveStatus }
+      : {}),
     publicationContract: "exact-request-v1",
     ...(approvedPlaybookAdmission ? { approvedPlaybookAdmission } : {}),
     ...(preparation.approvedPlaybookPin !== undefined

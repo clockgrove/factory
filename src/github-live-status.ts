@@ -1,6 +1,10 @@
 import { type FactoryConfig, githubProgressSettings } from "./config.js";
 import type { GitHubGateway } from "./contracts.js";
-import { redactDiagnosticDetail } from "./diagnostics.js";
+import {
+  type ModelActivity,
+  objectiveModelActivity,
+  redactDiagnosticDetail,
+} from "./diagnostics.js";
 import { attachedFault } from "./fault.js";
 import {
   type LiveStatusRecord,
@@ -12,9 +16,11 @@ import {
   isCheckpointAdmissionFailure,
 } from "./recovery-checkpoint.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
+import { type PlanningStepView, planningActivity } from "./status-summary.js";
 import {
   activityLine,
   changesLine,
+  formatTokens,
   type ItemActivity,
   itemActivities,
   shortAge,
@@ -67,77 +73,91 @@ interface LiveTarget {
 
 /**
  * Edit the one live status comment per active Work Item issue, and the
- * Objective's, in place (#1325). Presentation only: a failure never stops the
- * run, and only the comment's creation is recorded, exactly once.
+ * Objective's, in place (#1325), from planning on. Presentation only: a
+ * failure never stops the run, and only the comment's creation is recorded,
+ * exactly once.
  */
 export async function projectLiveStatus(
   args: Args,
   retained: ContinuationState,
   live: () => ContinuationState,
   phase: string,
+  step?: PlanningStepView | null,
 ): Promise<void> {
   if (!githubProgressSettings(args.config) || !args.github.liveStatusComment)
     return;
-  if (!isExecutionState(retained)) return;
   const now = Date.now();
   const stamp = `<sub>Updated ${new Date(now).toISOString().slice(0, 16).replace("T", " ")}Z · edited in place while work runs</sub>`;
   const targets: LiveTarget[] = [];
   const itemDigests: string[] = [];
-  for (const [id, issue] of Object.entries(retained.issueByItemId)) {
-    const work = retained.work[id];
-    if (!work || !PROGRESS_ITEM_ID.test(id)) continue;
-    if (work.status === "pending" || work.status === "skipped") continue;
-    const tracking = retained.workItemTracking?.[id];
-    // A graph revision that rebinds the item to another issue ends its tracking.
-    if (tracking && tracking.issue !== issue) continue;
-    const active = ACTIVE.includes(work.status);
-    // A settled item gets no new comment; an existing one gets its final edit.
-    if (!active && !tracking?.live) continue;
-    const digest = JSON.stringify([
-      work.status,
-      work.step,
-      work.attempt,
-      work.pullRequest,
-    ]);
-    itemDigests.push(`${id}:${digest}`);
-    targets.push({
-      label: `Work Item ${id}`,
-      item: { id, issue },
-      issue,
-      digest,
-      active,
-      read: (state) =>
-        isExecutionState(state)
-          ? state.workItemTracking?.[id]?.live
-          : undefined,
-      write: (state, record) => {
-        if (!isExecutionState(state))
-          throw new Error("Work Item tracking requires an executing Objective");
-        state.workItemTracking ??= {};
-        state.workItemTracking[id] ??= { issue };
-        state.workItemTracking[id].live = record;
-      },
-      render: (items, at) => {
-        const item = items.find((entry) => entry.id === id);
-        return itemBody(item ?? { id, status: work.status }, at);
-      },
-    });
-  }
+  // Planning has no Work Item yet: the Objective's comment shows its step.
+  const planning = isExecutionState(retained)
+    ? undefined
+    : planningActivity(retained.coordinator.phase, step);
+  if (isExecutionState(retained))
+    for (const [id, issue] of Object.entries(retained.issueByItemId)) {
+      const work = retained.work[id];
+      if (!work || !PROGRESS_ITEM_ID.test(id)) continue;
+      if (work.status === "pending" || work.status === "skipped") continue;
+      const tracking = retained.workItemTracking?.[id];
+      // A graph revision that rebinds the item to another issue ends its tracking.
+      if (tracking && tracking.issue !== issue) continue;
+      const active = ACTIVE.includes(work.status);
+      // A settled item gets no new comment; an existing one gets its final edit.
+      if (!active && !tracking?.live) continue;
+      const digest = JSON.stringify([
+        work.status,
+        work.step,
+        work.attempt,
+        work.pullRequest,
+      ]);
+      itemDigests.push(`${id}:${digest}`);
+      targets.push({
+        label: `Work Item ${id}`,
+        item: { id, issue },
+        issue,
+        digest,
+        active,
+        read: (state) =>
+          isExecutionState(state)
+            ? state.workItemTracking?.[id]?.live
+            : undefined,
+        write: (state, record) => {
+          if (!isExecutionState(state))
+            throw new Error(
+              "Work Item tracking requires an executing Objective",
+            );
+          state.workItemTracking ??= {};
+          state.workItemTracking[id] ??= { issue };
+          state.workItemTracking[id].live = record;
+        },
+        render: (items, at) => {
+          const item = items.find((entry) => entry.id === id);
+          return itemBody(item ?? { id, status: work.status }, at);
+        },
+      });
+    }
   const objectiveActive = !TERMINAL_PHASES.includes(phase);
   if (objectiveActive || retained.githubLiveStatus)
     targets.push({
       label: `Objective #${args.objective}`,
       issue: args.objective,
-      digest: JSON.stringify([phase, ...itemDigests]),
+      digest: JSON.stringify([phase, planning, ...itemDigests]),
       active: objectiveActive,
-      read: (state) =>
-        isExecutionState(state) ? state.githubLiveStatus : undefined,
+      read: (state) => state.githubLiveStatus,
       write: (state, record) => {
-        if (!isExecutionState(state))
-          throw new Error("Live status requires an executing Objective");
         state.githubLiveStatus = record;
       },
-      render: (items, at) => objectiveBody(phase, items, at),
+      render: (items, at) =>
+        planning === undefined
+          ? objectiveBody(phase, items, at)
+          : planningBody(
+              phase,
+              planning,
+              retained.coordinator?.phaseStartedAt,
+              objectiveModelActivity(args.config.repository, args.objective),
+              at,
+            ),
     });
   const key = (target: LiveTarget) =>
     `${args.config.repository}#${args.objective}:${retained.runId}:${target.issue}`;
@@ -227,11 +247,9 @@ async function editLiveStatus(
       } catch (error) {
         // The POST follows this call, so nothing was sent.
         const latest = live();
-        if (isExecutionState(latest)) {
-          if (target.item)
-            delete latest.workItemTracking?.[target.item.id]?.live;
-          else delete latest.githubLiveStatus;
-        }
+        if (!target.item) delete latest.githubLiveStatus;
+        else if (isExecutionState(latest))
+          delete latest.workItemTracking?.[target.item.id]?.live;
         args.save();
         throw error;
       }
@@ -279,6 +297,46 @@ function objectiveBody(
     );
   }
   if (lines.length === 2) lines.push("No Work Item has started yet.");
+  return lines.join("\n");
+}
+
+/** Planning's step, how long its phase has run and the planner's activity: structured facts only. */
+function planningBody(
+  phase: string,
+  activity: string,
+  phaseStartedAt: string | undefined,
+  model: ModelActivity | undefined,
+  now: number,
+): string {
+  const lines = [
+    `### Live status · ${phase}`,
+    "",
+    `**${activity.charAt(0).toUpperCase()}${activity.slice(1)}**`,
+  ];
+  const since = phaseStartedAt ? Date.parse(phaseStartedAt) : Number.NaN;
+  if (Number.isFinite(since))
+    lines.push(`- In this phase ${shortAge(now - since)}`);
+  if (model) {
+    const call = `${model.phase} call`;
+    const usage = [
+      ...(model.inputTokens !== undefined
+        ? [`${formatTokens(model.inputTokens)} input`]
+        : []),
+      ...(model.outputTokens !== undefined
+        ? [`${formatTokens(model.outputTokens)} output tokens`]
+        : []),
+    ];
+    if (model.endedAt !== undefined)
+      lines.push(
+        `- Model: last ${call} ${model.outcome} after ${shortAge(model.endedAt - model.startedAt)}${usage.length ? ` · ${usage.join(" · ")}` : ""}`,
+      );
+    else {
+      const quiet = now - model.lastEventAt;
+      lines.push(
+        `- Model: ${call} running ${shortAge(now - model.startedAt)} · last event ${shortAge(quiet)} ago${quiet > STALE_MS ? " (stale)" : ""} · ${model.events} event${model.events === 1 ? "" : "s"}`,
+      );
+    }
+  }
   return lines.join("\n");
 }
 

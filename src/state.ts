@@ -251,6 +251,8 @@ export interface PreparationState {
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
   githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
   githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
+  /** The Objective's live status comment while it plans; execution keeps the same record. */
+  githubLiveStatus?: import("./github-progress-state.js").LiveStatusRecord;
   /** Immutable advisory selection; absence is legacy no-input, null is explicit no-input. */
   approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
   sourcePacketDigest?: string;

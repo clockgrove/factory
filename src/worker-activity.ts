@@ -223,7 +223,8 @@ export function shortAge(ms: number): string {
   return minutes < 120 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
 }
 
-const tokens = (value: number): string =>
+/** A token count such as `950`, `42k` or `1.2M`. */
+export const formatTokens = (value: number): string =>
   value >= 1_000_000
     ? `${(value / 1_000_000).toFixed(1)}M`
     : value >= 1000
@@ -242,7 +243,7 @@ export function activityLine(
     `last worker activity ${shortAge(age)} ago${age > staleMs ? " (stale)" : ""}`,
     `${activity.turns} turns`,
     ...(activity.contextTokens !== undefined
-      ? [`context ${tokens(activity.contextTokens)}`]
+      ? [`context ${formatTokens(activity.contextTokens)}`]
       : []),
     ...(activity.compactions
       ? [
@@ -284,14 +285,14 @@ export function itemHeadline(item: ItemActivity): string {
   ].join(" · ");
 }
 
-/** The `factory watch` screen: a headline, then each Work Item's lines. */
+/** The `factory watch` screen: the status headline and in-flight detail, then each Work Item's lines. */
 export function renderWatch(
-  headline: string,
+  headline: string[],
   items: ItemActivity[],
   now: number,
   staleMs: number,
 ): string[] {
-  const lines = [headline];
+  const lines = [...headline];
   for (const item of items) {
     lines.push("", itemHeadline(item));
     const activity = activityLine(item.activity, now, staleMs);

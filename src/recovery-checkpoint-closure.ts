@@ -853,9 +853,22 @@ async function verifyDescription(
           "Restoration archive repository differs from its continuation",
         );
       for (const ref of value.contentRefs) add(ref);
+      // A retired Objective in the source checkpoint is its snapshot only: its
+      // evidence is in the archive history and was never installed here, so it
+      // adds no original to verify (#1307), the same rule restore applies.
+      const archived = new Set(
+        (value.gaps as RecoveryClosureGap[])
+          .filter(
+            (gap) =>
+              gap.availability === ARCHIVED_EVIDENCE &&
+              gap.required === false &&
+              typeof gap.evidenceCommit === "string",
+          )
+          .map((gap) => gap.path),
+      );
       for (const file of value.files) {
         add(file.ref);
-        if (file.kind === "continuation") {
+        if (file.kind === "continuation" && !archived.has(file.path)) {
           const match = /^objectives\/([1-9][0-9]*)\/state\.json$/.exec(
             file.path,
           );

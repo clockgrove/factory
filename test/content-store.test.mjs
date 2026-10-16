@@ -1018,6 +1018,43 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       usageAvailable: false,
     },
   );
+  // A cancelled Objective whose planning return exists nowhere else: once it
+  // retires, that body is only in the archive history and a restored
+  // installation never receives it (#1307).
+  const exclusiveReturn = randomUUID();
+  const exclusiveRef = store.putBytes(
+    Buffer.from(
+      JSON.stringify({
+        schemaVersion: 1,
+        invocationId: exclusiveReturn,
+        phase: "compile",
+        representation: "literal-agent-text",
+        response: "Exclusive retired planning return",
+        terminal: "completed",
+      }),
+    ),
+    { mediaType: "application/json" },
+  );
+  saveState(
+    statePath(repository, 6),
+    {
+      ...structuredClone(cancelled),
+      objective: 6,
+      runId: "retired-exclusive-orchard-documentation",
+      planningRecovery: {
+        phase: "stopped",
+        invocations: [
+          {
+            id: exclusiveReturn,
+            phase: "compile",
+            nativeReturns: [exclusiveRef],
+          },
+        ],
+        history: [],
+      },
+    },
+    { observeMemory: false },
+  );
   // Installation-level accounting stays live when Objectives retire (#1307).
   retainWorkerAccounting(
     {

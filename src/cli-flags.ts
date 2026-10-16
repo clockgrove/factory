@@ -55,6 +55,7 @@ const commandFlags: Record<string, string[]> = {
   supervisor: ["cli", "disable", "service-credential"],
   decide: ["objective", "item", "criterion", "outcome", "answer", "reason"],
   status: ["objective", "json"],
+  watch: ["objective", "json", "follow", "interval", "stale-minutes"],
   diagnostics: [
     "objective",
     "follow",

@@ -5,6 +5,7 @@ import {
   continuationStatusDocument,
   redactDiagnosticDetail,
 } from "./diagnostics.js";
+import { projectLiveStatus } from "./github-live-status.js";
 import { planDecisionTemplate } from "./github-plan-decisions.js";
 import {
   type GitHubProgressDecision,
@@ -239,6 +240,7 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
   if (isExecutionState(retained))
     for (const [id, issue] of Object.entries(retained.issueByItemId))
       await projectWorkItemProgress(args, retained, live, id, issue);
+  await projectLiveStatus(args, retained, live, snapshot.phase);
 }
 
 /** One Work Item's transition comment on its own issue, from structured facts only. */

@@ -9,6 +9,7 @@ import {
 import { isAbsolute, join } from "node:path";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
+import { itemActivities, renderWatch } from "./worker-activity.js";
 import {
   readSelectedConfig,
   type SelectedConfig,
@@ -150,6 +151,8 @@ function help(): void {
       "      Freeze an existing completed local return; ordinary validation and review remain required",
       "  propose-amendment --objective N --proposal FILE",
       "      Submit a graph amendment (or a replacement for a rejected one)",
+      "  watch --objective N [--json] [--follow [--interval SECONDS]] [--stale-minutes N]",
+      "      One screen: each Work Item's step, worker liveness and effort, files changed so far and recent tool calls",
       "  diagnostics --objective N [--follow | --summary | --analyze | --logs ITEM [--follow] | --captures [--content RECORD_ID]]",
       "  diagnostics --scorecard FILE [--json] [--output ABSOLUTE_NEW_FILE]",
       "      The one observation command: agent timeline by default. --summary prints the efficiency report (time per stage, operator waits, attempts, tokens per role; --json for tools). --analyze takes [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--native-tool-content] [--json|--gantt] [--output ABSOLUTE_NEW_FILE]",
@@ -543,6 +546,7 @@ async function dispatchMain(): Promise<void> {
       "decide",
       "run",
       "status",
+      "watch",
       "diagnostics",
       "export-captures",
       "select",
@@ -690,6 +694,8 @@ async function dispatchMain(): Promise<void> {
         `Provider: ${provider.name} (${providerSummary(config)}; selected by ${provider.selectedBy})`,
       );
     }
+  } else if (command === "watch") {
+    await watchObjective(config, objective, args);
   } else if (command === "export-captures") {
     const result = await runCaptureExportCommand(config, objective, args);
     console.log(JSON.stringify(result, null, 2));
@@ -901,6 +907,66 @@ function statusDocument(
     },
     secrets,
   };
+}
+
+/** `factory watch`: one screen of each Work Item's live state; `--follow` reprints it. */
+async function watchObjective(
+  config: FactoryConfig,
+  objective: number,
+  args: string[],
+): Promise<void> {
+  const number = (name: string, fallback: number): number => {
+    const raw = option(args, name);
+    if (raw === undefined) return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0)
+      throw new Error(`--${name} requires a positive number`);
+    return value;
+  };
+  const staleMs = number("stale-minutes", 5) * 60_000;
+  const intervalMs = number("interval", 30) * 1000;
+  const print = () => {
+    const { document, secrets } = statusDocument(config, objective);
+    const continuation = readContinuation(config.repository, objective);
+    const items = continuation
+      ? itemActivities(config.repository, continuation)
+      : [];
+    if (args.includes("--json")) {
+      console.log(
+        redactDiagnosticDetail(
+          JSON.stringify({
+            objective,
+            state: document.state,
+            summary: document.summary,
+            observedAt: new Date().toISOString(),
+            staleMinutes: staleMs / 60_000,
+            items,
+          }),
+          secrets,
+        ),
+      );
+      return;
+    }
+    const headline =
+      renderStatusText(document, option(process.argv.slice(3), "config"))[0] ??
+      `Objective #${objective}`;
+    for (const line of renderWatch(headline, items, Date.now(), staleMs))
+      console.log(redactDiagnosticDetail(line, secrets));
+  };
+  print();
+  if (!args.includes("--follow")) return;
+  await new Promise<void>((resolve) => {
+    const timer = setInterval(() => {
+      console.log("");
+      print();
+    }, intervalMs);
+    const stop = () => {
+      clearInterval(timer);
+      resolve();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
 }
 
 function statusLines(

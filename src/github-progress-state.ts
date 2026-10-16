@@ -152,3 +152,50 @@ export function assertGitHubProgressProjection(
   )
     throw new Error("Invalid GitHub progress disposition");
 }
+
+/**
+ * The one live status comment Factory edits in place on an issue while work
+ * runs (#1325): who created it and, once the create is observed, its identity.
+ * Edits are idempotent and keep no state; only the create is exactly-once.
+ */
+export interface LiveStatusRecord {
+  actorId: number;
+  comment?: { id: number; createdAt: string };
+}
+
+/** The live status comment's hidden marker: one per run and issue. */
+export function liveStatusMarker(binding: {
+  objective: number;
+  runId: string;
+  item?: string;
+}): string {
+  return binding.item === undefined
+    ? `<!-- factory:live;objective=${binding.objective};run=${binding.runId} -->`
+    : `<!-- factory:live;objective=${binding.objective};item=${binding.item};run=${binding.runId} -->`;
+}
+
+export function assertLiveStatusRecord(value: unknown): void {
+  if (value === undefined) return;
+  const positive = (field: unknown) =>
+    Number.isSafeInteger(field) && Number(field) > 0;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid live status record");
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).some((key) => !["actorId", "comment"].includes(key)) ||
+    !positive(record.actorId)
+  )
+    throw new Error("Invalid live status record");
+  if (record.comment === undefined) return;
+  const comment = record.comment as Record<string, unknown>;
+  if (
+    !comment ||
+    typeof comment !== "object" ||
+    Array.isArray(comment) ||
+    Object.keys(comment).some((key) => !["id", "createdAt"].includes(key)) ||
+    !positive(comment.id) ||
+    typeof comment.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(comment.createdAt))
+  )
+    throw new Error("Invalid live status comment observation");
+}

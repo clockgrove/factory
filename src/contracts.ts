@@ -1584,6 +1584,19 @@ export interface GitHubGateway {
     /** Durable exact intent immediately before the sole POST. */
     beforeWrite: (actorId: number) => void | Promise<void>;
   }): Promise<import("./github-progress-state.js").ProgressCommentIdentity>;
+  /**
+   * The issue's live status comment: created once (the intent is recorded
+   * before the sole POST; an unresolved create is reconciled by reading
+   * only) and edited in place afterwards. Returns the settled record.
+   */
+  liveStatusComment?(request: {
+    objective: number;
+    item?: { id: string; issue: number };
+    runId: string;
+    body: string;
+    record?: import("./github-progress-state.js").LiveStatusRecord;
+    beforeWrite: (actorId: number) => void | Promise<void>;
+  }): Promise<import("./github-progress-state.js").LiveStatusRecord>;
   /** Strict protection: GitHub merges the base into the PR from exactly `identity.headSha`; returns the verified new head. */
   updateBranch(
     identity: PullRequestIdentity,

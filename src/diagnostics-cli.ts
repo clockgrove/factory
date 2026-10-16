@@ -1,4 +1,5 @@
 import { isExecutionState } from "./state.js";
+import { claudeWorker, renderWorkerProgress } from "./worker-activity.js";
 import { readFileSync } from "node:fs";
 import { runAnalysisCommand, writeAnalysisReport } from "./analysis-cli.js";
 import { readInteractionContent, readInteractionMetadata } from "./capture.js";
@@ -111,9 +112,14 @@ export async function runDiagnosticsCommand(
     if (!attempt)
       throw new Error("--logs requires a Work Item with a recorded attempt");
     let lines = 0;
+    // A Claude worker reports its activity in the progress stream, not the
+    // output log (#1325).
+    const claude = claudeWorker(config.repository, attempt);
     const show = () => {
-      const complete = readWorkerOutput(config.repository, attempt).split("\n");
-      complete.pop();
+      const complete = claude
+        ? renderWorkerProgress(config.repository, attempt)
+        : readWorkerOutput(config.repository, attempt).split("\n");
+      if (!claude) complete.pop();
       for (const line of complete.slice(lines))
         console.log(redactDiagnosticDetail(line, secrets));
       lines = complete.length;

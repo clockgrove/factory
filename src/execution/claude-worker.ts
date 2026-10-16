@@ -52,11 +52,13 @@ import {
   writeHarnessResult,
 } from "./harness-support.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
+import { toolActivity } from "./tool-activity.js";
 
 function progressEvent(
   message: SDKMessage,
   attemptId: string,
   secrets: string[],
+  worktree: string,
 ): Record<string, unknown> {
   const event: Record<string, unknown> = {
     eventId: randomUUID(),
@@ -76,6 +78,23 @@ function progressEvent(
       path: redact(path, secrets),
       ...(version && { version: redact(version, secrets) }),
     }));
+  }
+  // Which tools the turn called and what they targeted, never their content.
+  if (message.type === "assistant") {
+    const content = (message.message as { content?: unknown }).content;
+    const tools = (Array.isArray(content) ? content : [])
+      .filter(
+        (block): block is { type: "tool_use"; name: unknown; input: unknown } =>
+          !!block && typeof block === "object" && block.type === "tool_use",
+      )
+      .map((block) => toolActivity(block.name, block.input, worktree))
+      .filter((activity) => activity !== undefined)
+      .slice(0, 16)
+      .map((activity) => ({
+        tool: activity.tool,
+        ...(activity.target && { target: redact(activity.target, secrets) }),
+      }));
+    if (tools.length) event.tools = tools;
   }
   if (message.type === "result") {
     event.success = message.subtype === "success" && !message.is_error;
@@ -325,6 +344,7 @@ async function main(): Promise<void> {
               message,
               input.request.attemptId ?? "",
               redactionValues,
+              input.request.worktree,
             ),
             ...observedUsage,
           });

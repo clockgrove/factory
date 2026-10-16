@@ -49,7 +49,10 @@ import {
   type Wait,
 } from "./fault.js";
 import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
-import { assertGitHubProgressProjection } from "./github-progress-state.js";
+import {
+  assertGitHubProgressProjection,
+  assertLiveStatusRecord,
+} from "./github-progress-state.js";
 import { assertGitHubProjectStatusProjection } from "./github-project-state.js";
 import {
   assertGraphRevisions,
@@ -217,6 +220,8 @@ export interface WorkItemTracking {
   issue: number;
   progress?: import("./github-progress-state.js").GitHubProgressProjection;
   projectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
+  /** The item's live status comment, edited in place while it runs (#1325). */
+  live?: import("./github-progress-state.js").LiveStatusRecord;
 }
 
 export interface CoordinatorDisposition {
@@ -413,6 +418,8 @@ export interface FactoryState {
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
   githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
   githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
+  /** The Objective's live status comment, edited in place while it runs (#1325). */
+  githubLiveStatus?: import("./github-progress-state.js").LiveStatusRecord;
   /**
    * Each Work Item's presentation on its own issue, by item id: progress comments and the
    * card's Project Status. The issue is recorded, so a later graph revision cannot rebind it.
@@ -978,7 +985,8 @@ export function parseFactoryState(
       const entry = raw as Record<string, unknown>;
       if (
         Object.keys(entry).some(
-          (key) => !["issue", "progress", "projectStatus"].includes(key),
+          (key) =>
+            !["issue", "progress", "projectStatus", "live"].includes(key),
         ) ||
         !Number.isSafeInteger(entry.issue) ||
         (entry.issue as number) <= 0
@@ -999,8 +1007,10 @@ export function parseFactoryState(
         ...context,
         issue,
       });
+      assertLiveStatusRecord(entry.live);
     }
   }
+  assertLiveStatusRecord(state.githubLiveStatus);
   assertPublicationIntents(state as unknown as FactoryState);
   sha(state.configDigest, "configDigest", 64);
   if (state.sourcePacketDigest !== undefined)

@@ -367,6 +367,16 @@ assert.throws(() => assertPinnedNpmScripts(checkout, rawBase, rawChanged, [boots
       status.split("\n")[1],
       `Next: factory run --objective 1 --config '${root}/selected config'"'"'s/factory.json'`,
     );
+    // The installed watch command reads the same status with no run recorded.
+    const watch = JSON.parse(
+      run("watch", "--objective", "1", "--json", "--config", config),
+    );
+    assert.equal(watch.state, "not-started");
+    assert.deepEqual(watch.items, []);
+    assert.equal(
+      run("watch", "--objective", "1", "--config", config).split("\n")[0],
+      "Objective #1: not started — no Factory run recorded",
+    );
     // A freshly installed target has no historical provider accounting. The installed
     // observation command must keep that absence visible and require no credentials.
     const summary = JSON.parse(

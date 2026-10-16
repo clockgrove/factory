@@ -35,6 +35,8 @@ import {
 import type { GitHubDecisionComment } from "./github-plan-decisions.js";
 import { parsePlanDecision } from "./github-plan-decisions.js";
 import {
+  type LiveStatusRecord,
+  liveStatusMarker,
   PROGRESS_ITEM_ID,
   type ProgressCommentIdentity,
   progressDigest,
@@ -415,6 +417,102 @@ export class RealGitHubGateway implements GitHubGateway {
         "GitHub progress create returned no exact authenticated observation",
       );
     return identity(comment, actor.id);
+  }
+
+  async liveStatusComment(
+    request: Parameters<NonNullable<GitHubGateway["liveStatusComment"]>>[0],
+  ): Promise<LiveStatusRecord> {
+    const marker = liveStatusMarker({
+      objective: request.objective,
+      runId: request.runId,
+      item: request.item?.id,
+    });
+    const issue = request.item?.issue ?? request.objective;
+    if (
+      !Number.isSafeInteger(request.objective) ||
+      request.objective <= 0 ||
+      (request.item &&
+        (!PROGRESS_ITEM_ID.test(request.item.id) ||
+          !Number.isSafeInteger(request.item.issue) ||
+          request.item.issue <= 0)) ||
+      !/^[a-zA-Z0-9-]{1,128}$/.test(request.runId) ||
+      !request.body.startsWith(`${marker}\n`) ||
+      Buffer.byteLength(request.body) > 24_000
+    )
+      throw new Error("Invalid GitHub live status request identity");
+    type Comment = {
+      id: number;
+      created_at?: string;
+      body?: string;
+      issue_url?: string;
+      user?: { id?: number };
+    };
+    const issueUrl = `https://api.github.com/repos/${this.repository}/issues/${issue}`;
+    const ours = (comment: Comment, actorId: number) =>
+      Number.isSafeInteger(comment.id) &&
+      comment.id > 0 &&
+      comment.user?.id === actorId &&
+      comment.issue_url === issueUrl &&
+      typeof comment.created_at === "string" &&
+      Number.isFinite(Date.parse(comment.created_at)) &&
+      !!comment.body?.startsWith(`${marker}\n`);
+    const edit = async (record: LiveStatusRecord & { comment: object }) => {
+      const comment = await this.api<Comment>(
+        "PATCH",
+        `issues/comments/${record.comment.id}`,
+        { body: request.body },
+      );
+      if (
+        comment.id !== record.comment.id ||
+        comment.user?.id !== record.actorId
+      )
+        throw new Error("GitHub live status edit returned another comment");
+      return record;
+    };
+    if (request.record?.comment)
+      return edit(request.record as LiveStatusRecord & { comment: object });
+    const comments = await this.pages<Comment>(`issues/${issue}/comments`);
+    if (request.record) {
+      // A create whose outcome was not observed: adopt it only by reading.
+      const found = comments.filter((comment) =>
+        ours(comment, request.record!.actorId),
+      );
+      if (found.length !== 1)
+        throw new Error(
+          "GitHub live status create remains unknown; reconciliation does not authorize another POST",
+        );
+      return edit({
+        actorId: request.record.actorId,
+        comment: { id: found[0]!.id, createdAt: found[0]!.created_at! },
+      });
+    }
+    const actor = await this.client.viewerIdentity();
+    const existing = comments.filter((comment) => ours(comment, actor.id));
+    if (existing.length > 1)
+      throw new Error("Several GitHub live status comments share one marker");
+    if (existing.length === 1)
+      return edit({
+        actorId: actor.id,
+        comment: { id: existing[0]!.id, createdAt: existing[0]!.created_at! },
+      });
+    if (comments.some((comment) => comment.body?.startsWith(marker)))
+      throw new Error("A GitHub live status marker belongs to another author");
+    await request.beforeWrite(actor.id);
+    const comment = await this.api<Comment>(
+      "POST",
+      `issues/${issue}/comments`,
+      {
+        body: request.body,
+      },
+    );
+    if (!ours(comment, actor.id))
+      throw new Error(
+        "GitHub live status create returned no exact authenticated observation",
+      );
+    return {
+      actorId: actor.id,
+      comment: { id: comment.id, createdAt: comment.created_at! },
+    };
   }
 
   /**

@@ -33,6 +33,7 @@ import {
   renderDiscoveryPrompt,
   writeHarnessResult,
 } from "./harness-support.js";
+import { shellProgram, worktreePath } from "./tool-activity.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
 
 interface WorkerInput {
@@ -54,6 +55,7 @@ function progressEvent(
   attemptId: string,
   secrets: string[],
   commandOffsets: Map<string, number>,
+  worktree: string,
 ): Record<string, unknown> {
   const base: Record<string, unknown> = {
     eventId: randomUUID(),
@@ -74,6 +76,9 @@ function progressEvent(
     base.itemId = event.item.id;
     base.itemType = event.item.type;
     if (event.item.type === "command_execution") {
+      base.tool = "shell";
+      const program = shellProgram(event.item.command);
+      if (program) base.target = program;
       base.exitCode = event.item.exit_code;
       base.status = event.item.status;
       const output = event.item.aggregated_output;
@@ -88,8 +93,15 @@ function progressEvent(
     } else if (event.item.type === "mcp_tool_call") {
       base.tool = `${event.item.server}/${event.item.tool}`;
       base.status = event.item.status;
-    } else if (event.item.type === "file_change")
+    } else if (event.item.type === "file_change") {
       base.status = event.item.status;
+      base.tool = "edit";
+      const paths = event.item.changes
+        .map((change) => worktreePath(worktree, change.path))
+        .filter((path): path is string => path !== undefined)
+        .slice(0, 16);
+      if (paths.length) base.paths = paths;
+    }
   }
   return base;
 }
@@ -328,6 +340,7 @@ export async function runCodexWorker(
             request.attemptId ?? "",
             redactionValues,
             commandOffsets,
+            request.worktree,
           );
           observe({
             ...observation,

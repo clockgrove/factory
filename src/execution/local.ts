@@ -681,6 +681,31 @@ const PRIVATE_STAGING = [
   ".factory-inputs",
   ".factory-assets.json",
 ];
+/**
+ * Pathspecs that keep present private staging out of `git add -A -- .`.
+ * Git rejects an explicit ignored path even when it is an exclusion, and
+ * already ignored untracked staging cannot be added by the root pathspec.
+ */
+export function privateStagingExclusions(
+  worktree: string,
+  names: readonly string[] = [...PRIVATE_STAGING, ".factory-media"],
+): string[] {
+  return names
+    .filter(
+      (name) =>
+        pinnedGitRaw(
+          worktree,
+          "ls-files",
+          "--cached",
+          "--others",
+          "--exclude-standard",
+          "-z",
+          "--",
+          name,
+        ).length > 0,
+    )
+    .map((name) => `:(exclude,literal)${name}`);
+}
 /** The first path under the worktree Factory cannot read, if any. */
 function firstUnreadable(directory: string, relative = ""): string | undefined {
   let names: string[];
@@ -1193,21 +1218,10 @@ export async function freezeRejectedCollection(args: {
       "-A",
       "--",
       ".",
-      ...[...PRIVATE_STAGING, ".factory-media"]
-        .filter(
-          (name) =>
-            pinnedGitRaw(
-              args.worktree,
-              "ls-files",
-              "--cached",
-              "--others",
-              "--exclude-standard",
-              "-z",
-              "--",
-              name,
-            ).length > 0,
-        )
-        .map((name) => `:(exclude,literal)${name}`),
+      ...privateStagingExclusions(args.worktree, [
+        ...PRIVATE_STAGING,
+        ".factory-media",
+      ]),
     );
     for (const name of [...PRIVATE_STAGING, ".factory-media"])
       if (
@@ -1411,21 +1425,7 @@ export async function collectWorktreeResult(
       "-A",
       "--",
       ".",
-      // Git rejects an explicit ignored path even when it is an exclusion.
-      // Already ignored untracked staging cannot be added by the root pathspec.
-      ...PRIVATE_STAGING.filter(
-        (name) =>
-          pinnedGitRaw(
-            worktree,
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            "--",
-            name,
-          ).length > 0,
-      ).map((name) => `:(exclude,literal)${name}`),
+      ...privateStagingExclusions(worktree, PRIVATE_STAGING),
     );
   } catch (error) {
     // Git cannot index what the worker left unreadable; any other failure

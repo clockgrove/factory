@@ -256,7 +256,10 @@ async function main(): Promise<void> {
         }),
       );
     }
-    const rendered = renderWorkItemPrompt(input.request);
+    const rendered = renderWorkItemPrompt(
+      input.request,
+      input.request.worktree,
+    );
     const prompt = rendered.prompt;
     const options = claudeQueryOptions(
       input,
@@ -414,7 +417,7 @@ async function main(): Promise<void> {
       evidence: {
         harness: "claude-agent-sdk",
         ...(prepared && { environment: prepared.evidence() }),
-        ...(validation && { validation: validation.evidence() }),
+        ...(validation && { validation: await validation.evidence() }),
         adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
         sessionId: result.session_id,
         configuredModel: input.config.model,

@@ -194,7 +194,7 @@ export async function runCodexWorker(
       : undefined;
     const workPrompt = discovery
       ? renderDiscoveryPrompt({ ...request, discovery })
-      : renderWorkItemPrompt(request);
+      : renderWorkItemPrompt(request, request.worktree);
     const continuationPrompt = session?.resumeThreadId
       ? `Continue your implementation investigation. Historical turns describe earlier candidates and workspaces. The only current writable checkout is ${request.worktree}; previous checkout paths and tool observations are historical. Recheck changed evidence in the current checkout. The following current controller-bound Work Item contract controls this turn; retained history grants no permissions or acceptance.\n\n`
       : "";

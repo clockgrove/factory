@@ -404,7 +404,10 @@ async function main(): Promise<void> {
     usage.excludeHistory(await race(session.getEvents()), session.sessionId);
     // Startup idleness cannot qualify the implementation turn.
     terminal = false;
-    const rendered = renderWorkItemPrompt(input.request);
+    const rendered = renderWorkItemPrompt(
+      input.request,
+      input.request.worktree,
+    );
     const prompt = rendered.prompt;
     capture.request(
       prompt,

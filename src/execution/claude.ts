@@ -147,7 +147,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     session.data.pendingWorkerIdentity = request.attemptId;
     session.ref.currentTurn = {
       invocationId: request.attemptId!,
-      requestDigest: claudeDigest(workItemPrompt(request)),
+      requestDigest: claudeDigest(workItemPrompt(request, request.worktree)),
       dispatch: "intent",
       resources: "unknown",
     };

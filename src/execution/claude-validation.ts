@@ -6,10 +6,11 @@ import {
   hasUnresolvedSubprocesses,
   pinnedGit,
   pinnedGitAsync,
+  pinnedGitMagicAsync,
 } from "../process.js";
 import { validateTree } from "../validation.js";
 import { CandidateValidationFailure } from "../work-repair.js";
-import { FACTORY_EMAIL } from "./local.js";
+import { FACTORY_EMAIL, privateStagingExclusions } from "./local.js";
 
 export const factoryValidationServerName = "factory-validation";
 export const factoryValidationServerVersion = "1.0.0";
@@ -91,6 +92,24 @@ function bounded(text: string): string {
     : `[earlier output omitted]\n${text.slice(-maxOutputChars)}`;
 }
 
+/** The tree of the worker's current files without private staging, as collection stages them. */
+export async function workerFilesTree(worktree: string): Promise<string> {
+  await pinnedGitMagicAsync(
+    worktree,
+    "add",
+    "-A",
+    "--",
+    ".",
+    ...privateStagingExclusions(worktree),
+  );
+  try {
+    return pinnedGit(worktree, "write-tree");
+  } finally {
+    // Leave the worker's index as it was; collection stages its own result.
+    await pinnedGitAsync(worktree, "reset", "--quiet");
+  }
+}
+
 /**
  * Run the item's declared validation commands on a snapshot of the worktree.
  * The snapshot is a commit of the current files; the controller's validator
@@ -101,31 +120,23 @@ export async function runDeclaredValidation(
   worktree: string,
   commands: readonly string[],
   run: number,
-): Promise<{ passed: boolean; text: string }> {
-  await pinnedGitAsync(worktree, "add", "--all");
-  let commit: string;
-  let tree: string;
-  try {
-    tree = pinnedGit(worktree, "write-tree");
-    commit = (
-      await pinnedGitAsync(
-        worktree,
-        "-c",
-        "user.name=Factory",
-        "-c",
-        `user.email=${FACTORY_EMAIL}`,
-        "commit-tree",
-        tree,
-        "-p",
-        "HEAD",
-        "-m",
-        "Factory worker validation snapshot",
-      )
-    ).trim();
-  } finally {
-    // Leave the worker's index as it was; collection stages its own result.
-    await pinnedGitAsync(worktree, "reset", "--quiet");
-  }
+): Promise<{ passed: boolean; text: string; tree: string }> {
+  const tree = await workerFilesTree(worktree);
+  const commit = (
+    await pinnedGitAsync(
+      worktree,
+      "-c",
+      "user.name=Factory",
+      "-c",
+      `user.email=${FACTORY_EMAIL}`,
+      "commit-tree",
+      tree,
+      "-p",
+      "HEAD",
+      "-m",
+      "Factory worker validation snapshot",
+    )
+  ).trim();
   const root = join(
     dirname(worktree),
     `${basename(worktree)}.validation`,
@@ -147,12 +158,14 @@ export async function runDeclaredValidation(
     );
     return {
       passed: true,
+      tree,
       text: `All ${evidence.commands.length} declared validation commands passed:\n${commands.map((command) => `- ${command}`).join("\n")}`,
     };
   } catch (error) {
     if (error instanceof CandidateValidationFailure)
       return {
         passed: false,
+        tree,
         text: `Validation failed. Fix this before you finish.\n${bounded(error.message)}`,
       };
     throw error;
@@ -176,6 +189,7 @@ export async function createFactoryValidationMcp(
   let ready = false;
   let runs = 0;
   let passed = 0;
+  const passedTrees = new Set<string>();
   let queue: Promise<unknown> = Promise.resolve();
   const server = createSdkMcpServer({
     name: factoryValidationServerName,
@@ -183,7 +197,7 @@ export async function createFactoryValidationMcp(
     tools: [
       tool(
         "run_validation",
-        "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, and return the result. Takes several minutes. Run it before you finish and fix any failure it reports.",
+        "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, and return the result. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review fixes: finish only after a run passes on your final files.",
         {},
         async () => {
           const run = ++runs;
@@ -193,8 +207,11 @@ export async function createFactoryValidationMcp(
           });
           queue = result.catch(() => undefined);
           try {
-            const { passed: ok, text } = await result;
-            if (ok) passed += 1;
+            const { passed: ok, text, tree } = await result;
+            if (ok) {
+              passed += 1;
+              passedTrees.add(tree);
+            }
             return { content: [{ type: "text" as const, text }] };
           } catch (error) {
             return {
@@ -234,12 +251,26 @@ export async function createFactoryValidationMcp(
       assertFactoryValidationReady(status);
       ready = true;
     },
-    evidence: () => ({
-      kind: "factory-validation" as const,
-      version: 1 as const,
-      runs,
-      passed,
-    }),
+    /** After the turn: did a passing run cover the files the worker returns? */
+    evidence: async () => {
+      let finalTreeValidated: boolean | undefined = false;
+      if (passedTrees.size)
+        try {
+          finalTreeValidated = passedTrees.has(
+            await workerFilesTree(input.worktree),
+          );
+        } catch {
+          // Collection classifies an unstageable worktree itself.
+          finalTreeValidated = undefined;
+        }
+      return {
+        kind: "factory-validation" as const,
+        version: 1 as const,
+        runs,
+        passed,
+        ...(finalTreeValidated !== undefined && { finalTreeValidated }),
+      };
+    },
   };
 }
 

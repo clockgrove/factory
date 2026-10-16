@@ -590,6 +590,22 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     assert(rendered.prompt.includes(sourceDelivery.files[0].digest));
     assert(rendered.prompt.includes("targeted entries"));
     assert(rendered.prompt.includes('"heading":"Selected"'));
+    // Only a whole-file source the checkout still holds byte for byte is
+    // marked; this checkout's lock changed after the pin.
+    assert.equal(
+      renderWorkItemPrompt(references, checkout).prompt.includes(
+        'inCheckout":',
+      ),
+      false,
+    );
+    const pinnedLockChanged = readFileSync(join(checkout, "package-lock.json"));
+    writeFileSync(join(checkout, "package-lock.json"), originalLock);
+    assert(
+      renderWorkItemPrompt(references, checkout).prompt.includes(
+        `"path":"package-lock.json","file":"${sourceDelivery.files[0].file}","lines":${sourceDelivery.files[0].lineCount},"bytes":${sourceDelivery.files[0].bytes},"inCheckout":true}`,
+      ),
+    );
+    writeFileSync(join(checkout, "package-lock.json"), pinnedLockChanged);
     assert.equal(
       JSON.parse(
         readFileSync(
@@ -648,7 +664,14 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       managedPrompt.prompt.includes(JSON.stringify(producer.inputSources)),
       false,
     );
-    assert(managedPrompt.prompt.includes("/workspace/repo/" + pinnedRelative));
+    assert(
+      managedPrompt.prompt.includes(
+        "under /workspace/repo/.factory-inputs/pinned-sources;",
+      ),
+    );
+    assert(
+      managedPrompt.prompt.includes(`"file":"${sourceDelivery.files[0].file}"`),
+    );
     assert.equal(managedOpenAI.harnessRequest.sourceBaseSha, baseSha);
 
     writeFileSync(

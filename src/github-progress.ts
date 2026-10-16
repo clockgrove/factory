@@ -73,61 +73,76 @@ export function renderGitHubProgress(input: GitHubProgressInput): string {
   const active = work.filter((item) =>
     ["running", "published", "merging"].includes(item.status),
   );
+  // Controller state is worth a line only when no controller is running.
   const ownership =
-    input.view.runActive === true
-      ? "Controller observed active"
-      : input.view.runActive === false
-        ? "No active controller observed"
-        : "Controller ownership unknown";
+    input.view.runActive === false
+      ? "No controller running"
+      : input.view.runActive === undefined
+        ? "Controller state unknown"
+        : undefined;
   const lines = [
     progressMarker({
       objective: input.view.objective,
       runId: input.runId,
       snapshotId: input.snapshotId,
     }),
-    `### Factory progress · ${issueLink(input.repository, input.view.objective)}`,
-    "",
-    `**${compact(phase)}** · ${ownership}`,
-    `Snapshot observed ${compact(input.observedAt)}; summary prepared ${compact(input.preparedAt)}. The GitHub comment timestamp records publication. This is a snapshot, not a live heartbeat.`,
-    "",
-    `**Accepted deliveries:** ${done.length}/${work.length} Work Items.`,
-    ...done
-      .slice(0, 12)
-      .map(
-        (item) =>
-          `- ${compact(item.id)}${item.pullRequest ? ` · ${pullLink(input.repository, item.pullRequest)}` : ""}`,
-      ),
-    ...(done.length > 12 ? [`- ${done.length - 12} more accepted items.`] : []),
-    "",
-    `**Running or delivering:** ${active.length} Work Items.`,
-    ...active
-      .slice(0, 12)
-      .map(
-        (item) =>
-          `- ${compact(item.id)} · ${compact(item.status)}${item.step && ["execute", "validate", "approve-asset", "approve-result", "deliver"].includes(item.step) ? ` (${item.step})` : ""}${item.pullRequest ? ` · ${pullLink(input.repository, item.pullRequest)}` : ""}`,
-      ),
-    ...(active.length > 12
-      ? [`- ${active.length - 12} more active items.`]
+    `### Factory · ${issueLink(input.repository, input.view.objective)} · ${compact(phase)}`,
+    ...(ownership ? [ownership] : []),
+    ...(work.length
+      ? [
+          "",
+          `**Delivered:** ${done.length}/${work.length}`,
+          ...done
+            .slice(0, 12)
+            .map(
+              (item) =>
+                `- ${compact(item.id)}${item.pullRequest ? ` · ${pullLink(input.repository, item.pullRequest)}` : ""}`,
+            ),
+          ...(done.length > 12 ? [`- ${done.length - 12} more`] : []),
+        ]
+      : []),
+    ...(active.length
+      ? [
+          "",
+          "**Active:**",
+          ...active
+            .slice(0, 12)
+            .map(
+              (item) =>
+                `- ${compact(item.id)} · ${compact(item.status)}${item.step && ["execute", "validate", "approve-asset", "approve-result", "deliver"].includes(item.step) ? ` (${item.step})` : ""}${item.pullRequest ? ` · ${pullLink(input.repository, item.pullRequest)}` : ""}`,
+            ),
+          ...(active.length > 12 ? [`- ${active.length - 12} more`] : []),
+        ]
       : []),
     "",
     `**Next:** ${compact(input.nextAction)}`,
+    ...(input.blockers.length
+      ? [
+          "",
+          "**Blockers:**",
+          ...input.blockers.map((blocker) => `- ${compact(blocker)}`),
+        ]
+      : []),
+    ...(input.decisions.length
+      ? [
+          "",
+          "**Decisions needed:**",
+          ...input.decisions.flatMap((decision, index) => [
+            `${index + 1}. ${compact(decision.question)}`,
+            `   Recommendation: ${compact(decision.recommendation)}`,
+            `   Consequences: ${compact(decision.consequences)}`,
+          ]),
+        ]
+      : []),
     "",
-    `**Blockers:** ${input.blockers.length ? "" : "None reported in this snapshot."}`,
-    ...input.blockers.map((blocker) => `- ${compact(blocker)}`),
+    `<sub>Observed ${shortTime(input.observedAt)}</sub>`,
     "",
-    `**Human decisions:** ${input.decisions.length ? "" : "None reported in this snapshot."}`,
-    ...input.decisions.flatMap((decision, index) => [
-      `${index + 1}. ${compact(decision.question)}`,
-      `   Recommendation: ${compact(decision.recommendation)}`,
-      `   Consequences: ${compact(decision.consequences)}`,
-    ]),
-    "",
-    "<details><summary>Run and decision details</summary>",
+    "<details><summary>Run details</summary>",
     "",
     `Run ${compact(input.runId)} · configuration ${input.configDigest}`,
     ...input.decisions.map(
       (decision, index) =>
-        `Decision ${index + 1} exact binding: ${compact(decision.binding)}`,
+        `Decision ${index + 1} binding: ${compact(decision.binding)}`,
     ),
     ...(input.planDecisionTemplate
       ? [
@@ -146,6 +161,11 @@ export function renderGitHubProgress(input: GitHubProgressInput): string {
   if (Buffer.byteLength(body) > 24_000)
     throw new Error("GitHub progress exceeds its publication byte bound");
   return body;
+}
+
+/** A compact UTC time such as `2026-10-16 05:04Z`. */
+function shortTime(iso: string): string {
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}Z`;
 }
 
 /** One Work Item's public facts: structured fields only, never logs or exception text. */
@@ -217,10 +237,8 @@ export function renderWorkItemProgress(input: WorkItemProgressInput): string {
       snapshotId: input.snapshotId,
       item: input.item.id,
     }),
-    `### Factory Work Item · ${issueLink(input.repository, input.item.issue)}`,
-    `Objective ${issueLink(input.repository, input.objective)} · item ${compact(input.item.id)}`,
-    "",
-    `**${headline}**${input.attempt ? ` · attempt ${compact(input.attempt.slice(0, 8))}` : ""}`,
+    `### ${headline} · ${compact(input.item.id)}`,
+    `Objective ${issueLink(input.repository, input.objective)}${input.attempt ? ` · attempt ${compact(input.attempt.slice(0, 8))}` : ""}`,
     ...(input.outage
       ? [
           `Waiting out a provider outage in ${compact(input.outage.step)}${input.outage.retryAt ? `; next try after ${compact(input.outage.retryAt)}` : ""}.`,
@@ -234,7 +252,7 @@ export function renderWorkItemProgress(input: WorkItemProgressInput): string {
       ? [`Factory is ${input.coordinator}.`]
       : []),
     "",
-    `Observed ${compact(input.observedAt)}. Factory comments when this item changes; this is not a live heartbeat.`,
+    `<sub>Observed ${shortTime(input.observedAt)}</sub>`,
     "",
     "<details><summary>Run details</summary>",
     "",

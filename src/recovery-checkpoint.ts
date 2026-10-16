@@ -341,6 +341,46 @@ export class CheckpointAdmissionFailure extends Error {
  * return before it admits; another admission waits for an active collector in
  * any controller process for the repository (#1281, #1285).
  */
+/**
+ * The checkpoint is larger than the installation's configured archive limits. They are
+ * operational settings outside the configuration digest, so the operator raises them and
+ * continues; this is a prerequisite to fix, not a failure (#1306).
+ */
+export class CheckpointBoundsExceeded extends Error {
+  readonly fault: { kind: "config"; detail: string; fix: string };
+  constructor(sizes: {
+    files: number;
+    maxFiles: number;
+    bytes: number;
+    maxBytes: number;
+  }) {
+    const over = [
+      sizes.files > sizes.maxFiles &&
+        `files=${sizes.files} > gitPersistence.maxFiles=${sizes.maxFiles}`,
+      sizes.bytes > sizes.maxBytes &&
+        `bytes=${sizes.bytes} > gitPersistence.maxBytes=${sizes.maxBytes}`,
+    ].filter(Boolean);
+    const detail = `The recovery checkpoint exceeds the configured archive limits: ${over.join(", ")}`;
+    super(detail);
+    this.fault = {
+      kind: "config",
+      detail,
+      fix: "Raise gitPersistence.maxFiles and/or gitPersistence.maxBytes in the installation configuration (operational limits; changing them never strands an Objective), then continue the run",
+    };
+  }
+}
+/** The configured-limit refusal in this error or the errors it wraps, if any. */
+export function checkpointBoundsExceeded(
+  error: unknown,
+): CheckpointBoundsExceeded | undefined {
+  for (
+    let current: unknown = error, depth = 0;
+    current instanceof Error && depth < 8;
+    current = current.cause, depth++
+  )
+    if (current instanceof CheckpointBoundsExceeded) return current;
+  return undefined;
+}
 export class CheckpointCollectionPending extends Error {
   constructor(readonly paths: string[]) {
     super(
@@ -2998,9 +3038,12 @@ function assertManifest(
     Buffer.byteLength(canonical(value)),
   );
   if (files > options.maxFiles || bytes > options.maxBytes)
-    throw new Error(
-      `Current materialized checkpoint exceeds admitted bounds: files=${files}, maxFiles=${options.maxFiles}, bytes=${bytes}, maxBytes=${options.maxBytes}`,
-    );
+    throw new CheckpointBoundsExceeded({
+      files,
+      maxFiles: options.maxFiles,
+      bytes,
+      maxBytes: options.maxBytes,
+    });
 }
 /** Validates a retained manifest against an explicit binding and whole-closure bounds.
  * Publisher metadata describes its original host; it does not authorize restoration.

@@ -24,7 +24,6 @@ import {
   acquireObjectiveLock,
   assertRestoredContinuationReady,
   type ControllerLock,
-  continuationConfigurationMatches,
   installationLockPath,
   readControllerOwner,
   objectiveLockPath,
@@ -448,7 +447,9 @@ export async function releaseCancelledSessions(
       owner.pid !== process.pid ||
       owner.startTime !== host.startTime ||
       owner.objective !== state.objective ||
-      !continuationConfigurationMatches(state, config) ||
+      // Cancellation needs no provider call, so an Objective bound to an
+      // earlier configuration of this installation still cancels (#1308).
+      state.repository !== config.repository ||
       !isDeepStrictEqual(current, state)
     )
       throw new Error(

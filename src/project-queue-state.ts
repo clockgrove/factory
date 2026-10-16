@@ -2917,6 +2917,7 @@ export function assertProjectQueueClaimAdmission(
   history: QueueRecord[],
   claim: QueueOwnerClaim,
   state: Pick<ContinuationState, "objective" | "objectiveBodyDigest">,
+  options: { historical?: boolean } = {},
 ): void {
   const admission = history.find(
     (record): record is QueueOperation =>
@@ -2928,7 +2929,8 @@ export function assertProjectQueueClaimAdmission(
     : undefined;
   const effect = admissionEffect(config, history, admission);
   if (
-    claim.authorityDigest !== factoryAuthorityDigest(config) ||
+    (!options.historical &&
+      claim.authorityDigest !== factoryAuthorityDigest(config)) ||
     claim.bodyDigest !== state.objectiveBodyDigest ||
     !admission?.completed ||
     admission.action !== "admit" ||
@@ -5717,7 +5719,7 @@ export async function settleCancelledProjectQueueRun(
     !state.cancelRequested ||
     (isExecutionState(state) && state.finalAcceptance) ||
     cancelledContinuationResourceHold(state) ||
-    !continuationConfigurationMatches(state, config)
+    state.repository !== config.repository
   )
     throw new Error(
       "Project cancellation requires a terminal run with authenticated resource cessation",
@@ -5751,7 +5753,11 @@ export async function settleCancelledProjectQueueRun(
   if (pending.length !== 1)
     throw new Error("Project cancellation has competing unfinished claims");
   const claim = pending[0]!;
-  assertProjectQueueClaimAdmission(config, history, claim, state);
+  // A cancelled run settles against the authority its claim was admitted
+  // under, which a later configuration change does not rewrite (#1308).
+  assertProjectQueueClaimAdmission(config, history, claim, state, {
+    historical: true,
+  });
   const archive = await readVerifiedRecoveryCheckpoint(
     config,
     undefined,

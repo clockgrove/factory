@@ -2074,21 +2074,28 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     `Changed checkpoint publication: ${publicationElapsedMs.toFixed(3)} ms; ${sharedRefs.length} exact bodies shared, ${currentRefs.size - sharedRefs.length} new or changed`,
   );
   // Whole current material remains charged even when nearly every body is
-  // already present in the verified publication base.
+  // already present in the verified publication base. The limit is an
+  // operational setting: changing it keeps both digests (#1306).
+  const smallerLimit = {
+    ...config,
+    gitPersistence: {
+      ...config.gitPersistence,
+      maxFiles:
+        secondInspection.current.logicalFiles +
+        secondInspection.current.uniqueBodies,
+    },
+  };
+  assert.equal(factoryConfigDigest(smallerLimit), factoryConfigDigest(config));
+  assert.equal(
+    factoryAuthorityDigest(smallerLimit),
+    factoryAuthorityDigest(config),
+  );
   await assert.rejects(
-    synchronizeRecoveryCheckpoint(
-      {
-        ...config,
-        gitPersistence: {
-          ...config.gitPersistence,
-          maxFiles:
-            secondInspection.current.logicalFiles +
-            secondInspection.current.uniqueBodies,
-        },
-      },
-      { reason: "explicit", buildClosure },
-    ),
-    /Current materialized checkpoint exceeds admitted bounds/,
+    synchronizeRecoveryCheckpoint(smallerLimit, {
+      reason: "explicit",
+      buildClosure,
+    }),
+    /exceeds the configured archive limits: files=\d+ > gitPersistence\.maxFiles=\d+/,
   );
   assert.equal(
     gitPersistenceStatus(config).lastAcknowledged.commitSha,

@@ -61,7 +61,10 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { isCheckpointAdmissionFailure } from "./recovery-checkpoint.js";
+import {
+  checkpointBoundsExceeded,
+  isCheckpointAdmissionFailure,
+} from "./recovery-checkpoint.js";
 import * as time from "./clock.js";
 import {
   attachedFault,
@@ -656,7 +659,12 @@ async function repeat<T>(
       } catch (error) {
         write({ ...record(), inFlight: undefined });
         save();
-        if (isCheckpointAdmissionFailure(error) && error.knownNotDispatched)
+        // A configured archive limit is a prerequisite with its own fix (#1306).
+        if (
+          isCheckpointAdmissionFailure(error) &&
+          error.knownNotDispatched &&
+          !checkpointBoundsExceeded(error)
+        )
           throw attachFault(
             error,
             decision(

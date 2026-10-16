@@ -52,6 +52,7 @@ import {
 } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
 import {
+  checkpointBoundsExceeded,
   gitPersistenceStatus,
   inspectRecoveryCheckpoint,
   synchronizeRecoveryCheckpoint,
@@ -1051,8 +1052,13 @@ main().catch((error: unknown) => {
   console.error(
     `Factory: ${error instanceof Error ? error.message : String(error)}`,
   );
-  // A held archive at service start needs the operator, like a decision.
+  // A configured archive limit names its fix (#1306).
+  const bounds = checkpointBoundsExceeded(error);
+  if (bounds) console.error(`Fix: ${bounds.fault.fix}`);
+  // A held archive at service start or a configured archive limit needs the
+  // operator, like a decision.
   process.exitCode =
+    bounds ||
     error instanceof ColdPublicationHeld ||
     (error instanceof Error && error.cause instanceof ColdPublicationHeld)
       ? EXIT_NEEDS_DECISION

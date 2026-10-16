@@ -1244,13 +1244,25 @@ export function githubProjectStatusSettings(
 }
 
 /**
- * Progress and Project status only present the run, so they are left out of both digests:
- * turning them on or off never strands a started Objective or a queue receipt. Key order is
- * kept, so a configuration without them digests exactly as before.
+ * Settings that only present or operate the run are left out of both digests, so changing
+ * them never strands a started Objective or a queue receipt: GitHub progress and Project
+ * status, and the archive's operational limits (`gitPersistence` maxBytes, maxFiles,
+ * timeoutMs and coalesceMs). The archive's identity (remote, ref, visibility, scope) stays
+ * bound. Key order is kept, so a configuration without them digests exactly as before.
  */
-function withoutPresentation(config: FactoryConfig): FactoryConfig {
+function withoutOperationalSettings(config: FactoryConfig): FactoryConfig {
   return Object.fromEntries(
     Object.entries(config).flatMap(([key, value]) => {
+      if (key === "gitPersistence") {
+        const {
+          maxBytes: _maxBytes,
+          maxFiles: _maxFiles,
+          timeoutMs: _timeoutMs,
+          coalesceMs: _coalesceMs,
+          ...identity
+        } = value as Record<string, unknown>;
+        return [[key, identity]];
+      }
       if (key !== "githubManagement") return [[key, value]];
       const {
         progress: _progress,
@@ -1275,7 +1287,7 @@ export function factoryConfigDigest(config: FactoryConfig): string {
     queue: _queue,
     queueProvider: _queueProvider,
     ...bound
-  } = withoutPresentation(config);
+  } = withoutOperationalSettings(config);
   assertJsonValue(bound, "configuration");
   return createHash("sha256").update(JSON.stringify(bound)).digest("hex");
 }
@@ -1292,7 +1304,7 @@ export function factoryAuthorityDigest(config: FactoryConfig): string {
     autonomy,
     queueProvider,
     ...declared
-  } = withoutPresentation(config);
+  } = withoutOperationalSettings(config);
   const { pollSeconds: _pollSeconds, ...queueAuthority } = queue ?? {};
   const bound = {
     ...declared,

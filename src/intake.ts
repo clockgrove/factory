@@ -70,6 +70,7 @@ import {
   type VerifiedQueueObservation,
 } from "./project-queue-state.js";
 import {
+  checkpointBoundsExceeded,
   awaitCheckpointAdmission,
   acceptForwardedCheckpointCompletion,
   bindRecoveryCheckpointControllerScope,
@@ -2043,6 +2044,22 @@ async function runIntakeOwned(
               reasons,
               error: String(error),
             };
+            // A configured archive limit stops for the operator, who raises it
+            // and continues (#1306): it needs a person, not a failure.
+            const bounds = checkpointBoundsExceeded(error);
+            if (bounds) {
+              record.observation = {
+                ...record.observation,
+                needsDecision: selected,
+                error: `${bounds.fault.detail}. ${bounds.fault.fix}`,
+              };
+              try {
+                await applyControl(config, services.github, "pause");
+              } catch {
+                /* Local stop retains remote uncertainty. */
+              }
+              return { ...record, mode: "paused" };
+            }
             if (
               options.backgroundConfigurationPath &&
               terminal(readContinuation(config.repository, selected)) &&

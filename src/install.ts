@@ -39,13 +39,8 @@ function providerFromOptions(args: string[]): ProviderConfig {
     throw new Error(
       "--harness must be codex-sdk, claude-agent-sdk, or github-copilot-sdk",
     );
-  if (
-    harness === "claude-agent-sdk" &&
-    (!option(args, "worker-model") || !option(args, "claude-max-turns"))
-  )
-    throw new Error(
-      "The Claude harness requires --worker-model and --claude-max-turns",
-    );
+  if (harness === "claude-agent-sdk" && !option(args, "worker-model"))
+    throw new Error("The Claude harness requires --worker-model");
   if (
     harness === "github-copilot-sdk" &&
     (!option(args, "worker-model") || !option(args, "copilot-timeout-seconds"))
@@ -144,7 +139,9 @@ function providerFromOptions(args: string[]): ProviderConfig {
                 : claudeTools.length
                   ? claudeTools
                   : defaultClaudeTools,
-              maxTurns: Number(option(args, "claude-max-turns")),
+              // A turn-limit stop continues the conversation, so this bounds
+              // each stretch of work rather than the whole attempt.
+              maxTurns: Number(option(args, "claude-max-turns") ?? 400),
             }
           : harness === "github-copilot-sdk"
             ? {

@@ -222,13 +222,19 @@ test("setup adds a provider without changing the others", () => {
       "claude-agent-sdk",
       "--worker-model",
       "claude-sonnet-5-5",
-      "--claude-max-turns",
-      "12",
     ],
     path,
   );
   assert.equal(factoryConfigDigest(readConfig(path, "codex")), before);
-  assert.equal(readConfig(path, "claude").planning.kind, "claude-agent-sdk");
+  const claude = readConfig(path, "claude");
+  assert.equal(claude.planning.kind, "claude-agent-sdk");
+  // A turn-limit stop continues the worker, so the limit is operational:
+  // new configurations default to 400, and changing it keeps both digests.
+  assert.equal(claude.execution.harness.maxTurns, 400);
+  const raised = structuredClone(claude);
+  raised.execution.harness.maxTurns = 800;
+  assert.equal(factoryConfigDigest(raised), factoryConfigDigest(claude));
+  assert.equal(factoryAuthorityDigest(raised), factoryAuthorityDigest(claude));
   assert.equal(readConfig(path).planning.kind, "codex-sdk");
   assert.throws(
     () => addProvider(["--provider", "claude"], path),

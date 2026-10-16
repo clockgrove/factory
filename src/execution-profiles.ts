@@ -3,6 +3,7 @@ import {
   harnessAdapterIdentity,
   type ExecutionProfile,
   type FactoryConfig,
+  withoutWorkerLimits,
 } from "./config.js";
 import type {
   ExecutionBinding,
@@ -35,7 +36,14 @@ export function profileBinding(
       ? { model: harness.model, reasoningEffort: harness.reasoningEffort }
       : {}),
     digest: createHash("sha256")
-      .update(JSON.stringify(canonical({ profile, policy })))
+      .update(
+        JSON.stringify(
+          canonical({
+            profile: { ...profile, harness: withoutWorkerLimits(harness) },
+            policy,
+          }),
+        ),
+      )
       .digest("hex"),
   };
 }

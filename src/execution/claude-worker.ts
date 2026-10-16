@@ -5,6 +5,7 @@ import type {
   SDKMessage,
   SDKResultMessage,
   SDKSystemMessage,
+  SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
 import type { AgentSessionRef, WorkerUsageObservation } from "../contracts.js";
@@ -160,6 +161,47 @@ function assertInitialization(
   // it does not remove built-ins. Explicit tools and host hooks enforce access.
 }
 
+/** Continuations of one attempt's conversation after a turn-limit stop. */
+const MAX_TURN_LIMIT_CONTINUATIONS = 2;
+
+/**
+ * The user turns of one streaming query. Streaming input keeps the native
+ * conversation, its tools and MCP servers open after a result, so a turn-limit
+ * stop continues in place with a fresh turn budget. Ending it lets the CLI exit.
+ */
+function userTurns() {
+  const pending: string[] = [];
+  let wake: (() => void) | undefined;
+  let ended = false;
+  const notify = () => {
+    wake?.();
+    wake = undefined;
+  };
+  return {
+    async *messages(): AsyncGenerator<SDKUserMessage> {
+      for (;;) {
+        const content = pending.shift();
+        if (content !== undefined)
+          yield {
+            type: "user",
+            message: { role: "user", content },
+            parent_tool_use_id: null,
+          };
+        else if (ended) return;
+        else await new Promise<void>((resolve) => (wake = resolve));
+      }
+    },
+    send(content: string): void {
+      pending.push(content);
+      notify();
+    },
+    end(): void {
+      ended = true;
+      notify();
+    },
+  };
+}
+
 function resultError(result: SDKResultMessage): string | undefined {
   if (result.subtype !== "success") return result.errors.join("; ");
   return result.is_error ? result.result : undefined;
@@ -203,6 +245,7 @@ async function main(): Promise<void> {
   let events: AsyncIterator<SDKMessage> | undefined;
   let closeStarted = false;
   let progressLost = false;
+  const turns = userTurns();
   const usage = new ClaudeUsage(
     redactionValues,
     input.session?.data.baseline,
@@ -308,7 +351,9 @@ async function main(): Promise<void> {
         input.session.ref,
       );
     }
-    const stream = query({ prompt, options });
+    turns.send(prompt);
+    const stream = query({ prompt: turns.messages(), options });
+    let continuations = 0;
     let result: SDKResultMessage | undefined;
     // The SDK reports a reached usage or session limit as structure.
     let limit: { retryAt?: string } | undefined;
@@ -384,6 +429,19 @@ async function main(): Promise<void> {
           );
         initialization = message;
       }
+      if (
+        message.type === "result" &&
+        message.subtype === "error_max_turns" &&
+        continuations < MAX_TURN_LIMIT_CONTINUATIONS
+      ) {
+        // A turn-limit stop is unfinished work, not a failed attempt: the same
+        // conversation and worktree continue under the same attempt and usage.
+        continuations += 1;
+        const continuation = `You reached the turn limit before finishing. Continue the same task from where you stopped: finish the change${validation ? ", run the Factory validate tool" : ""}, review your own diff, then give your final report.`;
+        capture.request(continuation);
+        turns.send(continuation);
+        continue;
+      }
       if (message.type === "result") break;
     }
     if (!initialization)
@@ -394,6 +452,7 @@ async function main(): Promise<void> {
       throw limit
         ? new ProviderLimitError(error, limit.retryAt)
         : new Error(error);
+    turns.end();
     closeStarted = true;
     await closeProviderEventStream(events, turn, true);
     if (prepared) await turn.race(prepared.close());
@@ -479,6 +538,7 @@ async function main(): Promise<void> {
     );
     process.exitCode = 1;
   } finally {
+    turns.end();
     if (events && !closeStarted)
       void closeProviderEventStream(events, turn, false);
     for (const owned of [prepared, validation]) {

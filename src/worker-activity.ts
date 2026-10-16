@@ -332,6 +332,13 @@ export function renderWorkerProgress(
       lines.push(`${at} context compacted`);
     else if (event.operation === "system" && event.subtype === "init")
       lines.push(`${at} session started`);
+    else if (
+      event.operation === "result" &&
+      event.subtype === "error_max_turns"
+    )
+      lines.push(
+        `${at} reached the turn limit${typeof event.turns === "number" ? ` after ${event.turns} turns` : ""}`,
+      );
     else if (event.operation === "result")
       lines.push(
         `${at} finished${event.success === false ? " (unsuccessful)" : ""}${typeof event.turns === "number" ? ` after ${event.turns} turns` : ""}`,

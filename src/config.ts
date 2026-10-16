@@ -1244,15 +1244,69 @@ export function githubProjectStatusSettings(
 }
 
 /**
+ * A harness without its worker run limits (Claude `maxTurns`, Copilot `timeoutSeconds`).
+ * They bound how long a worker runs, not what it builds, so an operator can change them
+ * without stranding started work.
+ */
+export function withoutWorkerLimits(
+  harness: LocalHarnessConfig,
+): LocalHarnessConfig {
+  if (harness.kind === "claude-agent-sdk") {
+    const { maxTurns: _maxTurns, ...bound } = harness;
+    return bound as LocalHarnessConfig;
+  }
+  if (harness.kind === "github-copilot-sdk") {
+    const { timeoutSeconds: _timeoutSeconds, ...bound } = harness;
+    return bound as LocalHarnessConfig;
+  }
+  return harness;
+}
+
+function executionWithoutWorkerLimits(
+  execution: ExecutionConfig,
+): ExecutionConfig {
+  if (execution.kind !== "local") return execution;
+  return {
+    ...execution,
+    ...(execution.harness && {
+      harness: withoutWorkerLimits(execution.harness),
+    }),
+    ...(execution.profiles && {
+      profiles: Object.fromEntries(
+        Object.entries(execution.profiles).map(([id, profile]) => [
+          id,
+          { ...profile, harness: withoutWorkerLimits(profile.harness) },
+        ]),
+      ),
+    }),
+  };
+}
+
+/**
  * Settings that only present or operate the run are left out of both digests, so changing
  * them never strands a started Objective or a queue receipt: GitHub progress and Project
- * status, and the archive's operational limits (`gitPersistence` maxBytes, maxFiles,
- * timeoutMs and coalesceMs). The archive's identity (remote, ref, visibility, scope) stays
- * bound. Key order is kept, so a configuration without them digests exactly as before.
+ * status, the archive's operational limits (`gitPersistence` maxBytes, maxFiles,
+ * timeoutMs and coalesceMs) and worker run limits (`withoutWorkerLimits`). The archive's
+ * identity (remote, ref, visibility, scope) stays bound. Key order is kept, so a
+ * configuration without them digests exactly as before.
  */
 function withoutOperationalSettings(config: FactoryConfig): FactoryConfig {
   return Object.fromEntries(
     Object.entries(config).flatMap(([key, value]) => {
+      if (key === "execution")
+        return [[key, executionWithoutWorkerLimits(value as ExecutionConfig)]];
+      if (key === "queueProvider") {
+        const provider = value as NonNullable<FactoryConfig["queueProvider"]>;
+        return [
+          [
+            key,
+            {
+              ...provider,
+              execution: executionWithoutWorkerLimits(provider.execution),
+            },
+          ],
+        ];
+      }
       if (key === "gitPersistence") {
         const {
           maxBytes: _maxBytes,

@@ -70,6 +70,18 @@ const LEARNING_LIMIT = { notes: 16, summary: 1024, paths: 8 };
 /** One verification note per acceptance criterion; the manifest size bounds the rest. */
 const VERIFICATION_LIMIT = { summary: 4096, paths: 16 };
 
+/**
+ * The most distinct files one item's handoff can cite: every learning note and
+ * every criterion's verification map at its path limit. Each cited file
+ * becomes one retained source.
+ */
+export function maxHandoffSources(criterionCount: number): number {
+  return (
+    LEARNING_LIMIT.notes * LEARNING_LIMIT.paths +
+    criterionCount * VERIFICATION_LIMIT.paths
+  );
+}
+
 /** Reject malformed optional data; the controller never repairs model claims. */
 export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
   const declaration = value as { notes?: unknown } | null;
@@ -141,7 +153,15 @@ export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
     throw new Error(
       `Handoff must hold at most ${LEARNING_LIMIT.notes} learning notes and one verification note per criterion`,
     );
+  if (citedPaths(notes) > maxHandoffSources(verifications.length))
+    throw new Error(
+      `Handoff cites more than ${maxHandoffSources(verifications.length)} distinct files`,
+    );
   return notes;
+}
+
+function citedPaths(notes: readonly WorkHandoffNote[]): number {
+  return new Set(notes.flatMap((note) => note.paths)).size;
 }
 
 /** Models choose recipients; the controller owns their identities. */
@@ -294,7 +314,15 @@ export function decodeWorkHandoffNotes(
       ...(criterionIndex === undefined ? {} : { criterionIndex }),
     };
   });
-  return parseWorkHandoffNotes({ notes });
+  const parsed = parseWorkHandoffNotes({ notes });
+  if (
+    criterionCount !== undefined &&
+    citedPaths(parsed) > maxHandoffSources(criterionCount)
+  )
+    throw new Error(
+      `Handoff cites more than ${maxHandoffSources(criterionCount)} distinct files`,
+    );
+  return parsed;
 }
 
 function body(
@@ -396,7 +424,11 @@ export function assertObjectiveKnowledge(
     !gitSha(record.commitSha) ||
     !gitSha(record.treeSha) ||
     !Array.isArray(record.sources) ||
-    record.sources.length > 128 ||
+    record.sources.length >
+      maxHandoffSources(
+        knownGraph?.items.find((peer) => peer.id === itemId)?.acceptance
+          .length ?? 0,
+      ) ||
     new Set(record.sources.map((source) => source.path)).size !==
       record.sources.length ||
     !record.sources.every(
@@ -476,8 +508,16 @@ export async function publishObjectiveKnowledge(
     throw new Error(
       "An immutable Objective knowledge record cannot be replaced",
     );
+  // Validate before keeping it: an invalid record must never enter state,
+  // where every later save would refuse it.
+  try {
+    assertObjectiveKnowledge(state, item.id, { ...work, knowledge: record });
+  } catch (error) {
+    throw workFault(
+      `Handoff knowledge is invalid: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   work.knowledge = record;
-  assertObjectiveKnowledge(state, item.id);
 }
 
 /** A compact view of settled claims, with actual availability in this execution base. */

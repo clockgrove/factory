@@ -47,6 +47,7 @@ import {
   buildRecoveryCheckpointClosure,
 } from "../dist/recovery-checkpoint-closure.js";
 import { LocalContentStore } from "../dist/content/local.js";
+import { faultOf } from "../dist/fault.js";
 import { retainStateMemory } from "../dist/repository-memory.js";
 import {
   proposalPersistenceReferences,
@@ -65,6 +66,7 @@ import {
 } from "../dist/graph-amendments.js";
 import {
   completeObjectiveKnowledge,
+  maxHandoffSources,
   objectiveKnowledgeView,
   publishObjectiveKnowledge,
   reviewObjectiveKnowledge,
@@ -1218,6 +1220,77 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     await store.verify(result.handoff.sources[0].ref);
     state.work.schema.changeRef = result.changeRef;
     state.work.schema.treeSha = result.treeSha;
+    {
+      // A handoff at its schema limits (every learning note and the one
+      // verification map at their path limits) cites more than 128 files; it
+      // publishes and the state still saves and loads.
+      const paths = Array.from(
+        { length: maxHandoffSources(producer.acceptance.length) },
+        (_, index) => `cited/file-${index}.json`,
+      );
+      const learning = Array.from({ length: 16 }, (_, note) => ({
+        kind: "pitfall",
+        summary: `Learning ${note}`,
+        paths: paths.slice(note * 8, note * 8 + 8),
+        consumers: [],
+      }));
+      const maximal = {
+        ...result,
+        handoff: {
+          notes: [
+            ...learning,
+            {
+              kind: "verification",
+              summary: "Every sub-clause mapped",
+              paths: paths.slice(128),
+              consumers: [],
+              criterionIndex: 0,
+            },
+          ],
+          sources: paths.map((path) => ({
+            path,
+            ref: result.handoff.sources[0].ref,
+          })),
+        },
+      };
+      assert(paths.length > 128);
+      const full = structuredClone(state);
+      await publishObjectiveKnowledge(full, producer, maximal, store);
+      assert.equal(full.work.schema.knowledge.sources.length, paths.length);
+      const fullSnapshot = join(root, "private-state", "full.json");
+      saveState(fullSnapshot, full);
+      parseFactoryState(
+        JSON.parse(readFileSync(fullSnapshot, "utf8")),
+        state.repository,
+        1,
+      );
+      // An invalid record is refused as the attempt's work fault before it
+      // enters state, so later saves are unaffected.
+      const invalid = structuredClone(state);
+      await assert.rejects(
+        () =>
+          publishObjectiveKnowledge(
+            invalid,
+            producer,
+            {
+              ...maximal,
+              handoff: {
+                ...maximal.handoff,
+                sources: [
+                  ...maximal.handoff.sources,
+                  { path: "uncited.json", ref: result.handoff.sources[0].ref },
+                ],
+              },
+            },
+            store,
+          ),
+        (error) =>
+          faultOf(error).kind === "work" &&
+          /Handoff knowledge is invalid/.test(error.message),
+      );
+      assert.equal(invalid.work.schema.knowledge, undefined);
+      saveState(join(root, "private-state", "invalid.json"), invalid);
+    }
     await publishObjectiveKnowledge(state, producer, result, store);
     const snapshot = join(root, "private-state", "state.json");
     saveState(snapshot, state);

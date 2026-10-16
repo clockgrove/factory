@@ -144,9 +144,13 @@ export interface PendingAmendment {
   decisions?: {
     question: string;
     answer?: { actor: string; answer: string; reason: string };
+    /** The completed compilation that asked, retained as its original. */
+    invocation?: PendingAmendment["planningInvocation"];
   }[];
   error?: string;
+  /** `decision`: the operator refused it at the planner's question (#1296). */
   rejectionStage?:
+    | "decision"
     | "compilation"
     | "validation"
     | "review"
@@ -260,6 +264,7 @@ export function assertGraphRevisions(state: FactoryState): void {
       ...(original.planningInvocation?.nativeReturns ?? []),
       ...(original.reviewInvocation?.nativeReturns ?? []),
       ...(original.reviewRejectedNativeReturns ?? []),
+      ...amendmentDecisionReturns(original),
     ]) {
       if (
         ![17, 19].includes(state.schemaVersion) ||
@@ -364,6 +369,7 @@ export function assertGraphRevisions(state: FactoryState): void {
         !/^[a-f0-9]{64}$/.test(pending.reviewDigest)) ||
       (pending.rejectionStage !== undefined &&
         ![
+          "decision",
           "compilation",
           "validation",
           "review",
@@ -428,13 +434,14 @@ export function assertGraphRevisions(state: FactoryState): void {
         "Amendment replacement lost its diagnosed rejection binding",
       );
   }
-  // Each started amendment was charged once, by its own id.
+  // Each started amendment was charged once, by its own id. One the operator
+  // refused at its question gave its charge back (#1296).
   const started = [
     ...(state.rejectedAmendments ?? []),
     ...(pending && !["ready", "backlog"].includes(pending.phase)
       ? [pending]
       : []),
-  ];
+  ].filter((entry) => entry.rejectionStage !== "decision");
   const charged = Object.keys(state.charges ?? {}).filter((event) =>
     event.startsWith(objectiveEvent("amend", "")),
   ).length;
@@ -871,6 +878,28 @@ export class AmendmentRejection extends Error {
   override readonly name = "AmendmentRejection";
 }
 
+/** The rejected amendment's wait for the operator's replacement. */
+function rejectionWait(pending: PendingAmendment): Error {
+  return attachFault(
+    new AmendmentRejection(pending.error ?? "Amendment rejected"),
+    {
+      kind: "work",
+      evidence: { detail: pending.error || "Amendment rejected" },
+    },
+  );
+}
+
+/** Native originals the planner's question-asking compilations retained. */
+export function amendmentDecisionReturns(original: object): ContentRef[] {
+  const decisions =
+    "decisions" in original
+      ? (original as PendingAmendment).decisions
+      : undefined;
+  return (decisions ?? []).flatMap(
+    (entry) => entry.invocation?.nativeReturns ?? [],
+  );
+}
+
 /** The operator's question about the pending amendment and how to answer it. */
 function amendmentQuestion(state: FactoryState, question: string): string {
   return `${question} Answer with factory decide --objective ${state.objective} --outcome accept --answer "..." --reason "...", or refuse the amendment with --outcome refuse --reason "...".`;
@@ -907,7 +936,7 @@ export function decideAmendment(
     };
   } else {
     pending.phase = "rejected";
-    pending.rejectionStage = "compilation";
+    pending.rejectionStage = "decision";
     pending.error = `The operator refused the amendment: ${input.reason}`;
     releaseCharge(state, amendmentEvent(pending), "planningRevisions");
     if (state.coordinator) {
@@ -950,6 +979,10 @@ export function applyPendingAmendment(
         throw new StepFault(
           decision(amendmentQuestion(args.state, open.question)),
         );
+      // A rejected amendment still waits for the operator's replacement: a
+      // blind rerun names that wait again instead of failing the run.
+      if (args.state.pendingAmendment.phase === "rejected")
+        throw rejectionWait(args.state.pendingAmendment);
       let workflowRecipe: WorkflowRecipeInput | undefined;
       if (args.state.workflowRecipePin) {
         try {
@@ -1100,6 +1133,7 @@ async function advanceAmendment(args: {
     state.coordinator?.processes?.length
   )
     return false;
+  if (pending.phase === "rejected") throw rejectionWait(pending);
   if (!["ready", "compiled", "reviewed", "projected"].includes(pending.phase))
     throw new Error(
       `Amendment ${pending.phase} cannot be replayed; inspect preserved evidence`,
@@ -1674,7 +1708,12 @@ async function advanceAmendment(args: {
     if (asked && !pending.proposal.graph) {
       pending.decisions = [
         ...(pending.decisions ?? []),
-        { question: asked.question },
+        {
+          question: asked.question,
+          ...(pending.planningInvocation && {
+            invocation: structuredClone(pending.planningInvocation),
+          }),
+        },
       ];
       delete pending.planningInvocation;
       delete pending.graph;
@@ -1687,7 +1726,9 @@ async function advanceAmendment(args: {
     const fault = attachedFault(error);
     const refusedResult =
       fault?.kind === "work" ||
-      (!fault && calling === "compile" && compilationResponseObserved);
+      (!fault && calling === "compile" && compilationResponseObserved) ||
+      // An operator-supplied graph cannot take an answer: it is refused.
+      !!asked;
     if (!refusedResult) throw error;
     pending.rejectionStage = stage;
     pending.phase = "rejected";

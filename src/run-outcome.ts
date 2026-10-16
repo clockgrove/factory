@@ -88,6 +88,15 @@ export function runOutcome(
       code: EXIT_NEEDS_DECISION,
       message: `Objective #${objective} waits for a prerequisite: ${wait.detail}\nFix: ${wait.fix ?? "see the detail"}; then \`${retry}\` and \`${rerun}\``,
     };
+  // The planner's unanswered question about the pending amendment (#1296).
+  const amendmentAsked = isExecutionState(state)
+    ? state.pendingAmendment?.decisions?.at(-1)
+    : undefined;
+  if (amendmentAsked && !amendmentAsked.answer)
+    return {
+      code: EXIT_NEEDS_DECISION,
+      message: `Objective #${objective} amendment needs a decision: ${amendmentAsked.question}\nAnswer with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…" --reason "…"`, configuration)}\` and \`${rerun}\`, or refuse the amendment with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``,
+    };
   if (
     wait?.kind === "decision" &&
     !(isExecutionState(state) && objectiveComplete(state))

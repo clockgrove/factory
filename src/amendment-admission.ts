@@ -84,6 +84,7 @@ function notReplaceable(
     rejected.proposal.graph ||
     (rejected.rejectionStage !== undefined
       ? ![
+          "decision",
           "compilation",
           "validation",
           "review-findings",

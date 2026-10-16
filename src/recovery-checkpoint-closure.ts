@@ -538,6 +538,12 @@ function continuationReferences(value: unknown): ContinuationReferences & {
         ...(original.planningInvocation?.nativeReturns ?? []),
         ...(original.reviewInvocation?.nativeReturns ?? []),
         ...(original.reviewRejectedNativeReturns ?? []),
+        // A planner question's compilation keeps its originals (#1296).
+        ...("decisions" in original
+          ? (original.decisions ?? []).flatMap(
+              (entry) => entry.invocation?.nativeReturns ?? [],
+            )
+          : []),
       ])
         add(ref);
     for (const packet of Object.values(state.adaptiveContexts ?? {})) {

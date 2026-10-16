@@ -201,6 +201,8 @@ export interface ExecutionStatusView extends WaitView {
   pendingAmendment: {
     phase: string;
     error: string | null;
+    /** The planner's unanswered question about the amendment, if any. */
+    question?: string | null;
     /** Why `factory propose-amendment` would refuse a replacement of a rejected amendment; null when it fits. */
     replacementRefusal?: Refusal | null;
   } | null;
@@ -537,6 +539,17 @@ function objectiveWait(
 
 function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
   const objective = view.objective;
+  // The planner asked about the pending amendment: decide answers it (#1296).
+  const asked = view.pendingAmendment?.question;
+  if (asked)
+    return {
+      phase: "needs-decision",
+      summary: "the pending amendment needs an answer",
+      nextAction: {
+        command: `factory decide --objective ${objective} --outcome accept|refuse --answer "…" --reason "…"`,
+        reason: `${asked} Accept records the answer and ${run(objective)} compiles the amendment with it; refuse rejects the amendment and gives back its planning revision.`,
+      },
+    };
   if (view.wait?.kind === "decision") return objectiveWait(view);
   for (const item of view.work)
     if (

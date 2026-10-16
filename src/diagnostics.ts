@@ -2360,6 +2360,13 @@ export function statusDocument(
           error: state.pendingAmendment.error
             ? redactDiagnosticDetail(state.pendingAmendment.error, secrets)
             : null,
+          // The planner's unanswered question about it (#1296).
+          question: (() => {
+            const open = state.pendingAmendment.decisions?.at(-1);
+            return open && !open.answer
+              ? redactDiagnosticDetail(open.question, secrets)
+              : null;
+          })(),
           // Why `factory propose-amendment` would refuse a replacement of a
           // rejected amendment (the checks submitAmendment applies); null when
           // it fits. Status names it only then; otherwise `factory cancel`.

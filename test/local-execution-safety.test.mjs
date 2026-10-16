@@ -2273,7 +2273,32 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       reason: "The Objective forbids this change",
     });
     assert.equal(refusing.pendingAmendment.phase, "rejected");
+    assert.equal(refusing.pendingAmendment.rejectionStage, "decision");
     assert.equal(consumption(refusing).planningRevisions, revisionsBefore);
+    // The refused amendment gave its charge back and still saves and loads.
+    saveState(legacyPath, refusing);
+    const refused = parseFactoryState(
+      JSON.parse(readFileSync(legacyPath, "utf8")),
+      legacy.repository,
+      legacy.objective,
+    );
+    assert.equal(refused.pendingAmendment.phase, "rejected");
+    // A blind rerun names the rejection wait again; no provider starts.
+    await assert.rejects(
+      () =>
+        applyPendingAmendment({
+          state: refused,
+          config: { repository: legacy.repository, checkout },
+          body: git(checkout, "show", `${legacy.baseSha}:README.md`),
+          model: legacyModel,
+          save: () => saveState(legacyPath, refused),
+          cancelled: () => false,
+        }),
+      (error) =>
+        error.name === "AmendmentRejection" &&
+        /The operator refused the amendment/.test(error.message),
+    );
+    assert.equal(existsSync(join(root, "legacy-planner-homes")), false);
     await store.verify(loaded.work.schema.knowledge.recordRef);
     const current = objectiveKnowledgeView(
       loaded,

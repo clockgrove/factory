@@ -442,12 +442,13 @@ export function renderWorkItemPrompt(request: HarnessRequest) {
   const peerInstructions = peers.length
     ? `Choose consumerIndices only from these current admitted peer choices: ${JSON.stringify(peers.map(({ title }, peerIndex) => ({ peerIndex, title })))}.`
     : "No peer recipients are supplied. Omit peer-targeted handoff notes; consumerIndices must be [].";
-  const handoffInstructions = `\n\nYou may leave compact advisory repository learnings in .factory-handoff.json at the CURRENT checkout root, exactly ${JSON.stringify(join(request.worktree, ".factory-handoff.json"))}. This is an allowed private staging exception even when absent from Owned paths. The collector reads only that checkout-root path. The collector scans the file, binds source identities, and excludes it from Git commits and public delivery. ${peerInstructions} An empty consumerIndices list retains untargeted own/dependency/path-relevant and final Objective learning; it grants no new authority. Use this exact manifest JSON schema: ${JSON.stringify(workHandoffSchema(peers.length))}. Refer to actual literal repository files; the decoder still rejects invalid paths, including directories, .git and private staging paths. Keep each note within its path/count/summary limits. Omit transcripts, credentials, personal data and raw logs. Mark unverified ideas as hypothesis. Notes do not settle contracts, add ownership or replace source requirements or independent acceptance. Do not commit this file or perform controller operations.`;
+  const selfReviewInstructions = `\n\nBefore finishing, review your candidate against every acceptance criterion the way the independent result reviewer will. That reviewer refuses a criterion for missing verification when the complete candidate sources show that an assertion, test case, report field, documented statement or other proof the criterion requires is absent and you were responsible for authoring it within this Work Item's ownership. Passing commands do not satisfy such a criterion: a suite can pass while a required case or field is missing. For each criterion, split it into every enumerated sub-clause (each listed case, refusal, field, identity, command, document item or property), locate the exact test assertion, report field or document section in your candidate that proves it, and add whatever is missing before your final validation run. Then record that map as one verification note per criterion in .factory-handoff.json: kind "verification", criterionIndex the zero-based position in the Acceptance list above, summary listing every sub-clause with its file:line, paths the cited files, and consumerIndices []. The reviewer uses this map only as a starting index and checks every claim independently, so cite exact locations rather than intentions.`;
+  const handoffInstructions = `\n\nYou may leave compact advisory repository learnings in .factory-handoff.json at the CURRENT checkout root, exactly ${JSON.stringify(join(request.worktree, ".factory-handoff.json"))}, and you must record your verification notes there. This is an allowed private staging exception even when absent from Owned paths. The collector reads only that checkout-root path. The collector scans the file, binds source identities, and excludes it from Git commits and public delivery. ${peerInstructions} An empty consumerIndices list retains untargeted own/dependency/path-relevant and final Objective learning; it grants no new authority. Use this exact manifest JSON schema, with criterionIndex only on verification notes: ${JSON.stringify(workHandoffSchema(peers.length, request.item.acceptance.length))}. Refer to actual literal repository files; the decoder still rejects invalid paths, including directories, .git and private staging paths. Keep each note within its path/count/summary limits. Omit transcripts, credentials, personal data and raw logs. Mark unverified ideas as hypothesis. Notes do not settle contracts, add ownership or replace source requirements or independent acceptance. Do not commit this file or perform controller operations.`;
   const transitionInstructions = `\n\nWhen implementing source-required asynchronous or UI lifecycle flows, trace which current intent owns results, errors, derived metadata and cleanup. Check what remains after an intent change or failure, and whether a late completion can affect newer state. Use accepted validation and authorized tools to verify materially interacting transitions as well as isolated paths, within owned scope; this guidance adds no acceptance requirements, commands or permissions.`;
   return renderPrompt([
     [
       "instructions",
-      `Implement this Work Item in the current repository checkout. Change only owned paths. Do not commit, push, create issues or pull requests, or access GitHub credentials. Stop and report if acceptance is impossible.${executionInstructions}${transitionInstructions}${discoveryInstructions}${handoffInstructions}`,
+      `Implement this Work Item in the current repository checkout. Change only owned paths. Do not commit, push, create issues or pull requests, or access GitHub credentials. Stop and report if acceptance is impossible.${executionInstructions}${transitionInstructions}${selfReviewInstructions}${discoveryInstructions}${handoffInstructions}`,
     ],
     [
       "objective",
@@ -510,15 +511,18 @@ export function readProducedAssets(
 export function readWorkHandoff(
   worktree: string,
   peers: readonly { id: string; title: string }[] = [],
+  criterionCount?: number,
 ): WorkHandoffNote[] | undefined {
   const manifest = join(worktree, ".factory-handoff.json");
   const stat = lstatSync(manifest, { throwIfNoEntry: false });
   if (!stat) return undefined;
   if (!stat.isFile() || realpathSync(manifest) !== resolve(manifest))
     throw new Error("Handoff manifest must be a regular private staging file");
-  if (stat.size > 64 * 1024) throw new Error("Handoff manifest exceeds 64 KiB");
+  if (stat.size > 256 * 1024)
+    throw new Error("Handoff manifest exceeds 256 KiB");
   return decodeWorkHandoffNotes(
     JSON.parse(readFileSync(manifest, "utf8")),
     peers,
+    criterionCount,
   );
 }

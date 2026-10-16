@@ -1299,7 +1299,11 @@ export async function collectWorktreeResult(
 ): Promise<ExecutionResult> {
   const handoffPath = join(worktree, ".factory-handoff.json");
   const handoffNotes = judgedAsWork(() =>
-    readWorkHandoff(worktree, request.handoffPeers),
+    readWorkHandoff(
+      worktree,
+      request.handoffPeers,
+      request.item.acceptance.length,
+    ),
   );
   if (handoffNotes) {
     if (

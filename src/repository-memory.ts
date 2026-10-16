@@ -1642,6 +1642,8 @@ export function retainStateMemory(
       handoff.authority = "advisory";
       handoff.summary =
         knowledge.notes
+          // Verification maps index one result's review, not lasting memory.
+          .filter((note) => note.kind !== "verification")
           .map((note) => `${note.kind}: ${note.summary}`)
           .join("\n") || "Retained Objective handoff";
       handoff.bodies = [

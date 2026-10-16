@@ -673,10 +673,16 @@ export interface AgentSessionContinuation extends AgentSessionRequest {
 
 /** Private advisory learning; never source, command or acceptance authority. */
 export interface WorkHandoffNote {
-  kind: "interface" | "pitfall" | "hypothesis";
+  kind: "interface" | "pitfall" | "hypothesis" | "verification";
   summary: string;
   paths: string[];
   consumers: string[];
+  /**
+   * A verification note's zero-based acceptance criterion: the implementer's
+   * claimed map from that criterion's sub-clauses to the files proving them.
+   * It is an index for review, never proof.
+   */
+  criterionIndex?: number;
 }
 
 /** Authenticated adapter recovery; observational captures never supply this. */

@@ -12,6 +12,7 @@ import {
 import { workHandoffSchema } from "../objective-knowledge.js";
 import { validateTree } from "../validation.js";
 import { CandidateValidationFailure } from "../work-repair.js";
+import type { WorkHandoffNote } from "../contracts.js";
 import { readWorkHandoff } from "./harness-support.js";
 import { FACTORY_EMAIL, privateStagingExclusions } from "./local.js";
 
@@ -32,8 +33,12 @@ interface ValidationEnvironmentInput {
 
 interface HandoffContext {
   peers: readonly { id: string; title: string }[];
-  criterionCount: number;
+  /** The Work Item's exact acceptance criteria, in criterionIndex order. */
+  acceptance: readonly string[];
 }
+
+/** Enough of a note to see which criterion and sub-clauses it answers. */
+const maxNoteExcerptChars = 600;
 
 export function validationAuthorized(input: {
   config: { tools: readonly string[]; allowedTools: readonly string[] };
@@ -189,25 +194,53 @@ export async function runDeclaredValidation(
 }
 
 /**
+ * Each criterion's exact text beside the note recorded for its index, so the
+ * final self-review compares against the criterion, not a remembered paraphrase.
+ * Criteria are never cut; long note summaries are, since the worker holds them.
+ */
+function criterionMap(
+  acceptance: readonly string[],
+  notes: readonly WorkHandoffNote[] = [],
+): string {
+  const summaries = new Map(
+    notes
+      .filter((note) => note.kind === "verification")
+      .map((note) => [note.criterionIndex, note.summary]),
+  );
+  const missing = acceptance.flatMap((_, index) =>
+    summaries.has(index) ? [] : [index],
+  );
+  const lines = acceptance.map((criterion, index) => {
+    const summary = summaries.get(index);
+    const note =
+      summary === undefined
+        ? "none recorded"
+        : summary.length <= maxNoteExcerptChars
+          ? summary
+          : `${summary.slice(0, maxNoteExcerptChars)} [${summary.length - maxNoteExcerptChars} more characters]`;
+    return `[${index}] ${criterion}\nnote [${index}]: ${note}`;
+  });
+  return `Check each acceptance criterion's exact text against the verification note recorded for its index. The reviewer checks every sub-clause of this text, not a paraphrase: a note that answers another criterion, merges criteria or omits a sub-clause leaves that criterion unproved. Add any missing proof, then fix the note.${missing.length ? ` No note yet for criteria ${missing.join(", ")}.` : ""}\n${lines.join("\n")}`;
+}
+
+/**
  * Decode .factory-handoff.json exactly as collection will, so the worker can
- * repair a manifest that would otherwise reject its whole result.
+ * repair a manifest that would otherwise reject its whole result. `criteria`
+ * maps each criterion to its note once the manifest decodes.
  */
 export function checkWorkHandoff(
   worktree: string,
   handoff: HandoffContext,
-): { passed: boolean; text?: string } {
+): { passed: boolean; text?: string; criteria?: string } {
+  const count = handoff.acceptance.length;
   try {
-    const notes = readWorkHandoff(
-      worktree,
-      handoff.peers,
-      handoff.criterionCount,
-    );
-    const criteria = handoff.criterionCount;
+    const notes = readWorkHandoff(worktree, handoff.peers, count);
     if (!notes)
       return {
         passed: true,
-        ...(criteria && {
-          text: `No .factory-handoff.json yet. Before you finish, record one verification note for each of the ${criteria} acceptance criteria there, using the schema in your instructions.`,
+        ...(count && {
+          text: `No .factory-handoff.json yet. Before you finish, record one verification note for each of the ${count} acceptance criteria there, using the schema in your instructions.`,
+          criteria: criterionMap(handoff.acceptance),
         }),
       };
     const verified = notes.filter(
@@ -215,12 +248,13 @@ export function checkWorkHandoff(
     ).length;
     return {
       passed: true,
-      text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${criteria} acceptance criteria.`,
+      text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${count} acceptance criteria.`,
+      ...(count && { criteria: criterionMap(handoff.acceptance, notes) }),
     };
   } catch (error) {
     return {
       passed: false,
-      text: `.factory-handoff.json would be rejected at collection, and your whole result with it. ${error instanceof Error ? error.message : String(error)}\nRewrite it to match this exact schema, then run validation again: ${JSON.stringify(workHandoffSchema(handoff.peers.length, handoff.criterionCount))}`,
+      text: `.factory-handoff.json would be rejected at collection, and your whole result with it. ${error instanceof Error ? error.message : String(error)}\nRewrite it to match this exact schema, then run validation again: ${JSON.stringify(workHandoffSchema(handoff.peers.length, count))}`,
     };
   }
 }
@@ -268,6 +302,9 @@ export async function createFactoryValidationMcp(
             if (handoff.text)
               if (handoff.passed) parts.push(handoff.text);
               else parts.unshift(handoff.text);
+            // Self-review follows a passing run; after the bounded output, so never cut.
+            if (declared.passed && handoff.criteria)
+              parts.push(handoff.criteria);
             if (declared.passed && !handoff.passed)
               parts.unshift("Validation failed. Fix this before you finish.");
             if (declared.passed) {

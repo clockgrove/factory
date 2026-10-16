@@ -73,7 +73,7 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   assert.equal(readFileSync(join(worktree, "a.txt"), "utf8"), "changed\n");
   assert.equal(existsSync(`${worktree}.validation/1`), false);
   // Validation decodes the handoff as collection will and names what is wrong.
-  const handoff = { peers: [], criterionCount: 1 };
+  const handoff = { peers: [], acceptance: ["a.txt holds the change"] };
   writeFileSync(
     join(worktree, ".factory-handoff.json"),
     JSON.stringify({
@@ -102,5 +102,11 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
       ],
     }),
   );
-  assert.equal(checkWorkHandoff(worktree, handoff).passed, true);
+  const decoded = checkWorkHandoff(worktree, handoff);
+  assert.equal(decoded.passed, true);
+  // Self-review sees the exact criterion beside the note for its index.
+  assert.match(
+    decoded.criteria,
+    /\n\[0\] a\.txt holds the change\nnote \[0\]: changed: a\.txt:1$/,
+  );
 });

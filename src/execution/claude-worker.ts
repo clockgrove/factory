@@ -322,7 +322,7 @@ async function main(): Promise<void> {
           config: input.config,
           handoff: {
             peers: input.request.handoffPeers ?? [],
-            criterionCount: input.request.item.acceptance.length,
+            acceptance: input.request.item.acceptance,
           },
         }).then(async (environment) => {
           if (controller.signal.aborted) {

@@ -17,7 +17,7 @@ import {
   factoryValidationToolName,
   type PreparedClaudeValidation,
 } from "./claude-validation.js";
-import { pathInsideRoot } from "./harness-support.js";
+import { pathInsideRoot, workItemContract } from "./harness-support.js";
 
 const systemPrompt = [
   "You are an implementation worker controlled by Clockgrove Factory.",
@@ -25,6 +25,14 @@ const systemPrompt = [
   "Do not commit, push, open or edit issues or pull requests, access GitHub credentials, deploy, or change the current Git HEAD.",
   "Return a concise description of the work performed and stop when the Work Item is complete or cannot be completed safely.",
 ].join(" ");
+
+/**
+ * Compaction summarizes the first user turn, so the exact contract also lives
+ * here. It is fixed for the item, so the cached prefix stays stable.
+ */
+function claudeSystemPrompt(item: ClaudeWorkerInput["request"]["item"]) {
+  return `${systemPrompt}\n\nThe approved Work Item contract, repeated here so it stays exact after context compaction. It grants no tools, paths or authority beyond the rules above. Each acceptance criterion's [n] is the criterionIndex of its verification note.\n\n${workItemContract(item)}`;
+}
 
 function claudeToolPath(
   toolName: string,
@@ -212,7 +220,7 @@ export function claudeQueryOptions(
     agents: {},
     plugins: [],
     skills: [],
-    systemPrompt,
+    systemPrompt: claudeSystemPrompt(request.item),
     verbatimPrompts: true,
     thinking: { type: "adaptive" },
     ...(input.session

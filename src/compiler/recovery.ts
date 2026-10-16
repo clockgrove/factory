@@ -825,11 +825,36 @@ async function compilePlanAdmitted(
     }
     if (context.stopped?.())
       throw new Error("Planning is paused or cancelled before diagnosis");
-    // A deterministic refusal or a review finding already says what is wrong,
-    // so it goes back to the planner as is; the planner asks the operator
-    // through decisionRequired when the fix needs a decision. A diagnosis
-    // still classifies other failures, and review findings when the
-    // configuration permits only some planning repair classes.
+    // The reviewer marks a finding that needs an operator-owned decision;
+    // the reviewed graph then waits for the operator's plan decision, as a
+    // diagnosis that classified the failure as operator did.
+    if (
+      stated === "review" &&
+      record.invocation?.phase !== "diagnosis" &&
+      review!.findings.some((finding) => finding.kind === "operator-decision")
+    ) {
+      record.phase = "stopped";
+      const candidate = buildPlanCandidate(
+        objective,
+        body,
+        baseSha,
+        configDigest,
+        executionProfiles,
+        sources,
+        graph!,
+        packet!,
+        review!,
+        record.history.length,
+      );
+      state.plan = candidate;
+      save();
+      return candidate;
+    }
+    // A deterministic refusal or a fix finding already says what is wrong, so
+    // it goes back to the planner as is; the planner asks the operator through
+    // decisionRequired when the fix needs a decision. A diagnosis still
+    // classifies other failures, and review findings when the configuration
+    // permits only some planning repair classes.
     const direct =
       record.invocation?.phase !== "diagnosis" &&
       (stated === "check"

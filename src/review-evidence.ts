@@ -84,7 +84,14 @@ export interface ReviewChoiceFinding {
   detail: string;
   question: string;
 }
+/**
+ * fix: the planner can correct the plan within the Objective as written.
+ * operator-decision: the correction needs a decision only the operator owns.
+ */
+export const GRAPH_FINDING_KINDS = ["fix", "operator-decision"] as const;
+export type GraphFindingKind = (typeof GRAPH_FINDING_KINDS)[number];
 export interface GraphReviewFinding {
+  kind: GraphFindingKind;
   /** Graph items the finding concerns; empty when it concerns the plan as a whole. */
   itemIds: string[];
   evidenceIndices: number[];
@@ -92,6 +99,7 @@ export interface GraphReviewFinding {
   question: string;
 }
 export interface ResolvedGraphFinding {
+  kind: GraphFindingKind;
   itemIds: string[];
   evidence: ReviewEvidenceReference[];
   detail: string;
@@ -429,7 +437,15 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
             },
           }),
       ...(graph
-        ? { itemIds: { type: "array", items: { type: "string" } } }
+        ? {
+            kind: {
+              type: "string",
+              enum: [...GRAPH_FINDING_KINDS],
+              description:
+                "fix when the plan can be corrected within the Objective and supplied sources as written; operator-decision when the correction needs a product, scope or authority decision only the operator can make, asked in question.",
+            },
+            itemIds: { type: "array", items: { type: "string" } },
+          }
         : {}),
       evidenceIndices: {
         type: "array",
@@ -456,7 +472,7 @@ export function reviewSchema(packet: ReviewPacket, graph = false): unknown {
       },
     },
     required: [
-      ...(graph ? ["itemIds"] : ["criterionIndex", "verdict"]),
+      ...(graph ? ["kind", "itemIds"] : ["criterionIndex", "verdict"]),
       "evidenceIndices",
       "detail",
       "question",
@@ -679,10 +695,20 @@ export function decodeGraphReview(
     if (
       Object.keys(value).some(
         (key) =>
-          !["itemIds", "evidenceIndices", "detail", "question"].includes(key),
+          ![
+            "kind",
+            "itemIds",
+            "evidenceIndices",
+            "detail",
+            "question",
+          ].includes(key),
       )
     )
       throw new ReviewProtocolError("Graph finding contains unknown fields");
+    if (!GRAPH_FINDING_KINDS.includes(value.kind as GraphFindingKind))
+      throw new ReviewProtocolError(
+        "Graph finding kind must be fix or operator-decision",
+      );
     const detail = text(value.detail, "detail");
     const question = text(value.question, "question", false).trim();
     // A finding without a question is still a finding: its detail says what
@@ -694,6 +720,7 @@ export function decodeGraphReview(
         "Review finding needs a question or a detail to derive one from",
       );
     return {
+      kind: value.kind as GraphFindingKind,
       itemIds: graphItemReferences(value.itemIds, graphItemIds),
       evidence: resolveReviewReferences(
         reviewEvidenceIds(value.evidenceIndices, packet),

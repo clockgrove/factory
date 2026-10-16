@@ -891,6 +891,15 @@ class ClaudePlanningTransport implements PlanningTransport {
         Object.assign(options, claudeResumeOptions(owned));
         options.env = claudeSessionEnvironment(owned, options.env ?? {});
       }
+      // A delta relies on the complete request earlier in the conversation;
+      // a compaction summary could drop it. Only full requests may compact.
+      if (nativePrompt !== args.prompt) {
+        options.settings = {
+          ...(options.settings as Record<string, unknown>),
+          autoCompactEnabled: false,
+        };
+        options.env = { ...options.env, DISABLE_AUTO_COMPACT: "1" };
+      }
       assertProviderTurnDeadline(args.deadlineAt);
       abortController.signal.throwIfAborted();
       // The controller callback admits the charged attempt, logical submission
@@ -998,6 +1007,14 @@ class ClaudePlanningTransport implements PlanningTransport {
         throw new Error(
           "Claude planning result belongs to another native conversation",
         );
+      if (compacted && nativePrompt !== args.prompt) {
+        // Never accept an answer planned from a summary of the request.
+        const detail =
+          "Claude compacted a delta turn despite disabled auto-compact; its answer is not accepted";
+        state.ended = true;
+        state.fault = { kind: "defect", detail };
+        throw new Error(detail);
+      }
       this.settle(result!, {
         state,
         invocation,

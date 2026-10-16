@@ -6606,11 +6606,12 @@ test("stopped collection freezes a completed owned local return before restart a
         buildClosure: () => buildRecoveryCheckpointClosure({ config }),
       },
       () =>
-        collectStoppedWorkerReturns(
-          config,
-          [readContinuation(repository, 1)],
-          driver,
-        ),
+        collectStoppedWorkerReturns([
+          {
+            state: readContinuation(repository, 1),
+            runtime: () => ({ config, driver }),
+          },
+        ]),
     );
   saveState(path, altered);
   await restart();

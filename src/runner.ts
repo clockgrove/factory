@@ -99,6 +99,7 @@ import {
   CheckpointProducerInventoryChanged,
   isCheckpointAdmissionFailure,
   isCheckpointCollectionPending,
+  privateCheckpointBounds,
   trackCollection,
   withQueueControlVerification,
   withRecoveryCheckpointControllerVerification,
@@ -701,7 +702,12 @@ async function runObjectiveOwned(
     // A completed return left by the stopped controller refuses every
     // publication until collected, starting with the claim's admission.
     if (snapshot)
-      await collectStoppedWorkerReturns(config, [snapshot], services.driver);
+      await collectStoppedWorkerReturns([
+        {
+          state: snapshot,
+          runtime: () => ({ config, driver: services.driver }),
+        },
+      ]);
     queueClaim = await claimProjectQueueRun(
       config,
       services.github,
@@ -2084,28 +2090,41 @@ export async function collectCompletedWorker(
 
 /**
  * Collect the completed local returns that a stopped controller left behind,
- * before this owner's first checkpoint admission (#1349). Until its collector
- * freezes it, such a return is a required gap that refuses every publication,
- * and only collection clears it: a restarted controller or a cold service
- * would otherwise stop at its first admission and never reach the Work Item's
- * collection. The owner that continues the Objective performs the collection
- * its execute step would, only earlier: nothing is started or accepted, and
- * other Work Items keep their own paths. A return that is not exactly the
- * retained attempt's keeps the existing path.
+ * before this owner's first checkpoint admission (#1349). With private-history
+ * persistence, such a return is a required gap that refuses every publication
+ * until its collector freezes it, and only collection clears it: a restarted
+ * controller or a cold service would otherwise stop at its first admission and
+ * never reach the Work Item's collection. Without that persistence there is no
+ * gap and the execute step collects as before. The owner that continues the
+ * Objective performs the collection its execute step would, only earlier, on
+ * the provider configuration the Objective froze (`runtime`): nothing is
+ * started or accepted, and other Work Items keep their own paths. A return that
+ * is not exactly the retained attempt's keeps the existing path.
+ *
+ * Unlike `factory collect`, this does not require a quiet Objective (no
+ * pending amendment or expansion, recorded processes, cancellation error or
+ * unsettled ownership elsewhere): the resumed controller reconciles those
+ * itself, and they do not bear on this attempt's own exact return, which its
+ * execute step would collect regardless. Each refuses an admission only after
+ * this gap is gone.
  */
 export async function collectStoppedWorkerReturns(
-  config: FactoryConfig,
-  states: ContinuationState[],
-  driver: ExecutionDriver,
+  objectives: {
+    state: ContinuationState;
+    runtime: () => { config: FactoryConfig; driver: ExecutionDriver };
+  }[],
 ): Promise<void> {
+  if (!privateCheckpointBounds()) return;
   const pending: {
+    repository: string;
     state: FactoryState;
     item: string;
     identity: string;
     collect: () => Promise<void>;
   }[] = [];
-  for (const state of states) {
+  for (const { state, runtime } of objectives) {
     if (!isExecutionState(state)) continue;
+    let resolved: ReturnType<typeof runtime> | undefined;
     for (const [item, work] of Object.entries(state.work)) {
       const handle = work.execution;
       const data = handle?.data as
@@ -2121,20 +2140,34 @@ export async function collectStoppedWorkerReturns(
       )
         continue;
       try {
+        // Only a completed original is the gap this pass exists to clear.
+        if (
+          localWorkerReturn(stateRoot(state.repository), handle, state)
+            ?.returned.state !== "complete"
+        )
+          continue;
+      } catch {
+        continue;
+      }
+      // An Objective that cannot be composed on its frozen provider stops
+      // here with that reason, not later with the gap's refusal.
+      resolved ??= runtime();
+      try {
         pending.push({
+          repository: resolved.config.repository,
           state,
           item,
           identity: handle.identity,
           collect: completedLocalCollection(
-            config,
+            resolved.config,
             state,
             { item, attempt: work.attempt },
-            driver,
+            resolved.driver,
           ),
         });
       } catch {
-        // Not an exact completed return of this stopped attempt: a running,
-        // missing or unknown worker keeps its existing owner and path.
+        // Not exactly the retained attempt's completed return: the existing
+        // path keeps it, and its refusal names the gap.
       }
     }
   }
@@ -2142,7 +2175,7 @@ export async function collectStoppedWorkerReturns(
   // Work Item collections do, so the first publication carries them all.
   const outcomes = await Promise.allSettled(
     pending.map((entry) =>
-      trackCollection(config.repository, entry.identity, entry.collect),
+      trackCollection(entry.repository, entry.identity, entry.collect),
     ),
   );
   const failures = outcomes.flatMap((outcome, index) => {
@@ -2153,6 +2186,10 @@ export async function collectStoppedWorkerReturns(
       | undefined;
     // A durably ended attempt (a frozen result, cessation or rejection) is
     // the Work Item's own outcome: its execute step consumes it exactly.
+    // With private-history bounds the driver records every work-fault
+    // rejection before raising it, so a failure without a record left the
+    // gap in place: the next admission would refuse it anyway, and this
+    // names the actual cause instead.
     return data?.result !== undefined ||
       data?.stopped !== undefined ||
       data?.rejectedCollection !== undefined

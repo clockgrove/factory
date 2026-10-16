@@ -1451,6 +1451,28 @@ async function runIntakeOwned(
     wake?.();
   };
   let heldUntil = 0;
+  // The provider configuration and services each Objective froze: the
+  // service continues every Objective on them.
+  const objectiveRuntime = (
+    objective: number,
+  ): { config: FactoryConfig; services: ApplicationServices } => {
+    const objectiveConfig = options.backgroundConfigurationPath
+      ? queuedObjectiveConfig(
+          config,
+          objective,
+          options.backgroundConfigurationPath,
+        )
+      : config;
+    if (objectiveConfig === config) return { config, services };
+    if (!options.servicesFor)
+      throw new Error(
+        `Objective #${objective} runs with another provider, and this service cannot compose it`,
+      );
+    return {
+      config: objectiveConfig,
+      services: options.servicesFor(objectiveConfig),
+    };
+  };
   let controlTail: Promise<unknown> = Promise.resolve();
   let pendingMutations = 0;
   let backgroundObservation: AbortController | undefined;
@@ -1589,21 +1611,8 @@ async function runIntakeOwned(
         // dispatch until it settles (#1290).
         if (record.objectives.includes(request.objective)) {
           const input = parseDecisionInput(request.input);
-          const objectiveConfig = options.backgroundConfigurationPath
-            ? queuedObjectiveConfig(
-                config,
-                request.objective,
-                options.backgroundConfigurationPath,
-              )
-            : config;
-          let objectiveServices = services;
-          if (objectiveConfig !== config) {
-            if (!options.servicesFor)
-              throw new Error(
-                `Objective #${request.objective} runs with another provider, and this service cannot compose it`,
-              );
-            objectiveServices = options.servicesFor(objectiveConfig);
-          }
+          const { config: objectiveConfig, services: objectiveServices } =
+            objectiveRuntime(request.objective);
           return asInstallationOwner(lock, () =>
             decideStoppedObjective(
               objectiveConfig,
@@ -1803,16 +1812,29 @@ async function runIntakeOwned(
     // This lease excludes every Objective owner: a completed worker return
     // still uncollected was left by a stopped controller, and it refuses
     // that publication and readiness until collected, so collect it first.
+    // Each Objective's return is collected on the provider it froze.
     const objectives = join(stateRoot(config.repository), "objectives");
     await collectStoppedWorkerReturns(
-      config,
       (existsSync(objectives) ? readdirSync(objectives) : [])
         .filter((name) => /^\d+$/.test(name))
         .flatMap((name) => {
-          const state = readContinuation(config.repository, Number(name));
-          return state ? [state] : [];
+          const objective = Number(name);
+          const state = readContinuation(config.repository, objective);
+          return state
+            ? [
+                {
+                  state,
+                  runtime: () => {
+                    const runtime = objectiveRuntime(objective);
+                    return {
+                      config: runtime.config,
+                      driver: runtime.services.driver,
+                    };
+                  },
+                },
+              ]
+            : [];
         }),
-      services.driver,
     );
     try {
       await awaitCheckpointAdmission(config.repository, "before-effect");
@@ -1996,21 +2018,8 @@ async function runIntakeOwned(
           retargetControllerLock(lockPath, lock, selected);
           try {
             if (handingOff || localMode || pendingMutations) continue;
-            const objectiveConfig = options.backgroundConfigurationPath
-              ? queuedObjectiveConfig(
-                  config,
-                  selected,
-                  options.backgroundConfigurationPath,
-                )
-              : config;
-            let objectiveServices = services;
-            if (objectiveConfig !== config) {
-              if (!options.servicesFor)
-                throw new Error(
-                  `Objective #${selected} runs with another provider, and this service cannot compose it`,
-                );
-              objectiveServices = options.servicesFor(objectiveConfig);
-            }
+            const { config: objectiveConfig, services: objectiveServices } =
+              objectiveRuntime(selected);
             const result = await runObjective(
               objectiveConfig,
               selected,

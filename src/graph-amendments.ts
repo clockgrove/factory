@@ -938,7 +938,10 @@ export function decideAmendment(
     pending.phase = "rejected";
     pending.rejectionStage = "decision";
     pending.error = `The operator refused the amendment: ${input.reason}`;
-    releaseCharge(state, amendmentEvent(pending), "planningRevisions");
+    // The operator refused it, so nothing it was charged for is consumed.
+    const event = amendmentEvent(pending);
+    for (const key of state.charges?.[event]?.allowances ?? [])
+      releaseCharge(state, event, key);
     if (state.coordinator) {
       state.coordinator.mode = "paused";
       state.coordinator.waitReason = pending.error;

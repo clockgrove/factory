@@ -342,6 +342,22 @@ export function rejectionHoldsPause(state: ContinuationState): boolean {
   );
 }
 
+/**
+ * The planner's open question about the pending amendment, if it still awaits
+ * an answer (#1296). A refused amendment is rejected, and its unanswered
+ * question is no longer open.
+ */
+export function openAmendmentQuestion(
+  state: ContinuationState,
+): { question: string } | undefined {
+  if (!isExecutionState(state)) return undefined;
+  const pending = state.pendingAmendment;
+  const open = pending?.decisions?.at(-1);
+  return pending && pending.phase !== "rejected" && open && !open.answer
+    ? open
+    : undefined;
+}
+
 /** Set the coordinator's mode, unless a rejected amendment holds it paused. */
 export function setCoordinatorMode(
   state: ContinuationState,

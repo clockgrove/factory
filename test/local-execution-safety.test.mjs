@@ -104,7 +104,7 @@ import { consumption, resolveAutonomy } from "../dist/repair-policy.js";
 import { materializeGraphExpansion } from "../dist/graph-expansion.js";
 import { authenticateExpansionInputs } from "../dist/runner/expansion.js";
 import { graphProjectionControl } from "../dist/graph-projection-control.js";
-import { parseFactoryState } from "../dist/state.js";
+import { openAmendmentQuestion, parseFactoryState } from "../dist/state.js";
 import {
   acquireControllerLock,
   objectiveLockPath,
@@ -2283,6 +2283,18 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       legacy.objective,
     );
     assert.equal(refused.pendingAmendment.phase, "rejected");
+    // The refused question is no longer open: status, run outcome and decide
+    // routing move on to the replacement instead of asking it again.
+    assert.equal(openAmendmentQuestion(refused), undefined);
+    assert.throws(
+      () =>
+        decideAmendment(refused, {
+          actor: "operator",
+          outcome: "refuse",
+          reason: "Asked again",
+        }),
+      /No amendment decision is pending/,
+    );
     // A blind rerun names the rejection wait again; no provider starts.
     await assert.rejects(
       () =>

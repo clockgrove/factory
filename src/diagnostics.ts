@@ -68,6 +68,7 @@ import type {
 import {
   isPreparationState,
   observedStackNumber,
+  openAmendmentQuestion,
   projectionStarted,
 } from "./state.js";
 import type { PreState } from "./state-store.js";
@@ -2363,10 +2364,8 @@ export function statusDocument(
             : null,
           // The planner's unanswered question about it (#1296).
           question: (() => {
-            const open = state.pendingAmendment.decisions?.at(-1);
-            return open && !open.answer
-              ? redactDiagnosticDetail(open.question, secrets)
-              : null;
+            const open = openAmendmentQuestion(state);
+            return open ? redactDiagnosticDetail(open.question, secrets) : null;
           })(),
           // Why `factory propose-amendment` would refuse a replacement of a
           // rejected amendment (the checks submitAmendment applies); null when

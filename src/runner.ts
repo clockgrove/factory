@@ -136,6 +136,7 @@ import type { ContinuationState, WorkState } from "./state.js";
 import {
   isExecutionState,
   isPreparationState,
+  openAmendmentQuestion,
   pendingQuestions,
   rejectionHoldsPause,
   setCoordinatorMode,
@@ -306,10 +307,8 @@ async function decideObjectiveUnscoped(
     return input.outcome === "accept" ? "plan-accepted" : "plan-refused";
   }
   // The planner's open question about the pending amendment (#1296).
-  const asked = isExecutionState(state)
-    ? state.pendingAmendment?.decisions?.at(-1)
-    : undefined;
-  if (asked && !asked.answer && !input.item && !input.criterion) {
+  const asked = openAmendmentQuestion(state);
+  if (asked && !input.item && !input.criterion) {
     // A live owner holds the amendment: it records the answer itself.
     if (forward) {
       const reply = await requestControl(config.repository, {
@@ -1062,8 +1061,7 @@ async function runObjectiveOwned(
         if (
           request.action === "decide" &&
           isExecutionState(owner.snapshot) &&
-          owner.snapshot.pendingAmendment?.decisions?.at(-1) &&
-          !owner.snapshot.pendingAmendment.decisions.at(-1)!.answer
+          openAmendmentQuestion(owner.snapshot)
         ) {
           const decision = parseDecisionInput(input);
           if (!decision.item && !decision.criterion) {

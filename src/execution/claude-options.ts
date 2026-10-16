@@ -139,6 +139,31 @@ function preToolUseDecision(
   };
 }
 
+/**
+ * Models with a 1M-token window that the bundled Claude Code CLI does not know.
+ * It uses that window only when the model string carries the `[1m]` suffix;
+ * otherwise it assumes 200K and auto-compacts a worker near 170K. Its catalog
+ * already gives claude-opus-5-5 1M, so that model needs no entry.
+ */
+const longContextModels = new Set(["claude-sonnet-5-5"]);
+
+/** A typical attempt's distinct context peaks near 400K, so it compacts at most once. */
+const longContextCompactWindow = 400_000;
+
+/**
+ * The model string passed to the SDK. Captures and digests keep the configured
+ * name. FACTORY_CLAUDE_1M=0 restores the standard window without a config
+ * change, so config digests and started Objectives are unaffected.
+ */
+export function claudeSdkModel(
+  model: string,
+  environment: NodeJS.ProcessEnv,
+): string {
+  return environment.FACTORY_CLAUDE_1M !== "0" && longContextModels.has(model)
+    ? `${model}[1m]`
+    : model;
+}
+
 /** Build the complete, fail-closed SDK option set from validated adapter config. */
 export function claudeQueryOptions(
   input: ClaudeWorkerInput,
@@ -148,10 +173,11 @@ export function claudeQueryOptions(
   validation?: PreparedClaudeValidation,
 ): Options {
   const { config, request } = input;
+  const model = claudeSdkModel(config.model, environment);
   return {
     abortController,
     cwd: request.worktree,
-    model: config.model,
+    model,
     // Factory calls this reasoningEffort across all harnesses; the Claude SDK
     // names the equivalent provider option `effort`.
     effort: config.reasoningEffort,
@@ -201,6 +227,9 @@ export function claudeQueryOptions(
       autoMemoryEnabled: false,
       disableBundledSkills: true,
       claudeMdExcludes: ["**"],
+      ...(model !== config.model && {
+        autoCompactWindow: longContextCompactWindow,
+      }),
     },
     maxTurns: config.maxTurns,
     env: {

@@ -112,13 +112,15 @@ function progressEvent(
 function assertInitialization(
   message: SDKSystemMessage,
   input: ClaudeWorkerInput,
+  sdkModel: string,
 ): void {
   const { config, request } = input;
   if (resolve(message.cwd) !== resolve(request.worktree))
     throw new Error("Claude SDK initialized outside the supplied worktree");
-  if (message.model !== config.model)
+  // The SDK reports the requested string, including a `[1m]` window suffix.
+  if (message.model !== sdkModel)
     throw new Error(
-      `Claude SDK selected model ${message.model}, expected ${config.model}`,
+      `Claude SDK selected model ${message.model}, expected ${sdkModel}`,
     );
   if (message.permissionMode !== config.permissionMode)
     throw new Error(
@@ -419,7 +421,7 @@ async function main(): Promise<void> {
           );
         }
       if (message.type === "system" && message.subtype === "init") {
-        assertInitialization(message, input);
+        assertInitialization(message, input, options.model!);
         if (prepared || validation) {
           const statuses = await turn.race(stream.mcpServerStatus());
           prepared?.markReady(

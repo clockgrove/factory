@@ -153,30 +153,6 @@ import {
   statePath,
 } from "../dist/state-store.js";
 
-/** The configuration file for a flat test config: one provider in planning's place. */
-function toConfigFile(config) {
-  return Object.fromEntries(
-    Object.entries(config).flatMap(([key, value]) =>
-      key === "planning"
-        ? [
-            [
-              "providers",
-              {
-                test: {
-                  planning: config.planning,
-                  execution: config.execution,
-                },
-              },
-            ],
-            ["defaultProvider", "test"],
-          ]
-        : key === "execution"
-          ? []
-          : [[key, value]],
-    ),
-  );
-}
-
 test("disk content survives storage and materialization, and corruption is refused", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-content-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -6357,7 +6333,9 @@ test("stopped collection freezes a completed owned local return before restart a
   );
   const { LocalExecutionDriver, CodexHarness, checkpointWorkerSession } =
     await import("../dist/execution/local.js");
-  const { collectCompletedWorker } = await import("../dist/runner.js");
+  const { collectCompletedWorker, collectStoppedWorkerReturns } = await import(
+    "../dist/runner.js"
+  );
   const { addWorktree, processGroupExists } = await import(
     "../dist/process.js"
   );
@@ -6618,29 +6596,31 @@ test("stopped collection freezes a completed owned local return before restart a
     ),
     /differs from its retained/,
   );
-  const configFile = join(temporary, "config.json");
-  writeFileSync(configFile, JSON.stringify(toConfigFile(config)), {
-    mode: 0o600,
-  });
-  const command = execFileSync(
-    process.execPath,
-    [
-      new URL("../dist/cli.js", import.meta.url).pathname,
-      "collect",
-      "--config",
-      configFile,
-      "--objective",
-      "1",
-      "--item",
-      item.id,
-      "--run",
-      state.runId,
-      "--attempt",
-      identity,
-    ],
-    { encoding: "utf8", timeout: 10000 },
+  // A restarted owner collects the return its stopped controller left
+  // before any admission, which this gap would otherwise refuse. A return
+  // that is not exactly the retained attempt's keeps the existing path.
+  const restart = () =>
+    withRecoveryCheckpointScope(
+      {
+        config,
+        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+      },
+      () =>
+        collectStoppedWorkerReturns(
+          config,
+          [readContinuation(repository, 1)],
+          driver,
+        ),
+    );
+  saveState(path, altered);
+  await restart();
+  assert.equal(
+    readState(repository, 1).work.local.execution.data.result,
+    undefined,
   );
-  assert.match(command, /normal validation and review remain required/);
+  assert.equal(existsSync(worktree), true);
+  saveState(path, state);
+  await restart();
   const collected = readState(repository, 1);
   assert.equal(collected.work.local.attempt, identity);
   assert.equal(collected.work.local.status, "running");

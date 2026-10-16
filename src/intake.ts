@@ -90,6 +90,7 @@ import { checkRequiredEnvironment } from "./repair-policy.js";
 import {
   type ApplicationServices,
   CoordinatorHandoff,
+  collectStoppedWorkerReturns,
   decideStoppedObjective,
   parseDecisionInput,
   runObjective,
@@ -1799,6 +1800,20 @@ async function runIntakeOwned(
     // checkpoint (durability-pending), or a submitted attempt not yet
     // acknowledged, is reconciled and published before the tip check and the
     // queue observation (#1298). A held archive needs the operator.
+    // This lease excludes every Objective owner: a completed worker return
+    // still uncollected was left by a stopped controller, and it refuses
+    // that publication and readiness until collected, so collect it first.
+    const objectives = join(stateRoot(config.repository), "objectives");
+    await collectStoppedWorkerReturns(
+      config,
+      (existsSync(objectives) ? readdirSync(objectives) : [])
+        .filter((name) => /^\d+$/.test(name))
+        .flatMap((name) => {
+          const state = readContinuation(config.repository, Number(name));
+          return state ? [state] : [];
+        }),
+      services.driver,
+    );
     try {
       await awaitCheckpointAdmission(config.repository, "before-effect");
     } catch (error) {

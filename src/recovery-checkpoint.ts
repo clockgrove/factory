@@ -3565,10 +3565,13 @@ function verificationKey(
   });
 }
 function verificationMetadataBudget(options: GitPersistenceConfig): number {
-  // One encoded metadata pool shares the existing 8 MiB allowance.
+  // One encoded metadata pool, bounded by half the archive byte allowance and
+  // at most 64 MiB. It must hold one archive's working set (body facts, the
+  // producers' reference summaries, the verified base and publisher material)
+  // or eviction cycles and every publication re-validates unchanged inputs.
   // Material fingerprints and pending facts count; no body bytes survive a read.
   // maxFiles bounds archive/scratch material, not multiple facts about one ref.
-  return Math.min(options.maxBytes, 8 * 1024 * 1024);
+  return Math.min(Math.floor(options.maxBytes / 2), 64 * 1024 * 1024);
 }
 function historicalManifestSummary(
   bytes: Buffer,

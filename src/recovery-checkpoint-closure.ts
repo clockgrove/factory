@@ -1310,18 +1310,23 @@ async function buildRecoveryCheckpointClosureLocal(input: {
           .sort()
       : [];
     const retired = new Map<number, RetirementRecord>();
+    const restoredRecords = new Set<number>();
     for (const id of objectiveIds) {
       const path = join(objectiveDirectory, id, "state.json");
       if (!existsSync(path)) continue;
       const bytes = privateBytes(path, root);
+      const value = JSON.parse(bytes.toString("utf8"));
       const record = retiredEvidence(
         config.repository,
         Number(id),
         bytes,
-        JSON.parse(bytes.toString("utf8")),
+        value,
         (commit) => acknowledgedArchiveCommit(config, commit),
       );
-      if (record) retired.set(Number(id), record);
+      if (!record) continue;
+      retired.set(Number(id), record);
+      if (object(value).restoration !== undefined)
+        restoredRecords.add(Number(id));
     }
     for (const entry of memory.typedGitObjects ?? [])
       objects.set(`${entry.kind}:${entry.sha}`, entry);
@@ -1355,16 +1360,34 @@ async function buildRecoveryCheckpointClosureLocal(input: {
         if (!existsSync(path)) continue;
         const bytes = privateBytes(path, root);
         if (name === "state.json") {
-          const state = parsePortableContinuation(
-            JSON.parse(bytes.toString("utf8")),
-            config.repository,
-            Number(id),
-          );
           // Retire only the exact bytes the retirement check read; a snapshot
           // that changed since (for example, a retry) takes the full path.
           const retirement = retired.get(Number(id));
           if (retirement && stateDigest(bytes) !== retirement.stateDigest)
             retired.delete(Number(id));
+          if (retired.has(Number(id)) && !restoredRecords.has(Number(id))) {
+            // These are exactly the terminal snapshot bytes an acknowledged
+            // evidence commit holds in full; that commit's closure validated
+            // them. Carry them as those exact bytes without parsing them again,
+            // so a retired snapshot a later parser rejects cannot stop every
+            // checkpoint. A restored record is anchored by its restoration
+            // receipt and keeps the full path below.
+            gaps.push({
+              path: `objectives/${id}/state.json`,
+              availability: ARCHIVED_EVIDENCE,
+              required: false,
+              reason:
+                "Retired terminal Objective: its complete evidence is in the archive history",
+              evidenceCommit: retirement!.evidenceCommit,
+            });
+            await include(`objectives/${id}/${name}`, "continuation", bytes);
+            continue;
+          }
+          const state = parsePortableContinuation(
+            JSON.parse(bytes.toString("utf8")),
+            config.repository,
+            Number(id),
+          );
           if (retired.has(Number(id))) {
             // A restored record keeps its receipt's original snapshot and
             // source manifest: they authenticate the snapshot itself.

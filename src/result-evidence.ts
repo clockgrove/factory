@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
 import type {
@@ -604,19 +604,8 @@ export function resultChangePacket(
       : textBudgetOverride) ?? configuredResultReviewTextBudget();
   const textBudget =
     Number.isSafeInteger(configured) && configured >= 0 ? configured : 48_000;
-  const diffs = changes.map(({ path }) => {
-    const lineStats = pinnedGit(
-      checkout,
-      "diff",
-      "--numstat",
-      "--no-renames",
-      baseSha,
-      commit,
-      "--",
-      path,
-    );
-    if (textBudget === 0)
-      return { path, lineStats, output: Buffer.alloc(0), overflow: true };
+  /** One path's text patch, at most `limit` bytes; overflow when longer. */
+  const textPatch = (path: string, limit: number) => {
     const result = spawnSync(
       "git",
       [
@@ -633,7 +622,7 @@ export function resultChangePacket(
         "--",
         path,
       ],
-      { env: pinnedGitEnvironment(), maxBuffer: textBudget },
+      { env: pinnedGitEnvironment(), maxBuffer: limit },
     );
     if (
       result.error &&
@@ -643,35 +632,50 @@ export function resultChangePacket(
     if (!result.error && result.status !== 0)
       throw new Error(`Cannot describe text change for ${path}`);
     return {
-      path,
-      lineStats,
       output: result.stdout ?? Buffer.alloc(0),
       overflow: Boolean(result.error),
     };
+  };
+  // First pass: each patch's length only, so one buffer is live at a time.
+  const sizes = changes.map(({ path }) => {
+    if (textBudget === 0) return Number.MAX_SAFE_INTEGER;
+    const { output, overflow } = textPatch(path, textBudget);
+    return overflow ? Number.MAX_SAFE_INTEGER : output.length;
   });
   // Share the inline budget fairly, smallest patches first, so every changed
   // file gets a slice and only the largest are cut (#1318). The complete
   // patches are also written for the reviewer to read (materializeChangeEvidence).
-  const allotted = new Array<number>(diffs.length).fill(0);
+  const allotted = new Array<number>(changes.length).fill(0);
   let remaining = textBudget;
-  diffs
-    .map((diff, index) => ({
-      index,
-      size: diff.overflow ? Number.MAX_SAFE_INTEGER : diff.output.length,
-    }))
+  sizes
+    .map((size, index) => ({ index, size }))
     .sort((left, right) => left.size - right.size)
     .forEach(({ index, size }, rank) => {
-      const share = Math.floor(remaining / (diffs.length - rank));
+      const share = Math.floor(remaining / (changes.length - rank));
       allotted[index] = Math.min(size, share);
       remaining -= allotted[index]!;
     });
+  // Second pass: each patch bounded by its share, so excerpts stay within budget.
   remaining = textBudget;
-  const patches = diffs.map(({ path, lineStats, output, overflow }, index) => {
+  const patches = changes.map(({ path }, index) => {
+    const lineStats = pinnedGit(
+      checkout,
+      "diff",
+      "--numstat",
+      "--no-renames",
+      baseSha,
+      commit,
+      "--",
+      path,
+    );
     const limit = allotted[index]!;
+    if (limit === 0)
+      return { path, lineStats, excerpt: "", truncated: sizes[index]! > 0 };
+    const { output, overflow } = textPatch(path, limit);
     const excerpt = new StringDecoder("utf8").write(output.subarray(0, limit));
     const truncated =
       overflow ||
-      output.length > limit ||
+      sizes[index]! > limit ||
       Buffer.byteLength(excerpt) !== Math.min(output.length, limit);
     remaining -= Buffer.byteLength(excerpt, "utf8");
     return { path, lineStats, excerpt, truncated };
@@ -945,8 +949,9 @@ function materializeChangeEvidence(
     checkoutTree(checkout, baseSha, base, join(root, "base-index"), atBase);
   const patches = join(root, "changes");
   mkdirSync(patches);
-  const index = changes.map((entry) => {
-    const patchFile = `changes/${entry.path}.patch`;
+  const index = changes.map((entry, position) => {
+    // Named by position: path-derived names collide (a and a.patch/b).
+    const patchFile = `changes/${position}.patch`;
     const result = spawnSync(
       "git",
       [
@@ -973,9 +978,9 @@ function materializeChangeEvidence(
     if (!result.error && result.status !== 0)
       throw new Error(`Cannot describe text change for ${entry.path}`);
     const complete = !result.error;
-    const target = join(root, patchFile);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, result.stdout ?? Buffer.alloc(0), { mode: 0o400 });
+    writeFileSync(join(root, patchFile), result.stdout ?? Buffer.alloc(0), {
+      mode: 0o400,
+    });
     return {
       path: entry.path,
       status: entry.status,
@@ -983,7 +988,9 @@ function materializeChangeEvidence(
       newMode: entry.newMode,
       baseFile: atBase.includes(entry.path) ? `base/${entry.path}` : null,
       candidateFile:
-        entry.newMode === "000000" ? null : `candidate/${entry.path}`,
+        entry.newMode === "000000" || entry.newMode === "160000"
+          ? null
+          : `candidate/${entry.path}`,
       patchFile,
       patchComplete: complete,
     };

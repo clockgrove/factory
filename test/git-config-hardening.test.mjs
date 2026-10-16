@@ -563,22 +563,26 @@ test("controller Git ignores executable configuration shared by a worker worktre
       {
         baseFile: sourceChange.baseFile,
         candidateFile: sourceChange.candidateFile,
-        patchFile: sourceChange.patchFile,
         patchComplete: sourceChange.patchComplete,
       },
       {
         baseFile: "base/source.ts",
         candidateFile: "candidate/source.ts",
-        patchFile: "changes/source.ts.patch",
         patchComplete: true,
       },
+    );
+    // Patch files are named by position, so no path can collide with another.
+    assert.match(sourceChange.patchFile, /^changes\/\d+\.patch$/);
+    assert.equal(
+      new Set(changeIndex.changes.map((entry) => entry.patchFile)).size,
+      changeIndex.changes.length,
     );
     assert.equal(
       readFileSync(join(tree.directory, "base", "source.ts"), "utf8"),
       baselineCode,
     );
     assert.equal(
-      readFileSync(join(tree.directory, "changes", "source.ts.patch"), "utf8"),
+      readFileSync(join(tree.directory, sourceChange.patchFile), "utf8"),
       execFileSync(
         "git",
         [

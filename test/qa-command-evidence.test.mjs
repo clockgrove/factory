@@ -1367,6 +1367,10 @@ if(mode==='json') {const dir=fs.mkdtempSync(p.join(os.tmpdir(),'evidence-'));fs.
       (value) => {
         value.text.bodies[0].resolvedPath = "../foreign/proof.json";
       },
+      // Inside the temporary root but outside the located directory.
+      (value) => {
+        value.text.bodies[0].resolvedPath = "other/proof.json";
+      },
     ]) {
       const changed = structuredClone(captured);
       mutate(changed[0]);
@@ -1375,6 +1379,43 @@ if(mode==='json') {const dir=fs.mkdtempSync(p.join(os.tmpdir(),'evidence-'));fs.
         /locator|contained and relative/,
       );
     }
+    // A located file aliasing a sibling directory in the same temporary root
+    // is refused: the guarantee is the located directory, not the root.
+    mkdirSync(join(owned, "other"), { recursive: true });
+    writeFileSync(join(owned, "other", "proof.json"), '{"equal":false}');
+    symlinkSync("../other/proof.json", join(directory, "sibling.json"));
+    await assert.rejects(
+      () =>
+        captureReviewArtifacts({
+          worktree: checkout,
+          treeSha: tree,
+          commandIndex: 0,
+          command: command("alias"),
+          stdout: `Runtime: ${markedDirectory}\n`,
+          stdoutBytes: Buffer.from(`Runtime: ${markedDirectory}\n`),
+          temporaryRoot: rootAlias,
+          selectors: [
+            {
+              command: command("alias"),
+              text: {
+                source: "proof.cjs",
+                locator: {
+                  stdoutPathPrefix: "Runtime: ",
+                  files: [
+                    {
+                      file: "sibling.json",
+                      mediaType: "application/json",
+                      maxBytes: 1024,
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+          contentStore: store,
+        }),
+      /outside its located directory/,
+    );
     await assert.rejects(
       () => run("stale", { locator }),
       /contained and relative/,

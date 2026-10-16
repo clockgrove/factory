@@ -432,7 +432,8 @@ export function assertReviewArtifacts(
         if (directoryPath !== undefined && body.origin === "temporary-file") {
           if (
             !(body.path as string).startsWith(`${directoryPath}/`) ||
-            body.resolvedPath === undefined
+            body.resolvedPath === undefined ||
+            !(body.resolvedPath as string).startsWith(`${directoryPath}/`)
           )
             throw new Error(
               "Retained text body differs from its locator directory",
@@ -778,6 +779,12 @@ async function captureTextArtifact(
         join(directoryPath, selected.file),
         selected.maxBytes,
       );
+      // A located file, or what its alias resolves to, stays inside the
+      // located directory, not merely inside the temporary root.
+      if (!resolvedPath.startsWith(`${directoryPath}/`))
+        throw new Error(
+          "Text artifact locator file resolves outside its located directory",
+        );
       await append(
         {
           origin: "temporary-file",

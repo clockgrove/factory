@@ -36,7 +36,7 @@ const manifest: ControllerCapabilitiesManifest = {
     {
       id: "review-artifact-capture",
       statement:
-        "For a configured reviewArtifacts text selector, Factory runs the exact validation command with TMPDIR, TMP and TEMP set to a fresh controller-owned directory, accepts a stdout locator only when it names exactly one directory inside that directory, and refuses capture for stale or outside paths, files outside the located directory, invalid UTF-8/JSON, missing bodies and bodies over the declared byte bounds. It records the command, exact tree, declaring source digest and verified body identities before cleanup. A supplied capture therefore was written under this validation's own fresh temporary root; it does not by itself prove semantic acceptance.",
+        "For a configured reviewArtifacts text selector with a stdout locator, Factory runs the exact validation command with TMPDIR, TMP and TEMP set to a fresh directory owned by this validation run (shared by its preparation and commands), accepts the locator only when it names exactly one directory inside that directory, and refuses capture for stale or outside locator paths, selected files whose path or alias target resolves outside the located directory, invalid UTF-8/JSON, missing bodies and bodies over the declared byte bounds. It records the command, exact tree, declaring source digest and verified body identities before cleanup. A supplied capture therefore was written inside this validation run's own fresh temporary directory; it does not by itself prove semantic acceptance.",
     },
     {
       id: "required-lfs-publication",

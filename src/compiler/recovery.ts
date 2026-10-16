@@ -163,7 +163,8 @@ export async function retainPlanningNativeReturn(
   owner.nativeReturns ??= [];
   owner.nativeReturns.push(ref);
   args.save();
-  await awaitCheckpointAdmission(args.repository, "explicit");
+  // Retained locally; the next pre-effect checkpoint carries it.
+  await awaitCheckpointAdmission(args.repository, "settled");
   return "admission-complete";
 }
 

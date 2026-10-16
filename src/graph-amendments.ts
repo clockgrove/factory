@@ -1107,7 +1107,8 @@ function amendmentNativeHooks(
       owner.nativeReturns ??= [];
       owner.nativeReturns.push(ref);
       args.save();
-      await awaitCheckpointAdmission(args.state.repository, "explicit");
+      // Retained locally; the next pre-effect checkpoint carries it.
+      await awaitCheckpointAdmission(args.state.repository, "settled");
       return "admission-complete";
     },
   };

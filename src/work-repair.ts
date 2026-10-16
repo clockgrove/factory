@@ -1691,9 +1691,11 @@ export async function diagnoseWorkRepair(args: {
                         invocation.nativeReturns ??= [];
                         invocation.nativeReturns.push(ref);
                         save();
+                        // Retained locally; the next pre-effect checkpoint
+                        // carries it.
                         await awaitCheckpointAdmission(
                           state.repository,
-                          "explicit",
+                          "settled",
                         );
                         return "admission-complete" as const;
                       },

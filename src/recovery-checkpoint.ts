@@ -714,6 +714,13 @@ interface QueueVerificationContext {
   publisherObjectBytes?: number;
   lineages: Map<string, CachedQueueLineage>;
   lineageBytes: number;
+  /** Queue receipt validation at exact receipt refs and original Git objects. */
+  queueValidation?: {
+    key: string;
+    originals: { ref: ContentRef; oid: string }[];
+    records: QueueRecord[];
+  };
+  queueValidationBytes?: number;
   reservationPrefixes: Map<string, string>;
   reservationPrefixBytes: number;
   gitPack?: {
@@ -1568,6 +1575,8 @@ export function withQueueControlVerification<T>(
       verification.summaries.clear();
       verification.content.clear();
       verification.lineages.clear();
+      delete verification.queueValidation;
+      delete verification.queueValidationBytes;
       verification.reservationPrefixes.clear();
       delete verification.objects;
       delete verification.negotiationTip;
@@ -2050,6 +2059,7 @@ function verificationMetadataBytes(context: QueueVerificationContext): number {
     context.summaryBytes +
     context.contentBytes +
     context.lineageBytes +
+    (context.queueValidationBytes ?? 0) +
     context.reservationPrefixBytes +
     context.pendingReferenceBytes +
     (context.objects ? context.objectBytes : 0) +
@@ -4643,6 +4653,8 @@ async function freshArchive(
   inspectHistory = false,
   lineageRequest?: QueueOwnerLineageRequest | QueueReservationLineageRequest,
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
+  /** The independent ACK of this controller's own pushed candidate. */
+  candidateAck = false,
 ) {
   const context = scopes.getStore()?.verification;
   if (!context)
@@ -4685,6 +4697,7 @@ async function freshArchive(
       lineageRequest,
       observeCapacity,
       context,
+      candidateAck,
     );
   } finally {
     release();
@@ -4995,6 +5008,7 @@ async function freshArchiveOwned(
   lineageRequest?: QueueOwnerLineageRequest | QueueReservationLineageRequest,
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   context?: QueueVerificationContext,
+  candidateAck = false,
 ) {
   const scope = scopes.getStore();
   const observed = checkpointObservation(
@@ -5019,6 +5033,7 @@ async function freshArchiveOwned(
       lineageRequest,
       observeCapacity,
       context,
+      candidateAck,
     );
   const result = await (async () => {
     try {
@@ -5100,6 +5115,7 @@ async function freshArchiveOwnedStrict(
   lineageRequest?: QueueOwnerLineageRequest | QueueReservationLineageRequest,
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   context?: QueueVerificationContext,
+  candidateAck = false,
 ) {
   const directory = context?.directory ?? verifierDirectory(config.repository);
   if (context) context.directory = directory;
@@ -5111,6 +5127,7 @@ async function freshArchiveOwnedStrict(
     | undefined;
   let queueSupportRows: number | undefined;
   let queueSupportEligible: boolean | undefined;
+  let queueValidationReused = false;
   const observed = checkpointObservation(
     config,
     "recovery-checkpoint-archive",
@@ -5125,6 +5142,7 @@ async function freshArchiveOwnedStrict(
       objectsRetained: Boolean(context?.objects),
       ...(queueSupportRows !== undefined ? { queueSupportRows } : {}),
       ...(queueSupportEligible !== undefined ? { queueSupportEligible } : {}),
+      ...(queueValidationReused ? { queueValidationReused } : {}),
       ...(semanticBodyReads
         ? {
             semanticBodyRefs: semanticBodyReads.refs,
@@ -5226,6 +5244,8 @@ async function freshArchiveOwnedStrict(
         delete context.negotiationTip;
         delete context.baseIdentity;
         delete context.baseIdentityBytes;
+        delete context.queueValidation;
+        delete context.queueValidationBytes;
       }
     }
     if (context && context.key !== verificationKey(config, options))
@@ -5419,48 +5439,127 @@ async function freshArchiveOwnedStrict(
       if (file.visibility !== "private" || file.kind !== "historical")
         throw new Error("Project queue receipt has an invalid archive scope");
     observed.start("queue-originals");
-    archive.prefetch(queueFiles.map((file) => file.ref));
-    const cache =
-      context && activeClosureBinding()?.scope.verification === context
-        ? {
-            store: new LocalContentStore(
-              join(stateRoot(config.repository), "content"),
-            ),
-            reader: "archive" as const,
-          }
+    // Receipt validation is a pure function of the receipt bytes, the
+    // originals they cite and the admitted binding. The ACK of this
+    // controller's own candidate may reuse its earlier complete ACK
+    // validation in this owned verifier only at the exact receipt refs and
+    // the exact Git objects of every original it read: those objects were
+    // authenticated here and the verifier material is unchanged since
+    // (checked before and after every fetch and below). Any difference
+    // validates again from the fetched bytes.
+    const oids = new Map(
+      archive.blobEntries.map((entry) => [entry.ref.digest, entry]),
+    );
+    const validationKey =
+      context?.objects && candidateAck
+        ? hash(
+            canonical([
+              context.key,
+              queueFiles.map((file) => [file.path, file.ref]),
+            ]),
+          )
         : undefined;
-    // This store carries bounded metadata only. Every supporting original is
-    // authenticated through the actual fetched Git reader, never local hydration.
-    const sources = queueFiles.map((file) => {
-      const source = { ref: file.ref, bytes: readQueueOriginal(file.ref) };
-      const originals = cache
-        ? cachedQueueRecordOriginals(
+    const retained = context?.queueValidation;
+    if (
+      validationKey &&
+      retained &&
+      (retained.key !== validationKey ||
+        retained.originals.some(({ ref, oid }) => {
+          const entry = oids.get(ref.digest);
+          return (
+            !entry ||
+            entry.oid !== oid ||
+            canonical(entry.ref) !== canonical(ref)
+          );
+        }))
+    ) {
+      delete context!.queueValidation;
+      delete context!.queueValidationBytes;
+    }
+    const reused = validationKey ? context?.queueValidation : undefined;
+    const read = new Map<string, { ref: ContentRef; oid: string }>();
+    const readValidatedOriginal = (ref: ContentRef) => {
+      const bytes = readQueueOriginal(ref);
+      const entry = oids.get(ref.digest);
+      if (entry) read.set(ref.digest, entry);
+      return bytes;
+    };
+    let records: QueueRecord[];
+    if (reused) {
+      records = structuredClone(reused.records);
+      queueValidationReused = true;
+    } else {
+      archive.prefetch(queueFiles.map((file) => file.ref));
+      const cache =
+        context && activeClosureBinding()?.scope.verification === context
+          ? {
+              store: new LocalContentStore(
+                join(stateRoot(config.repository), "content"),
+              ),
+              reader: "archive" as const,
+            }
+          : undefined;
+      // This store carries bounded metadata only. Every supporting original is
+      // authenticated through the actual fetched Git reader, never local hydration.
+      const sources = queueFiles.map((file) => {
+        const source = {
+          ref: file.ref,
+          bytes: readValidatedOriginal(file.ref),
+        };
+        const originals = cache
+          ? cachedQueueRecordOriginals(
+              config.repository,
+              file.path,
+              source,
+              cache.store,
+            )
+          : undefined;
+        return { file, source, originals };
+      });
+      queueSupportRows = sources.filter((entry) => entry.originals).length;
+      queueSupportEligible =
+        Boolean(cache) && queueSupportRows === sources.length;
+      if (queueSupportEligible)
+        archive.prefetch(sources.flatMap((entry) => entry.originals!));
+      records = sources.map(
+        ({ file, source }) =>
+          checkpointQueueRecordReferences(
             config.repository,
             file.path,
             source,
-            cache.store,
+            readValidatedOriginal,
+            cache,
+          ).record,
+      );
+      if (new Set(records.map((record) => record.id)).size !== records.length)
+        throw new Error("Duplicate archived Project queue receipt");
+      assertQueueCommandHistory(records, readValidatedOriginal);
+      if (validationKey && context) {
+        const witness = {
+          key: validationKey,
+          originals: [...read.values()].map(({ ref, oid }) => ({
+            ref: { ...ref },
+            oid,
+          })),
+          records: structuredClone(records),
+        };
+        const charge =
+          Buffer.byteLength("queue-validation") +
+          Buffer.byteLength(canonical(witness));
+        if (
+          reserveVerificationMetadata(
+            context,
+            options,
+            charge,
+            context.queueValidationBytes ?? 0,
+            true,
           )
-        : undefined;
-      return { file, source, originals };
-    });
-    queueSupportRows = sources.filter((entry) => entry.originals).length;
-    queueSupportEligible =
-      Boolean(cache) && queueSupportRows === sources.length;
-    if (queueSupportEligible)
-      archive.prefetch(sources.flatMap((entry) => entry.originals!));
-    const records = sources.map(
-      ({ file, source }) =>
-        checkpointQueueRecordReferences(
-          config.repository,
-          file.path,
-          source,
-          readQueueOriginal,
-          cache,
-        ).record,
-    );
-    if (new Set(records.map((record) => record.id)).size !== records.length)
-      throw new Error("Duplicate archived Project queue receipt");
-    assertQueueCommandHistory(records, readQueueOriginal);
+        ) {
+          context.queueValidation = witness;
+          context.queueValidationBytes = charge;
+        }
+      }
+    }
     observed.start("queue-ancestry");
     for (const record of records) {
       if (record.kind === "project-queue-operation") {
@@ -5579,6 +5678,8 @@ async function freshArchiveOwnedStrict(
       // verifier path; it never increases the admitted archive capacity.
       context.lineages.clear();
       context.lineageBytes = 0;
+      delete context.queueValidation;
+      delete context.queueValidationBytes;
       context.reservationPrefixes.clear();
       context.reservationPrefixBytes = 0;
       context.summaries.clear();
@@ -5598,6 +5699,8 @@ async function freshArchiveOwnedStrict(
         context.quarantined = true;
         context.summaries.clear();
         context.lineages.clear();
+        delete context.queueValidation;
+        delete context.queueValidationBytes;
         context.reservationPrefixes.clear();
         context.lineageBytes = 0;
         context.reservationPrefixBytes = 0;
@@ -5617,6 +5720,8 @@ async function freshArchiveOwnedStrict(
       context.contentBytes = 0;
       context.lineages.clear();
       context.lineageBytes = 0;
+      delete context.queueValidation;
+      delete context.queueValidationBytes;
       context.reservationPrefixes.clear();
       context.reservationPrefixBytes = 0;
       delete context.objects;
@@ -6054,8 +6159,9 @@ function acknowledge(
   config: FactoryConfig,
   options: GitPersistenceConfig,
   attempt: CheckpointAttempt,
+  capturedAt?: string,
 ): RecoveryCheckpointStatus {
-  const acknowledged = acknowledgeAttempt(config, options, attempt);
+  const acknowledged = acknowledgeAttempt(config, options, attempt, capturedAt);
   if (options.scope === "private-history")
     retireAcknowledgedTerminals(config, options, attempt.candidate);
   return acknowledged;
@@ -6064,6 +6170,8 @@ function acknowledgeAttempt(
   config: FactoryConfig,
   options: GitPersistenceConfig,
   attempt: CheckpointAttempt,
+  /** No change after this time is in the attempt's captured sequence. */
+  capturedAt?: string,
 ): RecoveryCheckpointStatus {
   return status(
     mutate(config, options, (record) => {
@@ -6088,7 +6196,16 @@ function acknowledgeAttempt(
       if (record.sequence === attempt.sequence) {
         record.changed = [];
         delete record.dirtySince;
-      }
+      } else if (
+        capturedAt &&
+        (!record.dirtySince ||
+          Date.parse(record.dirtySince) < Date.parse(capturedAt))
+      )
+        // Every change this ACK leaves pending was made after the publication
+        // read its sequence. Keeping the older timestamp would make each later
+        // coalesced (`settled`) admission publish at once, forever, while
+        // writes continue during publications.
+        record.dirtySince = capturedAt;
       delete record.error;
     }),
     options,
@@ -6260,7 +6377,7 @@ async function publishCheckpoint(
   mkdirSync(p.root, { recursive: true, mode: 0o700 });
   return withCheckpointPublication(p.publicationGuard, async () => {
     try {
-      await verifyDestination(config, options);
+      const capturedAt = new Date().toISOString();
       let record = journal(config, options);
       const build =
         scopes.getStore()?.buildClosure ??
@@ -6364,6 +6481,10 @@ async function publishCheckpoint(
         Date.now() - Date.parse(record.dirtySince) < options.coalesceMs
       )
         return status(record, options);
+      // Destination visibility guards publication, so it is checked once a
+      // publication will be built, not for an admission that publishes nothing.
+      // The exact pre-push check below still precedes the push.
+      await verifyDestination(config, options);
       let sequence = record.sequence;
       const local = await withFiniteCheckpointReads(
         config,
@@ -6715,7 +6836,15 @@ async function publishCheckpoint(
       submittedObservation.start("independent-candidate-ack");
       let verified;
       try {
-        verified = await freshArchive(config, options, candidate);
+        verified = await freshArchive(
+          config,
+          options,
+          candidate,
+          false,
+          undefined,
+          undefined,
+          true,
+        );
         submittedObservation.complete();
       } catch (error) {
         submittedObservation.fail(error);
@@ -6726,7 +6855,7 @@ async function publishCheckpoint(
           "Independent remote payload differs from submitted checkpoint",
         );
       const submitted = journal(config, options).attempts.at(-1)!;
-      const acknowledged = acknowledge(config, options, submitted);
+      const acknowledged = acknowledge(config, options, submitted, capturedAt);
       retainVerifiedBaseIdentity(
         config,
         options,

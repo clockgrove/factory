@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import type { McpServerStatus } from "@anthropic-ai/claude-agent-sdk";
 import { validateToolConfigName } from "../config.js";
 import {
@@ -18,7 +19,7 @@ export const factoryValidationToolName =
   "mcp__factory-validation__run_validation";
 
 /** Keep the tail: failures report last. */
-const maxOutputChars = 24_000;
+const maxOutputChars = 8_000;
 
 interface ValidationEnvironmentInput {
   worktree: string;
@@ -86,10 +87,14 @@ export function assertFactoryValidationReady(status: McpServerStatus): void {
     throw new Error("Factory validation MCP readiness verification failed");
 }
 
+/** Plain text: colour codes cost tokens and carry nothing for the worker. */
 function bounded(text: string): string {
-  return text.length <= maxOutputChars
-    ? text
-    : `[earlier output omitted]\n${text.slice(-maxOutputChars)}`;
+  const plain = stripVTControlCharacters(text);
+  // The first line names the failed command; the tail holds the failures.
+  const head = plain.split("\n", 1)[0]!.slice(0, 300);
+  const dropped = plain.length - head.length - 1 - maxOutputChars;
+  if (dropped <= 0) return plain;
+  return `${head}\n[${dropped} earlier characters omitted]\n${plain.slice(-maxOutputChars)}`;
 }
 
 /** The tree of the worker's current files without private staging, as collection stages them. */

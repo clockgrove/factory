@@ -200,6 +200,9 @@ export function claudeQueryOptions(
         ? claudeSessionEnvironment(input.session, environment)
         : environment),
       DISABLE_TELEMETRY: "1",
+      // A Read over this many tokens fails and tells the worker to use
+      // offset/limit or search; whole-file reads otherwise fill its context.
+      CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS: "8000",
     },
     mcpServers: {
       ...(prepared && { [factoryMcpServerName]: prepared.server }),

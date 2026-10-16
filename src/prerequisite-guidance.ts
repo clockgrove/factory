@@ -4,6 +4,7 @@ import {
   type PlanningTurnResponse,
 } from "./compiler/context.js";
 import { graphDigest } from "./graph-amendments.js";
+import type { AgentSessionScope } from "./contracts.js";
 import { type ContinuationState, isPreparationState } from "./state.js";
 import {
   configurationCommand,
@@ -88,6 +89,26 @@ function freeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
+}
+
+/**
+ * Whether an agent session's scope is running now: planning before its plan
+ * or an amendment under review, a running Work Item, or final review before
+ * acceptance is sealed. Only then can its unsettled turn be in flight.
+ */
+function scopeRunning(
+  state: ContinuationState,
+  scope: AgentSessionScope,
+): boolean {
+  if (isPreparationState(state))
+    return scope.role === "planning" && state.coordinator.phase === "planning";
+  if (scope.role === "planning")
+    return (
+      state.pendingAmendment !== undefined &&
+      state.pendingAmendment.phase !== "rejected"
+    );
+  if (scope.role === "objective-review") return !state.finalAcceptance;
+  return state.work[scope.itemId]?.status === "running";
 }
 
 /** Reads an already validated snapshot and redacted status, with no probes, writes or provider calls. */
@@ -210,17 +231,21 @@ export function derivePrerequisiteGuidance(
       unknown(
         `session:${key}`,
         "The admitted native turn's resource settlement is unknown",
-        `${session.scope.role} model call ${turn.terminal ? "settling" : "starting"}`,
+        scopeRunning(state!, session.scope)
+          ? `${session.scope.role} model call ${turn.terminal ? "settling" : "starting"}`
+          : undefined,
       );
   }
   for (const intent of Object.values(state?.graphProjectionIntents ?? {})) {
-    const recorded = intent.effects.some(
-      (effect) =>
-        effect.observation?.outcome === "unknown" ||
-        effect.observation?.outcome === "reconciled",
+    // A read-back reconciliation settles an effect; a known pre-transport
+    // rejection (blocked) was never sent. An unknown transport outcome stays
+    // unresolved; a request with neither is still awaiting its response.
+    const open = intent.effects.filter((effect) => !effect.reconciliation);
+    const recorded = open.some(
+      (effect) => effect.observation?.outcome === "unknown",
     );
-    const awaiting = intent.effects.filter(
-      (effect) => !effect.observation,
+    const awaiting = open.filter(
+      (effect) => !effect.observation && effect.admission !== "blocked",
     ).length;
     if (recorded || awaiting)
       unknown(
@@ -231,21 +256,28 @@ export function derivePrerequisiteGuidance(
           : `GitHub Work Item issue request${awaiting === 1 ? "" : "s"} (${awaiting}) awaiting response`,
       );
   }
-  if (
-    state?.githubProjectStatus?.requests.some(
-      (request) => !request.response && !request.notSent,
-    )
-  )
+  const project = state?.githubProjectStatus;
+  const projectOpen = project?.requests.filter(
+    (request) => !request.response && !request.notSent,
+  );
+  if (projectOpen?.length)
     unknown(
       "project-status",
       "A submitted Project field update remains unknown; subsequent observations do not authorize another update",
-      "GitHub Project field update awaiting response",
+      // An ambiguous outcome is recorded as update-unknown with a later read.
+      project!.failure === "update-unknown" ||
+        projectOpen.some((request) => request.laterObservation)
+        ? undefined
+        : "GitHub Project field update awaiting response",
     );
-  if (state?.githubProgress?.requests.some((request) => !request.comment))
+  const progress = state?.githubProgress;
+  if (progress?.requests.some((request) => !request.comment))
     unknown(
       "progress-publication",
       "A progress comment publication remains unknown; this presentation fence grants no new publication and does not stop otherwise admitted work",
-      "GitHub progress comment awaiting response",
+      progress.failure === "publication-unknown"
+        ? undefined
+        : "GitHub progress comment awaiting response",
     );
 
   const decision = (scope: string, pending: PendingDecisionView) => {

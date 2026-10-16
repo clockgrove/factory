@@ -91,6 +91,8 @@ export interface RecoveryCheckpointGap {
   reason: string;
   availability: string;
   required?: boolean;
+  /** For an `archived` gap: the commit that holds the complete evidence. */
+  evidenceCommit?: string;
 }
 export interface RecoveryCheckpointClosure {
   files: RecoveryCheckpointFile[];
@@ -3013,14 +3015,21 @@ function assertManifest(
   }
   const pathsSeen = new Set<string>();
   for (const gap of value.gaps) {
-    keys(gap, ["path", "reason", "availability"], ["required"]);
+    keys(
+      gap,
+      ["path", "reason", "availability"],
+      ["required", "evidenceCommit"],
+    );
     safePath(gap.path);
     if (
       typeof gap.reason !== "string" ||
       !gap.reason ||
       typeof gap.availability !== "string" ||
       !gap.availability ||
-      (gap.required !== undefined && typeof gap.required !== "boolean")
+      (gap.required !== undefined && typeof gap.required !== "boolean") ||
+      (gap.evidenceCommit !== undefined &&
+        (typeof gap.evidenceCommit !== "string" ||
+          !/^[a-f0-9]{40,64}$/.test(gap.evidenceCommit)))
     )
       throw new Error("Invalid declared checkpoint historical gap");
   }
@@ -5902,6 +5911,40 @@ export async function inspectRecoveryCheckpoint(
     },
   };
 }
+const acknowledgedHistory = new Map<string, boolean>();
+/**
+ * Whether `commit` is this installation's last acknowledged checkpoint or one
+ * of its ancestors in the local replica (#1307 retention hardening).
+ */
+export function acknowledgedArchiveCommit(
+  config: FactoryConfig,
+  commit: string,
+): boolean {
+  const options = settings(config);
+  if (!options || options.scope !== "private-history") return false;
+  const last = journal(config, options).lastAcknowledged?.commitSha;
+  if (!last) return false;
+  if (last === commit) return true;
+  const key = `${commit}:${last}`;
+  const cached = acknowledgedHistory.get(key);
+  if (cached !== undefined) return cached;
+  let ancestor = false;
+  try {
+    git(paths(config.repository).git, options, [
+      "merge-base",
+      "--is-ancestor",
+      commit,
+      last,
+    ]);
+    ancestor = true;
+  } catch (error) {
+    // Exit 1 is git's definite "not an ancestor"; anything else (an absent
+    // object, a stopped process) is not acknowledged now and is not cached.
+    if ((error as { status?: unknown }).status !== 1) return false;
+  }
+  acknowledgedHistory.set(key, ancestor);
+  return ancestor;
+}
 /**
  * After an acknowledgement, record each terminal Objective whose exact snapshot
  * this checkpoint holds with complete evidence, so later checkpoints can leave
@@ -5928,13 +5971,36 @@ function retireAcknowledgedTerminals(
     const store = new LocalContentStore(
       join(stateRoot(config.repository), "content"),
     );
+    // The exact accounting originals this commit holds, by Objective; content
+    // reads verify each body against its digest-named reference.
+    const accounting = new Map<number, string[]>();
+    for (const file of manifest.files) {
+      if (!/^accounting\/[a-f0-9]{64}\.json$/.test(file.path)) continue;
+      const objective = Number(
+        (
+          JSON.parse(store.readBytes(file.ref).toString("utf8")) as {
+            binding?: { objective?: unknown };
+          }
+        ).binding?.objective,
+      );
+      accounting.set(objective, [
+        ...(accounting.get(objective) ?? []),
+        file.path,
+      ]);
+    }
     for (const file of manifest.files) {
       const match = /^objectives\/([1-9][0-9]*)\/state\.json$/.exec(file.path);
       if (file.kind !== "continuation" || !match || archived.has(file.path))
         continue;
       const bytes = store.readBytes(file.ref);
       if (terminalContinuation(JSON.parse(bytes.toString("utf8"))))
-        recordRetirement(config.repository, Number(match[1]), bytes, commitSha);
+        recordRetirement(
+          config.repository,
+          Number(match[1]),
+          bytes,
+          commitSha,
+          accounting.get(Number(match[1])) ?? [],
+        );
     }
   } catch {
     // The next acknowledged checkpoint records it instead.

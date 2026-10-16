@@ -1123,7 +1123,8 @@ export async function restoreRecoveryCheckpoint(args: {
     const originals: {
       state: ContinuationState;
       ref: ContentRef;
-      retired: boolean;
+      /** The evidence commit of a retired terminal Objective. */
+      retired: string | undefined;
     }[] = [];
     const gitObjects = new Map<string, { sha: string; kind: string }>();
     for (const file of checkpoint.manifest.files) {
@@ -1142,14 +1143,16 @@ export async function restoreRecoveryCheckpoint(args: {
         );
         // A retired terminal Objective keeps only its snapshot; its evidence
         // is in the archive history at the recorded commit (#1307).
-        const retired =
-          terminalContinuation(state) &&
-          checkpoint.manifest.gaps.some(
-            (gap) =>
-              gap.path === file.path &&
-              gap.availability === ARCHIVED_EVIDENCE &&
-              gap.required === false,
-          );
+        const archived = terminalContinuation(state)
+          ? checkpoint.manifest.gaps.find(
+              (gap) =>
+                gap.path === file.path &&
+                gap.availability === ARCHIVED_EVIDENCE &&
+                gap.required === false &&
+                typeof gap.evidenceCommit === "string",
+            )
+          : undefined;
+        const retired = archived?.evidenceCommit;
         if (!retired) {
           const closure = await verifyContinuationReferenceClosure(
             state,
@@ -1440,7 +1443,8 @@ export async function restoreRecoveryCheckpoint(args: {
           config.repository,
           state.objective,
           readFileSync(statePath(config.repository, state.objective)),
-          checkpoint.commitSha,
+          retired,
+          [],
         );
       objectives.push({
         objective: state.objective,

@@ -29,6 +29,7 @@ import {
   ARCHIVED_EVIDENCE,
   type RetirementRecord,
   retiredEvidence,
+  stateDigest,
 } from "./checkpoint-retention.js";
 import { stateRoot } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
@@ -62,6 +63,7 @@ import type {
   RecoveryCheckpointFile,
 } from "./recovery-checkpoint.js";
 import {
+  acknowledgedArchiveCommit,
   assertRecoveryCheckpointManifest,
   cachedRecoveryCheckpointGitPack,
   recoveryCheckpointGitPackObservation,
@@ -85,6 +87,8 @@ export interface RecoveryClosureGap {
   availability: "missing-legacy" | "unavailable" | "transient" | "archived";
   reason: string;
   required?: boolean;
+  /** For an `archived` gap: the commit that holds the complete evidence. */
+  evidenceCommit?: string;
 }
 interface BodyRoot {
   ref: ContentRef;
@@ -1302,17 +1306,10 @@ async function buildRecoveryCheckpointClosureLocal(input: {
         Number(id),
         bytes,
         JSON.parse(bytes.toString("utf8")),
+        (commit) => acknowledgedArchiveCommit(config, commit),
       );
       if (record) retired.set(Number(id), record);
     }
-    const { accountingPersistenceClosure } = await import("./accounting.js");
-    const accounting = accountingPersistenceClosure(
-      config.repository,
-      new Set(retired.keys()),
-    );
-    files.push(...accounting.files);
-    for (const ref of accounting.contentRefs) refs.set(refKey(ref), ref);
-    gaps.push(...(accounting.gaps as RecoveryClosureGap[]));
     for (const entry of memory.typedGitObjects ?? [])
       objects.set(`${entry.kind}:${entry.sha}`, entry);
     for (const entry of memory.gitObjects ?? [])
@@ -1350,6 +1347,11 @@ async function buildRecoveryCheckpointClosureLocal(input: {
             config.repository,
             Number(id),
           );
+          // Retire only the exact bytes the retirement check read; a snapshot
+          // that changed since (for example, a retry) takes the full path.
+          const retirement = retired.get(Number(id));
+          if (retirement && stateDigest(bytes) !== retirement.stateDigest)
+            retired.delete(Number(id));
           if (retired.has(Number(id))) {
             // A restored record keeps its receipt's original snapshot and
             // source manifest: they authenticate the snapshot itself.
@@ -1367,6 +1369,7 @@ async function buildRecoveryCheckpointClosureLocal(input: {
               required: false,
               reason:
                 "Retired terminal Objective: its complete evidence is in the archive history",
+              evidenceCommit: retirement!.evidenceCommit,
             });
             await include(`objectives/${id}/${name}`, "continuation", bytes);
             continue;
@@ -1544,6 +1547,16 @@ async function buildRecoveryCheckpointClosureLocal(input: {
         );
       }
     }
+    // Accounting after the snapshots: only the exact originals each retired
+    // Objective's evidence commit holds leave; everything else stays live.
+    const { accountingPersistenceClosure } = await import("./accounting.js");
+    const accounting = accountingPersistenceClosure(
+      config.repository,
+      new Set([...retired.values()].flatMap((record) => record.accounting)),
+    );
+    files.push(...accounting.files);
+    for (const ref of accounting.contentRefs) refs.set(refKey(ref), ref);
+    gaps.push(...(accounting.gaps as RecoveryClosureGap[]));
   }
   if (objects.size) {
     const roots = [...objects.values()].sort((left, right) =>

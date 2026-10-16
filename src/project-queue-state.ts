@@ -656,6 +656,22 @@ function assertStoppedClaimState(state: ContinuationState): void {
         data.rejectedCollection === undefined
       );
     };
+    // A refused return: the driver records the rejection only after freezing
+    // the candidate and settling the worker, so nothing remains to collect.
+    const rejected = (entry: (typeof work)[number]) => {
+      const execution = entry.execution;
+      const data = execution?.data as
+        | { result?: unknown; rejectedCollection?: unknown }
+        | undefined;
+      return !!(
+        execution?.provider === "local" &&
+        execution.identity === entry.attempt &&
+        data?.rejectedCollection !== undefined &&
+        data.result === undefined
+      );
+    };
+    const settled = (entry: (typeof work)[number]) =>
+      collected(entry) || ceased(entry) || rejected(entry);
     if (
       state.restoration ||
       state.cancelRequested ||
@@ -664,14 +680,14 @@ function assertStoppedClaimState(state: ContinuationState): void {
       state.coordinator?.cancelError ||
       state.coordinator?.processes?.length ||
       restoredContinuationOwnershipHold(state, true) ||
-      !work.some((entry) => collected(entry) || ceased(entry)) ||
+      // Every running item must be settled; pending items (for example after
+      // a retry) hold no worker and need no proof.
       work.some(
         (entry) =>
           (entry.execution && entry.execution.provider !== "local") ||
           entry.status === "published" ||
           (entry.status === "running" &&
-            (entry.step !== "execute" ||
-              (!collected(entry) && !ceased(entry)))),
+            (entry.step !== "execute" || !settled(entry))),
       )
     )
       throw new Error(

@@ -348,7 +348,11 @@ export function reviewFindingsCorrection(
     return undefined;
   }
   const refused = [
-    { criterion: refusal.criterion, finding: refusal.finding },
+    {
+      criterion: refusal.criterion,
+      finding: refusal.finding,
+      evidence: refusal.evidence,
+    },
     ...(refusal.others ?? []),
   ];
   if (
@@ -358,34 +362,22 @@ export function reviewFindingsCorrection(
     )
   )
     return undefined;
-  // Findings of one review share its packet, so the first refusal's resolved
-  // references resolve the evidence ids of the others.
-  const cited = (ids: string[]) =>
-    ids.flatMap((evidenceId) => {
-      const reference = refusal.evidence.find(
-        (entry) => entry.id === evidenceId,
-      );
-      return reference
-        ? [
-            {
-              path: reference.path,
-              origin: reference.origin,
-              complete: reference.complete,
-            },
-          ]
-        : [];
-    });
   const correction: RepairCorrection = {
     kind: "implementation",
     failureDigest: failure.digest,
     event: failure.event,
     diagnosis: `The independent result review refused ${refused.length} acceptance ${refused.length === 1 ? "criterion" : "criteria"} of candidate tree ${refusal.treeSha} after its validation commands passed. Each finding states the gap the candidate must close.`,
     correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's position in the Work Item's acceptance; evidence is what the reviewer cited.\n${JSON.stringify(
-      refused.map(({ criterion, finding }) => ({
+      refused.map(({ criterion, finding, evidence }) => ({
         criterionIndex: item.acceptance.indexOf(criterion),
         criterion,
         finding: finding.detail,
-        evidence: cited(finding.evidenceIds),
+        // Each finding's own resolved references, as the reviewer cited them.
+        evidence: evidence.map(({ path, origin, complete }) => ({
+          path,
+          origin,
+          complete,
+        })),
       })),
     )}`,
     actor: REVIEW_FINDINGS_ACTOR,

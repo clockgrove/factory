@@ -436,7 +436,15 @@ export async function reviewAcceptance(args: {
         const primary = semanticRefusalDetail(semanticRefusal);
         semanticRefusal.others = [
           ...(semanticRefusal.others ?? []),
-          { criterion, finding: structuredClone(finding) },
+          {
+            criterion,
+            finding: structuredClone(finding),
+            evidence: resolveReviewReferences(
+              finding.evidenceIds,
+              packet,
+              false,
+            ),
+          },
         ];
         if (refused === primary)
           refused = semanticRefusalDetail(semanticRefusal);

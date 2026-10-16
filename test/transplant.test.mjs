@@ -253,6 +253,7 @@ test("independent prepared change is replayed on the observed integration head",
             criterionId: packet.criteria[1].id,
             detail: "The candidate note drops its final newline.",
           },
+          evidence: references,
         },
       ],
     };

@@ -26,7 +26,11 @@ export type SemanticRefusalEvidence = {
       finding: ReviewFinding;
       evidence: ReviewEvidenceReference[];
       /** Every further criterion the same review refused, so one repair sees them all. */
-      others?: { criterion: string; finding: ReviewFinding }[];
+      others?: {
+        criterion: string;
+        finding: ReviewFinding;
+        evidence: ReviewEvidenceReference[];
+      }[];
     }
   | { source: "operator"; decision: AcceptanceDecision }
 );
@@ -154,12 +158,13 @@ export function assertSemanticRefusalRecord(
       failure.detail !== semanticRefusalDetail(value)
     )
       throw new Error("Semantic refusal lacks its exact rejected finding");
+    const references = [...value.evidence];
     if (value.others !== undefined) {
       const seen = new Set([value.criterion]);
       if (!Array.isArray(value.others) || !value.others.length)
         throw new Error("Semantic refusal lists no further refusals");
       for (const other of value.others) {
-        object(other, ["criterion", "finding"], "Further refusal");
+        object(other, ["criterion", "finding", "evidence"], "Further refusal");
         object(
           other.finding,
           ["criterionId", "verdict", "evidenceIds", "detail", "question"],
@@ -176,13 +181,19 @@ export function assertSemanticRefusalRecord(
           typeof other.finding.question !== "string" ||
           !Array.isArray(other.finding.evidenceIds) ||
           new Set(other.finding.evidenceIds).size !==
-            other.finding.evidenceIds.length
+            other.finding.evidenceIds.length ||
+          !Array.isArray(other.evidence) ||
+          !isDeepStrictEqual(
+            other.finding.evidenceIds,
+            other.evidence.map((entry) => entry.id),
+          )
         )
           throw new Error("Semantic refusal has an invalid further refusal");
         seen.add(other.criterion);
+        references.push(...other.evidence);
       }
     }
-    for (const reference of value.evidence) {
+    for (const reference of references) {
       object(
         reference,
         ["id", "origin", "path", "digest", "complete"],

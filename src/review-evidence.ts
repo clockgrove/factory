@@ -167,7 +167,7 @@ export function assertReviewPacketBinding(
  * The packet's criteria and evidence as provider choices, which omit opaque
  * identities. This part repeats across calls over the same sources.
  */
-function reviewPacketChoices(
+export function reviewPacketChoices(
   packet: ReviewPacket,
   files: ReviewBodyFile[] = [],
 ) {

@@ -404,6 +404,7 @@ export function composePlanningModel(
     return composedPlanningModel(
       new ClaudePlanningModel(config.planning, {
         redactionValues,
+        reviewArtifacts: config.reviewArtifacts,
         ...(retainedSessions
           ? {
               sessionRoot: join(
@@ -422,6 +423,7 @@ export function composePlanningModel(
       undefined,
       {
         redactionValues,
+        reviewArtifacts: config.reviewArtifacts,
         transport: config.planning.codex?.transport ?? "exec",
         sourceArtifacts: config.planning.codex?.sourceArtifacts,
         ...(retainedSessions

@@ -30,12 +30,15 @@ import {
   MAX_REVIEW_IMAGES,
   MAX_REVIEW_TOTAL_IMAGE_BYTES,
 } from "../review-artifacts.js";
+import type { ReviewArtifactSelector } from "../review-artifacts.js";
 import type { ReviewBodyFile, ReviewPacket } from "../review-evidence.js";
 import type { PlanningSourceDelivery } from "./source-delivery.js";
 
 export interface PlanningModelOptions {
   /** Nonrenewable elapsed budget for one admitted planning invocation, including capacity backoff. */
   providerTurnElapsedTimeoutMs?: number;
+  /** The installation's configured selectors, shown to compile and graph review. */
+  reviewArtifacts?: readonly ReviewArtifactSelector[];
   reviewCapacityRetryDelaysMs?: readonly number[];
   wait?: (milliseconds: number) => Promise<void>;
 }

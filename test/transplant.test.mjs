@@ -871,7 +871,13 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     const historicalChoices = JSON.parse(
       historical.call.prompt.split("Compiler choices (JSON data):\n")[1],
     );
-    assert.ok(historicalChoices.sources.at(-2).lines);
+    const historicalInline = historicalChoices.sources.at(-2);
+    assert.equal(historicalInline.contentFile, undefined);
+    assert.ok(
+      historical.call.prompt.includes(
+        ` source ${historicalInline.sourceIndex}>>>\n`,
+      ),
+    );
     assert.ok(historicalChoices.sources[0].contentFile);
     const expandedCall = renderCompilationCall(
       { ...request, sources: expanded },
@@ -1002,7 +1008,21 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       ),
       sources.map((source) => source.content),
     );
-    assert.ok(review.prompt.includes(renderReviewPacketChoices(evidence)));
+    // Bodies are literal blocks; the packet-local choices keep their identities.
+    for (const entry of evidence.evidence)
+      assert.ok(review.prompt.includes(`>>>\n${entry.content}\n<<<`));
+    assert.ok(
+      review.prompt.includes(
+        JSON.stringify(
+          JSON.parse(renderReviewPacketChoices(evidence)).evidence.map(
+            (entry) => ({
+              ...entry,
+              content: { block: `evidence ${entry.evidenceIndex}` },
+            }),
+          ),
+        ),
+      ),
+    );
     const view = planningGraphView(currentGraph, sources);
     for (const [index, item] of view.items.entries()) {
       const input = item.inputSources[0];

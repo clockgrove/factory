@@ -3178,9 +3178,20 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     assert.ok(renderedDiagnosis.prompt.includes(JSON.stringify(supplied)));
     assert.ok(
       renderedDiagnosis.prompt.includes(
-        `Pinned sources:\n${JSON.stringify(pinnedSources)}`,
+        `Pinned sources:\n${JSON.stringify(
+          pinnedSources.map(({ content: _content, ...source }, index) => ({
+            ...source,
+            content: { block: `source ${index}` },
+          })),
+        )}`,
       ),
     );
+    for (const [index, source] of pinnedSources.entries())
+      assert.ok(
+        renderedDiagnosis.prompt.includes(
+          ` source ${index}>>>\n${source.content}\n<<<`,
+        ),
+      );
     assert.ok(
       renderedDiagnosis.prompt.includes(
         "Candidate-file contents and their ownership/completeness are supplied in repairEvidence, not pinned command authority.",

@@ -33,7 +33,11 @@ import {
 } from "../fault.js";
 import { readPinnedPlaybook } from "../learning.js";
 import { UnsettledSubprocessError } from "../process.js";
-import { promptJsonParts, renderPrompt } from "../prompt-bytes.js";
+import {
+  literalBodyBlocks,
+  promptJsonParts,
+  renderPrompt,
+} from "../prompt-bytes.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnElapsedTimeoutError,
@@ -43,13 +47,14 @@ import {
   isCheckpointAdmissionFailure,
   markCheckpointEffectDispatched,
 } from "../recovery-checkpoint.js";
+import type { ReviewArtifactSelector } from "../review-artifacts.js";
 import {
   type ReviewBodyFile,
   type ReviewPacket,
   renderReviewPacket,
-  renderReviewPacketChoices,
   renderReviewPacketId,
   reviewPacket,
+  reviewPacketChoices,
   reviewSchema,
 } from "../review-evidence.js";
 import {
@@ -255,6 +260,16 @@ export function renderDiagnosisCall(
         return { ...metadata, contentFile: sourceDelivery.files[sourceIndex] };
       })
     : sources;
+  // Inline bodies render once as literal blocks; their metadata stays JSON.
+  const inlineSources: { label: string; content: string }[] = [];
+  const sourceView = deliveredSources.map((source, sourceIndex) => {
+    if (!("content" in source) || typeof source.content !== "string")
+      return source;
+    const { content, ...metadata } = source;
+    inlineSources.push({ label: `source ${sourceIndex}`, content });
+    return { ...metadata, content: { block: `source ${sourceIndex}` } };
+  });
+  const bodies = literalBodyBlocks(inlineSources);
   const phaseGuidance = delivery
     ? "Diagnose the retained Work Item failure and propose one concrete owned implementation correction or required operator decision; do not redesign the plan or Objective. The full original task scope, acceptance and authority remain binding. Historical worker read instructions describe that worker's task, not a request to repeat its entire read set."
     : "Explain what failed and what change to the plan or Objective would fix it.";
@@ -263,7 +278,7 @@ export function renderDiagnosisCall(
       ? sourceDelivery
         ? "Historical worker inputSources are omitted from this diagnosis. Current candidate bodies remain inline; selected source bodies are inline or complete current contentFile references. Resolve sourceSpan only from complete literal source bytes."
         : "Historical worker inputSources are omitted from this diagnosis. Selected source and current candidate bodies are supplied inline once; no sourceSpan substring resolution or tool read is required."
-      : "Item inputSources sourceSpan references select the exact decoded pinned sources[sourceIndex].content by JavaScript string start/length; retain sourceDigest, contentDigest and original path/heading scope. Resolve supplied bytes without recopying them. Unmatched inputs remain inline.";
+      : "Item inputSources sourceSpan references select the exact literal body of pinned sources[sourceIndex] by JavaScript string start/length; retain sourceDigest, contentDigest and original path/heading scope. Resolve supplied bytes without recopying them. Unmatched inputs remain inline.";
   const prerequisiteGuidance = humanPrerequisiteGuidance(
     delivery
       ? "diagnosis, correction and question fields"
@@ -280,7 +295,7 @@ export function renderDiagnosisCall(
     ["objective", request.objective],
     [
       "evidence",
-      `\nPinned sources:\n${JSON.stringify(deliveredSources)}\nWork Item diagnosis delivery:\n${JSON.stringify(delivery ?? null)}\nController capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nNative Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\nController execution bounds:\n${JSON.stringify(request.executionBounds ?? null)}\nRejected canonical graph (null when unavailable):\n${JSON.stringify(request.rejectedGraph ? planningGraphView(request.rejectedGraph, request.sources) : null)}`,
+      `\n${inlineSources.length ? `Pinned source bodies. ${bodies.guidance} A source content {"block": LABEL} is the complete literal body in that block.\n${bodies.text}` : ""}Pinned sources:\n${JSON.stringify(sourceView)}\nWork Item diagnosis delivery:\n${JSON.stringify(delivery ?? null)}\nController capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nNative Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\nController execution bounds:\n${JSON.stringify(request.executionBounds ?? null)}\nRejected canonical graph (null when unavailable):\n${JSON.stringify(request.rejectedGraph ? planningGraphView(request.rejectedGraph, request.sources) : null)}`,
     ],
   ]);
   return {
@@ -341,6 +356,18 @@ function planningSourceReadGuidance(delivery?: PlanningSourceDelivery): string {
     : "";
 }
 
+const REVIEW_ARTIFACT_GUIDANCE =
+  "Configured review artifact selectors are installation configuration: when an item validation, read-only QA validation or final Acceptance command exactly equals a selector command and passes, Factory captures that selector's declared bodies and supplies them to that item's result review and to final Objective review. A work item captures a text selector only when it owns the selector's text.source.";
+
+/** The installation's exact selectors, bound by its config digest. */
+function configuredReviewArtifacts(
+  reviewArtifacts?: readonly ReviewArtifactSelector[],
+): string {
+  return reviewArtifacts?.length
+    ? `Configured review artifact selectors (installation configuration, not command authority):\n${JSON.stringify(reviewArtifacts)}\n`
+    : "";
+}
+
 /** The shared production compiler request, available for offline exact-input preflight. */
 const QA_EVIDENCE_GUIDANCE =
   "Read-only QA has no implementation turn or interpreter for brief prose: it executes only declared validation commands and named CI checks. Required dependency inspection and runtime artifacts need complete supplied source or an explicitly selected validation-evidence mechanism. A brief promising inspection or retention does not execute it. A passing cacheable command does not by itself establish fresh execution or missing runtime facts; absent proof remains unavailable.";
@@ -348,6 +375,7 @@ const QA_EVIDENCE_GUIDANCE =
 export function renderCompilationCall(
   request: PlanningRequest<unknown>,
   sourceDelivery?: PlanningSourceDelivery,
+  reviewArtifacts?: readonly ReviewArtifactSelector[],
 ): {
   wire: ReturnType<typeof compilerWire>;
   call: StructuredCall;
@@ -361,28 +389,34 @@ export function renderCompilationCall(
       request.baseSha,
       request.sources,
     );
-  const data = sourceDelivery
-    ? {
-        ...wire.data,
-        sources: wire.data.sources.map((source, sourceIndex) => {
-          if (
-            sourceDelivery.bodyDelivery !== "all-files" &&
-            !sourceDelivery.reusedSourceIndices.includes(sourceIndex)
-          )
-            return source;
-          const { lines: _lines, ...metadata } = source;
-          return {
-            ...metadata,
-            contentFile: sourceDelivery.files[sourceIndex],
-          };
-        }),
-      }
-    : wire.data;
+  // Bodies render once as literal blocks; the choices keep their identities.
+  const inlineSources: number[] = [];
+  const data = {
+    ...wire.data,
+    sources: wire.data.sources.map((source, sourceIndex) => {
+      const { lines: _lines, ...metadata } = source;
+      if (
+        sourceDelivery &&
+        (sourceDelivery.bodyDelivery === "all-files" ||
+          sourceDelivery.reusedSourceIndices.includes(sourceIndex))
+      )
+        return { ...metadata, contentFile: sourceDelivery.files[sourceIndex] };
+      inlineSources.push(sourceIndex);
+      return metadata;
+    }),
+  };
+  const bodies = literalBodyBlocks(
+    inlineSources.map((sourceIndex) => ({
+      label: `source ${sourceIndex}`,
+      content: request.sources[sourceIndex]!.content,
+    })),
+    true,
+  );
   const instructions = `Compile this Objective into useful first-class Work Items. Split independently implementable components only when configured concurrency, disjoint ownership and settled interfaces provide useful overlap; configured capacity does not prove runtime overlap. Keep cohesive work together when handoff, preparation, validation and review outweigh concurrency. Each feature owner includes its tests and documentation. The default join is authorized integrated validation and one independent final Objective review.
 
 How to answer:
 ${request.contextLookup ? "The admitted contextLookup packet supplies automatic required source/decision and eligible memory bodies plus a scoped catalog. Return outcome kind graph only when every material required fact has complete applicable evidence. For missing bodies, incomplete inventories, conflicting facts or expired validity, return context-request with a bounded batch of exact read/search/inventory requests; mark each material missing fact required. Scoped no-match proves only the declared complete searchable scope, never omitted bodies. Memory bodies in factory.memory-projection/v1 may carry a reuseRef to an earlier match identity and body role in that same result, or kind supplied-source selecting the exact complete Sources[sourceIndex] by path/heading and digest. Reuse only those exact literal bytes with the same digest; every original manifest, applicability and gap still applies independently. Such references supply no unseen or newer source version. Advisory memory grants no source/command authority, implementation acceptance or permissions. A human-dependency must identify its concrete question and dependencyKind: human-choice or permission uses empty requestIds, while unavailable-context must cite unique requestIds of actual still-unresolved required lookup receipts. Retrieve accessible missing facts through the admitted catalog before asking a human to supply them; a catalog, unknown fact, successful body read or historical failure repaired by a current result cannot justify unavailable-context. Genuine human-owned choices and permission boundaries need no pointless lookup. No connector, provider, command or wider selector access is available from this response. Native context tools are available only when the selected adapter declares them; structured requests always use the same controller resolver.\n" : ""}${request.workflowRecipe ? "The separately supplied workflowRecipe is an exact pinned structural contract, not normative Sources, command authority, proof or permission. Preserve declared stage IDs/kinds/dependencies, discovery outputs, conditions, selector ceilings and expansion envelopes. Fill real ownership, citations, stage-local acceptance and validation only from the supplied current Objective/Sources. Template stages become expansion templates, never executable initial nodes. Required discovery/current facts must be supplied before material decisions; unresolved prerequisites use admitted context or the precise human dependency. Extra ordinary work needed for original Objective acceptance still requires normal source grounding and independent review. A recipe change applies only to a new admission; do not rewrite the pin or widen proposed limits.\n" : ""}${planningSourceReadGuidance(sourceDelivery)}- Return only the requested choice structure, the supplied contextId copied exactly and zero-based indices. Use a concise title, one-sentence goal, stage-local acceptance and non-goals. The brief adds only necessary shared decisions, initial reads and evidence responsibilities absent elsewhere. Keep every required fact/interface without recopying authoritative sources or acceptance/ownership/commands.
-- ${sourceDelivery ? "Inline sources hold ordered lines; join them with newlines. A contentFile supplies the same complete literal UTF-8 bytes through the current read-only source directory." : "The compiler choices below hold the pinned sources as ordered lines; join a source's lines with newlines to read it."} Graph input sourceSpan references select those exact joined bytes by sourceIndex and JavaScript string start/length, authenticated by sourceDigest and contentDigest; they supply the full worker inputs without repeating them.
+- A pinned source without contentFile has its complete literal body in the block labeled "source <sourceIndex>"; a source-line lineIndex is that block's numbered line.${sourceDelivery ? " A contentFile supplies the same complete literal UTF-8 bytes through the current read-only source directory." : ""} Graph input sourceSpan references select those exact joined bytes by sourceIndex and JavaScript string start/length, authenticated by sourceDigest and contentDigest; they supply the full worker inputs without repeating them.
 - Coverage: emit one top-level entry per supplied obligation, in order; array position selects obligationIndex. Choose a declared owner and a proof allowed by its actual item kind, including retained kinds. Owner acceptance/validation indices refer to that same item. Do not duplicate coverage or obligation indices. Preserve every clause of the whole obligation. Item-local proof and acceptance are after its validation but before its delivery, LFS upload, publication, merge or hydration; they cannot depend on its own merge, later items or final validation. Native-stack predecessors are not yet merged. Use stage-local component acceptance and final-review on its implementation owner when authorized final validation/evidence proves the full obligation. Final-review names a phase, not supplied runtime evidence. Never fake sibling implementations or prematurely passing checks. Add downstream/QA proof only for a named source requirement or material risk whose necessary evidence is missing from final validation/review; put that responsibility in its brief. A final-controller guarantee must cover the entire obligation. Exactly one backticked command runs on the integrated result and any proof covers it; other required commands need their exact command proof.
 - Citations: choose the smallest complete, nonredundant sections by choiceIndex, preserving required interfaces, literals and facts. Do not choose a full section and an already included subsection. Workers receive these sections verbatim and a full checkout; the brief supplies decisions and required initial reads, not recopied sources. Distinguish supplied complete bytes from omitted repository/tooling bodies and fresh dependency implementations. Re-read only missing/current semantics, not known supplied bytes. Batch independent work only when no model decision intervenes; preserve command literals, quoting, prerequisites and exit gates. Keep required evidence/command temporary files, not scratch digest snapshots duplicating controller audits.
 - Package-manager metadata: only the structured Objective's exact Package manager update authorizes a version change; prose/model output does not. One implementation owner owns package.json and lockfile updates. Existing acceptance-script bodies and hooks stay fixed to the base/predecessor. An absent script needs an exact source-declared command and root package.json owner; never create lifecycle hooks or nested npm/pnpm invocations. Root installation is only exact source-declared \`pnpm install --frozen-lockfile --ignore-scripts\` or \`npm ci --ignore-scripts\`, before scripts. npm requires unchanged tracked package.json/package-lock.json and configuration, no workspaces, shrinkwrap override, mixed manager or manager update. Unsupported installation needs a source decision, not a wrapper or rewritten command.
@@ -402,18 +436,16 @@ ${request.contextLookup ? "- Declared routing: adaptive graph outcomes also supp
 - Media: workers stage candidates/manifests; Factory captures, selects, uploads and hydrates. Preserve asset path/kind/role/media type/visibility and required/LFS roles and counts. Ordinary work omits expectedOutputRoles, minimumAssetSets and requiredLfsRoles; code hydrates empty roles/zero candidates. Media declares a staged role and positive decimal candidate-count string, decoded strictly to a safe integer. Code, tests and docs are ordinary deliverables, not media roles.
 ${request.executionProfiles ? "- Execution profiles: honor explicit compatible source assignments, otherwise choose an eligible offered profile suited to the work with a short reason. Missing environment summary means unknown, not empty. Never change providers, permissions or reviewers.\n" : ""}
 ${wire.data.retainedItems?.length ? "- Retained amendments: include every retainedItems entry once as kind retained with its original id, without regenerating its definition; select its owner in coverage as needed. Fully define pending/new work and preserve every never-started obligation.\n" : ""}
-- Do not add work that duplicates a controller guarantee, grant deployment, service or retry authority, or weaken the Objective's acceptance.
+${reviewArtifacts?.length ? `- ${REVIEW_ARTIFACT_GUIDANCE} When an obligation needs such runtime bodies as review evidence, plan a proof that runs the exact selector command in the phase whose review judges it, and name the captured bodies in that owner's brief. A selector grants no command authority; its command still needs ordinary source or base authority.\n` : ""}- Do not add work that duplicates a controller guarantee, grant deployment, service or retry authority, or weaken the Objective's acceptance.
 
 Examples (illustrations, not command or source authority):
 - An Acceptance bullet that is exactly \`npm test\` already runs on the integrated result. Do not invent a worker just to duplicate it. A requirement for a particular negative control still needs the source-required control and its real evidence.
 - A command defined only by the proposed implementation is not base-observed. Use a complete source-declared command line or leave the missing authority for review. Indices and CI names always come from the current supplied choices.
 `;
+  const evidence = `Native Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\n${configuredReviewArtifacts(reviewArtifacts)}${inlineSources.length ? `Pinned source bodies. ${bodies.guidance}\n${bodies.text}` : ""}Compiler choices (JSON data):\n`;
   const rendered = renderPrompt([
     ["instructions", instructions],
-    [
-      "evidence",
-      `Native Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\nCompiler choices (JSON data):\n`,
-    ],
+    ["evidence", evidence],
     ...promptJsonParts(data, {
       obligations: "objective",
       sources: "evidence",
@@ -435,8 +467,9 @@ Examples (illustrations, not command or source authority):
     invocation: request.invocation,
     defaultPhase: "compile",
     session: request.session,
+    // The evidence text carries the literal bodies that data no longer holds.
     continuation: compilationContinuation(
-      [instructions, request.prerequisites, request.localExecutables],
+      [instructions, evidence],
       data,
       wire.schema,
     ),
@@ -467,6 +500,7 @@ Examples (illustrations, not command or source authority):
       sources: request.sources,
       controllerCapabilities: request.controllerCapabilities,
       controllerCapabilitiesDigest: request.controllerCapabilitiesDigest,
+      ...(reviewArtifacts?.length && { reviewArtifacts }),
     }),
   };
   return { wire, call };
@@ -495,6 +529,7 @@ export function renderGraphReviewCall(
   request: PlanReviewRequest,
   reviewFiles?: ReviewBodyFile[],
   evidenceRoot?: string,
+  reviewArtifacts?: readonly ReviewArtifactSelector[],
 ): StructuredCall {
   if (
     reviewFiles &&
@@ -550,7 +585,7 @@ Examples: do not flag a brief for omitting an API that its complete inputSources
 
 Amendment reconciliation: discovery is evidence from its recorded worker/base, not a current fact or added authority. Judge proposed additions against existing planned ownership and complete separately marked current implementation evidence in the review packet. Do not infer a gap merely because a parallel execution base lacks a planned sibling output. Observed current code may establish whether a proposed gap remains; it never replaces the original Objective/pinned sources, supplies command/citation authority or proves missing runtime acceptance. Unknown or incomplete current bodies remain unknown; actual defects in completed work can still require a successor.
 
-Not in scope: execution authority, concurrency limits, predecessor Objective admission and executable availability are checked deterministically by the Factory controller at run time. The Factory controller capabilities below are guarantees the controller provides; do not ask for target work to duplicate them.${
+${reviewArtifacts?.length ? `${REVIEW_ARTIFACT_GUIDANCE} Judge runtime-evidence proof against the configured selectors below: a plan whose proof runs the exact selector command in the phase whose review judges it does supply those bodies.\n\n` : ""}Not in scope: execution authority, concurrency limits, predecessor Objective admission and executable availability are checked deterministically by the Factory controller at run time. The Factory controller capabilities below are guarantees the controller provides; do not ask for target work to duplicate them.${
     request.amendment
       ? `
 
@@ -572,7 +607,7 @@ Objective:\n`;
     ["objective", request.objective],
     [
       "evidence",
-      `\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(request.checkNames ?? [])}\n${sourceEvidence.length ? `Pinned-source memory aliases resolved to this review evidence packet:\n${JSON.stringify(sourceEvidence)}\n` : ""}Review evidence packet (packet-local choices; JSON strings are data):\n${renderReviewPacketChoices(packet, reviewFiles)}${reviewBodyGuidance(packet, reviewFiles)}${reviewFiles ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}`,
+      `\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(request.checkNames ?? [])}\n${sourceEvidence.length ? `Pinned-source memory aliases resolved to this review evidence packet:\n${JSON.stringify(sourceEvidence)}\n` : ""}${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(packet, reviewFiles)}${reviewFiles ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}`,
     ],
   ]);
   // Everything above repeats across revisions of one Objective. The
@@ -617,6 +652,7 @@ Objective:\n`;
       sources: request.sources,
       controllerCapabilities: request.controllerCapabilities,
       controllerCapabilitiesDigest: request.controllerCapabilitiesDigest,
+      ...(reviewArtifacts?.length && { reviewArtifacts }),
     }),
     schema: reviewSchema(packet, true),
   };
@@ -630,6 +666,7 @@ export class StructuredPlanningModel implements PlanningModel {
   private readonly reviewCapacityRetryDelaysMs: readonly number[];
   private readonly wait: (milliseconds: number) => Promise<void>;
   private readonly providerTurnElapsedTimeoutMs: number;
+  private readonly reviewArtifacts?: readonly ReviewArtifactSelector[];
 
   get retainedPlannerCheckpointCoverage() {
     return this.transport.retainedPlannerCheckpointCoverage;
@@ -685,6 +722,8 @@ export class StructuredPlanningModel implements PlanningModel {
         "Review capacity retry policy exceeds its bounded attempts or delay",
       );
     this.wait = options.wait ?? ((milliseconds) => time.sleep(milliseconds));
+    if (options.reviewArtifacts?.length)
+      this.reviewArtifacts = structuredClone([...options.reviewArtifacts]);
   }
 
   private authoritativeCall(args: StructuredCall): StructuredCall {
@@ -1083,6 +1122,7 @@ export class StructuredPlanningModel implements PlanningModel {
       reviewCapacityRetryDelaysMs: this.reviewCapacityRetryDelaysMs,
       wait: this.wait,
       providerTurnElapsedTimeoutMs: this.providerTurnElapsedTimeoutMs,
+      reviewArtifacts: this.reviewArtifacts,
     });
     scoped.approvedPlaybook = playbook;
     scoped.approvedPlaybookPin = pin;
@@ -1118,7 +1158,11 @@ export class StructuredPlanningModel implements PlanningModel {
       );
     }
     const run = async (delivery?: PlanningSourceDelivery) => {
-      const { wire, call } = renderCompilationCall(request, delivery);
+      const { wire, call } = renderCompilationCall(
+        request,
+        delivery,
+        this.reviewArtifacts,
+      );
       const result = await this.runStructured<unknown>(call);
       return this.decodeCompilationResult<T>(request, wire, result);
     };
@@ -1178,6 +1222,7 @@ export class StructuredPlanningModel implements PlanningModel {
         : renderCompilationCall(
             request,
             this.transport.sourceDelivery?.(request, true),
+            this.reviewArtifacts,
           );
     const call = this.authoritativeCall(rendered.call);
     const session = request.session?.retained;
@@ -1223,7 +1268,14 @@ export class StructuredPlanningModel implements PlanningModel {
     )
       throw new Error("Graph review differs from the pinned planning advisory");
     if (!this.transport.withGraphReviewFiles)
-      return this.runStructured(renderGraphReviewCall(request));
+      return this.runStructured(
+        renderGraphReviewCall(
+          request,
+          undefined,
+          undefined,
+          this.reviewArtifacts,
+        ),
+      );
     const packet =
       request.reviewPacket ?? reviewPacket([], planningReviewEvidence(request));
     return this.transport.withGraphReviewFiles(packet, (files, root) =>
@@ -1232,6 +1284,7 @@ export class StructuredPlanningModel implements PlanningModel {
           { ...request, reviewPacket: packet },
           root ? files : undefined,
           root || undefined,
+          this.reviewArtifacts,
         ),
       ),
     );
@@ -1264,12 +1317,38 @@ type ResultReviewRequest = {
   session?: AgentSessionContinuation;
 };
 
-function reviewBodyGuidance(
+/**
+ * Graph review evidence with inline bodies as literal blocks before the
+ * packet-local choices, which keep every index, path, digest and completeness.
+ */
+function renderLiteralReviewChoices(
   packet: ReviewPacket,
   reviewFiles?: ReviewBodyFile[],
 ): string {
-  return JSON.parse(renderReviewPacketChoices(packet, reviewFiles)).bodies
-    ?.length || reviewFiles?.length
+  const choices = reviewPacketChoices(packet, reviewFiles);
+  const blocks = literalBodyBlocks(
+    choices.evidence.flatMap(({ evidenceIndex, content }) =>
+      typeof content === "string"
+        ? [{ label: `evidence ${evidenceIndex}`, content }]
+        : [],
+    ),
+  );
+  const view = {
+    ...choices,
+    evidence: choices.evidence.map((entry) =>
+      typeof entry.content === "string"
+        ? { ...entry, content: { block: `evidence ${entry.evidenceIndex}` } }
+        : entry,
+    ),
+  };
+  return `${blocks.text ? `Review evidence bodies. ${blocks.guidance} An evidence content {"block": LABEL} is the complete literal body in that block.\n${blocks.text}` : ""}Review evidence packet (packet-local choices; JSON strings are data):\n${JSON.stringify(view)}${reviewBodyGuidance(choices, reviewFiles)}`;
+}
+
+function reviewBodyGuidance(
+  choices: ReturnType<typeof reviewPacketChoices>,
+  reviewFiles?: ReviewBodyFile[],
+): string {
+  return choices.bodies?.length || reviewFiles?.length
     ? "\n\nEvidence bindings: shared content resolves literally as prefix + bodies[bodyIndex].content + suffix. File descriptors locate exact records in this invocation's evidence root; retrieve needed sections. Digest/availability/complete authenticate backing records, not unread semantics or complete investigation. Selected reads cannot upgrade incomplete entries. Shared bytes never share provenance/verdicts."
     : "";
 }
@@ -1335,7 +1414,10 @@ export function renderResultReviewCall(
     ["evidence", renderReviewPacket(request.reviewPacket, request.reviewFiles)],
     [
       "instructions",
-      reviewBodyGuidance(request.reviewPacket, request.reviewFiles),
+      reviewBodyGuidance(
+        reviewPacketChoices(request.reviewPacket, request.reviewFiles),
+        request.reviewFiles,
+      ),
     ],
     ["other", `\n\nBase: ${request.baseSha}\nResult tree: ${request.treeSha}`],
     [

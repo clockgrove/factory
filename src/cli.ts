@@ -957,8 +957,15 @@ async function watchObjective(
   if (!args.includes("--follow")) return;
   await new Promise<void>((resolve) => {
     const timer = setInterval(() => {
-      console.log("");
-      print();
+      try {
+        // JSON output stays one object per line.
+        if (!args.includes("--json")) console.log("");
+        print();
+      } catch (error) {
+        process.stderr.write(
+          `factory watch: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
     }, intervalMs);
     const stop = () => {
       clearInterval(timer);

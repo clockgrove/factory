@@ -1,6 +1,7 @@
 import { type FactoryConfig, githubProgressSettings } from "./config.js";
 import type { GitHubGateway } from "./contracts.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
+import { attachedFault } from "./fault.js";
 import {
   type LiveStatusRecord,
   liveStatusMarker,
@@ -38,7 +39,19 @@ const TERMINAL_PHASES = ["complete", "cancelled", "failed"];
  * Edits are idempotent and keep no state: after a restart the first tick edits once.
  */
 const lastEdit = new Map<string, { digest: string; at: number }>();
-const warned = new Set<string>();
+/**
+ * Failed edits or creates by transition digest, like the snapshot comments'
+ * memo: a change retries at once; a repeat waits 3, 6, 12 … up to 60 minutes,
+ * so a refused edit or an unknown create never spends delivery's request budget.
+ */
+const failedEdit = new Map<
+  string,
+  { digest: string; at: number; failures: number }
+>();
+const backoffMs = (failures: number) =>
+  Math.min(REFRESH_MS * 2 ** (failures - 1), 60 * 60_000);
+/** In-call tries of a final edit, which no later tick may follow. */
+const FINAL_TRIES = 3;
 
 interface LiveTarget {
   label: string;
@@ -129,6 +142,12 @@ export async function projectLiveStatus(
   const key = (target: LiveTarget) =>
     `${args.config.repository}#${args.objective}:${retained.runId}:${target.issue}`;
   const due = targets.filter((target) => {
+    const failed = failedEdit.get(key(target));
+    if (
+      failed?.digest === target.digest &&
+      now - failed.at < backoffMs(failed.failures)
+    )
+      return false;
     const last = lastEdit.get(key(target));
     if (!last || last.digest !== target.digest) return true;
     return target.active && now - last.at >= REFRESH_MS;
@@ -141,63 +160,93 @@ export async function projectLiveStatus(
       runId: retained.runId,
       item: target.item?.id,
     });
-    lastEdit.set(key(target), { digest: target.digest, at: now });
-    try {
-      const body = redactDiagnosticDetail(
-        `${marker}\n${target.render(items, now)}\n\n${stamp}`,
-        args.secrets,
-      );
-      const record = target.read(live());
-      const observed = await args.github.liveStatusComment({
-        objective: args.objective,
-        ...(target.item && { item: target.item }),
-        runId: retained.runId,
-        body,
-        ...(record && { record }),
-        beforeWrite: async (actorId) => {
-          const state = live();
-          if (target.read(state))
-            throw new Error("A live status create is already recorded");
-          target.write(state, { actorId });
-          args.save();
-          try {
-            await awaitCheckpointAdmission(
-              args.config.repository,
-              "before-effect",
-            );
-          } catch (error) {
-            // The POST follows this call, so nothing was sent.
-            const latest = live();
-            if (isExecutionState(latest)) {
-              if (target.item)
-                delete latest.workItemTracking?.[target.item.id]?.live;
-              else delete latest.githubLiveStatus;
-            }
-            args.save();
-            throw error;
-          }
-        },
-      });
-      const state = live();
-      if (JSON.stringify(target.read(state)) !== JSON.stringify(observed)) {
-        target.write(state, observed);
-        args.save();
-      }
-    } catch (error) {
-      if (isCheckpointAdmissionFailure(error)) throw error;
-      // Presentation only: try again on the next transition or refresh.
-      if (!warned.has(key(target))) {
-        warned.add(key(target));
-        process.stderr.write(
-          `Factory live status for ${target.label} is unavailable: ${redactDiagnosticDetail(error instanceof Error ? error.message : String(error), args.secrets)}\n`,
-        );
+    const body = redactDiagnosticDetail(
+      `${marker}\n${target.render(items, now)}\n\n${stamp}`,
+      args.secrets,
+    );
+    // A settled target's final edit may be the controller's last pass, so a
+    // transient failure is tried again here; an active one waits for a later tick.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await editLiveStatus(args, retained, live, target, body);
+        lastEdit.set(key(target), { digest: target.digest, at: now });
+        failedEdit.delete(key(target));
+        break;
+      } catch (error) {
+        if (isCheckpointAdmissionFailure(error)) throw error;
+        if (
+          !target.active &&
+          attempt < FINAL_TRIES &&
+          attachedFault(error)?.kind === "transient"
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+          continue;
+        }
+        const failed = failedEdit.get(key(target));
+        const failures =
+          failed?.digest === target.digest ? failed.failures + 1 : 1;
+        failedEdit.set(key(target), {
+          digest: target.digest,
+          at: Date.now(),
+          failures,
+        });
+        // Presentation only: tried again on the next transition or after the backoff.
+        if (failures === 1)
+          process.stderr.write(
+            `Factory live status for ${target.label} is unavailable: ${redactDiagnosticDetail(error instanceof Error ? error.message : String(error), args.secrets)}\n`,
+          );
+        break;
       }
     }
   }
 }
 
-/** A code span that cannot be broken out of. */
-const code = (text: string) => `\`${text.replaceAll("`", "'")}\``;
+/** Create the target's comment exactly once, or edit it in place. */
+async function editLiveStatus(
+  args: Args,
+  retained: ContinuationState,
+  live: () => ContinuationState,
+  target: LiveTarget,
+  body: string,
+): Promise<void> {
+  const record = target.read(live());
+  const observed = await args.github.liveStatusComment!({
+    objective: args.objective,
+    ...(target.item && { item: target.item }),
+    runId: retained.runId,
+    body,
+    ...(record && { record }),
+    beforeWrite: async (actorId) => {
+      const state = live();
+      if (target.read(state))
+        throw new Error("A live status create is already recorded");
+      target.write(state, { actorId });
+      args.save();
+      try {
+        await awaitCheckpointAdmission(args.config.repository, "before-effect");
+      } catch (error) {
+        // The POST follows this call, so nothing was sent.
+        const latest = live();
+        if (isExecutionState(latest)) {
+          if (target.item)
+            delete latest.workItemTracking?.[target.item.id]?.live;
+          else delete latest.githubLiveStatus;
+        }
+        args.save();
+        throw error;
+      }
+    },
+  });
+  const state = live();
+  if (JSON.stringify(target.read(state)) !== JSON.stringify(observed)) {
+    target.write(state, observed);
+    args.save();
+  }
+}
+
+/** A code span that cannot be broken out of: no backtick, line break or control character. */
+const code = (text: string) =>
+  `\`${text.replaceAll("`", "'").replace(/[\p{Cc}\u2028\u2029]/gu, "")}\``;
 
 function itemBody(item: ItemActivity, now: number): string {
   const lines = [`### Live status · ${item.id}`, "", `**${headline(item)}**`];

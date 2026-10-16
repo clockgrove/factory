@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { stateRoot } from "./config.js";
 import { privateRecords } from "./diagnostics.js";
-import { pinnedGitRaw } from "./process.js";
+import { pinnedGitRawWithin } from "./process.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
 
 /** One recorded worker tool call: metadata only. */
@@ -48,6 +48,8 @@ export function workerProgressPath(
   if (!ATTEMPT.test(attempt)) throw new Error("Invalid worker attempt ID");
   return join(stateRoot(repository), "harness", `${attempt}.progress.ndjson`);
 }
+
+const CONTROL = /\p{Cc}/u;
 
 const count = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
@@ -135,11 +137,17 @@ export function readWorkerActivity(
   return activity;
 }
 
-/** Paths changed so far in a worker checkout, excluding Factory's private staging. */
+/**
+ * Paths changed so far in a worker checkout, excluding Factory's private staging,
+ * or undefined when unknown. Takes no index lock, so a worker's own `git add` or
+ * commit never collides with it, and gives up after 5 seconds.
+ */
 export function worktreeChanges(worktree: string): string[] | undefined {
   try {
-    const raw = pinnedGitRaw(
+    const raw = pinnedGitRawWithin(
       worktree,
+      5000,
+      "--no-optional-locks",
       "status",
       "--porcelain=v1",
       "-z",
@@ -154,7 +162,11 @@ export function worktreeChanges(worktree: string): string[] | undefined {
       const path = entry.slice(3);
       // A rename or copy is followed by its original path.
       if (code.includes("R") || code.includes("C")) index += 1;
-      if (!path.split("/").some((part) => part.startsWith(".factory-")))
+      // A control character could break out of the public comment's code span.
+      if (
+        !CONTROL.test(path) &&
+        !path.split("/").some((part) => part.startsWith(".factory-"))
+      )
         paths.add(path);
     }
     return [...paths].sort();

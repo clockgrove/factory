@@ -14,10 +14,17 @@ const TOOL_NAME = /^[A-Za-z0-9_.:/-]{1,128}$/;
 const PROGRAM = /^[A-Za-z0-9._+-]{1,64}$/;
 const FILE_FIELDS = ["file_path", "notebook_path", "path"] as const;
 
-/** A shell command's program name (its first word, without a directory), if plain. */
+const SHELL_WRAPPER = /^\s*(?:\S*\/)?(?:ba|z)?sh\s+-l?c\s+['"]?/;
+
+/**
+ * A shell command's program name (its first word, without a directory), if plain.
+ * For `bash -lc '<command>'`, as Codex runs commands, the inner command's.
+ */
 export function shellProgram(command: unknown): string | undefined {
   if (typeof command !== "string") return undefined;
-  const first = command.trim().split(/\s+/, 1)[0] ?? "";
+  const wrapper = SHELL_WRAPPER.exec(command);
+  const inner = wrapper ? command.slice(wrapper[0].length) : command;
+  const first = inner.trim().split(/\s+/, 1)[0] ?? "";
   const program = first.split("/").pop() ?? "";
   return PROGRAM.test(program) ? program : undefined;
 }
@@ -30,7 +37,14 @@ export function worktreePath(
   worktree: string,
   path: unknown,
 ): string | undefined {
-  if (typeof path !== "string" || !path || path.length > 4096) return undefined;
+  if (
+    typeof path !== "string" ||
+    !path ||
+    path.length > 4096 ||
+    // A control character could break out of the public comment's code span.
+    /\p{Cc}/u.test(path)
+  )
+    return undefined;
   const root = resolve(worktree);
   const relativePath = relative(
     root,

@@ -1003,12 +1003,25 @@ export function pinnedGit(checkout: string, ...args: string[]): string {
 
 /** Preserve exact pinned Git output without trimming or decoding. */
 export function pinnedGitRaw(checkout: string, ...args: string[]): Buffer {
+  return pinnedGitRawWithin(checkout, undefined, ...args);
+}
+
+/** `pinnedGitRaw` killed after `timeoutMs`, which then throws. */
+export function pinnedGitRawWithin(
+  checkout: string,
+  timeoutMs: number | undefined,
+  ...args: string[]
+): Buffer {
   assertUnlocked(args);
   return classifiedGit(args, () => {
     const factory = factoryGit(checkout, args, true);
     const result = spawnSync("git", factory.args, {
       env: factory.env,
       maxBuffer: Number.MAX_SAFE_INTEGER,
+      ...(timeoutMs !== undefined && {
+        timeout: timeoutMs,
+        killSignal: "SIGKILL" as const,
+      }),
     });
     if (result.error) throw result.error;
     if (result.status !== 0)

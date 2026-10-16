@@ -2437,7 +2437,12 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
 
     // Exercise the stock prepared-request producer and its real strict atomic
     // checkpoint, holding before Codex starts; these are no provider responses.
-    const prepare = async (objectiveBody, policy, retainedFailedResult) => {
+    const prepare = async (
+      objectiveBody,
+      policy,
+      retainedFailedResult,
+      executionBase = loaded.baseSha,
+    ) => {
       const originalHead = git(checkout, "rev-parse", "HEAD");
       const preparedState = structuredClone(loaded);
       preparedState.schemaVersion = 17;
@@ -2446,7 +2451,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         status: "running",
         step: "execute",
         attempt,
-        baseSha: loaded.baseSha,
+        baseSha: executionBase,
         startedAt: new Date().toISOString(),
       };
       if (retainedFailedResult) {
@@ -2520,7 +2525,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         driver.start(
           {
             item: preparedState.graph.items.find((item) => item.id === "api"),
-            baseSha: preparedState.baseSha,
+            baseSha: executionBase,
             attemptId: attempt,
             objectiveBody,
             ...(retainedFailedResult && { retainedFailedResult }),
@@ -2561,12 +2566,40 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     assert.equal(declared.packageManagerUpdate, "npm@10.1.0");
     assert.deepEqual(declared.capture.policy, policy);
     // A retried or repaired wrong result continues from its refused candidate
-    // (#1313): the candidate's tree is the working tree and index of the new
-    // attempt's checkout, HEAD stays at the accepted base, and the brief says so.
+    // (#1313): its tree is the working tree and index of the new attempt's
+    // checkout while HEAD stays at the accepted base, and the brief says so.
+    const commitOn = (parent, files) => {
+      const env = {
+        ...process.env,
+        GIT_INDEX_FILE: join(root, `index-${randomUUID()}`),
+        GIT_AUTHOR_NAME: "Factory Test",
+        GIT_AUTHOR_EMAIL: "factory-test@example.invalid",
+        GIT_COMMITTER_NAME: "Factory Test",
+        GIT_COMMITTER_EMAIL: "factory-test@example.invalid",
+      };
+      const run = (args, input) =>
+        execFileSync("git", ["-C", checkout, ...args], {
+          env,
+          encoding: "utf8",
+          ...(input !== undefined && { input }),
+        }).trim();
+      run(["read-tree", parent]);
+      for (const [path, content] of Object.entries(files))
+        run([
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          `100644,${run(["hash-object", "-w", "--stdin"], content)},${path}`,
+        ]);
+      const tree = run(["write-tree"]);
+      return {
+        commitSha: run(["commit-tree", tree, "-p", parent, "-m", "attempt"]),
+        treeSha: tree,
+      };
+    };
     const refusedCandidate = {
       attemptId: "refused-candidate",
-      commitSha: result.changeRef,
-      treeSha: git(checkout, "rev-parse", `${result.changeRef}^{tree}`),
+      ...commitOn(loaded.baseSha, { "api.json": '{"refused":true}\n' }),
     };
     const continued = await prepare(
       "## Package manager update\n_No response_\n",
@@ -2586,7 +2619,59 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       continued.preparedHarnessRequest.item.brief,
       /Its files are already in your working tree/,
     );
-
+    // Returning the starting tree unchanged resubmits the refused result: it
+    // is collected as no change, before any validation or review.
+    await assert.rejects(
+      collectWorktreeResult(
+        checkout,
+        continued.worktree,
+        continued.request,
+        store,
+        { evidence: { finalResponse: "Nothing left to change." } },
+      ),
+      /Worker produced no repository change/,
+    );
+    // A peer merged after the refusal: the candidate moves onto the new base
+    // and keeps the peer's change instead of reverting it.
+    const peerBase = commitOn(loaded.baseSha, { "peer.json": "peer\n" });
+    const moved = await prepare(
+      "## Package manager update\n_No response_\n",
+      undefined,
+      refusedCandidate,
+      peerBase.commitSha,
+    );
+    assert.equal(git(moved.worktree, "rev-parse", "HEAD"), peerBase.commitSha);
+    assert.equal(
+      readFileSync(join(moved.worktree, "api.json"), "utf8"),
+      '{"refused":true}\n',
+    );
+    assert.equal(
+      readFileSync(join(moved.worktree, "peer.json"), "utf8"),
+      "peer\n",
+    );
+    assert.match(
+      moved.preparedHarnessRequest.item.brief,
+      /Its files are already in your working tree/,
+    );
+    // A peer change that conflicts falls back to the accepted base with
+    // inspect-only context, and the brief says why.
+    const conflictBase = commitOn(loaded.baseSha, {
+      "api.json": '{"peer":true}\n',
+    });
+    const fallback = await prepare(
+      "## Package manager update\n_No response_\n",
+      undefined,
+      refusedCandidate,
+      conflictBase.commitSha,
+    );
+    assert.equal(
+      git(fallback.worktree, "write-tree"),
+      git(fallback.worktree, "rev-parse", "HEAD^{tree}"),
+    );
+    assert.match(
+      fallback.preparedHarnessRequest.item.brief,
+      /Its files are not in this checkout/,
+    );
     const save = () => saveState(snapshot, loaded);
     const session = agentSessionContinuation(
       loaded,

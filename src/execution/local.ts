@@ -1445,8 +1445,16 @@ export async function collectWorktreeResult(
     acceptedIgnoredLinks,
   );
   // An empty result is still wrong, but a staged discovery is the worker's
-  // account of why: it rides on the fault so Factory reviews it (#820).
-  if (!paths.length && !assets.length)
+  // account of why: it rides on the fault so Factory reviews it (#820). A
+  // continued attempt that left its starting tree as it was resubmits the
+  // refused result, so it is empty too (#1313).
+  const unchangedContinuation =
+    !assets.length &&
+    paths.length > 0 &&
+    request.retainedFailedResult !== undefined &&
+    pinnedGit(worktree, "write-tree") ===
+      continuedRetainedTree(checkout, worktree, request);
+  if ((!paths.length && !assets.length) || unchangedContinuation)
     throw new StepFault({
       kind: "work",
       evidence: {
@@ -1514,7 +1522,16 @@ export async function collectWorktreeResult(
 
 const retainedFailedUnavailable =
   "\nRetained failed committed-result context is unavailable or could not be authenticated in this checkout. Do not infer prior source contents; unfinished uncommitted edits remain unavailable.";
-const retainedFailedAvailable = (
+/** The retained result as inspect-only context; workers launched before #1313 received exactly this. */
+const retainedFailedReachable = (
+  retained: NonNullable<ExecutionRequest["retainedFailedResult"]>,
+): string =>
+  `\nRetained failed committed result, verified reachable in this checkout: ${JSON.stringify(retained)}. This is unaccepted implementation context, not normative source, an accepted base or acceptance proof. You may inspect currently owned files from this exact Git tree and reuse their implementation in owned edits while making the diagnosed correction. Preserve the checkout's current accepted HEAD; do not checkout, reset or cherry-pick the failed commit. Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
+const retainedFailedNotContinued = (
+  retained: NonNullable<ExecutionRequest["retainedFailedResult"]>,
+): string =>
+  `${retainedFailedReachable(retained)} Its files are not in this checkout: the accepted base or this Work Item's ownership changed since that result, and its changes do not apply cleanly within current ownership, so this attempt starts from the accepted base.`;
+const retainedFailedContinued = (
   retained: NonNullable<ExecutionRequest["retainedFailedResult"]>,
 ): string =>
   `\nRetained failed committed result, verified in this checkout: ${JSON.stringify(retained)}. Its files are already in your working tree: this attempt continues from that result, as uncommitted changes on top of the accepted base HEAD. It is unaccepted implementation context, not normative source or acceptance proof. Fix exactly what the findings and any diagnosed correction refuse, and keep the rest. Do not checkout, reset or cherry-pick the failed commit or the base; your result is collected from this working tree as usual. Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
@@ -1524,49 +1541,119 @@ export function retainedFailedResultBriefs(
   retainedResult: ExecutionRequest["retainedFailedResult"],
 ): string[] {
   return retainedResult
-    ? [retainedFailedAvailable(retainedResult), retainedFailedUnavailable]
+    ? [
+        retainedFailedContinued(retainedResult),
+        retainedFailedNotContinued(retainedResult),
+        retainedFailedReachable(retainedResult),
+        retainedFailedUnavailable,
+      ]
     : [""];
 }
 
-/** Render only authenticated local Git context, never an execution base or proof. */
-export function retainedFailedResultBrief(
+/** The retained commit and tree are exactly these objects in this checkout's repository. */
+function retainedResultAuthentic(
   checkout: string,
   worktree: string,
-  retainedResult: ExecutionRequest["retainedFailedResult"],
-): string {
-  let failedContext = "";
-  if (retainedResult) {
-    const retained = retainedResult;
-    try {
-      if (
-        !/^[a-f0-9]{40}$/.test(retained.commitSha) ||
-        !/^[a-f0-9]{40}$/.test(retained.treeSha) ||
-        pinnedGit(worktree, "rev-parse", `${retained.commitSha}^{commit}`) !==
-          retained.commitSha ||
-        pinnedGit(worktree, "rev-parse", `${retained.commitSha}^{tree}`) !==
-          retained.treeSha ||
+  retained: NonNullable<ExecutionRequest["retainedFailedResult"]>,
+): boolean {
+  try {
+    return (
+      /^[a-f0-9]{40}$/.test(retained.commitSha) &&
+      /^[a-f0-9]{40}$/.test(retained.treeSha) &&
+      pinnedGit(worktree, "rev-parse", `${retained.commitSha}^{commit}`) ===
+        retained.commitSha &&
+      pinnedGit(worktree, "rev-parse", `${retained.commitSha}^{tree}`) ===
+        retained.treeSha &&
+      pinnedGit(
+        worktree,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      ) ===
         pinnedGit(
-          worktree,
+          checkout,
           "rev-parse",
           "--path-format=absolute",
           "--git-common-dir",
-        ) !==
-          pinnedGit(
-            checkout,
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-          )
-      )
-        throw new Error(
-          "Retained failed Git result is not authenticated in this checkout",
-        );
-      failedContext = retainedFailedAvailable(retained);
-    } catch {
-      failedContext = retainedFailedUnavailable;
-    }
+        )
+    );
+  } catch {
+    return false;
   }
-  return failedContext;
+}
+
+/**
+ * The tree a retried or repaired attempt starts from (#1313): the refused
+ * candidate on its own base, or its clean three-way move onto a newer base.
+ * Either way its changes from the current base must stay within current
+ * ownership, so a peer's merged work is never reverted and an ownership
+ * change never makes the attempt fail after a paid run. Undefined when the
+ * result cannot continue on this base.
+ */
+export function continuedRetainedTree(
+  checkout: string,
+  worktree: string,
+  request: Pick<ExecutionRequest, "retainedFailedResult" | "baseSha" | "item">,
+): string | undefined {
+  const retained = request.retainedFailedResult;
+  if (!retained || !retainedResultAuthentic(checkout, worktree, retained))
+    return undefined;
+  try {
+    const parent = pinnedGit(
+      worktree,
+      "rev-parse",
+      "--verify",
+      `${retained.commitSha}^`,
+    );
+    const tree =
+      parent === request.baseSha
+        ? retained.treeSha
+        : pinnedGit(
+            worktree,
+            "merge-tree",
+            "--write-tree",
+            `--merge-base=${parent}`,
+            request.baseSha,
+            retained.commitSha,
+          ).split("\n")[0]!;
+    if (!/^[a-f0-9]{40}$/.test(tree)) return undefined;
+    const changed = pinnedGit(
+      worktree,
+      "diff-tree",
+      "-r",
+      "--name-only",
+      "-z",
+      `${request.baseSha}^{tree}`,
+      tree,
+    )
+      .split("\0")
+      .filter(Boolean);
+    return changed.every((path) => ownsPath(path, request.item.ownedPaths))
+      ? tree
+      : undefined;
+  } catch {
+    // A conflicting move (merge-tree exits 1) or an unreadable object.
+    return undefined;
+  }
+}
+
+/**
+ * Render only authenticated local Git context, never an execution base or
+ * proof, and the tree the attempt continues from when it can.
+ */
+export function retainedFailedResultStart(
+  checkout: string,
+  worktree: string,
+  request: Pick<ExecutionRequest, "retainedFailedResult" | "baseSha" | "item">,
+): { brief: string; tree?: string } {
+  const retained = request.retainedFailedResult;
+  if (!retained) return { brief: "" };
+  if (!retainedResultAuthentic(checkout, worktree, retained))
+    return { brief: retainedFailedUnavailable };
+  const tree = continuedRetainedTree(checkout, worktree, request);
+  return tree
+    ? { brief: retainedFailedContinued(retained), tree }
+    : { brief: retainedFailedNotContinued(retained) };
 }
 
 /** Admit only the selected harness's native turn; preserve prior fresh-only ownership. */
@@ -2073,27 +2160,18 @@ export class LocalExecutionDriver implements ExecutionDriver {
         !request.discovery && request.item.executionProfile
           ? this.profiles?.get(request.item.executionProfile.id)?.environment
           : undefined;
-      const failedContext = retainedFailedResultBrief(
+      const retainedStart = retainedFailedResultStart(
         this.checkout,
         worktree,
-        request.retainedFailedResult,
+        request,
       );
+      const failedContext = retainedStart.brief;
       // An authenticated refused candidate is the attempt's starting tree:
       // its files land in the working tree and index while HEAD stays at the
       // accepted base, so collection and ownership checks are unchanged (#1313).
-      const continuesCandidate = Boolean(
-        request.retainedFailedResult &&
-          failedContext &&
-          failedContext !== retainedFailedUnavailable,
-      );
-      if (continuesCandidate)
-        pinnedGit(
-          worktree,
-          "read-tree",
-          "-u",
-          "--reset",
-          request.retainedFailedResult!.treeSha,
-        );
+      const continuesCandidate = retainedStart.tree !== undefined;
+      if (retainedStart.tree)
+        pinnedGit(worktree, "read-tree", "-u", "--reset", retainedStart.tree);
       const admittedSession = checkpointWorkerSession(
         session,
         {

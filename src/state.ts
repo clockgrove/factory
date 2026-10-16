@@ -1899,13 +1899,15 @@ export function parseFactoryState(
                 : undefined));
         if (!attemptGraph)
           throw new Error(`Work Item ${id} has no authenticated attempt graph`);
+        // Exactly the result the runtime continues from: the latest archived
+        // attempt, and none when the operator asked for a fresh base.
+        const recovery = item.recovery as WorkRecovery | undefined;
         if (
           request.retainedFailedResult !== undefined &&
-          !(item.recovery as WorkRecovery | undefined)?.history?.some(
-            (prior) =>
-              JSON.stringify(retainedFailedResultContext(prior)) ===
-              JSON.stringify(request.retainedFailedResult),
-          )
+          (recovery?.freshBase ||
+            JSON.stringify(
+              retainedFailedResultContext(recovery?.history?.at(-1)),
+            ) !== JSON.stringify(request.retainedFailedResult))
         )
           throw new Error(
             `Work Item ${id} retained failed result differs from its archived repair`,

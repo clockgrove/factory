@@ -44,10 +44,14 @@ import type { ContentRef } from "./contracts.js";
 import {
   checkpointDiagnosticEmitter,
   type DiagnosticEmitter,
+  redactDiagnosticDetail,
 } from "./diagnostics.js";
-import { attachFault, decision } from "./fault.js";
+import { attachFault, decision, type Fault, transient } from "./fault.js";
 import {
   assertProcessActive,
+  currentProcessDeadlineAt,
+  currentProcessSignal,
+  gitFault,
   linuxProcessIdentity,
   pinnedGitCommand,
   pinnedGitEnvironment,
@@ -333,15 +337,36 @@ export class CheckpointAdmissionFailure extends Error {
       this.stack += `\nCaused by: ${cause.stack}`;
     this.knownNotDispatched = boundary === "before-effect";
     // A configured archive limit keeps its own prerequisite and fix (#1306).
+    // A read that failed in transit is waited out (#1384): it sent nothing,
+    // and the next admission settles any unconfirmed push by exact remote
+    // observation before it publishes again.
     attachFault(
       this,
       onlyCheckpointBoundsExceeded(cause)?.fault ??
+        transitFault(cause, message) ??
         decision(
           "Recovery checkpoint admission or retention is unavailable; preserve the retained owner and receipt",
           `Checkpoint boundary: ${boundary}`,
         ),
     );
   }
+}
+/** A transient fault when only archive reads that failed in transit caused this error. */
+function transitFault(error: unknown, detail: string): Fault | undefined {
+  for (
+    let current: unknown = error, depth = 0;
+    current instanceof Error && depth < 8;
+    current = current.cause, depth++
+  ) {
+    if (current instanceof ArchiveTransportFailure)
+      return current.transient ? transient(detail, false) : undefined;
+    if (current instanceof AggregateError)
+      return current.errors.length &&
+        current.errors.every((entry) => transitFault(entry, detail))
+        ? transient(detail, false)
+        : undefined;
+  }
+  return undefined;
 }
 /**
  * A completed local worker return is not yet frozen by its collector, so no
@@ -562,13 +587,10 @@ function checkpointObservation(
   let operationAttemptId: string | undefined;
   try {
     operationAttemptId = randomUUID();
-    emitter = checkpointDiagnosticEmitter(config.repository, [
-      ...(config.policy?.allowedSecretNames ?? [])
-        .map((name) => process.env[name])
-        .filter((value): value is string => Boolean(value)),
-      ...serviceLoginSecrets(),
-      ...(config.gitPersistence ? [config.gitPersistence.remote] : []),
-    ]);
+    emitter = checkpointDiagnosticEmitter(
+      config.repository,
+      checkpointSecrets(config, config.gitPersistence?.remote),
+    );
   } catch {
     // Observation setup is also outside lifecycle and checkpoint authority.
   }
@@ -2701,6 +2723,45 @@ function git(
     },
   );
 }
+/** Values no checkpoint diagnostic or transport error may show. */
+function checkpointSecrets(
+  config: FactoryConfig | undefined,
+  remote: string | undefined,
+): string[] {
+  const destination = remote ? githubRepository(remote) : undefined;
+  return [
+    ...(config?.policy?.allowedSecretNames ?? [])
+      .map((name) => process.env[name])
+      .filter((value): value is string => Boolean(value)),
+    ...serviceLoginSecrets(),
+    ...(remote ? [remote] : []),
+    ...(destination ? [destination] : []),
+  ];
+}
+/** What a failed bounded transport command showed. */
+interface TransportFailure {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+/**
+ * A bounded archive transport command failed. The message names its exit
+ * status or timeout and a redacted stderr tail. `transient` means it failed
+ * in transit (no response, a timeout, a 408/429/5xx response, or a transport
+ * error), so a later read-only try may succeed (#1384).
+ */
+class ArchiveTransportFailure extends Error {
+  constructor(
+    message: string,
+    readonly transient: boolean,
+    readonly exitStatus: number | null,
+    readonly timedOut: boolean,
+  ) {
+    super(message);
+  }
+}
+const STDERR_TAIL_CHARS = 600;
 async function boundedCommand(
   file: string,
   args: string[],
@@ -2708,34 +2769,125 @@ async function boundedCommand(
   env?: NodeJS.ProcessEnv,
   input?: string,
   observe?: (stream: "stdout" | "stderr", chunk: Buffer) => void,
+  transport: {
+    /** The command named in its failure, such as `git fetch`. */
+    label: string;
+    /** Whether a failure happened in transit; only read-only callers pass one. */
+    transient?: (failure: TransportFailure) => boolean;
+  } = { label: file },
 ): Promise<string> {
   assertProcessActive();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, options.timeoutMs);
   let bytes = 0;
-  try {
-    const result = await subprocessAsync(
-      file,
-      args,
-      { env, signal: controller.signal },
-      input,
-      (_stream, chunk) => {
-        bytes += chunk.length;
-        if (bytes > options.maxBytes + 65536) controller.abort();
-        try {
-          observe?.(_stream, chunk);
-        } catch {
-          /* Diagnostics never change command control. */
-        }
-      },
-      undefined,
-      env?.GIT_TRACE2_EVENT === "1" ? { stderr: false } : undefined,
+  const fail = (failure: TransportFailure): never => {
+    const shown = redactDiagnosticDetail(
+      failure.stderr,
+      checkpointSecrets(scopes.getStore()?.config, options.remote),
+    )
+      .trim()
+      .replace(/\s*\n\s*/g, " | ");
+    const tail =
+      shown.length > STDERR_TAIL_CHARS
+        ? `…${shown.slice(-STDERR_TAIL_CHARS)}`
+        : shown;
+    throw new ArchiveTransportFailure(
+      `Bounded Git archive transport command failed: ${transport.label} ${
+        failure.timedOut
+          ? `timed out after ${options.timeoutMs} ms`
+          : failure.status === null
+            ? "ended by a signal"
+            : `exited ${failure.status}`
+      }${tail ? `; stderr: ${tail}` : ""}`,
+      transport.transient?.(failure) ?? false,
+      failure.status,
+      failure.timedOut,
     );
-    if (result.status !== 0)
-      throw new Error("Bounded Git archive transport command failed");
+  };
+  try {
+    let result: Awaited<ReturnType<typeof subprocessAsync>>;
+    try {
+      result = await subprocessAsync(
+        file,
+        args,
+        { env, signal: controller.signal },
+        input,
+        (_stream, chunk) => {
+          bytes += chunk.length;
+          if (bytes > options.maxBytes + 65536) controller.abort();
+          try {
+            observe?.(_stream, chunk);
+          } catch {
+            /* Diagnostics never change command control. */
+          }
+        },
+        undefined,
+        env?.GIT_TRACE2_EVENT === "1" ? { stderr: false } : undefined,
+      );
+    } catch (error) {
+      // Only this command's own time bound is reported as a timeout: an
+      // operator cancellation or an unverified cessation keeps its error.
+      if (
+        timedOut &&
+        !(error instanceof UnsettledSubprocessError) &&
+        !currentProcessSignal()?.aborted
+      )
+        fail({ status: null, stdout: "", stderr: "", timedOut: true });
+      throw error;
+    }
+    if (result.status !== 0) fail({ ...result, timedOut: false });
     return result.stdout;
   } finally {
     clearTimeout(timer);
+  }
+}
+/** Delays before the second and third try of a read that failed in transit. */
+const TRANSPORT_RETRY_DELAYS_MS = [10_000, 20_000];
+/**
+ * Run a read-only archive transport, trying again after a quick failure in
+ * transit (#1384). A read that used its whole time bound is not repeated here,
+ * where it holds the publication guard; its admission failure is transient
+ * and the step waits it out. Never used for a push: an unknown push outcome is
+ * settled only by exact remote observation.
+ */
+async function readTransport<T>(run: (attempt: number) => Promise<T>) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run(attempt);
+    } catch (error) {
+      const delay = TRANSPORT_RETRY_DELAYS_MS[attempt - 1];
+      if (
+        !(error instanceof ArchiveTransportFailure) ||
+        !error.transient ||
+        error.timedOut ||
+        delay === undefined
+      )
+        throw error;
+      const deadline = currentProcessDeadlineAt();
+      const signal = currentProcessSignal();
+      await new Promise<void>((done) => {
+        if (signal?.aborted) return done();
+        const timer = setTimeout(
+          done,
+          deadline
+            ? Math.max(0, Math.min(delay, Date.parse(deadline) - Date.now()))
+            : delay,
+        );
+        signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            done();
+          },
+          { once: true },
+        );
+      });
+      assertProcessActive();
+    }
   }
 }
 async function gitRemote(
@@ -2811,35 +2963,65 @@ async function gitRemote(
           }
         }
       : undefined;
-  const observed = scope
-    ? checkpointObservation(
-        scope.config,
-        "recovery-checkpoint-transport",
-        () => ({
-          kind,
-          ...(observeTrace && {
-            trace2: Object.keys(timings).length ? "observed" : "unavailable",
-            ...timings,
+  // A read from a networked archive may be tried again after a failure in
+  // transit, classified by the existing Git transport classifier. A push is
+  // never repeated, and a local archive has no transit.
+  const transient =
+    (kind === "fetch" || kind === "ls-remote") && !isAbsolute(options.remote)
+      ? (failure: TransportFailure) =>
+          failure.timedOut ||
+          gitFault(args, new Error(failure.stderr))?.kind === "transient"
+      : undefined;
+  const run = async (attempt: number) => {
+    let failure: ArchiveTransportFailure | undefined;
+    const observed = scope
+      ? checkpointObservation(
+          scope.config,
+          "recovery-checkpoint-transport",
+          () => ({
+            kind,
+            ...(attempt > 1 && { try: attempt }),
+            ...(failure && transportFacts(failure)),
+            ...(observeTrace && {
+              trace2: Object.keys(timings).length ? "observed" : "unavailable",
+              ...timings,
+            }),
           }),
-        }),
-      )
-    : undefined;
-  observed?.start("command");
-  try {
-    const result = await boundedCommand(
-      "git",
-      command.args,
-      options,
-      observeTrace ? { ...command.env, GIT_TRACE2_EVENT: "1" } : command.env,
-      input,
-      observeTrace,
-    );
-    observed?.complete();
-    return result;
-  } catch (error) {
-    observed?.fail(error);
-    throw error;
-  }
+        )
+      : undefined;
+    observed?.start("command");
+    try {
+      const result = await boundedCommand(
+        "git",
+        command.args,
+        options,
+        observeTrace ? { ...command.env, GIT_TRACE2_EVENT: "1" } : command.env,
+        input,
+        observeTrace,
+        {
+          label: `git ${kind === "other" ? (args.find((arg) => !arg.startsWith("-")) ?? kind) : kind}`,
+          transient,
+        },
+      );
+      observed?.complete();
+      return result;
+    } catch (error) {
+      if (error instanceof ArchiveTransportFailure) failure = error;
+      observed?.fail(error);
+      throw error;
+    }
+  };
+  return transient ? readTransport(run) : run(1);
+}
+/** Structured failure facts for a transport observation. */
+function transportFacts(
+  failure: ArchiveTransportFailure,
+): Record<string, string | number | boolean> {
+  return {
+    ...(failure.exitStatus !== null && { exitStatus: failure.exitStatus }),
+    timedOut: failure.timedOut,
+    transient: failure.transient,
+  };
 }
 function githubRepository(remote: string): string | undefined {
   return /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(
@@ -2851,26 +3033,58 @@ async function githubVisibility(
   options: GitPersistenceConfig,
 ): Promise<boolean> {
   const scope = scopes.getStore();
-  const observed = scope
-    ? checkpointObservation(
-        scope.config,
-        "recovery-checkpoint-transport",
-        () => ({ kind: "visibility" }),
-      )
-    : undefined;
-  observed?.start("command");
-  let bytes: string;
-  try {
-    bytes = await boundedCommand(
-      "gh",
-      ["api", "--hostname", "github.com", `repos/${repository}`],
-      options,
-    );
-    observed?.complete();
-  } catch (error) {
-    observed?.fail(error);
-    throw error;
-  }
+  // `--include` prints the HTTP status line, so the response is classified by
+  // its status: none at all, 408, 429 or 5xx failed in transit (#1384). Exit
+  // status 4 is gh's missing authentication, which no retry fixes.
+  const statusOf = (stdout: string) =>
+    Number(/^HTTP\/[0-9.]+ ([0-9]{3})\b/.exec(stdout)?.[1] ?? Number.NaN);
+  const output = await readTransport(async (attempt) => {
+    let failure: ArchiveTransportFailure | undefined;
+    const observed = scope
+      ? checkpointObservation(
+          scope.config,
+          "recovery-checkpoint-transport",
+          () => ({
+            kind: "visibility",
+            ...(attempt > 1 && { try: attempt }),
+            ...(failure && transportFacts(failure)),
+          }),
+        )
+      : undefined;
+    observed?.start("command");
+    try {
+      const result = await boundedCommand(
+        "gh",
+        ["api", "--include", "--hostname", "github.com", `repos/${repository}`],
+        options,
+        undefined,
+        undefined,
+        undefined,
+        {
+          label: "gh api",
+          transient: ({ status, stdout, timedOut }) => {
+            const http = statusOf(stdout);
+            return (
+              timedOut ||
+              (Number.isNaN(http)
+                ? status === 1
+                : http === 408 || http === 429 || http >= 500)
+            );
+          },
+        },
+      );
+      observed?.complete();
+      return result;
+    } catch (error) {
+      if (error instanceof ArchiveTransportFailure) failure = error;
+      observed?.fail(error);
+      throw error;
+    }
+  });
+  const headersEnd = output.indexOf("\r\n\r\n");
+  if (statusOf(output) !== 200 || headersEnd === -1)
+    throw new Error("Git destination visibility could not be authenticated");
+  const bytes = output.slice(headersEnd + 4);
   const value = JSON.parse(bytes);
   if (
     typeof value.private !== "boolean" ||

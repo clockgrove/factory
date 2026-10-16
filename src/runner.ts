@@ -41,7 +41,7 @@ import { LocalExecutionDriver } from "./execution/local.js";
 import { workerIdentity } from "./item-steps.js";
 import { isDeepStrictEqual } from "node:util";
 import { assertFailedValidationRecord } from "./failed-validation.js";
-import { cancelledFault } from "./fault.js";
+import { attachedFault, cancelledFault } from "./fault.js";
 import {
   withGitHubRequestBudget,
   withGitHubTransportObserver,
@@ -1204,10 +1204,13 @@ async function runObjectiveOwned(
         : undefined,
     )
       .catch((error: unknown) => {
-        // A worker return awaiting collection, or a producer inventory that
-        // changed while the closure was built, is transient: the next tick
-        // tries again (#1291), as the controller's own admission does.
+        // A worker return awaiting collection, a producer inventory that
+        // changed while the closure was built, or an archive read that failed
+        // in transit is transient: the next tick tries again (#1291, #1384),
+        // as the controller's own admission does.
         if (
+          (isCheckpointAdmissionFailure(error) &&
+            attachedFault(error)?.kind === "transient") ||
           isCheckpointCollectionPending(error) ||
           error instanceof CheckpointProducerInventoryChanged ||
           (error instanceof Error &&

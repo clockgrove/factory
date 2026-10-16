@@ -2250,7 +2250,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         );
         await assert.rejects(
           readVerifiedRecoveryCheckpoint(config, git("rev-parse", "HEAD")),
-          /merge-base|bad object|Not a valid|unknown revision/i,
+          /is not in the remote archive/,
         );
         const changedBinding = structuredClone(config);
         changedBinding.gitPersistence.ref = "refs/heads/another-history";

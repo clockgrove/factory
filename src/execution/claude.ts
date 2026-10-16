@@ -5,7 +5,7 @@ import { join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { assertAgentSessionRef } from "../agent-session.js";
-import type { ClaudeAgentSdkConfig } from "../config.js";
+import { type ClaudeAgentSdkConfig, withoutWorkerLimits } from "../config.js";
 import type {
   AgentHarness,
   AgentSessionRef,
@@ -137,7 +137,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       request.session,
       this.sessionAdapter,
       claudeDigest([
-        this.config,
+        withoutWorkerLimits(this.config),
         request.item.executionBinding,
         request.environment,
       ]),

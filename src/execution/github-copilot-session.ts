@@ -13,7 +13,7 @@ import {
   assertAgentSessionRef,
   assertAgentSessionScope,
 } from "../agent-session.js";
-import type { GitHubCopilotSdkConfig } from "../config.js";
+import { type GitHubCopilotSdkConfig, withoutWorkerLimits } from "../config.js";
 import type { AgentSessionRef, HarnessRequest } from "../contracts.js";
 import type { WorkerHandleData } from "./worker-process.js";
 
@@ -98,7 +98,7 @@ export function prepareCopilotSession(
     throw new Error("Copilot session belongs to another Work Item or role");
   const selectionDigest = copilotDigest({
     sdk: "1.0.13",
-    config,
+    config: withoutWorkerLimits(config),
     authenticationSelection,
     executionBinding: request.item.executionBinding,
   });

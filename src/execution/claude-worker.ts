@@ -202,6 +202,17 @@ function userTurns() {
   };
 }
 
+/** Validate evidence, noting for review a result whose final files no passing run covered. */
+async function validationEvidence(validation: PreparedClaudeValidation) {
+  const evidence = await validation.evidence();
+  return evidence.finalTreeValidated === false
+    ? {
+        ...evidence,
+        note: "No passing Validate run covered the worker's final files, even after a request to validate them.",
+      }
+    : evidence;
+}
+
 function resultError(result: SDKResultMessage): string | undefined {
   if (result.subtype !== "success") return result.errors.join("; ");
   return result.is_error ? result.result : undefined;
@@ -354,6 +365,7 @@ async function main(): Promise<void> {
     turns.send(prompt);
     const stream = query({ prompt: turns.messages(), options });
     let continuations = 0;
+    let validationRequested = false;
     let result: SDKResultMessage | undefined;
     // The SDK reports a reached usage or session limit as structure.
     let limit: { retryAt?: string } | undefined;
@@ -437,9 +449,24 @@ async function main(): Promise<void> {
         // A turn-limit stop is unfinished work, not a failed attempt: the same
         // conversation and worktree continue under the same attempt and usage.
         continuations += 1;
-        const continuation = `You reached the turn limit before finishing. Continue the same task from where you stopped: finish the change${validation ? ", run the Factory validate tool" : ""}, review your own diff, then give your final report.`;
+        const continuation = `You reached the turn limit before finishing. Continue the same task from where you stopped.${validation ? " Finish only after Validate passes on your final files," : " Finish the change,"} then review your own diff, then give your final report.`;
         capture.request(continuation);
         turns.send(continuation);
+        continue;
+      }
+      if (
+        message.type === "result" &&
+        validation &&
+        !validationRequested &&
+        !resultError(message) &&
+        (await turn.race(validation.evidence())).finalTreeValidated === false
+      ) {
+        // One more turn when no passing Validate run covers the final files.
+        validationRequested = true;
+        const request =
+          "Run Validate on your final files, fix any failures, then give your final report.";
+        capture.request(request);
+        turns.send(request);
         continue;
       }
       if (message.type === "result") break;
@@ -496,7 +523,7 @@ async function main(): Promise<void> {
       evidence: {
         harness: "claude-agent-sdk",
         ...(prepared && { environment: prepared.evidence() }),
-        ...(validation && { validation: await validation.evidence() }),
+        ...(validation && { validation: await validationEvidence(validation) }),
         adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
         sessionId: result.session_id,
         configuredModel: input.config.model,

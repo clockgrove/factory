@@ -1351,10 +1351,16 @@ export function renderStatusText(
   ];
   const pending = inFlightLine(view);
   if (pending) lines.push(pending);
-  if (view.githubProgress)
-    lines.push(
-      `GitHub progress: ${view.githubProgress.failure ?? "projected"}; ${view.githubProgress.snapshots} retained snapshots${view.githubProgress.lastObservedAt ? `; last observed ${view.githubProgress.lastObservedAt}` : ""}${view.githubProgress.lastComment ? `; comment ${view.githubProgress.lastComment}` : ""}${view.githubProgress.unresolved ? "; publication outcome unknown; reconciliation only" : ""}`,
+  if (view.githubProgress) {
+    // The latest request's state: one the live controller awaits is neither
+    // unknown nor an earlier request's failure.
+    const awaiting = view.prerequisiteGuidance?.inFlight.some(
+      (entry) => entry.scope === "progress-publication",
     );
+    lines.push(
+      `GitHub progress: ${awaiting ? "comment awaiting response" : (view.githubProgress.failure ?? "projected")}; ${view.githubProgress.snapshots} retained snapshots${view.githubProgress.lastObservedAt ? `; last observed ${view.githubProgress.lastObservedAt}` : ""}${view.githubProgress.lastComment ? `; comment ${view.githubProgress.lastComment}` : ""}${view.githubProgress.unresolved && !awaiting ? "; publication outcome unknown; reconciliation only" : ""}`,
+    );
+  }
   if (view.githubProjectTracking)
     lines.push(
       `GitHub Project tracking: ${view.githubProjectTracking.failure ?? "observed"}; ${view.githubProjectTracking.retainedUpdates} retained update requests${view.githubProjectTracking.observedAt ? `; last observed ${view.githubProjectTracking.observedAt}` : ""}${view.githubProjectTracking.unknownUpdate ? "; update outcome unknown; managed field held read-only" : ""}`,

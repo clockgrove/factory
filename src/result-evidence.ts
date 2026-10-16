@@ -2748,6 +2748,29 @@ export function objectiveReviewEvidence(args: {
     };
   });
   assertIntegrationBindings(checkout, integrationRecords);
+  // The operator's attributable answers on each item's accepted result tree,
+  // so the final reviewer can cite an answer instead of asking it again.
+  const decisions = state.graph.items.flatMap((item) => {
+    const current = state.work[item.id];
+    if (current?.status !== "done") return [];
+    return (current.acceptanceDecisions ?? [])
+      .filter((decision) => decision.treeSha === current.treeSha)
+      .map((decision) => ({
+        itemId: item.id,
+        ...decision,
+        sameExactTree: decision.treeSha === candidateTreeSha,
+      }));
+  });
+  if (decisions.length)
+    evidence.push({
+      path: "Operator decisions on Work Item criteria",
+      content: JSON.stringify({
+        scope:
+          "Attributable operator decisions on Work Item criterion questions, each bound to that item's accepted result tree; sameExactTree marks this final candidate tree. They answer the item question asked; independently judge whether they settle an Objective criterion before asking the operator again.",
+        candidateTreeSha,
+        decisions,
+      }),
+    });
   return {
     observations: JSON.stringify({
       ...(state.conditionFacts ? { conditionFacts: state.conditionFacts } : {}),

@@ -7,6 +7,15 @@ import {
 } from "./diagnostics.js";
 import { attachedFault } from "./fault.js";
 import {
+  type GitHubProgressDecision,
+  type ObjectiveStatusInput,
+  objectiveStatusLines,
+  type RunDetailsInput,
+  runDetailsLines,
+  type WorkItemFacts,
+  workItemStatusLines,
+} from "./github-progress.js";
+import {
   type LiveStatusRecord,
   liveStatusMarker,
   PROGRESS_ITEM_ID,
@@ -63,17 +72,35 @@ interface LiveTarget {
   label: string;
   item?: { id: string; issue: number };
   issue: number;
-  /** Status, step, attempt and pull request; a change edits at once. */
+  /** The public facts the comment shows; a change edits at once. */
   digest: string;
   active: boolean;
   read: (state: ContinuationState) => LiveStatusRecord | undefined;
   write: (state: ContinuationState, record: LiveStatusRecord) => void;
-  render: (items: ItemActivity[], now: number) => string;
+  /** The status lines, then the collapsed details below the update stamp. */
+  render: (
+    items: ItemActivity[],
+    now: number,
+  ) => { lines: string[]; details: string[] };
+}
+
+/** The status the projection derives once per tick, for the live comments. */
+export interface LivePresentation {
+  status: ObjectiveStatusInput;
+  details: RunDetailsInput;
+  /** Next action, blockers, decisions, template and control mode. */
+  digest: string;
+  /** Each started Work Item's public facts and its own pending criteria. */
+  items: Record<
+    string,
+    WorkItemFacts & { decisions: GitHubProgressDecision[] }
+  >;
 }
 
 /**
- * Edit the one live status comment per active Work Item issue, and the
- * Objective's, in place (#1325), from planning on. Presentation only: a
+ * Edit the one live status comment per started Work Item issue, and the
+ * Objective's, in place (#1325), from planning on. It is the issue's single
+ * status comment; new comments are only notifications. Presentation only: a
  * failure never stops the run, and only the comment's creation is recorded,
  * exactly once.
  */
@@ -82,7 +109,8 @@ export async function projectLiveStatus(
   retained: ContinuationState,
   live: () => ContinuationState,
   phase: string,
-  step?: PlanningStepView | null,
+  step: PlanningStepView | null | undefined,
+  presentation: LivePresentation,
 ): Promise<void> {
   if (!githubProgressSettings(args.config) || !args.github.liveStatusComment)
     return;
@@ -96,21 +124,13 @@ export async function projectLiveStatus(
     : planningActivity(retained.coordinator.phase, step);
   if (isExecutionState(retained))
     for (const [id, issue] of Object.entries(retained.issueByItemId)) {
-      const work = retained.work[id];
-      if (!work || !PROGRESS_ITEM_ID.test(id)) continue;
-      if (work.status === "pending" || work.status === "skipped") continue;
+      const facts = presentation.items[id];
+      if (!facts || !PROGRESS_ITEM_ID.test(id)) continue;
       const tracking = retained.workItemTracking?.[id];
       // A graph revision that rebinds the item to another issue ends its tracking.
       if (tracking && tracking.issue !== issue) continue;
-      const active = ACTIVE.includes(work.status);
-      // A settled item gets no new comment; an existing one gets its final edit.
-      if (!active && !tracking?.live) continue;
-      const digest = JSON.stringify([
-        work.status,
-        work.step,
-        work.attempt,
-        work.pullRequest,
-      ]);
+      const active = ACTIVE.includes(facts.status);
+      const digest = JSON.stringify(facts);
       itemDigests.push(`${id}:${digest}`);
       targets.push({
         label: `Work Item ${id}`,
@@ -133,7 +153,24 @@ export async function projectLiveStatus(
         },
         render: (items, at) => {
           const item = items.find((entry) => entry.id === id);
-          return itemBody(item ?? { id, status: work.status }, at);
+          return {
+            lines: [
+              ...workItemStatusLines({
+                repository: args.config.repository,
+                objective: args.objective,
+                item: { id, issue },
+                ...facts,
+              }),
+              ...(item ? workerLines(item, at) : []),
+            ],
+            details: facts.decisions.length
+              ? runDetailsLines({
+                  runId: retained.runId,
+                  configDigest: retained.configDigest,
+                  decisions: facts.decisions,
+                })
+              : [],
+          };
         },
       });
     }
@@ -142,22 +179,34 @@ export async function projectLiveStatus(
     targets.push({
       label: `Objective #${args.objective}`,
       issue: args.objective,
-      digest: JSON.stringify([phase, planning, ...itemDigests]),
+      digest: JSON.stringify([
+        phase,
+        planning,
+        presentation.digest,
+        ...itemDigests,
+      ]),
       active: objectiveActive,
       read: (state) => state.githubLiveStatus,
       write: (state, record) => {
         state.githubLiveStatus = record;
       },
-      render: (items, at) =>
-        planning === undefined
-          ? objectiveBody(phase, items, at)
-          : planningBody(
-              phase,
-              planning,
-              retained.coordinator?.phaseStartedAt,
-              objectiveModelActivity(args.config.repository, args.objective),
-              at,
-            ),
+      render: (items, at) => ({
+        lines: [
+          ...objectiveStatusLines(presentation.status, {
+            items: true,
+            activeNote: (id) => workerAge(items, id, at),
+          }),
+          ...(planning === undefined
+            ? []
+            : planningLines(
+                planning,
+                retained.coordinator?.phaseStartedAt,
+                objectiveModelActivity(args.config.repository, args.objective),
+                at,
+              )),
+        ],
+        details: runDetailsLines(presentation.details),
+      }),
     });
   const key = (target: LiveTarget) =>
     `${args.config.repository}#${args.objective}:${retained.runId}:${target.issue}`;
@@ -180,14 +229,21 @@ export async function projectLiveStatus(
       runId: retained.runId,
       item: target.item?.id,
     });
-    const body = redactDiagnosticDetail(
-      `${marker}\n${target.render(items, now)}\n\n${stamp}`,
-      args.secrets,
-    );
     // A settled target's final edit may be the controller's last pass, so a
     // transient failure is tried again here; an active one waits for a later tick.
     for (let attempt = 1; ; attempt += 1) {
       try {
+        const { lines, details } = target.render(items, now);
+        const body = redactDiagnosticDetail(
+          [
+            marker,
+            ...lines,
+            "",
+            stamp,
+            ...(details.length ? ["", ...details] : []),
+          ].join("\n"),
+          args.secrets,
+        );
         await editLiveStatus(args, retained, live, target, body);
         lastEdit.set(key(target), { digest: target.digest, at: now });
         failedEdit.delete(key(target));
@@ -267,8 +323,9 @@ async function editLiveStatus(
 const code = (text: string) =>
   `\`${text.replaceAll("`", "'").replace(/[\p{Cc}\u2028\u2029]/gu, "")}\``;
 
-function itemBody(item: ItemActivity, now: number): string {
-  const lines = [`### Live status · ${item.id}`, "", `**${headline(item)}**`];
+/** A running worker's liveness, changed paths and recent tool calls. */
+function workerLines(item: ItemActivity, now: number): string[] {
+  const lines: string[] = [];
   const activity = activityLine(item.activity, now, STALE_MS);
   if (activity) lines.push(`- Worker: ${activity}`);
   const changes = changesLine(item.changes?.map(code));
@@ -279,38 +336,25 @@ function itemBody(item: ItemActivity, now: number): string {
     )
     .join(" · ");
   if (recent) lines.push(`- Recent: ${recent}`);
-  return lines.join("\n");
+  return lines.length ? ["", ...lines] : [];
 }
 
-function objectiveBody(
-  phase: string,
-  items: ItemActivity[],
-  now: number,
-): string {
-  const lines = [`### Live status · ${phase}`, ""];
-  for (const item of items) {
-    if (item.status === "pending" || item.status === "skipped") continue;
-    const last = item.activity?.lastEventAt
-      ? now - Date.parse(item.activity.lastEventAt)
-      : undefined;
-    lines.push(
-      `- ${headline(item)}${last === undefined ? "" : ` · worker ${shortAge(last)} ago${last > STALE_MS ? " (stale)" : ""}`}`,
-    );
-  }
-  if (lines.length === 2) lines.push("No Work Item has started yet.");
-  return lines.join("\n");
+/** How long ago an active item's worker last reported, for the Objective's list. */
+function workerAge(items: ItemActivity[], id: string, now: number): string {
+  const at = items.find((item) => item.id === id)?.activity?.lastEventAt;
+  if (!at) return "";
+  const last = now - Date.parse(at);
+  return ` · worker ${shortAge(last)} ago${last > STALE_MS ? " (stale)" : ""}`;
 }
 
 /** Planning's step, how long its phase has run and the planner's activity: structured facts only. */
-function planningBody(
-  phase: string,
+function planningLines(
   activity: string,
   phaseStartedAt: string | undefined,
   model: ModelActivity | undefined,
   now: number,
-): string {
+): string[] {
   const lines = [
-    `### Live status · ${phase}`,
     "",
     `**${activity.charAt(0).toUpperCase()}${activity.slice(1)}**`,
   ];
@@ -338,12 +382,5 @@ function planningBody(
       );
     }
   }
-  return lines.join("\n");
-}
-
-function headline(item: ItemActivity): string {
-  return [
-    `${item.id} · ${item.status}${item.step ? ` (${item.step})` : ""}`,
-    ...(item.pullRequest ? [`PR #${item.pullRequest}`] : []),
-  ].join(" · ");
+  return lines;
 }

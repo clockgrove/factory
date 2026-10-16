@@ -1358,7 +1358,7 @@ export function renderStatusText(
       (entry) => entry.scope === "progress-publication",
     );
     lines.push(
-      `GitHub progress: ${awaiting ? "comment awaiting response" : (view.githubProgress.failure ?? "projected")}; ${view.githubProgress.snapshots} retained snapshots${view.githubProgress.lastObservedAt ? `; last observed ${view.githubProgress.lastObservedAt}` : ""}${view.githubProgress.lastComment ? `; comment ${view.githubProgress.lastComment}` : ""}${view.githubProgress.unresolved && !awaiting ? "; publication outcome unknown; reconciliation only" : ""}`,
+      `GitHub progress: ${awaiting ? "comment awaiting response" : (view.githubProgress.failure ?? "projected")}; ${view.githubProgress.snapshots} notification comments${view.githubProgress.lastObservedAt ? `; last observed ${view.githubProgress.lastObservedAt}` : ""}${view.githubProgress.lastComment ? `; comment ${view.githubProgress.lastComment}` : ""}${view.githubProgress.unresolved && !awaiting ? "; publication outcome unknown; reconciliation only" : ""}`,
     );
   }
   if (view.githubProjectTracking)

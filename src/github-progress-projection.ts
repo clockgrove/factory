@@ -9,8 +9,9 @@ import { projectLiveStatus } from "./github-live-status.js";
 import { planDecisionTemplate } from "./github-plan-decisions.js";
 import {
   type GitHubProgressDecision,
-  renderGitHubProgress,
-  renderWorkItemProgress,
+  renderObjectiveNotification,
+  renderWorkItemNotification,
+  type WorkItemFacts,
 } from "./github-progress.js";
 import {
   type GitHubProgressProjection,
@@ -43,7 +44,7 @@ type Args = {
   secrets: string[];
 };
 
-/** One comment stream: the Objective's own issue, or a Work Item's. */
+/** One notification stream: the Objective's own issue, or a Work Item's. */
 interface ProgressTarget {
   label: string;
   objective: number;
@@ -51,9 +52,10 @@ interface ProgressTarget {
   item?: { id: string; issue: number };
   read: (state: ContinuationState) => GitHubProgressProjection | undefined;
   ensure: (state: ContinuationState) => GitHubProgressProjection;
-  /** Public presentation only; timestamps never take part. */
+  /** What the notification announces; timestamps never take part. */
   presentationDigest: string;
-  important: boolean;
+  /** Whether the current state needs a new comment; edits do not notify. */
+  notify: boolean;
   render: (snapshotId: string, observedAt: string) => string;
 }
 
@@ -99,6 +101,8 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
       : {}),
   };
   const decisions: GitHubProgressDecision[] = [];
+  /** Each Work Item's own pending criteria, for its issue. */
+  const itemDecisions: Record<string, GitHubProgressDecision[]> = {};
   if (settings.includeQuestions) {
     if (
       isPreparationState(retained) &&
@@ -130,15 +134,21 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
       for (const group of groups)
         for (const pending of group.pending
           ? [group.pending, ...(group.pending.more ?? [])]
-          : [])
-          decisions.push({
+          : []) {
+          const decision = {
             question: redactDiagnosticDetail(pending.question, args.secrets),
             recommendation:
               "Assess the named criterion against its exact retained evidence using the supported local decision path.",
             consequences:
               "Accepting answers this pending human-owned criterion; other criteria and independent validation remain required. Refusal retains the failed outcome.",
             binding: `Objective ${objective}; run ${retained.runId}; item ${group.id}; criterion digest ${progressDigest(pending.criterion)}; tree ${pending.treeSha}`,
-          });
+          };
+          decisions.push(decision);
+          itemDecisions[group.id] = [
+            ...(itemDecisions[group.id] ?? []),
+            decision,
+          ];
+        }
     }
   }
   const blockers: string[] = [];
@@ -173,38 +183,31 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
         : snapshot.phase === "needs-decision" ||
             snapshot.phase === "needs-plan-decision"
           ? template
-            ? "Copy the filled decision template below into a comment on this Objective, replacing only answer and reason."
+            ? "Copy the filled decision template from Run details below into a new comment on this Objective, replacing only answer and reason."
             : "Handle the listed questions through the supported local Factory decision path."
           : snapshot.phase === "failed"
             ? "Inspect local Factory status for the exact supported recovery or prerequisite."
             : retained.coordinator?.mode !== "running"
               ? "Wait for the operator's supported resume or drain disposition."
               : "Factory will continue the admitted work within its recorded limits.";
-  const presentation = { view, next, blockers, decisions };
-  // Only public presentation fields affect coalescing; private detail changes are irrelevant.
-  const presentationDigest = progressDigest(
-    JSON.stringify({
-      phase: snapshot.phase,
-      state: snapshot.state,
-      work:
-        "work" in view
-          ? (view.work ?? []).map(({ id, status, step, pullRequest }) => ({
-              id,
-              status,
-              step,
-              pullRequest,
-            }))
-          : [],
-      coordinator: retained.coordinator?.mode,
-      next,
-      blockers,
-      decisions,
-      template,
-    }),
-  );
-  const important = [
+  const status = {
+    repository: config.repository,
+    view,
+    nextAction: next,
+    blockers,
+    decisions,
+  };
+  const details = {
+    runId: retained.runId,
+    configDigest: retained.configDigest,
+    decisions,
+    ...(template ? { planDecisionTemplate: template } : {}),
+  };
+  // A new comment only for what needs a phone notification; edits do not notify.
+  const notify = [
     "complete",
     "cancelled",
+    "failed",
     "needs-decision",
     "needs-plan-decision",
   ].includes(snapshot.phase);
@@ -217,55 +220,70 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
       state.githubProgress ??= { requests: [] };
       return state.githubProgress;
     },
-    presentationDigest,
-    important,
+    // A new question, answer path or outcome notifies again; nothing else does.
+    presentationDigest: progressDigest(
+      JSON.stringify({ phase: snapshot.phase, decisions, template }),
+    ),
+    notify,
     render: (snapshotId, observedAt) =>
-      renderGitHubProgress({
-        repository: config.repository,
-        runId: retained.runId,
+      renderObjectiveNotification({
+        ...status,
+        ...details,
         snapshotId,
-        configDigest: retained.configDigest,
         observedAt,
         preparedAt: observedAt,
-        view: presentation.view,
-        nextAction: next,
-        blockers,
-        decisions,
-        ...(template ? { planDecisionTemplate: template } : {}),
       }),
   });
   // Keep a fresh snapshot read outside the persistence catch: a corrupt or
   // unreadable continuation must never be repaired from a remembered owner.
   if (flushCurrent) return projectGitHubProgressUnscoped(args);
+  const items: Record<
+    string,
+    WorkItemFacts & { decisions: GitHubProgressDecision[] }
+  > = {};
   if (isExecutionState(retained))
-    for (const [id, issue] of Object.entries(retained.issueByItemId))
-      await projectWorkItemProgress(args, retained, live, id, issue);
+    for (const [id, issue] of Object.entries(retained.issueByItemId)) {
+      const facts = workItemFacts(retained, id);
+      if (!facts) continue;
+      items[id] = { ...facts, decisions: itemDecisions[id] ?? [] };
+      await projectWorkItemProgress(args, retained, live, id, issue, items[id]);
+    }
   await projectLiveStatus(
     args,
     retained,
     live,
     snapshot.phase,
     snapshot.state === "preparing" ? snapshot.planningStep : undefined,
+    {
+      status,
+      details,
+      // Public presentation only; a change edits the comment at once.
+      digest: progressDigest(
+        JSON.stringify({
+          next,
+          blockers,
+          decisions,
+          template,
+          coordinator: retained.coordinator?.mode,
+          runActive: args.active,
+        }),
+      ),
+      items,
+    },
   );
 }
 
-/** One Work Item's transition comment on its own issue, from structured facts only. */
-async function projectWorkItemProgress(
-  args: Args,
+/** A started Work Item's public facts, from structured state only. */
+function workItemFacts(
   retained: ContinuationState,
-  live: () => ContinuationState,
   id: string,
-  issue: number,
-): Promise<void> {
+): WorkItemFacts | undefined {
   if (!isExecutionState(retained) || !PROGRESS_ITEM_ID.test(id)) return;
   const work = retained.work[id];
   // An item that has not started has nothing to report yet.
   if (!work || work.status === "pending" || work.status === "skipped") return;
-  const recorded = retained.workItemTracking?.[id]?.issue;
-  // A graph revision that rebinds the item to another issue ends its tracking.
-  if (recorded !== undefined && recorded !== issue) return;
   const outage = outageOf(retained, { item: id });
-  const facts = {
+  return {
     status: work.status,
     ...(work.step && { step: work.step }),
     ...(work.attempt && { attempt: work.attempt }),
@@ -279,12 +297,27 @@ async function projectWorkItemProgress(
     ...(work.recovery?.failure && {
       failure: work.recovery.failure.classification,
     }),
-    // A pause, drain or restart concerns only items still in progress; a settled item's
-    // issue gets no comment for it.
+    // A pause, drain or restart concerns only items still in progress.
     ...(!["done", "failed", "cancelled"].includes(work.status) && {
       coordinator: retained.coordinator?.mode,
     }),
   };
+}
+
+/** A Work Item's notification comment on its own issue: it failed or waits for a decision. */
+async function projectWorkItemProgress(
+  args: Args,
+  retained: ContinuationState,
+  live: () => ContinuationState,
+  id: string,
+  issue: number,
+  facts: WorkItemFacts & { decisions: GitHubProgressDecision[] },
+): Promise<void> {
+  const recorded = isExecutionState(retained)
+    ? retained.workItemTracking?.[id]?.issue
+    : undefined;
+  // A graph revision that rebinds the item to another issue ends its tracking.
+  if (recorded !== undefined && recorded !== issue) return;
   const flushCurrent = await publishProgress(args, live, {
     label: `Work Item ${id}`,
     objective: args.objective,
@@ -303,10 +336,18 @@ async function projectWorkItemProgress(
       entry.progress ??= { requests: [] };
       return entry.progress;
     },
-    presentationDigest: progressDigest(JSON.stringify(facts)),
-    important: ["done", "failed", "cancelled", "waiting"].includes(work.status),
+    // A later attempt's failure or a new question notifies again.
+    presentationDigest: progressDigest(
+      JSON.stringify({
+        status: facts.status,
+        attempt: facts.attempt,
+        failure: facts.failure,
+        decisions: facts.decisions,
+      }),
+    ),
+    notify: facts.status === "failed" || facts.status === "waiting",
     render: (snapshotId, observedAt) =>
-      renderWorkItemProgress({
+      renderWorkItemNotification({
         repository: args.config.repository,
         objective: args.objective,
         item: { id, issue },
@@ -319,7 +360,12 @@ async function projectWorkItemProgress(
   });
   if (flushCurrent) {
     const fresh = readContinuation(args.config.repository, args.objective);
-    if (fresh) await projectWorkItemProgress(args, fresh, live, id, issue);
+    const current = fresh && workItemFacts(fresh, id);
+    if (fresh && current)
+      await projectWorkItemProgress(args, fresh, live, id, issue, {
+        ...current,
+        decisions: facts.decisions,
+      });
   }
 }
 
@@ -349,13 +395,16 @@ async function publishProgress(
     const progress = target.read(live());
     const previous = progress?.requests.at(-1);
     pending = previous && !previous.comment ? previous : undefined;
+    // An unresolved earlier intent is always reconciled; otherwise only a
+    // notification-worthy state posts.
+    if (!pending && !target.notify) return false;
     if (!pending && failedComments.get(failedKey) === target.presentationDigest)
       return false;
     failedComments.delete(failedKey);
     // No heartbeat refreshes: timestamps never participate in semantic deduplication.
     if (!pending && previous?.presentationDigest === target.presentationDigest)
       return false;
-    const bound = target.important ? 64 : 62;
+    const bound = 64;
     if (!pending && (progress?.requests.length ?? 0) >= bound) {
       const current = target.ensure(live());
       if (current.failure !== "history-exhausted") {
@@ -434,7 +483,9 @@ async function publishProgress(
     // A reconciled older snapshot may precede the current presentation
     // (including final closure). Publish that meaningful change once next.
     return Boolean(
-      pending && pending.presentationDigest !== target.presentationDigest,
+      pending &&
+        target.notify &&
+        pending.presentationDigest !== target.presentationDigest,
     );
   } catch (error) {
     if (isCheckpointAdmissionFailure(error)) throw error;

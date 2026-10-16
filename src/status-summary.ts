@@ -6,6 +6,7 @@
 
 import { type Refusal, settlesFirst } from "./amendment-admission.js";
 import { displayDateTime } from "./display-time.js";
+import { attemptLabel } from "./repair-policy.js";
 import type { Wait } from "./fault.js";
 import type { PrerequisiteGuidance } from "./prerequisite-guidance.js";
 
@@ -78,6 +79,9 @@ export interface StatusItemView extends WaitView {
    * or `asset-selection`. Steps' waits are on `wait`.
    */
   blockedReason: string | null;
+  /** The current attempt's ordinal and how it started (`attemptOrigin`). */
+  attemptNumber?: number | null;
+  attemptKind?: string | null;
   pullRequest: number | null;
   acceptancePending: PendingDecisionView | null;
   candidateAssetSets: string[];
@@ -333,6 +337,19 @@ interface ShownWait {
   fix?: string;
   /** An outage of 24 hours' running time: offer cancel. */
   escalated?: boolean;
+}
+
+/** ` · attempt 2 · retry` for a later attempt, or nothing. */
+export function itemAttempt(item: {
+  attemptNumber?: number | null;
+  attemptKind?: string | null;
+}): string {
+  const label = attemptLabel(
+    item.attemptNumber
+      ? { number: item.attemptNumber, kind: item.attemptKind ?? "" }
+      : undefined,
+  );
+  return label ? ` · ${label}` : "";
 }
 
 /** "(step): since … (N tries, last: …)" for a step in a run of faults. */
@@ -974,7 +991,7 @@ function progress(view: ExecutionStatusView): StatusSummary {
       .slice(0, 3)
       .map(
         (item) =>
-          `${item.id} (${item.status === "pending" ? "ready" : (item.step ?? item.status)})`,
+          `${item.id}${itemAttempt(item)} (${item.status === "pending" ? "ready" : (item.step ?? item.status)})`,
       )
       .join(", ");
     return {
@@ -1425,7 +1442,7 @@ export function renderStatusText(
             : (wait?.detail ?? "");
       return [
         item.id,
-        `${item.status}${item.step ? ` (${item.step})` : ""}`,
+        `${item.status}${item.step ? ` (${item.step})` : ""}${itemAttempt(item)}`,
         item.pullRequest ? `#${item.pullRequest}` : "-",
         reason,
       ];

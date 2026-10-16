@@ -47,6 +47,7 @@ import {
 } from "./prerequisite-guidance.js";
 import { objectiveCandidate } from "./qa.js";
 import {
+  attemptOrigin,
   consumption,
   failureDigest,
   implementationRepairable,
@@ -2265,6 +2266,8 @@ export function statusDocument(
       ready: current.status === "pending" && !blockedReason ? null : false,
       blockedReason: blockedReason ?? null,
       attemptId: current.attempt ?? null,
+      attemptNumber: attemptOrigin(current)?.number ?? null,
+      attemptKind: attemptOrigin(current)?.kind ?? null,
       ...(item.executionBinding
         ? {
             assignedExecution: item.executionBinding,

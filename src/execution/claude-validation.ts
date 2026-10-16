@@ -29,6 +29,21 @@ interface ValidationEnvironmentInput {
   commands: readonly string[];
   config: { tools: readonly string[]; allowedTools: readonly string[] };
   handoff: HandoffContext;
+  /** Each completed run's structured facts, for the worker's progress stream. */
+  onRun?: (facts: ValidationRunFacts) => void;
+}
+
+/** A completed worker validation run: counts and identities, never output. */
+export interface ValidationRunFacts {
+  run: number;
+  /** The worker was told it passed: declared commands and its handoff. */
+  passed: boolean;
+  /** The validated files' Git tree. */
+  tree: string;
+  commands: number;
+  ran: number;
+  failed: number;
+  handoffPassed: boolean;
 }
 
 interface HandoffContext {
@@ -138,8 +153,16 @@ export async function runDeclaredValidation(
   worktree: string,
   commands: readonly string[],
   run: number,
-): Promise<{ passed: boolean; text: string; tree: string }> {
+): Promise<{
+  passed: boolean;
+  text: string;
+  tree: string;
+  ran: number;
+  failed: number;
+}> {
   const tree = await workerFilesTree(worktree);
+  let ran = 0;
+  let failed = 0;
   const commit = (
     await pinnedGitAsync(
       worktree,
@@ -167,7 +190,10 @@ export async function runDeclaredValidation(
       commit,
       tree,
       [...commands],
-      undefined,
+      (entry) => {
+        ran += 1;
+        if (!entry.passed) failed += 1;
+      },
       undefined,
       [],
       undefined,
@@ -177,6 +203,8 @@ export async function runDeclaredValidation(
     return {
       passed: true,
       tree,
+      ran,
+      failed,
       text: `All ${evidence.commands.length} declared validation commands passed:\n${commands.map((command) => `- ${command}`).join("\n")}`,
     };
   } catch (error) {
@@ -184,6 +212,8 @@ export async function runDeclaredValidation(
       return {
         passed: false,
         tree,
+        ran,
+        failed,
         text: `Validation failed. Fix this before you finish.\n${bounded(error.message)}`,
       };
     throw error;
@@ -311,6 +341,19 @@ export async function createFactoryValidationMcp(
               // The handoff is outside the tree; evidence decodes its final bytes.
               passedTrees.add(declared.tree);
               if (handoff.passed) passed += 1;
+            }
+            try {
+              input.onRun?.({
+                run,
+                passed: declared.passed && handoff.passed,
+                tree: declared.tree,
+                commands: input.commands.length,
+                ran: declared.ran,
+                failed: declared.failed,
+                handoffPassed: handoff.passed,
+              });
+            } catch {
+              // Telemetry only: a lost observation never changes the result.
             }
             return {
               content: [{ type: "text" as const, text: parts.join("\n\n") }],

@@ -1,6 +1,11 @@
 import { displayDateTime } from "./display-time.js";
+import { attemptKindLabel } from "./repair-policy.js";
 import { PROGRESS_ITEM_ID, progressMarker } from "./github-progress-state.js";
-import { summarizeStatus, type StatusView } from "./status-summary.js";
+import {
+  itemAttempt,
+  summarizeStatus,
+  type StatusView,
+} from "./status-summary.js";
 
 /** Text explicitly cleared for the target issue's existing disclosure scope. */
 export interface GitHubProgressDecision {
@@ -121,7 +126,7 @@ export function objectiveStatusLines(
             .slice(0, 12)
             .map(
               (item) =>
-                `- ${compact(item.id)} · ${compact(item.status)}${item.step && ACTIVE_STEPS.includes(item.step) ? ` (${item.step})` : ""}${item.pullRequest ? ` · ${pullLink(input.repository, item.pullRequest)}` : ""}${options.activeNote?.(item.id) ?? ""}`,
+                `- ${compact(item.id)} · ${compact(item.status)}${item.step && ACTIVE_STEPS.includes(item.step) ? ` (${item.step})` : ""}${itemAttempt(item)}${item.pullRequest ? ` · ${pullLink(input.repository, item.pullRequest)}` : ""}${options.activeNote?.(item.id) ?? ""}`,
             ),
           ...(active.length > 12 ? [`- ${active.length - 12} more`] : []),
         ]
@@ -219,12 +224,23 @@ export function renderObjectiveNotification(
   return body;
 }
 
+/** `attempt 2 (1a2b3c4d) · retry`, or `attempt 1a2b3c4d` without an ordinal. */
+function attemptText(id: string, number?: number, kind?: string): string {
+  const short = compact(id.slice(0, 8));
+  if (!number) return `attempt ${short}`;
+  const label = number > 1 && kind ? attemptKindLabel(kind) : undefined;
+  return `attempt ${number} (${short})${label ? ` · ${label}` : ""}`;
+}
+
 /** One Work Item's public facts: structured fields only, never logs or exception text. */
 export interface WorkItemFacts {
   status: import("./state.js").WorkStatus;
   step?: import("./state.js").WorkStep;
   /** The current attempt's identity. */
   attempt?: string;
+  /** The current attempt's ordinal and how it started. */
+  attemptNumber?: number;
+  attemptKind?: string;
   pullRequest?: number;
   /** A provider outage the item's step is waiting out. */
   outage?: { step: string; retryAt?: string };
@@ -292,7 +308,7 @@ export function workItemStatusLines(input: WorkItemStatusInput): string[] {
                 : compact(input.status);
   return [
     `### ${headline} · ${compact(input.item.id)}`,
-    `Objective ${issueLink(input.repository, input.objective)}${input.attempt ? ` · attempt ${compact(input.attempt.slice(0, 8))}` : ""}`,
+    `Objective ${issueLink(input.repository, input.objective)}${input.attempt ? ` · ${attemptText(input.attempt, input.attemptNumber, input.attemptKind)}` : ""}`,
     ...(input.outage
       ? [
           `Waiting out a provider outage in ${compact(input.outage.step)}${input.outage.retryAt ? `; next try after ${displayDateTime(input.outage.retryAt)}` : ""}.`,

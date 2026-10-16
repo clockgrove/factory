@@ -24,6 +24,7 @@ import {
   withRecoveryCheckpointScope,
 } from "./recovery-checkpoint.js";
 import { buildRecoveryCheckpointClosure } from "./recovery-checkpoint-closure.js";
+import { attemptOrigin } from "./repair-policy.js";
 import type { ContinuationState } from "./state.js";
 import { isExecutionState, isPreparationState } from "./state.js";
 import {
@@ -283,10 +284,12 @@ function workItemFacts(
   // An item that has not started has nothing to report yet.
   if (!work || work.status === "pending" || work.status === "skipped") return;
   const outage = outageOf(retained, { item: id });
+  const origin = attemptOrigin(work);
   return {
     status: work.status,
     ...(work.step && { step: work.step }),
     ...(work.attempt && { attempt: work.attempt }),
+    ...(origin && { attemptNumber: origin.number, attemptKind: origin.kind }),
     ...(work.pullRequest && { pullRequest: work.pullRequest }),
     ...(outage && {
       outage: {

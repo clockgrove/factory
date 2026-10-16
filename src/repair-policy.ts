@@ -478,6 +478,73 @@ export function repairScopes(state: FactoryState, id: string): string[] {
   visit(id);
   return scopes.size ? [...scopes].sort() : ["$objective"];
 }
+/** How a Work Item's current attempt started. */
+export type AttemptKind =
+  | "first"
+  | "retry"
+  | "review-findings-repair"
+  | "diagnosed-repair"
+  | "operator-repair";
+
+/**
+ * The current attempt's ordinal among the item's distinct attempts and how it
+ * started: a repair when the archived attempt before it carries the
+ * correction admitted for its own failure, otherwise a retry.
+ */
+export function attemptOrigin(
+  work: WorkState,
+): { number: number; kind: AttemptKind } | undefined {
+  if (!work.attempt) return undefined;
+  const history = work.recovery?.history ?? [];
+  const attempts: string[] = [];
+  for (const entry of history)
+    if (entry.work.attempt && !attempts.includes(entry.work.attempt))
+      attempts.push(entry.work.attempt);
+  const index = attempts.indexOf(work.attempt);
+  const number = (index === -1 ? attempts.length : index) + 1;
+  if (number === 1) return { number, kind: "first" };
+  // A result re-review archives the same attempt: look before its first entry.
+  const first = history.findIndex(
+    (entry) => entry.work.attempt === work.attempt,
+  );
+  const before = first === -1 ? history.at(-1) : history[first - 1];
+  const correction = before?.correction;
+  if (!correction || correction.failureDigest !== before?.failure?.digest)
+    return { number, kind: "retry" };
+  return {
+    number,
+    kind:
+      correction.actor === REVIEW_FINDINGS_ACTOR
+        ? "review-findings-repair"
+        : correction.actor === "factory-controller"
+          ? "diagnosed-repair"
+          : "operator-repair",
+  };
+}
+
+const ATTEMPT_KIND_LABEL: Record<AttemptKind, string> = {
+  first: "first attempt",
+  retry: "retry",
+  "review-findings-repair": "repair from review findings",
+  "diagnosed-repair": "diagnosed repair",
+  "operator-repair": "operator repair",
+};
+
+/** A readable attempt kind, such as `repair from review findings`. */
+export const attemptKindLabel = (kind: string): string | undefined =>
+  Object.hasOwn(ATTEMPT_KIND_LABEL, kind)
+    ? ATTEMPT_KIND_LABEL[kind as AttemptKind]
+    : undefined;
+
+/** `attempt 2 · repair from review findings`, or nothing for a first attempt. */
+export function attemptLabel(
+  origin: { number: number; kind: string } | undefined | null,
+): string | undefined {
+  if (!origin || origin.number < 2) return undefined;
+  const kind = attemptKindLabel(origin.kind);
+  return `attempt ${origin.number}${kind ? ` · ${kind}` : ""}`;
+}
+
 /** Commits earlier attempts of this Work Item produced, oldest first. */
 export function earlierHeads(work: WorkState): string[] {
   return (work.recovery?.history ?? []).flatMap((attempt) =>

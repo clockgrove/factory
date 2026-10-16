@@ -5,6 +5,11 @@ import { privateRecords } from "./diagnostics.js";
 import { displayClock } from "./display-time.js";
 import { factoryValidationToolName } from "./execution/claude-validation.js";
 import { ownsPath } from "./ownership.js";
+import {
+  type AttemptKind,
+  attemptKindLabel,
+  attemptOrigin,
+} from "./repair-policy.js";
 import { pinnedGitRawWithin } from "./process.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
 
@@ -25,6 +30,13 @@ export interface WorkerActivity {
    * validation call in the stream, or a changed owned file's modification.
    */
   lastProgressAt?: string;
+  /** Completed Factory validation runs. */
+  validationRuns?: number;
+  lastValidationPassAt?: string;
+  /** The first failed run since the last pass, while runs keep failing. */
+  validationFailingSince?: string;
+  /** Failed runs since the last pass. */
+  validationFailingRuns?: number;
   /** Model turns (Claude) or started tool steps (Codex). */
   turns: number;
   /** Output tokens so far, when reported. */
@@ -41,6 +53,9 @@ export interface ItemActivity {
   status: string;
   step?: string;
   attempt?: string;
+  /** The attempt's ordinal and how it started (`attemptOrigin`). */
+  attemptNumber?: number;
+  attemptKind?: AttemptKind;
   pullRequest?: number;
   activity?: WorkerActivity;
   /** Paths changed in the worker's checkout so far. */
@@ -65,6 +80,9 @@ const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
 
 /** How long a worker may emit events without progress before it is called out. */
 export const PROGRESS_QUIET_MS = 15 * 60_000;
+
+/** How long validation may keep failing before it is called out. */
+export const VALIDATION_FAILING_MS = 20 * 60_000;
 
 const count = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
@@ -123,6 +141,24 @@ export function readWorkerActivity(
     }
     if (operation === "system" && event.subtype === "compact_boundary")
       activity.compactions += 1;
+    const validation = event.validation as { passed?: unknown } | undefined;
+    if (
+      operation === "validation" &&
+      typeof validation?.passed === "boolean" &&
+      at
+    ) {
+      activity.lastProgressAt = at;
+      activity.validationRuns = (activity.validationRuns ?? 0) + 1;
+      if (validation.passed) {
+        activity.lastValidationPassAt = at;
+        delete activity.validationFailingSince;
+        delete activity.validationFailingRuns;
+      } else {
+        activity.validationFailingSince ??= at;
+        activity.validationFailingRuns =
+          (activity.validationFailingRuns ?? 0) + 1;
+      }
+    }
     if (Array.isArray(event.tools) && at)
       for (const tool of event.tools as { tool?: unknown; target?: unknown }[])
         if (typeof tool?.tool === "string") {
@@ -234,11 +270,13 @@ export function itemActivities(
   if (!isExecutionState(state)) return [];
   const worktrees = resolve(stateRoot(repository), "worktrees") + sep;
   return Object.entries(state.work).map(([id, work]) => {
+    const origin = attemptOrigin(work);
     const item: ItemActivity = {
       id,
       status: work.status,
       ...(work.step && { step: work.step }),
       ...(work.attempt && { attempt: work.attempt }),
+      ...(origin && { attemptNumber: origin.number, attemptKind: origin.kind }),
       ...(work.pullRequest && { pullRequest: work.pullRequest }),
     };
     if (
@@ -308,6 +346,7 @@ export function activityLine(
     ...(age <= staleMs && quiet !== undefined && quiet > PROGRESS_QUIET_MS
       ? [`no progress for ${shortAge(quiet)}`]
       : []),
+    ...validationLine(activity, now),
     `${activity.turns} turns`,
     ...(activity.contextTokens !== undefined
       ? [`context ${formatTokens(activity.contextTokens)}`]
@@ -318,6 +357,20 @@ export function activityLine(
         ]
       : []),
   ].join(" · ");
+}
+
+/** Validation failing past its threshold, with the last pass's age. */
+function validationLine(activity: WorkerActivity, now: number): string[] {
+  if (!activity.validationFailingSince) return [];
+  const failing = now - Date.parse(activity.validationFailingSince);
+  if (!(failing > VALIDATION_FAILING_MS)) return [];
+  const runs = activity.validationFailingRuns ?? 0;
+  return [
+    `validation failing for ${shortAge(failing)} (${runs} run${runs === 1 ? "" : "s"})`,
+    activity.lastValidationPassAt
+      ? `last passing validation ${shortAge(now - Date.parse(activity.lastValidationPassAt))} ago`
+      : "no passing validation yet",
+  ];
 }
 
 /** Providers whose progress stream names edited files. */
@@ -370,7 +423,14 @@ export function changesLine(
 export function itemHeadline(item: ItemActivity): string {
   return [
     `${item.id} · ${item.status}${item.step ? ` (${item.step})` : ""}`,
-    ...(item.attempt ? [`attempt ${item.attempt.slice(0, 8)}`] : []),
+    ...(item.attempt
+      ? [
+          `attempt ${item.attemptNumber ? `${item.attemptNumber} (${item.attempt.slice(0, 8)})` : item.attempt.slice(0, 8)}`,
+        ]
+      : []),
+    ...(item.attemptNumber && item.attemptNumber > 1 && item.attemptKind
+      ? [attemptKindLabel(item.attemptKind)!]
+      : []),
     ...(item.pullRequest ? [`PR #${item.pullRequest}`] : []),
   ].join(" · ");
 }
@@ -436,6 +496,13 @@ export function renderWorkerProgress(
       );
     else if (event.operation === "rate_limit_event")
       lines.push(`${at} rate limit notice`);
+    else if (event.operation === "validation") {
+      const run = event.validation as Record<string, unknown> | undefined;
+      if (typeof run?.passed === "boolean")
+        lines.push(
+          `${at} validation ${run.passed ? "passed" : "failed"} (${count(run.ran)}/${count(run.commands)} commands ran, ${count(run.failed)} failed${run.handoffPassed === false ? ", handoff rejected" : ""})`,
+        );
+    }
   }
   return lines;
 }

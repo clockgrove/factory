@@ -326,6 +326,23 @@ async function main(): Promise<void> {
             peers: input.request.handoffPeers ?? [],
             acceptance: input.request.item.acceptance,
           },
+          onRun: (validation) => {
+            if (progressLost) return;
+            try {
+              privateProgress(progressPath, {
+                eventId: randomUUID(),
+                at: new Date().toISOString(),
+                attemptId: input.request.attemptId ?? "",
+                operation: "validation",
+                validation,
+              });
+            } catch (error) {
+              progressLost = true;
+              process.stderr.write(
+                `Factory Claude worker progress unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
+              );
+            }
+          },
         }).then(async (environment) => {
           if (controller.signal.aborted) {
             await environment.close();

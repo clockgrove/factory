@@ -41,7 +41,11 @@ import {
   reusableEnvironmentValidationIndices,
 } from "./qa.js";
 import { preflightItemEnvironment } from "./qa-execution.js";
-import { retainedFailedResultFor, type WorkRecovery } from "./repair-policy.js";
+import {
+  REVIEW_FINDINGS_ACTOR,
+  retainedFailedResultFor,
+  type WorkRecovery,
+} from "./repair-policy.js";
 import type { FactoryState } from "./state.js";
 import { workspacePackageAdditions } from "./workspace-membership.js";
 import {
@@ -70,8 +74,11 @@ function attemptItem(item: WorkItem, recovery?: WorkRecovery): WorkItem {
   if (!failure && !correction) return item;
   // A new attempt continues from the refused candidate only when the driver
   // materializes it and appends retained failed-result context (#1277, #1313).
+  // A review findings correction restates the failure with its structure;
+  // the brief carries those findings once.
+  const restated = correction?.actor === REVIEW_FINDINGS_ACTOR;
   const previous = failure
-    ? `\nThe previous attempt failed. Do not repeat it: ${failure.detail}\nIf the retained failed-result context below says the previous result's files are already in this checkout, this attempt continues from that result: fix exactly what these findings refuse and keep everything else. Otherwise it starts from a fresh checkout of the base without the previous files: implement the Work Item completely, treating these findings as requirements.`
+    ? `\nThe previous attempt failed. Do not repeat it: ${restated ? "the result review refused the findings in the required correction below." : failure.detail}\nIf the retained failed-result context below says the previous result's files are already in this checkout, this attempt continues from that result: fix exactly what these findings refuse and keep everything else. Otherwise it starts from a fresh checkout of the base without the previous files: implement the Work Item completely, treating these findings as requirements.`
     : "";
   const repair = correction
     ? `\nDiagnosed repair: ${correction.diagnosis}\nRequired correction: ${correction.correction}`

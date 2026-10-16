@@ -27,6 +27,7 @@ import {
   consumption,
   failureDigest,
   itemEvent,
+  REVIEW_FINDINGS_ACTOR,
   repairScopes,
 } from "./repair-policy.js";
 import {
@@ -2279,7 +2280,15 @@ function retainedRepairProof(
           ? correction.readiness
             ? { availability: "available", ...correction.readiness }
             : { availability: "unavailable" }
-          : { availability: "not-applicable", origin: "operator-declaration" },
+          : correction.actor === REVIEW_FINDINGS_ACTOR
+            ? {
+                availability: "not-applicable",
+                origin: "independent-review-findings",
+              }
+            : {
+                availability: "not-applicable",
+                origin: "operator-declaration",
+              },
       snapshotConsumption: {
         allowance: key,
         objective: {

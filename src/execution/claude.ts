@@ -110,6 +110,11 @@ export function claudeWorkerEnvironment(
 
 export class ClaudeAgentSdkHarness implements AgentHarness {
   readonly sessionAdapter = "claude-agent-sdk";
+  // A resumed worker conversation is already deep in context, so a repair
+  // auto-compacts early and its summary can drop the repair instructions.
+  // A fresh conversation starts from the prompt that carries them, with the
+  // refused candidate already in the worktree.
+  readonly candidateContinuationSession = "fresh" as const;
   get sessionCapabilities() {
     // Isolating session storage must not silently discard explicitly requested user settings.
     return this.config.settingSources.includes("user")

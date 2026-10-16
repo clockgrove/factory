@@ -34,6 +34,7 @@ import { graphDigest, recordWorkerDiscovery } from "./graph-amendments.js";
 import { completeObjectiveKnowledge } from "./objective-knowledge.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { pinnedGitRaw } from "./process.js";
+import { literalBodyBlocks } from "./prompt-bytes.js";
 import { awaitCheckpointAdmission } from "./recovery-checkpoint.js";
 import {
   archiveAttempt,
@@ -44,6 +45,7 @@ import {
   failureDigest,
   implementationRepairable,
   itemEvent,
+  REVIEW_FINDINGS_ACTOR,
   type RepairCorrection,
   releaseCharge,
   repairScopes,
@@ -305,6 +307,92 @@ export function recordSavedResultRefusal(
   );
   return true;
 }
+
+/**
+ * The correction for a model result review's refusal: its refused findings,
+ * each with its criterion index and cited evidence. The reviewer already
+ * stated each gap against the exact candidate, so a diagnosis call would only
+ * restate it. Undefined sends the failure to the diagnosis, which still makes
+ * the decisions this cannot: a finding with a question may need an operator,
+ * and an operator refusal, a command failure or a repeated failure needs a
+ * new judgment. Built from the retained refusal alone, so it is rebuilt
+ * identically after a restart.
+ */
+export function reviewFindingsCorrection(
+  state: FactoryState,
+  id: string,
+): RepairCorrection | undefined {
+  const work = state.work[id];
+  const failure = work?.recovery?.failure;
+  const refusal = failure?.semanticRefusal;
+  const item = state.graph.items.find((entry) => entry.id === id);
+  if (
+    !work ||
+    !item ||
+    !failure?.event ||
+    refusal?.source !== "model" ||
+    failure.classification !== "implementation" ||
+    // A diagnosis already asked for this failure is answered, not replaced.
+    work.recovery?.diagnosisInvocation
+  )
+    return undefined;
+  try {
+    assertSemanticRefusalRecord(state, id, work, failure);
+  } catch {
+    return undefined;
+  }
+  const refused = [
+    { criterion: refusal.criterion, finding: refusal.finding },
+    ...(refusal.others ?? []),
+  ];
+  if (
+    refused.some(
+      ({ criterion, finding }) =>
+        finding.question.trim() || !item.acceptance.includes(criterion),
+    )
+  )
+    return undefined;
+  // Findings of one review share its packet, so the first refusal's resolved
+  // references resolve the evidence ids of the others.
+  const cited = (ids: string[]) =>
+    ids.flatMap((evidenceId) => {
+      const reference = refusal.evidence.find(
+        (entry) => entry.id === evidenceId,
+      );
+      return reference
+        ? [
+            {
+              path: reference.path,
+              origin: reference.origin,
+              complete: reference.complete,
+            },
+          ]
+        : [];
+    });
+  const correction: RepairCorrection = {
+    kind: "implementation",
+    failureDigest: failure.digest,
+    event: failure.event,
+    diagnosis: `The independent result review refused ${refused.length} acceptance ${refused.length === 1 ? "criterion" : "criteria"} of candidate tree ${refusal.treeSha} after its validation commands passed. Each finding states the gap the candidate must close.`,
+    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's position in the Work Item's acceptance; evidence is what the reviewer cited.\n${JSON.stringify(
+      refused.map(({ criterion, finding }) => ({
+        criterionIndex: item.acceptance.indexOf(criterion),
+        criterion,
+        finding: finding.detail,
+        evidence: cited(finding.evidenceIds),
+      })),
+    )}`,
+    actor: REVIEW_FINDINGS_ACTOR,
+  };
+  try {
+    validateCorrection(work, correction);
+  } catch {
+    // The same findings after the same correction: a repeated failure.
+    return undefined;
+  }
+  return correction;
+}
+
 export function applyWorkCorrection(
   state: FactoryState,
   id: string,
@@ -337,6 +425,17 @@ export function applyWorkCorrection(
     throw new Error(
       "Operator corrections cannot declare controller-checked readiness",
     );
+  else if (correction.actor === REVIEW_FINDINGS_ACTOR) {
+    // Only the retained refusal's own findings carry this provenance.
+    const derived = reviewFindingsCorrection(state, id);
+    if (
+      derived?.diagnosis !== correction.diagnosis ||
+      derived.correction !== correction.correction
+    )
+      throw new Error(
+        "Review findings correction differs from the retained refusal",
+      );
+  }
   if (correction.kind !== "implementation")
     throw new Error(
       "Only an implementation correction is supported: a diagnosed new attempt",
@@ -1220,6 +1319,45 @@ function focusedDiagnosisSources(
   }
 }
 
+/**
+ * The sources the failing item pins: the Objective, the repository guides,
+ * and what its citations, inputs, commands and coverage name. Other items'
+ * sources are listed by identity only.
+ */
+function itemSourceIndices(
+  state: FactoryState,
+  item: WorkItem,
+  view: ReturnType<typeof planningGraphView>["items"][number],
+  sources: PlanningRequest<DiagnosisAnswer>["sources"],
+): number[] {
+  const pinned: { path: string; heading?: string }[] = [
+    ...item.citations,
+    ...(item.inputSources ?? []),
+    ...item.validation.flatMap((command) =>
+      command.source ? [{ path: command.source }] : [],
+    ),
+    ...state.graph.coverage
+      .filter((entry) => entry.itemId === item.id)
+      .map((entry) => entry.source),
+  ];
+  const spans = new Set(
+    (view.inputSources ?? []).flatMap((input) =>
+      "sourceSpan" in input ? [input.sourceSpan.sourceIndex] : [],
+    ),
+  );
+  return sources.flatMap((source, index) =>
+    spans.has(index) ||
+    ["OBJECTIVE", "AGENTS.md", "README.md"].includes(source.path) ||
+    pinned.some(
+      (entry) =>
+        entry.path === source.path &&
+        (!entry.heading || !source.heading || entry.heading === source.heading),
+    )
+      ? [index]
+      : [],
+  );
+}
+
 /** Transient diagnosis inputs; canonical graph and indexed repair evidence remain unchanged. */
 export function workRepairDiagnosisRequest(args: {
   state: FactoryState;
@@ -1252,6 +1390,26 @@ export function workRepairDiagnosisRequest(args: {
       : [],
   );
   const { inputSources: historicalInputs, ...focusedItem } = item;
+  const view = planningGraphView({ ...state.graph, items: [item] }, sources)
+    .items[0]!;
+  // Inputs no pinned source holds render once as literal blocks, not as
+  // escaped JSON strings.
+  const inputBodies: { label: string; content: string }[] = [];
+  const itemView = focusedSources
+    ? focusedItem
+    : {
+        ...view,
+        ...(view.inputSources && {
+          inputSources: view.inputSources.map((input) => {
+            if (!("content" in input)) return input;
+            const { content, ...identity } = input;
+            const label = `input ${inputBodies.length}`;
+            inputBodies.push({ label, content });
+            return { ...identity, content: { block: label } };
+          }),
+        }),
+      };
+  const inputs = literalBodyBlocks(inputBodies);
   const visibleEvidence = evidence.map((entry, index) => {
     if (evidenceIndices.includes(index) || !("content" in entry)) return entry;
     const { content, ...metadata } = entry;
@@ -1269,9 +1427,10 @@ export function workRepairDiagnosisRequest(args: {
       evidenceDigest: inputDigest(evidence),
       sourcesDigest: inputDigest(sources),
       evidenceIndices,
-      sourceIndices: focusedSources ?? sources.map((_entry, index) => index),
+      sourceIndices:
+        focusedSources ?? itemSourceIndices(state, item, view, sources),
     },
-    objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return commandAssessments as [] when there are no failed commands. Include every required output field; commandAssessments must never be omitted. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished edits are unavailable; a repair starts from the accepted base.${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}\n${JSON.stringify({ item: focusedSources ? focusedItem : planningGraphView({ ...state.graph, items: [item] }, sources).items[0], ...(focusedSources && { historicalWorkerInputs: { contentDelivery: "omitted", count: historicalInputs?.length ?? 0, digest: inputDigest(historicalInputs ?? []) } }), failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: visibleEvidence })}`,
+    objective: `Diagnose this failed Work Item using its original evidence. Return a concrete correction within the unchanged acceptance, ownership, commands and configured authority. Do not propose weaker validation, provider changes, new permissions or repeating an unchanged failure. Readiness is actionable only when an owned implementation change can proceed now without any unmet or unknown operator prerequisite. List every outstanding prerequisite with its concrete question, even when decision is repair; never claim an external action happened because a correction proposes it. Command failures require their retained failed-command capture. Assess every retained failed command by its original commandIndex; passed commands are not failed evidence. An explicitly retained semanticRefusal instead names the exact rejected review or operator decision after passing commands: ground that refusal and its separate passingValidation, and return commandAssessments as [] when there are no failed commands. Include every required output field; commandAssessments must never be omitted. Missing command outcomes do not imply semantic refusal. Ground the correction with repairEvidence indices, including the original failure, retained validation when available and the complete named owned candidate file when present. Missing or truncated facts are unavailable. With actionable repair, path names the owned file to change, question is empty and prerequisites is empty. Otherwise return operator-required or unknown readiness and a concrete question. If the failure comes from a file this item does not own but a merged predecessor does (see predecessors, and the files under "owned by"), return predecessor with that predecessor's id and the file's path: the item cannot fix it. If evidence cannot establish a correction, return operator. Prior unfinished uncommitted edits are unavailable. A repair continues from the refused committed result when it is retained (its files are in the repair's working tree), otherwise from the accepted base.\n${JSON.stringify({ item: itemView, ...(focusedSources && { historicalWorkerInputs: { contentDelivery: "omitted", count: historicalInputs?.length ?? 0, digest: inputDigest(historicalInputs ?? []) } }), failure, predecessors: predecessors.map((entry) => ({ id: entry.item.id, pullRequest: entry.pullRequest, ownedPaths: entry.item.ownedPaths })), prior: work.recovery?.history?.map((entry) => ({ failure: entry.failure, correction: entry.correction })), treeSha: work.treeSha, changeRef: work.changeRef, repairEvidence: visibleEvidence })}${inputBodies.length ? `\nWork Item input bodies. ${inputs.guidance} An input content {"block": LABEL} is the complete literal body in that block.\n${inputs.text}` : ""}${rejected ? `\nYour previous answer was rejected: ${rejected}. Answer again.` : ""}`,
     baseSha: work.executionBaseSha ?? state.baseSha,
     sources,
     controllerCapabilities: installedControllerCapabilities(),
@@ -1361,6 +1520,18 @@ export async function diagnoseWorkRepair(args: {
   // phase is "diagnosing", so resumeDiagnoses asks it once the run goes on
   // (pause is not cancel; its event is already charged).
   if (args.stopped()) return false;
+  // A model review's refused findings already say what to fix: they go to
+  // the repair as its correction, under the charge above, with no diagnosis.
+  const findings = reviewFindingsCorrection(state, item.id);
+  if (findings) {
+    try {
+      applyWorkCorrection(state, item.id, findings);
+    } catch (error) {
+      return stop(error instanceof Error ? error.message : String(error));
+    }
+    save();
+    return true;
+  }
   // A paid step: a lost answer is asked again, an invalid one again with
   // its validation error, until the paid bound makes it a decision.
   let answer: RepairCorrection | string | { blame: Blame; diagnosis: string };

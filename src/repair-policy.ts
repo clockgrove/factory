@@ -213,6 +213,12 @@ export interface FailureDisposition {
     graphDigest: string;
   };
 }
+/**
+ * The actor of a correction the controller derives, without a diagnosis
+ * call, from a model result review's refused findings. It carries no
+ * readiness: the retained semantic refusal it restates is its binding.
+ */
+export const REVIEW_FINDINGS_ACTOR = "factory-result-review";
 export interface RepairCorrection {
   failureDigest: string;
   /** The failure event it was admitted for; the controller sets it. */

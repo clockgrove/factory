@@ -1021,6 +1021,13 @@ export interface AgentHarnessCapabilities {
 export interface AgentHarness {
   readonly sessionCapabilities?: AgentSessionCapabilities;
   readonly sessionAdapter?: string;
+  /**
+   * "fresh": an attempt that continues a refused candidate starts a new native
+   * conversation instead of resuming the earlier one. Its worktree holds the
+   * candidate and its prompt carries the findings, so the earlier transcript
+   * adds context but no needed fact.
+   */
+  readonly candidateContinuationSession?: "fresh";
   releaseSession?(session: AgentSessionRef): Promise<void>;
   /** Declared before composition; Factory rejects incompatible semantics. */
   readonly capabilities: AgentHarnessCapabilities;

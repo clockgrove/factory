@@ -1666,6 +1666,8 @@ export function checkpointWorkerSession(
   options: {
     adapter: string;
     supportsResume: boolean;
+    /** This turn starts a new native conversation although the harness can resume. */
+    fresh?: boolean;
     executionIdentity: string;
     profileId?: string;
   },
@@ -1680,30 +1682,31 @@ export function checkpointWorkerSession(
       session.retained.currentTurn.resources !== "settled")
   )
     throw new Error("Unsettled worker conversation cannot dispatch fresh work");
+  const resumes = options.supportsResume && !options.fresh;
   // This fresh worker has its own durable execution handle. The old native
   // receipt remains unchanged and addressable by supported disposal.
-  if (!options.supportsResume && session.retained?.status === "ready")
-    return undefined;
+  if (!resumes && session.retained?.status === "ready") return undefined;
   checkpoint?.({
     scope: structuredClone(session.scope),
     adapter: options.adapter,
     identity: session.identity,
     turn: (session.retained?.turn ?? 0) + 1,
-    status: options.supportsResume ? "in-flight" : "unavailable",
+    status: resumes ? "in-flight" : "unavailable",
     executionIdentity: options.executionIdentity,
-    data: options.supportsResume
+    data: resumes
       ? {
           ...(session.retained?.data as Record<string, unknown> | undefined),
           pendingWorkerIdentity: options.executionIdentity,
           ...(options.profileId && { profileId: options.profileId }),
         }
       : {
-          reason:
-            "The selected harness does not support native conversation continuation",
+          reason: options.fresh
+            ? "An attempt that continues a refused candidate starts a fresh native conversation"
+            : "The selected harness does not support native conversation continuation",
           ...(options.profileId && { profileId: options.profileId }),
         },
   });
-  return options.supportsResume ? session : undefined;
+  return resumes ? session : undefined;
 }
 
 async function cessationAdmission(context?: ExecutionContext): Promise<void> {
@@ -2187,6 +2190,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
             harness.sessionCapabilities?.resumeRoles.includes(
               "implementation",
             ) === true,
+          fresh:
+            continuesCandidate &&
+            harness.candidateContinuationSession === "fresh",
           executionIdentity: identity,
           profileId: request.item.executionBinding?.id,
         },

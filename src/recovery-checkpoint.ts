@@ -2223,7 +2223,8 @@ function checkpointCompletionFingerprint(
     record.changed.length ||
     record.retentionGaps?.length ||
     (record.attempts.at(-1) &&
-      record.attempts.at(-1)?.status !== "acknowledged")
+      record.attempts.at(-1)?.status !== "acknowledged" &&
+      record.attempts.at(-1)?.status !== "not-landed")
   )
     return undefined;
   return `${factoryConfigDigest(config)}:${canonical(record)}`;
@@ -5863,7 +5864,6 @@ async function observeAttempt(
   config: FactoryConfig,
   options: GitPersistenceConfig,
   attempt: CheckpointAttempt,
-  record: CheckpointJournal,
 ): Promise<boolean> {
   const tip = await remoteTip(paths(config.repository).git, options);
   if (tip === undefined && attempt.base)
@@ -5887,23 +5887,42 @@ async function observeAttempt(
     markNotLanded(config, options, attempt);
     return false;
   }
-  const late = record.attempts.find(
-    (entry) =>
-      entry.status === "not-landed" && entry.candidate === absent.remoteTip,
-  );
-  if (!late)
+  if (!(await settleLateLanding(config, options, absent.remoteTip)))
     throw new CheckpointConflict(
       "Remote archive moved outside this writer while a publication was unconfirmed; conflict requires inspection",
     );
+  markNotLanded(config, options, attempt);
+  return false;
+}
+/**
+ * Acknowledge an attempt recorded as not landed that the remote now holds: it
+ * landed late. Only one built on the current acknowledged base qualifies, so an
+ * outside rewind to an older candidate stays a conflict. Returns whether the
+ * tip was settled this way.
+ */
+async function settleLateLanding(
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+  tip: string | undefined,
+): Promise<boolean> {
+  const record = journal(config, options);
+  const late = record.attempts.find(
+    (entry) =>
+      entry.status === "not-landed" &&
+      entry.candidate === tip &&
+      entry.base === record.lastAcknowledged?.commitSha,
+  );
+  if (!late) return false;
   acknowledgeObserved(
     config,
     options,
     late,
     await freshArchive(config, options, late.candidate),
   );
-  markNotLanded(config, options, attempt);
-  return false;
+  return true;
 }
+/** A late landing was acknowledged mid-publication; publication starts over. */
+class CheckpointLateLandingSettled extends Error {}
 function acknowledgeObserved(
   config: FactoryConfig,
   options: GitPersistenceConfig,
@@ -5947,7 +5966,12 @@ export async function synchronizeRecoveryCheckpoint(
 ): Promise<RecoveryCheckpointStatus> {
   return serializePublication(config.repository, async () => {
     try {
-      return await publishCheckpoint(config, input);
+      try {
+        return await publishCheckpoint(config, input);
+      } catch (error) {
+        if (!(error instanceof CheckpointLateLandingSettled)) throw error;
+        return await publishCheckpoint(config, input);
+      }
     } catch (error) {
       if (isCheckpointAdmissionFailure(error)) throw error;
       throw new CheckpointAdmissionFailure(
@@ -6066,7 +6090,7 @@ async function publishCheckpoint(
       ) {
         // Exact remote observation settles an unconfirmed submission. It never
         // grants a blind second push: a new one is a fast-forward from the base.
-        const landed = await observeAttempt(config, options, previous, record);
+        const landed = await observeAttempt(config, options, previous);
         record = journal(config, options);
         if (
           landed &&
@@ -6146,10 +6170,13 @@ async function publishCheckpoint(
           options,
           record.lastAcknowledged.commitSha,
         );
-        if (acknowledged.remoteTip !== record.lastAcknowledged.commitSha)
+        if (acknowledged.remoteTip !== record.lastAcknowledged.commitSha) {
+          if (await settleLateLanding(config, options, acknowledged.remoteTip))
+            throw new CheckpointLateLandingSettled();
           throw new CheckpointConflict(
             "Remote archive advanced outside the acknowledged writer; conflict requires inspection",
           );
+        }
         if (
           acknowledged.payloadDigest !== record.lastAcknowledged.payloadDigest
         )
@@ -6250,10 +6277,13 @@ async function publishCheckpoint(
             "Existing archive has no locally acknowledged restored baseline; read-only restoration is required before publication",
           );
         }
-        if (base !== record.lastAcknowledged.commitSha)
+        if (base !== record.lastAcknowledged.commitSha) {
+          if (await settleLateLanding(config, options, base))
+            throw new CheckpointLateLandingSettled();
           throw new CheckpointConflict(
             "Remote archive advanced outside the acknowledged writer; conflict requires inspection",
           );
+        }
         if (!reusedParent)
           await gitRemote(p.git, options, [
             "fetch",
@@ -6379,7 +6409,18 @@ async function publishCheckpoint(
         delete current.error;
       });
       await verifyDestination(config, options);
-      if ((await remoteTip(p.git, options)) !== base) {
+      const prePushTip = await remoteTip(p.git, options);
+      if (
+        prePushTip !== base &&
+        (await settleLateLanding(config, options, prePushTip))
+      ) {
+        // This candidate was never dispatched; it is rebuilt on the late base.
+        mutate(config, options, (current) => {
+          current.attempts.at(-1)!.status = "not-landed";
+        });
+        throw new CheckpointLateLandingSettled();
+      }
+      if (prePushTip !== base) {
         mutate(config, options, (current) => {
           current.attempts.at(-1)!.status = "conflict";
           current.error =
@@ -6449,6 +6490,7 @@ async function publishCheckpoint(
       );
       return acknowledged;
     } catch (error) {
+      if (error instanceof CheckpointLateLandingSettled) throw error;
       try {
         mutate(config, options, (record) => {
           if (

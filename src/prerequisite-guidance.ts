@@ -13,6 +13,7 @@ import {
   type StatusSummary,
   type StatusView,
 } from "./status-summary.js";
+import { awaitsOperator } from "./step.js";
 
 export interface PrerequisiteGuidanceEntry {
   id: string;
@@ -489,12 +490,45 @@ export function derivePrerequisiteGuidance(
     view.state !== "not-started" &&
     view.state !== "preparing"
   ) {
-    for (const [id, intents] of Object.entries(state.publicationIntents ?? {}))
-      if (intents.some((intent) => !intent.observation))
+    for (const [id, intents] of Object.entries(
+      state.publicationIntents ?? {},
+    )) {
+      const work = state.work[id];
+      const open = intents.find((intent) => !intent.observation);
+      // The delivery step that recorded the request still owns it until its
+      // pull request is observed. A blocked admission was refused, and an
+      // item past that step left it unresolved.
+      if (open)
         unknown(
           id,
           "The original pull request publication is unresolved; retry cannot authorize another creation",
+          work?.status === "running" &&
+            work.step === "deliver" &&
+            !awaitsOperator(work.wait) &&
+            !open.admissionBlockedAt &&
+            !open.effects?.some((effect) => effect.disposition === "blocked")
+            ? `GitHub pull request ${open.submission === "possibly-submitted" ? "creation" : "publication"} for ${id} awaiting response`
+            : undefined,
         );
+      // A merge request awaiting its response is the delivery's own; with no
+      // live owner its retained request is reconciled when delivery resumes.
+      const merge = intents
+        .at(-1)
+        ?.effects?.find(
+          (effect) =>
+            effect.request.kind === "merge" && effect.disposition === "intent",
+        );
+      if (
+        live &&
+        merge &&
+        work?.status === "published" &&
+        !awaitsOperator(work.wait)
+      )
+        inFlight.push({
+          scope: id,
+          detail: `GitHub pull request #${merge.request.pullRequest} merge for ${id} awaiting response`,
+        });
+    }
     for (const item of view.work) {
       const current = state.work[item.id]!;
       const execution = object(current.execution?.data);

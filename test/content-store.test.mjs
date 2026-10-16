@@ -119,6 +119,7 @@ import {
 } from "../dist/recovery-checkpoint.js";
 import {
   buildRecoveryCheckpointClosure,
+  describeContinuationReferences,
   describeMemoryBodyReferences,
   uniqueRecoveryCheckpointFiles,
 } from "../dist/recovery-checkpoint-closure.js";
@@ -991,6 +992,51 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     LocalContentStore.prototype.retainCheckpointReferences =
       originalRetainSummary;
   }
+  // An active Objective beside the cancelled one keeps its evidence (#1307).
+  const active = {
+    ...structuredClone(cancelled),
+    objective: 5,
+    runId: "active-orchard-documentation",
+  };
+  delete active.cancelledAt;
+  saveState(statePath(repository, 5), active);
+  retainWorkerAccounting(
+    {
+      repository,
+      objective: 5,
+      runId: active.runId,
+      itemId: null,
+      attemptId: null,
+      configDigest: active.configDigest,
+    },
+    {
+      type: "completed",
+      invocationId: "active-accounting",
+      phase: "implementation",
+      role: "worker",
+      providerAttempt: 1,
+      usageAvailable: false,
+    },
+  );
+  // Installation-level accounting stays live when Objectives retire (#1307).
+  retainWorkerAccounting(
+    {
+      repository,
+      objective: 0,
+      runId: null,
+      itemId: null,
+      attemptId: null,
+      configDigest: null,
+    },
+    {
+      type: "completed",
+      invocationId: "live-accounting",
+      phase: "implementation",
+      role: "worker",
+      providerAttempt: 1,
+      usageAvailable: false,
+    },
+  );
   const closure = await buildClosure();
   // A linked checkout has a .git file; packing uses its common object storage.
   const linkedCheckout = join(root, "linked-checkpoint");
@@ -1157,6 +1203,60 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       firstInspection.current.uniqueBodyBytes,
     true,
   );
+  // The acknowledged checkpoint holds the cancelled Objective's complete
+  // evidence, so it is retired (#1307): later closures keep only its exact
+  // snapshot and an archived gap, without its bodies or accounting.
+  const retiredClosure = await buildClosure();
+  assert.equal(
+    retiredClosure.gaps.some(
+      (gap) =>
+        gap.path === "objectives/1/state.json" &&
+        gap.availability === "archived" &&
+        gap.required === false,
+    ),
+    true,
+  );
+  assert.equal(
+    retiredClosure.files.some(
+      (file) =>
+        file.path === "objectives/1/state.json" && file.kind === "continuation",
+    ),
+    true,
+  );
+  assert.equal(
+    retiredClosure.gaps.some((gap) => gap.path === "objectives/5/state.json"),
+    false,
+  );
+  const accountingObjectives = (value) =>
+    value.files
+      .filter((file) => file.path.startsWith("accounting/"))
+      .map(
+        (file) =>
+          JSON.parse(readFileSync(join(state, file.path), "utf8")).binding
+            .objective,
+      );
+  assert.equal(accountingObjectives(retiredClosure).includes(5), true);
+  assert.equal(accountingObjectives(retiredClosure).includes(1), false);
+  assert.equal(accountingObjectives(closure).includes(1), true);
+  const accountingFiles = (value) =>
+    value.files.filter((file) => file.path.startsWith("accounting/")).length;
+  assert.equal(
+    accountingFiles(retiredClosure) < accountingFiles(closure),
+    true,
+  );
+  assert.equal(
+    retiredClosure.contentRefs.length < closure.contentRefs.length,
+    true,
+  );
+  const retirementCheckpoint = await synchronizeRecoveryCheckpoint(config, {
+    reason: "explicit",
+    buildClosure,
+  });
+  assert.equal(retirementCheckpoint.status, "acknowledged");
+  assert.notEqual(
+    retirementCheckpoint.lastAcknowledged.commitSha,
+    firstCheckpoint.lastAcknowledged.commitSha,
+  );
   const diagnosticConfig = factoryConfigDigest(config);
   const unchangedCheckpoint = await withDiagnosticSession(
     new DiagnosticEmitter(repository, 1, [], undefined, diagnosticConfig),
@@ -1203,7 +1303,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(unchangedCheckpoint.status, "acknowledged");
   assert.equal(
     unchangedCheckpoint.lastAcknowledged.commitSha,
-    firstCheckpoint.lastAcknowledged.commitSha,
+    retirementCheckpoint.lastAcknowledged.commitSha,
   );
   assert.deepEqual(readFileSync(join(checkout, "api.md")), source);
   // A failed verification of an acknowledged original remains failed until
@@ -2033,6 +2133,18 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   });
   const publicationElapsedMs = performance.now() - publicationStarted;
   assert.equal(secondCheckpoint.status, "acknowledged");
+  // Every Objective here is terminal and archived, so each keeps only its
+  // snapshot and an archived gap (#1307).
+  const terminalClosure = await buildClosure();
+  for (const objective of [1, 3])
+    assert.equal(
+      terminalClosure.gaps.some(
+        (gap) =>
+          gap.path === `objectives/${objective}/state.json` &&
+          gap.availability === "archived",
+      ),
+      true,
+    );
   const secondInspection = await inspectRecoveryCheckpoint(config);
   const publishedManifest = JSON.parse(
     execFileSync(
@@ -3310,10 +3422,24 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   const originals = closure.files
     .filter((file) => file.kind === "learning-original")
     .map((file) => ({ ...file, bytes: readFileSync(join(state, file.path)) }));
-  const accountingOriginals = closure.files
+  // The latest checkpoint holds live accounting; the retired Objective's
+  // accounting stays in the archive history with its evidence (#1307).
+  const accountingOriginals = (await buildClosure()).files
     .filter((file) => file.path.startsWith("accounting/"))
     .map((file) => ({ ...file, bytes: readFileSync(join(state, file.path)) }));
+  assert.equal(accountingOriginals.length > 0, true);
+  assert.equal(
+    accountingOriginals.length <
+      closure.files.filter((file) => file.path.startsWith("accounting/"))
+        .length,
+    true,
+  );
   const originalSnapshot = readFileSync(statePath(repository, 1));
+  // The cancelled Objective is retired: its complete evidence, including its
+  // sealed accounting, is in the archive history at its recorded commit.
+  const retirement = JSON.parse(
+    readFileSync(join(state, "recovery", "retired", "1.json"), "utf8"),
+  );
   // The only surviving originals are in the remote Git archive. Fetch into an
   // independent repository after both the source workspace and replicas are gone.
   rmSync(checkout, { recursive: true });
@@ -3329,12 +3455,16 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(recovered.manifest.binding.repository, repository);
   assert.equal(recovered.manifest.binding.ref, config.gitPersistence.ref);
   assert.equal(existsSync(join(state, "content")), false);
+  const archivedEvidence = await readVerifiedRecoveryCheckpoint(
+    config,
+    retirement.commitSha,
+  );
   await assertAccountingSealContent(
     repository,
     1,
     cancelled.runId,
     accountingSeal,
-    recovered.readVerifiedBlob,
+    archivedEvidence.readVerifiedBlob,
   );
   assert.equal(existsSync(join(state, "content")), false);
   const reconstructed = join(root, "reconstructed");
@@ -3449,23 +3579,13 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     existsSync(join(state, "objectives", "1", "diagnostics.ndjson")),
     false,
   );
-  assert.deepEqual(readAccountingRecords(repository, 1), accountingBefore);
-  assert.deepEqual(readInteractionMetadata(repository, 1), metadataBefore);
-  assert.deepEqual(
-    analyzeInteractions(readInteractionMetadata(repository, 1), [], {}),
-    interactionBefore,
-  );
-  assert.deepEqual(
-    summarizeDiagnosticUsage(readUsageSummaryEvents(repository, 1)),
-    usageBefore,
-  );
-  assert.equal(
-    readInteractionContent(repository, retainedCapture),
-    retainedText,
-  );
-  assert.throws(() =>
-    readInteractionContent(repository, observed[2].content.reference),
-  );
+  // The retired Objective is restored as its snapshot only (#1307): its
+  // accounting and captured interactions stay in the archive history at its
+  // recorded commit, which the sealed accounting check above read.
+  assert.notDeepEqual(accountingBefore, []);
+  assert.deepEqual(readAccountingRecords(repository, 1), []);
+  assert.deepEqual(readInteractionMetadata(repository, 1), []);
+  assert.throws(() => readInteractionContent(repository, retainedCapture));
   assert.deepEqual(
     store.readBytes(capturedAssets[0].manifestRef),
     declarationBytes,
@@ -3609,15 +3729,9 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.deepEqual(nextOriginalFields, cancelled);
   for (const original of [...originals, ...accountingOriginals])
     assert.deepEqual(readFileSync(join(state, original.path)), original.bytes);
-  assert.deepEqual(readAccountingRecords(repository, 1), accountingBefore);
-  assert.deepEqual(
-    summarizeDiagnosticUsage(readUsageSummaryEvents(repository, 1)),
-    usageBefore,
-  );
-  assert.equal(
-    readInteractionContent(repository, retainedCapture),
-    retainedText,
-  );
+  // Still a retired snapshot-only record through the rebound archive (#1307).
+  assert.deepEqual(readAccountingRecords(repository, 1), []);
+  assert.throws(() => readInteractionContent(repository, retainedCapture));
   assert.equal(nextRestore.catalog, "ready");
   assert.equal(existsSync(join(state, "memory", "catalog.sqlite")), true);
   assert.deepEqual(readPinnedPlaybook(repository, pin), originalPlaybook);

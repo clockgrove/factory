@@ -841,8 +841,27 @@ function retainedPayload(
   store.readBytes(payload);
   return payload;
 }
+/** Accounting originals are immutable and named by digest: their Objective never changes. */
+const accountingObjectives = new Map<string, number>();
+function accountingObjective(path: string): number {
+  let objective = accountingObjectives.get(path);
+  if (objective === undefined) {
+    const value = JSON.parse(privateBytes(path).toString("utf8")) as {
+      binding?: { objective?: unknown };
+    };
+    objective = Number(value.binding?.objective);
+    accountingObjectives.set(path, objective);
+  }
+  return objective;
+}
+
+/**
+ * Accounting originals for the recovery checkpoint. Records of `retired`
+ * Objectives are archived with their complete evidence and stay out (#1307).
+ */
 export function accountingPersistenceClosure(
   repository: string,
+  retired: ReadonlySet<number> = new Set(),
 ): RecoveryCheckpointClosure {
   for (const pending of [...failed.values()])
     if (pending.record.binding.repository === repository) {
@@ -919,6 +938,16 @@ export function accountingPersistenceClosure(
   }[] = [];
   for (const entry of originals) {
     const source = "source" in entry ? entry.source : undefined;
+    if (
+      retired.size &&
+      retired.has(
+        source
+          ? accountingObjective(source.path)
+          : (entry as { original: { record: AccountingRecord } }).original
+              .record.binding.objective,
+      )
+    )
+      continue;
     const signature =
       source && JSON.stringify(["accounting-original", repository, source]);
     const cached = signature

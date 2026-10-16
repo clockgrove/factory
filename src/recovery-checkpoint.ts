@@ -35,6 +35,11 @@ import {
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
+import {
+  ARCHIVED_EVIDENCE,
+  recordRetirement,
+  terminalContinuation,
+} from "./checkpoint-retention.js";
 import type { ContentRef } from "./contracts.js";
 import {
   checkpointDiagnosticEmitter,
@@ -5897,7 +5902,55 @@ export async function inspectRecoveryCheckpoint(
     },
   };
 }
+/**
+ * After an acknowledgement, record each terminal Objective whose exact snapshot
+ * this checkpoint holds with complete evidence, so later checkpoints can leave
+ * that evidence in the archive history (#1307). Retention is an optimization:
+ * a failure here never affects the acknowledgement.
+ */
+function retireAcknowledgedTerminals(
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+  commitSha: string,
+): void {
+  try {
+    const manifest = JSON.parse(
+      git(paths(config.repository).git, options, [
+        "show",
+        `${commitSha}:checkpoint.json`,
+      ]).toString("utf8"),
+    ) as RecoveryCheckpointManifest;
+    const archived = new Set(
+      manifest.gaps
+        .filter((gap) => gap.availability === ARCHIVED_EVIDENCE)
+        .map((gap) => gap.path),
+    );
+    const store = new LocalContentStore(
+      join(stateRoot(config.repository), "content"),
+    );
+    for (const file of manifest.files) {
+      const match = /^objectives\/([1-9][0-9]*)\/state\.json$/.exec(file.path);
+      if (file.kind !== "continuation" || !match || archived.has(file.path))
+        continue;
+      const bytes = store.readBytes(file.ref);
+      if (terminalContinuation(JSON.parse(bytes.toString("utf8"))))
+        recordRetirement(config.repository, Number(match[1]), bytes, commitSha);
+    }
+  } catch {
+    // The next acknowledged checkpoint records it instead.
+  }
+}
 function acknowledge(
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+  attempt: CheckpointAttempt,
+): RecoveryCheckpointStatus {
+  const acknowledged = acknowledgeAttempt(config, options, attempt);
+  if (options.scope === "private-history")
+    retireAcknowledgedTerminals(config, options, attempt.candidate);
+  return acknowledged;
+}
+function acknowledgeAttempt(
   config: FactoryConfig,
   options: GitPersistenceConfig,
   attempt: CheckpointAttempt,

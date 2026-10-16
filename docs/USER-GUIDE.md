@@ -923,6 +923,12 @@ With `private-history`, critical external actions wait for the saved intent and 
 
 Checkpoints preserve historical controller/provider owner receipts and unknown effects. Fetching them on another machine grants no foreign-process resume, watch consent, service activation, acceptance or replay. Archived queue observations are historical; current membership, order and control are read from the bound Project.
 
+### Retention of finished Objectives
+
+The current checkpoint scales with active work. A terminal Objective (complete with final acceptance and closure, or cancelled) is archived once in full: after a checkpoint holding its exact terminal snapshot with every referenced original is acknowledged, Factory records that commit locally (`recovery/retired/N.json`). Later checkpoints keep only the Objective's snapshot and an `archived` gap; its referenced bodies, worker returns and accounting stay in the archive history at the recorded commit. The first checkpoint after an Objective finishes therefore publishes once more, smaller. A snapshot that changes again is archived in full again before it retires.
+
+Restoring the current checkpoint brings back a retired Objective as its snapshot only, held as an inspection record: status, dependency checks and queue history work, but its evidence bodies and accounting are not installed. Read them from the archive history with `factory persistence inspect` or restore the recorded commit on a separate installation. Local copies of retired evidence stay on disk; retention changes what the archive must carry forward, not what the local installation keeps.
+
 ### Restore on another installation
 
 Prepare the target's ordinary Git checkout and approved private configuration on the destination machine. Keep the same repository, archive binding, providers, model/profile choices, commands, permissions and limits. Only the local checkout and state-root layout may be rebound through restore. No installed packages, ignored runtime files or provider login are recovered from Git; use the supported setup and exact runtime preparation commands when continuation becomes eligible.

@@ -38,6 +38,7 @@ import {
 import { compose, composeIntake, composePlanning } from "./index.js";
 import { RealGitHubGateway } from "./github.js";
 import {
+  ColdPublicationHeld,
   type IntakeAuthorization,
   QUEUE_COMMAND_TIMEOUT_MS,
   withIntakeCommandDeadline,
@@ -60,6 +61,8 @@ import { buildRecoveryCheckpointClosure } from "./recovery-checkpoint-closure.js
 import {
   AwaitingBeforeState,
   awaitingOutcome,
+  EXIT_FAILED,
+  EXIT_NEEDS_DECISION,
   intakeExitCode,
   runOutcome,
 } from "./run-outcome.js";
@@ -1041,5 +1044,10 @@ main().catch((error: unknown) => {
   console.error(
     `Factory: ${error instanceof Error ? error.message : String(error)}`,
   );
-  process.exitCode = 1;
+  // A held archive at service start needs the operator, like a decision.
+  process.exitCode =
+    error instanceof ColdPublicationHeld ||
+    (error instanceof Error && error.cause instanceof ColdPublicationHeld)
+      ? EXIT_NEEDS_DECISION
+      : EXIT_FAILED;
 });

@@ -73,6 +73,7 @@ import {
   repositoryMap,
   writeRepositoryTree,
 } from "./repository-tree.js";
+import { repositoryConventions } from "./repository-conventions.js";
 import {
   assertPlanningContextPacket,
   planningMemorySourceIndices,
@@ -365,6 +366,8 @@ function planningSourceReadGuidance(delivery?: PlanningSourceDelivery): string {
 interface RepositoryView {
   /** Deterministic path map of the base tree (repositoryMap). */
   map: string;
+  /** Exported symbols and duplicated helpers of the base tree (repositoryConventions). */
+  conventions: string;
   /** `repository/` in the working directory holds the exported base files. */
   reads: boolean;
 }
@@ -374,12 +377,17 @@ function compileRepositoryGuidance(
   baseSha: string,
 ): string {
   if (!repository) return "";
-  return repository.reads
-    ? `- Repository: your working directory contains \`${REPOSITORY_DIRECTORY}/\`, a read-only offline export of every tracked regular file of the repository at base ${baseSha}, without Git metadata; the repository map lists every tracked path with its byte size and marks files that are not exported. These read tools are your browsing surface. Before choosing the Work Item split, owned paths, tests and commands, read the existing code, tests, manifests, scripts and documentation the plan depends on, using targeted searches and bounded reads rather than reading every file. Never write files, run builds or tests, or execute repository code.
+  const helpers = repository.conventions
+    ? "- Shared helpers: the repository conventions map lists exported functions, classes, values and types by module, most-imported first, and top-level helpers defined in several files. Use it, with your reads, to name the existing shared helpers, types and error families each item must reuse (rule 5), and give the item that must export a private helper for reuse ownership of its defining file.\n"
+    : "";
+  return `${
+    repository.reads
+      ? `- Repository: your working directory contains \`${REPOSITORY_DIRECTORY}/\`, a read-only offline export of every tracked regular file of the repository at base ${baseSha}, without Git metadata; the repository map lists every tracked path with its byte size and marks files that are not exported. These read tools are your browsing surface. Before choosing the Work Item split, owned paths, tests and commands, read the existing code, tests, manifests, scripts and documentation the plan depends on, using targeted searches and bounded reads rather than reading every file. Never write files, run builds or tests, or execute repository code.
 - Repository citations: a Work Item may cite any exported UTF-8 file you read by its path relative to \`${REPOSITORY_DIRECTORY}/\`, with heading "" for the whole file or one exact Markdown heading. Factory pins those exact base bytes into the Work Item's inputs, so the reviewer and the worker read what you read. Cite only what the worker needs verbatim. Repository citations carry no command authority: a validation command still needs a pinned-source line or a base-observed exact line.
 `
-    : `- Repository: this route has no file tools; the repository map lists every tracked path at base ${baseSha} with its byte size. A Work Item may still cite a repository file by path, with heading "" for the whole file or one exact Markdown heading; Factory pins those exact base bytes into the Work Item's inputs. Repository citations carry no command authority.
-`;
+      : `- Repository: this route has no file tools; the repository map lists every tracked path at base ${baseSha} with its byte size. A Work Item may still cite a repository file by path, with heading "" for the whole file or one exact Markdown heading; Factory pins those exact base bytes into the Work Item's inputs. Repository citations carry no command authority.
+`
+  }${helpers}`;
 }
 
 function reviewRepositoryGuidance(
@@ -391,7 +399,7 @@ function reviewRepositoryGuidance(
     repository.reads
       ? `The read-only directory \`${REPOSITORY_DIRECTORY}/\` in your working directory is an offline export of every tracked regular file at base ${baseSha}, without Git metadata. Read the code, tests, manifests and scripts a judgment depends on (for example whether owned paths cover the files the work must change, or whether a named test or script exists); do not read every file by habit.`
       : `This route has no file tools; the repository map below lists every tracked path at base ${baseSha}.`
-  } Work Item inputSources without an evidenceSpan carry the exact base bytes of a repository file the planner cited; Factory has authenticated them against the base.\n${repository.map}`;
+  } Work Item inputSources without an evidenceSpan carry the exact base bytes of a repository file the planner cited; Factory has authenticated them against the base.\n${repository.map}${repository.conventions}`;
 }
 
 const REVIEW_ARTIFACT_GUIDANCE =
@@ -477,7 +485,7 @@ Examples (illustrations, not command or source authority):
 - An Acceptance bullet that is exactly \`npm test\` already runs on the integrated result. Do not invent a worker just to duplicate it. A requirement for a particular negative control still needs the source-required control and its real evidence.
 - A command defined only by the proposed implementation is not base-observed. Use a complete source-declared command line or leave the missing authority for review. Indices and CI names always come from the current supplied choices.
 `;
-  const evidence = `${repository ? repository.map : ""}Native Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\n${configuredReviewArtifacts(reviewArtifacts)}${inlineSources.length ? `Pinned source bodies. ${bodies.guidance}\n${bodies.text}` : ""}Compiler choices (JSON data):\n`;
+  const evidence = `${repository ? repository.map + repository.conventions : ""}Native Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\n${configuredReviewArtifacts(reviewArtifacts)}${inlineSources.length ? `Pinned source bodies. ${bodies.guidance}\n${bodies.text}` : ""}Compiler choices (JSON data):\n`;
   const rendered = renderPrompt([
     ["instructions", instructions],
     ["evidence", evidence],
@@ -779,6 +787,7 @@ export class StructuredPlanningModel implements PlanningModel {
     if (!this.checkout) return undefined;
     return {
       map: repositoryMap(this.checkout, baseSha),
+      conventions: repositoryConventions(this.checkout, baseSha),
       reads: Boolean(readRoot) || this.transport.repositoryTree === true,
     };
   }

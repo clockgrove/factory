@@ -123,6 +123,7 @@ export async function prepareOpenAIInput(args: {
         sourceDelivery,
       }),
       item: request.item,
+      ...(request.conventions && { conventions: request.conventions }),
       ...(request.handoffPeers && {
         handoffPeers: structuredClone(request.handoffPeers),
       }),

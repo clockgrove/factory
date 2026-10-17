@@ -25,7 +25,7 @@ const MAX_TREE_BYTES = 67_108_864;
 /** Rendered map bound; the remainder is counted, not listed. */
 const MAX_MAP_BYTES = 49_152;
 
-interface TreeEntry {
+export interface TreeEntry {
   path: string;
   mode: string;
   type: string;
@@ -35,7 +35,7 @@ interface TreeEntry {
   note?: string;
 }
 
-function treeEntries(checkout: string, baseSha: string): TreeEntry[] {
+export function treeEntries(checkout: string, baseSha: string): TreeEntry[] {
   if (!/^[a-f0-9]{40,64}$/.test(baseSha))
     throw new Error("Repository tree requires an exact base commit");
   let total = 0;
@@ -113,34 +113,44 @@ export function writeRepositoryTree(
   const files = treeEntries(checkout, baseSha).filter(
     (entry) => entry.exported,
   );
-  const output = files.length
-    ? execFileSync("git", ["-C", checkout, "cat-file", "--batch"], {
-        env: pinnedGitEnvironment(),
-        input: files.map((entry) => `${entry.sha}\n`).join(""),
-        maxBuffer:
-          files.reduce((sum, entry) => sum + entry.size, 0) +
-          files.length * 128 +
-          65_536,
-        stdio: ["pipe", "pipe", "pipe"],
-      })
-    : Buffer.alloc(0);
+  const bodies = readBlobs(checkout, files);
   // Write into a private staging name, then publish the complete tree once.
   const staging = `${root}.partial`;
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { mode: 0o700 });
+  for (const [index, entry] of files.entries()) {
+    const path = resolve(staging, entry.path);
+    if (!path.startsWith(`${staging}${sep}`))
+      throw new Error("Repository path escapes its read directory");
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, bodies[index]!, { flag: "wx", mode: 0o444 });
+  }
+  renameSync(staging, root);
+}
+
+/** The exact bytes of these base-tree blobs, in order, checked against the tree. */
+export function readBlobs(
+  checkout: string,
+  files: readonly TreeEntry[],
+): Buffer[] {
+  if (!files.length) return [];
+  const output = execFileSync("git", ["-C", checkout, "cat-file", "--batch"], {
+    env: pinnedGitEnvironment(),
+    input: files.map((entry) => `${entry.sha}\n`).join(""),
+    maxBuffer:
+      files.reduce((sum, entry) => sum + entry.size, 0) +
+      files.length * 128 +
+      65_536,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   let offset = 0;
-  for (const entry of files) {
+  return files.map((entry) => {
     const newline = output.indexOf(10, offset);
     const header = output.subarray(offset, newline).toString("utf8");
     if (header !== `${entry.sha} blob ${entry.size}`)
       throw new Error("Repository export differs from the base tree");
     const body = output.subarray(newline + 1, newline + 1 + entry.size);
     offset = newline + 1 + entry.size + 1;
-    const path = resolve(staging, entry.path);
-    if (!path.startsWith(`${staging}${sep}`))
-      throw new Error("Repository path escapes its read directory");
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, body, { flag: "wx", mode: 0o444 });
-  }
-  renameSync(staging, root);
+    return body;
+  });
 }

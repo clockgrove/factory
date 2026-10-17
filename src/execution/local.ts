@@ -2273,6 +2273,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
           handoffPeers: structuredClone(request.handoffPeers),
         }),
         ...(request.childAgents && { childAgents: request.childAgents }),
+        ...(!request.discovery &&
+          request.conventions && { conventions: request.conventions }),
         ...(request.discovery &&
           discoveryBody && {
             discovery: {

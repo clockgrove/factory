@@ -852,6 +852,8 @@ export interface ExecutionRequest {
   /** Original accepted citation base, distinct from the integrated execution base. */
   sourceBaseSha?: string;
   baseSha: string;
+  /** Exported symbols and duplicated helpers at baseSha; reference data only. */
+  conventions?: string;
   attemptId?: string;
   sourceAssets?: { binding: SourceAssetBinding; ref: ContentRef }[];
   objectiveBody?: string;
@@ -1051,6 +1053,8 @@ export interface HarnessRequest {
   /** Original accepted source pin and current owned file presentation. */
   sourceBaseSha?: string;
   sourceDelivery?: import("./compiler/source-delivery.js").PlanningSourceDelivery;
+  /** Exported symbols and duplicated helpers at the attempt base; reference data only. */
+  conventions?: string;
   worktree: string;
   attemptId?: string;
   sourceAssets?: {

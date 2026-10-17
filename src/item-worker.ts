@@ -10,6 +10,7 @@ import {
   retainedAdaptiveDispatchContext,
 } from "./adaptive-context.js";
 import { adaptiveWorkflowEnabled } from "./adaptive-workflow.js";
+import { repositoryConventions } from "./compiler/repository-conventions.js";
 import { resolveWorkItemSources } from "./compiler/sources.js";
 import type { FactoryConfig } from "./config.js";
 import type {
@@ -341,6 +342,7 @@ export async function runWorker(
         : {}),
       baseSha,
       sourceBaseSha: state.baseSha,
+      conventions: repositoryConventions(args.config.checkout, baseSha),
       attemptId,
       objectiveBody: args.objectiveBody,
       selectedAssets: selectedInputsForItem(state, item),

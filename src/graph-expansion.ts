@@ -13,6 +13,7 @@ import {
 } from "./discovery.js";
 import { ownsPath, pathsOverlap, validOwnershipPath } from "./ownership.js";
 import { assertWorkItemFields, validateAndOrderGraph } from "./scheduler.js";
+import { record } from "./unknown-fields.js";
 
 /** Complete immutable inputs to one materialization, retained before projection. */
 export interface GraphExpansionInputPacket {
@@ -34,11 +35,6 @@ export interface GraphExpansionMaterialization {
 }
 function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error(`${label} must be an object`);
-  return value as Record<string, unknown>;
 }
 function keys(
   value: Record<string, unknown>,
@@ -73,7 +69,7 @@ export function graphExpansionEnvelopeDigest(
 export function assertGraphExpansionEnvelope(
   value: unknown,
 ): asserts value is GraphExpansionEnvelope {
-  const envelope = object(value, "Expansion envelope");
+  const envelope = record(value, "Expansion envelope");
   keys(
     envelope,
     [
@@ -104,7 +100,7 @@ export function assertGraphExpansionEnvelope(
     throw new Error(
       "Expansion identity, shape or empty semantics are unsupported",
     );
-  const input = object(envelope.input, "Expansion input");
+  const input = record(envelope.input, "Expansion input");
   keys(input, ["producerItemId", "role", "schema"], "Expansion input");
   if (
     typeof input.producerItemId !== "string" ||
@@ -139,7 +135,7 @@ export function assertGraphExpansionEnvelope(
     throw new Error(
       "Expansion selectors must be literal permitted repository paths",
     );
-  const selection = object(envelope.selection, "Expansion selection");
+  const selection = record(envelope.selection, "Expansion selection");
   if (selection.kind === "all-regular-files")
     keys(selection, ["kind"], "Expansion selection");
   else if (selection.kind === "classified") {
@@ -155,10 +151,10 @@ export function assertGraphExpansionEnvelope(
         "Expansion included and excluded classifications overlap",
       );
   } else throw new Error("Expansion selection must be explicit and exhaustive");
-  const batching = object(envelope.batching, "Expansion batching");
+  const batching = record(envelope.batching, "Expansion batching");
   keys(batching, ["maxFilesPerChild"], "Expansion batching");
   positive(batching.maxFilesPerChild, "Expansion batch size");
-  const limits = object(envelope.limits, "Expansion limits");
+  const limits = record(envelope.limits, "Expansion limits");
   keys(limits, ["maxChildren", "maxIterations"], "Expansion limits");
   positive(limits.maxChildren, "Expansion child allowance");
   if (limits.maxIterations !== 1)

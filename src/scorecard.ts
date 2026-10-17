@@ -242,7 +242,7 @@ const observationFields = [
 ] as const;
 
 /** A finite observation selection, never continuation state or execution authority. */
-export interface ScorecardSelection {
+interface ScorecardSelection {
   schemaVersion: 1;
   window: { startedAt: string; endedAt: string };
   comparison?: {

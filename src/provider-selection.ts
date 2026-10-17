@@ -15,7 +15,7 @@ import {
  * Objective's frozen configuration matches no configured provider and several
  * are configured, so the default may not be the provider it ran with.
  */
-export type ProviderSource = "objective" | "flag" | "default" | "unmatched";
+type ProviderSource = "objective" | "flag" | "default" | "unmatched";
 
 export interface SelectedConfig {
   config: FactoryConfig;

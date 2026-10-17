@@ -371,12 +371,6 @@ function transitFault(error: unknown, detail: string): Fault | undefined {
   return undefined;
 }
 /**
- * A completed local worker return is not yet frozen by its collector, so no
- * checkpoint can be published until collection. A collector freezes its own
- * return before it admits; another admission waits for an active collector in
- * any controller process for the repository (#1281, #1285).
- */
-/**
  * The checkpoint is larger than the installation's configured archive limits. They are
  * operational settings outside the configuration digest, so the operator raises them and
  * continues; this is a prerequisite to fix, not a failure (#1306).
@@ -444,6 +438,12 @@ export function onlyCheckpointBoundsExceeded(
   }
   return undefined;
 }
+/**
+ * A completed local worker return is not yet frozen by its collector, so no
+ * checkpoint can be published until collection. A collector freezes its own
+ * return before it admits; another admission waits for an active collector in
+ * any controller process for the repository (#1281, #1285).
+ */
 export class CheckpointCollectionPending extends Error {
   constructor(readonly paths: string[]) {
     super(

@@ -1,7 +1,7 @@
 import { markdownLines } from "./markdown.js";
 
 /** The pinned Objective selects guidance; acceptance and authority stay unchanged. */
-export function qualityCheckpointEnabled(body: string): boolean {
+function qualityCheckpointEnabled(body: string): boolean {
   const lines = markdownLines(body);
   const declarations = lines.flatMap((line, index) =>
     line.heading?.text.toLowerCase() === "quality checkpoint" ? [index] : [],

@@ -88,8 +88,8 @@ export interface ReviewChoiceFinding {
  * fix: the planner can correct the plan within the Objective as written.
  * operator-decision: the correction needs a decision only the operator owns.
  */
-export const GRAPH_FINDING_KINDS = ["fix", "operator-decision"] as const;
-export type GraphFindingKind = (typeof GRAPH_FINDING_KINDS)[number];
+const GRAPH_FINDING_KINDS = ["fix", "operator-decision"] as const;
+type GraphFindingKind = (typeof GRAPH_FINDING_KINDS)[number];
 export interface GraphReviewFinding {
   kind: GraphFindingKind;
   /** Graph items the finding concerns; empty when it concerns the plan as a whole. */
@@ -105,7 +105,7 @@ export interface ResolvedGraphFinding {
   detail: string;
   question: string;
 }
-export class ReviewProtocolError extends Error {
+class ReviewProtocolError extends Error {
   override readonly name = "ReviewProtocolError";
 }
 

@@ -474,7 +474,7 @@ export async function runQaItem(args: {
     args.phases?.release(item.id);
     // Paused: stop quietly; the step's repeat record and wait stay.
     if (error instanceof StepPaused) return;
-    // Decision, config and cancel leave the item in place (contract 2):
+    // Decision, config and cancel leave the item in place (step rule 7):
     // the step saved its wait, and the caller stops or waits.
     const kind = faultOf(error).kind;
     if (kind === "work" || kind === "defect") {

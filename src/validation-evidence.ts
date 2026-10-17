@@ -188,7 +188,7 @@ export function assertRetainedReviewEvidence(
   }
 }
 
-export interface ValidationWorktreeObservation {
+interface ValidationWorktreeObservation {
   treeSha: string;
   /** The owning validator created this checkout before executing this sequence. */
   checkoutPreparation?: {

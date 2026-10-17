@@ -18,12 +18,12 @@ import type {
 import { pinnedGitRaw } from "./process.js";
 import { refuseUnknownFields } from "./unknown-fields.js";
 
-export const MAX_REVIEW_RECEIPT_BYTES = 1024 * 1024;
+const MAX_REVIEW_RECEIPT_BYTES = 1024 * 1024;
 export const MAX_REVIEW_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_REVIEW_IMAGES = 8;
 export const MAX_REVIEW_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024;
-export const MAX_REVIEW_MATCHED_FILES = 256;
-export interface ReviewImageArtifactSelector {
+const MAX_REVIEW_MATCHED_FILES = 256;
+interface ReviewImageArtifactSelector {
   command: string;
   receipt: {
     stdoutPathField: string;
@@ -33,13 +33,13 @@ export interface ReviewImageArtifactSelector {
   image: { file: string; sha256Field: string; maxBytes: number };
   candidate: { file: string; sha256Field: string };
 }
-export interface ReviewTextFileSelector {
+interface ReviewTextFileSelector {
   file: string;
   mediaType: "text/plain" | "application/json";
   maxBytes: number;
 }
 /** Every regular file directly in the located directory whose name matches. */
-export interface ReviewTextMatchSelector {
+interface ReviewTextMatchSelector {
   /** File name with exactly one `*` wildcard, such as `*.json`. */
   pattern: string;
   mediaType: ReviewTextFileSelector["mediaType"];
@@ -49,7 +49,7 @@ export interface ReviewTextMatchSelector {
   maxTotalBytes: number;
   maxFiles: number;
 }
-export interface ReviewTextArtifactSelector {
+interface ReviewTextArtifactSelector {
   command: string;
   text: {
     /** Tracked exact-candidate source declaring this proof responsibility. */
@@ -79,14 +79,14 @@ export interface ReviewImageArtifactEvidence {
   image: { path: string; ref: ContentRef };
   complete: true;
 }
-export interface ReviewTextArtifactEvidence {
+interface ReviewTextArtifactEvidence {
   selectorIndex: number;
   commandIndex: number;
   command: string;
   treeSha: string;
   text: {
     source: { path: string; sha256: string };
-    /** Controller-observed locator facts; absent in historical captures. */
+    /** Controller-observed locator facts; absent when the selector has no locator. */
     locator?: {
       temporaryRoot: string;
       resolvedTemporaryRoot: string;

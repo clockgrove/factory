@@ -12,6 +12,7 @@ import {
   type DiscoveryOutputManifest,
   type DiscoveryProducer,
 } from "./discovery.js";
+import { record } from "./unknown-fields.js";
 
 /** Retained literal facts, not a result-acceptance receipt or new authority. */
 export interface WorkConditionInputPacket {
@@ -35,11 +36,6 @@ export type WorkConditionEvaluation =
 function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error(`${label} must be an object`);
-  return value as Record<string, unknown>;
-}
 function keys(
   value: Record<string, unknown>,
   fields: string[],
@@ -54,7 +50,7 @@ export function workConditionDigest(condition: DeclaredWorkCondition): string {
 export function assertDeclaredWorkCondition(
   value: unknown,
 ): asserts value is DeclaredWorkCondition {
-  const condition = object(value, "Work condition");
+  const condition = record(value, "Work condition");
   keys(
     condition,
     ["schemaVersion", "id", "input", "predicate"],
@@ -66,7 +62,7 @@ export function assertDeclaredWorkCondition(
     !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(condition.id)
   )
     throw new Error("Work condition has an invalid version or stable identity");
-  const input = object(condition.input, "Condition input");
+  const input = record(condition.input, "Condition input");
   keys(input, ["producerItemId", "role", "schema"], "Condition input");
   if (
     typeof input.producerItemId !== "string" ||
@@ -78,7 +74,7 @@ export function assertDeclaredWorkCondition(
     throw new Error(
       "Work condition must select a declared repository discovery output",
     );
-  const predicate = object(condition.predicate, "Condition predicate");
+  const predicate = record(condition.predicate, "Condition predicate");
   if (predicate.kind === "inventory-empty")
     keys(predicate, ["kind"], "Condition predicate");
   else if (predicate.kind === "has-classification") {
@@ -150,7 +146,7 @@ export function assertDeclaredConditions(graph: WorkGraph): void {
   const referenced = new Set<string>();
   for (const item of graph.items) {
     if (item.condition === undefined) continue;
-    const selected = object(item.condition, "Work branch");
+    const selected = record(item.condition, "Work branch");
     keys(selected, ["conditionId", "when"], "Work branch");
     if (
       typeof selected.conditionId !== "string" ||

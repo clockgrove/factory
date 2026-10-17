@@ -3,6 +3,7 @@ import type { ContentRef, ContentStore } from "./contracts.js";
 import { judgedAsWork } from "./fault.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { pinnedGit, pinnedGitRaw } from "./process.js";
+import { record } from "./unknown-fields.js";
 
 /** Discovery is information, never QA proof, source ownership or delivery authority. */
 export interface DiscoverySpecification {
@@ -103,7 +104,7 @@ export function selectDiscoveryOutputFields(
 export function assertDiscoveryOutputManifest(
   value: unknown,
 ): asserts value is DiscoveryOutputManifest {
-  const manifest = object(value, "Discovery manifest");
+  const manifest = record(value, "Discovery manifest");
   keys(
     manifest,
     [
@@ -120,15 +121,15 @@ export function assertDiscoveryOutputManifest(
     ],
     "Discovery manifest",
   );
-  const producer = object(manifest.producer, "Discovery producer");
+  const producer = record(manifest.producer, "Discovery producer");
   keys(
     producer,
     ["objective", "runId", "itemId", "attemptId"],
     "Discovery producer",
   );
-  const source = object(manifest.source, "Discovery source");
+  const source = record(manifest.source, "Discovery source");
   keys(source, ["commitSha", "treeSha", "selectors"], "Discovery source");
-  const body = object(manifest.body, "Discovery content reference");
+  const body = record(manifest.body, "Discovery content reference");
   keys(body, ["digest", "bytes", "mediaType"], "Discovery content reference");
   if (
     manifest.schemaVersion !== 1 ||
@@ -171,12 +172,6 @@ export function assertDiscoveryOutputManifest(
     );
 }
 
-function object(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error(`${label} must be an object`);
-  return value as Record<string, unknown>;
-}
-
 function keys(
   value: Record<string, unknown>,
   expected: string[],
@@ -189,7 +184,7 @@ function keys(
 export function assertDiscoverySpecification(
   value: unknown,
 ): asserts value is DiscoverySpecification {
-  const spec = object(value, "Discovery specification");
+  const spec = record(value, "Discovery specification");
   keys(
     spec,
     ["mode", "selectors", "schema", "role", "completeness", "allowance"],
@@ -211,7 +206,7 @@ export function assertDiscoverySpecification(
     throw new Error(
       "Discovery requires literal read selectors, a supported schema, role and complete output",
     );
-  const allowance = object(spec.allowance, "Discovery allowance");
+  const allowance = record(spec.allowance, "Discovery allowance");
   keys(
     allowance,
     ["maxEntries", "maxBytes", "maxAttempts"],
@@ -289,7 +284,7 @@ async function put(
 export function assertDiscoveryBody(
   value: unknown,
 ): asserts value is DiscoveryBody {
-  const body = object(value, "Discovery body");
+  const body = record(value, "Discovery body");
   keys(body, ["schema", "entries", "failures", "semantic"], "Discovery body");
   if (
     body.schema !== "factory.repository-inventory/v1" ||
@@ -299,13 +294,13 @@ export function assertDiscoveryBody(
     throw new Error("Discovery body has an unsupported schema");
   const paths = new Set<string>();
   for (const value of body.entries) {
-    const entry = object(value, "Discovery entry");
+    const entry = record(value, "Discovery entry");
     keys(
       entry,
       ["path", "mode", "blobSha", "content", "classification"],
       "Discovery entry",
     );
-    const ref = object(entry.content, "Discovery source reference");
+    const ref = record(entry.content, "Discovery source reference");
     keys(ref, ["digest", "bytes", "mediaType"], "Discovery source reference");
     if (
       typeof entry.path !== "string" ||
@@ -331,7 +326,7 @@ export function assertDiscoveryBody(
     paths.add(entry.path);
   }
   for (const value of body.failures) {
-    const failure = object(value, "Discovery failure");
+    const failure = record(value, "Discovery failure");
     keys(failure, ["path", "status", "detail"], "Discovery failure");
     if (
       typeof failure.path !== "string" ||
@@ -347,7 +342,7 @@ export function assertDiscoveryBody(
     paths.add(failure.path);
   }
   if (body.semantic !== undefined) {
-    const semantic = object(body.semantic, "Semantic discovery");
+    const semantic = record(body.semantic, "Semantic discovery");
     keys(semantic, ["status", "detail"], "Semantic discovery");
     if (
       !["complete", "partial", "failed"].includes(String(semantic.status)) ||
@@ -515,7 +510,7 @@ export async function authenticateDiscoveryOutput(args: {
   const observed = new Set<string>();
   let bytes = 0;
   for (const entry of body.entries) {
-    const fields = object(entry, "Discovery entry");
+    const fields = record(entry, "Discovery entry");
     keys(
       fields,
       ["path", "mode", "blobSha", "content", "classification"],
@@ -533,7 +528,7 @@ export async function authenticateDiscoveryOutput(args: {
           !entry.classification.trim()))
     )
       throw new Error("Discovery entry is duplicate, unobserved or mismatched");
-    const ref = object(entry.content, "Discovery source reference");
+    const ref = record(entry.content, "Discovery source reference");
     keys(ref, ["digest", "bytes", "mediaType"], "Discovery source reference");
     const size = Number(pinnedGit(args.checkout, "cat-file", "-s", source.oid));
     if (
@@ -560,7 +555,7 @@ export async function authenticateDiscoveryOutput(args: {
   }
   for (const failure of body.failures) {
     keys(
-      object(failure, "Discovery failure"),
+      record(failure, "Discovery failure"),
       ["path", "status", "detail"],
       "Discovery failure",
     );
@@ -578,7 +573,7 @@ export async function authenticateDiscoveryOutput(args: {
   }
   if (body.semantic) {
     keys(
-      object(body.semantic, "Semantic discovery"),
+      record(body.semantic, "Semantic discovery"),
       ["status", "detail"],
       "Semantic discovery",
     );
@@ -660,7 +655,7 @@ export async function classifyDiscoveryOutput(args: {
       throw new Error(
         "Semantic discovery response exceeds its declared byte allowance",
       );
-    const parsed = object(JSON.parse(args.response), "Semantic response");
+    const parsed = record(JSON.parse(args.response), "Semantic response");
     keys(parsed, ["status", "entries", "detail"], "Semantic response");
     if (
       !["complete", "partial", "failed"].includes(String(parsed.status)) ||
@@ -670,7 +665,7 @@ export async function classifyDiscoveryOutput(args: {
       throw new Error("Semantic discovery response is malformed");
     const seen = new Set<string>();
     for (const value of parsed.entries) {
-      const entry = object(value, "Semantic classification");
+      const entry = record(value, "Semantic classification");
       keys(entry, ["path", "classification"], "Semantic classification");
       const observed = body.entries.find(
         (source) => source.path === entry.path,

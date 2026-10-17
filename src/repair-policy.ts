@@ -12,7 +12,7 @@ export const repairClasses = [
   "planning-choice",
 ] as const;
 export type RepairClass = (typeof repairClasses)[number];
-export interface RepairPolicy {
+interface RepairPolicy {
   perPath: AllowanceConsumption;
 }
 /** Limits on unattended work; each Objective snapshots them when it starts. */
@@ -64,7 +64,7 @@ function assertAllowances(value: unknown, label: string): void {
       throw new Error(`${label}.${key} must be a nonnegative integer`);
   }
 }
-export function validateAutonomy(value: Autonomy): Autonomy {
+function validateAutonomy(value: Autonomy): Autonomy {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("autonomy must be an object");
   onlyKeys(
@@ -227,7 +227,7 @@ export interface RepairCorrection {
   diagnosis: string;
   correction: string;
   actor: string;
-  /** Checked automatic diagnosis input; absent in legacy and operator declarations. */
+  /** Checked automatic diagnosis input; absent in operator declarations and review-finding corrections. */
   readiness?: {
     origin: "checked-model-diagnosis";
     failureEvent: string;
@@ -436,10 +436,7 @@ export function releaseCharge(
     : others;
 }
 /** Corrections of `kind` must be enabled for this Objective. */
-export function assertRepairClass(
-  state: RepairLedger,
-  kind: RepairClass,
-): void {
+function assertRepairClass(state: RepairLedger, kind: RepairClass): void {
   if (!state.autonomy.repairClasses.includes(kind))
     throw new Error(
       `Repair class ${kind} is not enabled; operator decision required`,
@@ -585,7 +582,7 @@ export function archiveAttempt(work: WorkState): WorkRecovery {
  * implementation correction. A planning correction changes the approach, so
  * its attempt starts from the base.
  */
-export function retainedFailedResultContext(
+function retainedFailedResultContext(
   prior: NonNullable<WorkRecovery["history"]>[number] | undefined,
 ): { attemptId: string; commitSha: string; treeSha: string } | undefined {
   const work = prior?.work;

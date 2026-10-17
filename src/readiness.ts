@@ -15,7 +15,7 @@ import {
  * What the preflight found. `document` is the full model-free report; a failing check also
  * names `detail` and `fix`, which setup and run print and stop on.
  */
-export interface Readiness {
+interface Readiness {
   ready: boolean;
   document: { status: string; [key: string]: unknown };
   detail?: string;

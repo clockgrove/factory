@@ -107,7 +107,7 @@ export function selectedLfsReviewEvidence(
   return { sources, textBytes: limit - remaining };
 }
 
-export type ReviewDeliveryObservation =
+type ReviewDeliveryObservation =
   | { kind: "regular" }
   | { kind: "read-only-proof" }
   | {
@@ -411,7 +411,7 @@ export function workItemReviewObservations(
  * materialization commit retains the worker result as its sole parent, so a
  * restart does not require a second receipt or diagnostic history.
  */
-export function workItemMaterializationEvidence(args: {
+function workItemMaterializationEvidence(args: {
   state: FactoryState;
   item: WorkItem;
   checkout: string;
@@ -1606,12 +1606,6 @@ function literalGitPatches(packet: ResultChangePacket): string {
     .join("\n");
 }
 
-/** Same transient current-result text for the prompt and exact citation source. */
-export function gitChangeEvidence(change: string): string {
-  const packet = parseResultChangePacket(change);
-  return `${JSON.stringify(gitChangeMetadata(packet))}\n${literalGitPatches(packet)}`;
-}
-
 /** Exact descriptors and independently bounded file deltas; metadata never proves file contents. */
 export function gitChangeEvidenceSources(
   change: string,
@@ -2535,11 +2529,6 @@ export function workItemReviewEvidence(args: {
     });
   return evidence;
 }
-/**
- * Build final-review authority from supervisor state and exact Git objects.
- * Accepted findings are historical context with their original literal evidence;
- * they never replace independent judgment of the integrated original criteria.
- */
 /** Accepted Work Item review bodies retained by reference, by digest. */
 export async function retainedReviewLiterals(
   state: FactoryState,
@@ -2565,6 +2554,11 @@ export async function retainedReviewLiterals(
   return literals;
 }
 
+/**
+ * Build final-review authority from supervisor state and exact Git objects.
+ * Accepted findings are historical context with their original literal evidence;
+ * they never replace independent judgment of the integrated original criteria.
+ */
 export function objectiveReviewEvidence(args: {
   state: FactoryState;
   checkout: string;

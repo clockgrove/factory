@@ -400,7 +400,7 @@ export function readyItems(
   return admitted;
 }
 
-export interface SchedulingBlocker {
+interface SchedulingBlocker {
   kind:
     | "dependency"
     | "ownership"
@@ -471,10 +471,7 @@ export function pendingItemBlocker(
 }
 
 /** Remaining DAG stages are a proxy; absent duration estimates remain unknown. */
-export function criticalPathValues(
-  graph: WorkGraph,
-  work: Record<string, WorkState>,
-) {
+function criticalPathValues(graph: WorkGraph, work: Record<string, WorkState>) {
   const successors = new Map<string, WorkItem[]>();
   for (const item of graph.items)
     for (const dependency of item.dependencies)

@@ -8,6 +8,7 @@ import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import {
   agentSessionContinuation,
   releaseAgentSessions,
+  settleAbandonedReviewTurns,
 } from "./agent-session.js";
 import { bindPlanningPlaybook, resolvePlan } from "./compiler.js";
 import { objectiveComplete } from "./completion.js";
@@ -636,6 +637,14 @@ async function runObjectiveOwned(
           runtime: () => ({ config, driver: services.driver }),
         },
       ]);
+    // A review the stopped controller left in flight holds no process; this
+    // owner reviews afresh, and the settled turn no longer holds a handoff.
+    if (snapshot) {
+      const stopped = snapshot;
+      settleAbandonedReviewTurns(stopped, () =>
+        saveState(statePath(config.repository, objective), stopped),
+      );
+    }
     queueClaim = await claimProjectQueueRun(
       config,
       services.github,

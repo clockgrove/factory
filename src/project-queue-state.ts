@@ -289,8 +289,17 @@ function assertStoppedClaimState(state: ContinuationState): void {
         data.result === undefined
       );
     };
+    // Execution may end with a collected, ceased or refused worker. The later
+    // pre-delivery steps (validation, review and operator approval) hold its
+    // collected result; delivery's GitHub effects are never handed off.
     const settled = (entry: (typeof work)[number]) =>
-      collected(entry) || ceased(entry) || rejected(entry);
+      entry.step === "execute"
+        ? collected(entry) || ceased(entry) || rejected(entry)
+        : (entry.step === "validate" ||
+            entry.step === "approve-asset" ||
+            entry.step === "approve-result") &&
+          entry.pullRequest === undefined &&
+          collected(entry);
     if (
       state.restoration ||
       state.cancelRequested ||
@@ -305,8 +314,7 @@ function assertStoppedClaimState(state: ContinuationState): void {
         (entry) =>
           (entry.execution && entry.execution.provider !== "local") ||
           entry.status === "published" ||
-          (entry.status === "running" &&
-            (entry.step !== "execute" || !settled(entry))),
+          (entry.status === "running" && !settled(entry)),
       )
     )
       throw new Error(

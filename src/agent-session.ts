@@ -568,6 +568,46 @@ export function agentSessionContinuation(
   return continuation;
 }
 
+/**
+ * A review call that ended without a native outcome (a timeout) leaves its
+ * turn in flight after its adapter settled the local process. No review answer
+ * is recovered from a retained turn, so the next ask starts a fresh
+ * conversation: settle the turn as abandoned, its terminal unknown and its
+ * resources settled. The receipt and its storage remain for later disposal.
+ * Only current-graph scopes settle; any other unsettled owner stays held.
+ */
+export function settleAbandonedReviewTurns(
+  state: ContinuationState,
+  save: () => void,
+  only?: { role: "result-review" | "objective-review"; itemId?: string },
+): void {
+  if (
+    !isExecutionState(state) ||
+    state.restoration ||
+    state.cancelledAt ||
+    state.finalAcceptance ||
+    state.objectiveClosure === "complete"
+  )
+    return;
+  const current = graphDigest(state.graph);
+  for (const ref of Object.values(state.agentSessions ?? {})) {
+    const { role, itemId } = ref.scope;
+    if (
+      (role !== "result-review" && role !== "objective-review") ||
+      (only && (only.role !== role || only.itemId !== itemId)) ||
+      ref.scope.graphDigest !== current ||
+      ref.status !== "in-flight" ||
+      ref.currentTurn?.resources !== "settled" ||
+      ref.currentTurn.terminal !== undefined
+    )
+      continue;
+    agentSessionContinuation(state, role, itemId, save).checkpoint({
+      ...ref,
+      status: "unavailable",
+    });
+  }
+}
+
 /** Exact settled source receipts remain historical; they grant no destination adapter ownership. */
 export function restoredSessionIsHistorical(
   state: ContinuationState,

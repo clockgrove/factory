@@ -22,7 +22,10 @@ import { workerContext } from "./execution/checkpoint.js";
 import { cancelledFault, faultOf, workFault } from "./fault.js";
 import { repeatKey, StepPaused, step } from "./step.js";
 import type { FactoryState } from "./state.js";
-import { agentSessionContinuation } from "./agent-session.js";
+import {
+  agentSessionContinuation,
+  settleAbandonedReviewTurns,
+} from "./agent-session.js";
 import {
   completeObjectiveKnowledge,
   reviewObjectiveKnowledge,
@@ -357,6 +360,11 @@ export function reviewItem(
             save: args.save,
           });
         }
+        // An earlier ask's abandoned turn gives way to a fresh conversation.
+        settleAbandonedReviewTurns(args.state, args.save, {
+          role: "result-review",
+          itemId: args.item.id,
+        });
         return ctx.paid(() =>
           reviewAcceptance({
             ...request,

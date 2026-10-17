@@ -2,7 +2,10 @@ import { workSettled } from "../scheduler.js";
 import { authenticateWorkRouting } from "./routing.js";
 import { createHash, randomUUID } from "node:crypto";
 import { buildAdaptiveContext } from "../adaptive-context.js";
-import { agentSessionContinuation } from "../agent-session.js";
+import {
+  agentSessionContinuation,
+  settleAbandonedReviewTurns,
+} from "../agent-session.js";
 import {
   completeObjectiveKnowledge,
   reviewObjectiveKnowledge,
@@ -411,6 +414,9 @@ export async function finalizeObjective(args: {
         "final-review",
         (context) => {
           const previousInvalid = context.previousInvalid();
+          settleAbandonedReviewTurns(state, () => save(state), {
+            role: "objective-review",
+          });
           return context.paid(() =>
             reviewAcceptance({
               checkpointReturnedEvidence: () => save(state),

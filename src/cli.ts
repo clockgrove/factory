@@ -324,9 +324,16 @@ async function supervisorCommand(args: string[], path: string): Promise<void> {
     } catch (error) {
       // Queue metadata approved under this installation's earlier queue
       // authority waits for the operator's re-authorization (#1305).
-      if (!(error instanceof QueueAuthorityChanged)) throw error;
+      const changed =
+        error instanceof QueueAuthorityChanged
+          ? error
+          : error instanceof Error &&
+              error.cause instanceof QueueAuthorityChanged
+            ? error.cause
+            : undefined;
+      if (!changed) throw error;
       console.error(
-        `Factory: ${error.message}; then start the service with factory supervisor start`,
+        `Factory: ${changed.message}; then start the service with factory supervisor start`,
       );
       process.exitCode = EXIT_NEEDS_DECISION;
       return;

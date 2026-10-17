@@ -146,8 +146,10 @@ export async function workerFilesTree(worktree: string): Promise<string> {
 /**
  * Run the item's declared validation commands on a snapshot of the worktree.
  * The snapshot is a commit of the current files; the controller's validator
- * runs it in a fresh detached checkout, so the worker's files never change.
- * The worker names no command: only the declared ones run.
+ * runs it in a fresh detached checkout with its own empty TMPDIR, so the
+ * worker's files never change and neither its build output nor another
+ * run's temporary files reach the commands. The worker names no command:
+ * only the declared ones run.
  */
 export async function runDeclaredValidation(
   worktree: string,
@@ -199,6 +201,10 @@ export async function runDeclaredValidation(
       undefined,
       undefined,
       false,
+      { commands: [] },
+      [],
+      // Its own empty TMPDIR: no files from earlier or concurrent runs.
+      true,
     );
     return {
       passed: true,

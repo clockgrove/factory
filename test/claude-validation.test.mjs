@@ -54,6 +54,8 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
       "test -f new.txt",
       "test ! -e .factory-inputs",
       "test ! -e .factory-handoff.json",
+      // Each run gets its own empty TMPDIR, as a capture run does.
+      'case "$TMPDIR" in */factory-validation-*) test -z "$(ls -A "$TMPDIR")" ;; *) exit 1 ;; esac',
     ],
     1,
   );

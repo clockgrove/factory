@@ -781,6 +781,54 @@ export function amendmentImplementationEvidence(args: {
   if (identityBytes > budget.remaining) return [];
   budget.remaining -= identityBytes;
   const evidence = [identitySource];
+  // Commands Factory's own validation saw pass, so a review can test a
+  // discovery premise such as "the environment lacks X" against them.
+  const passes = Object.entries(state.work).flatMap(([itemId, work]) =>
+    [
+      work.validation,
+      work.failedValidation && {
+        treeSha: work.failedValidation.evidence.treeSha,
+        commands: work.failedValidation.evidence.commands.filter(
+          (command) => command.passed,
+        ),
+      },
+    ].flatMap((observed) =>
+      observed?.commands.length
+        ? [
+            {
+              itemId,
+              treeSha: observed.treeSha,
+              commands: observed.commands.map(({ index, command }) => ({
+                index,
+                command,
+              })),
+            },
+          ]
+        : [],
+    ),
+  );
+  const passEvidence = (complete: boolean): ResultReviewEvidenceSource => ({
+    origin: "controller",
+    path: "Controller validation passes",
+    complete,
+    content: JSON.stringify({
+      scope:
+        "Commands Factory's own validation ran in a fresh checkout of the named exact tree and observed exit 0. A pass proves only that command's assertion on that tree in Factory's validation environment, not the semantics of other trees.",
+      passes,
+    }),
+  });
+  let receipts = passEvidence(true);
+  while (
+    passes.length &&
+    Buffer.byteLength(JSON.stringify(receipts)) > budget.remaining
+  ) {
+    passes.pop();
+    receipts = passEvidence(false);
+  }
+  if (passes.length) {
+    budget.remaining -= Buffer.byteLength(JSON.stringify(receipts));
+    evidence.push(receipts);
+  }
   const inventory = resultTreeInventory(
     checkout,
     treeSha,

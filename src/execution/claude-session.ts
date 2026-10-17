@@ -33,6 +33,8 @@ export interface ClaudeNativeProcess {
   startTime: string;
   namespace: string;
   uid: number;
+  /** The kernel boot the process ran in; absent from earlier receipts. */
+  boot?: string;
 }
 export interface ClaudeSessionData {
   root: string;
@@ -284,27 +286,43 @@ export function claudeResumeOptions(
       : { sessionId: session.data.nativeSessionId }),
   };
 }
+let kernelBoot: string | undefined;
+/** This kernel boot's identity; it cannot change while this process runs. */
+function currentBoot(): string {
+  kernelBoot ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  return kernelBoot;
+}
+/**
+ * Whether the recorded process may still run. `settled` is a proof that it
+ * and its group ceased: a later boot ended every process of an earlier one,
+ * whatever its namespace; within the recorded namespace, the leader is gone
+ * or its pid now names another process, and no process remains in its group.
+ * `active` is only ever the exact recorded process or its group, so a caller
+ * never signals a process it cannot identify. Anything else is `unknown`.
+ */
 export function claudeProcessDisposition(
   owner: ClaudeNativeProcess | undefined,
 ): "active" | "settled" | "unknown" {
-  if (
-    !owner ||
-    owner.namespace !== readlinkSync("/proc/self/ns/pid") ||
-    owner.uid !== process.getuid?.()
-  )
-    return "unknown";
+  if (!owner || owner.uid !== process.getuid?.()) return "unknown";
+  if (owner.boot !== undefined && owner.boot !== currentBoot())
+    return "settled";
+  if (owner.namespace !== readlinkSync("/proc/self/ns/pid")) return "unknown";
   const current = linuxProcessIdentity(owner.pid);
-  if (
-    current &&
-    (current.startTime !== owner.startTime || current.group !== owner.group)
-  )
-    return "unknown";
-  return processGroupExists(owner.group) ? "active" : "settled";
+  if (current?.startTime === owner.startTime) {
+    // The recorded process itself still runs; outside its group it is unowned.
+    if (current.group !== owner.group) return "unknown";
+    return processGroupExists(owner.group) ? "active" : "settled";
+  }
+  // The leader is gone or its pid is reused. A reused pid's group may be
+  // another owner's, so only an empty group proves cessation.
+  if (processGroupExists(owner.group)) return current ? "unknown" : "active";
+  return "settled";
 }
 export function claudeOwnedSpawn(
   onSpawn: (owner: ClaudeNativeProcess) => void,
 ): NonNullable<Options["spawnClaudeCodeProcess"]> {
   return (options) => {
+    const boot = currentBoot();
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
       env: options.env,
@@ -326,6 +344,7 @@ export function claudeOwnedSpawn(
       startTime: identity.startTime,
       namespace: readlinkSync("/proc/self/ns/pid"),
       uid: process.getuid!(),
+      boot,
     };
     try {
       onSpawn(owner);

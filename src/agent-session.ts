@@ -568,19 +568,62 @@ export function agentSessionContinuation(
   return continuation;
 }
 
+/** The ceased turn's unavailable receipt; the adapter may settle only its resources. */
+function ceasedReceipt(
+  ref: AgentSessionRef,
+  session: AgentSessionRef,
+): AgentSessionRef {
+  if (
+    session.identity !== ref.identity ||
+    session.adapter !== ref.adapter ||
+    session.turn !== ref.turn ||
+    session.currentTurn?.invocationId !== ref.currentTurn?.invocationId ||
+    session.currentTurn?.resources !== "settled" ||
+    session.currentTurn.terminal !== undefined
+  )
+    throw new Error("Ceased agent turn differs from its admitted owner");
+  return { ...session, status: "unavailable" };
+}
+
 /**
- * A review call that ended without a native outcome (a timeout) leaves its
- * turn in flight after its adapter settled the local process. No review answer
- * is recovered from a retained turn, so the next ask starts a fresh
- * conversation: settle the turn as abandoned, its terminal unknown and its
- * resources settled. The receipt and its storage remain for later disposal.
- * Only current-graph scopes settle; any other unsettled owner stays held.
+ * The unavailable receipt for an in-flight turn that ended without a native
+ * outcome, or undefined while one may still arrive: its adapter settled the
+ * local process, or proves that the process a stopped controller left behind
+ * has ceased.
  */
-export function settleAbandonedReviewTurns(
+export async function stoppedTurnReceipt(
+  ref: AgentSessionRef,
+  model: PlanningModel | undefined,
+): Promise<AgentSessionRef | undefined> {
+  if (
+    ref.status !== "in-flight" ||
+    !ref.currentTurn ||
+    ref.currentTurn.terminal !== undefined
+  )
+    return undefined;
+  if (ref.currentTurn.resources === "settled")
+    return { ...ref, status: "unavailable" };
+  const reconciled = await model?.reconcileSession?.(structuredClone(ref));
+  return reconciled?.disposition === "ceased"
+    ? ceasedReceipt(ref, reconciled.session)
+    : undefined;
+}
+
+/**
+ * A review call that ended without a native outcome (a timeout, or a stopped
+ * controller whose process has since ceased) leaves its turn in flight. No
+ * review answer is recovered from a retained turn, so the next ask starts a
+ * fresh conversation: settle the turn as abandoned, its terminal unknown and
+ * its resources settled. The receipt and its storage remain for later
+ * disposal. Only current-graph scopes settle; any other unsettled owner stays
+ * held.
+ */
+export async function settleAbandonedReviewTurns(
   state: ContinuationState,
+  model: PlanningModel | undefined,
   save: () => void,
   only?: { role: "result-review" | "objective-review"; itemId?: string },
-): void {
+): Promise<void> {
   if (
     !isExecutionState(state) ||
     state.restoration ||
@@ -595,27 +638,23 @@ export function settleAbandonedReviewTurns(
     if (
       (role !== "result-review" && role !== "objective-review") ||
       (only && (only.role !== role || only.itemId !== itemId)) ||
-      ref.scope.graphDigest !== current ||
-      ref.status !== "in-flight" ||
-      ref.currentTurn?.resources !== "settled" ||
-      ref.currentTurn.terminal !== undefined
+      ref.scope.graphDigest !== current
     )
       continue;
-    agentSessionContinuation(state, role, itemId, save).checkpoint({
-      ...ref,
-      status: "unavailable",
-    });
+    const receipt = await stoppedTurnReceipt(ref, model);
+    if (receipt)
+      agentSessionContinuation(state, role, itemId, save).checkpoint(receipt);
   }
 }
 
 /**
- * A planning call that ended without a native outcome (an elapsed deadline)
- * leaves its invocation submitted and its turn in flight after its adapter
- * settled the local process. When the adapter cannot authenticate an outcome
- * from the retained turn, settle both as abandoned in one save: the turn
- * becomes unavailable (terminal unknown, resources settled) and the receipt
- * is kept, marked abandoned, so the next call is a fresh invocation in a
- * fresh conversation. During execution the owner is a Work Item diagnosis.
+ * A planning call that ended without a native outcome (an elapsed deadline,
+ * or a stopped controller) leaves its invocation submitted and its turn in
+ * flight. Once its adapter settled the local process or proves it ceased,
+ * and cannot authenticate an outcome from the retained turn, settle both as
+ * abandoned in one save: the turn becomes unavailable (terminal unknown,
+ * resources settled) and the receipt is kept, marked abandoned, so the next
+ * call is a fresh invocation in a fresh conversation. During execution the owner is a Work Item diagnosis.
  * A live or recoverable turn stays held for its owner.
  */
 export async function settleAbandonedPlanningTurn(
@@ -694,17 +733,24 @@ export async function settleAbandonedPlanningTurn(
   if (
     retained?.status !== "in-flight" ||
     retained.currentTurn?.invocationId !== invocationId ||
-    retained.currentTurn.resources !== "settled" ||
     retained.currentTurn.terminal !== undefined
   )
     return;
-  const { disposition } = await model.reconcileSession(
-    structuredClone(retained),
-  );
-  if (disposition !== "unknown") return;
+  // A turn left active is abandoned only once its adapter proves the process
+  // ceased; one its adapter settled, once no outcome can be authenticated.
+  const reconciled = await model.reconcileSession(structuredClone(retained));
+  let receipt: AgentSessionRef;
+  if (reconciled.disposition === "ceased")
+    receipt = ceasedReceipt(retained, reconciled.session);
+  else if (
+    reconciled.disposition === "unknown" &&
+    retained.currentTurn.resources === "settled"
+  )
+    receipt = { ...retained, status: "unavailable" };
+  else return;
   abandon();
   try {
-    session.checkpoint({ ...retained, status: "unavailable" });
+    session.checkpoint(receipt);
   } catch (error) {
     restore();
     throw error;

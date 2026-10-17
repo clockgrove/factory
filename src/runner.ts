@@ -639,13 +639,13 @@ async function runObjectiveOwned(
         },
       ]);
     // A review or planning call the stopped controller left in flight holds
-    // no process; this owner asks afresh, and the settled turn no longer
-    // holds a handoff.
+    // no process once its adapter settled or proves it ceased; this owner
+    // asks afresh, and the settled turn no longer holds a handoff.
     if (snapshot) {
       const stopped = snapshot;
       const save = () =>
         saveState(statePath(config.repository, objective), stopped);
-      settleAbandonedReviewTurns(stopped, save);
+      await settleAbandonedReviewTurns(stopped, services.planningModel, save);
       await settleAbandonedPlanningTurn(stopped, services.planningModel, save);
     }
     queueClaim = await claimProjectQueueRun(

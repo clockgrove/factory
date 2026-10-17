@@ -412,11 +412,16 @@ export async function finalizeObjective(args: {
       objectiveStep(
         state,
         "final-review",
-        (context) => {
+        async (context) => {
           const previousInvalid = context.previousInvalid();
-          settleAbandonedReviewTurns(state, () => save(state), {
-            role: "objective-review",
-          });
+          await settleAbandonedReviewTurns(
+            state,
+            planningModel,
+            () => save(state),
+            {
+              role: "objective-review",
+            },
+          );
           return context.paid(() =>
             reviewAcceptance({
               checkpointReturnedEvidence: () => save(state),

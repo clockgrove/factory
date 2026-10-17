@@ -761,6 +761,15 @@ export interface WorkHandoffNote {
 export type AgentSessionReconciliation =
   | { disposition: "active" | "unknown" }
   | {
+      /**
+       * The adapter proved the turn's recorded process ceased and holds no
+       * outcome for it. `session` is the receipt with its resources settled
+       * and its turn still unknown, for settlement as abandoned.
+       */
+      disposition: "ceased";
+      session: AgentSessionRef;
+    }
+  | {
       disposition: "settled";
       session: AgentSessionRef;
       /** Exact retained final bytes; normal shared decoding/grounding still applies. */

@@ -4,6 +4,8 @@ import {
   agentSessionContinuation,
   releaseAgentSessions,
   settleAbandonedPlanningTurn,
+  settleAbandonedReviewTurns,
+  stoppedTurnReceipt,
 } from "../agent-session.js";
 import { closeCancelledWorkItems } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
@@ -480,25 +482,30 @@ export async function releaseCancelledSessions(
     }
     assertCurrent();
   }
-  // A stopped amendment or Work Item diagnosis turn whose adapter settled its
-  // local process has no outcome left to wait for once the Objective cancels:
-  // it becomes unavailable, then is disposed like any other session.
-  const stopped = isExecutionState(state)
+  // A stopped amendment, Work Item diagnosis or review turn whose adapter
+  // settled its local process, or proves it ceased, has no outcome left to
+  // wait for once the Objective cancels: it becomes unavailable, then is
+  // disposed like any other session. A turn that stays held is refused below.
+  const planningTurn = isExecutionState(state)
     ? Object.values(state.agentSessions ?? {}).find(
-        (ref) =>
-          ref.scope.role === "planning" &&
-          ref.status === "in-flight" &&
-          ref.currentTurn?.resources === "settled" &&
-          ref.currentTurn.terminal === undefined,
+        (ref) => ref.scope.role === "planning" && ref.status === "in-flight",
       )
     : undefined;
+  const stopped =
+    planningTurn &&
+    (await stoppedTurnReceipt(planningTurn, model).catch(() => undefined));
   if (stopped) {
-    agentSessionContinuation(state, "planning", undefined, save).checkpoint({
-      ...structuredClone(stopped),
-      status: "unavailable",
-    });
+    agentSessionContinuation(state, "planning", undefined, save).checkpoint(
+      stopped,
+    );
     assertCurrent();
   }
+  try {
+    await settleAbandonedReviewTurns(state, model, save);
+  } catch {
+    // The turn stays held; disposal below refuses it.
+  }
+  assertCurrent();
   const planning = state.planningRecovery;
   const unresolvedPlanning =
     planning?.phase === "submitted" &&

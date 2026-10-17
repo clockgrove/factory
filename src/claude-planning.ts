@@ -713,6 +713,31 @@ type RequestBaseData = ClaudeOwnedSession["data"] & {
   diagnosis?: true;
 };
 
+/** One Claude planning turn's request. */
+interface ClaudePlanningRun {
+  role: PlanningRole;
+  prompt: string;
+  schema: unknown;
+  invocation: ModelInvocationContext;
+  turn: PlanningTurn;
+  tree?: string;
+  reviewImages?: ReviewImageInput[];
+  session?: AgentSessionContinuation & { currentGraphDigest?: string };
+  continuation?: { base: string; prompt: string };
+  sourcePacket?: string;
+  beforeNativeDispatch?: NonNullable<
+    ModelInvocationContext["beforeProviderDispatch"]
+  >;
+  signal?: AbortSignal;
+  deadlineAt?: string;
+}
+
+/**
+ * Session roots whose turn this controller is still running. Its process can
+ * exit before the turn's outcome is written, so such a turn is never ceased.
+ */
+const runningTurns = new Set<string>();
+
 interface SessionFacts {
   initialized: boolean;
   /** A real model message arrived, not only a runtime-synthesized one. */
@@ -772,8 +797,21 @@ class ClaudePlanningTransport implements PlanningTransport {
     if (!existsSync(join(resolve(this.sessionRoot), ref.identity)))
       return { disposition: "unknown" };
     const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
+    if (runningTurns.has(session.data.root)) return { disposition: "active" };
     const disposition = claudeProcessDisposition(session.data.process);
     if (disposition !== "settled") return { disposition };
+    // Only the controller writes `completed.json`, so a turn without its own
+    // has no outcome left to recover once its process has ceased.
+    const ceased: AgentSessionReconciliation = {
+      disposition: "ceased",
+      session: {
+        ...ref,
+        data: { ...session.data, settled: true },
+        ...(ref.currentTurn && {
+          currentTurn: { ...ref.currentTurn, resources: "settled" },
+        }),
+      },
+    };
     let completed: {
       session: AgentSessionRef;
       response?: string;
@@ -784,7 +822,8 @@ class ClaudePlanningTransport implements PlanningTransport {
     };
     try {
       completed = readClaudePrivate(join(session.data.root, "completed.json"));
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return ceased;
       return { disposition: "unknown" };
     }
     if (
@@ -797,7 +836,7 @@ class ClaudePlanningTransport implements PlanningTransport {
         ref.currentTurn?.requestDigest ||
       completed.session.currentTurn?.deadlineAt !== ref.currentTurn?.deadlineAt
     )
-      return { disposition: "unknown" };
+      return ceased;
     const native = requireClaudeSession(
       this.sessionRoot,
       completed.session,
@@ -870,23 +909,19 @@ class ClaudePlanningTransport implements PlanningTransport {
     };
   }
 
-  async run(args: {
-    role: PlanningRole;
-    prompt: string;
-    schema: unknown;
-    invocation: ModelInvocationContext;
-    turn: PlanningTurn;
-    tree?: string;
-    reviewImages?: ReviewImageInput[];
-    session?: AgentSessionContinuation & { currentGraphDigest?: string };
-    continuation?: { base: string; prompt: string };
-    sourcePacket?: string;
-    beforeNativeDispatch?: NonNullable<
-      ModelInvocationContext["beforeProviderDispatch"]
-    >;
-    signal?: AbortSignal;
-    deadlineAt?: string;
-  }): Promise<void> {
+  async run(args: ClaudePlanningRun): Promise<void> {
+    const running: string[] = [];
+    try {
+      await this.runTurn(args, running);
+    } finally {
+      for (const root of running) runningTurns.delete(root);
+    }
+  }
+
+  private async runTurn(
+    args: ClaudePlanningRun,
+    running: string[],
+  ): Promise<void> {
     if (args.reviewImages?.length) throw unsupportedReviewImages(this.adapter);
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
@@ -930,6 +965,8 @@ class ClaudePlanningTransport implements PlanningTransport {
         this.adapter,
         claudeDigest([selection, this.config, Boolean(args.tree)]),
       );
+      runningTurns.add(owned.data.root);
+      running.push(owned.data.root);
       const data = owned.data as RequestBaseData;
       if (diagnosis) data.diagnosis = true;
       // The conversation holds an earlier complete request with this base:

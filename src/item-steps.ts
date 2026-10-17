@@ -361,7 +361,7 @@ export function reviewItem(
           });
         }
         // An earlier ask's abandoned turn gives way to a fresh conversation.
-        settleAbandonedReviewTurns(args.state, args.save, {
+        await settleAbandonedReviewTurns(args.state, request.model, args.save, {
           role: "result-review",
           itemId: args.item.id,
         });

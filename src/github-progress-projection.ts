@@ -308,7 +308,8 @@ function publicCommand(
   let command = snapshot.nextAction.command;
   const criterion = command.indexOf(" --criterion ");
   if (criterion >= 0 && !includeQuestions) {
-    const rest = command.indexOf(" --outcome ", criterion);
+    // The criterion itself may contain " --outcome "; the real one is last.
+    const rest = command.lastIndexOf(" --outcome ");
     command = `${command.slice(0, criterion)} --criterion "…"${rest >= 0 ? command.slice(rest) : ""}`;
   }
   command = redactDiagnosticDetail(command, secrets);

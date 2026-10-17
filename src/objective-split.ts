@@ -60,13 +60,15 @@ export interface ObjectiveSplit {
   closedAt?: string;
 }
 
-export type ChildDisposition =
-  | "queued"
-  | "waiting-for-dependencies"
-  | "running"
-  | "needs-decision"
-  | "accepted"
-  | "cancelled";
+const CHILD_DISPOSITIONS = [
+  "queued",
+  "waiting-for-dependencies",
+  "running",
+  "needs-decision",
+  "accepted",
+  "cancelled",
+] as const;
+export type ChildDisposition = (typeof CHILD_DISPOSITIONS)[number];
 
 const KEY = /^[a-z][a-z0-9-]{0,63}$/;
 const MAX_CHILDREN = 16;
@@ -353,14 +355,7 @@ export function assertObjectiveSplitRecord(state: PreparationState): void {
     throw new Error("Enqueued children lack their issues");
   if (split.closedAt !== undefined && split.enqueuedAt === undefined)
     throw new Error("A split closes only after its children are enqueued");
-  const dispositions: string[] = [
-    "queued",
-    "waiting-for-dependencies",
-    "running",
-    "needs-decision",
-    "accepted",
-    "cancelled",
-  ];
+  const dispositions: readonly string[] = CHILD_DISPOSITIONS;
   if (
     split.shown !== undefined &&
     (typeof split.shown !== "object" ||

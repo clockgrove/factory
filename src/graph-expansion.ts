@@ -188,10 +188,7 @@ export function assertGraphExpansionEnvelope(
 /** Admission validation also applies to templates that are never executable nodes. */
 export function assertGraphExpansions(
   graph: WorkGraph,
-  options: {
-    executionProfiles?: ExecutionProfileChoices;
-    immutableItemIds?: readonly string[];
-  } = {},
+  options: { executionProfiles?: ExecutionProfileChoices } = {},
 ): void {
   if (graph.expansions === undefined) return;
   if (!Array.isArray(graph.expansions) || !graph.expansions.length)
@@ -359,7 +356,6 @@ export function materializeGraphExpansion(args: {
   manifest: DiscoveryOutputManifest;
   body: DiscoveryBody;
   runId: string;
-  iteration: 1;
   immutableItemIds?: readonly string[];
   executionProfiles?: ExecutionProfileChoices;
 }): GraphExpansionMaterialization {
@@ -376,7 +372,6 @@ export function materializeGraphExpansion(args: {
   assertDiscoveryOutputManifest(manifest);
   const encodedBody = Buffer.from(JSON.stringify(args.body));
   if (
-    args.iteration !== 1 ||
     !args.runId ||
     manifest.producer.runId !== args.runId ||
     manifest.producer.objective !== args.graph.objective ||

@@ -164,7 +164,6 @@ async function importAttachment(
   store: ContentStore,
   binding: SourceAssetBinding,
   objectiveBody: string,
-  tokenProvider: () => string,
 ): Promise<ContentRef> {
   if (
     !recognizedObjectiveAttachment(binding.path) ||
@@ -173,7 +172,7 @@ async function importAttachment(
     throw new Error(
       "Attachment must be a recognized URL in the Objective body",
     );
-  const token = tokenProvider();
+  const token = command("gh", ["auth", "token"]);
   let url = binding.path;
   for (let redirect = 0; redirect < 5; redirect++) {
     const response = await fetch(url, {
@@ -412,19 +411,13 @@ export async function importSourceAssets(
   worktree: string,
   item: WorkItem,
   objectiveBody = "",
-  tokenProvider: () => string = () => command("gh", ["auth", "token"]),
 ): Promise<{ binding: SourceAssetBinding; ref: ContentRef }[]> {
   const result: { binding: SourceAssetBinding; ref: ContentRef }[] = [];
   for (const binding of item.sourceAssets ?? []) {
     const { path } = binding;
     let ref: ContentRef;
     if (binding.kind === "github-attachment") {
-      ref = await importAttachment(
-        store,
-        binding,
-        objectiveBody,
-        tokenProvider,
-      );
+      ref = await importAttachment(store, binding, objectiveBody);
     } else {
       if (binding.kind === "local") {
         if (
@@ -444,6 +437,26 @@ export async function importSourceAssets(
     result.push({ binding, ref });
   }
   return result;
+}
+
+/** The source inputs as a controller capture receipt records them. */
+function captureReceiptInputs(
+  inputs: { binding: SourceAssetBinding; ref: ContentRef }[],
+): NonNullable<AssetCaptureReceipt["inputs"]> {
+  return inputs.map((input) => ({
+    binding: {
+      kind: input.binding.kind ?? "repository",
+      path: input.binding.path,
+      role: input.binding.role,
+      mediaType: input.binding.mediaType,
+      visibility: input.binding.visibility,
+    },
+    ref: {
+      digest: input.ref.digest,
+      bytes: input.ref.bytes,
+      mediaType: input.ref.mediaType,
+    },
+  }));
 }
 
 export async function captureAssetSets(
@@ -553,22 +566,7 @@ export async function captureAssetSets(
   )
     throw workFault("Produced media root is missing or redirected");
   const captured: CapturedAssetSet[] = [];
-  const receiptInputs: NonNullable<AssetCaptureReceipt["inputs"]> = inputs.map(
-    (input) => ({
-      binding: {
-        kind: input.binding.kind ?? "repository",
-        path: input.binding.path,
-        role: input.binding.role,
-        mediaType: input.binding.mediaType,
-        visibility: input.binding.visibility,
-      },
-      ref: {
-        digest: input.ref.digest,
-        bytes: input.ref.bytes,
-        mediaType: input.ref.mediaType,
-      },
-    }),
-  );
+  const receiptInputs = captureReceiptInputs(inputs);
   for (const set of sets) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(set.id) || !set.members.length)
       throw workFault(
@@ -711,22 +709,7 @@ export function assertAssetCaptureReceipt(set: CapturedAssetSet): void {
     receipt.members.length !== set.members.length
   )
     throw new Error("AssetSet controller capture receipt is invalid");
-  const expectedInputs: NonNullable<AssetCaptureReceipt["inputs"]> = (
-    set.inputs ?? []
-  ).map((input) => ({
-    binding: {
-      kind: input.binding.kind ?? "repository",
-      path: input.binding.path,
-      role: input.binding.role,
-      mediaType: input.binding.mediaType,
-      visibility: input.binding.visibility,
-    },
-    ref: {
-      digest: input.ref.digest,
-      bytes: input.ref.bytes,
-      mediaType: input.ref.mediaType,
-    },
-  }));
+  const expectedInputs = captureReceiptInputs(set.inputs ?? []);
   if (
     (receipt.inputs === undefined) !== (expectedInputs.length === 0) ||
     (receipt.inputs !== undefined &&
@@ -1020,11 +1003,7 @@ export function validationLfsMembersForItem(
       visit(dependency);
   };
   visit(item.id);
-  const all = selectedRequiredLfsMembers(
-    state,
-    new Set(state.graph.items.map((entry) => entry.id)),
-  );
-  return all.filter((member) => {
+  return finalValidationLfsMembers(state).filter((member) => {
     if (relevant.has(member.itemId)) return true;
     const expected = Buffer.from(
       `version https://git-lfs.github.com/spec/v1\noid sha256:${member.digest}\nsize ${member.bytes}\n`,
@@ -1071,7 +1050,7 @@ export interface HydrationReceipt {
   passed: true;
 }
 
-export interface SelectedAssetSet {
+interface SelectedAssetSet {
   itemId: string;
   set: CapturedAssetSet;
 }

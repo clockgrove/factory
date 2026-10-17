@@ -5,9 +5,9 @@ import { userInfo } from "node:os";
  * The name recorded on decisions, selections and re-reviews. A container whose UID has no
  * passwd entry has no `userInfo()`, so fall back to `$USER`, then the git identity.
  */
-export function operatorName(lookup: { user?: () => string } = {}): string {
+export function operatorName(): string {
   const attempts: (() => string | undefined)[] = [
-    lookup.user ?? (() => userInfo().username),
+    () => userInfo().username,
     () => process.env.USER || process.env.LOGNAME,
     () =>
       execFileSync("git", ["config", "--get", "user.name"], {

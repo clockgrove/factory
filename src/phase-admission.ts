@@ -153,8 +153,6 @@ export function phaseAdmission(
       return { kind: "completion", detail: "completion phase waiting" };
     return undefined;
   };
-  const reason = (id: string, phase: ResourcePhase): string | undefined =>
-    blocker(id, phase)?.detail;
   const release = (id: string) => {
     delete state.work[id]!.phaseReservation;
     delete state.work[id]!.requestedPhase;
@@ -203,7 +201,6 @@ export function phaseAdmission(
     notify();
   };
   return {
-    reason,
     blocker,
     slotBlocker,
     reserve,

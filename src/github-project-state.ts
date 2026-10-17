@@ -1,4 +1,4 @@
-export const PROJECT_PHASES = [
+const PROJECT_PHASES = [
   "planning",
   "running",
   "review",
@@ -16,7 +16,7 @@ export interface GitHubProjectStatusConfig {
   factoryManagedField: true;
   options: Record<ProjectPhase, string>;
 }
-export interface ProjectStatusIntent {
+interface ProjectStatusIntent {
   requestId: string;
   repository: string;
   objective: number;
@@ -272,7 +272,7 @@ export function assertGitHubProjectStatusProjection(
  * Default Project Status options, matched by name without case: the first listed name the
  * field has wins. The later names fit GitHub's default Todo / In Progress / Done board.
  */
-export const STATUS_OPTION_NAMES: Record<ProjectPhase, readonly string[]> = {
+const STATUS_OPTION_NAMES: Record<ProjectPhase, readonly string[]> = {
   planning: ["Planning", "In Progress"],
   running: ["Running", "In Progress"],
   review: ["In Review", "Review", "In Progress"],

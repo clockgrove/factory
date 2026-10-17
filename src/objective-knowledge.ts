@@ -179,7 +179,7 @@ function handoffError(problems: readonly string[]): Error {
 }
 
 /** Reject malformed optional data; the controller never repairs model claims. */
-export function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
+function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
   if (!isRecord(value))
     throw handoffError(["the manifest must be an object with a notes array"]);
   const problems = keyProblems(value, ["notes"], []);

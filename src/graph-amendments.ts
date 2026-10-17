@@ -26,10 +26,9 @@ import {
   releaseCharge,
 } from "./repair-policy.js";
 
-export { replacementRefusal } from "./amendment-admission.js";
-
 import { createHash, randomUUID } from "node:crypto";
 import { graphProjectionControl } from "./graph-projection-control.js";
+import { prerequisitesDigest } from "./native-prerequisite-evidence.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   intakeRefusal,
@@ -114,13 +113,7 @@ export interface PendingAmendment {
   id: string;
   proposal: AmendmentProposal;
   /** Last completed phase; a restart repeats the next call. */
-  phase:
-    | "ready"
-    | "compiled"
-    | "reviewed"
-    | "projected"
-    | "rejected"
-    | "backlog";
+  phase: "ready" | "compiled" | "reviewed" | "projected" | "rejected";
   graph?: WorkGraph;
   planningInvocation?: {
     id: string;
@@ -339,14 +332,9 @@ export function assertGraphRevisions(state: FactoryState): void {
     assertDiscovery(pending.proposal);
     if (
       !pending.id ||
-      ![
-        "ready",
-        "compiled",
-        "reviewed",
-        "projected",
-        "rejected",
-        "backlog",
-      ].includes(pending.phase) ||
+      !["ready", "compiled", "reviewed", "projected", "rejected"].includes(
+        pending.phase,
+      ) ||
       pending.proposal.expectedGraphDigest !== graphDigest(state.graph)
     )
       throw new Error("Pending amendment has stale graph identity");
@@ -444,9 +432,7 @@ export function assertGraphRevisions(state: FactoryState): void {
   // refused at its question gave its charge back (#1296).
   const started = [
     ...(state.rejectedAmendments ?? []),
-    ...(pending && !["ready", "backlog"].includes(pending.phase)
-      ? [pending]
-      : []),
+    ...(pending && pending.phase !== "ready" ? [pending] : []),
   ].filter((entry) => entry.rejectionStage !== "decision");
   const charged = Object.keys(state.charges ?? {}).filter((event) =>
     event.startsWith(objectiveEvent("amend", "")),
@@ -489,7 +475,7 @@ function admitAdvancedAmendmentFormat(
 export function submitAmendment(
   state: FactoryState,
   proposal: AmendmentProposal,
-): PendingAmendment {
+): PendingAmendment | (Omit<PendingAmendment, "phase"> & { phase: "backlog" }) {
   if (state.pendingExpansion)
     throw new Error(
       "A deterministic expansion already owns the next graph transition; preserve its exact projection before proposing an amendment",
@@ -752,7 +738,7 @@ function reattemptedItem(
 
 export function amendmentBlocksDispatch(state: FactoryState): boolean {
   return (
-    (!!state.pendingAmendment && state.pendingAmendment.phase !== "backlog") ||
+    !!state.pendingAmendment ||
     Object.values(state.work).some(
       (work) =>
         work.discovery?.scope === "in-scope" && !work.discoveryDisposition,
@@ -760,7 +746,7 @@ export function amendmentBlocksDispatch(state: FactoryState): boolean {
   );
 }
 
-export function validateAmendment(
+function validateAmendment(
   state: FactoryState,
   graph: WorkGraph,
   config: FactoryConfig,
@@ -911,7 +897,7 @@ function rejectionWait(pending: PendingAmendment): Error {
 }
 
 /** Native originals the planner's question-asking compilations retained. */
-export function amendmentDecisionReturns(original: object): ContentRef[] {
+function amendmentDecisionReturns(original: object): ContentRef[] {
   const decisions =
     "decisions" in original
       ? (original as PendingAmendment).decisions
@@ -987,11 +973,7 @@ export function applyPendingAmendment(
     { scope: "objective", name: "amend", paid: true },
     async (context) => {
       selectWorkerAmendment(args.state);
-      if (
-        !args.state.pendingAmendment ||
-        args.state.pendingAmendment.phase === "backlog"
-      )
-        return false;
+      if (!args.state.pendingAmendment) return false;
       // An unanswered planner question holds the amendment: asking again
       // needs no planner admission, charge or model call (#1296).
       const open = args.state.pendingAmendment.decisions?.at(-1);
@@ -1149,7 +1131,7 @@ async function advanceAmendment(args: {
 }): Promise<boolean> {
   const { state, config, save } = args;
   const pending = state.pendingAmendment;
-  if (!pending || pending.phase === "backlog") return false;
+  if (!pending) return false;
 
   if (
     Object.values(state.work).some(
@@ -1267,9 +1249,7 @@ async function advanceAmendment(args: {
       // Reobserve the original sources against the immutable admission facts
       // and their activation digest; never change them during an amendment.
       const current = await observePrerequisites();
-      const observed = current
-        ? createHash("sha256").update(JSON.stringify(current)).digest("hex")
-        : undefined;
+      const observed = current ? prerequisitesDigest(current) : undefined;
       if (
         observed !== state.prerequisitesDigest ||
         (state.prerequisites !== undefined &&

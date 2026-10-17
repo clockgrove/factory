@@ -226,7 +226,6 @@ async function materialization(
     manifest,
     body,
     runId: state.runId,
-    iteration: 1,
     immutableItemIds,
     executionProfiles: executionProfileChoices(config),
   });

@@ -23,7 +23,6 @@ import {
 } from "./compiler.js";
 import {
   type FactoryConfig,
-  configPath,
   factoryConfigDigest,
   stateRoot,
   validateTarget,
@@ -36,7 +35,7 @@ import type {
 import { LocalContentStore } from "./content/local.js";
 import { failedWithoutProviderEvidence } from "./compiler/observation.js";
 import { DiagnosticEmitter } from "./diagnostics.js";
-import { serviceLoginSecrets } from "./provider-credentials.js";
+import { secrets } from "./learning.js";
 import {
   awaitCheckpointAdmission,
   markCheckpointDirty,
@@ -1094,12 +1093,7 @@ async function generate(
   const diagnostics = new DiagnosticEmitter(
     config.repository,
     0,
-    [
-      ...config.policy.allowedSecretNames.flatMap((name) =>
-        process.env[name] ? [process.env[name]!] : [],
-      ),
-      ...serviceLoginSecrets(),
-    ],
+    secrets(config),
     config.capture,
     factoryConfigDigest(config),
   );
@@ -1509,7 +1503,7 @@ async function publish(
 async function proposeCommand(
   config: FactoryConfig,
   args: string[],
-  configuration = configPath(),
+  configuration: string,
 ): Promise<void> {
   validateTarget(config.repository, config.checkout);
   if (
@@ -1563,7 +1557,7 @@ async function proposeCommand(
 export async function runProposeCommand(
   config: FactoryConfig,
   args: string[],
-  configuration = configPath(),
+  configuration: string,
 ): Promise<void> {
   return withRecoveryCheckpointScope(
     {

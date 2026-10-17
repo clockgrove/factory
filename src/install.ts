@@ -17,7 +17,7 @@ import {
 } from "./config.js";
 
 /** The provider name setup writes: --provider, or the planning provider's short name. */
-export function setupProviderName(args: string[]): string {
+function setupProviderName(args: string[]): string {
   return (
     option(args, "provider") ??
     (option(args, "planning") === "claude-agent-sdk" ? "claude" : "codex")

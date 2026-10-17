@@ -167,9 +167,11 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     );
   if (retained.coordinator?.cancelError)
     blockers.push("Owned-resource cancellation remains unresolved.");
-  if (retained.coordinator?.mode === "paused")
+  // A finished Objective's last control mode blocks nothing (#1429).
+  const finished = ["complete", "cancelled"].includes(snapshot.phase);
+  if (!finished && retained.coordinator?.mode === "paused")
     blockers.push("The coordinator is paused.");
-  if (retained.coordinator?.mode === "draining")
+  if (!finished && retained.coordinator?.mode === "draining")
     blockers.push("The coordinator is draining owned work.");
   const command = publicCommand(
     snapshot,

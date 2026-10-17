@@ -94,31 +94,48 @@ export class GitFailure extends Error {
 export interface GitTraceFacts {
   /** Format strings of git's `error` trace2 events, from git and its helpers. */
   errors: string[];
-  /** The last final HTTP status the transport received. */
+  /** The final HTTP status of the last answered request, once all are answered. */
   httpStatus?: number;
-  /** A request was sent after the last response and never answered. */
+  /** A request was sent and never answered. */
   unanswered: boolean;
 }
+
+/** Where trace directories live: `factory-git-<pid>-<start time>-<random>`. */
+const TRACE_PREFIX = "factory-git-";
 
 /**
  * Trace files a remote command writes, read once it ends. Git reports why a
  * transfer failed as structure only in its traces: trace2 `error` events carry
- * each message's format string (git's own source text, since Factory pins the
- * C locale), and the curl trace (git) or Git LFS's trace carries every HTTP
- * request and status line. The directory is private and removed after the
- * read; the curl trace omits bodies and redacts credentials, and only request
- * and status lines are read.
+ * each message's format string (git's own source text, since Factory pins
+ * LC_MESSAGES=C), and the curl trace (git) or Git LFS's trace carries every
+ * HTTP request and status line. Only request and status lines are read.
+ *
+ * The traces can hold what a URL or header carries: the curl trace omits
+ * bodies and redacts Authorization and cookie headers, but not a credential
+ * inside a URL, which also appears in trace2's child arguments. So a command
+ * naming a URL with userinfo is not traced, and origin bindings refuse such
+ * URLs (see remoteRepository). The directory is private to this user, named
+ * for the owning process, and removed after the read; removeStaleGitTraces
+ * removes those of processes that died first.
  */
 export class GitTraces {
-  private readonly directory = mkdtempSync(join(tmpdir(), "factory-git-"));
-  private constructor(private readonly lfs: boolean) {}
+  private readonly directory: string;
+  private constructor(private readonly lfs: boolean) {
+    const { pid, startTime } = ownIdentity();
+    this.directory = mkdtempSync(
+      join(tmpdir(), `${TRACE_PREFIX}${pid}-${startTime}-`),
+    );
+  }
 
-  /** Traces for a remote command; other commands have none. */
+  /**
+   * Traces for a remote command. Other commands, and any naming an HTTP URL
+   * with userinfo (a credential the traces would record), have none.
+   */
   static open(args: string[]): GitTraces | undefined {
     const subcommand = gitSubcommand(args);
-    return GIT_REMOTE.has(subcommand)
-      ? new GitTraces(subcommand.startsWith("lfs "))
-      : undefined;
+    if (!GIT_REMOTE.has(subcommand)) return undefined;
+    if (args.some((arg) => /^https?:\/\/[^/]*@/i.test(arg))) return undefined;
+    return new GitTraces(subcommand.startsWith("lfs "));
   }
 
   env(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -161,17 +178,26 @@ export class GitTraces {
           /=> Send header: [A-Z]+ \S+ HTTP\/[\d.]+$/,
           /<= Recv header: HTTP\/[\d.]+ (\d{3})\b/,
         ];
+    // Requests and final answers are counted, since Git LFS transfers
+    // concurrently. A 401 challenge is normally followed by an authenticated
+    // request; if that one goes unanswered, the failure is in transit.
+    let requests = 0;
+    let answers = 0;
     let httpStatus: number | undefined;
-    let unanswered = false;
     for (const line of read(this.lfs ? "lfs" : "curl")) {
       const status = Number(response.exec(line)?.[1]);
       // An informational (1xx) status does not answer the request.
       if (status >= 200) {
+        answers++;
         httpStatus = status;
-        unanswered = false;
-      } else if (request.test(line)) unanswered = true;
+      } else if (request.test(line)) requests++;
     }
-    return { errors, unanswered, ...(httpStatus && { httpStatus }) };
+    const unanswered = requests > answers;
+    return {
+      errors,
+      unanswered,
+      ...(!unanswered && httpStatus && { httpStatus }),
+    };
   }
 
   close(): void {
@@ -205,7 +231,6 @@ const IN_TRANSIT = new Set([
   "unable to access '%s': %s",
   "RPC failed; %s",
   "the remote end hung up unexpectedly",
-  "unexpected disconnect while reading sideband packet",
   "early EOF",
 ]);
 /**
@@ -218,6 +243,49 @@ const INITIAL_CONTACT = new Set([
   "Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.",
   "the remote end hung up upon initial contact",
 ]);
+
+/** Local commands that lock the index or refs, and die when they cannot. */
+const LOCKING = new Set([
+  "add",
+  "rm",
+  "mv",
+  "commit",
+  "reset",
+  "checkout",
+  "switch",
+  "restore",
+  "read-tree",
+  "update-index",
+  "update-ref",
+  "symbolic-ref",
+  "merge",
+  "cherry-pick",
+  "revert",
+  "rebase",
+  "stash",
+  "tag",
+  "branch",
+  "worktree",
+  "pack-refs",
+  "apply",
+]);
+
+/**
+ * Remove trace directories (see GitTraces) that this user's processes left
+ * when they died before removing them. A live process's directories stay.
+ */
+export function removeStaleGitTraces(): void {
+  const uid = process.getuid?.();
+  for (const name of readdirSync(tmpdir())) {
+    const owner = new RegExp(`^${TRACE_PREFIX}(\\d+)-(\\d+)-`).exec(name);
+    if (!owner) continue;
+    const path = join(tmpdir(), name);
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (!stat?.isDirectory() || stat.uid !== uid) continue;
+    if (processAlive({ pid: Number(owner[1]), startTime: owner[2]! })) continue;
+    rmSync(path, { recursive: true, force: true });
+  }
+}
 
 /** A lock file another git process holds in `directory`'s repository. */
 function heldGitLock(directory: string): string | undefined {
@@ -239,9 +307,7 @@ function heldGitLock(directory: string): string | undefined {
   const candidates = [
     join(gitDir, "index.lock"),
     join(gitDir, "HEAD.lock"),
-    ...["packed-refs.lock", "config.lock", "shallow.lock"].map((name) =>
-      join(commonDir, name),
-    ),
+    join(commonDir, "packed-refs.lock"),
   ];
   try {
     for (const name of readdirSync(join(commonDir, "refs"), {
@@ -339,12 +405,18 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
       detail: "Git LFS is not installed on the controller host",
       fix: "Install Git LFS, then `factory run`",
     };
-  // Another git process holds a repository lock; it releases it shortly.
-  // Git dies (exit 128) when it cannot take a lock; Factory's fetches lock
-  // only their own private ref (see fetchHead).
-  if (error.status === 128 && heldGitLock(error.directory))
-    return transient(`git ${subcommand} found the repository locked`, false);
-  if (!GIT_REMOTE.has(subcommand)) return undefined;
+  if (!GIT_REMOTE.has(subcommand)) {
+    // Another git process holds a lock this command needed; it releases it
+    // shortly. Git dies (exit 128) when it cannot take a lock. A lock left by
+    // a killed process stays, so the detail names it for the operator.
+    const lock =
+      LOCKING.has(subcommand) && error.status === 128
+        ? heldGitLock(error.directory)
+        : undefined;
+    return lock
+      ? transient(`git ${subcommand} found ${lock} held`, false)
+      : undefined;
+  }
   const push = subcommand === "push" || subcommand === "lfs push";
   const refused = pushedRefs(error.stdout).find((ref) => ref.flag === "!");
   if (refused?.summary === "[remote failure]")
@@ -365,19 +437,20 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
   // checks it with ls-remote (see pushBranch).
   if (pushRefusal(error)) return undefined;
   const { errors, httpStatus, unanswered } = error.trace;
+  if (
+    unanswered ||
+    httpStatus === 408 ||
+    httpStatus === 429 ||
+    (httpStatus !== undefined && httpStatus >= 500)
+  )
+    return transient(`git ${subcommand} failed in transit`, push);
   if (httpStatus === 401 || httpStatus === 403 || httpStatus === 404)
     return {
       kind: "config",
       detail: `git ${subcommand} was refused credentials or access (HTTP ${httpStatus})`,
       fix: "Check `gh auth status` and the origin remote's credentials, then `factory run`",
     };
-  if (
-    httpStatus === 408 ||
-    httpStatus === 429 ||
-    (httpStatus !== undefined && httpStatus >= 500) ||
-    unanswered ||
-    errors.some((format) => IN_TRANSIT.has(format))
-  )
+  if (errors.some((format) => IN_TRANSIT.has(format)))
     return transient(`git ${subcommand} failed in transit`, push);
   if (errors.some((format) => INITIAL_CONTACT.has(format)))
     return transient(
@@ -1020,12 +1093,13 @@ function factoryGit(
       env = withGitConfig(env, [["protocol.file.allow", "never"]]);
     assertBoundOrigin(directory, args, env);
   }
-  // Git's messages and trace2 format strings follow the locale; pin git's own
-  // wording so what Factory reads of them (see gitFault) cannot vary.
-  const { LANGUAGE: _, ...unlocalized } = env;
+  // Git's messages and trace2 format strings follow the message locale; pin
+  // git's own wording so what Factory reads of them (see gitFault) cannot
+  // vary. LC_ALL and LANGUAGE would override LC_MESSAGES.
+  const { LANGUAGE: _language, LC_ALL: _all, ...unlocalized } = env;
   return {
     args: ["-C", directory, ...withoutDiffPrograms(args)],
-    env: { ...unlocalized, LC_ALL: "C" },
+    env: { ...unlocalized, LC_MESSAGES: "C" },
   };
 }
 /** A stalled transfer must not hold the repository lock indefinitely. */

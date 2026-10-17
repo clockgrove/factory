@@ -18,8 +18,14 @@ export function remoteRepository(remote: string): string | undefined {
   if (scp) return `${scp[1]}/${scp[2]}`.toLowerCase();
   try {
     const url = new URL(remote);
+    // A credential in the URL would reach logs and traces; HTTPS
+    // credentials come from a credential helper.
     const https =
-      url.protocol === "https:" && url.hostname === "github.com" && !url.port;
+      url.protocol === "https:" &&
+      url.hostname === "github.com" &&
+      !url.port &&
+      !url.username &&
+      !url.password;
     const ssh =
       url.protocol === "ssh:" &&
       url.username === "git" &&
@@ -66,7 +72,7 @@ export function originRepositories(
   const repositories = output.split("\n").map(remoteRepository);
   if (repositories.some((repository) => !repository))
     throw new Error(
-      `Origin ${direction} URL is not a supported GitHub repository URL; use the target repository's HTTPS or SSH clone URL`,
+      `Origin ${direction} URL is not a supported GitHub repository URL; use the target repository's HTTPS clone URL without embedded credentials (with a credential helper such as \`gh auth setup-git\`) or its SSH clone URL`,
     );
   return repositories as string[];
 }

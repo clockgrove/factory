@@ -78,6 +78,7 @@ import {
   currentProcessSignal,
   linuxProcessIdentity,
   pinnedGit,
+  removeStaleGitTraces,
   withProcessCancellation,
 } from "./process.js";
 import {
@@ -696,6 +697,7 @@ async function runObjectiveOwned(
   let snapshot: ContinuationState | undefined;
   let queueClaim: QueueOwnerClaim | undefined;
   try {
+    removeStaleGitTraces();
     assertRestoredInstallationDispatchReady(config);
     snapshot = readContinuation(config.repository, objective);
     if (snapshot) assertRestoredContinuationReady(snapshot, config);

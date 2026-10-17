@@ -339,9 +339,10 @@ export class CheckpointAdmissionFailure extends Error {
       this.stack += `\nCaused by: ${cause.stack}`;
     this.knownNotDispatched = boundary === "before-effect";
     // A configured archive limit keeps its own prerequisite and fix (#1306).
-    // A read that failed in transit is waited out (#1384): it sent nothing,
-    // and the next admission settles any unconfirmed push by exact remote
-    // observation before it publishes again.
+    // A read that failed in transit (#1384), or a pushed candidate that the
+    // read after it does not show yet (#1445), is waited out: the next
+    // admission settles any unconfirmed push by exact remote observation
+    // before it publishes again.
     attachFault(
       this,
       onlyCheckpointBoundsExceeded(cause)?.fault ??
@@ -353,13 +354,18 @@ export class CheckpointAdmissionFailure extends Error {
     );
   }
 }
-/** A transient fault when only archive reads that failed in transit caused this error. */
+/**
+ * A transient fault when only archive reads that failed in transit, or a push
+ * not yet visible to the read after it, caused this error.
+ */
 function transitFault(error: unknown, detail: string): Fault | undefined {
   for (
     let current: unknown = error, depth = 0;
     current instanceof Error && depth < 8;
     current = current.cause, depth++
   ) {
+    if (current instanceof CheckpointPushUnobserved)
+      return transient(detail, false);
     if (current instanceof ArchiveTransportFailure)
       return current.transient ? transient(detail, false) : undefined;
     if (current instanceof AggregateError)
@@ -672,6 +678,17 @@ class CheckpointCommitAbsent extends Error {
     super(
       `Checkpoint commit ${commit} is not in the remote archive (tip ${remoteTip})`,
     );
+  }
+}
+/**
+ * The push reported success, but the independent read after it does not show
+ * the candidate yet: a remote's reads can lag its writes. The attempt stays
+ * unconfirmed, and the next admission settles it by exact remote observation
+ * (#1301), so this is waited out, never held (#1445).
+ */
+class CheckpointPushUnobserved extends Error {
+  constructor(absent: CheckpointCommitAbsent) {
+    super(absent.message, { cause: absent });
   }
 }
 /**
@@ -7086,7 +7103,9 @@ async function publishCheckpoint(
         submittedObservation.complete();
       } catch (error) {
         submittedObservation.fail(error);
-        throw error;
+        throw error instanceof CheckpointCommitAbsent
+          ? new CheckpointPushUnobserved(error)
+          : error;
       }
       if (verified.payloadDigest !== attempt.payloadDigest)
         throw new Error(

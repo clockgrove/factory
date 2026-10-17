@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -8,8 +9,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { LocalContentStore } from "../dist/content/local.js";
 import {
   checkWorkHandoff,
   runDeclaredValidation,
@@ -28,7 +30,33 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   );
   execFileSync("git", ["init", "-q", worktree]);
   writeFileSync(join(worktree, "a.txt"), "original\n");
-  execFileSync("git", ["-C", worktree, "add", "a.txt"]);
+  // A dependency's selected LFS member: the tree holds only its pointer.
+  const asset = Buffer.from("selected asset bytes\n");
+  const member = {
+    itemId: "dependency",
+    setId: "set",
+    role: "image",
+    destination: "asset.bin",
+    digest: createHash("sha256").update(asset).digest("hex"),
+    bytes: asset.length,
+    mediaType: "application/octet-stream",
+  };
+  writeFileSync(
+    join(worktree, ".gitattributes"),
+    "asset.bin filter=lfs diff=lfs merge=lfs -text\n",
+  );
+  writeFileSync(
+    join(worktree, "asset.bin"),
+    `version https://git-lfs.github.com/spec/v1\noid sha256:${member.digest}\nsize ${member.bytes}\n`,
+  );
+  execFileSync("git", [
+    "-C",
+    worktree,
+    "add",
+    "a.txt",
+    ".gitattributes",
+    "asset.bin",
+  ]);
   execFileSync("git", [
     "-C",
     worktree,
@@ -68,6 +96,20 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   );
   assert.equal(failed.passed, false);
   assert.match(failed.text, /marker-output/);
+  // The controller-staged member's bytes are restored by digest, as
+  // controller validation restores them; without them the pointer remains.
+  const store = join(dirname(worktree), "staged-lfs");
+  new LocalContentStore(store).putBytes(asset, member);
+  const restore = ["grep -qx 'selected asset bytes' asset.bin"];
+  const restored = await runDeclaredValidation(worktree, restore, 3, {
+    members: [member],
+    store,
+  });
+  assert.equal(restored.passed, true, restored.text);
+  assert.equal(
+    (await runDeclaredValidation(worktree, restore, 4)).passed,
+    false,
+  );
   assert.equal(status(worktree), before);
   // An edit after the passing run leaves the final files unvalidated.
   writeFileSync(join(worktree, "new.txt"), "edited\n");

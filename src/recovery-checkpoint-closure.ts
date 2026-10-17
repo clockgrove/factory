@@ -380,7 +380,10 @@ function continuationReferences(value: unknown): ContinuationReferences & {
     );
     for (const asset of entry.sourceAssets ?? []) add(asset.ref);
     for (const asset of entry.selectedAssets ?? []) add(asset.ref);
-    for (const member of entry.environmentReadiness?.lfsMembers ?? [])
+    for (const member of [
+      ...(entry.environmentReadiness?.lfsMembers ?? []),
+      ...(entry.validationLfsMembers ?? []),
+    ])
       add({
         digest: member.digest,
         bytes: member.bytes,

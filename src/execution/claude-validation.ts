@@ -1,8 +1,9 @@
 import { rm } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { McpServerStatus } from "@anthropic-ai/claude-agent-sdk";
 import { validateToolConfigName } from "../config.js";
+import { LocalContentStore } from "../content/local.js";
 import {
   hasUnresolvedSubprocesses,
   pinnedGit,
@@ -12,9 +13,13 @@ import {
 import { workHandoffSchema } from "../objective-knowledge.js";
 import { validateTree } from "../validation.js";
 import { CandidateValidationFailure } from "../work-repair.js";
-import type { WorkHandoffNote } from "../contracts.js";
+import type { HarnessRequest, WorkHandoffNote } from "../contracts.js";
 import { readWorkHandoff } from "./harness-support.js";
-import { FACTORY_EMAIL, privateStagingExclusions } from "./local.js";
+import {
+  FACTORY_EMAIL,
+  privateStagingExclusions,
+  workerValidationRoot,
+} from "./local.js";
 
 export const factoryValidationServerName = "factory-validation";
 const factoryValidationServerVersion = "1.0.0";
@@ -29,6 +34,7 @@ interface ValidationEnvironmentInput {
   commands: readonly string[];
   config: { tools: readonly string[]; allowedTools: readonly string[] };
   handoff: HandoffContext;
+  lfs?: HarnessRequest["validationLfs"];
   /** Each completed run's structured facts, for the worker's progress stream. */
   onRun?: (facts: ValidationRunFacts) => void;
 }
@@ -148,13 +154,15 @@ export async function workerFilesTree(worktree: string): Promise<string> {
  * The snapshot is a commit of the current files; the controller's validator
  * runs it in a fresh detached checkout with its own empty TMPDIR, so the
  * worker's files never change and neither its build output nor another
- * run's temporary files reach the commands. The worker names no command:
- * only the declared ones run.
+ * run's temporary files reach the commands. It restores the selected LFS
+ * bytes controller validation restores, by digest from the controller's
+ * staged copy. The worker names no command: only the declared ones run.
  */
 export async function runDeclaredValidation(
   worktree: string,
   commands: readonly string[],
   run: number,
+  lfs?: HarnessRequest["validationLfs"],
 ): Promise<{
   passed: boolean;
   text: string;
@@ -180,11 +188,7 @@ export async function runDeclaredValidation(
       "Factory worker validation snapshot",
     )
   ).trim();
-  const root = join(
-    dirname(worktree),
-    `${basename(worktree)}.validation`,
-    `${run}`,
-  );
+  const root = join(workerValidationRoot(worktree), `${run}`);
   try {
     const evidence = await validateTree(
       worktree,
@@ -197,14 +201,10 @@ export async function runDeclaredValidation(
         if (!entry.passed) failed += 1;
       },
       undefined,
-      [],
-      undefined,
+      lfs?.members ?? [],
+      lfs && new LocalContentStore(lfs.store),
       undefined,
       false,
-      { commands: [] },
-      [],
-      // Its own empty TMPDIR: no files from earlier or concurrent runs.
-      true,
     );
     return {
       passed: true,
@@ -328,6 +328,7 @@ export async function createFactoryValidationMcp(
               input.worktree,
               input.commands,
               run,
+              input.lfs,
             );
             return { declared, handoff };
           });

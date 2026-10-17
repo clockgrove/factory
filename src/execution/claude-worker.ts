@@ -339,6 +339,9 @@ async function main(): Promise<void> {
           worktree: input.request.worktree,
           commands: validationCommands,
           config: input.config,
+          ...(input.request.validationLfs && {
+            lfs: input.request.validationLfs,
+          }),
           handoff: {
             peers: input.request.handoffPeers ?? [],
             acceptance: input.request.item.acceptance,

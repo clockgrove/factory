@@ -690,7 +690,13 @@ async function compilePlanAdmitted(
       // A review that did not answer validly is not a revision. A paid step
       // sees it as a fault of its paid call and re-asks within its bound
       // (paidPlanningModel); without a step it is kept for the operator.
-      failure = JSON.stringify(review);
+      // Fix findings are the planner's: a review with any is revised for
+      // them alone, and the revised plan's fresh review asks the operator
+      // only the decisions that remain (#1434).
+      const fixes = review.findings.filter((finding) => finding.kind === "fix");
+      failure = JSON.stringify(
+        fixes.length ? { ...review, findings: fixes } : review,
+      );
       if (review.findings.length) stated = "review";
     } catch (error) {
       if (error instanceof MissingPlanningContext) {
@@ -802,6 +808,8 @@ async function compilePlanAdmitted(
     // accepted corrections before it.
     const event = objectiveEvent("plan", record.history.length);
     const unanswered = Boolean(review && !review.findings.length);
+    const fixes =
+      review?.findings.filter((finding) => finding.kind === "fix") ?? [];
     const diagnosed = (record.invocations ?? []).filter(
       (entry) => entry.phase === "diagnosis",
     ).length;
@@ -813,9 +821,11 @@ async function compilePlanAdmitted(
       !permitted.length ||
       !allowanceAvailable(state, event, "planningRevisions", ["$planning"])
     ) {
-      // A reviewed graph waits for an operator plan decision; anything else stops planning.
+      // A reviewed graph waits for an operator plan decision only when no fix
+      // finding remains; fixes the planner could not apply stop planning and
+      // say why, never become operator choices. Anything else stops planning.
       record.phase = "stopped";
-      if (graph && packet && review) {
+      if (graph && packet && review && !fixes.length) {
         const candidate = buildPlanCandidate(
           objective,
           body,
@@ -833,23 +843,28 @@ async function compilePlanAdmitted(
         return candidate;
       }
       save();
+      const reason = unchanged
+        ? "Unchanged planning failure"
+        : diagnosed >= PAID_ATTEMPTS
+          ? `Planning diagnosis did not answer ${PAID_ATTEMPTS} times`
+          : !permitted.length
+            ? "Planning correction is disabled"
+            : "Planning revision allowance is exhausted";
       throw new PlanningNeedsDecision(
-        unchanged
-          ? "Unchanged planning failure; operator decision required"
-          : diagnosed >= PAID_ATTEMPTS
-            ? `Planning diagnosis did not answer ${PAID_ATTEMPTS} times; operator decision required`
-            : "Planning correction is disabled or its allowance is exhausted",
+        fixes.length
+          ? `${reason}; the planner did not apply ${fixes.length} plan review fix finding${fixes.length === 1 ? "" : "s"}`
+          : `${reason}; operator decision required`,
       );
     }
     if (context.stopped?.())
       throw new Error("Planning is paused or cancelled before diagnosis");
-    // The reviewer marks a finding that needs an operator-owned decision;
-    // the reviewed graph then waits for the operator's plan decision, as a
-    // diagnosis that classified the failure as operator did.
+    // A review whose findings all need an operator-owned decision waits for
+    // the operator's plan decision, as a diagnosis that classified the
+    // failure as operator did. A review with fix findings is revised first.
     if (
       stated === "review" &&
       record.invocation?.phase !== "diagnosis" &&
-      review!.findings.some((finding) => finding.kind === "operator-decision")
+      !fixes.length
     ) {
       record.phase = "stopped";
       const candidate = buildPlanCandidate(
@@ -870,7 +885,9 @@ async function compilePlanAdmitted(
     }
     // A deterministic refusal or a fix finding already says what is wrong, so
     // it goes back to the planner as is; the planner asks the operator through
-    // decisionRequired when the fix needs a decision. A diagnosis still
+    // decisionRequired when the fix needs a decision. Operator-decision
+    // findings of the same review are not corrections: the revised plan's
+    // fresh review raises them again if they still apply. A diagnosis still
     // classifies other failures, and review findings when the configuration
     // permits only some planning repair classes.
     const direct =
@@ -882,7 +899,7 @@ async function compilePlanAdmitted(
       const stating: PlanCorrection[] =
         stated === "check"
           ? [{ source: "check", detail: failure }]
-          : review!.findings.map((finding) => ({
+          : fixes.map((finding) => ({
               source: "review" as const,
               detail: finding.detail,
               question: finding.question,
@@ -974,21 +991,10 @@ async function compilePlanAdmitted(
       !diagnosis.diagnosis?.trim() ||
       !diagnosis.correction?.trim()
     ) {
+      // Only a review with fix findings reaches diagnosis; fixes the
+      // diagnosis does not admit stop planning rather than ask the operator.
       record.phase = "stopped";
       save();
-      if (graph && packet && review)
-        return buildPlanCandidate(
-          objective,
-          body,
-          baseSha,
-          configDigest,
-          executionProfiles,
-          sources,
-          graph,
-          packet,
-          review,
-          record.history.length,
-        );
       throw new PlanningNeedsDecision(
         `Planning needs an undelegated decision: ${diagnosis.diagnosis || failure}`,
       );

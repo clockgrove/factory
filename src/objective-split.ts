@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { stateRoot } from "./config.js";
 import { objectiveComplete } from "./completion.js";
 import type { WorkGraph } from "./contracts.js";
 import { markdownLines } from "./markdown.js";
@@ -41,6 +44,7 @@ export interface ChildObjectiveSpec {
 export interface ObjectiveSplit {
   /** The parent plan review that accepted this split. */
   reviewDigest: string;
+  /** The reviewed children without their graphs, which stay in the plan. */
   children: ChildObjectiveSpec[];
   /** Child issue number by key, recorded as each issue is created or found. */
   issues: Record<string, number>;
@@ -67,8 +71,16 @@ export function childMarker(parent: number, key: string): string {
   return `<!-- factory:parent=${parent};child=${key} -->`;
 }
 
+/** A child as its issue and the parent's record show it: without its graph. */
+export function childSummary(child: ChildObjectiveSpec): ChildObjectiveSpec {
+  const { graph: _graph, ...summary } = child;
+  return summary;
+}
+
 export function splitDigest(children: ChildObjectiveSpec[]): string {
-  return createHash("sha256").update(JSON.stringify(children)).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify(children.map(childSummary)))
+    .digest("hex");
 }
 
 /** Shape, identity and dependency checks; semantics belong to the planner and review. */
@@ -129,24 +141,38 @@ export function assertChildObjectives(children: ChildObjectiveSpec[]): void {
     throw new Error("A split needs a child Objective with no dependencies");
 }
 
-/** Top-level `##` sections of a body, in order, with their raw text. */
-function sections(body: string): { heading: string; text: string }[] {
+const REPLACED = ["outcome", "acceptance", "sources"];
+
+/**
+ * The body without its Outcome, Acceptance and Sources sections. A section
+ * is a level-2 or level-3 heading (issue forms render fields as `###`) and
+ * everything up to the next heading at its level or above.
+ */
+function carriedSections(body: string): string {
   const lines = body.split("\n");
   const marks = markdownLines(body);
-  const result: { heading: string; text: string[] }[] = [];
+  let dropping: number | undefined;
+  let started = false;
+  const kept: string[] = [];
   for (const [index, line] of lines.entries()) {
     const heading = marks[index]?.heading;
-    if (heading?.level === 2)
-      result.push({ heading: heading.text, text: [line] });
-    else result.at(-1)?.text.push(line);
+    if (heading && [2, 3].includes(heading.level)) {
+      started = true;
+      if (dropping === undefined || heading.level <= dropping)
+        dropping = REPLACED.includes(heading.text.toLowerCase())
+          ? heading.level
+          : undefined;
+    }
+    // Text before the first section is the parent's own preamble. Kept
+    // headings become level 2, so no carried section nests inside the
+    // child's own Sources.
+    if (started && dropping === undefined)
+      kept.push(
+        heading && [2, 3].includes(heading.level) ? `## ${heading.text}` : line,
+      );
   }
-  return result.map(({ heading, text }) => ({
-    heading,
-    text: text.join("\n").trimEnd(),
-  }));
+  return kept.join("\n").trim();
 }
-
-const REPLACED = ["outcome", "acceptance", "sources"];
 
 /**
  * The child's issue body: its own Outcome, Acceptance and Sources, with every
@@ -159,9 +185,7 @@ export function childIssueBody(
   parentBody: string,
   child: ChildObjectiveSpec,
 ): string {
-  const carried = sections(parentBody).filter(
-    ({ heading }) => !REPLACED.includes(heading.toLowerCase()),
-  );
+  const carried = carriedSections(parentBody);
   return [
     childMarker(parent, child.key),
     `Part of #${parent}. Factory created this child Objective from its reviewed plan.`,
@@ -185,7 +209,7 @@ export function childIssueBody(
           "",
         ]
       : []),
-    ...carried.flatMap(({ text }) => [text, ""]),
+    carried,
   ]
     .join("\n")
     .trimEnd()
@@ -271,13 +295,14 @@ export function expandSplitPredecessors(
 export function assertObjectiveSplitRecord(state: PreparationState): void {
   const split = state.split;
   if (split === undefined) return;
+  const planned = state.plan?.graph.split?.children;
   if (
     !split ||
     typeof split !== "object" ||
-    !state.plan?.split ||
-    split.reviewDigest !== state.plan.reviewDigest ||
-    !["clean", "human-accepted"].includes(state.plan.review.status) ||
-    JSON.stringify(split.children) !== JSON.stringify(state.plan.split)
+    !planned ||
+    split.reviewDigest !== state.plan!.reviewDigest ||
+    !["clean", "human-accepted"].includes(state.plan!.review.status) ||
+    JSON.stringify(split.children) !== JSON.stringify(planned.map(childSummary))
   )
     throw new Error("Objective split differs from its reviewed plan");
   assertChildObjectives(split.children);
@@ -320,4 +345,33 @@ export function assertObjectiveSplitRecord(state: PreparationState): void {
       ))
   )
     throw new Error("Invalid child Objective disposition record");
+}
+
+/**
+ * The split parent that created this child issue, from retained parent
+ * records only: a child without state of its own runs on its parent's
+ * provider.
+ */
+export function recordedSplitParent(
+  repository: string,
+  objective: number,
+): number | undefined {
+  const root = join(stateRoot(repository), "objectives");
+  if (!existsSync(root)) return undefined;
+  for (const name of readdirSync(root)) {
+    const parent = Number(name);
+    if (!Number.isSafeInteger(parent) || parent <= 0 || parent === objective)
+      continue;
+    const path = join(root, name, "state.json");
+    // Only a preparation that split can name children.
+    if (!existsSync(path) || !readFileSync(path, "utf8").includes('"split"'))
+      continue;
+    const state = readContinuation(repository, parent);
+    if (
+      isPreparationState(state) &&
+      Object.values(state.split?.issues ?? {}).includes(objective)
+    )
+      return parent;
+  }
+  return undefined;
 }

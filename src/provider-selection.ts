@@ -4,6 +4,7 @@ import {
   readConfigFile,
   resolveProvider,
 } from "./config.js";
+import { recordedSplitParent } from "./objective-split.js";
 import {
   continuationConfigurationMatches,
   readContinuation,
@@ -38,6 +39,12 @@ export function selectProvider(
   const names = Object.keys(file.providers);
   if (options.objective !== undefined) {
     const state = readContinuation(file.repository, options.objective);
+    // A child Objective without state of its own runs on its parent's provider.
+    const parent = state
+      ? undefined
+      : recordedSplitParent(file.repository, options.objective);
+    if (parent !== undefined)
+      return selectProvider(file, { ...options, objective: parent });
     if (state) {
       const provider = names.find((name) =>
         continuationConfigurationMatches(state, resolveProvider(file, name)),

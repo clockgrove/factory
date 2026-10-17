@@ -14,6 +14,7 @@ import {
   type PlanCandidate,
   paidPlanningModel,
   planningSources,
+  planReviewPacket,
   resolvePlan,
   verifyPlanCandidate,
 } from "../compiler.js";
@@ -56,6 +57,8 @@ import {
   readPinnedWorkflowRecipe,
 } from "../workflow-recipes.js";
 import { shortPlanDigest } from "../status-summary.js";
+import { buildPlanCandidate } from "../compiler/candidate.js";
+import { adoptionBase, type ChildAdoption, childAdoption } from "./split.js";
 import {
   type ApplicationServices,
   CoordinatorHandoff,
@@ -210,6 +213,80 @@ function preparationSourceDigest(
     : createHash("sha256")
         .update(JSON.stringify([advisory, workflowRecipePin]))
         .digest("hex");
+}
+
+/**
+ * The child's own plan candidate for its parent-reviewed graph: built from
+ * the child's issue body, sources and controller observations at the
+ * parent's base, and verified like any reviewed plan. A graph that no longer
+ * verifies is not adopted; the child compiles its own plan instead.
+ */
+function adoptedPlan(args: {
+  adoption: ChildAdoption;
+  config: FactoryConfig;
+  objective: number;
+  body: string;
+  baseSha: string;
+  sources: PlanCandidate["sources"];
+  prerequisites: PlanCandidate["prerequisites"];
+  localExecutables: PlanCandidate["localExecutables"];
+  approvedPlaybookPin: PlanCandidate["approvedPlaybookPin"];
+  configDigest: string;
+  concurrency: number;
+}): PlanCandidate | undefined {
+  const { adoption, config, objective, body, baseSha, sources } = args;
+  const graph = { ...structuredClone(adoption.graph), objective };
+  const executionProfiles = executionProfileChoices(config);
+  const executionBounds = { configuredConcurrency: args.concurrency };
+  try {
+    const packet = planReviewPacket(
+      body,
+      baseSha,
+      sources,
+      graph,
+      config.checkout,
+      executionProfiles,
+      args.prerequisites,
+      args.localExecutables,
+      executionBounds,
+      args.approvedPlaybookPin,
+    );
+    const candidate: PlanCandidate = {
+      ...buildPlanCandidate(
+        objective,
+        body,
+        baseSha,
+        args.configDigest,
+        executionProfiles,
+        sources,
+        graph,
+        packet,
+        { findings: [] },
+        0,
+      ),
+      adoptedFrom: {
+        objective: adoption.parent,
+        key: adoption.key,
+        reviewDigest: adoption.reviewDigest,
+      },
+    };
+    verifyPlanCandidate(
+      candidate,
+      objective,
+      body,
+      baseSha,
+      config.checkout,
+      args.configDigest,
+      false,
+      args.concurrency,
+    );
+    return candidate;
+  } catch (error) {
+    process.stderr.write(
+      `Factory: Objective #${objective} plans its own graph; the one reviewed with #${adoption.parent} does not verify: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return undefined;
+  }
 }
 
 /** A read-only preview: plans and reviews without writing Objective state. */
@@ -526,6 +603,10 @@ export async function prepareObjective(args: {
   if (args.preparation)
     assertRestoredContinuationReady(args.preparation, args.config);
   let { preparation } = args;
+  // A ready child of a split takes the graph its parent's review accepted.
+  const adoption = preparation
+    ? undefined
+    : childAdoption(config.repository, objective, issue.body);
   const adaptive = adaptiveWorkflowEnabled(issue.body);
   if (adaptive && !config.planningContext?.enabled)
     throw new Error(
@@ -553,7 +634,9 @@ export async function prepareObjective(args: {
             "Compilation checkout diverges from authenticated default head",
           );
       }
-      return head;
+      return adoption
+        ? await adoptionBase(config.checkout, adoption, head)
+        : head;
     }));
   const prerequisites = await objectiveStep(
     owner.snapshot,
@@ -703,6 +786,25 @@ export async function prepareObjective(args: {
     reportRunStatus?.("Factory: continuing with the persisted plan");
   const capacity = preparation.capacity;
   let plan = preparation.plan;
+  if (!plan && adoption?.parentBase === baseSha) {
+    plan = adoptedPlan({
+      adoption,
+      config,
+      objective,
+      body: issue.body,
+      baseSha,
+      sources,
+      prerequisites,
+      localExecutables,
+      approvedPlaybookPin,
+      configDigest: installationConfigDigest,
+      concurrency: capacity.concurrency,
+    });
+    if (plan)
+      reportRunStatus?.(
+        `Factory: using the Work Item graph reviewed with parent Objective #${adoption.parent}`,
+      );
+  }
   if (!plan)
     try {
       plan = await diagnostics.span(

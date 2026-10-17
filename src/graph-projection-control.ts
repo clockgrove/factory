@@ -60,8 +60,8 @@ export function assertGraphProjectionIntents(state: ContinuationState): void {
       ];
   const admitted = new Set(graphs.map(graphDigest));
   // A reviewed split projects child Objective issues under its own digest.
-  if (isPreparationState(state) && state.plan?.split)
-    admitted.add(splitDigest(state.plan.split));
+  if (isPreparationState(state) && state.plan?.graph.split)
+    admitted.add(splitDigest(state.plan.graph.split.children));
   for (const [digest, intent] of Object.entries(intents)) {
     if (
       !intent ||

@@ -1,14 +1,17 @@
 import { createHash } from "node:crypto";
 import type { FactoryConfig } from "../config.js";
-import type { GitHubGateway } from "../contracts.js";
+import type { GitHubGateway, WorkGraph } from "../contracts.js";
 import type { PlanCandidate } from "../compiler.js";
 import { projectGitHubProgress } from "../github-progress-projection.js";
 import { projectGitHubProjectStatus } from "../github-project-projection.js";
 import { splitProjectionControl } from "../graph-projection-control.js";
+import { ownsPath } from "../ownership.js";
+import { git, gitAsync } from "../process.js";
 import {
   childDispositions,
   childIdentity,
   childIssueBody,
+  childSummary,
   type ObjectiveSplit,
   splitSettled,
 } from "../objective-split.js";
@@ -54,14 +57,15 @@ export async function splitObjective(args: {
   waitWhileStopped: () => Promise<void>;
 }): Promise<PreparationState> {
   const { config, objective, body, path, github, preparation, plan } = args;
-  if (!plan.split) throw new Error("Plan has no child Objectives");
+  const planned = plan.graph.split?.children;
+  if (!planned) throw new Error("Plan has no child Objectives");
   if (!github.projectChildObjectives)
     throw new Error("GitHub adapter cannot create child Objective issues");
   const save = () => saveState(path, preparation);
   if (!preparation.split) {
     preparation.split = {
       reviewDigest: plan.reviewDigest,
-      children: structuredClone(plan.split),
+      children: planned.map(childSummary),
       issues: {},
     };
     preparation.coordinator.phase = "splitting";
@@ -208,4 +212,80 @@ export function splitParentOf(
     parent.split?.issues[identity.key] === objective
     ? identity.parent
     : undefined;
+}
+
+/** A ready child's graph, reviewed with its parent's plan. */
+export interface ChildAdoption {
+  parent: number;
+  key: string;
+  parentBase: string;
+  reviewDigest: string;
+  graph: WorkGraph;
+}
+
+/**
+ * The graph a new child Objective takes from its parent's reviewed split,
+ * when the parent compiled one for it (a ready child). Anything else
+ * compiles normally.
+ */
+export function childAdoption(
+  repository: string,
+  objective: number,
+  body: string,
+): ChildAdoption | undefined {
+  const parent = splitParentOf(repository, objective, body);
+  if (parent === undefined) return undefined;
+  const state = readContinuation(repository, parent);
+  if (!isPreparationState(state) || !state.plan || !state.split)
+    return undefined;
+  const identity = childIdentity(body)!;
+  const child = state.plan.graph.split?.children.find(
+    (entry) => entry.key === identity.key,
+  );
+  if (!child?.graph) return undefined;
+  return {
+    parent,
+    key: child.key,
+    parentBase: state.baseSha,
+    reviewDigest: state.split.reviewDigest,
+    graph: child.graph,
+  };
+}
+
+/**
+ * The parent's base stays this child's base while nothing the child's Work
+ * Items own has changed on the default branch since: the reviewed graph then
+ * still describes current code. Otherwise the child plans afresh at `head`.
+ */
+export async function adoptionBase(
+  checkout: string,
+  adoption: ChildAdoption,
+  head: string,
+): Promise<string> {
+  if (adoption.parentBase === head) return head;
+  const ancestor = await gitAsync(
+    checkout,
+    "merge-base",
+    "--is-ancestor",
+    adoption.parentBase,
+    head,
+  ).then(
+    () => true,
+    () => false,
+  );
+  if (!ancestor) return head;
+  const changed = git(
+    checkout,
+    "diff",
+    "--name-only",
+    "--no-renames",
+    adoption.parentBase,
+    head,
+  )
+    .split("\n")
+    .filter(Boolean);
+  const owned = adoption.graph.items.flatMap((item) => item.ownedPaths);
+  return changed.some((path) => ownsPath(path, owned))
+    ? head
+    : adoption.parentBase;
 }

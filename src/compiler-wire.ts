@@ -19,6 +19,10 @@ import {
   type WorkGraph,
 } from "./contracts.js";
 import { PlannerDecision } from "./fault.js";
+import {
+  assertChildObjectives,
+  type ChildObjectiveSpec,
+} from "./objective-split.js";
 import { ownsPath } from "./ownership.js";
 import {
   aggregateAcceptance,
@@ -375,19 +379,36 @@ export function compilerWire(
       "final-controller",
     ],
   };
+  // A new plan may split the Objective into child Objectives. An obligation
+  // a stub child carries names that child's key as its itemId.
+  const splittable = !context.previousGraph && !request.contextLookup;
   const proofFields: Record<string, Schema> = {
     itemId: { ...text, minLength: 1 },
     proof: {
       description:
         "Choose a kind allowed for the owner's item kind by proofModesByItemKind in the compiler choices.",
-      anyOf: Object.keys(proofForms)
-        .filter((form) => !form.endsWith("-ci") || checkNames.length)
-        .map((form) =>
-          strict({
-            kind: { type: "string", enum: [form] },
-            ...proofForms[form],
-          }),
-        ),
+      anyOf: [
+        ...Object.keys(proofForms)
+          .filter((form) => !form.endsWith("-ci") || checkNames.length)
+          .map((form) =>
+            strict({
+              kind: { type: "string", enum: [form] },
+              ...proofForms[form],
+            }),
+          ),
+        ...(splittable
+          ? [
+              strict({
+                kind: {
+                  type: "string",
+                  enum: ["child-objective"],
+                  description:
+                    "Only in a split: a stub child Objective carries this obligation; itemId is that child's key.",
+                },
+              }),
+            ]
+          : []),
+      ],
     },
     environment,
   };
@@ -543,6 +564,59 @@ export function compilerWire(
     },
     coverage: coverageSchema,
     sourceObligations: sourceObligationsSchema,
+    ...(splittable
+      ? {
+          split: {
+            description:
+              "null for one Work Item graph. Otherwise the child Objectives that replace it: every Work Item belongs to one ready child through itemIds, and every Objective obligation goes to one child.",
+            anyOf: [
+              { type: "null" },
+              strict({
+                children: {
+                  type: "array",
+                  minItems: 2,
+                  maxItems: 16,
+                  items: strict({
+                    key: {
+                      type: "string",
+                      pattern: "^[a-z][a-z0-9-]{0,63}$",
+                      description:
+                        "Stable child key: lowercase letters, digits and hyphens.",
+                    },
+                    title: { ...text, minLength: 1 },
+                    goal: {
+                      ...text,
+                      minLength: 1,
+                      description:
+                        "One paragraph: what this child delivers and what it leaves to its siblings.",
+                    },
+                    sources: {
+                      type: "array",
+                      items: strict({
+                        choiceIndex: integer(citations.length),
+                      }),
+                      description:
+                        "Cited sections this child needs, including every section its Work Items cite; never the OBJECTIVE.",
+                    },
+                    dependsOn: {
+                      type: "array",
+                      items: text,
+                      description:
+                        "Keys of earlier children whose merged code this child builds on; empty for a ready child.",
+                    },
+                    itemIds: {
+                      type: "array",
+                      items: text,
+                      description:
+                        "A ready child's Work Items; empty for a stub, which is compiled after its dependencies merge.",
+                    },
+                  }),
+                },
+              }),
+            ],
+          },
+        }
+      : {}),
     decisionRequired: {
       description:
         "null when the graph covers every obligation. Otherwise the one obligation the Objective as written does not let you cover (for example, it needs a change the Objective forbids or a human-owned choice) and the concrete question the operator must answer; Factory asks it before using this graph.",
@@ -700,6 +774,7 @@ export function compilerWire(
           "requiredPreIntegrationChecks",
           "decisionRequired",
           ...(request.contextLookup ? ["expansions", "conditions"] : []),
+          ...(splittable ? ["split"] : []),
         ],
         "response",
       );
@@ -1143,9 +1218,30 @@ export function compilerWire(
           } as NonNullable<WorkGraph["coverage"]>[number]["environment"],
         };
       };
+      // Obligations a stub child carries, by obligation index, and the stub
+      // keys source obligations name; only a split can have them.
+      const stubObligations = new Map<number, string>();
+      const stubSourceKeys: string[] = [];
+      const stubOwner = (entry: ObjectValue, label: string) => {
+        const proof = object(entry.proof, "proof");
+        if (proof.kind !== "child-objective") return undefined;
+        if (!splittable || wire.split === null)
+          throw new PlannerChoiceError(
+            `Planner ${label} names a child Objective, but the plan has no split`,
+          );
+        keys(proof, ["kind"], "proof");
+        if (typeof entry.itemId !== "string")
+          throw new Error("Planner child Objective owner must be its key");
+        return entry.itemId;
+      };
       for (const [obligationIndex, value] of wire.coverage.entries()) {
         const entry = object(value, "coverage");
         keys(entry, ["itemId", "proof", "environment"], "coverage");
+        const stub = stubOwner(entry, `coverage ${obligationIndex}`);
+        if (stub !== undefined) {
+          stubObligations.set(obligationIndex, stub);
+          continue;
+        }
         graph.coverage!.push({
           ...structuredClone(obligations[obligationIndex]!),
           ...proved(entry, `coverage ${obligationIndex}`),
@@ -1196,6 +1292,12 @@ export function compilerWire(
             ["kind", "itemId", "proof", "environment"],
             "covered disposition",
           );
+          // A stub compiles later from its own sources and extracts this again.
+          const stub = stubOwner(disposition, `source obligation ${position}`);
+          if (stub !== undefined) {
+            stubSourceKeys.push(stub);
+            continue;
+          }
           graph.coverage!.push({
             criterionId: sourceObligationId(source),
             source,
@@ -1283,9 +1385,165 @@ export function compilerWire(
         }
         assertDeclaredConditions(graph);
       }
+      if (splittable && wire.split !== null)
+        return splitGraph(graph, wire.split, stubObligations, stubSourceKeys);
       return graph;
     },
   };
+  /**
+   * The decoded union graph regrouped as child Objectives: each ready child
+   * gets its own Work Items and the coverage they own, and every Objective
+   * obligation becomes an Acceptance outcome of exactly one child. Planning
+   * validates each ready child's graph against that child's own Objective.
+   */
+  function splitGraph(
+    union: WorkGraph,
+    raw: unknown,
+    stubObligations: Map<number, string>,
+    stubSourceKeys: string[],
+  ): WorkGraph {
+    const split = object(raw, "split");
+    keys(split, ["children"], "split");
+    if (!Array.isArray(split.children) || split.children.length < 2)
+      throw new PlannerChoiceError("A split needs at least two children");
+    const children = split.children.map((value) => {
+      const child = object(value, "split child");
+      keys(
+        child,
+        ["key", "title", "goal", "sources", "dependsOn", "itemIds"],
+        "split child",
+      );
+      if (
+        typeof child.key !== "string" ||
+        typeof child.title !== "string" ||
+        typeof child.goal !== "string" ||
+        !Array.isArray(child.sources)
+      )
+        throw new Error("Planner split child is invalid");
+      const sources = child.sources.map((choice) => {
+        const selected = object(choice, "split child source");
+        keys(selected, ["choiceIndex"], "split child source");
+        const { path, heading } =
+          citations[
+            index(selected.choiceIndex, citations.length, "choiceIndex")
+          ]!;
+        if (path === "OBJECTIVE")
+          throw new PlannerChoiceError(
+            `Child ${child.key} cites the OBJECTIVE as a source; its own Objective replaces it`,
+          );
+        return heading ? { path, heading } : { path };
+      });
+      return {
+        key: child.key,
+        title: child.title.trim(),
+        goal: child.goal.trim(),
+        sources,
+        dependsOn: strings(child.dependsOn, "dependsOn"),
+        itemIds: strings(child.itemIds, "itemIds"),
+      };
+    });
+    const owner = new Map<string, string>();
+    for (const child of children) {
+      if (child.dependsOn.length && child.itemIds.length)
+        throw new PlannerChoiceError(
+          `Child ${child.key} depends on siblings, so it is a stub: it is compiled after they merge and has no Work Items now`,
+        );
+      if (!child.dependsOn.length && !child.itemIds.length)
+        throw new PlannerChoiceError(
+          `Child ${child.key} has no dependencies, so it is ready: list its Work Items in itemIds`,
+        );
+      for (const id of child.itemIds) {
+        if (!union.items.some((item) => item.id === id) || owner.has(id))
+          throw new PlannerChoiceError(
+            `Child ${child.key} lists a missing or already assigned Work Item ${id}`,
+          );
+        owner.set(id, child.key);
+      }
+    }
+    for (const item of union.items) {
+      const key = owner.get(item.id);
+      if (key === undefined)
+        throw new PlannerChoiceError(
+          `Work Item ${item.id} belongs to no ready child`,
+        );
+      if (
+        [...item.dependencies, ...(item.children ?? [])].some(
+          (id) => owner.get(id) !== key,
+        )
+      )
+        throw new PlannerChoiceError(
+          `Work Item ${item.id} depends on another child's Work Item; children depend on each other through dependsOn`,
+        );
+    }
+    const stubs = new Set(
+      children.filter((child) => child.dependsOn.length).map(({ key }) => key),
+    );
+    for (const key of [...stubObligations.values(), ...stubSourceKeys])
+      if (!stubs.has(key))
+        throw new PlannerChoiceError(
+          `A child-objective proof names ${key}, which is not a stub child`,
+        );
+    const assigned = new Map<string, number[]>(
+      children.map(({ key }) => [key, []]),
+    );
+    for (const [position, obligation] of obligations.entries()) {
+      if (obligation.source.path !== "OBJECTIVE")
+        throw new PlannerChoiceError(
+          "Only a new plan's Objective obligations can be split",
+        );
+      const entry = union.coverage.find(
+        (candidate) => candidate.criterionId === obligation.criterionId,
+      );
+      const key =
+        stubObligations.get(position) ??
+        (entry ? owner.get(entry.itemId) : undefined);
+      assigned.get(key!)!.push(position);
+    }
+    const specs: ChildObjectiveSpec[] = children.map((child) => {
+      const outcomes = assigned
+        .get(child.key)!
+        .map((position) => coverageCriterion(obligations[position]!));
+      if (!outcomes.length)
+        throw new PlannerChoiceError(
+          `Child ${child.key} carries no Objective obligation; every child delivers at least one Acceptance outcome`,
+        );
+      const { itemIds, ...spec } = child;
+      return {
+        ...spec,
+        outcomes,
+        ...(itemIds.length
+          ? {
+              graph: {
+                objective: union.objective,
+                baseSha: union.baseSha,
+                items: union.items.filter((item) => itemIds.includes(item.id)),
+                coverage: union.coverage.filter(
+                  (entry) => owner.get(entry.itemId) === child.key,
+                ),
+                requiredPreIntegrationChecks: structuredClone(
+                  union.requiredPreIntegrationChecks ?? [],
+                ),
+              },
+            }
+          : {}),
+      };
+    });
+    try {
+      assertChildObjectives(specs);
+    } catch (error) {
+      throw new PlannerChoiceError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return {
+      objective: union.objective,
+      baseSha: union.baseSha,
+      items: [],
+      coverage: [],
+      requiredPreIntegrationChecks: [],
+      split: { children: specs },
+    };
+  }
   if (!request.contextLookup) return graphWire;
   assertPlanningContextPacket(request.contextLookup);
   const requestSchema = strict({

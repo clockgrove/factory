@@ -12,6 +12,21 @@ Objective + pinned sources → compile and review → project Work Item graph
   → deliver → validate integrated result → seal acceptance → close Objective
 ```
 
+A compile can split the Objective into child Objectives instead (`src/compiler-wire.ts`, `src/compiler/split.ts`, `src/runner/split.ts`, `src/objective-split.ts`):
+
+```text
+compile and review split → create child issues → admit children to the queue
+  → each child: plan (or adopt its reviewed graph) → normal delivery flow
+  → last child accepted → close parent
+```
+
+- **Children and stubs.** A child with no sibling dependencies is ready: the same compile gives it a full graph, and the parent's graph review checks the split, the stubs and those graphs. A child with dependencies is a stub (goal, outcomes, sources, dependencies). It is compiled later, by the normal compiler against the default branch that holds its dependencies' merged code, and gets its own graph review.
+- **Acceptance partition.** Every parent Acceptance criterion becomes an Acceptance outcome of exactly one child. When every child is accepted, every parent criterion has been accepted.
+- **Child issues.** A child issue keeps the parent's other sections unchanged, so it plans under the same authority. It is a Feature sub-issue with `factory:objective`, blocked by the siblings it builds on. It is created under the existing projection receipts.
+- **Queue gating.** Children are admitted to the queue, which holds each one on its native dependencies. A child runs on its parent's provider.
+- **Adoption.** A ready child adopts its reviewed graph only while nothing its Work Items own has changed on the default branch since the parent's base. The adopted graph must still verify against the child's own body and sources. Otherwise the child plans afresh.
+- **Parent.** The parent's own run ends once its children are admitted. Its continuation records the child issues, and it closes after the last child.
+
 The target owns requirements, validation commands, permissions, protection rules and acceptance. Factory coordinates that work under the approved configuration and recorded limits; it never grants itself deployment, provider, retry or spending authority.
 
 ## Module ownership

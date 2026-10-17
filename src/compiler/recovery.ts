@@ -1,3 +1,4 @@
+import { graphItems } from "./split.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -390,7 +391,7 @@ async function compilePlanAdmitted(
       decodeGraphReview(
         record.review.response,
         retained.packet,
-        state.plan.graph.items.map((item) => item.id),
+        graphItems(state.plan.graph).map((item) => item.id),
       ).length
     )
       throw new PlanningReviewBindingError(

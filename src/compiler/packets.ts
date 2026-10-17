@@ -1,3 +1,4 @@
+import { graphItems } from "./split.js";
 import { createHash } from "node:crypto";
 import {
   assertWorkflowRecipeInput,
@@ -67,7 +68,12 @@ export function planReviewPacket(
     controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
     graph,
     ...(executionProfiles ? { executionProfiles } : {}),
-    commands: commandAuthorizations(graph, sources, checkout),
+    // A split's commands are its ready children's.
+    commands: commandAuthorizations(
+      graph.split ? { ...graph, items: graphItems(graph) } : graph,
+      sources,
+      checkout,
+    ),
     finalCommands: finalObjectiveCommands(objective),
     checkNames: workflowCheckNames(checkout, baseSha),
   };

@@ -439,6 +439,16 @@ Keep Objectives small and executable:
 - Inject missing services or values rather than requiring prerequisites that do not exist.
 - Keep stable repository facts in the target’s contributor docs instead of repeating them in every Objective.
 
+#### Child Objectives
+
+When an Objective spans distinct capabilities worth accepting and merging separately, or later parts need earlier parts' code to plan well, the planner can split it into child Objectives instead of one graph. Each Acceptance bullet goes to exactly one child, so write one observable fact per bullet.
+
+- Factory creates a child issue per child: a sub-issue of the Objective, labelled `factory:objective` and blocked by the children it builds on.
+- With a Project queue, Factory adds every child to the queue. Each child waits until the children it depends on are accepted, then plans against the current default branch. Without a queue, run each child with `factory run --objective N` once its dependencies are accepted.
+- Children run on the parent's provider.
+- `run` on the parent exits 0 once the children exist. `factory status --objective N` and the parent's Live status show each child's state.
+- The parent closes when every child is accepted. If a child is cancelled, cancel the parent and file a new Objective for the remaining work.
+
 Declare executable validation commands as complete standalone source lines; lines inside a multi-line fenced block are supported. Root package scripts use `npm test`, `pnpm test`, `pnpm check`, or `npm/pnpm run NAME`. Selected script bodies and their pre/post hooks stay pinned; nested package-manager invocations need separate authority.
 
 Dependency preparation supports exact source-declared `pnpm install --frozen-lockfile --ignore-scripts` and `npm ci --ignore-scripts`, ordered before package-script commands. npm preparation requires regular tracked `package.json` and valid `package-lock.json` already present at the accepted base, with both byte-identical in the result; planning cannot authorize creating them for this install. The package must be a root npm package without workspaces, a shrinkwrap override, mixed package managers or a Package manager update. Existing `.npmrc`, `config` and `pnpm` configuration remains fixed, and lifecycle scripts are disabled by the exact install command. Extra options, shell wrappers and other install subcommands are unsupported. This source authority does not grant additional network, filesystem, provider or resource permissions. Each fresh execution or validation checkout still needs its own authorized setup and readiness proof; ignored installations are not transferred.

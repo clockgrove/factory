@@ -72,6 +72,7 @@ import {
   ProviderContextWindowFailure,
 } from "./faults.js";
 import { observeModelInvocation } from "./observation.js";
+import { graphItems, validateSplitGraph } from "./split.js";
 import { planningReviewEvidence, planReviewDigest } from "./packets.js";
 import {
   assertObjectiveCriteria,
@@ -316,7 +317,7 @@ export function paidPlanningModel(
             response,
             request.reviewPacket ??
               reviewPacket([], planningReviewEvidence(request)),
-            request.graph.items.map((item) => item.id),
+            graphItems(request.graph).map((item) => item.id),
           );
         } catch (error) {
           observeInvalidReview(request.invocation);
@@ -602,6 +603,7 @@ export function validateCompiledGraph(args: {
   const objective = request.compileContext?.objectiveNumber;
   if (objective === undefined)
     throw new Error("Compilation requires trusted compile context");
+  if (graph.split) return validateSplitGraph(args);
   try {
     if (request.workflowRecipe && !request.compileContext?.previousGraph)
       assertWorkflowRecipeGraph(graph, request.workflowRecipe);
@@ -680,7 +682,7 @@ export async function checkedPlanReview(
     const findings = decodeGraphReview(
       response,
       evidencePacket,
-      packet.graph.items.map((item) => item.id),
+      graphItems(packet.graph).map((item) => item.id),
     );
     observeModelInvocation(invocation, {
       type: "progress",

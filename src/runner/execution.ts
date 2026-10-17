@@ -474,7 +474,7 @@ export async function runObjectivePass(
       if ("schemaVersion" in prepared) return prepared;
       preparation = prepared.preparation;
       const { plan } = prepared;
-      if (plan.split) {
+      if (plan.graph.split) {
         const splitting = preparation;
         return await splitObjective({
           config,

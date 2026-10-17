@@ -37,7 +37,6 @@ import {
 } from "./github-project-queue.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { expandSplitPredecessors, splitSettled } from "./objective-split.js";
-import { splitParentOf } from "./runner/split.js";
 import {
   currentProcessSignal,
   currentProcessDeadlineAt,
@@ -1474,17 +1473,14 @@ async function runIntakeOwned(
   let heldUntil = 0;
   // The provider configuration and services each Objective froze: the
   // service continues every Objective on them.
-  // A child Objective without state of its own runs on its parent's provider.
   const objectiveRuntime = (
     objective: number,
-    parent?: number,
   ): { config: FactoryConfig; services: ApplicationServices } => {
     const objectiveConfig = options.backgroundConfigurationPath
       ? queuedObjectiveConfig(
           config,
           objective,
           options.backgroundConfigurationPath,
-          parent,
         )
       : config;
     if (objectiveConfig === config) return { config, services };
@@ -1971,7 +1967,6 @@ async function runIntakeOwned(
       ) {
         const reasons: Record<string, string> = {};
         let selected: number | undefined;
-        let selectedParent: number | undefined;
         for (const entry of observed.entries.filter(
           (entry) => entry.state === "queued",
         )) {
@@ -2022,9 +2017,6 @@ async function runIntakeOwned(
               );
             }
             selected = entry.objective;
-            selectedParent = state
-              ? undefined
-              : splitParentOf(config.repository, entry.objective, card.body);
             break;
           } catch (error) {
             holdFor(error);
@@ -2048,7 +2040,7 @@ async function runIntakeOwned(
           try {
             if (handingOff || localMode || pendingMutations) continue;
             const { config: objectiveConfig, services: objectiveServices } =
-              objectiveRuntime(selected, selectedParent);
+              objectiveRuntime(selected);
             const result = await runObjective(
               objectiveConfig,
               selected,

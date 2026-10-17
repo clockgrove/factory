@@ -1,4 +1,4 @@
-import { splitSettled } from "./objective-split.js";
+import { recordedSplitParent, splitSettled } from "./objective-split.js";
 import {
   credentialFileBindings,
   optionalProviderCredentials,
@@ -517,13 +517,16 @@ export function queuedObjectiveConfig(
   config: FactoryConfig,
   objective: number,
   configPath: string,
-  /** The split parent of a child Objective that has no state yet. */
-  parent?: number,
 ): FactoryConfig {
   const state = readContinuation(config.repository, objective);
-  if (!state && parent !== undefined)
-    return queuedObjectiveConfig(config, parent, configPath);
-  if (!state || continuationConfigurationMatches(state, config)) return config;
+  // A child Objective without state of its own runs on its parent's provider.
+  if (!state) {
+    const parent = recordedSplitParent(config.repository, objective);
+    return parent === undefined
+      ? config
+      : queuedObjectiveConfig(config, parent, configPath);
+  }
+  if (continuationConfigurationMatches(state, config)) return config;
   return selectProvider(readConfigFile(configPath), { objective }).config;
 }
 function hasOwner(config: FactoryConfig): boolean {

@@ -236,6 +236,11 @@ export interface WorkGraph {
   objective: number;
   baseSha: string;
   items: WorkItem[];
+  /**
+   * Child Objectives instead of this Objective's own Work Items: items and
+   * coverage are then empty, and each ready child carries its own graph.
+   */
+  split?: { children: import("./objective-split.js").ChildObjectiveSpec[] };
 }
 
 export type ModelInvocationPhase =

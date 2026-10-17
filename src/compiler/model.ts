@@ -1120,6 +1120,8 @@ export class StructuredPlanningModel implements PlanningModel {
           responseDigest,
           usage: turn.usage,
           usageAvailable: Boolean(turn.usage),
+          turns: turn.turns,
+          toolCalls: turn.toolCalls,
           failureClass: "structured-output-parse",
           detail: error instanceof Error ? error.message : String(error),
         });
@@ -1146,6 +1148,8 @@ export class StructuredPlanningModel implements PlanningModel {
         responseDigest,
         usage: turn.usage,
         usageAvailable: Boolean(turn.usage),
+        turns: turn.turns,
+        toolCalls: turn.toolCalls,
       });
       return parsed;
     } catch (error) {
@@ -1200,6 +1204,8 @@ export class StructuredPlanningModel implements PlanningModel {
             : {}),
           usage: turn.usage,
           usageAvailable: Boolean(turn.usage),
+          turns: turn.turns,
+          toolCalls: turn.toolCalls,
           failureClass,
           detail: error instanceof Error ? error.message : String(error),
         });

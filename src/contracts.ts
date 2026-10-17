@@ -323,6 +323,14 @@ export interface ModelInvocationObservation {
   tool?: string;
   usage?: ModelInvocationUsage;
   usageAvailable?: boolean;
+  /** Model turns of this provider attempt so far; the provider's own count once it ends. Presentation only. */
+  turns?: number;
+  /** Tool calls the model made in this provider attempt so far. Presentation only. */
+  toolCalls?: number;
+  /** Token counts the provider streamed before its final usage; never accounting. */
+  liveInputTokens?: number;
+  liveCachedInputTokens?: number;
+  liveOutputTokens?: number;
   failureClass?: string;
   failureField?: string;
   failureReason?: string;

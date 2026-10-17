@@ -77,6 +77,9 @@ export interface PlanningTurn {
   nativeInvocationStarted?: boolean;
   /** Observed model activity; absence never proves an unpaid native invocation. */
   started?: boolean;
+  /** Model turns and tool calls observed in this attempt, for presentation. */
+  turns?: number;
+  toolCalls?: number;
 }
 
 /**

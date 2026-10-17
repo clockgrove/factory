@@ -3,7 +3,7 @@ import { formatDuration } from "./efficiency.js";
 import { formatTokens } from "./worker-activity.js";
 import { attemptKindLabel } from "./repair-policy.js";
 import { PROGRESS_ITEM_ID, progressMarker } from "./github-progress-state.js";
-import type { ModelCallRow } from "./run-telemetry.js";
+import { callLabel, type ModelCallRow } from "./run-telemetry.js";
 import {
   itemAttempt,
   summarizeStatus,
@@ -211,16 +211,6 @@ export function runDetailsLines(input: RunDetailsInput): string[] {
   ];
 }
 
-const CALL_LABEL: Record<string, string> = {
-  propose: "Propose",
-  dream: "Dream",
-  compile: "Plan",
-  diagnosis: "Diagnosis",
-  "graph-review": "Graph review",
-  implementation: "Worker",
-  "result-review": "Result review",
-  "objective-review": "Final review",
-};
 /** Listed calls: each item's last attempts, then the most recent overall. */
 const CALL_ATTEMPTS = 2;
 const CALL_ROWS = 30;
@@ -239,7 +229,7 @@ const sum = (values: (number | undefined)[]): number | undefined =>
     : undefined;
 
 function callLine(call: ModelCallRow): string {
-  const label = CALL_LABEL[call.phase] ?? identity(call.phase);
+  const label = callLabel(call.phase, call.ordinal) ?? identity(call.phase);
   const owner =
     call.itemId && PROGRESS_ITEM_ID.test(call.itemId)
       ? `${compact(call.itemId)}${call.attempt ? ` #${call.attempt}` : ""} ${label.toLowerCase()}`

@@ -17,13 +17,14 @@ import {
   createCodexHome,
   releaseCodexHome,
 } from "../codex-planning-isolation.js";
-import type { CodexModelSelection } from "../config.js";
+import { type CodexModelSelection, reviewerSelection } from "../config.js";
 import type {
   AgentSessionCapabilities,
   AgentSessionContinuation,
   AgentSessionReconciliation,
   AgentSessionRef,
   ModelInvocationContext,
+  ModelInvocationPhase,
   ModelInvocationUsage,
   PlanningRequest,
   ReviewImageInput,
@@ -71,6 +72,7 @@ import {
   CODEX_APP_SERVER_PLANNING_ADAPTER,
   CODEX_PLANNING_ADAPTER,
   CODEX_PLANNING_PROVIDER,
+  type CodexPlanningModelOptions,
   type PlanningRole,
   type PlanningTransport,
   type PlanningTurn,
@@ -266,6 +268,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     private sessionRoot?: string,
     private transport: "exec" | "app-server" = "exec",
     private sourceArtifacts = transport === "exec",
+    private reviewEffort?: CodexPlanningModelOptions["reviewEffort"],
   ) {
     if (sourceArtifacts && transport !== "exec")
       throw new Error("Planning source artifacts require the exec transport");
@@ -471,11 +474,13 @@ export class CodexPlanningTransport implements PlanningTransport {
     role: PlanningRole,
     tree: boolean,
     sourceRead = false,
+    /** A review phase, or a retained review session's scope role naming it. */
+    phase?: string,
   ): string {
     return createHash("sha256")
       .update(
         JSON.stringify([
-          this.selection(role),
+          this.selection(role, phase),
           this.adapter,
           role,
           "read-only",
@@ -590,6 +595,7 @@ export class CodexPlanningTransport implements PlanningTransport {
         planning ? "planner" : "reviewer",
         !planning,
         data.sourceReadProfile === "pinned-source-read-v1",
+        planning ? undefined : session.scope.role,
       )
     )
       throw new Error(
@@ -745,18 +751,24 @@ export class CodexPlanningTransport implements PlanningTransport {
     releaseCodexHome(data.sessionRoot, this.sessionOwner(session));
   }
 
-  selection(role: PlanningRole): CodexModelSelection {
-    return role === "planner" ? this.planner : this.reviewer;
+  selection(role: PlanningRole, phase?: string): CodexModelSelection {
+    return role === "planner"
+      ? this.planner
+      : reviewerSelection(this.reviewer, this.reviewEffort, phase);
   }
 
-  settings(role: PlanningRole, tree?: string): Record<string, unknown> {
+  settings(
+    role: PlanningRole,
+    tree?: string,
+    phase?: ModelInvocationPhase,
+  ): Record<string, unknown> {
     return {
       transport: tree ? "exec" : this.transport,
       sandboxMode: "read-only",
       approvalPolicy: "never",
       ...(tree && { shell: "read-only tree" }),
       ...(role === "planner" && { sourceArtifacts: this.sourceArtifacts }),
-      ...this.selection(role),
+      ...this.selection(role, phase),
     };
   }
 
@@ -796,7 +808,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     running: string[],
   ): Promise<void> {
     const { invocation, turn: state } = args;
-    const selection = this.selection(args.role);
+    const selection = this.selection(args.role, invocation.phase);
     const selectedTransport = args.tree ? "exec" : this.transport;
     if (args.beforeNativeDispatch && selectedTransport !== "exec")
       throw new Error(
@@ -845,7 +857,12 @@ export class CodexPlanningTransport implements PlanningTransport {
           );
         if (
           sessionData.selectionDigest !==
-          this.selectionDigest(args.role, Boolean(args.tree), sourceRead)
+          this.selectionDigest(
+            args.role,
+            Boolean(args.tree),
+            sourceRead,
+            invocation.phase,
+          )
         )
           throw new Error(
             "Codex session model or tool policy changed. Do not resume or replay the old turn. After authenticated resource settlement, use supported session disposal before a fresh review within its existing allowance.",
@@ -872,6 +889,7 @@ export class CodexPlanningTransport implements PlanningTransport {
             args.role,
             Boolean(args.tree),
             sourceRead,
+            invocation.phase,
           ),
           transport: selectedTransport,
           ...(sourceRead && { sourceReadProfile: "pinned-source-read-v1" }),

@@ -46,6 +46,13 @@ export interface PlanningModelOptions {
 }
 
 export interface CodexPlanningModelOptions extends PlanningModelOptions {
+  /** Per review phase reasoning effort; an omitted phase uses the reviewer's. */
+  reviewEffort?: Partial<
+    Record<
+      import("../config.js").ReviewEffortPhase,
+      import("../config.js").CodexReasoningEffort
+    >
+  >;
   /** Capture redaction only; never sent to the provider. */
   redactionValues?: string[];
   /** Installation-owned private reviewer session storage; absence uses fresh turns. */
@@ -120,13 +127,21 @@ export interface PlanningTransport {
     packet: ReviewPacket,
     run: (files: ReviewBodyFile[], root: string) => Promise<T>,
   ): Promise<T>;
-  selection(role: PlanningRole): {
+  /** A review phase may select its own configured reasoning effort. */
+  selection(
+    role: PlanningRole,
+    phase?: ModelInvocationPhase,
+  ): {
     model: string;
     reasoningEffort?: string;
     serviceTier?: import("../config.js").CodexServiceTier;
   };
   /** Provider settings recorded with opt-in request capture content. */
-  settings(role: PlanningRole, tree?: string): Record<string, unknown>;
+  settings(
+    role: PlanningRole,
+    tree?: string,
+    phase?: ModelInvocationPhase,
+  ): Record<string, unknown>;
   /**
    * Run one attempt, filling `turn`; progress observations are optional. With
    * `tree`, the session may read that directory with read-only tools. An

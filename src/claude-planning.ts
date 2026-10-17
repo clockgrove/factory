@@ -28,6 +28,7 @@ import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   type ClaudeModelSelection,
   type PlanningConfig,
+  reviewerSelection,
 } from "./config.js";
 import {
   AuthenticationRequiredError,
@@ -35,6 +36,7 @@ import {
   type AgentSessionRef,
   type AgentSessionReconciliation,
   type ModelInvocationContext,
+  type ModelInvocationPhase,
 } from "./contracts.js";
 import {
   claudeAuthenticationFailure,
@@ -890,8 +892,17 @@ class ClaudePlanningTransport implements PlanningTransport {
     ];
   }
 
-  selection(role: PlanningRole): ClaudeModelSelection {
-    return role === "planner" ? this.config.planner : this.config.reviewer;
+  selection(
+    role: PlanningRole,
+    phase?: ModelInvocationPhase,
+  ): ClaudeModelSelection {
+    return role === "planner"
+      ? this.config.planner
+      : reviewerSelection(
+          this.config.reviewer,
+          this.config.reviewEffort,
+          phase,
+        );
   }
 
   /** No native effect separates the local session intent from the SDK launch. */
@@ -899,9 +910,13 @@ class ClaudePlanningTransport implements PlanningTransport {
     return "native-before-effect-v1";
   }
 
-  settings(role: PlanningRole, tree?: string): Record<string, unknown> {
+  settings(
+    role: PlanningRole,
+    tree?: string,
+    phase?: ModelInvocationPhase,
+  ): Record<string, unknown> {
     return {
-      ...this.selection(role),
+      ...this.selection(role, phase),
       maxOutputTokens: this.config.maxOutputTokens,
       maxTurns: tree ? CLAUDE_TREE_REVIEW_MAX_TURNS : CLAUDE_PLANNING_MAX_TURNS,
       thinking: "adaptive",
@@ -926,7 +941,7 @@ class ClaudePlanningTransport implements PlanningTransport {
   ): Promise<void> {
     if (args.reviewImages?.length) throw unsupportedReviewImages(this.adapter);
     const { invocation, turn: state } = args;
-    const selection = this.selection(args.role);
+    const selection = this.selection(args.role, invocation.phase);
     const { model, reasoningEffort } = selection;
     const started = Date.now();
     const continuation = this.sessionRoot ? args.session : undefined;

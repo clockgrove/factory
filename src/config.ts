@@ -161,6 +161,24 @@ export interface ClaudeModelSelection {
   reasoningEffort: HarnessReasoningEffort;
 }
 
+/** The review calls whose reasoning effort `planning.reviewEffort` can set. */
+export const REVIEW_EFFORT_PHASES = [
+  "graph-review",
+  "result-review",
+  "objective-review",
+] as const;
+export type ReviewEffortPhase = (typeof REVIEW_EFFORT_PHASES)[number];
+
+/** The reviewer selection for one call: its phase's `reviewEffort`, else the reviewer's own effort. */
+export function reviewerSelection<T extends { reasoningEffort: string }>(
+  reviewer: T,
+  reviewEffort: Partial<Record<string, T["reasoningEffort"]>> | undefined,
+  phase: string | undefined,
+): T {
+  const effort = phase === undefined ? undefined : reviewEffort?.[phase];
+  return effort ? { ...reviewer, reasoningEffort: effort } : reviewer;
+}
+
 /** Planning and review run through one configured provider. */
 export type PlanningConfig =
   | {
@@ -173,6 +191,8 @@ export type PlanningConfig =
       };
       planner: CodexModelSelection;
       reviewer: CodexModelSelection;
+      /** Per review phase effort; an omitted phase uses `reviewer.reasoningEffort`. */
+      reviewEffort?: Partial<Record<ReviewEffortPhase, CodexReasoningEffort>>;
     }
   | {
       /**
@@ -184,6 +204,8 @@ export type PlanningConfig =
       maxOutputTokens: number;
       planner: ClaudeModelSelection;
       reviewer: ClaudeModelSelection;
+      /** Per review phase effort; an omitted phase uses `reviewer.reasoningEffort`. */
+      reviewEffort?: Partial<Record<ReviewEffortPhase, HarnessReasoningEffort>>;
     };
 
 export type ResourcePhase = "coding" | "validation" | "review" | "delivery";
@@ -431,12 +453,25 @@ function assertClaudeModelSelection(
     throw new Error(`${name}.reasoningEffort is unsupported`);
 }
 
+function assertReviewEffort(value: unknown, efforts: Set<string>): void {
+  if (value === undefined) return;
+  assertObject(value, "planning.reviewEffort");
+  assertOnlyKeys(value, [...REVIEW_EFFORT_PHASES], "planning.reviewEffort");
+  for (const [phase, effort] of Object.entries(value))
+    if (typeof effort !== "string" || !efforts.has(effort))
+      throw new Error(`planning.reviewEffort.${phase} is unsupported`);
+}
+
 export function validatePlanning(
   value: unknown,
 ): asserts value is FactoryConfig["planning"] {
   assertObject(value, "planning");
   if (value.kind === "codex-sdk") {
-    assertOnlyKeys(value, ["kind", "codex", "planner", "reviewer"], "planning");
+    assertOnlyKeys(
+      value,
+      ["kind", "codex", "planner", "reviewer", "reviewEffort"],
+      "planning",
+    );
     if (value.codex !== undefined) {
       assertObject(value.codex, "planning.codex");
       assertOnlyKeys(
@@ -463,13 +498,14 @@ export function validatePlanning(
     }
     assertCodexModelSelection(value.planner, "planning.planner");
     assertCodexModelSelection(value.reviewer, "planning.reviewer");
+    assertReviewEffort(value.reviewEffort, codexReasoningEfforts);
     return;
   }
   if (value.kind !== "claude-agent-sdk")
     throw new Error("Unsupported planning model");
   assertOnlyKeys(
     value,
-    ["kind", "maxOutputTokens", "planner", "reviewer"],
+    ["kind", "maxOutputTokens", "planner", "reviewer", "reviewEffort"],
     "planning",
   );
   if (
@@ -479,6 +515,7 @@ export function validatePlanning(
     throw new Error("planning.maxOutputTokens must be a positive integer");
   assertClaudeModelSelection(value.planner, "planning.planner");
   assertClaudeModelSelection(value.reviewer, "planning.reviewer");
+  assertReviewEffort(value.reviewEffort, harnessReasoningEfforts);
 }
 
 function assertUniqueStrings(value: unknown, name: string): string[] {

@@ -971,7 +971,10 @@ export class StructuredPlanningModel implements PlanningModel {
           Math.max(0, Date.parse(deadlineAt) - Date.now()),
         );
         assertStepAdmission();
-        const selection = this.transport.selection(args.role);
+        const selection = this.transport.selection(
+          args.role,
+          args.defaultPhase,
+        );
         observeModelInvocation(invocation, {
           type: "retry-scheduled",
           provider: this.transport.provider,
@@ -996,6 +999,7 @@ export class StructuredPlanningModel implements PlanningModel {
     const provider = this.transport.provider;
     const { model, reasoningEffort, serviceTier } = this.transport.selection(
       args.role,
+      args.defaultPhase,
     );
     const schema = JSON.stringify(args.schema);
     const started = Date.now();
@@ -1039,7 +1043,11 @@ export class StructuredPlanningModel implements PlanningModel {
           ...(args.reviewImages?.length
             ? { reviewImages: reviewImageIdentities(args.reviewImages) }
             : {}),
-          settings: this.transport.settings(args.role, args.tree),
+          settings: this.transport.settings(
+            args.role,
+            args.tree,
+            args.defaultPhase,
+          ),
           admittedDeadlineAt: args.deadlineAt,
           coverage: {
             implicitSystemPrompt: "not-exposed",
@@ -1546,7 +1554,7 @@ export function renderResultReviewCall(
           `Criteria ${request.itemCriteria} to ${request.criteria.length - 1} are the Objective's acceptance criteria and pinned-source exit items this Work Item's result proves, quoted verbatim; the criteria before them are its own acceptance. Final review judges these same texts again with the same standard, so judge each now as it will: every enumerated sub-clause, each with its own proof. A fact only the integrated tree, a sibling Work Item or final validation can show belongs to final review and is not missing here; pass when this result delivers its own part.`,
         ]
       : []),
-    "Return exact packetId and one finding per criterionIndex in any order, with packet-local evidenceIndices; omit criterion text, labels and quotations. Judge the whole criterion using its required proof modes, not index membership or preferred extra ordering/tests. Explicit runtime requirements need runtime evidence; permitted component/source proof needs no invented stronger requirement. Pass cites only complete true entries; reads do not upgrade incomplete entries. Incomplete entries may support needs-human/refuse, never missing facts. Refuse direct disproof, judging the implementation, not only its tests: refuse a semantic defect even when every bullet is literally met, such as code breaking an invariant a criterion or pinned source states (output varying with step size or ordering), an adapter rejecting the real upstream producer's output, or a parallel helper, type or convention where a criterion or pinned source requires the shared one. File it under the broken criterion, citing that criterion or source and the code file/lines; unanchored style or design preference is no finding. A verification deliverable proves a sub-clause only when its assertion would fail if that sub-clause were wrong: it asserts the exact stated value, formula or text rather than a range or plausibility bound, recomputes the judged fact independently instead of reading it back from the output under test, and in generated cases varies every input the sub-clause names. Also refuse a missing verification deliverable only when complete exact candidate sources positively establish absence of an assertion/proof the criterion requires and the candidate must author within its accepted ownership/phase. Cite criterion, complete source/inventory scope, file/lines and evidence indices; name the omitted fact as missing verification, not an inferred app bug or failed passing command. Before refusing a criterion for missing verification, check every enumerated sub-clause of that criterion and name all the omitted ones in that one finding, so a single correction can address them together; never stop at the first. Correction still obeys ownership, authority and finite charged repair limits. Use needs-human with a precise question for operator-owned decisions/prerequisites, unavailable external facts, unknown completeness or insufficient evidence not establishing that candidate omission; never ask the operator to supply repository contents, patches, base bodies or other facts the supplied evidence or evidence root contains. Missing facts never pass; insufficient proof alone is not refusal.",
+    "Return exact packetId and one finding per criterionIndex in any order, with packet-local evidenceIndices; omit criterion text, labels and quotations. Judge the whole criterion using its required proof modes, not index membership or preferred extra ordering/tests. Explicit runtime requirements need runtime evidence; permitted component/source proof needs no invented stronger requirement. Pass cites only complete true entries; reads do not upgrade incomplete entries. Incomplete entries may support needs-human/refuse, never missing facts. Refuse direct disproof, judging the implementation, not only its tests: refuse a semantic defect even when every bullet is literally met, such as code breaking an invariant a criterion or pinned source states (output varying with step size or ordering), an adapter rejecting the real upstream producer's output, a total or never-throws criterion met by a catch-all that reports internal defects as invalid input, or a parallel helper, type or convention where a criterion or pinned source requires the shared one. File it under the broken criterion, citing that criterion or source and the code file/lines; unanchored style or design preference is no finding. A verification deliverable proves a sub-clause only when its assertion would fail if that sub-clause were wrong: it asserts the exact stated value, formula or text rather than a range or plausibility bound, recomputes the judged fact independently instead of reading it back from the output under test, and in generated cases varies every input the sub-clause names. To pass an invariant, property or refusal criterion, name in its detail one concrete code mutation a cited test would kill (such as applying a cooldown against the input's last-fired time instead of the carried state); when you cannot name one, the criterion lacks verification: refuse it as missing verification, naming the surviving mutation. Also refuse a missing verification deliverable only when complete exact candidate sources positively establish absence of an assertion/proof the criterion requires and the candidate must author within its accepted ownership/phase. Cite criterion, complete source/inventory scope, file/lines and evidence indices; name the omitted fact as missing verification, not an inferred app bug or failed passing command. Before refusing a criterion for missing verification, check every enumerated sub-clause of that criterion and name all the omitted ones in that one finding, so a single correction can address them together; never stop at the first. Correction still obeys ownership, authority and finite charged repair limits. Use needs-human with a precise question for operator-owned decisions/prerequisites, unavailable external facts, unknown completeness or insufficient evidence not establishing that candidate omission; never ask the operator to supply repository contents, patches, base bodies or other facts the supplied evidence or evidence root contains. Missing facts never pass; insufficient proof alone is not refusal.",
     ...(request.reviewImages?.length
       ? [
           `Native PNG inputs are supplied in this exact order: ${JSON.stringify(reviewImageIdentities(request.reviewImages))}. Inspect these actual pixels where a criterion requires visual evidence. Their packet-local backing records bind command/tree/artifact provenance; descriptors alone prove no visual semantics. Judge each actual criterion independently, cite its backing packet evidence, and keep these observed frames distinct from unobserved behavior or historical model opinions.`,
@@ -1634,6 +1642,7 @@ export class CodexPlanningModel extends StructuredPlanningModel {
         options.sessionRoot,
         options.transport,
         options.sourceArtifacts,
+        options.reviewEffort,
       ),
       { ...options, checkout },
     );

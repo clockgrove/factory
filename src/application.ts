@@ -433,6 +433,7 @@ export function composePlanningModel(
         reviewArtifacts: config.reviewArtifacts,
         transport: config.planning.codex?.transport ?? "exec",
         sourceArtifacts: config.planning.codex?.sourceArtifacts,
+        reviewEffort: config.planning.reviewEffort,
         ...(retainedSessions
           ? {
               sessionRoot: join(

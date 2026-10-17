@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { assertKnownFlags } from "../dist/cli-flags.js";
 import { planningSources } from "../dist/compiler/sources.js";
@@ -795,7 +795,7 @@ test("QA rereview retains exact command, installed dependency and runtime proof 
       join(checkout, "proof.cjs"),
       `const fs=require('node:fs'),os=require('node:os'),p=require('node:path');
 if(process.argv[2]==='install') { fs.mkdirSync('node_modules/.store/dependency',{recursive:true}); fs.writeFileSync('node_modules/.store/dependency/package.json',JSON.stringify({version:'1.0.0',exports:'./api.js'})); fs.writeFileSync('node_modules/.store/dependency/api.js','exports.fromState = state => [...state];\\n'); fs.symlinkSync('.store/dependency','node_modules/dependency'); console.log('Dependency inspection ready'); }
-else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.TEMP) throw Error('temp not owned'); const dir=fs.mkdtempSync(p.join(os.tmpdir(),'runtime-')); fs.writeFileSync(p.join(dir,'node.json'),JSON.stringify({state:[1,2],restoration:true})); fs.writeFileSync(p.join(dir,'comparison.json'),JSON.stringify({equal:true})); console.log('Owned temp: '+process.env.TMPDIR); console.log('runner prefix: Runtime evidence: '+dir); }
+else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.TEMP) throw Error('temp not owned'); const dir=fs.mkdtempSync(p.join(os.tmpdir(),'runtime-')); fs.writeFileSync(p.join(dir,'node.json'),JSON.stringify({state:[1,2],restoration:true})); fs.writeFileSync(p.join(dir,'comparison.json'),JSON.stringify({equal:true})); fs.writeFileSync(p.join(dir,'trace.log'),'unselected'); console.log('Owned temp: '+process.env.TMPDIR); console.log('runner prefix: Runtime evidence: '+dir); }
 `,
     );
     git("add", ".");
@@ -969,18 +969,13 @@ else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.
           stdout: { maxBytes: 4096 },
           locator: {
             stdoutPathPrefix: "Runtime evidence: ",
-            files: [
-              {
-                file: "node.json",
-                mediaType: "application/json",
-                maxBytes: 4096,
-              },
-              {
-                file: "comparison.json",
-                mediaType: "application/json",
-                maxBytes: 4096,
-              },
-            ],
+            match: {
+              pattern: "*.json",
+              mediaType: "application/json",
+              maxBytes: 4096,
+              maxTotalBytes: 8192,
+              maxFiles: 4,
+            },
           },
         },
       },
@@ -1106,6 +1101,11 @@ else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.
       selectors[1].text.locator.stdoutPathPrefix,
     );
     assert.equal(dirname(locator.directory), locator.temporaryRoot);
+    // A match captures every matching file in sorted order, nothing else.
+    assert.deepEqual(
+      artifacts[1].text.bodies.slice(1).map((body) => basename(body.path)),
+      ["comparison.json", "node.json"],
+    );
     const resultBinding = captured.reviewPacket.evidence
       .map((entry) => {
         try {

@@ -5,6 +5,7 @@ import {
   fstatSync,
   lstatSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
 } from "node:fs";
@@ -21,6 +22,7 @@ export const MAX_REVIEW_RECEIPT_BYTES = 1024 * 1024;
 export const MAX_REVIEW_IMAGE_BYTES = 16 * 1024 * 1024;
 export const MAX_REVIEW_IMAGES = 8;
 export const MAX_REVIEW_TOTAL_IMAGE_BYTES = 64 * 1024 * 1024;
+export const MAX_REVIEW_MATCHED_FILES = 256;
 export interface ReviewImageArtifactSelector {
   command: string;
   receipt: {
@@ -36,6 +38,17 @@ export interface ReviewTextFileSelector {
   mediaType: "text/plain" | "application/json";
   maxBytes: number;
 }
+/** Every regular file directly in the located directory whose name matches. */
+export interface ReviewTextMatchSelector {
+  /** File name with exactly one `*` wildcard, such as `*.json`. */
+  pattern: string;
+  mediaType: ReviewTextFileSelector["mediaType"];
+  /** Bound for each matched file. */
+  maxBytes: number;
+  /** Bound for all matched files together. */
+  maxTotalBytes: number;
+  maxFiles: number;
+}
 export interface ReviewTextArtifactSelector {
   command: string;
   text: {
@@ -47,7 +60,9 @@ export interface ReviewTextArtifactSelector {
     locator?: {
       /** Literal marker preceding a directory path within one stdout line. */
       stdoutPathPrefix: string;
-      files: ReviewTextFileSelector[];
+      /** Exactly one of `files` or `match`. */
+      files?: ReviewTextFileSelector[];
+      match?: ReviewTextMatchSelector;
     };
   };
 }
@@ -163,6 +178,29 @@ function bound(value: unknown, maximum: number): void {
   )
     throw new Error("Review artifact byte bound is invalid");
 }
+function matchPattern(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.length > 255 ||
+    value.split("*").length !== 2 ||
+    /[/\\]/.test(value) ||
+    [...value].some(
+      (character) =>
+        character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    )
+  )
+    throw new Error(
+      "Text artifact locator match pattern must be one file name with exactly one *",
+    );
+}
+const matchesPattern = (pattern: string, name: string) => {
+  const [head, tail] = pattern.split("*") as [string, string];
+  return (
+    name.length >= head.length + tail.length &&
+    name.startsWith(head) &&
+    name.endsWith(tail)
+  );
+};
 export function assertReviewArtifactSelectors(
   value: unknown,
 ): asserts value is ReviewArtifactSelector[] | undefined {
@@ -297,11 +335,36 @@ function assertTextSelector(selector: Record<string, unknown>): void {
     const locator = object(text.locator);
     refuseUnknownFields(
       locator,
-      ["stdoutPathPrefix", "files"],
+      ["stdoutPathPrefix", "files", "match"],
       "text artifact locator",
     );
     locatorPrefix(locator.stdoutPathPrefix);
-    files(locator.files);
+    if ((locator.files === undefined) === (locator.match === undefined))
+      throw new Error(
+        "Text artifact locator requires exactly one of files or match",
+      );
+    if (locator.files !== undefined) files(locator.files);
+    else {
+      const match = object(locator.match);
+      refuseUnknownFields(
+        match,
+        ["pattern", "mediaType", "maxBytes", "maxTotalBytes", "maxFiles"],
+        "text artifact locator match",
+      );
+      matchPattern(match.pattern);
+      if (
+        !["text/plain", "application/json"].includes(match.mediaType as string)
+      )
+        throw new Error("Text artifact MIME is unsupported");
+      bound(match.maxBytes, MAX_REVIEW_IMAGE_BYTES);
+      bound(match.maxTotalBytes, MAX_REVIEW_TOTAL_IMAGE_BYTES);
+      if (
+        !Number.isSafeInteger(match.maxFiles) ||
+        (match.maxFiles as number) <= 0 ||
+        (match.maxFiles as number) > MAX_REVIEW_MATCHED_FILES
+      )
+        throw new Error("Text artifact locator match file bound is invalid");
+    }
     selected = true;
   }
   if (!selected) throw new Error("Text artifact selection contains no bodies");
@@ -773,7 +836,7 @@ async function captureTextArtifact(
       directory: matches[0]!,
       resolvedDirectory: directory,
     };
-    for (const selected of selector.text.locator.files) {
+    for (const selected of selector.text.locator.files ?? []) {
       const { bytes, resolvedPath } = readSelectedText(
         temporaryRoot,
         join(directoryPath, selected.file),
@@ -795,6 +858,38 @@ async function captureTextArtifact(
         selected.mediaType,
         selected.maxBytes,
       );
+    }
+    const match = selector.text.locator.match;
+    if (match) {
+      // Sorted names keep bodies, review packets and digests deterministic.
+      const entries = readdirSync(directory, { withFileTypes: true })
+        .filter((entry) => matchesPattern(match.pattern, entry.name))
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      if (!entries.length)
+        throw new Error("Text artifact locator match selected no files");
+      if (entries.length > match.maxFiles)
+        throw new Error("Text artifact locator match exceeds its file bound");
+      let total = 0;
+      for (const entry of entries) {
+        // Matched symlinks, directories and other non-regular entries refuse.
+        if (!entry.isFile())
+          throw new Error(
+            "Text artifact locator match is not a regular contained file",
+          );
+        const file = join(directoryPath, entry.name);
+        const bytes = readContained(temporaryRoot, file, match.maxBytes, true);
+        total += bytes.length;
+        if (total > match.maxTotalBytes)
+          throw new Error(
+            "Text artifact locator match exceeds its total byte bound",
+          );
+        await append(
+          { origin: "temporary-file", path: file, resolvedPath: file },
+          bytes,
+          match.mediaType,
+          match.maxBytes,
+        );
+      }
     }
   }
   return {

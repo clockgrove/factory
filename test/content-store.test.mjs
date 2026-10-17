@@ -32,7 +32,6 @@ import {
   authenticateAdaptiveContextPacket,
   buildAdaptiveContext,
 } from "../dist/adaptive-context.js";
-import { analyzeInteractions } from "../dist/analysis.js";
 import {
   CaptureWriter,
   readInteractionContent,
@@ -122,7 +121,6 @@ import {
 } from "../dist/recovery-checkpoint.js";
 import {
   buildRecoveryCheckpointClosure,
-  describeContinuationReferences,
   describeMemoryBodyReferences,
   uniqueRecoveryCheckpointFiles,
 } from "../dist/recovery-checkpoint-closure.js";
@@ -727,7 +725,6 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       .boundary.elapsedMs,
     durationMs,
   );
-  const interactionBefore = analyzeInteractions(metadataBefore, [], {});
   // Capture a declaration over the same actual source read, then retain the
   // resulting observation as historical memory before its staging is removed.
   const declared = [
@@ -6828,7 +6825,6 @@ async function failedWorkerCollection(t, returned) {
     "../dist/process.js"
   );
   const { executionContext } = await import("../dist/execution/checkpoint.js");
-  const { attachedFault } = await import("../dist/fault.js");
   const temporary = mkdtempSync(join(tmpdir(), "factory-failed-worker-"));
   const repository = `fixture/failed-worker-${randomUUID()}`;
   const privateRoot = stateRoot(repository),

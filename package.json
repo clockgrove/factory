@@ -31,7 +31,6 @@
     "skills",
     "assets",
     "docs/USER-GUIDE.md",
-    "docs/GITHUB-MANAGEMENT.md",
     ".codex-plugin",
     ".claude-plugin/plugin.json",
     "README.md",
@@ -53,8 +52,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "biome lint --error-on-warnings .",
-    "format:check": "biome format . && prettier --check package-lock.json \"**/*.{md,yml,yaml}\"",
-    "format": "biome format --write . && prettier --write package-lock.json \"**/*.{md,yml,yaml}\"",
+    "format:check": "biome format . && prettier --check \"**/*.{md,yml,yaml}\"",
+    "format": "biome format --write . && prettier --write \"**/*.{md,yml,yaml}\"",
     "test": "npm run build && node --import ./test/isolate-env.mjs --test --test-timeout=300000 test/*.test.mjs",
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check"
@@ -62,7 +61,6 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@types/node": "^24.5.2",
-    "pnpm": "10.34.5",
     "prettier": "^3.6.2",
     "typescript": "^5.9.2"
   },

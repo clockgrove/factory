@@ -21,7 +21,6 @@ const production = Object.entries(lock.packages)
     ),
     version: entry.version,
     license: entry.license,
-    optional: Boolean(entry.optional),
   }))
   .sort((a, b) => a.path.localeCompare(b.path));
 
@@ -100,15 +99,6 @@ function noticesFor(entry) {
       {
         source: "koffi@3.3.1/LICENSE.txt (same published package family)",
         text: koffiLicense,
-      },
-    ];
-  if (["spdx-exceptions", "spdx-license-ids"].includes(entry.name))
-    return [
-      {
-        source: `${entry.path}/README.md (publisher licensing statement)`,
-        text: readFileSync(resolve(directory, "README.md"), "utf8")
-          .replace(/\r\n?/g, "\n")
-          .trimEnd(),
       },
     ];
   if (entry.name === "@azu/format-text" && entry.version === "1.0.2")

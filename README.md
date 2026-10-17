@@ -52,7 +52,7 @@ codex plugin marketplace add clockgrove/factory --ref "v$VERSION"
 codex plugin add factory@clockgrove
 ```
 
-**Claude Code** (releases after v0.1.75):
+**Claude Code**:
 
 ```sh
 claude plugin marketplace add "clockgrove/factory#v$VERSION"
@@ -72,7 +72,7 @@ gh attestation verify "clockgrove-factory-$VERSION.tgz" --repo clockgrove/factor
 sha256sum --check SHA256SUMS
 ```
 
-`gh attestation verify` proves the tarball was built by this repository's [release workflow](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) from the tagged source. Do not install a tarball that fails verification. Releases before v0.1.75 predate attestations; their verification is linked in the [historical release record](https://github.com/clockgrove/factory/blob/1ce1758836c6a249540d6c4bbddf1d01236ac0d7/CHANGELOG.md).
+`gh attestation verify` proves the tarball was built by this repository's [release workflow](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) from the tagged source. Do not install a tarball that fails verification. Releases before v0.1.75 predate attestations; see the [release history](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md#history).
 
 Choose an absolute installation directory outside your target repository and credential, configuration or state roots (including `CODEX_HOME`):
 
@@ -119,7 +119,7 @@ For background operation, ask:
 
 > Use Factory to set up this repository and keep watching for explicitly approved Objectives, with a concurrency limit of two.
 
-On a supported Linux/WSL user-service host, bind the target's existing GitHub Project scheduling fields and a private-history Git checkpoint destination, then use guided setup to register, start and verify the background service. The [queue guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#queue-and-background) lists the required bindings. Project holds current membership and order; Git retains approval and ownership receipts. An idle watcher makes no model calls. It checks every 30 seconds by default and starts only explicitly authorized Objective IDs; roadmap cards and labels grant no execution authority. Add later approved batches with `factory queue add N`, and reread them with `factory queue sync`. Queue changes have a three-minute deadline through durable completion; after installing a release, upgrade the service (`factory supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI`) before queue commands; timeout preserves uncertainty and does not permit replay. Local status retains its one-second deadline; the local pause acknowledgment targets a one-second response. The service must be able to run on this machine; shutdown, sleep and user-manager lifetime still apply.
+On a supported Linux/WSL user-service host, bind the target's existing GitHub Project scheduling fields and a private-history Git checkpoint destination, then use guided setup to register, start and verify the background service. The [queue guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#queue-and-background) lists the required bindings. Project holds current membership and order; Git retains approval and ownership receipts. An idle watcher makes no model calls. It checks every 30 seconds by default and starts only explicitly authorized Objective IDs; roadmap cards and labels grant no execution authority. Add later approved batches with `factory queue add N`, and reread them with `factory queue sync`. The queue guide also covers command deadlines and upgrading the service after a release. The service must be able to run on this machine; shutdown, sleep and user-manager lifetime still apply.
 
 For a new laptop or sandbox, [restore the explicitly configured Git checkpoint](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#restore-on-another-installation) with `factory persistence restore`. It rebuilds local replicas and opens recovered work for inspection; ownership reconciliation and service activation remain separate. Without a Git archive, Factory records are local only.
 

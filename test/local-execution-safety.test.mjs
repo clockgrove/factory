@@ -169,7 +169,6 @@ import { CodexPlanningTransport } from "../dist/compiler/codex-transport.js";
 import { materializeResultTree } from "../dist/result-evidence.js";
 import {
   createCodexHome,
-  CODEX_PLANNING_CONFIG,
   CODEX_TREE_REVIEW_CONFIG,
 } from "../dist/codex-planning-isolation.js";
 import {

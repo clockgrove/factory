@@ -55,7 +55,7 @@ Check the exact source-authorized prerequisite commands and their order in the a
 
 Present every known blocker together and ask for required choices once. Tell the operator where each secret belongs according to the approved configuration or source instructions; never request secret values in chat or issues. Keep private evidence in its authorized destination. Recheck the actual requirement before recording a decision, and use the live status command for continuation. Checklist text grants no setup, account, spending, deployment or acceptance authority. Continue independent work only when already authorized and admitted by the current gates; do not bypass a blocked Objective, weaken acceptance or create a new state root.
 
-Ask when the real question exists; do not create an advance availability-confirmation gate merely to reach it. If the operator is away, preserve the pending question and original deadline. At the next check-in, inspect live status and surface the retained choices in this conversation. Do not claim the background service can wake an inactive conversation. Never edit state or submit an agent-authored comment as the human's answer.
+Ask when the real question exists; do not create an advance availability-confirmation gate merely to reach it. If the operator is away, preserve the pending question and original deadline. At the next check-in, inspect live status and surface the retained choices in this conversation. Do not claim the background service can wake an inactive conversation. Never edit state.
 
 ## Decide
 

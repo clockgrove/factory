@@ -56,11 +56,9 @@ For a minor version, also compare the downloaded archive byte for byte with the 
 
 ## Phase acceptance
 
-The release issue defines the required phase outcomes and their order. Complete those outcomes with the approved providers, targets, substantive acceptance and resource limits. Keep exact candidate identities, real results, failures, usage and consumed allowances. Reuse meaningful tests and retained evidence for the facts they actually prove; they do not turn failed historical work into current acceptance.
+The release issue defines the required phase outcomes and their order. Complete those outcomes with the approved providers, targets, substantive acceptance and resource limits. Keep exact candidate identities, real results, failures, usage and consumed allowances. The release issue holds the current roadmap and acceptance evidence; do not duplicate that tracking here.
 
-Qualification must remain proportional to the product change. Broad provider/profile matrices, benchmarks and deliberate fault drills are not automatic release or feature-closure gates. A live check is needed only when a specific changed behavior remains unproved by the existing tests and retained facts. New live provider capabilities require actual SDK evidence for the named claim, using the smallest bounded check that proves it. Preserve security, ownership, unknown outcomes, accounting and recorded limits. Stop when the required behavior works and its checks pass; do not grow a qualification program around a completed outcome.
-
-Batch corrections before the milestone review, and repeat a failed check only after a demonstrated correction. Preserve terminal runs and their accounting without reviving them or treating them as successful evidence. The release issue holds the current roadmap and acceptance evidence; do not duplicate that tracking here.
+Qualification scope, evidence reuse, batching and milestone review follow the Delivery and Coverage rules in [AGENTS.md](../AGENTS.md).
 
 ## Version numbers
 

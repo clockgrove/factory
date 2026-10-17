@@ -30,7 +30,7 @@ Each check-in should answer:
 
 Keep technical details and evidence available through GitHub links. Group known related questions instead of requiring a sequence of small interruptions. Ask once the real retained question exists; advance availability confirmation is not another approval gate. An unanswered question stays durable until the operator returns, within the original deadline. Current background operation does not establish that Factory can proactively wake a Codex conversation; distinguish questions surfaced during a check-in from any future notification capability. A technical failure alone does not establish that a human decision is required: use supported, authorized recovery within the recorded bounds when it exists. Unresolved external effects and exhausted allowances remain visible stops.
 
-GitHub comments and Project status are operational visibility, a projection of the run. Factory reads no human comment as input; the planning-comment intake experiment introduced in 0.2.30 was removed without a qualified decision-consumption journey. Human decisions and steering go through the agent conversation and local commands.
+GitHub comments and Project status are operational visibility, a projection of the run. Factory reads no human comment as input. Human decisions and steering go through the agent conversation and local commands.
 
 Continue independent work only where dependency, ownership and sequencing contracts permit it. The current background queue is sequential and stops when its active Objective needs a human decision. Continuing other admitted work past that stop is an open design question, not an existing capability or permission to bypass the queue.
 
@@ -42,13 +42,11 @@ Keep normal implementation close to the supported agent harness. Compilation sho
 
 Give each review a distinct responsibility. Work Item review checks its contract against the exact result; integrated review examines every original Objective criterion and cross-component behavior. Start reviewers with a small brief and evidence map, letting them search and retrieve the facts needed for their judgment. Reuse authenticated source evidence and receipts within their proven scope instead of automatically loading full source catalogs, designs and review histories into each context. Final acceptance still requires independent assessment of the integrated result; earlier verdicts do not become final acceptance.
 
-Use existing model profiles deliberately. The current cleanup qualification and following direct-Codex comparison use the same supported model throughout, with reasoning effort tuned by phase. Lower reasoning is a candidate for narrow, settled work; UI and integration assignments need their own quality evidence. Compare cheaper models separately after this baseline. Preserve compiled assignments and provider limits; this direction does not authorize runtime fallback or broader recovery.
+Use existing model profiles deliberately. Lower reasoning is a candidate for narrow, settled work; UI and integration assignments need their own quality evidence. Compare cheaper models separately against a same-model baseline. Preserve compiled assignments and provider limits; this direction does not authorize runtime fallback or broader recovery.
 
 ## Evidence and measurement
 
-The completed bounded full-stack comparison did not demonstrate Factory acceleration or dollar savings. Same-model Factory supplied stronger verification but took longer than the recorded direct route. The mixed-model result required repair and had weaker authored proof and visible metric explanation. Neither establishes a generally better app or a cheaper-worker default. The [published scorecard](https://github.com/clockgrove/factory/issues/894#issuecomment-6081418952) records the outcomes and accounting limits.
-
-Extend the existing scorecard for sustained delivery, keeping these dimensions separate:
+Measure sustained delivery along these separate dimensions:
 
 | Dimension           | Evidence to collect                                                                                                                                    |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -59,17 +57,7 @@ Extend the existing scorecard for sustained delivery, keeping these dimensions s
 | GitHub tracking     | Accurate issues, dependencies, PRs, acceptance evidence and Project status; visible uncertainty and links from Codex check-ins                         |
 | Delivery efficiency | Accepted throughput, full elapsed time, critical path, review/repair overhead, model and tool calls, cached/uncached input and accounting completeness |
 
-The next qualification should use a small admitted development queue over multiple sessions, recorded phone-style check-ins, a controlled restart or handoff, and a human-owned decision answered in Codex. Availability windows remain unknown when the operator has not supplied them; that does not create another approval gate. Predeclare equivalent substantive acceptance and independent quality assessment, including any direct-harness comparison. Include setup, review, repair, operator involvement and all selected failures. Preserve unknown usage and sample limits; do not infer benefits from failed or unfinished runs.
-
-## Follow-up work
-
-The [direction issue #982](https://github.com/clockgrove/factory/issues/982) coordinates three linked outcomes:
-
-- [#983: GitHub detail and Codex decisions](https://github.com/clockgrove/factory/issues/983), including fresh progress and a supported conversational human-decision journey.
-- [#984: Low-touch qualification](https://github.com/clockgrove/factory/issues/984), covering multiple sessions, measured operator involvement and a controlled restart or handoff.
-- [#985: Proportional planning and review](https://github.com/clockgrove/factory/issues/985), preserving independent acceptance while addressing evidenced overhead and qualifying worker selection.
-
-A baseline may record current phone-management limitations. Full qualification of that journey requires the supported outcome from #983. Existing receipts can inform overhead diagnosis before another live milestone. Filing these issues does not start implementation or a paid run.
+When comparing routes, predeclare equivalent substantive acceptance and independent quality assessment, including any direct-harness comparison. Include setup, review, repair, operator involvement and all selected failures. Preserve unknown usage and sample limits; do not infer benefits from failed or unfinished runs.
 
 ## Boundaries
 

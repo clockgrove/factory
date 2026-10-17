@@ -2,9 +2,7 @@
 
 Factory welcomes bug reports, documentation fixes, and focused pull requests. Search the [issue tracker](https://github.com/clockgrove/factory/issues) before opening a new issue. For a larger change, describe the outcome and agree on its scope in an issue before implementing it. The [public project](https://github.com/orgs/clockgrove/projects/2) tracks priorities.
 
-Set the native issue type: `Bug` for a defect, `Feature` for a requested capability, or `Task` for maintenance, investigation or qualification. Use labels for area, priority or other independent information; omit redundant `bug`, `enhancement`, `feature` and `task` labels. CLI/API authors must supply the type explicitly and verify the returned issue. See [issue metadata rules](AGENTS.md#issue-metadata) for Objective and Work Item roles.
-
-Maintainers and agents must assign one priority when creating an issue or triaging a report: `P0` for urgent security/data loss, duplicate effects or stranded work; `P1` for current critical-path delivery or incorrect behavior with a supported workaround; `P2` for minor, optional or deferred work. Verify the label after creation. A blocked status does not by itself lower priority, and a priority label does not authorize execution.
+Set the native issue type and one priority label as the [issue metadata rules](AGENTS.md#issue-metadata) describe.
 
 This guide is for developers adding features or fixing bugs in Factory itself. To use the plugin on your own repository, follow the [plugin user guide](docs/USER-GUIDE.md).
 
@@ -74,7 +72,7 @@ npm run build
 node --import ./test/isolate-env.mjs --test test/git-registry-lock.test.mjs
 ```
 
-Keep coverage small and tied to demonstrated failures. Reuse an existing real workflow before adding a test. Do not add unit tests, mocks, fake services, scripted provider responses, fault matrices or fixture frameworks. CI runs the complete small suite; avoid repeatedly running it locally when the affected check already passed and nothing changed.
+Keep coverage within the [coverage rules](AGENTS.md#coverage-and-model-contracts); CI runs the complete small suite.
 
 Check documentation commands, links and formatting when they change. Use the [release procedure](docs/RELEASING.md) for the release issue’s actual milestone acceptance; do not add per-fix live runs or a separate public-fixture gate. Local CI does not claim live provider or GitHub acceptance.
 

@@ -15,7 +15,6 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { assertKnownFlags } from "../dist/cli-flags.js";
-import { planningSources } from "../dist/compiler/sources.js";
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import {

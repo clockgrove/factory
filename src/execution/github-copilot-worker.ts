@@ -20,6 +20,8 @@ import {
 import { bounded, cleanupCopilotClient } from "./github-copilot-lifecycle.js";
 import {
   assertCopilotToolPolicy,
+  copilotValidationCommands,
+  createCopilotValidation,
   githubCopilotClientOptions,
   githubCopilotSessionOptions,
 } from "./github-copilot-options.js";
@@ -255,6 +257,7 @@ async function main(): Promise<void> {
   let client: import("@github/copilot-sdk").CopilotClient | undefined;
   let session: import("@github/copilot-sdk").CopilotSession | undefined;
   let outcome: Record<string, unknown> | undefined;
+  let validation: ReturnType<typeof createCopilotValidation> | undefined;
   let sessionStart:
     | Extract<
         SessionEvent,
@@ -302,7 +305,28 @@ async function main(): Promise<void> {
       if (input.session.resume && prior !== authenticationDigest)
         throw new Error("Copilot continuation authentication identity changed");
     }
-    const sessionOptions = githubCopilotSessionOptions(input);
+    if (copilotValidationCommands(input).length)
+      validation = createCopilotValidation(input, (facts) => {
+        if (progressLost) return;
+        try {
+          privateProgress(progressPath, {
+            eventId: randomUUID(),
+            at: new Date().toISOString(),
+            attemptId: input.request.attemptId ?? "",
+            operation: "validation",
+            validation: facts,
+          });
+        } catch (error) {
+          progressLost = true;
+          process.stderr.write(
+            `Factory GitHub Copilot progress unavailable: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        }
+      });
+    const sessionOptions = githubCopilotSessionOptions(
+      input,
+      validation ? [validation.tool] : [],
+    );
     const onEvent = (event: SessionEvent) => {
       turn.progress(event.type);
       if (dispatched && event.type === "session.idle") {
@@ -436,6 +460,8 @@ async function main(): Promise<void> {
       },
       rendered.sections,
     );
+    // The tool policy check above confirmed the session offers Validate.
+    validation?.markReady();
     dispatched = true;
     const response = await race(
       session.sendAndWait({ prompt }, input.config.timeoutSeconds * 1_000),
@@ -458,6 +484,7 @@ async function main(): Promise<void> {
       processingAtEnd.processing !== false
     )
       throw new Error("Copilot completed event still has active native work");
+    if (validation) await race(validation.close());
     turn.finish();
     providerCompleted = true;
     capture.providerCompleted();
@@ -467,6 +494,7 @@ async function main(): Promise<void> {
       assets,
       evidence: {
         harness: "github-copilot-sdk",
+        ...(validation && { validation: await validation.evidence() }),
         adapter: GITHUB_COPILOT_SDK_ADAPTER_IDENTITY,
         sessionId: session.sessionId,
         configuredModel: input.config.model,
@@ -484,6 +512,9 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   } finally {
     turn.finish();
+    // A run already started finishes before the worker exits, unless cancelled.
+    const closing = validation?.close();
+    if (closing && !cancelled) await closing;
     try {
       if (client)
         await cleanupCopilotClient(

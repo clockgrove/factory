@@ -323,7 +323,7 @@ const claudeSettingSources = new Set<ClaudeSettingSource>([
   "local",
 ]);
 const claudeFileTools = new Set(["Read", "Edit", "Write", "Glob", "Grep"]);
-/** A Claude worker tool that runs only the item's declared validation. */
+/** A worker tool that runs only the item's declared validation. */
 export const validateToolConfigName = "Validate";
 const copilotFileTools = new Set([
   "view",
@@ -1565,11 +1565,11 @@ export function validateLocalHarness(
         "execution.harness.availableTools must name bounded SDK tools",
       );
     const unsupportedTool = availableTools.find(
-      (tool) => !copilotFileTools.has(tool),
+      (tool) => !copilotFileTools.has(tool) && tool !== validateToolConfigName,
     );
     if (unsupportedTool)
       throw new Error(
-        `execution.harness.availableTools supports only view, create, edit, apply_patch, grep, and glob; received ${unsupportedTool}`,
+        `execution.harness.availableTools supports only view, create, edit, apply_patch, grep, glob, and Validate; received ${unsupportedTool}`,
       );
     const permissionKinds = assertUniqueStrings(
       harness.permissionKinds,

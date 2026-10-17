@@ -83,6 +83,7 @@ function providerFromOptions(args: string[]): ProviderConfig {
     "apply_patch",
     "grep",
     "glob",
+    "Validate",
   ];
   return {
     planning:

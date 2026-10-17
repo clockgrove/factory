@@ -49,6 +49,7 @@ import {
 import { LocalContentStore } from "../dist/content/local.js";
 import { faultOf } from "../dist/fault.js";
 import { retainStateMemory } from "../dist/repository-memory.js";
+import { buildMemoryLearningClosure } from "../dist/repository-memory-transfer.js";
 import {
   proposalPersistenceReferences,
   proposalSchema,
@@ -2592,6 +2593,29 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       false,
     );
     assert.equal(memoryBody.notes.length, 2);
+    // The filtered body cites its sources by digest; the checkpoint closure
+    // binds each one to the record's exact retained source reference. The
+    // source bytes live in the worker's store, which production shares.
+    for (const record of memoryRecords)
+      for (const body of record.bodies)
+        if (body.role.startsWith("source:"))
+          memoryStore.putBytes(store.readBytes(body.ref), {
+            mediaType: body.ref.mediaType,
+          });
+    const memoryClosure = await buildMemoryLearningClosure({
+      repository: loaded.repository,
+      root: memoryRoot,
+      access: {
+        repository: loaded.repository,
+        visibility: ["private", "repository"],
+      },
+    });
+    assert.deepEqual(
+      memoryBody.sources.map((source) =>
+        memoryClosure.contentRefs.some((ref) => ref.digest === source.digest),
+      ),
+      memoryBody.sources.map(() => true),
+    );
     // The item's own review receives its verification map; other workers
     // (the consumer views above) never do.
     const ownVerification = ownDeclaration.view.entries.find(

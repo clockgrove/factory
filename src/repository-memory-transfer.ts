@@ -174,21 +174,36 @@ async function memoryBodyReferences(
     return handoff.sources.map((source) => {
       if (!source || typeof source !== "object" || Array.isArray(source))
         throw new Error("Invalid original handoff source");
-      const retained = source as { path?: string; ref?: unknown };
-      const ref = retained.ref;
-      assertRef(ref);
-      if (
-        !record.sources.some(
-          (source) =>
-            source.identity === `repository:${retained.path}` &&
-            source.ref &&
-            refIdentity(source.ref) === refIdentity(ref),
-        )
+      // An original worker record cites each source by its exact reference; the
+      // filtered memory body cites it by digest. Either binds to one retained
+      // source whose exact reference the record holds.
+      const retained = source as {
+        path?: string;
+        ref?: unknown;
+        digest?: unknown;
+      };
+      if ("ref" in retained) assertRef(retained.ref);
+      else if (
+        Object.keys(retained).sort().join() !== "digest,path" ||
+        typeof retained.digest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(retained.digest)
       )
+        throw new Error("Invalid original handoff source");
+      const bound = record.sources.find(
+        (source) =>
+          source.identity === `repository:${retained.path}` &&
+          source.ref &&
+          (retained.ref
+            ? refIdentity(source.ref) ===
+              refIdentity(retained.ref as ContentRef)
+            : source.ref.digest === retained.digest),
+      )?.ref;
+      if (!bound)
         throw new Error(
           "Original handoff source differs from its retained binding",
         );
-      return ref;
+      assertRef(bound);
+      return bound;
     });
   }
   const {

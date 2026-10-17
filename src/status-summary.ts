@@ -539,8 +539,7 @@ function proposedDiscovery(
   view: ExecutionStatusView,
 ): StatusSummary | undefined {
   const pending = view.pendingAmendment;
-  if (!pending?.worker || ["rejected", "backlog"].includes(pending.phase))
-    return undefined;
+  if (!pending?.worker || pending.phase === "rejected") return undefined;
   return {
     phase: "waiting",
     summary: `amendment for ${pending.worker}'s discovery is ${pending.phase}`,
@@ -834,7 +833,7 @@ function blamedItem(
           },
     };
   }
-  if (pending && pending.phase !== "backlog")
+  if (pending)
     return {
       phase: "failed",
       summary: `${summary}; an amendment to fix ${file} is pending`,

@@ -2020,7 +2020,6 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         manifest: inventoryManifest,
         body: inventoryBody,
         runId: expanded.runId,
-        iteration: 1,
       });
       const inputBytes = new TextEncoder().encode(
         JSON.stringify(materialized.inputPacket),

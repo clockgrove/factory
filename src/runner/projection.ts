@@ -26,6 +26,7 @@ import {
   verifyExecutionProfiles,
 } from "../execution-profiles.js";
 import { preflightLocalExecutables } from "../local-preflight.js";
+import { prerequisitesDigest } from "../native-prerequisite-evidence.js";
 import { retainAcceptedPlanningDecision } from "../planning-decision-context.js";
 import type { FactoryState, PreparationState } from "../state.js";
 import { saveState } from "../state-store.js";
@@ -342,9 +343,7 @@ export function activateProjectedObjective(args: {
     planGraphDigest: plan.graphDigest,
     ...(plan.prerequisites
       ? {
-          prerequisitesDigest: createHash("sha256")
-            .update(JSON.stringify(plan.prerequisites))
-            .digest("hex"),
+          prerequisitesDigest: prerequisitesDigest(plan.prerequisites),
           prerequisites: plan.prerequisites,
         }
       : {}),

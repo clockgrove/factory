@@ -45,7 +45,7 @@ export function blameDecision(
       ? `${head} The amendment that was to fix it was rejected and no replacement can be submitted (${refusal.message}): \`factory cancel --objective ${objective}\`, then start a new Objective (limits are recorded per Objective, so a raised limit applies to a new one)`
       : `${head} The amendment that was to fix it was rejected: \`factory propose-amendment --objective ${objective} --proposal FILE\` with a replacement`;
   }
-  if (pending && pending.phase !== "backlog")
+  if (pending)
     return `${head} An amendment is pending: (1) \`${run}\` reviews and projects it and merges its Work Items. (2) \`${retry}\`, which starts a new attempt on the integrated head. (3) \`${run}\` again`;
   // The stored text does not follow the amendment's Work Items as they merge;
   // `factory status` does, and says when the retry is due.

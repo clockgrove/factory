@@ -4401,7 +4401,6 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     manifest,
     body,
     runId: producer.runId,
-    iteration: 1,
   });
   const children = materialized.childIds.map((id) =>
     materialized.graph.items.find((item) => item.id === id),
@@ -4956,7 +4955,6 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     manifest: retainedPacket.manifest,
     body: retainedPacket.body,
     runId: retainedPacket.runId,
-    iteration: retainedPacket.iteration,
   });
   assert.deepEqual(reloaded, materialized);
   assert.throws(
@@ -4967,7 +4965,6 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
         manifest,
         body,
         runId: producer.runId,
-        iteration: 1,
         immutableItemIds: ["integration"],
       }),
     /started or completed integration barrier/,
@@ -5010,7 +5007,6 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     manifest: empty,
     body: emptyBody,
     runId: producer.runId,
-    iteration: 1,
   });
   assert.deepEqual(emptyExpansion.childIds, []);
   assertExpansionCoverage(emptyGraph, emptyExpansion.graph);
@@ -5696,7 +5692,6 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
         manifest: truncated,
         body,
         runId: producer.runId,
-        iteration: 1,
       }),
     /complete exact producer-bound/,
   );

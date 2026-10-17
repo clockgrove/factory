@@ -8,7 +8,7 @@ export const PROMPT_SECTION_KINDS = [
   "follow-up",
   "other",
 ] as const;
-export type PromptSectionKind = (typeof PROMPT_SECTION_KINDS)[number];
+type PromptSectionKind = (typeof PROMPT_SECTION_KINDS)[number];
 export interface PromptSection {
   kind: PromptSectionKind;
   startByte: number;

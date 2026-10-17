@@ -91,7 +91,7 @@ export class GitFailure extends Error {
 }
 
 /** What a remote command's traces showed (see GitTraces). */
-export interface GitTraceFacts {
+interface GitTraceFacts {
   /** Format strings of git's `error` trace2 events, from git and its helpers. */
   errors: string[];
   /** The final HTTP status of the last answered request, once all are answered. */
@@ -703,7 +703,7 @@ export function releaseGuard(guard: string): void {
 }
 
 /** Where a checkout's cross-process registry lock lives, keyed by git common directory. */
-export function registryLockDirectory(key: string): string {
+function registryLockDirectory(key: string): string {
   return join(
     process.env.XDG_STATE_HOME ??
       join(process.env.HOME ?? "", ".local", "state"),
@@ -890,7 +890,7 @@ const LFS_FILTER_COMMANDS: Record<string, string[]> = {
 };
 
 /** The repository's configuration would run a program inside Factory's git. */
-export class RepositoryProgramConfigured extends Error {
+class RepositoryProgramConfigured extends Error {
   constructor(
     readonly directory: string,
     readonly key: string,
@@ -1107,10 +1107,10 @@ const LOCKED_NETWORK_CONFIG: [string, string][] = [
   ["http.lowSpeedLimit", "1000"],
   ["http.lowSpeedTime", "60"],
 ];
-/** Deadline for a locked network command (fetch, pull); tests shorten it. */
-export const lockedNetworkDeadline = { milliseconds: 15 * 60_000 };
+/** Deadline for a locked network command (fetch, pull). */
+const LOCKED_NETWORK_DEADLINE_MS = 15 * 60_000;
 /** The SSH counterpart of the HTTP low-speed bound: 4 unanswered 15 s probes. */
-export const SSH_KEEPALIVE_COMMAND =
+const SSH_KEEPALIVE_COMMAND =
   "ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
 
 /** Append configuration through GIT_CONFIG_COUNT, after any entries already set. */
@@ -1139,8 +1139,8 @@ function ambientGitEnvironment(): NodeJS.ProcessEnv {
   return withGitConfig(env, GIT_CONFIG);
 }
 
-/** A locked network command outlived lockedNetworkDeadline. */
-export class GitDeadlineExceeded extends Error {}
+/** A locked network command outlived LOCKED_NETWORK_DEADLINE_MS. */
+class GitDeadlineExceeded extends Error {}
 
 function gitProcess(
   checkout: string,
@@ -1154,7 +1154,7 @@ function gitProcess(
   const network = ["fetch", "pull"].includes(gitSubcommand(args));
   const run = async () => {
     const deadline = network
-      ? AbortSignal.timeout(lockedNetworkDeadline.milliseconds)
+      ? AbortSignal.timeout(LOCKED_NETWORK_DEADLINE_MS)
       : undefined;
     let traces: GitTraces | undefined;
     try {
@@ -1169,7 +1169,7 @@ function gitProcess(
     } catch (error) {
       if (deadline?.aborted && !currentProcessSignal()?.aborted)
         throw new GitDeadlineExceeded(
-          `git ${gitSubcommand(args)} exceeded ${lockedNetworkDeadline.milliseconds / 1000}s`,
+          `git ${gitSubcommand(args)} exceeded ${LOCKED_NETWORK_DEADLINE_MS / 1000}s`,
           { cause: error },
         );
       throw error;
@@ -1521,7 +1521,7 @@ function processGroupMembers(group: number, limit = Infinity): number {
   return members;
 }
 
-export interface OwnedSubprocess {
+interface OwnedSubprocess {
   pid: number;
   startTime: string;
 }
@@ -1574,8 +1574,8 @@ export function withProcessCancellation<T>(
   return processCancellation.run({ signal, observe, deadlineAt }, operation);
 }
 
-/** How long an exited command's leftover descendants may run before they are stopped; tests shorten it. */
-export const lingeringDescendants = { graceMilliseconds: 5_000 };
+/** How long an exited command's leftover descendants may run before they are stopped. */
+const LINGERING_DESCENDANTS_GRACE_MS = 5_000;
 
 /** Whether process group `group` is gone within `milliseconds`. */
 async function groupEnds(
@@ -1598,7 +1598,7 @@ export interface SubprocessInputChannel {
   end(): void;
 }
 
-export interface InteractiveSubprocessInput {
+interface InteractiveSubprocessInput {
   run(channel: SubprocessInputChannel): Promise<void>;
   /** Request protocol interruption before bounded process-group cancellation. */
   cancel?(reason: unknown): void;
@@ -1789,7 +1789,7 @@ export async function subprocessAsync(
     }
   } else if (
     owned &&
-    !(await groupEnds(owned.pid, lingeringDescendants.graceMilliseconds))
+    !(await groupEnds(owned.pid, LINGERING_DESCENDANTS_GRACE_MS))
   ) {
     // The command has exited, but descendants it left in its group (such as
     // a git transport helper after a connection reset) are still running.

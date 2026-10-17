@@ -15,7 +15,7 @@ import { redactDiagnosticDetail } from "./diagnostics.js";
 import { createCodexHome } from "./codex-planning-isolation.js";
 import { sanitizedWorkerEnvironment } from "./process.js";
 
-export interface HarnessReadiness {
+interface HarnessReadiness {
   status: "ready" | "unavailable";
   workspace: string;
   outsideDirectory: string;
@@ -26,17 +26,13 @@ export interface HarnessReadiness {
 }
 
 /** Model-free Codex diagnostic using the same overrides and environment as its worker. */
-export async function probeCodexReadiness(
-  input: {
-    workspace: string;
-    outsideDirectory?: string;
-    credentialDirectory: string;
-    network: "host" | "off";
-    allowedSecretNames?: string[];
-  },
-  // Narrow process seam for credential-free protocol conformance tests.
-  command?: string[],
-): Promise<HarnessReadiness> {
+export async function probeCodexReadiness(input: {
+  workspace: string;
+  outsideDirectory?: string;
+  credentialDirectory: string;
+  network: "host" | "off";
+  allowedSecretNames?: string[];
+}): Promise<HarnessReadiness> {
   const selectedOutside = input.outsideDirectory ?? homedir();
   if (![input.workspace, selectedOutside].every(isAbsolute))
     throw new Error(
@@ -86,18 +82,14 @@ export async function probeCodexReadiness(
     );
     return result;
   }
-  const bundled = () => {
-    const require = createRequire(import.meta.url);
-    return [
-      process.execPath,
-      join(
-        dirname(require.resolve("@openai/codex/package.json")),
-        "bin/codex.js",
-      ),
-    ];
-  };
-  const argv = command ?? bundled();
-  if (!argv.length) throw new Error("Readiness has no harness executable");
+  const require = createRequire(import.meta.url);
+  const argv = [
+    process.execPath,
+    join(
+      dirname(require.resolve("@openai/codex/package.json")),
+      "bin/codex.js",
+    ),
+  ];
   // The worker's own private home and permission profile.
   const home = createCodexHome({
     source: env,

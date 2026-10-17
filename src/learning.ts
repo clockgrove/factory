@@ -21,12 +21,7 @@ import { DEFAULT_CONTEXT_LOOKUP_BOUNDS } from "./compiler/context.js";
 import { failedWithoutProviderEvidence } from "./compiler/observation.js";
 import { objectiveComplete } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
-import {
-  configPath,
-  factoryConfigDigest,
-  stateRoot,
-  validateTarget,
-} from "./config.js";
+import { factoryConfigDigest, stateRoot, validateTarget } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import type {
   ApprovedPlaybook,
@@ -63,12 +58,12 @@ export const DEFAULT_PLAYBOOK_BUDGET_BYTES = 16_384;
 export const learningDigest = (value: string | Buffer): string =>
   createHash("sha256").update(value).digest("hex");
 
-export interface EpisodeSource {
+interface EpisodeSource {
   episodeId: string;
   digest: string;
 }
 
-export interface Retrospective {
+interface Retrospective {
   schemaVersion: 1;
   repository: string;
   objective: number;
@@ -82,14 +77,14 @@ export interface Retrospective {
   experiences: unknown;
 }
 
-export interface PlaybookLesson {
+interface PlaybookLesson {
   text: string;
   sources: EpisodeSource[];
   /** Indices in the parent revision's lessons, retained even after consolidation. */
   previousLessons: number[];
 }
 
-export interface PlaybookDraft {
+interface PlaybookDraft {
   lessons: PlaybookLesson[];
   summaries: {
     text: string;
@@ -101,7 +96,7 @@ export interface PlaybookDraft {
   retired: { previousLesson: number; reason: string }[];
 }
 
-export interface PlaybookProposal {
+interface PlaybookProposal {
   schemaVersion: 1;
   repository: string;
   configDigest: string;
@@ -289,7 +284,7 @@ function proposalIdentity(value: unknown): asserts value is string {
     throw new Error("Invalid dream proposal identity");
 }
 
-export function readRetrospectives(
+function readRetrospectives(
   repository: string,
 ): { source: EpisodeSource; episode: Retrospective }[] {
   return readdirSync(directory(repository, "episodes"))
@@ -299,7 +294,7 @@ export function readRetrospectives(
 }
 
 /** Authenticate one original source; a bounded selection need not open all snapshots. */
-export function readRetrospectiveSource(
+function readRetrospectiveSource(
   repository: string,
   episodeId: string,
 ): { source: EpisodeSource; episode: Retrospective } {
@@ -337,7 +332,7 @@ export function readRetrospectiveSource(
 
 /** Retain original learning bytes/provenance for retrieval, without promoting guidance.
  * Missing historical snapshot bodies stay explicit; Dream's stricter source validation
- * is unchanged. Catalog rebuild/intake can call this bridge for preexisting records.
+ * is unchanged. Retrospective recording, Dream input and planning context call it.
  */
 export function retainLearningMemory(
   repository: string,
@@ -636,7 +631,7 @@ export function observeRetrospective(
   }
 }
 
-export function validatePlaybookDraft(
+function validatePlaybookDraft(
   repository: string,
   draft: PlaybookDraft,
   parent: PlaybookRevision | null,
@@ -762,7 +757,7 @@ export function validatePlaybookDraft(
     );
 }
 
-export function readPlaybookRevision(
+function readPlaybookRevision(
   repository: string,
   throughVersion?: number,
 ): PlaybookRevision | null {
@@ -1066,7 +1061,8 @@ function outsideTarget(config: FactoryConfig, path: string): boolean {
   const local = relative(realpathSync(config.checkout), realpathSync(path));
   return local === ".." || local.startsWith("../") || isAbsolute(local);
 }
-function secrets(config: FactoryConfig): string[] {
+/** Values no learning or proposal diagnostic may show. */
+export function secrets(config: FactoryConfig): string[] {
   return [
     ...config.policy.allowedSecretNames.flatMap((name) =>
       process.env[name] ? [process.env[name]!] : [],
@@ -1087,7 +1083,7 @@ export const LEARNING_ORIGINAL_KINDS = [
   "submissions",
   "returns",
 ] as const;
-export type LearningOriginalKind = (typeof LEARNING_ORIGINAL_KINDS)[number];
+type LearningOriginalKind = (typeof LEARNING_ORIGINAL_KINDS)[number];
 export interface LearningOriginal {
   path: string;
   bytes: Uint8Array;
@@ -1598,18 +1594,7 @@ export function learningPersistenceClosure(repository: string): {
     }
     for (const child of Object.values(body)) inspect(child);
   };
-  for (const kind of [
-    "episodes",
-    "snapshots",
-    "proposals",
-    "reviews",
-    "decisions",
-    "versions",
-    "calls",
-    "checkpoints",
-    "submissions",
-    "returns",
-  ])
+  for (const kind of LEARNING_ORIGINAL_KINDS)
     for (const name of readdirSync(directory(repository, kind))
       .filter((name) => name.endsWith(".json") && !name.endsWith(".draft.json"))
       .sort()) {
@@ -1886,8 +1871,6 @@ export async function prepareDreamInput(
   input: {
     budgetBytes: number;
     inputBudgetBytes?: number;
-    id?: string;
-    invocationId?: string;
   },
 ): Promise<{
   checkpoint: DreamInputCheckpoint;
@@ -1912,10 +1895,8 @@ export async function prepareDreamInput(
     throw new Error(
       "Dream input and playbook bounds must be positive safe integers",
     );
-  const id = input.id ?? randomUUID(),
-    invocationId = input.invocationId ?? randomUUID();
-  proposalIdentity(id);
-  proposalIdentity(invocationId);
+  const id = randomUUID(),
+    invocationId = randomUUID();
   const started = Date.now(),
     parent = readPlaybookRevision(config.repository);
   const parentIdentity = parent
@@ -2170,7 +2151,7 @@ export async function prepareDreamInput(
 }
 
 /** Dream choices name only episodes and parent lessons supplied to this call. */
-export function dreamSchema(sourceCount: number, previousCount: number) {
+function dreamSchema(sourceCount: number, previousCount: number) {
   const nonblank = {
     type: "string",
     minLength: 1,
@@ -2539,7 +2520,7 @@ async function dream(
 export async function runDreamCommand(
   config: FactoryConfig,
   args: string[],
-  configuration = configPath(),
+  configuration: string,
 ): Promise<void> {
   if (!config.gitPersistence)
     return runDreamCommandUnscoped(config, args, configuration);
@@ -2562,7 +2543,7 @@ export async function runDreamCommand(
 async function runDreamCommandUnscoped(
   config: FactoryConfig,
   args: string[],
-  configuration = configPath(),
+  configuration: string,
 ): Promise<void> {
   validateTarget(config.repository, config.checkout);
   const preview = args.includes("--preview");

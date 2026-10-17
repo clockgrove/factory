@@ -119,7 +119,7 @@ export async function projectLiveStatus(
     return;
   const now = Date.now();
   // Rendered time never enters a transition digest, so it forces no edit.
-  const stamp = `<sub>Updated ${displayDateTime(now)} · edited in place while work runs</sub>`;
+  const stamp = `<sub>Updated ${displayDateTime(now)}</sub>`;
   const targets: LiveTarget[] = [];
   const itemDigests: string[] = [];
   // Planning has no Work Item yet: the Objective's comment shows its step.

@@ -1,8 +1,8 @@
 /**
  * Human-facing times. GitHub has no viewer time zone, so text shows the
- * controller host's zone, or FACTORY_DISPLAY_TIMEZONE (an IANA name), with
- * UTC beside it. Stored, compared and JSON times stay ISO UTC: never parse
- * these strings back or put them in a digest.
+ * controller host's zone, or FACTORY_DISPLAY_TIMEZONE (an IANA name).
+ * Stored, compared and JSON times stay ISO UTC: never parse these strings
+ * back or put them in a digest.
  */
 
 const formats = new Map<string, Intl.DateTimeFormat>();
@@ -57,30 +57,17 @@ function parts(at: Date, zone: string): Parts {
   };
 }
 
-function render(
-  value: string | number,
-  withDate: boolean,
-  withSeconds = false,
-): string {
+function render(value: string | number, withDate: boolean): string {
   const at = new Date(value);
   if (Number.isNaN(at.getTime())) return String(value);
-  const utc = at.toISOString();
-  const utcDate = utc.slice(0, 10);
-  const utcClock = utc.slice(11, withSeconds ? 19 : 16);
-  const zone = displayZone();
-  if (zone === "UTC" || zone === "Etc/UTC")
-    return `${withDate ? `${utcDate} ` : ""}${utcClock}Z`;
-  const local = parts(at, zone);
-  const clock = `${local.clock}${withSeconds ? `:${local.seconds}` : ""}`;
-  // UTC names its date when it differs from the local one.
-  const reference = `${local.date === utcDate ? "" : `${utcDate} `}${utcClock}Z`;
-  return `${withDate ? `${local.date} ` : ""}${clock} ${local.zone} (${reference})`;
+  const local = parts(at, displayZone());
+  return `${withDate ? `${local.date} ` : ""}${local.clock}:${local.seconds} ${local.zone}`;
 }
 
-/** A date and time such as `2026-10-16 16:21 PDT (23:21Z)`. */
+/** A date and time such as `2026-10-16 16:21:05 PDT`. */
 export const displayDateTime = (value: string | number): string =>
   render(value, true);
 
-/** A time of day such as `16:21:05 PDT (23:21:05Z)`, for a same-day log. */
+/** A time of day such as `16:21:05 PDT`, for a same-day log. */
 export const displayClock = (value: string | number): string =>
-  render(value, false, true);
+  render(value, false);

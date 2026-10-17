@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
+import { settleAbandonedPlanningTurn } from "./agent-session.js";
 import {
   authenticateAdaptiveContextPacket,
   buildAdaptiveContext,
@@ -1640,6 +1641,9 @@ export async function diagnoseWorkRepair(args: {
                 question:
                   "Work Item failure changed while waiting for the planner; revalidate the current failure before diagnosis",
               });
+            // A diagnosis that stopped without an outcome is abandoned, and
+            // this one starts as a fresh invocation in a fresh conversation.
+            await settleAbandonedPlanningTurn(state, args.model, save);
             const evidence = repairEvidence(
               state,
               item,

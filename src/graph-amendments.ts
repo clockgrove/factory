@@ -1,3 +1,4 @@
+import { settleAbandonedPlanningTurn } from "./agent-session.js";
 import { Readable } from "node:stream";
 import { awaitCheckpointAdmission } from "./recovery-checkpoint.js";
 import {
@@ -1017,8 +1018,11 @@ export function applyPendingAmendment(
           Boolean(
             args.state.coordinator && args.state.coordinator.mode !== "running",
           ),
-        () =>
-          advanceAmendment({
+        async () => {
+          // A Work Item diagnosis that stopped without an outcome no longer
+          // holds the planner conversation this amendment needs.
+          await settleAbandonedPlanningTurn(args.state, args.model, args.save);
+          return advanceAmendment({
             ...rest,
             workflowRecipe,
             model: {
@@ -1065,7 +1069,8 @@ export function applyPendingAmendment(
                   return response;
                 }),
             },
-          }),
+          });
+        },
       );
     },
     { save: args.save, signal, pause, clock },

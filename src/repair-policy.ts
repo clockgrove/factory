@@ -229,6 +229,8 @@ export interface WorkRecovery {
     requestDigest?: string;
     response?: unknown;
     nativeReturns?: ContentRef[];
+    /** Submitted earlier invocations settled without a native outcome; never answered. */
+    abandoned?: string[];
     rejected?: {
       id: string;
       response: unknown;
@@ -803,6 +805,11 @@ export function assertRepairLedger(
         typeof diagnosis.submitted !== "boolean" ||
         (diagnosis.requestDigest !== undefined &&
           !/^[a-f0-9]{64}$/.test(diagnosis.requestDigest)) ||
+        (diagnosis.abandoned !== undefined &&
+          (!Array.isArray(diagnosis.abandoned) ||
+            diagnosis.abandoned.some(
+              (id) => typeof id !== "string" || !id || id === diagnosis.id,
+            ))) ||
         (diagnosis.rejected !== undefined &&
           (!Array.isArray(diagnosis.rejected) ||
             diagnosis.rejected.some(

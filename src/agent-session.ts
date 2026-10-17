@@ -615,35 +615,85 @@ export function settleAbandonedReviewTurns(
  * from the retained turn, settle both as abandoned in one save: the turn
  * becomes unavailable (terminal unknown, resources settled) and the receipt
  * is kept, marked abandoned, so the next call is a fresh invocation in a
- * fresh conversation. A live or recoverable turn stays held for its owner.
+ * fresh conversation. During execution the owner is a Work Item diagnosis.
+ * A live or recoverable turn stays held for its owner.
  */
 export async function settleAbandonedPlanningTurn(
   state: ContinuationState,
   model: PlanningModel | undefined,
   save: () => void,
 ): Promise<void> {
-  const planning = state.planningRecovery;
-  const invocation = planning?.invocation;
   if (
-    !isPreparationState(state) ||
     state.restoration ||
     state.cancelledAt ||
     state.coordinator?.processes?.length ||
-    !model?.reconcileSession ||
-    planning?.phase !== "submitted" ||
-    planning.response !== undefined ||
-    !invocation
+    !model?.reconcileSession
   )
     return;
-  const receipt = planning.invocations?.find(
-    (entry) => entry.id === invocation.id && entry.phase === invocation.phase,
-  );
-  if (!receipt || receipt.resultDigest) return;
+  let invocationId: string;
+  let abandon: () => void;
+  let restore: () => void;
+  if (isPreparationState(state)) {
+    const planning = state.planningRecovery;
+    const invocation = planning?.invocation;
+    if (
+      planning?.phase !== "submitted" ||
+      planning.response !== undefined ||
+      !invocation
+    )
+      return;
+    const receipt = planning.invocations?.find(
+      (entry) => entry.id === invocation.id && entry.phase === invocation.phase,
+    );
+    if (!receipt || receipt.resultDigest) return;
+    invocationId = invocation.id;
+    abandon = () => {
+      receipt.abandoned = true;
+      delete planning.invocation;
+      planning.phase = "ready";
+    };
+    restore = () => {
+      delete receipt.abandoned;
+      planning.invocation = invocation;
+      planning.phase = "submitted";
+    };
+  } else {
+    if (state.finalAcceptance || state.objectiveClosure === "complete") return;
+    const current = Object.values(state.agentSessions ?? {}).find(
+      (ref) => ref.scope.role === "planning" && ref.status === "in-flight",
+    )?.currentTurn?.invocationId;
+    if (!current) return;
+    const recovery = Object.values(state.work).find(
+      (work) => work.recovery?.diagnosisInvocation?.id === current,
+    )?.recovery;
+    const invocation = recovery?.diagnosisInvocation;
+    if (
+      !recovery ||
+      !invocation?.submitted ||
+      invocation.response !== undefined ||
+      invocation.nativeReturns?.length
+    )
+      return;
+    invocationId = invocation.id;
+    abandon = () => {
+      recovery.diagnosisInvocation = {
+        id: randomUUID(),
+        submitted: false,
+        ...(invocation.rejected && {
+          rejected: structuredClone(invocation.rejected),
+        }),
+        abandoned: [...(invocation.abandoned ?? []), invocation.id],
+      };
+    };
+    restore = () => {
+      recovery.diagnosisInvocation = invocation;
+    };
+  }
   const session = agentSessionContinuation(state, "planning", undefined, save);
   const retained = session.retained;
   if (
     retained?.status !== "in-flight" ||
-    retained.currentTurn?.invocationId !== invocation.id ||
+    retained.currentTurn?.invocationId !== invocationId ||
     retained.currentTurn.resources !== "settled" ||
     retained.currentTurn.terminal !== undefined
   )
@@ -652,15 +702,11 @@ export async function settleAbandonedPlanningTurn(
     structuredClone(retained),
   );
   if (disposition !== "unknown") return;
-  receipt.abandoned = true;
-  delete planning.invocation;
-  planning.phase = "ready";
+  abandon();
   try {
     session.checkpoint({ ...retained, status: "unavailable" });
   } catch (error) {
-    delete receipt.abandoned;
-    planning.invocation = invocation;
-    planning.phase = "submitted";
+    restore();
     throw error;
   }
 }

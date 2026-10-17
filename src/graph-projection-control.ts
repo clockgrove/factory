@@ -233,56 +233,100 @@ function projectionControl(
         "Projection owner or desired graph changed during submission",
       );
   };
-  return {
-    effects: structuredClone(
-      retained.effects.filter((effect) => effect.admission !== "blocked"),
-    ),
-    beforeWrite: async (request: GraphProjectionEffectRequest) => {
-      assertStepAdmission();
-      check();
-      let effect = retained.effects.find(
+  const withdrawable = [17, 18, 19, 20].includes(state.schemaVersion);
+  /** Known not dispatched: an identical request may admit it again. */
+  const block = (effects: GraphProjectionEffect[], reason: string) => {
+    for (const effect of effects) {
+      effect.admission = "blocked";
+      effect.admissionFailures ??= [];
+      effect.admissionFailures.push({ at: new Date().toISOString(), reason });
+    }
+    assertGraphProjectionIntents(state);
+    save();
+  };
+  /** Record every exact request, then admit them all with one checkpoint. */
+  const admit = async (requests: GraphProjectionEffectRequest[]) => {
+    assertStepAdmission();
+    check();
+    if (
+      new Set(requests.map((request) => request.key)).size !==
+        requests.length ||
+      new Set(requests.map((request) => request.id)).size !== requests.length
+    )
+      throw fence("Projection admission repeats one request");
+    // Every request is checked before any is recorded.
+    const prior = requests.map((request) => {
+      const effect = retained.effects.find(
         (entry) => entry.id === request.id || entry.key === request.key,
       );
-      if (effect) {
-        if (
-          effect.admission !== "blocked" ||
+      if (
+        effect &&
+        (effect.admission !== "blocked" ||
           effect.id !== request.id ||
           effect.key !== request.key ||
           effect.method !== request.method ||
           effect.path !== request.path ||
-          effect.bodyDigest !== request.bodyDigest
-        )
-          throw fence(
-            `Projection effect ${request.key} was already submitted; its outcome cannot authorize replay`,
-          );
+          effect.bodyDigest !== request.bodyDigest)
+      )
+        throw fence(
+          `Projection effect ${request.key} was already submitted; its outcome cannot authorize replay`,
+        );
+      return effect;
+    });
+    const recorded = requests.map((request, index) => {
+      const effect = prior[index];
+      if (effect) {
         delete effect.admission;
-      } else {
-        effect = structuredClone(request);
-        retained.effects.push(effect);
+        return effect;
       }
-      assertGraphProjectionIntents(state);
-      save();
-      try {
-        await awaitCheckpointAdmission(state.repository, "before-effect");
-        assertStepAdmission();
-        check();
-      } catch (error) {
-        if (
-          isCheckpointAdmissionFailure(error) &&
-          error.knownNotDispatched &&
-          [17, 18, 19, 20].includes(state.schemaVersion)
-        ) {
-          effect.admission = "blocked";
-          effect.admissionFailures ??= [];
-          effect.admissionFailures.push({
-            at: new Date().toISOString(),
-            reason: error.message,
-          });
-          save();
+      const added = structuredClone(request);
+      retained.effects.push(added);
+      return added;
+    });
+    assertGraphProjectionIntents(state);
+    save();
+    try {
+      await awaitCheckpointAdmission(state.repository, "before-effect");
+      assertStepAdmission();
+      check();
+    } catch (error) {
+      if (
+        isCheckpointAdmissionFailure(error) &&
+        error.knownNotDispatched &&
+        withdrawable
+      )
+        block(recorded, error.message);
+      throw error;
+    }
+  };
+  return {
+    effects: structuredClone(
+      retained.effects.filter((effect) => effect.admission !== "blocked"),
+    ),
+    beforeWrite: (request: GraphProjectionEffectRequest) => admit([request]),
+    // A batch needs a snapshot that can record a known-unsent request.
+    ...(withdrawable
+      ? {
+          beforeWrites: admit,
+          withdraw: (ids: string[], reason: string) => {
+            check();
+            const unsent = ids.map((id) => {
+              const effect = retained.effects.find((entry) => entry.id === id);
+              if (
+                !effect ||
+                effect.admission === "blocked" ||
+                effect.observation !== undefined ||
+                effect.reconciliation !== undefined
+              )
+                throw fence(
+                  "Only an admitted projection request that was never sent can be withdrawn",
+                );
+              return effect;
+            });
+            block(unsent, reason);
+          },
         }
-        throw error;
-      }
-    },
+      : {}),
     observed: async (
       id: string,
       observation: GraphProjectionEffectObservation,

@@ -71,7 +71,16 @@ type Issue = {
   user?: { login?: string } | null;
   state_reason?: string | null;
   closed_at?: string | null;
+  created_at?: string;
   comments?: number;
+};
+/** One exact graph projection mutation, before its intent is recorded. */
+type ProjectionWrite = {
+  key: string;
+  method: GraphProjectionEffectRequest["method"];
+  path: string;
+  body?: Record<string, unknown>;
+  call?: Omit<GitHubCall, "method" | "path">;
 };
 type Pull = {
   number: number;
@@ -493,16 +502,22 @@ export class RealGitHubGateway implements GitHubGateway {
    * else every issue. GitHub's lists lag creation while single-issue reads
    * do not, so numbers past the repository's newest listed issue are read
    * until PROBE_GAP in a row hold none: an issue whose create response was
-   * lost is found before the lists show it.
+   * lost is found before the lists show it. Every marked issue was created
+   * after its Objective issue, so it was last updated after that too: the
+   * list starts there instead of at the repository's first issue.
    */
   private async ownedWorkItemIssues(
-    objective: number,
+    objective: Issue,
     author: string | undefined,
-    prefix = `<!-- factory:objective=${objective};item=`,
+    prefix = `<!-- factory:objective=${objective.number};item=`,
   ): Promise<Issue[]> {
     const byId = new Map<number, Issue>();
+    const since =
+      objective.created_at && Number.isFinite(Date.parse(objective.created_at))
+        ? `&since=${encodeURIComponent(objective.created_at)}`
+        : "";
     for (const issue of await this.pages<Issue>(
-      `issues?state=all${author ? `&creator=${encodeURIComponent(author)}` : ""}&sort=created&direction=asc`,
+      `issues?state=all${author ? `&creator=${encodeURIComponent(author)}` : ""}&sort=created&direction=asc${since}`,
     ))
       byId.set(issue.id, issue);
     const [newest] = await this.api<Issue[]>(
@@ -1019,14 +1034,12 @@ export class RealGitHubGateway implements GitHubGateway {
       });
       unreconciled.delete(key);
     };
-    const write = async <T>(
-      key: string,
-      method: GraphProjectionEffectRequest["method"],
-      path: string,
-      body?: Record<string, unknown>,
-      call: Omit<GitHubCall, "method" | "path"> = {},
-    ): Promise<T> => {
-      if (!control) return this.api<T>(method, path, body, undefined, call);
+    const intended = ({
+      key,
+      method,
+      path,
+      body,
+    }: ProjectionWrite): GraphProjectionEffectRequest => {
       if (effects.has(key))
         throw foreignChange(
           `Recorded graph projection mutation ${key} has no matching readback; resubmission is refused`,
@@ -1040,13 +1053,26 @@ export class RealGitHubGateway implements GitHubGateway {
         path: this.route(path),
         bodyDigest: digest(body),
       };
-      const effect: GraphProjectionEffectRequest = {
-        key,
-        id: digest(metadata),
-        ...metadata,
-      };
+      return { key, id: digest(metadata), ...metadata };
+    };
+    const write = async <T>(
+      key: string,
+      method: GraphProjectionEffectRequest["method"],
+      path: string,
+      body?: Record<string, unknown>,
+      call: Omit<GitHubCall, "method" | "path"> = {},
+    ): Promise<T> => {
+      if (!control) return this.api<T>(method, path, body, undefined, call);
+      const effect = intended({ key, method, path, body });
       await control.beforeWrite(effect);
       effects.set(key, effect);
+      return send<T>(effect, { key, method, path, body, call });
+    };
+    const send = async <T>(
+      effect: GraphProjectionEffectRequest,
+      { method, path, body, call }: ProjectionWrite,
+    ): Promise<T> => {
+      if (!control) throw new Error("Projection write has no control");
       let response: T;
       try {
         response = await this.api<T>(method, path, body, undefined, call);
@@ -1073,6 +1099,56 @@ export class RealGitHubGateway implements GitHubGateway {
         ...(identity(response) ? { identity: identity(response) } : {}),
       });
       return response;
+    };
+    /**
+     * Independent writes whose exact requests are all known: every intent is
+     * recorded under one checkpoint admission, then each is sent in order.
+     * Writes not yet sent when one stops are withdrawn as never dispatched.
+     */
+    const writes = async <T>(
+      planned: ProjectionWrite[],
+      each: (response: T, index: number) => void | Promise<void>,
+    ): Promise<void> => {
+      if (!control?.beforeWrites || !control.withdraw || planned.length < 2) {
+        for (const [index, entry] of planned.entries())
+          await each(
+            await write<T>(
+              entry.key,
+              entry.method,
+              entry.path,
+              entry.body,
+              entry.call,
+            ),
+            index,
+          );
+        return;
+      }
+      const requests = planned.map(intended);
+      await control.beforeWrites(requests);
+      for (const request of requests) effects.set(request.key, request);
+      let dispatched = 0;
+      try {
+        for (const [index, entry] of planned.entries()) {
+          dispatched = index + 1;
+          await each(await send<T>(requests[index]!, entry), index);
+        }
+      } catch (error) {
+        const unsent = requests.slice(dispatched).map((request) => request.id);
+        if (unsent.length)
+          try {
+            await control.withdraw(
+              unsent,
+              `An earlier write admitted with it stopped: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          } catch (withdrawal) {
+            throw new AggregateError(
+              [error, withdrawal],
+              "Graph projection stopped with admitted writes it could not withdraw",
+              { cause: error },
+            );
+          }
+        throw error;
+      }
     };
     const authenticated = (issue: Issue, number?: number) =>
       this.authenticatedIssue(issue, number);
@@ -1149,7 +1225,7 @@ export class RealGitHubGateway implements GitHubGateway {
       await reconcile(key, "POST", `issues/${issue.number}/labels`, observed);
       return observed;
     };
-    return { write, reconcile, ensureRoleLabels, ensureRole };
+    return { write, writes, reconcile, ensureRoleLabels, ensureRole };
   }
 
   async projectGraph(request: GraphProjection): Promise<ProjectedGraph> {
@@ -1184,7 +1260,7 @@ export class RealGitHubGateway implements GitHubGateway {
     request: GraphProjection,
   ): Promise<ProjectedGraph> {
     const control = request.expansionControl;
-    const { write, reconcile, ensureRoleLabels, ensureRole } =
+    const { write, writes, reconcile, ensureRoleLabels, ensureRole } =
       this.projectionEffects(control);
     const authenticated = (issue: Issue, number?: number) =>
       this.authenticatedIssue(issue, number);
@@ -1213,10 +1289,7 @@ export class RealGitHubGateway implements GitHubGateway {
       marker: string,
     ): Promise<Issue | undefined> => {
       author ??= await this.viewer();
-      existing ??= await this.ownedWorkItemIssues(
-        request.objectiveIssue,
-        author,
-      );
+      existing ??= await this.ownedWorkItemIssues(objective, author);
       const candidates = existing.filter(
         (issue) =>
           (issue.body ?? "").includes(marker) &&
@@ -1259,6 +1332,9 @@ export class RealGitHubGateway implements GitHubGateway {
       return kept;
     };
     let taskType: Promise<string | undefined> | undefined;
+    // Missing issues are created together after every item was observed, so
+    // their exact requests share one checkpoint admission.
+    const missing: WorkItem[] = [];
     for (const item of request.graph.items) {
       const marker = `<!-- factory:objective=${request.objectiveIssue};item=${item.id} -->`;
       const known = request.knownIssues?.[item.id];
@@ -1352,57 +1428,70 @@ export class RealGitHubGateway implements GitHubGateway {
         request.projected?.(item.id, found.number);
         continue;
       }
-      const body = projectedIssueBody(item, request.objectiveIssue);
+      missing.push(item);
+    }
+    if (missing.length) {
       taskType ??= availableIssueType(this.client, this.repository, "Task");
       const type = await taskType;
-      await request.beforeCreate?.(item.id);
-      const created = await write<Issue>(
-        `issue-create:${item.id}`,
-        "POST",
-        "issues",
-        {
-          title: item.title,
-          body,
-          labels: [roles[1]!],
-          ...(type ? { type } : {}),
+      for (const item of missing) await request.beforeCreate?.(item.id);
+      await writes<Issue>(
+        missing.map((item) => ({
+          key: `issue-create:${item.id}`,
+          method: "POST",
+          path: "issues",
+          body: {
+            title: item.title,
+            body: projectedIssueBody(item, request.objectiveIssue),
+            labels: [roles[1]!],
+            ...(type ? { type } : {}),
+          },
+        })),
+        async (created, index) => {
+          const item = missing[index]!;
+          if (
+            !created ||
+            !Number.isSafeInteger(created.number) ||
+            created.number <= 0
+          )
+            throw unverifiedCreate(
+              "Cannot parse created Work Item issue identity; outcome unknown",
+            );
+          authenticated(created);
+          // The author of Factory's first issue is its identity from now on.
+          if (!request.author && created.user?.login) {
+            author = created.user.login;
+            request.authored?.(created.user.login);
+          }
+          request.projected?.(item.id, created.number);
+          issueByItemId[item.id] = created.number;
+          if (
+            !(created.labels ?? []).some(
+              (label) =>
+                (typeof label === "string" ? label : label.name) === roles[1],
+            )
+          )
+            throw new Error("Created Work Item lacks its Factory role label");
+          if (
+            created.title !== item.title ||
+            created.body !== projectedIssueBody(item, request.objectiveIssue) ||
+            created.state !== "open"
+          )
+            throw new Error(
+              "Created Work Item projection did not reconcile exactly",
+            );
+          issues.set(created.number, created);
+          await reconcile(`issue-create:${item.id}`, "POST", "issues", created);
+          createdAt.set(created.number, time.now());
         },
       );
-      if (
-        !created ||
-        !Number.isSafeInteger(created.number) ||
-        created.number <= 0
-      )
-        throw unverifiedCreate(
-          "Cannot parse created Work Item issue identity; outcome unknown",
-        );
-      authenticated(created);
-      // The author of Factory's first issue is its identity from now on.
-      if (!request.author && created.user?.login) {
-        author = created.user.login;
-        request.authored?.(created.user.login);
-      }
-      request.projected?.(item.id, created.number);
-      issueByItemId[item.id] = created.number;
-      if (
-        !(created.labels ?? []).some(
-          (label) =>
-            (typeof label === "string" ? label : label.name) === roles[1],
-        )
-      )
-        throw new Error("Created Work Item lacks its Factory role label");
-      if (
-        created.title !== item.title ||
-        created.body !== body ||
-        created.state !== "open"
-      )
-        throw new Error(
-          "Created Work Item projection did not reconcile exactly",
-        );
-      issues.set(created.number, created);
-      await reconcile(`issue-create:${item.id}`, "POST", "issues", created);
-      createdAt.set(created.number, time.now());
-      existing?.push(created);
     }
+    // Every link is observed before any is written; the missing ones are then
+    // written under one checkpoint admission and read back. A list nothing
+    // was written to is already its own readback.
+    type LinkWrite = ProjectionWrite & { uncontrolled: () => Promise<unknown> };
+    const links: LinkWrite[] = [];
+    const dependencyLists = new Map<string, Issue[]>();
+    const dependencyWrites = new Set<string>();
     for (const item of request.graph.items) {
       const number = issueByItemId[item.id]!;
       const fresh = { createdAt: createdAt.get(number) };
@@ -1420,7 +1509,7 @@ export class RealGitHubGateway implements GitHubGateway {
         observations.length
       )
         throw foreignChange("Ambiguous remote dependency identity");
-      const existing = new Set(observations.map((issue) => issue.number));
+      const linked = new Set(observations.map((issue) => issue.number));
       const allowed = new Set(
         [
           ...item.dependencies,
@@ -1464,256 +1553,256 @@ export class RealGitHubGateway implements GitHubGateway {
             item.dependencies.some((id) => issueByItemId[id] === issue.number)
           )
             continue;
-          try {
-            await write(
-              `dependency-remove:${item.id}:${issue.id}`,
-              "DELETE",
-              `issues/${number}/dependencies/blocked_by/${issue.id}`,
-            );
-          } catch (error) {
-            // Already removed, perhaps by a repeat whose response was lost;
-            // the read-back below confirms the result.
-            if (
-              control ||
-              !(error instanceof GitHubRequestError && error.status === 404)
-            )
-              throw error;
-          }
+          const key = `dependency-remove:${item.id}:${issue.id}`;
+          const path = `issues/${number}/dependencies/blocked_by/${issue.id}`;
+          dependencyWrites.add(item.id);
+          links.push({
+            key,
+            method: "DELETE",
+            path,
+            uncontrolled: () =>
+              write(key, "DELETE", path).catch((error: unknown) => {
+                // Already removed, perhaps by a repeat whose response was
+                // lost; the read-back below confirms the result.
+                if (
+                  !(error instanceof GitHubRequestError && error.status === 404)
+                )
+                  throw error;
+              }),
+          });
         }
       }
       for (const dependency of item.dependencies) {
         const blocker = issueByItemId[dependency]!;
-        if (!existing.has(blocker)) {
-          const issue = issues.get(blocker)!;
-          if (!Number.isSafeInteger(issue.id) || issue.id <= 0)
-            throw new Error(
-              "Dependency issue has no authenticated database identity",
-            );
-          const post = () =>
-            write(
-              `dependency-add:${item.id}:${dependency}`,
-              "POST",
-              `issues/${number}/dependencies/blocked_by`,
-              { issue_id: issue.id },
-              fresh,
-            );
-          if (control) await post();
-          else
-            await this.linked(
-              post,
-              `issues/${number}/dependencies/blocked_by`,
+        if (linked.has(blocker)) continue;
+        const issue = issues.get(blocker)!;
+        if (!Number.isSafeInteger(issue.id) || issue.id <= 0)
+          throw new Error(
+            "Dependency issue has no authenticated database identity",
+          );
+        const key = `dependency-add:${item.id}:${dependency}`;
+        const path = `issues/${number}/dependencies/blocked_by`;
+        const body = { issue_id: issue.id };
+        dependencyWrites.add(item.id);
+        links.push({
+          key,
+          method: "POST",
+          path,
+          body,
+          call: fresh,
+          uncontrolled: () =>
+            this.linked(
+              () => write(key, "POST", path, body, fresh),
+              path,
               issue.id,
               fresh,
-            );
-        }
+            ),
+        });
       }
-      {
-        const observed = await this.pages<Issue>(
-          `issues/${number}/dependencies/blocked_by`,
-          fresh,
-        );
-        const expected = item.dependencies.map((id) => issueByItemId[id]);
-        const key = `${this.repository}:dependencies:${number}`;
-        if (
-          observed.length !== expected.length ||
-          new Set(observed.map((issue) => issue.number)).size !==
-            observed.length ||
-          observed.some((issue) => {
-            authenticated(issue);
-            return (
-              !expected.includes(issue.number) ||
-              issues.get(issue.number)?.id !== issue.id
-            );
-          })
-        )
-          throw stillLagging(
-            key,
-            `Work Item issue #${number} dependencies did not reconcile exactly`,
-          );
-        settled(key);
-        for (const dependency of item.dependencies) {
-          const issue = observed.find(
-            (entry) => entry.number === issueByItemId[dependency],
-          )!;
-          await reconcile(
-            `dependency-add:${item.id}:${dependency}`,
-            "POST",
-            `issues/${number}/dependencies/blocked_by`,
-            issue,
-          );
-        }
-        for (const dependency of request.previousGraph?.items.find(
-          (entry) => entry.id === item.id,
-        )?.dependencies ?? []) {
-          if (item.dependencies.includes(dependency)) continue;
-          const removed = issues.get(issueByItemId[dependency]!)!;
-          await reconcile(
-            `dependency-remove:${item.id}:${removed.id}`,
-            "DELETE",
-            `issues/${number}/dependencies/blocked_by/${removed.id}`,
-            observed,
-          );
-        }
-      }
+      dependencyLists.set(item.id, observations);
     }
-    {
-      const parentsFor = (graph: GraphProjection["graph"]) => {
-        const aggregateByChild = new Map(
-          graph.items.flatMap((parent) =>
-            (parent.children ?? []).map((id) => [id, parent.id] as const),
-          ),
-        );
-        return new Map(
-          graph.items.map((item) => [
-            issueByItemId[item.id]!,
-            aggregateByChild.has(item.id)
-              ? issueByItemId[aggregateByChild.get(item.id)!]!
-              : request.objectiveIssue,
-          ]),
-        );
-      };
-      const desiredParents = parentsFor(request.graph);
-      const previousParents = request.previousGraph
-        ? parentsFor(request.previousGraph)
-        : new Map<number, number>();
-      const childrenByParent = new Map<number, number[]>(
-        [
-          ...new Set([...desiredParents.values(), ...previousParents.values()]),
-        ].map((parent) => [parent, []]),
+    const parentsFor = (graph: GraphProjection["graph"]) => {
+      const aggregateByChild = new Map(
+        graph.items.flatMap((parent) =>
+          (parent.children ?? []).map((id) => [id, parent.id] as const),
+        ),
       );
-      for (const [child, parent] of desiredParents)
-        childrenByParent.get(parent)!.push(child);
+      return new Map(
+        graph.items.map((item) => [
+          issueByItemId[item.id]!,
+          aggregateByChild.has(item.id)
+            ? issueByItemId[aggregateByChild.get(item.id)!]!
+            : request.objectiveIssue,
+        ]),
+      );
+    };
+    const desiredParents = parentsFor(request.graph);
+    const previousParents = request.previousGraph
+      ? parentsFor(request.previousGraph)
+      : new Map<number, number>();
+    const childrenByParent = new Map<number, number[]>(
+      [
+        ...new Set([...desiredParents.values(), ...previousParents.values()]),
+      ].map((parent) => [parent, []]),
+    );
+    for (const [child, parent] of desiredParents)
+      childrenByParent.get(parent)!.push(child);
 
-      // Inspect the complete old/new hierarchy before changing any parent. A
-      // reviewed move may already have completed before an interrupted readback.
-      const observedParents = new Map<number, number>();
-      for (const parent of childrenByParent.keys()) {
-        const existing = await this.pages<Issue>(
-          `issues/${parent}/sub_issues`,
-          { createdAt: createdAt.get(parent) },
-        );
-        for (const issue of existing) {
-          authenticated(issue);
-          if (issues.get(issue.number)?.id !== issue.id)
-            throw foreignChange("Ambiguous remote hierarchy identity");
-          if (
-            observedParents.has(issue.number) ||
-            (desiredParents.get(issue.number) !== parent &&
-              previousParents.get(issue.number) !== parent)
-          )
-            throw foreignChange("Unreviewed remote hierarchy edit");
-          observedParents.set(issue.number, parent);
-        }
-      }
-      for (const [child, parent] of desiredParents) {
-        const currentParent = observedParents.get(child);
-        if (currentParent === parent) {
-          const item = request.graph.items.find(
-            (entry) => issueByItemId[entry.id] === child,
-          )!;
-          await reconcile(
-            `hierarchy:${item.id}`,
-            "POST",
-            `issues/${parent}/sub_issues`,
-            issues.get(child)!,
-          );
-          continue;
-        }
-        const childIssue = authenticated(
-          await this.api<Issue>(
-            "GET",
-            `issues/${child}`,
-            undefined,
-            undefined,
-            {
-              createdAt: createdAt.get(child),
-            },
-          ),
-          child,
-        );
-        if (childIssue.id !== issues.get(child)!.id)
+    // Inspect the complete old/new hierarchy before changing any parent. A
+    // reviewed move may already have completed before an interrupted readback.
+    const observedParents = new Map<number, number>();
+    const parentLists = new Map<number, Issue[]>();
+    for (const parent of childrenByParent.keys()) {
+      const listed = await this.pages<Issue>(`issues/${parent}/sub_issues`, {
+        createdAt: createdAt.get(parent),
+      });
+      for (const issue of listed) {
+        authenticated(issue);
+        if (issues.get(issue.number)?.id !== issue.id)
           throw foreignChange("Ambiguous remote hierarchy identity");
-        const replacing = currentParent !== undefined;
-        let observedParent: Issue | undefined;
-        try {
-          observedParent = authenticated(
-            await this.api<Issue>("GET", `issues/${child}/parent`),
-          );
-        } catch (error) {
-          if (!(error instanceof GitHubRequestError && error.status === 404))
-            throw error;
-        }
-        const expectedParent =
-          currentParent === request.objectiveIssue
-            ? objective
-            : currentParent === undefined
-              ? undefined
-              : issues.get(currentParent);
         if (
-          (replacing &&
-            (previousParents.get(child) !== currentParent ||
-              observedParent?.number !== currentParent ||
-              observedParent?.id !== expectedParent?.id)) ||
-          (!replacing && observedParent !== undefined)
+          observedParents.has(issue.number) ||
+          (desiredParents.get(issue.number) !== parent &&
+            previousParents.get(issue.number) !== parent)
         )
-          throw foreignChange("Unreviewed remote hierarchy parent");
-        // Either side may be an issue GitHub does not show yet.
-        const call = {
-          createdAt: latest(createdAt.get(parent), createdAt.get(child)),
-        };
-        const post = () =>
-          write(
-            `hierarchy:${request.graph.items.find((item) => issueByItemId[item.id] === child)!.id}`,
-            "POST",
-            `issues/${parent}/sub_issues`,
-            { sub_issue_id: childIssue.id, replace_parent: replacing },
-            call,
-          );
-        if (control) await post();
-        else
-          await this.linked(
-            post,
-            `issues/${parent}/sub_issues`,
+          throw foreignChange("Unreviewed remote hierarchy edit");
+        observedParents.set(issue.number, parent);
+      }
+      parentLists.set(parent, listed);
+    }
+    let hierarchyWrites = false;
+    for (const [child, parent] of desiredParents) {
+      const item = request.graph.items.find(
+        (entry) => issueByItemId[entry.id] === child,
+      )!;
+      const currentParent = observedParents.get(child);
+      if (currentParent === parent) {
+        await reconcile(
+          `hierarchy:${item.id}`,
+          "POST",
+          `issues/${parent}/sub_issues`,
+          issues.get(child)!,
+        );
+        continue;
+      }
+      // Its identity was authenticated by this projection's own read or
+      // create; only its current parent is read again.
+      const childIssue = issues.get(child)!;
+      const replacing = currentParent !== undefined;
+      let observedParent: Issue | undefined;
+      try {
+        observedParent = authenticated(
+          await this.api<Issue>("GET", `issues/${child}/parent`),
+        );
+      } catch (error) {
+        if (!(error instanceof GitHubRequestError && error.status === 404))
+          throw error;
+      }
+      const expectedParent =
+        currentParent === request.objectiveIssue
+          ? objective
+          : currentParent === undefined
+            ? undefined
+            : issues.get(currentParent);
+      if (
+        (replacing &&
+          (previousParents.get(child) !== currentParent ||
+            observedParent?.number !== currentParent ||
+            observedParent?.id !== expectedParent?.id)) ||
+        (!replacing && observedParent !== undefined)
+      )
+        throw foreignChange("Unreviewed remote hierarchy parent");
+      // Either side may be an issue GitHub does not show yet.
+      const call = {
+        createdAt: latest(createdAt.get(parent), createdAt.get(child)),
+      };
+      const key = `hierarchy:${item.id}`;
+      const path = `issues/${parent}/sub_issues`;
+      const body = { sub_issue_id: childIssue.id, replace_parent: replacing };
+      hierarchyWrites = true;
+      links.push({
+        key,
+        method: "POST",
+        path,
+        body,
+        call,
+        uncontrolled: () =>
+          this.linked(
+            () => write(key, "POST", path, body, call),
+            path,
             childIssue.id,
             { createdAt: createdAt.get(parent) },
-          );
-      }
-      // Read back every affected parent, including those that became empty.
-      for (const [parent, children] of childrenByParent) {
-        const observed = await this.pages<Issue>(
-          `issues/${parent}/sub_issues`,
-          { createdAt: createdAt.get(parent) },
-        );
-        const key = `${this.repository}:sub-issues:${parent}`;
-        if (
-          observed.length !== children.length ||
-          new Set(observed.map((issue) => issue.number)).size !==
-            observed.length ||
-          observed.some((issue) => {
-            authenticated(issue);
-            return (
-              !children.includes(issue.number) ||
-              issues.get(issue.number)?.id !== issue.id
-            );
+          ),
+      });
+    }
+    if (control) await writes(links, () => undefined);
+    else for (const link of links) await link.uncontrolled();
+    for (const item of request.graph.items) {
+      const number = issueByItemId[item.id]!;
+      const observed = dependencyWrites.has(item.id)
+        ? await this.pages<Issue>(`issues/${number}/dependencies/blocked_by`, {
+            createdAt: createdAt.get(number),
           })
-        )
-          throw stillLagging(
-            key,
-            `Issue #${parent} sub-issues did not reconcile exactly`,
+        : dependencyLists.get(item.id)!;
+      const expected = item.dependencies.map((id) => issueByItemId[id]);
+      const key = `${this.repository}:dependencies:${number}`;
+      if (
+        observed.length !== expected.length ||
+        new Set(observed.map((issue) => issue.number)).size !==
+          observed.length ||
+        observed.some((issue) => {
+          authenticated(issue);
+          return (
+            !expected.includes(issue.number) ||
+            issues.get(issue.number)?.id !== issue.id
           );
-        settled(key);
-        for (const child of children) {
-          const item = request.graph.items.find(
-            (entry) => issueByItemId[entry.id] === child,
-          )!;
-          const issue = observed.find((entry) => entry.number === child)!;
-          await reconcile(
-            `hierarchy:${item.id}`,
-            "POST",
-            `issues/${parent}/sub_issues`,
-            issue,
+        })
+      )
+        throw stillLagging(
+          key,
+          `Work Item issue #${number} dependencies did not reconcile exactly`,
+        );
+      settled(key);
+      for (const dependency of item.dependencies) {
+        const issue = observed.find(
+          (entry) => entry.number === issueByItemId[dependency],
+        )!;
+        await reconcile(
+          `dependency-add:${item.id}:${dependency}`,
+          "POST",
+          `issues/${number}/dependencies/blocked_by`,
+          issue,
+        );
+      }
+      for (const dependency of request.previousGraph?.items.find(
+        (entry) => entry.id === item.id,
+      )?.dependencies ?? []) {
+        if (item.dependencies.includes(dependency)) continue;
+        const removed = issues.get(issueByItemId[dependency]!)!;
+        await reconcile(
+          `dependency-remove:${item.id}:${removed.id}`,
+          "DELETE",
+          `issues/${number}/dependencies/blocked_by/${removed.id}`,
+          observed,
+        );
+      }
+    }
+    // Read back every affected parent, including those that became empty.
+    for (const [parent, children] of childrenByParent) {
+      const observed = hierarchyWrites
+        ? await this.pages<Issue>(`issues/${parent}/sub_issues`, {
+            createdAt: createdAt.get(parent),
+          })
+        : parentLists.get(parent)!;
+      const key = `${this.repository}:sub-issues:${parent}`;
+      if (
+        observed.length !== children.length ||
+        new Set(observed.map((issue) => issue.number)).size !==
+          observed.length ||
+        observed.some((issue) => {
+          authenticated(issue);
+          return (
+            !children.includes(issue.number) ||
+            issues.get(issue.number)?.id !== issue.id
           );
-        }
+        })
+      )
+        throw stillLagging(
+          key,
+          `Issue #${parent} sub-issues did not reconcile exactly`,
+        );
+      settled(key);
+      for (const child of children) {
+        const item = request.graph.items.find(
+          (entry) => issueByItemId[entry.id] === child,
+        )!;
+        const issue = observed.find((entry) => entry.number === child)!;
+        await reconcile(
+          `hierarchy:${item.id}`,
+          "POST",
+          `issues/${parent}/sub_issues`,
+          issue,
+        );
       }
     }
     return { issueByItemId };
@@ -1792,7 +1881,7 @@ export class RealGitHubGateway implements GitHubGateway {
       } else {
         author ??= await this.viewer();
         existing ??= await this.ownedWorkItemIssues(
-          request.parent,
+          parent,
           author,
           `<!-- factory:parent=${request.parent};child=`,
         );
@@ -2563,19 +2652,8 @@ export class RealGitHubGateway implements GitHubGateway {
         return observed(await this.confirmMerged(identity, after));
       throw new Error("PR merge did not produce an integrated commit");
     }
-    const key = `merge:${identity.number}:${identity.headSha}`;
-    const detail = await this.api<Pull>("GET", `pulls/${identity.number}`);
-    if (
-      detail.state !== "closed" ||
-      detail.merged !== true ||
-      detail.head.sha !== expectedHead ||
-      detail.head.ref !== identity.branch
-    )
-      throw notYet(
-        key,
-        `PR #${identity.number} does not show its merge ${result.sha} yet`,
-      );
-    settled(key);
+    // GitHub merged exactly the expected head (the request's `sha` guard)
+    // and named the merge commit; the caller verifies it on the base branch.
     return observed({ integratedSha: result.sha });
   }
 

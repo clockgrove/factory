@@ -1375,6 +1375,10 @@ export interface GraphProjection {
   expansionControl?: {
     effects: GraphProjectionEffect[];
     beforeWrite(effect: GraphProjectionEffectRequest): void | Promise<void>;
+    /** Records several exact requests under one checkpoint admission; absent when the snapshot cannot record withdrawn intents. */
+    beforeWrites?(effects: GraphProjectionEffectRequest[]): Promise<void>;
+    /** Marks admitted requests that were never sent, so only an identical request may admit them again. */
+    withdraw?(effectIds: string[], reason: string): void | Promise<void>;
     observed(
       effectId: string,
       receipt: GraphProjectionEffectObservation,

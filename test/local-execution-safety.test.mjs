@@ -455,6 +455,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         baseSha,
         checkout,
       ),
+      checkout,
     );
     const graph = {
       objective: 1,

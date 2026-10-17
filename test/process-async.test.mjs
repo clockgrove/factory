@@ -2273,7 +2273,7 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
         },
       ],
     };
-    hydrateWorkerInputSources(graph, pinnedSources);
+    hydrateWorkerInputSources(graph, pinnedSources, checkout);
     const work = {
       status: "running",
       step: "validate",
@@ -3915,7 +3915,7 @@ test("source readiness prepares each real fresh checkout before its phase checks
           children: [],
           newPackages: [],
           priority: 0,
-          citations: [{ choiceIndex: citation.choiceIndex }],
+          citations: [{ path: citation.path, heading: citation.heading }],
           validation: [setup, probe, acceptance].map((command) => ({
             kind: "source-line",
             sourceIndex: source.sourceIndex,

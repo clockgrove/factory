@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { markdownLines } from "./markdown.js";
+import { githubEmptyField, markdownLines } from "./markdown.js";
 import { pinnedGit, pinnedGitRaw } from "./process.js";
 
 /** A version update, never a manager switch, range, URL or prerelease. */
@@ -29,12 +29,7 @@ export function packageManagerUpdate(body: string): string | undefined {
     if (line.heading && line.heading.level <= level) break;
     if (line.text.trim()) entries.push(line);
   }
-  if (
-    entries.length === 1 &&
-    !entries[0]!.fenced &&
-    entries[0]!.text.trim() === "_No response_"
-  )
-    return undefined;
+  if (entries.length === 1 && githubEmptyField(entries[0]!)) return undefined;
   const pin =
     entries.length === 1 && !entries[0]!.fenced
       ? entries[0]!.text.match(/^\s*-\s+`([^`]+)`\s*$/)?.[1]

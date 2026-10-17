@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import type { ContentRef, ContentStore, WorkGraph } from "../contracts.js";
 import { memorySourceHeading } from "../repository-memory.js";
 import type { PlanningSource } from "./sources.js";
-import { pinnedGitEnvironment } from "../process.js";
 
 export type ContextDisposition =
   | "complete"
@@ -751,185 +749,6 @@ export async function resolveContextRequests(
   record.elapsedMs += Date.now() - start;
   return results;
 }
-/** Deterministic immutable Git reads; no shell, worktree mutation, symlink traversal or caller commands. */
-export function repositoryContextResult(
-  checkout: string,
-  baseSha: string,
-  request: ContextRequest,
-  remaining: { maxResults: number; maxBytes: number; deadlineAt: number },
-): ContextResult {
-  const answer = (
-    disposition: ContextDisposition,
-    matches: ContextMatch[] = [],
-    detail = "",
-  ): ContextResult => ({ request, disposition, matches, detail });
-  if (
-    !/^[a-f0-9]{40,64}$/.test(baseSha) ||
-    request.selector.startsWith("/") ||
-    request.selector.includes("\\") ||
-    request.selector.split("/").some((p) => p === "." || p === "..") ||
-    request.selector.includes("\0") ||
-    /[*?[\]:]/.test(request.selector)
-  )
-    return answer(
-      "denied",
-      [],
-      "Only admitted literal repository-relative selectors are readable",
-    );
-  const run = (args: string[]): Buffer =>
-    execFileSync("git", ["-C", checkout, ...args], {
-      env: pinnedGitEnvironment(),
-      maxBuffer: remaining.maxBytes + 65536,
-      timeout: Math.max(1, remaining.deadlineAt - Date.now()),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  try {
-    const entries = run([
-      "ls-tree",
-      "-rzl",
-      "--full-tree",
-      baseSha,
-      ...(request.selector ? ["--", request.selector] : []),
-    ])
-      .toString("utf8")
-      .split("\0")
-      .filter(Boolean)
-      .map((line) => {
-        const tab = line.indexOf("\t");
-        const [mode, type, sha, size] = line.slice(0, tab).trim().split(/\s+/);
-        return {
-          path: line.slice(tab + 1),
-          mode,
-          type,
-          sha,
-          size: type === "blob" ? Number(size) : null,
-        };
-      })
-      .filter((e) =>
-        request.operation === "read"
-          ? e.path === request.selector
-          : e.path === request.selector ||
-            e.path.startsWith(
-              request.selector.endsWith("/")
-                ? request.selector
-                : `${request.selector}/`,
-            ) ||
-            request.selector === "",
-      );
-    if (!entries.length)
-      return answer(
-        "no-match",
-        [],
-        "Complete immutable Git tree has no match in this exact scope",
-      );
-    if (request.operation === "inventory") {
-      const content = JSON.stringify(
-        entries.map(({ path, mode, type, sha, size }) => ({
-          path,
-          mode,
-          type,
-          sha,
-          size,
-        })),
-      );
-      if (
-        entries.length > remaining.maxResults ||
-        Buffer.byteLength(content) > remaining.maxBytes
-      )
-        return answer(
-          "incomplete",
-          [],
-          "Scoped inventory exceeds the remaining allowance; narrow selectors before relying on absence",
-        );
-      return answer(
-        "complete",
-        [
-          contextMatch(`git:${baseSha}:${request.selector}`, content, {
-            baseSha,
-            selector: request.selector,
-            complete: true,
-          }),
-        ],
-        "Complete scoped immutable Git inventory",
-      );
-    }
-    const matches: ContextMatch[] = [];
-    let bytes = 0;
-    let unavailable = false;
-    for (const entry of entries) {
-      if (entry.type !== "blob" || entry.mode === "120000") {
-        if (request.operation === "read")
-          return answer(
-            "unavailable",
-            [],
-            "Selected Git entry is a symlink or non-file; no target traversal is allowed",
-          );
-        unavailable = true;
-        continue;
-      }
-      const body = run(["cat-file", "blob", entry.sha!]);
-      const content = body.toString("utf8");
-      if (!Buffer.from(content).equals(body)) {
-        if (request.operation === "read")
-          return answer(
-            "unavailable",
-            [],
-            "Selected body is not complete UTF-8 text",
-          );
-        unavailable = true;
-        continue;
-      }
-      if (
-        request.operation === "search" &&
-        !content.toLowerCase().includes(request.query.toLowerCase()) &&
-        !entry.path.toLowerCase().includes(request.query.toLowerCase())
-      )
-        continue;
-      if (
-        matches.length >= remaining.maxResults ||
-        bytes + body.length > remaining.maxBytes
-      )
-        return answer(
-          "incomplete",
-          matches,
-          "Search or read exceeds remaining allowance; returned matches are complete bodies but inventory is incomplete",
-        );
-      matches.push(
-        contextMatch(`git:${baseSha}:${entry.path}`, content, {
-          baseSha,
-          path: entry.path,
-          blobSha: entry.sha,
-          complete: true,
-        }),
-      );
-      bytes += body.length;
-    }
-    if (unavailable)
-      return answer(
-        "incomplete",
-        matches,
-        "Some scoped entries are symlinks, non-files or non-UTF8 bodies; their semantics remain unavailable",
-      );
-    return matches.length
-      ? answer(
-          "complete",
-          matches,
-          "Complete attributable bodies from immutable Git scope",
-        )
-      : answer(
-          "no-match",
-          [],
-          "Complete searchable UTF-8 Git scope has no match; binary and symlink semantics are unavailable",
-        );
-  } catch {
-    return answer(
-      "unavailable",
-      [],
-      "Immutable Git source is unavailable or exceeds the remaining read/time allowance",
-    );
-  }
-}
-
 /** Discovery source selectors cannot widen the controller's immutable retrieval admission. */
 export function assertDiscoveryContextScope(
   graph: WorkGraph,
@@ -945,13 +764,9 @@ export function assertDiscoveryContextScope(
   const repository = packet.catalog.find(
     (collection) => collection.id === "repository",
   );
-  if (
-    !repository ||
-    !repository.operations.includes("read") ||
-    !repository.operations.includes("inventory")
-  )
+  if (!repository)
     throw new Error(
-      "Discovery requires an admitted read-only repository collection",
+      "Discovery requires an admitted repository selector ceiling",
     );
   for (const item of discoveries) {
     if (

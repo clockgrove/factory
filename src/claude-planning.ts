@@ -88,9 +88,9 @@ export const CLAUDE_PLANNING_ADAPTER = CLAUDE_AGENT_SDK_ADAPTER_IDENTITY;
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 /** One answer plus the SDK's bounded schema-repair turns. */
 const CLAUDE_PLANNING_MAX_TURNS = 4;
-/** A result review also spends turns reading the tree. */
+/** Compile, graph review and result review also spend turns reading a tree. */
 const CLAUDE_TREE_REVIEW_MAX_TURNS = 40;
-/** Read-only tools a result review gets over the exact candidate tree. */
+/** Read-only tools a session gets over its exact tree. */
 const TREE_REVIEW_TOOLS = ["Read", "Grep", "Glob"];
 
 /** Stable system context shared by every Claude planning call. */
@@ -100,11 +100,11 @@ export const CLAUDE_PLANNING_SYSTEM_PROMPT = [
   "Return exactly the requested result through the structured output.",
 ].join(" ");
 
-/** The system prompt when the session may read the exact result tree. */
+/** The system prompt when the session may read an exact tree. */
 export const CLAUDE_TREE_REVIEW_SYSTEM_PROMPT = [
   "You are the planning and review model for Clockgrove Factory.",
   "The user message is the complete request; you have no network.",
-  "Your working directory holds the exact tree under review, and your tools can only read it.",
+  "Your working directory holds the exact files the request names, and your tools can only read them.",
   "Return exactly the requested result through the structured output.",
 ].join(" ");
 
@@ -585,6 +585,7 @@ interface SessionFacts {
 class ClaudePlanningTransport implements PlanningTransport {
   readonly provider = CLAUDE_PLANNING_PROVIDER;
   readonly adapter = CLAUDE_PLANNING_ADAPTER;
+  readonly repositoryTree = true;
   private readonly secrets: string[];
   get sessionCapabilities() {
     return this.sessionRoot

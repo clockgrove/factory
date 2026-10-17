@@ -6,8 +6,8 @@ body:
   - type: textarea
     id: outcome
     attributes:
-      label: Outcome
-      description: One paragraph — what changes, for whom, and what is out of scope.
+      label: Goal
+      description: One paragraph — what changes, for whom, and what is out of scope. A goal paragraph from a PRD works as is.
     validations:
       required: true
   - type: textarea
@@ -20,14 +20,15 @@ body:
     validations:
       required: true
   - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Optional prose and links, such as PRD sections, issues or design notes. The planner reads the repository itself.
+  - type: textarea
     id: sources
     attributes:
       label: Sources
-      description: Repository files, one per bullet, or path#Exact Heading for one section. Workers get them verbatim.
-      value: |
-        - README.md
-    validations:
-      required: true
+      description: Optional. Only repository files every worker must receive verbatim, one per bullet ("- path" or "- path#Exact Heading").
   - type: textarea
     id: constraints
     attributes:

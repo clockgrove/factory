@@ -8,7 +8,6 @@ import {
   type WorkflowRecipeInput,
 } from "../workflow-recipes.js";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { adaptiveWorkflowEnabled } from "../adaptive-workflow.js";
 import {
   factoryConfigDigest,
@@ -17,7 +16,7 @@ import {
 } from "../config.js";
 import type { ContentStore } from "../contracts.js";
 import { retainLearningMemory } from "../learning.js";
-import { pinnedGit, pinnedGitEnvironment } from "../process.js";
+import { pinnedGit } from "../process.js";
 import {
   LocalRepositoryMemory,
   memorySourceHeading,
@@ -32,7 +31,6 @@ import {
   memoryBodySuppliedSource,
   contextMatch,
   contextResultBytes,
-  repositoryContextResult,
   type ContextMatch,
   type ContextRequest,
   type ContextResult,
@@ -295,36 +293,14 @@ export function createPlanningContextResolver(input: {
       .sort((a, b) => Number(b.request.required) - Number(a.request.required))
       .map(({ request }) => request),
   );
-  // Optional metadata follows required facts and stays inside the same frozen allowance.
-  const inventories = options.selectors
-    .filter((selector) => selector.endsWith("/"))
-    .slice(0, Math.max(0, 128 - automatic.length))
-    .map(
-      (selector, index): ContextRequest => ({
-        id: `automatic-directory-inventory-${index}`,
-        operation: "inventory",
-        collection: "repository",
-        selector,
-        query: "",
-        required: false,
-        reason:
-          "Supply tracked path presence from the admitted immutable directory; incomplete inventory cannot establish absence",
-      }),
-    );
-  const optionalMemoryIndex = automatic.findIndex(
-    (request) => request.id === "automatic-relevant-memory",
-  );
-  automatic.splice(
-    optionalMemoryIndex < 0 ? automatic.length : optionalMemoryIndex,
-    0,
-    ...inventories,
-  );
   const catalog: PlanningContextResolver["catalog"] = [
     {
+      // The discovery selector ceiling. Repository files are read with the
+      // planner's read-only tools over the exported base tree, not here.
       id: "repository",
       selectors: [...options.selectors],
-      operations: ["read", "search", "inventory"],
-      freshness: `Immutable admitted Git commit ${baseSha}, tree ${treeSha}`,
+      operations: [],
+      freshness: `Discovery selector ceiling at Git commit ${baseSha}, tree ${treeSha}; read repository files with the read-only repository tools`,
       completeness: "complete",
     },
     {
@@ -461,81 +437,6 @@ export function createPlanningContextResolver(input: {
           "complete",
           "Reused exact required Source bytes already supplied to the compiler",
         );
-      }
-      if (request.collection === "repository") {
-        if (!admittedPath(request.selector, options.selectors))
-          return answer(
-            "denied",
-            "Repository selector is outside the explicit admitted scope",
-          );
-        const source = sources.find(
-          (source) =>
-            source.path === request.selector &&
-            memorySourceHeading(source.heading) === undefined,
-        );
-        let blobSha: string | undefined;
-        if (request.operation === "read" && source) {
-          try {
-            const entry = execFileSync(
-              "git",
-              [
-                "-C",
-                config.checkout,
-                "ls-tree",
-                "-z",
-                baseSha,
-                "--",
-                source.path,
-              ],
-              {
-                env: pinnedGitEnvironment(),
-                timeout: Math.max(1, remaining.deadlineAt - Date.now()),
-                maxBuffer: 8192,
-                stdio: ["ignore", "pipe", "pipe"],
-              },
-            ).toString("utf8");
-            blobSha = /^(?:100644|100755) blob ([a-f0-9]{40,64})\t/.exec(
-              entry,
-            )?.[1];
-            if (!blobSha)
-              return answer(
-                "unavailable",
-                "Selected pinned source is not a regular immutable Git blob; symlink targets are not traversed",
-              );
-          } catch {
-            return answer(
-              "unavailable",
-              "Selected pinned source metadata is unavailable within the remaining read/time allowance",
-            );
-          }
-        }
-        const result =
-          request.operation === "read" && source
-            ? bound(
-                request,
-                [
-                  contextMatch(
-                    `git:${baseSha}:${source.path}`,
-                    source.content,
-                    { baseSha, path: source.path, blobSha, complete: true },
-                  ),
-                ],
-                remaining,
-                "complete",
-                "Reused complete pinned source body without another target read",
-              )
-            : repositoryContextResult(
-                config.checkout,
-                baseSha,
-                request,
-                remaining,
-              );
-        for (const match of result.matches) {
-          const path = match.provenance.path;
-          if (typeof path === "string" && match.provenance.complete === true)
-            applicability.paths![path] = match.digest;
-        }
-        return result;
       }
       if (request.collection !== "memory" || !options.memory)
         return answer(

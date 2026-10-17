@@ -4588,7 +4588,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
       },
     ],
   };
-  hydrateWorkerInputSources(citedGraph, pinnedSources);
+  hydrateWorkerInputSources(citedGraph, pinnedSources, checkout);
   const sources = citedGraph.items[0].inputSources.slice(0, 2);
   assert.deepEqual(
     sources.map((source) => source.heading),
@@ -5248,7 +5248,12 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
       .map((item) => ({
         ...item,
         kind: "work",
-        citations: [{ choiceIndex: 0 }],
+        citations: [
+          {
+            path: compilation.wire.data.citations[0].path,
+            heading: compilation.wire.data.citations[0].heading,
+          },
+        ],
         children: [],
         newPackages: [],
         priority: 0,

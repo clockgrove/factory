@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { markdownLines } from "../markdown.js";
+import { githubEmptyField, markdownLines } from "../markdown.js";
 import type { WorkGraph } from "../contracts.js";
 import type { ReviewPacket } from "../review-evidence.js";
 import {
@@ -85,31 +85,101 @@ export function compilerCitationChoices(sources: PlanningSource[]) {
   });
 }
 
-function workerInputSources(graph: WorkGraph, sources: PlanningSource[]) {
+/** Exact worker inputs: a pinned citation choice, else the cited file at the graph base. */
+function workerInputSources(
+  graph: WorkGraph,
+  sources: PlanningSource[],
+  checkout: string,
+) {
   const choices = compilerCitationChoices(sources);
   return workShapes(graph).map((item) =>
     item.citations.map((citation) => {
+      const heading = citation.heading ?? "";
       const source = choices.find(
-        (choice) =>
-          choice.path === citation.path &&
-          choice.heading === (citation.heading ?? ""),
+        (choice) => choice.path === citation.path && choice.heading === heading,
       );
-      if (!source)
-        throw new GraphValidationError(
-          item.id,
-          `Work Item ${item.id} cites an unavailable pinned section`,
-        );
-      return structuredClone(source);
+      return source
+        ? structuredClone(source)
+        : repositoryCitation(
+            checkout,
+            graph.baseSha,
+            item.id,
+            citation.path,
+            heading,
+          );
     }),
   );
+}
+
+/** One cited repository section; a whole file uses the empty heading. */
+const MAX_REPOSITORY_CITATION_BYTES = 131_072;
+/** A heading citation reads at most a file the read tree exports. */
+const MAX_REPOSITORY_SECTION_FILE_BYTES = 1_048_576;
+/** Distinct repository-cited bytes one graph may carry inline. */
+const MAX_REPOSITORY_CITED_BYTES = 524_288;
+
+/**
+ * A citation outside the Objective's pinned Sources: the exact UTF-8 bytes of
+ * a regular tracked file (or one exact Markdown heading of it) at the graph
+ * base. The bytes travel inline in the Work Item's inputSources, so the graph
+ * digest, the independent reviewer and the worker all bind the same content.
+ * Repository citations carry no command authority.
+ */
+function repositoryCitation(
+  checkout: string,
+  baseSha: string,
+  itemId: string,
+  path: string,
+  heading: string,
+): { path: string; heading: string; content: string } {
+  const refuse = (reason: string): never => {
+    throw new GraphValidationError(
+      itemId,
+      `Work Item ${itemId} cites ${boundedDiagnosticValue(heading ? `${path}#${heading}` : path)}, which is neither a pinned source section nor a citable repository file at base ${baseSha}: ${reason}. Cite a pinned choice, or a regular UTF-8 file path from the repository map with heading "" (whole file) or one exact Markdown heading.`,
+    );
+  };
+  // Regular blob identity and size come from the tree before any body read.
+  let size: number | undefined;
+  try {
+    const entry = /^(?:100644|100755) blob [a-f0-9]{40,64} +(\d+)\t/.exec(
+      pinnedGitRaw(checkout, "ls-tree", "-lz", baseSha, "--", path).toString(
+        "utf8",
+      ),
+    );
+    size = entry ? Number(entry[1]) : undefined;
+  } catch {
+    size = undefined;
+  }
+  if (size === undefined) return refuse("it is not a regular tracked file");
+  // A heading selects a section of a file up to the read tree's 1 MiB export bound.
+  const readBound = heading
+    ? MAX_REPOSITORY_SECTION_FILE_BYTES
+    : MAX_REPOSITORY_CITATION_BYTES;
+  if (size > readBound)
+    refuse(
+      `the file has ${size} bytes, over the ${readBound}-byte bound for ${heading ? "a heading citation" : "a whole-file citation"}; cite one exact heading or a smaller file`,
+    );
+  let content: string;
+  try {
+    const text = pinnedText(checkout, baseSha, path);
+    content = heading ? sectionText(path, text, heading) : text;
+  } catch (error) {
+    return refuse(error instanceof Error ? error.message : String(error));
+  }
+  if (Buffer.byteLength(content) > MAX_REPOSITORY_CITATION_BYTES)
+    refuse(
+      `the cited content exceeds ${MAX_REPOSITORY_CITATION_BYTES} bytes; cite one exact heading or a smaller file`,
+    );
+  return { path, heading, content };
 }
 
 /** Source text is controller-owned regardless of the planning adapter. */
 export function hydrateWorkerInputSources(
   graph: WorkGraph,
   sources: PlanningSource[],
+  checkout: string,
 ): void {
-  const inputs = workerInputSources(graph, sources);
+  const inputs = workerInputSources(graph, sources, checkout);
   workShapes(graph).forEach((item, index) => {
     item.inputSources = inputs[index]!;
   });
@@ -259,13 +329,14 @@ export function reviewGraphView(
 export function assertWorkerInputSources(
   graph: WorkGraph,
   sources: PlanningSource[],
+  checkout: string,
 ): void {
-  const inputs = workerInputSources(graph, sources);
+  const inputs = workerInputSources(graph, sources, checkout);
   for (const [index, item] of workShapes(graph).entries()) {
     if (JSON.stringify(item.inputSources) !== JSON.stringify(inputs[index]))
       throw new GraphValidationError(
         item.id,
-        `Work Item ${item.id} inputs differ from pinned citation sections`,
+        `Work Item ${item.id} inputs differ from its cited sections at the base`,
       );
   }
 }
@@ -370,29 +441,26 @@ export function commandAuthorizations(
 }
 
 /**
- * The Objective template has four sections. A removed field is refused with
- * where its content goes now, because a silent fallback would plan from a
- * different Objective than the one the author wrote.
+ * Headings whose content Factory would otherwise silently not act on: their
+ * old structural meaning (acceptance, commands, pinned sources) now lives in
+ * another section. Prose sections (Goal, Outcome, Context, Non-goals,
+ * Required checks, Constraints) are read by the planner as written.
  */
 const REMOVED_OBJECTIVE_FIELDS: Record<string, string> = {
   "final validation":
     "write each command as an Acceptance bullet that is exactly one backticked command",
-  "required checks":
-    "a plan can name a CI check only if it is a pull-request workflow job at the base",
   "planning sources": "rename it to Sources",
   "what must be true": "rename it to Acceptance",
-  goal: "rename it to Outcome",
-  "non-goals": "move them to Constraints",
 };
 
-/** Refuse an Objective that still uses a field the template no longer has. */
+/** Refuse an Objective whose structured content sits under a retired heading. */
 export function assertObjectiveTemplate(body: string): void {
   for (const { heading } of markdownLines(body)) {
     if (!heading || ![2, 3].includes(heading.level)) continue;
     const advice = REMOVED_OBJECTIVE_FIELDS[heading.text.toLowerCase()];
     if (advice)
       throw new Error(
-        `Objective field "${heading.text}" was removed; ${advice}. The Objective template has four sections: Outcome, Acceptance, Sources, Constraints (docs/templates/objective.md)`,
+        `Objective field "${heading.text}" is no longer read structurally; ${advice} (see the Objective format in docs/USER-GUIDE.md)`,
       );
   }
 }
@@ -429,7 +497,7 @@ export function objectiveCriteria(body: string): string[] {
 export function assertObjectiveCriteria(body: string): void {
   if (!objectiveCriteria(body).some((criterion) => criterion.trim()))
     throw new Error(
-      "Objective requires nonempty criteria under Acceptance before planning or activation",
+      "Objective requires an Acceptance section with at least one observable outcome bullet before planning or activation",
     );
 }
 
@@ -594,22 +662,28 @@ function authorizedCommand(
 function selectedHeadings(body: string): SourceSelector[] {
   const section = objectiveSection(body, ["Sources"]);
   if (!section) return [];
-  return markdownLines(section)
+  const invalid = (line: string): never => {
+    throw new Error(
+      `Sources line ${JSON.stringify(line.trim())} is not a repository path entry; write "- path" or "- path#Exact Heading", one file per bullet. Put prose and links under Context instead.`,
+    );
+  };
+  const lines = markdownLines(section).filter(({ text }) => text.trim());
+  // An unanswered optional issue-form field means no pinned Sources.
+  if (lines.length === 1 && githubEmptyField(lines[0]!)) return [];
+  return lines
     .map(({ text, fenced }) => {
-      if (fenced && text.trim())
-        throw new Error(`Invalid Sources entry: ${text.trim()}`);
+      if (fenced) invalid(text);
       return text;
     })
-    .filter((line) => line.trim())
     .map((line) => {
       const value = line
         .match(/^\s*-\s+(?:`([^`]+)`|([^`\s][^`]*?))\s*$/)
         ?.slice(1)
         .find(Boolean);
-      if (!value) throw new Error(`Invalid Sources entry: ${line.trim()}`);
+      if (!value) return invalid(line);
       const split = value.indexOf("#");
       if (split === 0 || (split >= 0 && !value.slice(split + 1).trim()))
-        throw new Error(`Invalid Sources entry: ${line.trim()}`);
+        invalid(line);
       return split < 0
         ? { path: value }
         : { path: value.slice(0, split), heading: value.slice(split + 1) };
@@ -702,12 +776,16 @@ export function planningSources(
     const identity = `${path}#${heading ?? ""}`;
     if (identities.has(identity)) continue;
     identities.add(identity);
-    const text = pinnedText(checkout, baseSha, path);
-    sources.push({
-      path,
-      ...(heading ? { heading } : {}),
-      content: heading ? sectionText(path, text, heading) : text,
-    });
+    let content: string;
+    try {
+      const text = pinnedText(checkout, baseSha, path);
+      content = heading ? sectionText(path, text, heading) : text;
+    } catch (error) {
+      throw new Error(
+        `Sources entry ${JSON.stringify(heading === undefined ? path : `${path}#${heading}`)}: ${error instanceof Error ? error.message : String(error)}. Each Sources bullet is "- path" or "- path#Exact Heading" naming a tracked UTF-8 file at the base; put prose and links under Context.`,
+      );
+    }
+    sources.push({ path, ...(heading ? { heading } : {}), content });
   }
   for (const command of finalObjectiveCommands(body))
     if (
@@ -757,24 +835,46 @@ function boundedAllowedHeadings(sources: PlanningSource[]): string {
 export function validateCitations(
   graph: WorkGraph,
   sources: PlanningSource[],
+  checkout: string,
 ): void {
+  const repositoryBytes = new Map<string, number>();
   for (const item of workShapes(graph)) {
     for (const citation of item.citations) {
       const matching = sources.filter(
         (source) => source.path === citation.path,
       );
-      if (!matching.length)
-        throw new GraphValidationError(
-          item.id,
-          `Work Item ${item.id} cites unavailable source ${citation.path}`,
-        );
       const heading = citation.heading ?? "";
       if (
-        !citationChoices(matching).some((choice) => choice.heading === heading)
+        citationChoices(matching).some((choice) => choice.heading === heading)
+      )
+        continue;
+      let cited: ReturnType<typeof repositoryCitation>;
+      try {
+        cited = repositoryCitation(
+          checkout,
+          graph.baseSha,
+          item.id,
+          citation.path,
+          heading,
+        );
+      } catch (error) {
+        if (!matching.length || !heading) throw error;
+        throw new GraphValidationError(
+          item.id,
+          `Work Item ${item.id} cites missing heading ${boundedDiagnosticText(heading)} in ${boundedDiagnosticText(citation.path)}; expected exact bare heading ${boundedAllowedHeadings(matching)}`,
+        );
+      }
+      repositoryBytes.set(
+        JSON.stringify([cited.path, cited.heading]),
+        Buffer.byteLength(cited.content),
+      );
+      if (
+        [...repositoryBytes.values()].reduce((sum, bytes) => sum + bytes, 0) >
+        MAX_REPOSITORY_CITED_BYTES
       )
         throw new GraphValidationError(
           item.id,
-          `Work Item ${item.id} cites missing heading ${citation.heading === undefined ? "<missing>" : citation.heading === "" ? '""' : boundedDiagnosticText(citation.heading)} in ${boundedDiagnosticText(citation.path)}; expected exact bare heading ${boundedAllowedHeadings(matching)}`,
+          `Repository citations exceed ${MAX_REPOSITORY_CITED_BYTES} distinct bytes; cite exact headings instead of whole files, or only what workers need verbatim`,
         );
     }
   }
@@ -815,8 +915,8 @@ export function validateGraphSources(
 ): void {
   assertPreIntegrationCheckSources(graph, sources);
   assertKnownCheckNames(graph, workflowCheckNames(checkout, baseSha));
-  validateCitations(graph, sources);
-  assertWorkerInputSources(graph, sources);
+  validateCitations(graph, sources, checkout);
+  assertWorkerInputSources(graph, sources, checkout);
   validateCommandProvenance(graph, sources, checkout);
   for (const item of workShapes(graph)) {
     if (

@@ -335,8 +335,8 @@ export function verifyPlanCandidate(
     candidate.finalCommands,
     commandAuthority(body),
   );
-  validateCitations(candidate.graph, candidate.sources);
-  assertWorkerInputSources(candidate.graph, candidate.sources);
+  validateCitations(candidate.graph, candidate.sources, checkout);
+  assertWorkerInputSources(candidate.graph, candidate.sources, checkout);
   validateCommandProvenance(candidate.graph, candidate.sources, checkout);
 }
 

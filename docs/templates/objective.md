@@ -1,8 +1,8 @@
 # Short title of the result
 
-## Outcome
+## Goal
 
-One paragraph: what changes, for whom, and what is out of scope for this Objective.
+One paragraph: what changes, for whom, and what is out of scope for this Objective. A goal paragraph from a PRD works as is.
 
 ## Acceptance
 
@@ -10,10 +10,13 @@ One paragraph: what changes, for whom, and what is out of scope for this Objecti
 - Put any constraint that must be verified here, not only under Constraints. For example: "Install, checks and tests leave the Git tree clean."
 - `npm test`
 
+## Context
+
+Optional prose and links (PRD sections, issues, design notes). The planner reads the repository itself. Sources below is optional too: list only files every worker must receive verbatim, one `- path` or `- path#Exact Heading` per bullet, and delete the section otherwise.
+
 ## Sources
 
 - `docs/spec.md#Exact Heading`
-- `docs/protocol.md`
 
 ## Constraints
 

@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as time from "../clock.js";
 import {
   COMPILER_READINESS_GUIDANCE,
@@ -63,6 +66,11 @@ import {
   stepDeadlineAt,
 } from "../step.js";
 import { CodexPlanningTransport } from "./codex-transport.js";
+import {
+  REPOSITORY_DIRECTORY,
+  repositoryMap,
+  writeRepositoryTree,
+} from "./repository-tree.js";
 import {
   assertPlanningContextPacket,
   planningMemorySourceIndices,
@@ -365,8 +373,41 @@ function planningSourceReadGuidance(delivery?: PlanningSourceDelivery): string {
   if (delivery && delivery.bodyDelivery !== "all-files")
     return retainedPlanningSourceReadGuidance(delivery);
   return delivery
-    ? `Complete pinned source bodies use contentFile references in the current immutable, read-only source directory at baseline ${delivery.baseSha}; no live repository checkout or network access is available. Read the relevant complete sections before deciding: paths, hashes and availability do not supply unread semantics. Use controller-supplied package/command facts; inspect generated dependency state or lock entries only for actual resolution, corruption, supply-chain or explicit lock requirements. Batch independent reads within the combined outer output budget, not larger per-command totals. Present needed literal source text and retain errors/truncation provenance without reprinting unrelated tool-response envelopes. Retrieve missing spans, not already supplied complete bytes; after compaction re-read missing required evidence. Unread/truncated required contents remain unproved. Bind reuse to current exact path, heading, digest and sourceIndex; earlier indices do not transfer. Split literal UTF-8 content on newline for zero-based lineIndex, preserving blank/final empty lines; sourceSpan uses JavaScript string units. Reads grant no implementation, validation-command, broader-source or acceptance authority. `
+    ? `Complete pinned source bodies use contentFile references in the current immutable, read-only source directory at baseline ${delivery.baseSha}; no live checkout, Git metadata or network access is available. Read the relevant complete sections before deciding: paths, hashes and availability do not supply unread semantics. Use controller-supplied package/command facts; inspect generated dependency state or lock entries only for actual resolution, corruption, supply-chain or explicit lock requirements. Batch independent reads within the combined outer output budget, not larger per-command totals. Present needed literal source text and retain errors/truncation provenance without reprinting unrelated tool-response envelopes. Retrieve missing spans, not already supplied complete bytes; after compaction re-read missing required evidence. Unread/truncated required contents remain unproved. Bind reuse to current exact path, heading, digest and sourceIndex; earlier indices do not transfer. Split literal UTF-8 content on newline for zero-based lineIndex, preserving blank/final empty lines; sourceSpan uses JavaScript string units. Reads grant no implementation, validation-command, broader-source or acceptance authority. `
     : "";
+}
+
+/** What the planner or graph reviewer can see of the repository at the base. */
+export interface RepositoryView {
+  /** Deterministic path map of the base tree (repositoryMap). */
+  map: string;
+  /** `repository/` in the working directory holds the exported base files. */
+  reads: boolean;
+}
+
+function compileRepositoryGuidance(
+  repository: RepositoryView | undefined,
+  baseSha: string,
+): string {
+  if (!repository) return "";
+  return repository.reads
+    ? `- Repository: your working directory contains \`${REPOSITORY_DIRECTORY}/\`, a read-only offline export of every tracked regular file of the repository at base ${baseSha}, without Git metadata; the repository map lists every tracked path with its byte size and marks files that are not exported. These read tools are your browsing surface. Before choosing the Work Item split, owned paths, tests and commands, read the existing code, tests, manifests, scripts and documentation the plan depends on, using targeted searches and bounded reads rather than reading every file. Never write files, run builds or tests, or execute repository code.
+- Repository citations: a Work Item may cite any exported UTF-8 file you read by its path relative to \`${REPOSITORY_DIRECTORY}/\`, with heading "" for the whole file or one exact Markdown heading. Factory pins those exact base bytes into the Work Item's inputs, so the reviewer and the worker read what you read. Cite only what the worker needs verbatim. Repository citations carry no command authority: a validation command still needs a pinned-source line or a base-observed exact line.
+`
+    : `- Repository: this route has no file tools; the repository map lists every tracked path at base ${baseSha} with its byte size. A Work Item may still cite a repository file by path, with heading "" for the whole file or one exact Markdown heading; Factory pins those exact base bytes into the Work Item's inputs. Repository citations carry no command authority.
+`;
+}
+
+function reviewRepositoryGuidance(
+  repository: RepositoryView | undefined,
+  baseSha: string,
+): string {
+  if (!repository) return "";
+  return `\n${
+    repository.reads
+      ? `The read-only directory \`${REPOSITORY_DIRECTORY}/\` in your working directory is an offline export of every tracked regular file at base ${baseSha}, without Git metadata. Read the code, tests, manifests and scripts a judgment depends on (for example whether owned paths cover the files the work must change, or whether a named test or script exists); do not read every file by habit.`
+      : `This route has no file tools; the repository map below lists every tracked path at base ${baseSha}.`
+  } Work Item inputSources without an evidenceSpan carry the exact base bytes of a repository file the planner cited; Factory has authenticated them against the base.\n${repository.map}`;
 }
 
 const REVIEW_ARTIFACT_GUIDANCE =
@@ -386,6 +427,7 @@ export function renderCompilationCall(
   request: PlanningRequest<unknown>,
   sourceDelivery?: PlanningSourceDelivery,
   reviewArtifacts?: readonly ReviewArtifactSelector[],
+  repository?: RepositoryView,
 ): {
   wire: ReturnType<typeof compilerWire>;
   call: StructuredCall;
@@ -425,17 +467,17 @@ export function renderCompilationCall(
   const instructions = `${WORK_ITEM_PLANNING_RULES}
 
 How to answer:
-${request.contextLookup ? "The admitted contextLookup packet supplies automatic required source/decision and eligible memory bodies plus a scoped catalog. Return outcome kind graph only when every material required fact has complete applicable evidence. For missing bodies, incomplete inventories, conflicting facts or expired validity, return context-request with a bounded batch of exact read/search/inventory requests; mark each material missing fact required. Scoped no-match proves only the declared complete searchable scope, never omitted bodies. Memory bodies in factory.memory-projection/v1 may carry a reuseRef to an earlier match identity and body role in that same result, or kind supplied-source selecting the exact complete Sources[sourceIndex] by path/heading and digest. Reuse only those exact literal bytes with the same digest; every original manifest, applicability and gap still applies independently. Such references supply no unseen or newer source version. Advisory memory grants no source/command authority, implementation acceptance or permissions. A human-dependency must identify its concrete question and dependencyKind: human-choice or permission uses empty requestIds, while unavailable-context must cite unique requestIds of actual still-unresolved required lookup receipts. Retrieve accessible missing facts through the admitted catalog before asking a human to supply them; a catalog, unknown fact, successful body read or historical failure repaired by a current result cannot justify unavailable-context. Genuine human-owned choices and permission boundaries need no pointless lookup. No connector, provider, command or wider selector access is available from this response. Native context tools are available only when the selected adapter declares them; structured requests always use the same controller resolver.\n" : ""}${request.workflowRecipe ? "The separately supplied workflowRecipe is an exact pinned structural contract, not normative Sources, command authority, proof or permission. Preserve declared stage IDs/kinds/dependencies, discovery outputs, conditions, selector ceilings and expansion envelopes. Fill real ownership, citations, stage-local acceptance and validation only from the supplied current Objective/Sources. Template stages become expansion templates, never executable initial nodes. Required discovery/current facts must be supplied before material decisions; unresolved prerequisites use admitted context or the precise human dependency. Extra ordinary work needed for original Objective acceptance still requires normal source grounding and independent review. A recipe change applies only to a new admission; do not rewrite the pin or widen proposed limits.\n" : ""}${planningSourceReadGuidance(sourceDelivery)}- Return only the requested choice structure, the supplied contextId copied exactly and zero-based indices. Use a concise title, one-sentence goal, stage-local acceptance and non-goals. The brief adds only necessary shared decisions, initial reads and evidence responsibilities absent elsewhere. Keep every required fact/interface without recopying authoritative sources or acceptance/ownership/commands.
+${request.contextLookup ? "Repository files come from the repository map and read tools below, never from context requests; context requests reach only the catalog's memory and pinned-source collections. The admitted contextLookup packet supplies automatic required source/decision and eligible memory bodies plus a scoped catalog. Return outcome kind graph only when every material required fact has complete applicable evidence. For missing bodies, incomplete inventories, conflicting facts or expired validity, return context-request with a bounded batch of exact read/search/inventory requests; mark each material missing fact required. Scoped no-match proves only the declared complete searchable scope, never omitted bodies. Memory bodies in factory.memory-projection/v1 may carry a reuseRef to an earlier match identity and body role in that same result, or kind supplied-source selecting the exact complete Sources[sourceIndex] by path/heading and digest. Reuse only those exact literal bytes with the same digest; every original manifest, applicability and gap still applies independently. Such references supply no unseen or newer source version. Advisory memory grants no source/command authority, implementation acceptance or permissions. A human-dependency must identify its concrete question and dependencyKind: human-choice or permission uses empty requestIds, while unavailable-context must cite unique requestIds of actual still-unresolved required lookup receipts. Retrieve accessible missing facts through the admitted catalog before asking a human to supply them; a catalog, unknown fact, successful body read or historical failure repaired by a current result cannot justify unavailable-context. Genuine human-owned choices and permission boundaries need no pointless lookup. No connector, provider, command or wider selector access is available from this response. Native context tools are available only when the selected adapter declares them; structured requests always use the same controller resolver.\n" : ""}${request.workflowRecipe ? "The separately supplied workflowRecipe is an exact pinned structural contract, not normative Sources, command authority, proof or permission. Preserve declared stage IDs/kinds/dependencies, discovery outputs, conditions, selector ceilings and expansion envelopes. Fill real ownership, citations, stage-local acceptance and validation only from the supplied current Objective/Sources. Template stages become expansion templates, never executable initial nodes. Required discovery/current facts must be supplied before material decisions; unresolved prerequisites use admitted context or the precise human dependency. Extra ordinary work needed for original Objective acceptance still requires normal source grounding and independent review. A recipe change applies only to a new admission; do not rewrite the pin or widen proposed limits.\n" : ""}${planningSourceReadGuidance(sourceDelivery)}${compileRepositoryGuidance(repository, request.baseSha)}- Return only the requested choice structure, the supplied contextId copied exactly and zero-based indices. Use a concise title, one-sentence goal, stage-local acceptance and non-goals. The brief adds only necessary shared decisions, initial reads and evidence responsibilities absent elsewhere. Keep every required fact/interface without recopying authoritative sources or acceptance/ownership/commands.
 - A pinned source without contentFile has its complete literal body in the block labeled "source <sourceIndex>"; a source-line lineIndex is that block's numbered line.${sourceDelivery ? " A contentFile supplies the same complete literal UTF-8 bytes through the current read-only source directory." : ""} Graph input sourceSpan references select those exact joined bytes by sourceIndex and JavaScript string start/length, authenticated by sourceDigest and contentDigest; they supply the full worker inputs without repeating them.
 - Coverage: emit one top-level entry per supplied obligation, in order; array position selects obligationIndex. Choose a declared owner and a proof allowed by its actual item kind, including retained kinds. Owner acceptance/validation indices refer to that same item. Do not duplicate coverage or obligation indices. Preserve every clause of the whole obligation. Item-local proof and acceptance are after its validation but before its delivery, LFS upload, publication, merge or hydration; they cannot depend on its own merge, later items or final validation. Native-stack predecessors are not yet merged. Use stage-local component acceptance and final-review on its implementation owner when authorized final validation/evidence proves the full obligation. Final-review names a phase, not supplied runtime evidence. Never fake sibling implementations or prematurely passing checks. Add downstream/QA proof only for a named source requirement or material risk whose necessary evidence is missing from final validation/review; put that responsibility in its brief. A final-controller guarantee must cover the entire obligation. Exactly one backticked command runs on the integrated result and any proof covers it; other required commands need their exact command proof.
-- Source obligations (rule 11): give each sourceObligations entry its sourceIndex, the smallest firstLineIndex..lastLineIndex range of that source's numbered lines stating it, and a short self-contained statement that keeps every clause; ranges never repeat or overlap. A covered entry has an owner, a proof allowed for the owner's kind and an environment, usually an owner acceptance criterion that states it; an out-of-scope entry has a reason and the OBJECTIVE objectiveLineIndices whose constraints or out-of-scope text exclude it. Obligations that carry source and lines are retained source obligations: cover them in coverage and do not list them again. In an amendment, list each previous sourceExclusions entry again with the same lines, or cover it.
-- Citations: choose the smallest complete, nonredundant sections by choiceIndex, preserving required interfaces, literals and facts. Do not choose a full section and an already included subsection. Workers receive these sections verbatim and a full checkout; the brief supplies decisions and required initial reads, not recopied sources. Distinguish supplied complete bytes from omitted repository/tooling bodies and fresh dependency implementations. Re-read only missing/current semantics, not known supplied bytes. Batch independent work only when no model decision intervenes; preserve command literals, quoting, prerequisites and exit gates. Keep required evidence/command temporary files, not scratch digest snapshots duplicating controller audits.
+- Source obligations (rule 11): give each sourceObligations entry its pinned sourceIndex (repository files you cite are not obligation sources), the smallest firstLineIndex..lastLineIndex range of that source's numbered lines stating it, and a short self-contained statement that keeps every clause; ranges never repeat or overlap. A covered entry has an owner, a proof allowed for the owner's kind and an environment, usually an owner acceptance criterion that states it; an out-of-scope entry has a reason and the OBJECTIVE objectiveLineIndices whose constraints or out-of-scope text exclude it. Obligations that carry source and lines are retained source obligations: cover them in coverage and do not list them again. In an amendment, list each previous sourceExclusions entry again with the same lines, or cover it.
+- Citations: each citation is {path, heading}; copy a pinned citation choice exactly or name a repository file. Choose the smallest complete, nonredundant sections, preserving required interfaces, literals and facts. Do not choose a full section and an already included subsection. Workers receive these sections verbatim and a full checkout; the brief supplies decisions and required initial reads, not recopied sources. Distinguish supplied complete bytes from omitted repository/tooling bodies and fresh dependency implementations. Re-read only missing/current semantics, not known supplied bytes. Batch independent work only when no model decision intervenes; preserve command literals, quoting, prerequisites and exit gates. Keep required evidence/command temporary files, not scratch digest snapshots duplicating controller audits.
 - Package-manager metadata: only the structured Objective's exact Package manager update authorizes a version change; prose/model output does not. One implementation owner owns package.json and lockfile updates. Existing acceptance-script bodies and hooks stay fixed to the base/predecessor. An absent script needs an exact source-declared command and root package.json owner; never create lifecycle hooks or nested npm/pnpm invocations. Root installation is only exact source-declared \`pnpm install --frozen-lockfile --ignore-scripts\` or \`npm ci --ignore-scripts\`, before scripts. npm requires unchanged tracked package.json/package-lock.json and configuration, no workspaces, shrinkwrap override, mixed manager or manager update. Unsupported installation needs a source decision, not a wrapper or rewritten command.
 - Validation: preserve exact authorized commands. Every check must terminate with exit zero on success and clean up its owned resources. A bare service launch is not finite proof; startup/request/shutdown requires a finite source-authorized harness, not a brief promising cleanup. Missing finite-command authority needs a source decision, never dropped acceptance or rewritten literals. A source-declared command selects sourceIndex/lineIndex of one complete standalone command, not a JSON script body. Base-observed package scripts use their existing authorized npm/pnpm invocation and package.json source; other files need the base's standalone executable line. Newly authored commands are never base-observed. Item checks must pass in its actual pre-delivery checkout. Author sibling-dependent verification against settled interfaces but run it through authorized integrated commands, without premature item acceptance. Retain required real runtime, ordering and negative-control proof.
 - Environment: default to local/available, null probe, empty prerequisiteValidationIndices and preparedBy unless sources require preparation/readiness. ${COMPILER_READINESS_GUIDANCE} A probe is an owner's exact command that can pass before implementation. Setup indices are unique, increasing and before the probe, with explicit source authority; null probe requires none. Never infer setup from names or use newly implemented behavior as readiness. Preflight, worker and fresh result/final checkouts each require their own authorized sequence; read-only QA uses its validator checkout once, not an extra preflight checkout. Ignored installs/historical receipts do not transfer, and setup is not semantic acceptance.
 - ${QA_EVIDENCE_GUIDANCE}
 - Item kinds: work implements; qa checks the integrated result read-only; aggregate depends on all children and omits acceptance. ${request.contextLookup ? "Discovery is a source-authorized read-only observation with explicit literal selectors, supported output schema and finite entry/byte/attempt allowances. A discovery item declares no commands, owned paths or coverage proof; typed observations are not implementation acceptance. Dependents select discoveryInputs by exact producerItemId, role and typed fields, with an actual dependency on that producer. Return empty discoveryInputs when none are needed. Inventory uses deterministic controller Git reads; semantic mode requires a configured eligible read-only native adapter, grants no command/provider/access authority and adds no PR." : ""} Children are aggregate hierarchy, not subtasks or implicit dependencies; schedulable components are separate items. Every QA owns an obligation and integrated QA depends transitively on every implementation. Add QA only for necessary evidence unavailable from final validation/review or source-required late CI, never duplicate final proof or invent a generic tests/docs stage. Read-only nodes omit ownership, assets, candidate counts and execution profiles.
-- Ownership paths: use literal relative files or directory prefixes ending "/", with no wildcards, absolute paths, backslashes, empty or "." parts. Own affected existing tests and the files fixedScripts run; fixed script bodies cannot change. ${request.contextLookup ? "Use only admitted context selectors for missing current baseline bodies." : sourceDelivery ? "You may read the supplied immutable pinned source files, not a live repository checkout. Assign other paths from supplied source/script facts; a worker reports any additional required path for review." : "No repository browsing is admitted. Assign paths from supplied source/script facts; a worker reports any additional required path for review."} newPackages lists every new package directory and its owner includes package.json. Own existing pnpm-workspace.yaml only for Objective-declared Workspace package additions: one owner preserves existing entries, owns new manifests and cites the named directories.
+- Ownership paths: use literal relative files or directory prefixes ending "/", with no wildcards, absolute paths, backslashes, empty or "." parts. Own affected existing tests and the files fixedScripts run; fixed script bodies cannot change. ${repository?.reads ? "Assign owned paths from the repository files and sources you read" : repository ? "Assign owned paths from the repository map and supplied source/script facts" : "Assign owned paths from supplied source/script facts"}; a worker reports any additional required path for review. newPackages lists every new package directory and its owner includes package.json. Own existing pnpm-workspace.yaml only for Objective-declared Workspace package additions: one owner preserves existing entries, owns new manifests and cites the named directories.
 - Required CI: add source-required premerge names to requiredPreIntegrationChecks using checkIndex from checkNames and the requiring sourceIndex; CI proofs use the same choices. Missing names remain a review/operator requirement, never silently dropped. No requirement means [].
 - When the Objective only asks to qualify existing behavior, a graph of read-only QA items with no implementation is valid. Never invent a no-op worker or PR.
 ${request.contextLookup ? "- Adaptive expansion: only when contextLookup is enabled and the affected inventory is genuinely unknown, declare reviewed expansions consuming an explicit discovery output. Otherwise return expansions []. Each declaration fixes literal selectors, exhaustive selection (all regular files or known included/excluded semantic labels), migration/cross-cutting-fix work shape, a separately identified ordinary-work template, eligible profiles/resources, maxFilesPerChild, finite maxChildren and maxIterations 1. Template ownedPaths exactly equal the declaration selectors; template dependencies exactly equal declaration dependencies and may not include integration barriers. Template acceptance and authorized checks must be achievable on its own selected batch, not require all siblings or final integrated behavior. Keep related files together and avoid tiny independent workers without benefit. The controller sorts authenticated paths and batches within directories; it never chooses semantic scope, new commands or new authority. Empty means settle-without-children while existing substantive proofs still run. Name real existing integrationBarrierItemIds; they wait for this expansion and gain explicit producer/child dependencies. Keep Objective coverage on those existing proofs, never discovery or the nonexecuting template. Shared interface/package-metadata changes require one concrete owner and real template dependencies. Missing/unrecognized classifications, excess children, changed input and outside-envelope semantic work require the existing reviewed amendment or human-decision path. No new recursion, paid planning allowance, provider fallback or permission follows from an expansion." : ""}
@@ -450,7 +492,7 @@ Examples (illustrations, not command or source authority):
 - An Acceptance bullet that is exactly \`npm test\` already runs on the integrated result. Do not invent a worker just to duplicate it. A requirement for a particular negative control still needs the source-required control and its real evidence.
 - A command defined only by the proposed implementation is not base-observed. Use a complete source-declared command line or leave the missing authority for review. Indices and CI names always come from the current supplied choices.
 `;
-  const evidence = `Native Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\n${configuredReviewArtifacts(reviewArtifacts)}${inlineSources.length ? `Pinned source bodies. ${bodies.guidance}\n${bodies.text}` : ""}Compiler choices (JSON data):\n`;
+  const evidence = `${repository ? repository.map : ""}Native Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\n${configuredReviewArtifacts(reviewArtifacts)}${inlineSources.length ? `Pinned source bodies. ${bodies.guidance}\n${bodies.text}` : ""}Compiler choices (JSON data):\n`;
   const rendered = renderPrompt([
     ["instructions", instructions],
     ["evidence", evidence],
@@ -538,6 +580,7 @@ export function renderGraphReviewCall(
   reviewFiles?: ReviewBodyFile[],
   evidenceRoot?: string,
   reviewArtifacts?: readonly ReviewArtifactSelector[],
+  repository?: RepositoryView,
 ): StructuredCall {
   if (
     reviewFiles &&
@@ -604,7 +647,7 @@ Objective:\n`;
     ["objective", request.objective],
     [
       "evidence",
-      `\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(request.checkNames ?? [])}\n${sourceEvidence.length ? `Pinned-source memory aliases resolved to this review evidence packet:\n${JSON.stringify(sourceEvidence)}\n` : ""}${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(packet, reviewFiles)}${reviewFiles ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}`,
+      `\nExecution profile policy: ${JSON.stringify(request.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities digest: ${request.controllerCapabilitiesDigest}\nFactory controller capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(request.checkNames ?? [])}\n${sourceEvidence.length ? `Pinned-source memory aliases resolved to this review evidence packet:\n${JSON.stringify(sourceEvidence)}\n` : ""}${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(packet, reviewFiles)}${reviewFiles ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, request.baseSha)}`,
     ],
   ]);
   // Everything above repeats across revisions of one Objective. The
@@ -664,6 +707,7 @@ export class StructuredPlanningModel implements PlanningModel {
   private readonly wait: (milliseconds: number) => Promise<void>;
   private readonly providerTurnElapsedTimeoutMs: number;
   private readonly reviewArtifacts?: readonly ReviewArtifactSelector[];
+  private readonly checkout?: string;
 
   get retainedPlannerCheckpointCoverage() {
     return this.transport.retainedPlannerCheckpointCoverage;
@@ -721,6 +765,43 @@ export class StructuredPlanningModel implements PlanningModel {
     this.wait = options.wait ?? ((milliseconds) => time.sleep(milliseconds));
     if (options.reviewArtifacts?.length)
       this.reviewArtifacts = structuredClone([...options.reviewArtifacts]);
+    this.checkout = options.checkout;
+  }
+
+  /**
+   * The repository at the base commit: a deterministic map always, and the
+   * exported files when this route can read a directory (a transport-owned
+   * read root, or a fresh private tree the session reads through `tree`).
+   */
+  private repositoryView(
+    baseSha: string,
+    readRoot: string | undefined,
+  ): RepositoryView | undefined {
+    if (!this.checkout) return undefined;
+    return {
+      map: repositoryMap(this.checkout, baseSha),
+      reads: Boolean(readRoot) || this.transport.repositoryTree === true,
+    };
+  }
+
+  private async withRepositoryReads<T>(
+    baseSha: string,
+    view: RepositoryView | undefined,
+    readRoot: string | undefined,
+    run: (tree?: string) => Promise<T>,
+  ): Promise<T> {
+    if (!view?.reads) return run();
+    if (readRoot) {
+      writeRepositoryTree(this.checkout!, baseSha, readRoot);
+      return run();
+    }
+    const tree = mkdtempSync(join(tmpdir(), "factory-planning-repository-"));
+    try {
+      writeRepositoryTree(this.checkout!, baseSha, tree);
+      return await run(tree);
+    } finally {
+      rmSync(tree, { recursive: true, force: true });
+    }
   }
 
   private authoritativeCall(args: StructuredCall): StructuredCall {
@@ -1122,6 +1203,7 @@ export class StructuredPlanningModel implements PlanningModel {
       wait: this.wait,
       providerTurnElapsedTimeoutMs: this.providerTurnElapsedTimeoutMs,
       reviewArtifacts: this.reviewArtifacts,
+      ...(this.checkout && { checkout: this.checkout }),
     });
     scoped.approvedPlaybook = playbook;
     scoped.approvedPlaybookPin = pin;
@@ -1157,12 +1239,19 @@ export class StructuredPlanningModel implements PlanningModel {
       );
     }
     const run = async (delivery?: PlanningSourceDelivery) => {
+      const repository = this.repositoryView(request.baseSha, delivery?.root);
       const { wire, call } = renderCompilationCall(
         request,
         delivery,
         this.reviewArtifacts,
+        repository,
       );
-      const result = await this.runStructured<unknown>(call);
+      const result = await this.withRepositoryReads(
+        request.baseSha,
+        repository,
+        delivery?.root,
+        (tree) => this.runStructured<unknown>(tree ? { ...call, tree } : call),
+      );
       return this.decodeCompilationResult<T>(request, wire, result);
     };
     return this.transport.withSourceDelivery
@@ -1218,11 +1307,15 @@ export class StructuredPlanningModel implements PlanningModel {
             ),
             wire: undefined,
           }
-        : renderCompilationCall(
-            request,
-            this.transport.sourceDelivery?.(request, true),
-            this.reviewArtifacts,
-          );
+        : (() => {
+            const delivery = this.transport.sourceDelivery?.(request, true);
+            return renderCompilationCall(
+              request,
+              delivery,
+              this.reviewArtifacts,
+              this.repositoryView(request.baseSha, delivery?.root),
+            );
+          })();
     const call = this.authoritativeCall(rendered.call);
     const session = request.session?.retained;
     const binding = session?.currentTurn;
@@ -1266,27 +1359,45 @@ export class StructuredPlanningModel implements PlanningModel {
       JSON.stringify(this.approvedPlaybookPin)
     )
       throw new Error("Graph review differs from the pinned planning advisory");
-    if (!this.transport.withGraphReviewFiles)
-      return this.runStructured(
-        renderGraphReviewCall(
-          request,
-          undefined,
-          undefined,
-          this.reviewArtifacts,
-        ),
+    if (!this.transport.withGraphReviewFiles) {
+      const repository = this.repositoryView(request.baseSha, undefined);
+      const call = renderGraphReviewCall(
+        request,
+        undefined,
+        undefined,
+        this.reviewArtifacts,
+        repository,
       );
+      return this.withRepositoryReads(
+        request.baseSha,
+        repository,
+        undefined,
+        (tree) => this.runStructured(tree ? { ...call, tree } : call),
+      );
+    }
     const packet =
       request.reviewPacket ?? reviewPacket([], planningReviewEvidence(request));
-    return this.transport.withGraphReviewFiles(packet, (files, root) =>
-      this.runStructured(
-        renderGraphReviewCall(
-          { ...request, reviewPacket: packet },
-          root ? files : undefined,
-          root || undefined,
-          this.reviewArtifacts,
-        ),
-      ),
-    );
+    return this.transport.withGraphReviewFiles(packet, (files, root) => {
+      const repository = this.repositoryView(
+        request.baseSha,
+        root || undefined,
+      );
+      return this.withRepositoryReads(
+        request.baseSha,
+        repository,
+        root || undefined,
+        () =>
+          this.runStructured(
+            renderGraphReviewCall(
+              { ...request, reviewPacket: packet },
+              root ? files : undefined,
+              root || undefined,
+              this.reviewArtifacts,
+              repository,
+            ),
+          ),
+      );
+    });
   }
 
   async reviewResult(request: ResultReviewRequest): Promise<{
@@ -1468,7 +1579,7 @@ export class CodexPlanningModel extends StructuredPlanningModel {
         options.transport,
         options.sourceArtifacts,
       ),
-      options,
+      { ...options, checkout },
     );
   }
 }

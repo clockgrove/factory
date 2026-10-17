@@ -605,7 +605,7 @@ export function validateCompiledGraph(args: {
     assertDiscoveryContextScope(graph, request.contextLookup);
     const obligations = request.coverageObligations ?? [];
     hydrateCoverageSources(graph, obligations);
-    hydrateWorkerInputSources(graph, sources);
+    hydrateWorkerInputSources(graph, sources, checkout);
     normalizeExecutionProfiles(graph, executionProfiles);
     assertGraphExpansions(graph, { executionProfiles });
     validateGraph(

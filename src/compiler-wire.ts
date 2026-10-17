@@ -168,7 +168,19 @@ export function compilerWire(
     citations: {
       type: "array",
       minItems: 1,
-      items: strict({ choiceIndex: integer(citations.length) }),
+      items: strict({
+        path: {
+          ...text,
+          minLength: 1,
+          description:
+            "A pinned citation choice's path, or any regular UTF-8 repository file path at the base.",
+        },
+        heading: {
+          ...text,
+          description:
+            'Exact Markdown heading text without # marks, or "" for the whole file.',
+        },
+      }),
     },
     children: { type: "array", items: text },
     dependencies: { type: "array", items: text },
@@ -641,12 +653,7 @@ export function compilerWire(
         ? { source: entry.source.path, lines: entry.source.lines }
         : {}),
     })),
-    citations: citations.map(
-      ({ content: _content, ...entry }, choiceIndex) => ({
-        choiceIndex,
-        ...entry,
-      }),
-    ),
+    citations: citations.map(({ path, heading }) => ({ path, heading })),
     sources: request.sources.map(({ content, ...source }, sourceIndex) => ({
       sourceIndex,
       ...source,
@@ -876,21 +883,18 @@ export function compilerWire(
           }
           if (!Array.isArray(item.citations) || !item.citations.length)
             throw new Error("Planner item needs citations");
-          const chosen = item.citations.map((value) => {
+          // Factory pins the cited bytes: a pinned choice, else the file at the base.
+          item.citations = item.citations.map((value) => {
             const choice = object(value, "citation");
-            keys(choice, ["choiceIndex"], "citation");
-            return citations[
-              index(
-                choice.choiceIndex,
-                citations.length,
-                "citation choiceIndex",
-              )
-            ]!;
+            keys(choice, ["path", "heading"], "citation");
+            if (
+              typeof choice.path !== "string" ||
+              !choice.path ||
+              typeof choice.heading !== "string"
+            )
+              throw new Error("Planner citation needs a path and a heading");
+            return { path: choice.path, heading: choice.heading };
           });
-          item.citations = chosen.map(({ path, heading }) => ({
-            path,
-            heading,
-          }));
           if (!Array.isArray(item.validation))
             throw new Error("Planner validation must be an array");
           item.validation = item.validation.map((value) => {

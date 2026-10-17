@@ -663,7 +663,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
         },
       ],
     };
-    hydrateWorkerInputSources(currentGraph, sources);
+    hydrateWorkerInputSources(currentGraph, sources, root);
     const before = JSON.stringify(currentGraph);
     const amendment = {
       currentGraph,
@@ -728,10 +728,13 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     const initialFiles = renderCompilationCall(initialRequest, sourceFiles);
     assert.doesNotMatch(initial.call.prompt, /Retained amendments:/);
     assert.doesNotMatch(initial.call.prompt, /Execution profiles:/);
-    assert.match(initial.call.prompt, /No repository browsing is admitted/);
+    assert.match(
+      initial.call.prompt,
+      /Assign owned paths from supplied source\/script facts/,
+    );
     assert.match(
       initialFiles.call.prompt,
-      /You may read the supplied immutable pinned source files, not a live repository checkout/,
+      /no live checkout, Git metadata or network access is available/,
     );
     assert.doesNotMatch(
       initialFiles.call.prompt,
@@ -1581,7 +1584,6 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     contextMatch,
     contextDigest,
     initializeContextLookup,
-    repositoryContextResult,
     resolveContextRequests,
     retainContextPacket,
   } = await import("../dist/compiler/context.js");
@@ -1711,50 +1713,17 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     /admit planningContext/,
   );
   const runtimeResolver = createPlanningContextResolver(runtimeInput);
-  const initialInventory = await initializeContextLookup(runtimeResolver);
-  const scopedInventory = initialInventory.packet.automatic.find(
-    (result) => result.request.operation === "inventory",
+  // Repository files are read with the planner's tools over the exported
+  // base tree; the packet keeps only the discovery selector ceiling.
+  const repositoryCeiling = runtimeResolver.catalog.find(
+    (collection) => collection.id === "repository",
   );
-  assert.equal(scopedInventory.request.selector, "api/");
-  assert.equal(scopedInventory.disposition, "complete");
-  const tracked = JSON.parse(scopedInventory.matches[0].content);
-  assert.deepEqual(
-    tracked.map((entry) => entry.path),
-    ["api/contract.txt", tabPath],
-  );
-  assert.equal(tracked[0].size, Buffer.byteLength(originalBody));
-  assert.equal(tracked[0].sha, originalBlob);
-  assert.equal(initialInventory.providerCalls, 0);
-  assert.equal(initialInventory.packet.bounds.maxProviderCalls, 1);
-  const narrowInventory = await initializeContextLookup(
-    createPlanningContextResolver({
-      ...runtimeInput,
-      config: {
-        ...config,
-        planningContext: {
-          ...config.planningContext,
-          bounds: { ...config.planningContext.bounds, maxResults: 1 },
-        },
-      },
-    }),
-  );
-  assert.equal(narrowInventory.packet.automatic[0].disposition, "incomplete");
-  assert.deepEqual(narrowInventory.packet.automatic[0].matches, []);
-  const absentInventory = await initializeContextLookup(
-    createPlanningContextResolver({
-      ...runtimeInput,
-      config: {
-        ...config,
-        planningContext: { ...config.planningContext, selectors: ["absent/"] },
-      },
-    }),
-  );
-  assert.equal(absentInventory.packet.automatic[0].disposition, "no-match");
-  assert.ok(
-    !runtimeResolver.automatic.some(
-      (request) => request.selector === "unrelated/",
-    ),
-  );
+  assert.deepEqual(repositoryCeiling.selectors, ["api/"]);
+  assert.deepEqual(repositoryCeiling.operations, []);
+  const initialLookup = await initializeContextLookup(runtimeResolver);
+  assert.deepEqual(initialLookup.packet.automatic, []);
+  assert.equal(initialLookup.providerCalls, 0);
+  assert.equal(initialLookup.packet.bounds.maxProviderCalls, 1);
   const remaining = {
     maxResults: 8,
     maxBytes: 4096,
@@ -2490,95 +2459,36 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
   const required = {
     id: "contract",
     operation: "read",
-    collection: "repository",
-    selector: "api/contract.txt",
+    collection: "pinned-sources",
+    selector: "1",
     query: "",
     required: true,
     reason: "Missing material interface body",
   };
-  const resolver = {
-    binding: contextDigest({ baseSha, selectors: ["api/"] }),
-    bounds: {
-      maxRounds: 3,
-      maxRequestsPerRound: 4,
-      maxResults: 8,
-      maxBytes: 4096,
-      maxElapsedMs: 5000,
-      maxProviderCalls: 1,
-    },
-    catalog: [
-      {
-        id: "repository",
-        selectors: ["api/"],
-        operations: ["read", "search", "inventory"],
-        freshness: `immutable:${baseSha}`,
-        completeness: "complete",
-      },
-    ],
-    automatic: [required],
-    contentStore: store,
-    resolve: async (request, remaining) =>
-      repositoryContextResult(checkout, baseSha, request, remaining),
-  };
-  const oldGitDir = process.env.GIT_DIR;
-  try {
-    process.env.GIT_DIR = join(root, "unrelated-git-directory");
-    const pinned = repositoryContextResult(
-      checkout,
-      baseSha,
-      required,
-      remaining,
-    );
-    assert.equal(pinned.disposition, "complete");
-    assert.equal(pinned.matches[0].content, originalBody);
-  } finally {
-    if (oldGitDir === undefined) delete process.env.GIT_DIR;
-    else process.env.GIT_DIR = oldGitDir;
-  }
-
-  writeFileSync(join(checkout, tabPath), "dirty tab filename body\n");
-  const literalTab = repositoryContextResult(
-    checkout,
-    baseSha,
-    { ...required, id: "literal-tab", selector: tabPath },
-    remaining,
-  );
-  assert.equal(literalTab.disposition, "complete");
-  assert.equal(literalTab.matches[0].content, "literal tab filename body\n");
-  assert.equal(literalTab.matches[0].provenance.path, tabPath);
+  const resolver = runtimeResolver;
   const record = await initializeContextLookup(resolver);
-  assertContextFactsResolved(record.packet);
-  assert.equal(
-    record.packet.automatic[0].matches[0].content,
-    "version one\ncomplete interface body\n",
+  record.packet.batches.push(
+    await resolveContextRequests(record, resolver, [required]),
   );
+  assertContextFactsResolved(record.packet);
+  assert.equal(record.packet.batches[0][0].matches[0].content, originalBody);
   writeFileSync(
     join(checkout, "api", "contract.txt"),
     "uncommitted changed body\n",
   );
   const results = await resolveContextRequests(record, resolver, [
     { ...required, id: "reused" },
-    { ...required, id: "inventory", operation: "inventory", selector: "api/" },
     {
       ...required,
-      id: "empty",
-      operation: "inventory",
-      selector: "api/missing/",
+      id: "repository-read",
+      collection: "repository",
+      selector: "api/contract.txt",
+      required: false,
     },
-    { ...required, id: "denied", selector: "secret.txt", required: false },
   ]);
   assert.match(results[0].detail, /Reused retained exact result/);
-  assert.equal(
-    results[0].matches[0].content,
-    record.packet.automatic[0].matches[0].content,
-  );
-  assert.equal(results[1].disposition, "complete");
-  assert.equal(
-    JSON.parse(results[1].matches[0].content)[0].path,
-    "api/contract.txt",
-  );
-  assert.equal(results[2].disposition, "no-match");
-  assert.equal(results[3].disposition, "denied");
+  assert.equal(results[0].matches[0].content, originalBody);
+  assert.equal(results[1].disposition, "denied");
   record.packet.batches.push(results);
   record.requestDigests.push(contextDigest(results.map((r) => r.request)));
   await retainContextPacket(record, store);
@@ -2595,9 +2505,9 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
         {
           kind: "human-dependency",
           dependencyKind: "unavailable-context",
-          requestIds: ["empty"],
-          question: "Supply missing inventory facts",
-          detail: "The scoped inventory returned no matches",
+          requestIds: ["contract"],
+          question: "Supply the interface body",
+          detail: "The body was read completely",
         },
         restarted.packet,
       ),
@@ -2609,16 +2519,15 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
         kind: "human-dependency",
         dependencyKind: "human-choice",
         requestIds: [],
-        question: "Which new entries should the empty inventory contain?",
-        detail:
-          "A complete scoped inventory establishes absence; choosing new entries is a human decision",
+        question: "Which new entries should the interface contain?",
+        detail: "Choosing new entries is a human decision",
       },
       restarted.packet,
     ),
   );
 
   const missing = await resolveContextRequests(restarted, resolver, [
-    { ...required, id: "missing-body", selector: "api/missing.txt" },
+    { ...required, id: "missing-body", selector: "9" },
   ]);
   restarted.packet.batches.push(missing);
   await retainContextPacket(restarted, store);
@@ -2635,21 +2544,36 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     () => assertContextFactsResolved(expired),
     /Mandatory planning facts remain unknown/,
   );
+
+  // The planner's read tree: exact base bytes from the pinned object store,
+  // ignoring replace refs, GIT_DIR and the dirty worktree; a bounded map.
+  const { repositoryMap, writeRepositoryTree } = await import(
+    "../dist/compiler/repository-tree.js"
+  );
+  const readRoot = join(root, "planning-read-root");
+  mkdirSync(readRoot);
+  writeFileSync(join(checkout, tabPath), "dirty tab filename body\n");
+  const oldGitDir = process.env.GIT_DIR;
+  try {
+    process.env.GIT_DIR = join(root, "unrelated-git-directory");
+    writeRepositoryTree(checkout, baseSha, readRoot);
+  } finally {
+    if (oldGitDir === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = oldGitDir;
+  }
   assert.equal(
-    repositoryContextResult(
-      checkout,
-      baseSha,
-      { ...required, selector: "../secret.txt" },
-      { maxResults: 1, maxBytes: 4096, deadlineAt: Date.now() + 5000 },
-    ).disposition,
-    "denied",
+    readFileSync(join(readRoot, "repository", "api", "contract.txt"), "utf8"),
+    originalBody,
   );
   assert.equal(
-    repositoryContextResult(checkout, baseSha, required, {
-      maxResults: 1,
-      maxBytes: 2,
-      deadlineAt: Date.now() + 5000,
-    }).disposition,
-    "incomplete",
+    readFileSync(join(readRoot, "repository", tabPath), "utf8"),
+    "literal tab filename body\n",
   );
+  assert.equal(existsSync(join(readRoot, "repository", ".git")), false);
+  const map = repositoryMap(checkout, baseSha);
+  assert.equal(map, repositoryMap(checkout, baseSha));
+  assert.match(map, new RegExp(`Repository map at base ${baseSha}`));
+  assert.match(map, /^api\/contract\.txt\t36$/m);
+  assert.ok(Buffer.byteLength(map) <= 49_152);
+  assert.match(map, /more paths are not listed/);
 });

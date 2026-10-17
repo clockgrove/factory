@@ -211,7 +211,13 @@ export function validateAndOrderGraph(
       (!["qa", "aggregate", "discovery"].includes(item.kind ?? "work") &&
         !item.ownedPaths.length) ||
       !item.citations.length ||
-      !item.citations.every((citation) => sources.has(citation.path))
+      // A repository citation carries its exact base bytes in inputSources;
+      // callers that admit a graph authenticate them against the base.
+      !item.citations.every(
+        (citation) =>
+          sources.has(citation.path) ||
+          item.inputSources?.some((input) => input.path === citation.path),
+      )
     ) {
       throw new GraphValidationError(
         item.id,

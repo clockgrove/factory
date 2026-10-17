@@ -125,7 +125,7 @@ For a new laptop or sandbox, [restore the explicitly configured Git checkpoint](
 
 The target must be a trusted GitHub repository with committed requirements and available validation tools. Factory cannot run against its own source repository.
 
-Create an Objective issue **in the target repository** with four sections: Outcome, Acceptance, Sources and Constraints. You can copy the [Objective issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml) into that repository. Then ask:
+Create an Objective issue **in the target repository**: a goal paragraph, observable Acceptance bullets, optional Context and Sources, and Constraints. You can copy the [Objective issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml) into that repository. Then ask:
 
 > Use Factory to inspect Objective #123 and its committed sources. Explain any missing prerequisites or unclear acceptance. Do not run it yet.
 

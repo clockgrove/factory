@@ -1298,6 +1298,7 @@ async function advanceAmendment(args: {
         hydrateWorkerInputSources(
           pending.graph,
           planningSources(args.body, state.baseSha, config.checkout),
+          config.checkout,
         );
         normalizeExecutionProfiles(pending.graph, choices);
       } else {

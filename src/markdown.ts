@@ -42,3 +42,11 @@ export function markdownLines(content: string): {
     };
   });
 }
+
+/** GitHub renders an unanswered optional issue-form field as this one line. */
+export function githubEmptyField(line: {
+  text: string;
+  fenced: boolean;
+}): boolean {
+  return !line.fenced && line.text.trim() === "_No response_";
+}

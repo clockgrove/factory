@@ -185,9 +185,11 @@ for (const file of delivered.files) assert.equal(readFileSync(join(sourceRoot, f
 rmSync(join(sourceRoot, delivered.files[0].file));
 assertPlanningSourceDelivery(delivered, baseSha, sources);
 assert.equal(readFileSync(join(sourceRoot, delivered.files[0].file), "utf8"), sources[0].content);
-const item = { id: "tooling", kind: "qa", title: "Verify tooling", acceptance: [], citations: [{ path: "README.md", heading: "" }], dependencies: [], ownedPaths: [], validation: [{ command: probe, provenance: "source-declared", source: "README.md" }, { command: "npm test", provenance: "base-observed", source: "package.json" }], brief: "Run the pinned tooling checks.", minimumAssetSets: 0 };
+const item = { id: "tooling", kind: "qa", title: "Verify tooling", acceptance: [], citations: [{ path: "README.md", heading: "" }, { path: "package.json", heading: "" }], dependencies: [], ownedPaths: [], validation: [{ command: probe, provenance: "source-declared", source: "README.md" }, { command: "npm test", provenance: "base-observed", source: "package.json" }], brief: "Run the pinned tooling checks.", minimumAssetSets: 0 };
 const graph = { objective: 1, baseSha, items: [item], coverage: [] };
-hydrateWorkerInputSources(graph, sources);
+hydrateWorkerInputSources(graph, sources, checkout);
+// A file outside Sources is citable: its exact base bytes travel in the Work Item inputs.
+assert.equal(item.inputSources[1].content, execFileSync("git", ["-C", checkout, "show", baseSha + ":package.json"], { encoding: "utf8" }));
 validateGraphSources(graph, sources, checkout, body, baseSha);
 const evidence = await validateWorkItem(checkout, ${JSON.stringify(join(root, "command-validation"))}, item, baseSha, git("rev-parse", "HEAD^{tree}"), baseSha);
 assert.equal(evidence.commands.length, 2);
@@ -233,7 +235,7 @@ assert.throws(() => assertPinnedNpmScripts(checkout, bootstrapBase, bootstrapBas
 const bootstrapSources = planningSources(body, bootstrapBase, checkout);
 graph.baseSha = bootstrapBase;
 item.validation = [{ command: bootstrap, provenance: "source-declared", source: "README.md" }, { command: "npm test", provenance: "base-observed", source: "package.json" }];
-hydrateWorkerInputSources(graph, bootstrapSources);
+hydrateWorkerInputSources(graph, bootstrapSources, checkout);
 validateGraphSources(graph, bootstrapSources, checkout, body, bootstrapBase);
 item.validation[0].provenance = "base-observed";
 assert.throws(() => validateGraphSources(graph, bootstrapSources, checkout, body, bootstrapBase), /no exact base-observed command authority/);

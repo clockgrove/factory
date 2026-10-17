@@ -37,6 +37,8 @@ import type { PlanningSourceDelivery } from "./source-delivery.js";
 export interface PlanningModelOptions {
   /** Nonrenewable elapsed budget for one admitted planning invocation, including capacity backoff. */
   providerTurnElapsedTimeoutMs?: number;
+  /** Target checkout: compile and graph review read its tree at the exact base commit. */
+  checkout?: string;
   /** The installation's configured selectors, shown to compile and graph review. */
   reviewArtifacts?: readonly ReviewArtifactSelector[];
   reviewCapacityRetryDelaysMs?: readonly number[];
@@ -91,6 +93,8 @@ export interface PlanningTransport {
     tree?: string,
   ): "native-before-effect-v1" | undefined;
   readonly sessionCapabilities?: AgentSessionCapabilities;
+  /** Compile and graph review may read the exported base tree through `tree`. */
+  readonly repositoryTree?: boolean;
   /** Native image observations; absence is unsupported, never silent omission. */
   readonly retainedPlannerCheckpointCoverage?: RetainedPlannerCheckpointCoverage;
   readonly reviewImageInput?: "png-local-file-v1";

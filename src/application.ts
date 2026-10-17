@@ -403,6 +403,7 @@ export function composePlanningModel(
   if (config.planning.kind === "claude-agent-sdk")
     return composedPlanningModel(
       new ClaudePlanningModel(config.planning, {
+        checkout: config.checkout,
         redactionValues,
         reviewArtifacts: config.reviewArtifacts,
         ...(retainedSessions

@@ -57,6 +57,17 @@ export function terminalContinuation(value: unknown): boolean {
   );
 }
 
+/**
+ * A terminal snapshot that is not a restored record: history, which is never
+ * acted on (#1457).
+ */
+export function terminalHistory(value: unknown): boolean {
+  return (
+    terminalContinuation(value) &&
+    (value as { restoration?: unknown }).restoration === undefined
+  );
+}
+
 export function stateDigest(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -93,6 +104,25 @@ function readRetirement(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Retired terminal history (#1457): the retirement record names exactly these
+ * snapshot bytes, which are terminal and not a restored record. Retirement is
+ * recorded only for a terminal snapshot an acknowledged checkpoint held in
+ * full, and any later write changes the digest, so a live, resumed or
+ * corrupted snapshot never matches. Such history is never acted on: scans of
+ * every Objective skip it unread, so a shape this version no longer reads
+ * cannot stop the installation.
+ */
+export function retiredHistory(
+  repository: string,
+  objective: number,
+  bytes: Uint8Array,
+): boolean {
+  if (readRetirement(repository, objective)?.stateDigest !== stateDigest(bytes))
+    return false;
+  return terminalHistory(JSON.parse(Buffer.from(bytes).toString("utf8")));
 }
 
 /**

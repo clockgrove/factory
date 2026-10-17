@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { option } from "./cli-flags.js";
+import { terminalHistory } from "./checkpoint-retention.js";
 import { DEFAULT_CONTEXT_LOOKUP_BOUNDS } from "./compiler/context.js";
 import { objectiveComplete } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
@@ -237,6 +238,15 @@ function snapshotState(
   };
 }
 
+/**
+ * A snapshot an earlier version wrote holds its terminal state inline. Its
+ * episode binds its exact digest; it is history, carried as its exact bytes
+ * and never read (#1457).
+ */
+function historicalSnapshot(value: Record<string, unknown>): boolean {
+  return value.schemaVersion !== 1 && terminalHistory(value);
+}
+
 /** A decoded snapshot original's state reference. */
 export function snapshotStateRef(value: Record<string, unknown>): ContentRef {
   const ref = record(value.stateRef);
@@ -369,7 +379,10 @@ export function retainLearningMemory(
     );
     if (learningDigest(snapshot) !== episode.snapshotDigest)
       throw new Error("Retrospective memory snapshot changed");
-    const snapshotRef = snapshotState(store, snapshot).stateRef;
+    // Historical: the snapshot is itself the original body, as it was retained.
+    const snapshotRef = historicalSnapshot(record(JSON.parse(snapshot)))
+      ? store.putBytes(Buffer.from(snapshot), { mediaType: "application/json" })
+      : snapshotState(store, snapshot).stateRef;
     bodies.push({
       role: "original-snapshot",
       ref: snapshotRef,
@@ -1077,7 +1090,12 @@ export function decodeLearningOriginal(
   repository: string,
   path: string,
   bytes: Uint8Array,
-): { kind: LearningOriginalKind; value: Record<string, unknown> } {
+): {
+  kind: LearningOriginalKind;
+  value: Record<string, unknown>;
+  /** An earlier version's snapshot, carried as its exact bytes and never read. */
+  history?: true;
+} {
   const match = /^learning\/([a-z]+)\/([^/]+)\.json$/.exec(path);
   const kind = match?.[1] as LearningOriginalKind;
   const identity = match?.[2];
@@ -1096,7 +1114,8 @@ export function decodeLearningOriginal(
   const value = record(JSON.parse(raw));
   if (raw !== encoded(value))
     throw new Error("Immutable learning bytes changed");
-  if (kind !== "calls" && value.schemaVersion !== 1)
+  const history = kind === "snapshots" && historicalSnapshot(value);
+  if (kind !== "calls" && value.schemaVersion !== 1 && !history)
     throw new Error("Unsupported learning original schema");
   if (
     kind !== "calls" &&
@@ -1114,7 +1133,7 @@ export function decodeLearningOriginal(
       learningDigest(JSON.stringify([repository, value.objective, value.runId]))
     )
       throw new Error("Learning original producer identity changed");
-    if (kind === "snapshots") snapshotStateRef(value);
+    if (kind === "snapshots" && !history) snapshotStateRef(value);
     if (kind === "episodes") {
       hash(value.snapshotDigest);
       if (!["accepted", "cancelled"].includes(String(value.outcome)))
@@ -1195,7 +1214,7 @@ export function decodeLearningOriginal(
         throw new Error("Invalid exact Dream native return original");
     }
   }
-  return { kind, value };
+  return history ? { kind, value, history } : { kind, value };
 }
 
 /** Private originals only; no shape-matching reference scan grants content access. */

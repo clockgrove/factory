@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import * as time from "./clock.js";
 import { objectiveComplete } from "./completion.js";
@@ -107,9 +107,11 @@ import {
   acquireInstallationLock,
   asInstallationOwner,
   assertRestoredInstallationDispatchReady,
+  installationContinuations,
   readContinuation,
   releaseControllerLock,
   retargetControllerLock,
+  retiredContinuation,
 } from "./state-store.js";
 
 /** A fresh in-memory Project view; never persisted or restored as a queue. */
@@ -349,15 +351,7 @@ export async function intakeSettled(config: FactoryConfig): Promise<boolean> {
     )
   )
     return false;
-  const directory = join(stateRoot(config.repository), "objectives");
-  return (
-    existsSync(directory)
-      ? readdirSync(directory)
-          .filter((name) => /^\d+$/.test(name))
-          .map((name) => readContinuation(config.repository, Number(name)))
-          .filter(Boolean)
-      : []
-  ).every(terminal);
+  return installationContinuations(config.repository).every(terminal);
 }
 function validateObjectives(objectives: number[]): void {
   if (
@@ -1201,7 +1195,10 @@ async function applyControlMutation(
         entry.state !== "queued"
       )
         throw new Error(`Objective #${objectives[index]} is not admitted`);
-      const state = readContinuation(config.repository, entry.objective);
+      // Retired terminal history is settled and never read (#1457).
+      const state = retiredContinuation(config.repository, entry.objective)
+        ? undefined
+        : readContinuation(config.repository, entry.objective);
       if (
         (state && !terminal(state)) ||
         current.history.some(
@@ -1790,28 +1787,17 @@ async function runIntakeOwned(
     // still uncollected was left by a stopped controller, and it refuses
     // that publication and readiness until collected, so collect it first.
     // Each Objective's return is collected on the provider it froze.
-    const objectives = join(stateRoot(config.repository), "objectives");
     await collectStoppedWorkerReturns(
-      (existsSync(objectives) ? readdirSync(objectives) : [])
-        .filter((name) => /^\d+$/.test(name))
-        .flatMap((name) => {
-          const objective = Number(name);
-          const state = readContinuation(config.repository, objective);
-          return state
-            ? [
-                {
-                  state,
-                  runtime: () => {
-                    const runtime = objectiveRuntime(objective);
-                    return {
-                      config: runtime.config,
-                      driver: runtime.services.driver,
-                    };
-                  },
-                },
-              ]
-            : [];
-        }),
+      installationContinuations(config.repository).map((state) => ({
+        state,
+        runtime: () => {
+          const runtime = objectiveRuntime(state.objective);
+          return {
+            config: runtime.config,
+            driver: runtime.services.driver,
+          };
+        },
+      })),
     );
     try {
       await awaitCheckpointAdmission(config.repository, "before-effect");
@@ -1921,6 +1907,8 @@ async function runIntakeOwned(
         for (const entry of observed.entries.filter(
           (entry) => entry.state === "queued",
         )) {
+          // Retired terminal history needs nothing and is never read (#1457).
+          if (retiredContinuation(config.repository, entry.objective)) continue;
           const state = readContinuation(config.repository, entry.objective);
           if (terminal(state)) {
             // A split parent whose last child settle failed closes here; it
@@ -2109,6 +2097,7 @@ async function runIntakeOwned(
           observed.entries.every(
             (entry) =>
               entry.state === "withdrawn" ||
+              retiredContinuation(config.repository, entry.objective) ||
               terminal(readContinuation(config.repository, entry.objective)),
           )
         )

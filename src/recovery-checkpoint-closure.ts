@@ -30,6 +30,7 @@ import {
   type RetirementRecord,
   retiredEvidence,
   stateDigest,
+  terminalHistory,
 } from "./checkpoint-retention.js";
 import { stateRoot } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
@@ -72,7 +73,11 @@ import {
 } from "./recovery-checkpoint.js";
 import type { RepositoryMemoryBinding } from "./repository-memory.js";
 import { decodeRepositoryMemoryManifest } from "./repository-memory.js";
-import { isPreparationState, type WorkState } from "./state.js";
+import {
+  type ContinuationState,
+  isPreparationState,
+  type WorkState,
+} from "./state.js";
 import { parsePortableContinuation } from "./state-store.js";
 import type { ValidationEvidence } from "./validation-evidence.js";
 import type { WorkflowRecipePin } from "./workflow-recipes.js";
@@ -200,7 +205,14 @@ function accountingReferences(
     roots.push({ ref: seal.records[0], kind: "accounting", accounting: seal });
 }
 
-/** Only declared record fields supply reads; opaque evidence and session data do not. */
+/**
+ * Only declared record fields supply reads; opaque evidence and session data
+ * do not. Callers pass original bytes verified against their content digest
+ * (a local snapshot is parsed by its caller first), so a terminal snapshot
+ * this version does not parse is an earlier version's shape, not corruption:
+ * it is history and supplies no reads, and its originals stay in the archive
+ * history that held them (#1457).
+ */
 function continuationReferences(value: unknown): ContinuationReferences & {
   roots: BodyRoot[];
 } {
@@ -212,11 +224,17 @@ function continuationReferences(value: unknown): ContinuationReferences & {
     Number(identity.objective) < 1
   )
     throw new Error("Recovery checkpoint snapshot identity is invalid");
-  const state = parsePortableContinuation(
-    value,
-    identity.repository,
-    Number(identity.objective),
-  );
+  let state: ContinuationState;
+  try {
+    state = parsePortableContinuation(
+      value,
+      identity.repository,
+      Number(identity.objective),
+    );
+  } catch (error) {
+    if (!terminalHistory(value)) throw error;
+    return { contentRefs: [], gitObjects: [], gaps: [], roots: [] };
+  }
   const refs = new Map<string, ContentRef>();
   const objects = new Map<string, RecoveryGitObject>();
   const roots: BodyRoot[] = [];
@@ -1389,20 +1407,26 @@ async function buildRecoveryCheckpointClosureLocal(input: {
         if (!existsSync(path)) continue;
         const bytes = privateBytes(path, root);
         if (name === "state.json") {
-          const state = parsePortableContinuation(
-            JSON.parse(bytes.toString("utf8")),
-            config.repository,
-            Number(id),
-          );
+          const value = JSON.parse(bytes.toString("utf8"));
           // Retire only the exact bytes the retirement check read; a snapshot
           // that changed since (for example, a retry) takes the full path.
           const retirement = retired.get(Number(id));
           if (retirement && stateDigest(bytes) !== retirement.stateDigest)
             retired.delete(Number(id));
           if (retired.has(Number(id))) {
-            // A restored record keeps its receipt's original snapshot and
-            // source manifest: they authenticate the snapshot itself.
-            if (state.restoration)
+            // A retired snapshot is history and is not parsed: a shape this
+            // version no longer reads stays opaque (#1457). A restored record
+            // keeps its receipt's original snapshot and source manifest: they
+            // authenticate the snapshot itself.
+            const state =
+              object(value).restoration === undefined
+                ? undefined
+                : parsePortableContinuation(
+                    value,
+                    config.repository,
+                    Number(id),
+                  );
+            if (state?.restoration)
               for (const ref of [
                 state.restoration.original.snapshot,
                 state.restoration.archive,
@@ -1421,6 +1445,11 @@ async function buildRecoveryCheckpointClosureLocal(input: {
             await include(`objectives/${id}/${name}`, "continuation", bytes);
             continue;
           }
+          const state = parsePortableContinuation(
+            value,
+            config.repository,
+            Number(id),
+          );
           const description = await verifyDescription(
             continuationReferences(state),
             reader,

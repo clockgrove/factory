@@ -402,12 +402,12 @@ async function buildMemoryLearningClosureLocal(
     );
     for (const original of originals) {
       retainFile("learning-original", original.path, original.bytes, "private");
-      const { kind, value } = decodeLearningOriginal(
+      const { kind, value, history } = decodeLearningOriginal(
         selection.repository,
         original.path,
         original.bytes,
       );
-      if (kind === "snapshots") {
+      if (kind === "snapshots" && !history) {
         const stateRef = snapshotStateRef(value);
         add(stateRef);
         const described = await verifyContinuationReferenceClosure(
@@ -556,12 +556,12 @@ export async function installExactMemoryLearning(
   for (const original of originals)
     assertLearningOriginalDestination(input.repository, original, root);
   for (const original of originals) {
-    const { kind, value } = decodeLearningOriginal(
+    const { kind, value, history } = decodeLearningOriginal(
       input.repository,
       original.path,
       original.bytes,
     );
-    if (kind === "snapshots") {
+    if (kind === "snapshots" && !history) {
       await verifyContinuationReferenceClosure(
         JSON.parse(
           Buffer.from(await load(snapshotStateRef(value))).toString("utf8"),

@@ -53,7 +53,9 @@ import {
 import {
   ARCHIVED_EVIDENCE,
   recordRetirement,
+  retiredHistory,
   terminalContinuation,
+  terminalHistory,
 } from "./checkpoint-retention.js";
 import {
   assertApprovedPlaybookPin,
@@ -289,6 +291,39 @@ export function readContinuation(
   if (!isPreparationState(value))
     return parseExecutionAtPath(value, repository, objective, path);
   return parsePreparation(value, repository, objective);
+}
+
+/** Whether an Objective's snapshot is retired terminal history, which is never read (#1457). */
+export function retiredContinuation(
+  repository: string,
+  objective: number,
+): boolean {
+  const path = statePath(repository, objective);
+  return (
+    existsSync(path) &&
+    retiredHistory(repository, objective, readFileSync(path))
+  );
+}
+
+/**
+ * Every Objective snapshot a scan of the installation acts on, in Objective
+ * order. Retired terminal history is skipped unread (#1457); any other
+ * snapshot that does not parse fails loudly.
+ */
+export function installationContinuations(
+  repository: string,
+): ContinuationState[] {
+  const root = join(stateRoot(repository), "objectives");
+  if (!existsSync(root)) return [];
+  return readdirSync(root)
+    .filter((name) => /^[1-9][0-9]*$/.test(name))
+    .map(Number)
+    .sort((left, right) => left - right)
+    .flatMap((objective) => {
+      if (retiredContinuation(repository, objective)) return [];
+      const state = readContinuation(repository, objective);
+      return state ? [state] : [];
+    });
 }
 
 /**
@@ -1144,6 +1179,12 @@ export async function restoreRecoveryCheckpoint(args: {
       /** The evidence commit of a retired terminal Objective. */
       retired: string | undefined;
     }[] = [];
+    /** Retired snapshots in a shape this version no longer reads (#1457). */
+    const history: {
+      objective: number;
+      bytes: Buffer;
+      evidenceCommit: string;
+    }[] = [];
     const gitObjects = new Map<string, { sha: string; kind: string }>();
     for (const file of checkpoint.manifest.files) {
       if (file.kind === "continuation") {
@@ -1154,14 +1195,11 @@ export async function restoreRecoveryCheckpoint(args: {
           throw new Error(
             "Recovery continuation path is outside its exact Objective identity",
           );
-        const state = parsePortableContinuation(
-          JSON.parse((await readBytes(file.ref)).toString("utf8")),
-          config.repository,
-          Number(match[1]),
-        );
+        const bytes = await readBytes(file.ref);
+        const value = JSON.parse(bytes.toString("utf8"));
         // A retired terminal Objective keeps only its snapshot; its evidence
         // is in the archive history at the recorded commit (#1307).
-        const archived = terminalContinuation(state)
+        const archived = terminalContinuation(value)
           ? checkpoint.manifest.gaps.find(
               (gap) =>
                 gap.path === file.path &&
@@ -1171,6 +1209,25 @@ export async function restoreRecoveryCheckpoint(args: {
             )
           : undefined;
         const retired = archived?.evidenceCommit;
+        let state: ContinuationState;
+        try {
+          state = parsePortableContinuation(
+            value,
+            config.repository,
+            Number(match[1]),
+          );
+        } catch (error) {
+          // Retired history in a shape this version no longer reads is
+          // installed as its exact bytes and never read (#1457).
+          if (!retired || !terminalHistory(value)) throw error;
+          replicaFiles.push(file);
+          history.push({
+            objective: Number(match[1]),
+            bytes,
+            evidenceCommit: retired,
+          });
+          continue;
+        }
         if (!retired) {
           const closure = await verifyContinuationReferenceClosure(
             state,
@@ -1240,19 +1297,30 @@ export async function restoreRecoveryCheckpoint(args: {
         file.kind === "historical" &&
         /^proposals\/[a-f0-9-]{36}\.json$/.test(file.path)
       ) {
-        const description = proposalPersistenceReferences(
-          await readBytes(file.ref),
-          config.repository,
-          file.path.split("/")[1]!.slice(0, -5),
-          (ref) => {
-            const data = bytes.get(key(ref));
-            if (!data)
-              throw new Error(
-                "Required proposal original is absent from the verified closure",
-              );
-            return data;
-          },
-        );
+        const journal = await readBytes(file.ref);
+        let description: ReturnType<typeof proposalPersistenceReferences>;
+        try {
+          description = proposalPersistenceReferences(
+            journal,
+            config.repository,
+            file.path.split("/")[1]!.slice(0, -5),
+            (ref) => {
+              const data = bytes.get(key(ref));
+              if (!data)
+                throw new Error(
+                  "Required proposal original is absent from the verified closure",
+                );
+              return data;
+            },
+          );
+        } catch (error) {
+          // An archived journal an earlier version wrote, with no submission
+          // pending, is history: installed as its exact bytes (#1457).
+          if (JSON.parse(journal.toString("utf8")).pending !== undefined)
+            throw error;
+          replicaFiles.push(file);
+          continue;
+        }
         gitObjects.set(`commit:${description.baseSha}`, {
           sha: description.baseSha,
           kind: "commit",
@@ -1384,6 +1452,15 @@ export async function restoreRecoveryCheckpoint(args: {
         }
       }
     }
+    // Its evidence stays in the archive history, as the source kept it.
+    for (const entry of history)
+      recordRetirement(
+        config.repository,
+        entry.objective,
+        entry.bytes,
+        entry.evidenceCommit,
+        [],
+      );
     const objectives: {
       objective: number;
       runId: string;
@@ -1585,13 +1662,8 @@ export async function reconcileRestoredContinuation(args: {
 export function assertRestoredInstallationDispatchReady(
   config: FactoryConfig,
 ): void {
-  const root = join(stateRoot(config.repository), "objectives");
-  if (!existsSync(root)) return;
-  for (const name of readdirSync(root).filter((name) =>
-    /^[1-9][0-9]*$/.test(name),
-  )) {
-    const state = readContinuation(config.repository, Number(name));
-    if (!state?.restoration || state.restoration.status !== "held") continue;
+  for (const state of installationContinuations(config.repository)) {
+    if (!state.restoration || state.restoration.status !== "held") continue;
     const hold = restoredContinuationOwnershipHold(state);
     if (hold)
       throw new Error(

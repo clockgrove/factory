@@ -976,6 +976,31 @@ function assertQueueOwnerReferenceBodies(
     JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes(ref)));
   const snapshot = (ref: ContentRef) =>
     parsePortableContinuation(json(ref), record.repository, record.objective);
+  // A settled claim is history. Its run snapshots match their digests, so one
+  // this version does not parse is an earlier version's shape, not
+  // corruption: every original is still read and checked, but those shapes
+  // are not (#1457).
+  if (
+    record.settled &&
+    [
+      record.runBinding?.initialSnapshot,
+      record.settled.handoff?.stoppedSnapshot,
+      record.settled.cancellation?.initialSnapshot,
+      record.settled.cancellation?.cancelledSnapshot,
+    ].some((ref) => {
+      if (!ref) return false;
+      try {
+        snapshot(ref);
+        return false;
+      } catch {
+        return true;
+      }
+    })
+  ) {
+    const refs = queueOwnerReferences(record);
+    for (const reference of refs) bytes(reference);
+    return refs;
+  }
   const matches = (state: ContinuationState, runId: string) => {
     if (
       state.runId !== runId ||

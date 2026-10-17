@@ -6077,6 +6077,50 @@ export function acknowledgedArchiveCommit(
   (ancestor ? known.ancestors : known.refused).add(commit);
   return ancestor;
 }
+/** Per local replica: one acknowledged manifest's file digests by path. */
+const acknowledgedFiles = new Map<
+  string,
+  { commit: string; files: Map<string, string> }
+>();
+/**
+ * Whether this installation's last acknowledged checkpoint holds exactly these
+ * bytes at `path` (#1457). An original this version no longer decodes is then
+ * history the archive already holds, with every original it referenced in that
+ * history; a changed, new or unarchived original never matches.
+ */
+export function acknowledgedArchiveOriginal(
+  config: FactoryConfig,
+  path: string,
+  bytes: Uint8Array,
+): boolean {
+  const options = settings(config);
+  if (!options || options.scope !== "private-history") return false;
+  const last = journal(config, options).lastAcknowledged?.commitSha;
+  if (!last) return false;
+  const directory = paths(config.repository).git;
+  let known = acknowledgedFiles.get(directory);
+  if (known?.commit !== last) {
+    let manifest: RecoveryCheckpointManifest;
+    try {
+      manifest = JSON.parse(
+        git(directory, options, ["show", `${last}:checkpoint.json`]).toString(
+          "utf8",
+        ),
+      );
+    } catch {
+      // An unreadable manifest proves nothing now and is not cached.
+      return false;
+    }
+    known = {
+      commit: last,
+      files: new Map(
+        manifest.files.map((file) => [file.path, file.ref.digest]),
+      ),
+    };
+    acknowledgedFiles.set(directory, known);
+  }
+  return known.files.get(path) === hash(bytes);
+}
 /**
  * After an acknowledgement, record each terminal Objective whose exact snapshot
  * this checkpoint holds with complete evidence, so later checkpoints can leave

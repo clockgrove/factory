@@ -36,6 +36,7 @@ import { LocalContentStore } from "./content/local.js";
 import { DiagnosticEmitter } from "./diagnostics.js";
 import { secrets } from "./learning.js";
 import {
+  acknowledgedArchiveOriginal,
   awaitCheckpointAdmission,
   markCheckpointDirty,
   synchronizeRecoveryCheckpoint,
@@ -199,6 +200,36 @@ function fields(
     )
   )
     throw new Error("Unsupported proposal original fields");
+}
+/**
+ * A journal this version does not decode, with no submission pending, whose
+ * exact bytes the acknowledged archive already holds: history an earlier
+ * version wrote, which this version never reads or acts on (#1457). Its
+ * originals stay in that archive history. A live journal this version wrote
+ * always decodes, and a changed one is not the archived bytes, so either
+ * still fails loudly.
+ */
+function retainedProposalReferences(
+  config: FactoryConfig,
+  name: string,
+  bytes: Uint8Array,
+  store: LocalContentStore,
+): ReturnType<typeof proposalPersistenceReferences> | undefined {
+  try {
+    return proposalPersistenceReferences(
+      bytes,
+      config.repository,
+      name,
+      (ref) => store.readBytes(ref),
+    );
+  } catch (error) {
+    if (
+      record(jsonOriginal(bytes), "journal").pending === undefined &&
+      acknowledgedArchiveOriginal(config, `proposals/${name}.json`, bytes)
+    )
+      return undefined;
+    throw error;
+  }
 }
 function jsonOriginal(bytes: Uint8Array): unknown {
   const value = new TextDecoder("utf-8", {
@@ -711,12 +742,6 @@ export function proposalPersistenceClosure(
         .sort()
     : []) {
     const bytes = privateOriginal(join(directory, name));
-    const description = proposalPersistenceReferences(
-      bytes,
-      config.repository,
-      name.slice(0, -5),
-      (ref) => store.readBytes(ref),
-    );
     const ref = store.putBytes(bytes, { mediaType: "application/json" });
     closure.files.push({
       kind: "historical",
@@ -724,7 +749,15 @@ export function proposalPersistenceClosure(
       ref,
       visibility: "private",
     });
-    closure.contentRefs.push(ref, ...description.contentRefs);
+    closure.contentRefs.push(ref);
+    const description = retainedProposalReferences(
+      config,
+      name.slice(0, -5),
+      bytes,
+      store,
+    );
+    if (!description) continue;
+    closure.contentRefs.push(...description.contentRefs);
     closure.gitObjects!.push({
       commitSha: description.baseSha,
       role: "proposal-source",
@@ -966,9 +999,12 @@ export function refuseUnknownProviderSubmissions(repository: string): void {
   for (const name of readdirSync(directory).filter((name) =>
     /^[0-9a-f-]{36}\.json$/.test(name),
   )) {
-    const path = join(directory, name);
+    const bytes = privateOriginal(join(directory, name));
+    // Only a pending submission can be unknown; a journal without one, which
+    // may be in an earlier version's shape, is not read (#1457).
+    if (record(jsonOriginal(bytes), "journal").pending === undefined) continue;
     const retained = proposalPersistenceReferences(
-      privateOriginal(path),
+      bytes,
       repository,
       name.slice(0, -5),
       (ref) => store.readBytes(ref),

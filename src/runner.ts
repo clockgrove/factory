@@ -78,8 +78,6 @@ import {
   bindProjectQueueRun,
   claimProjectQueueRun,
   type QueueOwnerClaim,
-  retireUnknownProjectAdmission,
-  retireUnknownProjectWithdrawal,
   settleCancelledProjectQueueRun,
   settleFailedProjectQueueReservation,
   settleProjectQueueRun,
@@ -444,14 +442,6 @@ async function stoppedOperatorHandoff(
     throw new Error(
       "Stopped operator disposition requires its explicit local operator and genuine Project gateway",
     );
-  if (
-    [
-      input.failedReservationEvidence,
-      input.retiredWithdrawalEvidence,
-      input.retiredAdmissionEvidence,
-    ].filter((value) => value !== undefined).length !== 1
-  )
-    throw new Error("Choose one exact stopped operator disposition");
   const actor = input.actor;
   const lockPath = installationLockPath(config.repository),
     lock = acquireInstallationLock(config.repository, request.objective);
@@ -462,34 +452,16 @@ async function stoppedOperatorHandoff(
         buildClosure: () => buildRecoveryCheckpointClosure({ config }),
       },
       () =>
-        checkpointController(config, async () => {
-          if (input.retiredAdmissionEvidence !== undefined)
-            return await retireUnknownProjectAdmission(
-              config,
-              github,
-              request.objective,
-              input.retiredAdmissionEvidence,
-              actor,
-              lock,
-            );
-          if (input.retiredWithdrawalEvidence !== undefined)
-            return await retireUnknownProjectWithdrawal(
-              config,
-              github,
-              request.objective,
-              input.retiredWithdrawalEvidence,
-              actor,
-              lock,
-            );
-          return await abandonFailedProjectQueueReservation(
+        checkpointController(config, () =>
+          abandonFailedProjectQueueReservation(
             config,
             github,
             request.objective,
             input.failedReservationEvidence,
             actor,
             lock,
-          );
-        }),
+          ),
+        ),
     );
   } finally {
     releaseControllerLock(lockPath, lock);
@@ -2921,9 +2893,7 @@ export function controlObjective(
   const [config, request, github] = args;
   if (
     request.action === "handoff" &&
-    (request.input?.failedReservationEvidence !== undefined ||
-      request.input?.retiredWithdrawalEvidence !== undefined ||
-      request.input?.retiredAdmissionEvidence !== undefined)
+    request.input?.failedReservationEvidence !== undefined
   )
     return stoppedOperatorHandoff(config, request, github);
   return checkpointController(

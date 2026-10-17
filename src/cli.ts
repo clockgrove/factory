@@ -170,10 +170,6 @@ function help(): void {
       "      Cancel the Objective; --provider names the provider it ran with when its frozen configuration matches none",
       "  handoff --objective N --failed-reservation-evidence ABSOLUTE_PRIVATE_FILE",
       "      Permanently stop an authenticated failed pre-snapshot reservation and preserve its unaccepted evidence",
-      "  handoff --objective N --retired-withdrawal-evidence ABSOLUTE_PRIVATE_FILE",
-      "      Permanently exclude an authenticated stopped uncertain withdrawal; preserve its unknown result",
-      "  handoff --objective N --retired-admission-evidence ABSOLUTE_PRIVATE_FILE",
-      "      Permanently exclude an authenticated stopped uncertain admission; preserve all originals and allocated order",
     ].join("\n"),
   );
 }
@@ -315,15 +311,6 @@ async function persistenceCommand(args: string[], path: string): Promise<void> {
 async function supervisorCommand(args: string[], path: string): Promise<void> {
   // The action comes first, before any option; `--config PATH` may precede it.
   const [action] = args[0] === "--config" ? args.slice(2) : args;
-  const moved: Record<string, string> = {
-    install: "factory setup --background",
-    status: "factory status",
-    disable: "factory supervisor stop --disable",
-  };
-  if (action && moved[action])
-    throw new Error(
-      `factory supervisor ${action} was removed; use ${moved[action]}`,
-    );
   if (action === "serve") {
     const config = readConfig(path);
     // A service reads only the credentials systemd loaded for it.
@@ -367,7 +354,7 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
   const queue = (await composeIntake(config).intakeControl(
     "status",
   )) as ServiceStatus["queue"] &
-    Pick<IntakeAuthorization, "remoteObservation" | "retiredAdmissions"> & {
+    Pick<IntakeAuthorization, "remoteObservation"> & {
       localMode?: string;
     };
   const objective = queue.activeObjective ?? queue.observation?.needsDecision;
@@ -418,10 +405,6 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
         queue.remoteObservation.availability === "last-observed"
           ? `Project observation: last observed at ${queue.remoteObservation.observedAt ? displayDateTime(queue.remoteObservation.observedAt) : "an unknown time"}.`
           : "Project observation: unavailable; status grants no new admission.",
-      );
-    for (const entry of queue.retiredAdmissions ?? [])
-      console.log(
-        `Objective #${entry.objective}: ${entry.state}; remote submission ${entry.remoteSubmission}; permanently ineligible. Admission ${entry.admissionId}, card ${entry.itemId}, retirement operation ${entry.operationId}.`,
       );
     console.log(`Durability: ${JSON.stringify(document.durability)}`);
     console.log(
@@ -624,19 +607,11 @@ async function dispatchMain(
   const requireApplication = (): ReturnType<typeof compose> =>
     (application ??= compose(config));
   if (command === "handoff") {
-    const evidenceOptions = [
-      ["failed-reservation-evidence", "failedReservationEvidence"],
-      ["retired-withdrawal-evidence", "retiredWithdrawalEvidence"],
-      ["retired-admission-evidence", "retiredAdmissionEvidence"],
-    ] as const;
-    const selected = evidenceOptions
-      .map(([flag, key]) => ({ key, path: option(args, flag) }))
-      .filter((value) => value.path !== undefined);
-    if (selected.length !== 1)
+    const evidencePath = option(args, "failed-reservation-evidence");
+    if (evidencePath === undefined)
       throw new Error(
-        "handoff requires exactly one private evidence file: --failed-reservation-evidence, --retired-withdrawal-evidence or --retired-admission-evidence",
+        "handoff requires its private evidence file: --failed-reservation-evidence",
       );
-    const evidencePath = selected[0]!.path!;
     if (!isAbsolute(evidencePath))
       throw new Error(
         "Handoff evidence requires an absolute private file path",
@@ -666,7 +641,7 @@ async function dispatchMain(
         objective,
         action: "handoff",
         input: {
-          [selected[0]!.key]: evidence,
+          failedReservationEvidence: evidence,
           actor: operatorName(),
         },
       },

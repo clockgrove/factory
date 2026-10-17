@@ -77,7 +77,6 @@ import {
   verifyQueueObservation,
   verifyQueueInspection,
   retainedQueueEntry,
-  retireUnknownProjectAdmission,
   settleFailedProjectQueueReservation,
 } from "../dist/project-queue-state.js";
 import {
@@ -1813,7 +1812,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           config,
           inspection,
           await readQueueHistory(config),
-          false,
           { allowUninitializedControl: true },
         ).uninitializedControl,
         true,
@@ -1825,7 +1823,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
             config,
             inspection,
             [parseQueueRecord(originalControl, repository, operation.id)],
-            false,
             { allowUninitializedControl: true },
           ),
         /partial or unknown/,
@@ -1875,17 +1872,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       });
     };
     await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
-      const historical = structuredClone(claim);
-      delete historical.ownerProcess;
-      await assert.rejects(
-        settleFailedProjectQueueReservation(
-          config,
-          historical,
-          lock.token,
-          error,
-        ),
-        /historical or started work/,
-      );
       await assert.rejects(
         settleFailedProjectQueueReservation(
           config,
@@ -2218,10 +2204,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       restoredHistory.find((row) => row.id === operationId).beforeEffectFailure,
       undefined,
     );
-    assert.equal(
-      restoredHistory.find((row) => row.id === operationId).retiredWithdrawal,
-      undefined,
-    );
 
     // One exact-ref fetch observes the current tip, while a selected older
     // checkpoint must still be its authenticated ancestor. Neither a previous
@@ -2504,34 +2486,27 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         issueNodeId: admission.issueNodeId,
         prior: { target: null },
       });
-      const ordered = createProjectQueuePlannedEffect(binding, {
+      const fields = createProjectQueuePlannedEffect(binding, {
         ...common,
         requestId: randomUUID(),
-        action: "set-order",
+        action: "set-admission-fields",
         target: { resultOf: ensured.requestId },
-        fieldId: binding.orderFieldId,
+        orderFieldId: binding.orderFieldId,
+        metadataFieldId: binding.metadataFieldId,
         order: 9,
-        prior: { resultOf: ensured.requestId },
-      });
-      const final = createProjectQueuePlannedEffect(binding, {
-        ...common,
-        requestId: randomUUID(),
-        action: "set-metadata",
-        target: { resultOf: ensured.requestId },
-        fieldId: binding.metadataFieldId,
         metadata: admission.metadata,
-        prior: { resultOf: ordered.requestId },
+        prior: { resultOf: ensured.requestId },
       });
       const admissionPlan = {
         operations: [admission],
-        effects: [ensured, ordered, final],
+        effects: [ensured, fields],
         deadlineAt: null,
       };
       assert.throws(
         () =>
           createQueueCommand(config, {
             ...admissionPlan,
-            effects: [ordered, ensured, final],
+            effects: [fields, ensured],
           }),
         /dependency must precede/,
       );
@@ -2539,7 +2514,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         () =>
           createQueueCommand(config, {
             ...admissionPlan,
-            effects: [ensured, final],
+            effects: [fields],
           }),
         /dependency must precede/,
       );
@@ -2557,12 +2532,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         () => createQueueCommand(config, wrongBody),
         /exact approved Issue body/,
       );
-      const wrongPrior = structuredClone(admissionPlan);
-      wrongPrior.effects[2].prior.resultOf = ensured.requestId;
-      assert.throws(
-        () => createQueueCommand(config, wrongPrior),
-        /immediately preceding/,
-      );
       await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
         const planned = createQueueCommand(config, admissionPlan);
         assert.equal(nextProjectQueueOrder([admission]), 10);
@@ -2572,8 +2541,8 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           /every declared fulfilled original/,
         );
       });
-      // Preserve the three-action legacy declaration above, and archive the new
-      // compound declaration as real local intent only: no remote result exists.
+      // Archive a second compound declaration as real local intent only: no
+      // remote result exists.
       const compoundAdmission = createQueueOperation(config, {
         action: "admit",
         scope: "I_compound",
@@ -3014,18 +2983,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         () => assertQueueCommandHistory([partial], readOriginal),
         /every declared original response/,
       );
-      // The old operator disposition accepts only its original three-action
-      // legacy shape; a partial compound record cannot acquire that authority.
-      const refusedRetirement = structuredClone(partial);
-      delete refusedRetirement.completed;
-      refusedRetirement.retiredAdmission = {
-        originalOperation: originalRef(refusedRetirement),
-      };
-      assert.throws(
-        () =>
-          assertQueueOperationReferenceBodies(refusedRetirement, readOriginal),
-        /two genuine ordered responses/,
-      );
       assert.equal(
         originals.get(partial.effects[1].rejectedOriginal.digest).toString(),
         JSON.stringify({
@@ -3044,7 +3001,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         await readFile(join(history, `${compoundAdmission.id}.json`)),
       );
       assert.equal(compoundAdmission.completed, undefined);
-      assert.equal(compoundAdmission.retiredAdmission, undefined);
       assert.deepEqual(compoundAdmission.effects, []);
       const controlOperation = createQueueOperation(config, {
         action: "control",
@@ -3114,12 +3070,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       );
       const groupedHistory = await readQueueHistory(config);
       assert.equal(nextProjectQueueOrder(groupedHistory), 18);
-      assert.equal(
-        groupedHistory.find((row) => row.id === admission.id).retiredAdmission,
-        undefined,
-      );
-      // Unknown legacy effects and grouped recipes cannot be silently reclassified
-      // as the narrowly authorized, two-response legacy admission disposition.
       assert.throws(
         () => acquireInstallationLock(repository, 4),
         /already owns Objective #1/,
@@ -3142,35 +3092,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           () => acquireObjectiveLock(repository, 5),
           /already owns this installation/,
         );
-        await assert.rejects(
-          retireUnknownProjectAdmission(
-            config,
-            {},
-            4,
-            {},
-            "Fixture",
-            maintenanceLock,
-          ),
-          /Explicit unknown.*evidence/,
-        );
-        await assert.rejects(
-          retireUnknownProjectAdmission(
-            { ...config, planning: { kind: "unsupported" } },
-            {},
-            4,
-            {},
-            "Fixture",
-            maintenanceLock,
-          ),
-          /unknown provider resource protocols/,
-        );
-        await assert.rejects(
-          retireUnknownProjectAdmission(config, {}, 4, {}, "Fixture", {
-            ...maintenanceLock,
-            token: "foreign",
-          }),
-          /exclusive stopped installation lease/,
-        );
       } finally {
         releaseControllerLock(
           installationLockPath(repository),
@@ -3179,7 +3100,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       }
       // Exercise the real stopped-controller entry and its error settlement.
       // These deliberately incomplete descriptors claim no operator observation,
-      // provider response or permission to retire any of the preserved intents.
+      // provider response or permission to abandon any preserved reservation.
       const configPath = join(directory, "maintenance-config.json"),
         configBytes = Buffer.from(JSON.stringify(toConfigFile(config))),
         refusedProofPath = join(directory, "not-an-operator-proof.json"),
@@ -3193,8 +3114,8 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       };
       const refusedEvidence = {
         schemaVersion: 1,
-        kind: "operator-retired-admission-unknown",
-        operationId: randomUUID(),
+        kind: "operator-observed-pre-snapshot-failure",
+        claimId: randomUUID(),
         originalInstallation: {
           cli: process.execPath,
           configPath,
@@ -3204,12 +3125,11 @@ test("the actual creating lease settles only a fresh failed reservation and arch
         originals: Object.fromEntries(
           [
             "ownerObservation",
-            "installedPlan",
-            "callerFailure",
             "sourceProtocolReview",
-            "physicalClosure",
+            "failureObservation",
           ].map((name) => [name, refusedOriginal]),
         ),
+        sourceProtocol: "canonical-snapshot-before-provider-v1",
       };
       const maintenanceOffset = (await readFile(diagnosticPath(repository, 0)))
         .length;
@@ -3230,12 +3150,12 @@ test("the actual creating lease settles only a fresh failed reservation and arch
               action: "handoff",
               input: {
                 actor: "Fixture",
-                retiredAdmissionEvidence: refusedEvidence,
+                failedReservationEvidence: refusedEvidence,
               },
             },
             {},
           ),
-          /Other partial effects or active owners remain held/,
+          /Competing, started or uncertain external queue effects remain held/,
         );
       } finally {
         observingMaintenance = false;
@@ -3284,7 +3204,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
               "handoff",
               "--objective",
               "4",
-              "--retired-admission-evidence",
+              "--failed-reservation-evidence",
               evidencePath,
               "--config",
               configPath,
@@ -3293,7 +3213,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           ),
         (error) =>
           error.status === 1 &&
-          /Other partial effects or active owners remain held/.test(
+          /Competing, started or uncertain external queue effects remain held/.test(
             error.stderr,
           ),
       );

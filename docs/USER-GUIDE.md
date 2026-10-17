@@ -338,7 +338,7 @@ The timeout bounds the entire attempt; cleanup gets a fresh window of the same l
 
 ## Write an Objective
 
-Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). An Objective has four sections. Keep it to one page.
+Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.md) or [the issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml). An Objective has four sections. Keep it to one page. Describe the goal and its observable outcomes, not the plan: Factory decides the Work Items, their acceptance criteria, ownership and evidence, and asks you when the Objective leaves a product choice open.
 
 The Markdown template contains the four core sections. Add an optional authority section only for a change this Objective actually requests; its examples are syntax guidance, not default package or version choices. The issue form keeps those fields optional.
 

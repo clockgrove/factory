@@ -120,16 +120,16 @@ import {
   WORK_ITEM_PLANNING_RULES,
 } from "./work-item-rubric.js";
 
-/** Load only the Objective's retained selection; legacy absence never selects current advice. */
+/** Load only the Objective's retained selection. */
 export function bindPlanningPlaybook(
   model: PlanningModel,
   repository: string,
-  pin: ApprovedPlaybookPin | undefined,
+  pin: ApprovedPlaybookPin,
 ): PlanningModel {
-  if (pin !== undefined) assertApprovedPlaybookPin(pin);
+  assertApprovedPlaybookPin(pin);
   let playbook: ApprovedPlaybook | undefined;
   try {
-    playbook = readPinnedPlaybook(repository, pin ?? null);
+    playbook = readPinnedPlaybook(repository, pin);
   } catch (error) {
     throw attachFault(
       error instanceof Error

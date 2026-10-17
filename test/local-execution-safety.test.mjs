@@ -54,7 +54,7 @@ import { buildMemoryLearningClosure } from "../dist/repository-memory-transfer.j
 import {
   proposalPersistenceReferences,
   proposalSchema,
-  settleOrRefuseUnknownProviderSubmissions,
+  refuseUnknownProviderSubmissions,
 } from "../dist/proposals.js";
 import {
   discoverRepository,
@@ -493,6 +493,15 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       baseSha,
       graph,
       planGraphDigest: graphDigest(graph),
+      approvedPlaybookPin: null,
+      approvedPlaybookAdmission: {
+        approvedPlaybookPin: null,
+        configDigest: "c".repeat(64),
+        graphDigest: graphDigest(graph),
+        packetDigest: "c".repeat(64),
+        reviewDigest: "d".repeat(64),
+        sourcePacketDigest: "e".repeat(64),
+      },
       capacity: { concurrency: 1 },
       autonomy: resolveAutonomy(),
       issueByItemId: { schema: 2, api: 3, ui: 4, docs: 5 },
@@ -558,6 +567,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     request.baseSha = git(checkout, "rev-parse", "HEAD");
     state.baseSha = graph.baseSha = request.baseSha;
     state.planGraphDigest = graphDigest(graph);
+    state.approvedPlaybookAdmission.graphDigest = state.planGraphDigest;
     const sourceDelivery = materializeWorkerSources(checkout, request);
     assert.notEqual(request.baseSha, sourceDelivery.baseSha);
     assert.equal(sourceDelivery.baseSha, baseSha);
@@ -963,6 +973,8 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         const rejectedSnapshot = structuredClone(state);
         rejectedSnapshot.schemaVersion = 17;
         rejectedSnapshot.configDigest = factoryConfigDigest(rejectedConfig);
+        rejectedSnapshot.approvedPlaybookAdmission.configDigest =
+          rejectedSnapshot.configDigest;
         rejectedSnapshot.work.schema = {
           status: "failed",
           attempt: request.attemptId,
@@ -1679,9 +1691,8 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         assert.equal(readFileSync(terminalPath, "utf8"), terminalBytes);
         assert.deepEqual(dreamSubmissionHolds(config.repository), []);
         {
-          // A submission recorded before any dispatch checkpoint whose call
-          // only started and failed never left the host; one the dispatch
-          // checkpoint admitted stays an unknown submission.
+          // A submission the dispatch checkpoint admitted stays unknown even
+          // when its call only started and failed.
           const { checkpoint } = prepared;
           const learning = join(stateRoot(config.repository), "learning");
           const observation = (type) => ({
@@ -1704,6 +1715,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
             providerAttempt: 1,
             providerMaxAttempts: 1,
             at: new Date().toISOString(),
+            dispatchAdmitted: true,
             outcome: "submitted-outcome-unobserved",
             usage: "unavailable",
             reconciliation: "not-exposed",
@@ -1730,13 +1742,6 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
           writeFileSync(submissionPath, JSON.stringify(submission), {
             mode: 0o600,
           });
-          assert.deepEqual(dreamSubmissionHolds(config.repository), []);
-          rmSync(submissionPath);
-          writeFileSync(
-            submissionPath,
-            JSON.stringify({ ...submission, dispatchAdmitted: true }),
-            { mode: 0o600 },
-          );
           assert.equal(dreamSubmissionHolds(config.repository).length, 1);
           rmSync(submissionPath);
           rmSync(callPath);
@@ -1866,45 +1871,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       );
       assert.equal(restartSaves, 1);
       assert.equal(readFileSync(rolePath, "utf8"), peerSnapshot);
-      // Historical stopped local ownership is preserved; no provider is launched.
-      const stoppedWorktree = join(
-        stateRoot(adaptive.repository),
-        "worktrees",
-        "api-role-attempt",
-      );
-      mkdirSync(join(stateRoot(adaptive.repository), "worktrees"), {
-        recursive: true,
-      });
-      git(
-        checkout,
-        "worktree",
-        "add",
-        "--detach",
-        stoppedWorktree,
-        result.changeRef,
-      );
       const owned = structuredClone(roleReload);
-      owned.work.api.execution = {
-        provider: "local",
-        identity: owned.work.api.attempt,
-        data: {
-          worktree: stoppedWorktree,
-          stopped: "Historical local start ceased",
-        },
-      };
-      const legacyOwned = structuredClone(owned);
-      delete legacyOwned.work.api.adaptiveContextId;
-      delete legacyOwned.adaptiveContexts;
-      saveState(rolePath, legacyOwned);
-      const legacySnapshot = readFileSync(rolePath, "utf8");
-      const legacyBefore = structuredClone(legacyOwned);
-      await assert.rejects(
-        () => resumeDispatch(legacyOwned),
-        /lacks its original dispatch packet/,
-      );
-      assert.deepEqual(legacyOwned, legacyBefore);
-      assert.equal(restartSaves, 1);
-      assert.equal(readFileSync(rolePath, "utf8"), legacySnapshot);
       saveState(rolePath, owned);
       const ownedSnapshot = readFileSync(rolePath, "utf8");
       const ownedBefore = structuredClone(owned);
@@ -1916,7 +1883,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
           selected.packet.contentRef.digest,
         ),
       );
-      // Historical ownership remains inspectable; another call cannot use missing bytes.
+      // The retained snapshot remains inspectable; another call cannot use missing bytes.
       assert.equal(
         parseFactoryState(
           JSON.parse(ownedSnapshot),
@@ -1931,7 +1898,6 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       );
       await assert.rejects(() => resumeDispatch(owned), /missing/);
       assert.deepEqual(owned, ownedBefore);
-      assert.equal(owned.work.api.execution.identity, "api-role-attempt");
       assert.equal(owned.work.api.adaptiveContextId, selected.packet.id);
       assert.equal(restartSaves, 1);
       assert.equal(readFileSync(rolePath, "utf8"), ownedSnapshot);
@@ -1988,6 +1954,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         candidate.citations = [{ path: "README.md" }];
       }
       expanded.planGraphDigest = graphDigest(expanded.graph);
+      expanded.approvedPlaybookAdmission.graphDigest = expanded.planGraphDigest;
       expanded.issueByItemId.inventory = 6;
       const inventoryManifest = await discoverRepository({
         checkout,
@@ -2106,6 +2073,15 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         baseSha: materialized.graph.baseSha,
         graph: structuredClone(materialized.graph),
         planGraphDigest: graphDigest(materialized.graph),
+        approvedPlaybookPin: null,
+        approvedPlaybookAdmission: {
+          approvedPlaybookPin: null,
+          configDigest: factoryConfigDigest(projectionConfig),
+          graphDigest: graphDigest(materialized.graph),
+          packetDigest: "c".repeat(64),
+          reviewDigest: "d".repeat(64),
+          sourcePacketDigest: "e".repeat(64),
+        },
         capacity: { concurrency: 1 },
         autonomy: resolveAutonomy(),
         issueByItemId: Object.fromEntries(
@@ -3351,6 +3327,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       schemaVersion: 8,
       kind: "preparing",
       repository: loaded.repository,
+      approvedPlaybookPin: null,
       objective: loaded.objective,
       runId: loaded.runId,
       configDigest: loaded.configDigest,
@@ -4677,6 +4654,7 @@ test("diagnosis dispatch intent follows complete admission before real process e
   const preparation = {
     schemaVersion: 18,
     kind: "preparing",
+    approvedPlaybookPin: null,
     repository,
     objective: 1,
     runId: randomUUID(),
@@ -4708,6 +4686,8 @@ test("diagnosis dispatch intent follows complete admission before real process e
       sourceArtifacts: false,
     },
   );
+  // Scoped as each Objective's model is: no approved advice selected.
+  nativeModel.approvedPlaybookPin = null;
   const stop = new AbortController();
   const beforeNativeBuilds = [];
   const buildClosure = async () => {
@@ -4841,14 +4821,13 @@ test("diagnosis dispatch intent follows complete admission before real process e
   );
 });
 
-test("proposal provider fences settle only attempts that never reached dispatch", async () => {
-  // Journals as retained after a provider call that failed with only a start
-  // and a failure. An attempt recorded before any dispatch checkpoint never
-  // left the host; one the dispatch checkpoint admitted, or one with provider
-  // evidence, stays unknown and keeps blocking later proposals.
-  const retain = (repository, { dispatchAdmitted, failure = {} }) => {
+test("proposal provider fences keep dispatched submissions unknown", async () => {
+  // A journal as retained after a dispatched provider call that failed with
+  // only a start and a failure: it stays unknown and blocks later proposals.
+  const retain = (repository) => {
     const proposalId = randomUUID();
     const invocationId = randomUUID();
+    const content = "# One\nBuild it.\n";
     const binding = {
       repository,
       configDigest: "a".repeat(64),
@@ -4859,7 +4838,7 @@ test("proposal provider fences settle only attempts that never reached dispatch"
         {
           path: "docs/wave.md",
           heading: "One",
-          content: "# One\nBuild it.\n",
+          digest: createHash("sha256").update(content).digest("hex"),
           purpose: "primary-wave",
         },
       ],
@@ -4872,7 +4851,14 @@ test("proposal provider fences settle only attempts that never reached dispatch"
           invocationId,
           prompt: "Draft Objectives.",
           schema: proposalSchema(1),
-          sourcePacket: JSON.stringify(binding.sources),
+          sourcePacket: JSON.stringify([
+            {
+              path: "docs/wave.md",
+              heading: "One",
+              content,
+              purpose: "primary-wave",
+            },
+          ]),
         }),
       ),
       { mediaType: "application/json" },
@@ -4896,7 +4882,7 @@ test("proposal provider fences settle only attempts that never reached dispatch"
         binding,
         observations: [
           observation("started"),
-          observation("failed", { usageAvailable: false, ...failure }),
+          observation("failed", { usageAvailable: false }),
         ],
         issues: {},
         generation: {
@@ -4907,7 +4893,7 @@ test("proposal provider fences settle only attempts that never reached dispatch"
               providerAttempt: 1,
               providerMaxAttempts: 1,
               at: new Date().toISOString(),
-              ...(dispatchAdmitted && { dispatchAdmitted: true }),
+              dispatchAdmitted: true,
               outcome: "submitted-outcome-unobserved",
             },
           ],
@@ -4927,29 +4913,11 @@ test("proposal provider fences settle only attempts that never reached dispatch"
           ).readBytes(ref),
       ).journal;
   };
-  const unknown = /remains unknown/;
   const dispatched = "example/proposal-dispatched";
-  const dispatchedJournal = retain(dispatched, { dispatchAdmitted: true });
+  const dispatchedJournal = retain(dispatched);
   assert.throws(
-    () => settleOrRefuseUnknownProviderSubmissions(dispatched),
-    unknown,
+    () => refuseUnknownProviderSubmissions(dispatched),
+    /remains unknown/,
   );
   assert.equal(dispatchedJournal().pending.kind, "provider");
-  const evidenced = "example/proposal-evidenced";
-  retain(evidenced, { failure: { providerThreadId: "thread-1" } });
-  assert.throws(
-    () => settleOrRefuseUnknownProviderSubmissions(evidenced),
-    unknown,
-  );
-  const undispatched = "example/proposal-undispatched";
-  const undispatchedJournal = retain(undispatched, {});
-  settleOrRefuseUnknownProviderSubmissions(undispatched);
-  const settled = undispatchedJournal();
-  assert.equal(settled.pending, undefined);
-  assert.equal(
-    settled.generation.attempts[0].outcome,
-    "failed-before-dispatch",
-  );
-  assert.equal(settled.observations.length, 2);
-  settleOrRefuseUnknownProviderSubmissions(undispatched);
 });

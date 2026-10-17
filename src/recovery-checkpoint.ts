@@ -119,7 +119,10 @@ export interface RecoveryCheckpointManifest extends RecoveryCheckpointClosure {
   binding: RecoveryCheckpointBinding;
   createdAt: string;
   sequence: number;
-  /** Publisher authority; individual historical records retain their original bindings. */
+  /**
+   * Publisher authority, on every private-history manifest and never on
+   * repository knowledge; individual historical records retain their original bindings.
+   */
   authority?: RecoveryCheckpointAuthority;
 }
 export interface RecoveryCheckpointHostLayout {
@@ -3242,13 +3245,12 @@ function assertManifest(
     throw new Error(
       "Checkpoint manifest is incomplete or outside its admitted binding",
     );
-  if (value.authority !== undefined) {
-    if (options.scope !== "private-history")
-      throw new Error(
-        "Publisher host authority is private-history metadata only",
-      );
+  if (options.scope === "private-history")
     assertRecoveryCheckpointAuthority(value.authority);
-  }
+  else if (value.authority !== undefined)
+    throw new Error(
+      "Publisher host authority is private-history metadata only",
+    );
   const pathsSeen = new Set<string>();
   for (const gap of value.gaps) {
     keys(

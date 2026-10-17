@@ -18,7 +18,6 @@ import {
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { option } from "./cli-flags.js";
 import { DEFAULT_CONTEXT_LOOKUP_BOUNDS } from "./compiler/context.js";
-import { failedWithoutProviderEvidence } from "./compiler/observation.js";
 import { objectiveComplete } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest, stateRoot, validateTarget } from "./config.js";
@@ -225,26 +224,21 @@ function append(path: string, text: string, repository?: string): void {
 
 /**
  * The terminal state a snapshot record names, read from the content store
- * (which verifies its exact bytes). A legacy snapshot is the state itself.
+ * (which verifies its exact bytes).
  */
 function snapshotState(
   store: LocalContentStore,
   raw: string,
-): { stateRef?: ContentRef; state: Record<string, unknown> } {
-  const value = record(JSON.parse(raw));
-  const stateRef = snapshotStateRef(value);
-  if (!stateRef) return { state: value };
+): { stateRef: ContentRef; state: Record<string, unknown> } {
+  const stateRef = snapshotStateRef(record(JSON.parse(raw)));
   return {
     stateRef,
     state: record(JSON.parse(store.readBytes(stateRef).toString("utf8"))),
   };
 }
 
-/** A decoded snapshot original's state reference; undefined for a legacy inline state. */
-export function snapshotStateRef(
-  value: Record<string, unknown>,
-): ContentRef | undefined {
-  if (value.stateRef === undefined) return undefined;
+/** A decoded snapshot original's state reference. */
+export function snapshotStateRef(value: Record<string, unknown>): ContentRef {
   const ref = record(value.stateRef);
   if (
     Object.keys(ref).sort().join() !== "bytes,digest,mediaType" ||
@@ -331,8 +325,7 @@ function readRetrospectiveSource(
 }
 
 /** Retain original learning bytes/provenance for retrieval, without promoting guidance.
- * Missing historical snapshot bodies stay explicit; Dream's stricter source validation
- * is unchanged. Retrospective recording, Dream input and planning context call it.
+ * Retrospective recording, Dream input and planning context call it.
  */
 export function retainLearningMemory(
   repository: string,
@@ -371,27 +364,17 @@ export function retainLearningMemory(
     const bodies: RepositoryMemoryRecord["bodies"] = [
       { role: "episode", ref: episodeRef, availability: "retained" },
     ];
-    let snapshotRef: import("./contracts.js").ContentRef | undefined;
-    const snapshotPath = join(directory(repository, "snapshots"), `${id}.json`);
-    if (existsSync(snapshotPath)) {
-      const snapshot = privateRead(snapshotPath);
-      if (learningDigest(snapshot) !== episode.snapshotDigest)
-        throw new Error("Retrospective memory snapshot changed");
-      snapshotRef =
-        snapshotState(store, snapshot).stateRef ??
-        store.putBytes(Buffer.from(snapshot), {
-          mediaType: "application/json",
-        });
-      bodies.push({
-        role: "original-snapshot",
-        ref: snapshotRef,
-        availability: "retained",
-      });
-    } else
-      bodies.push({
-        role: "original-snapshot",
-        availability: "missing-legacy",
-      });
+    const snapshot = privateRead(
+      join(directory(repository, "snapshots"), `${id}.json`),
+    );
+    if (learningDigest(snapshot) !== episode.snapshotDigest)
+      throw new Error("Retrospective memory snapshot changed");
+    const snapshotRef = snapshotState(store, snapshot).stateRef;
+    bodies.push({
+      role: "original-snapshot",
+      ref: snapshotRef,
+      availability: "retained",
+    });
     bindings.push(
       memory.retain({
         schemaVersion: 1,
@@ -415,8 +398,8 @@ export function retainLearningMemory(
           },
           {
             identity: `learning:snapshots/${id}`,
-            ...(snapshotRef ? { ref: snapshotRef } : {}),
-            complete: !!snapshotRef,
+            ref: snapshotRef,
+            complete: true,
           },
         ],
         bindings: {},
@@ -1113,7 +1096,7 @@ export function decodeLearningOriginal(
   const value = record(JSON.parse(raw));
   if (raw !== encoded(value))
     throw new Error("Immutable learning bytes changed");
-  if (kind !== "calls" && value.schemaVersion !== 1 && kind !== "snapshots")
+  if (kind !== "calls" && value.schemaVersion !== 1)
     throw new Error("Unsupported learning original schema");
   if (
     kind !== "calls" &&
@@ -1391,8 +1374,8 @@ export function validateLearningOriginals(
     }));
   for (const episode of episodes) {
     const path = `learning/snapshots/${episode.source.episodeId}.json`;
-    // Absence remains legacy unavailability; a present original may never change.
-    if (bodies.has(path) && digest(path) !== episode.episode.snapshotDigest)
+    original(path);
+    if (digest(path) !== episode.episode.snapshotDigest)
       throw new Error("Retrospective original snapshot changed");
   }
   const checkProposal = (
@@ -1781,7 +1764,6 @@ export function dreamSubmissionHolds(repository: string): {
         parent: DreamInputCheckpoint["parent"];
         providerAttempt: number;
         providerMaxAttempts: number;
-        dispatchAdmitted?: true;
       };
       const checkpoint = readDreamCheckpoint(repository, {
         checkpointId: submitted.id,
@@ -1830,17 +1812,6 @@ export function dreamSubmissionHolds(repository: string): {
             (observation) =>
               ["completed", "response-invalid"].includes(observation.type) &&
               observation.providerAttempt === submitted.providerAttempt,
-          )
-        )
-          return [];
-        // A submission recorded before any dispatch checkpoint whose only
-        // evidence is a start and a failure never left the host.
-        if (
-          !submitted.dispatchAdmitted &&
-          failedWithoutProviderEvidence(
-            observations,
-            submitted.invocationId,
-            submitted.providerAttempt,
           )
         )
           return [];

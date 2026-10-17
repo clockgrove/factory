@@ -102,6 +102,15 @@ test("final review receives actual fresh integrated checkout provenance", async 
       runId: "final-provenance",
       graph,
       planGraphDigest: graphDigest(graph),
+      approvedPlaybookPin: null,
+      approvedPlaybookAdmission: {
+        approvedPlaybookPin: null,
+        configDigest: "f".repeat(64),
+        graphDigest: graphDigest(graph),
+        packetDigest: "c".repeat(64),
+        reviewDigest: "d".repeat(64),
+        sourcePacketDigest: "e".repeat(64),
+      },
       baseSha,
       integratedSha: commit,
       work: {
@@ -191,6 +200,8 @@ test("final review receives actual fresh integrated checkout provenance", async 
     baselineState.graph.baseSha = commit;
     baselineState.graph.items[0].kind = "qa";
     baselineState.planGraphDigest = graphDigest(baselineState.graph);
+    baselineState.approvedPlaybookAdmission.graphDigest =
+      baselineState.planGraphDigest;
     delete baselineState.integratedSha;
     delete baselineState.work.final.integratedSha;
     await assert.rejects(

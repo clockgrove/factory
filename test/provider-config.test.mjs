@@ -162,6 +162,7 @@ test("the service continues a started Objective on the provider it froze", () =>
       repository: file.repository,
       objective,
       runId: `run-${objective}`,
+      approvedPlaybookPin: null,
       configDigest,
       baseSha: "b".repeat(40),
       objectiveBodyDigest: "c".repeat(64),

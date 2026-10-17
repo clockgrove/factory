@@ -397,7 +397,6 @@ async function buildMemoryLearningClosureLocal(
       );
     const originals = learningOriginals(selection.repository, root);
     validateLearningOriginals(selection.repository, originals);
-    const paths = new Set(originals.map((original) => original.path));
     const { verifyContinuationReferenceClosure } = await import(
       "./recovery-checkpoint-closure.js"
     );
@@ -410,11 +409,9 @@ async function buildMemoryLearningClosureLocal(
       );
       if (kind === "snapshots") {
         const stateRef = snapshotStateRef(value);
-        if (stateRef) add(stateRef);
+        add(stateRef);
         const described = await verifyContinuationReferenceClosure(
-          stateRef
-            ? JSON.parse(Buffer.from(readBytes(stateRef)).toString("utf8"))
-            : value,
+          JSON.parse(Buffer.from(readBytes(stateRef)).toString("utf8")),
           { readBytes },
         );
         for (const ref of described.contentRefs) add(ref);
@@ -438,15 +435,6 @@ async function buildMemoryLearningClosureLocal(
           add(included.episodeRef);
           for (const ref of included.supporting) add(ref);
         }
-      } else if (kind === "episodes") {
-        const path = `learning/snapshots/${original.path.slice("learning/episodes/".length)}`;
-        if (!paths.has(path))
-          gaps.push({
-            path,
-            availability: "missing-legacy",
-            reason: "Original historical snapshot was not retained",
-            required: false,
-          });
       }
     }
   }
@@ -574,11 +562,10 @@ export async function installExactMemoryLearning(
       original.bytes,
     );
     if (kind === "snapshots") {
-      const stateRef = snapshotStateRef(value);
       await verifyContinuationReferenceClosure(
-        stateRef
-          ? JSON.parse(Buffer.from(await load(stateRef)).toString("utf8"))
-          : value,
+        JSON.parse(
+          Buffer.from(await load(snapshotStateRef(value))).toString("utf8"),
+        ),
         { readBytes: load },
       );
     } else if (kind === "returns") await load(value.responseRef as ContentRef);

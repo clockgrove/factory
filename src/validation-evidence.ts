@@ -107,6 +107,8 @@ export function assertRetainedReviewEvidence(
     for (const reference of finding.evidence) {
       if (
         !reference ||
+        Object.keys(reference).sort().join() !==
+          "complete,digest,id,origin,path" ||
         typeof reference.id !== "string" ||
         !reference.id ||
         typeof reference.path !== "string" ||
@@ -140,24 +142,12 @@ export function assertRetainedReviewEvidence(
       throw new Error("Retained review literal body is invalid");
     const { content, reusableBody } = entry;
     // A citation carries its declared reference (#1254); a retained body keeps
-    // its input's other fields, such as a pinned source's heading. A citation
-    // saved before #1254 also carries those fields, and they must match.
-    const citation = cited.get(entry.id) as Record<string, unknown> | undefined;
+    // its input's other fields, such as a pinned source's heading.
+    const citation = cited.get(entry.id);
     if (
       seen.has(entry.id) ||
       !citation ||
-      !isDeepStrictEqual(
-        declaredReference(citation),
-        declaredReference(entry),
-      ) ||
-      Object.keys(citation).some(
-        (key) =>
-          !(key in declaredReference(citation)) &&
-          !isDeepStrictEqual(
-            citation[key],
-            (entry as unknown as Record<string, unknown>)[key],
-          ),
-      ) ||
+      !isDeepStrictEqual(citation, declaredReference(entry)) ||
       entry.complete !== true ||
       (content !== undefined &&
         (Buffer.from(content).toString("utf8") !== content ||

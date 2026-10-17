@@ -10,7 +10,7 @@ export function prerequisitesDigest(facts: PlanningPrerequisites): string {
   return createHash("sha256").update(JSON.stringify(facts)).digest("hex");
 }
 
-/** Validate retained admission facts without reconstructing legacy missing facts. */
+/** Validate retained admission facts against their activation digest. */
 export function assertNativePrerequisites(
   state: Pick<
     FactoryState,
@@ -114,7 +114,7 @@ export function nativePrerequisiteReviewEvidence(args: {
 }): ResultReviewEvidenceSource[] {
   const { state, checkout, candidateCommitSha, candidateTreeSha } = args;
   assertNativePrerequisites(state);
-  if (state.prerequisitesDigest === undefined) return [];
+  if (!state.prerequisites) return [];
   const binding = {
     repository: state.repository,
     objective: state.objective,
@@ -126,19 +126,6 @@ export function nativePrerequisiteReviewEvidence(args: {
     reviewedCommitSha: candidateCommitSha,
     reviewedTreeSha: candidateTreeSha,
   };
-  if (!state.prerequisites)
-    return [
-      {
-        path: "Native Objective prerequisite evidence",
-        complete: true,
-        content: JSON.stringify({
-          availability: "unavailable",
-          binding,
-          reason:
-            "Historical activation retained only the prerequisite digest; sealed predecessor facts are unavailable.",
-        }),
-      },
-    ];
   const ancestor = (commit: string, descendant: string) => {
     try {
       pinnedGit(checkout, "merge-base", "--is-ancestor", commit, descendant);

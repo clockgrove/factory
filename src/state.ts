@@ -252,8 +252,8 @@ export interface PreparationState {
   githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
   /** The Objective's live status comment while it plans; execution keeps the same record. */
   githubLiveStatus?: import("./github-progress-state.js").LiveStatusRecord;
-  /** Immutable advisory selection; absence is legacy no-input, null is explicit no-input. */
-  approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
+  /** Immutable advisory selection; null is explicit no-input. */
+  approvedPlaybookPin: import("./contracts.js").ApprovedPlaybookPin;
   sourcePacketDigest?: string;
   planningRecovery?: import("./compiler.js").PlanningRecoveryRecord;
   /** Limits snapshotted from configuration when the Objective started. */
@@ -463,8 +463,8 @@ export interface FactoryState {
   /** Immutable authenticated admission facts, bound to prerequisitesDigest. */
   prerequisites?: import("./contracts.js").PlanningPrerequisites;
   schemaVersion: 7 | 9 | 11 | 13 | 15 | 17 | 19;
-  approvedPlaybookAdmission?: import("./contracts.js").ApprovedPlaybookAdmission;
-  approvedPlaybookPin?: import("./contracts.js").ApprovedPlaybookPin;
+  approvedPlaybookAdmission: import("./contracts.js").ApprovedPlaybookAdmission;
+  approvedPlaybookPin: import("./contracts.js").ApprovedPlaybookPin;
   repository: string;
   objective: number;
   runId: string;
@@ -1006,8 +1006,7 @@ export function parseFactoryState(
   sha(state.configDigest, "configDigest", 64);
   if (state.sourcePacketDigest !== undefined)
     sha(state.sourcePacketDigest, "sourcePacketDigest", 64);
-  if (Object.hasOwn(state, "approvedPlaybookPin"))
-    assertApprovedPlaybookPin(state.approvedPlaybookPin);
+  assertApprovedPlaybookPin(state.approvedPlaybookPin);
   sha(state.planGraphDigest, "planGraphDigest", 64);
   assertStateWorkflowRecipe(state as unknown as FactoryState);
   assertAcceptedPlanningDecision(
@@ -1019,7 +1018,6 @@ export function parseFactoryState(
     state.approvedPlaybookAdmission,
     state.configDigest,
     state.planGraphDigest,
-    Object.hasOwn(state, "approvedPlaybookPin"),
   );
   validateCapacity(state.capacity as Capacity);
   if (state.prerequisitesDigest !== undefined)
@@ -1296,11 +1294,6 @@ export function parseFactoryState(
         planned.validation.map((check) => check.command),
       );
     }
-    for (const legacy of ["pendingEffect", "interruptions", "waitingReason"])
-      if (item[legacy] !== undefined)
-        throw new Error(
-          `Work Item ${id} records ${legacy} from an earlier Factory version; start the Objective fresh`,
-        );
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
     for (const field of ["phaseReservation", "requestedPhase"])
@@ -1840,13 +1833,7 @@ export function parseFactoryState(
             throw new Error("Invalid managed checkpoint admission disposition");
         }
       }
-      const interruptedStart =
-        execution.provider === "local" &&
-        JSON.stringify(
-          Object.keys(record(execution.data, `${id}.data`)).sort(),
-        ) === '["stopped","worktree"]' &&
-        typeof (execution.data as { stopped?: unknown }).stopped === "string";
-      if (execution.provider === "local" && !interruptedStart) {
+      if (execution.provider === "local") {
         const active = record(execution.data, `work.${id}.execution.data`);
         const request = record(active.request, `work.${id}.execution.request`);
         const attemptedItem = record(request.item, `work.${id}.execution.item`);
@@ -2301,7 +2288,7 @@ export interface ContinuationRestoration {
     configDigest: string;
     schemaVersion: number;
   };
-  source?: {
+  source: {
     authorityDigest: string;
     configDigest: string;
     checkout: string;
@@ -2403,7 +2390,7 @@ export function assertContinuationRestoration(state: ContinuationState): void {
           "Restoration layout must retain exact absolute host paths",
         );
   };
-  if (value.source) layout(value.source, true);
+  layout(value.source, true);
   layout(value.installation, false);
   if (
     value.schemaVersion !== 1 ||
@@ -2411,8 +2398,4 @@ export function assertContinuationRestoration(state: ContinuationState): void {
     !value.reason?.trim()
   )
     throw new Error("Invalid restoration disposition");
-  if (value.status === "reconciled" && !value.source)
-    throw new Error(
-      "A legacy checkpoint without original authority cannot be rebound",
-    );
 }

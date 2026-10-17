@@ -689,6 +689,15 @@ async function watcherWorkflow(
       baseSha,
       graph,
       planGraphDigest: graphDigest(graph),
+      approvedPlaybookPin: null,
+      approvedPlaybookAdmission: {
+        approvedPlaybookPin: null,
+        configDigest: factoryConfigDigest(config),
+        graphDigest: graphDigest(graph),
+        packetDigest: "c".repeat(64),
+        reviewDigest: "d".repeat(64),
+        sourcePacketDigest: "e".repeat(64),
+      },
       capacity: { concurrency: 1 },
       autonomy: resolveAutonomy(),
       issueByItemId: { local: 2 },
@@ -1282,6 +1291,15 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
     objectiveCommands: ["git diff --exit-code"],
     graph,
     planGraphDigest: graphDigest(graph),
+    approvedPlaybookPin: null,
+    approvedPlaybookAdmission: {
+      approvedPlaybookPin: null,
+      configDigest: factoryConfigDigest(config),
+      graphDigest: graphDigest(graph),
+      packetDigest: "c".repeat(64),
+      reviewDigest: "d".repeat(64),
+      sourcePacketDigest: "e".repeat(64),
+    },
     issueByItemId: { qa: 2 },
     work: {
       qa: {
@@ -1586,12 +1604,12 @@ async function holder(key, mode, publication = false) {
     [
       "--input-type=module",
       "-e",
-      `import { withRegistryFiles, withCheckpointPublication, takeGuard, releaseGuard } from ${JSON.stringify(processUrl)};
+      `import { withRegistryFiles, withCheckpointPublication } from ${JSON.stringify(processUrl)};
        const body = async () => {
          process.stdout.write("held\\n");
          await new Promise((resolve) => process.stdin.once("data", resolve));
        };
-       ${publication === "legacy" ? `takeGuard(${JSON.stringify(key)}); try { await body(); } finally { releaseGuard(${JSON.stringify(key)}); }` : `await ${publication ? `withCheckpointPublication(${JSON.stringify(key)}, body)` : `withRegistryFiles(${JSON.stringify(key)}, ${JSON.stringify(mode)}, undefined, body)`};`}
+       await ${publication ? `withCheckpointPublication(${JSON.stringify(key)}, body)` : `withRegistryFiles(${JSON.stringify(key)}, ${JSON.stringify(mode)}, undefined, body)`};
        process.exit(0);`,
     ],
     { stdio: ["pipe", "pipe", "inherit"] },
@@ -3495,17 +3513,6 @@ test("archive publication waits for a real publisher beyond one second and prese
 
     other = await holder(guard, "exclusive", true);
     await other.kill();
-    other = undefined;
-    await withCheckpointPublication(guard, async () => undefined);
-
-    other = await holder(guard, "exclusive", "legacy");
-    await assert.rejects(
-      withCheckpointPublication(guard, async () =>
-        assert.fail("live legacy publisher ignored"),
-      ),
-      /lock guard .* held by process/,
-    );
-    await other.release();
     other = undefined;
     await withCheckpointPublication(guard, async () => undefined);
   } finally {

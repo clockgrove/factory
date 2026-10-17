@@ -50,12 +50,8 @@ function evidenceDigest(state: FactoryState): string {
     .update(
       JSON.stringify({
         objectiveBodyDigest: state.objectiveBodyDigest,
-        ...(state.approvedPlaybookAdmission
-          ? {
-              approvedPlaybookAdmission: state.approvedPlaybookAdmission,
-              approvedPlaybookPin: state.approvedPlaybookPin,
-            }
-          : {}),
+        approvedPlaybookAdmission: state.approvedPlaybookAdmission,
+        approvedPlaybookPin: state.approvedPlaybookPin,
         ...(state.prerequisites
           ? {
               nativePrerequisites: {
@@ -81,7 +77,6 @@ export function assertTerminalEligibility(state: FactoryState): void {
     state.approvedPlaybookAdmission,
     state.configDigest,
     state.planGraphDigest,
-    Object.hasOwn(state, "approvedPlaybookPin"),
   );
   assertWorkRoutingState(state);
   const candidate = objectiveCandidate(state);

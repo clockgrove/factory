@@ -18,13 +18,14 @@ import {
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { canonical } from "./canonical-json.js";
 import { stateRoot } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import type { ContentRef } from "./contracts.js";
 import { parseDiscoveryBody } from "./discovery.js";
 import { validOwnershipPath } from "./ownership.js";
 import { acceptedPlanningDecisionContext } from "./planning-decision-context.js";
-import { canonical, markCheckpointDirty } from "./recovery-checkpoint.js";
+import { markCheckpointDirty } from "./recovery-checkpoint.js";
 import {
   type ContinuationState,
   isExecutionState,

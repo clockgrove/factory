@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { canonical } from "./canonical-json.js";
 import type { InteractionMetadata } from "./capture.js";
 import { stateRoot } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
@@ -25,7 +26,6 @@ import type {
   WorkerUsageObservation,
 } from "./contracts.js";
 import {
-  canonical,
   checkpointOriginalInventory,
   checkpointRetentionGaps,
   markAccountingGap,

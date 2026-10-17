@@ -33,6 +33,7 @@ import { currentProcessSignal, UnsettledSubprocessError } from "../process.js";
 import { transient } from "../fault.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  PLANNING_TURN_ELAPSED_TIMEOUT_MS,
   ProviderTurnGuard,
   requireCompletedProviderTurn,
 } from "../provider-turn.js";
@@ -985,7 +986,7 @@ export class CodexPlanningTransport implements PlanningTransport {
         (lowerEffortReview
           ? LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS
           : DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS),
-      this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+      this.providerTurnIdleTimeoutMs ?? PLANNING_TURN_ELAPSED_TIMEOUT_MS,
       args.deadlineAt,
     );
     const checkpointSession = (status: AgentSessionRef["status"]) => {

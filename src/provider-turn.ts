@@ -1,4 +1,10 @@
 export const DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS = 15 * 60 * 1_000;
+/**
+ * Elapsed bound for one planning or review call. A large Objective's compile
+ * reads the tree for many turns and then writes the whole plan; 15 minutes cut
+ * real compiles off mid-answer. Liveness still ends a silent call early.
+ */
+export const PLANNING_TURN_ELAPSED_TIMEOUT_MS = 45 * 60 * 1_000;
 
 /** Native event surfaces may omit ongoing reasoning; higher effort gets a finite quiet window. */
 export function modelResponseTimeoutMs(reasoningEffort?: string): number {

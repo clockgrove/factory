@@ -75,7 +75,7 @@ import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
   assertProviderTurnDeadline,
   closeProviderEventStream,
-  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  PLANNING_TURN_ELAPSED_TIMEOUT_MS,
   modelResponseTimeoutMs,
   ProviderTurnGuard,
   requireCompletedProviderTurn,
@@ -949,7 +949,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     }
     const guard = new ProviderTurnGuard(
       modelResponseTimeoutMs(reasoningEffort),
-      DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+      PLANNING_TURN_ELAPSED_TIMEOUT_MS,
       args.deadlineAt,
     );
     const abortController = new AbortController();

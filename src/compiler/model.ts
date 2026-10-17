@@ -44,7 +44,7 @@ import {
   renderPrompt,
 } from "../prompt-bytes.js";
 import {
-  DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+  PLANNING_TURN_ELAPSED_TIMEOUT_MS,
   ProviderTurnElapsedTimeoutError,
   ProviderTurnTimeoutError,
 } from "../provider-turn.js";
@@ -737,8 +737,7 @@ export class StructuredPlanningModel implements PlanningModel {
     options: PlanningModelOptions = {},
   ) {
     this.providerTurnElapsedTimeoutMs =
-      options.providerTurnElapsedTimeoutMs ??
-      DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS;
+      options.providerTurnElapsedTimeoutMs ?? PLANNING_TURN_ELAPSED_TIMEOUT_MS;
     if (
       !Number.isSafeInteger(this.providerTurnElapsedTimeoutMs) ||
       this.providerTurnElapsedTimeoutMs <= 0

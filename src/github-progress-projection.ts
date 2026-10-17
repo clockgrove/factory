@@ -182,24 +182,25 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     snapshot.state === "preparing" && snapshot.split?.enqueuedAt
       ? snapshot.split
       : undefined;
-  const next = split
-    ? split.closedAt
-      ? "Every child Objective is accepted; this Objective is closed."
-      : snapshot.phase === "needs-decision"
-        ? "A child Objective was cancelled; inspect local Factory status for the supported way to end this Objective."
-        : "Factory runs each child Objective through the queue, after the children it builds on are accepted, and closes this Objective when every child is accepted."
-    : snapshot.phase === "complete"
-      ? "The Objective is accepted and closed. Inspect linked delivery evidence."
-      : snapshot.phase === "cancelled"
-        ? "This run is cancelled; preserve its retained history."
-        : snapshot.phase === "needs-decision" ||
-            snapshot.phase === "needs-plan-decision"
-          ? "Handle the listed questions through the supported local Factory decision path."
-          : snapshot.phase === "failed"
-            ? "Inspect local Factory status for the exact supported recovery or prerequisite."
-            : retained.coordinator?.mode !== "running"
-              ? "Wait for the operator's supported resume or drain disposition."
-              : "Factory will continue the admitted work within its recorded limits.";
+  const next =
+    split && snapshot.phase !== "cancelled"
+      ? split.closedAt
+        ? "Every child Objective is accepted; this Objective is closed."
+        : snapshot.phase === "needs-decision"
+          ? "A child Objective was cancelled; inspect local Factory status for the supported way to end this Objective."
+          : "Factory runs each child Objective through the queue, after the children it builds on are accepted, and closes this Objective when every child is accepted."
+      : snapshot.phase === "complete"
+        ? "The Objective is accepted and closed. Inspect linked delivery evidence."
+        : snapshot.phase === "cancelled"
+          ? "This run is cancelled; preserve its retained history."
+          : snapshot.phase === "needs-decision" ||
+              snapshot.phase === "needs-plan-decision"
+            ? "Handle the listed questions through the supported local Factory decision path."
+            : snapshot.phase === "failed"
+              ? "Inspect local Factory status for the exact supported recovery or prerequisite."
+              : retained.coordinator?.mode !== "running"
+                ? "Wait for the operator's supported resume or drain disposition."
+                : "Factory will continue the admitted work within its recorded limits.";
   const status = {
     repository: config.repository,
     view,

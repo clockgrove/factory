@@ -243,7 +243,12 @@ export function recordWorkFailure(
   return isolated;
 }
 
-/** A retained current unpublished refusal; this preview creates no failure event. */
+/**
+ * A retained current unpublished refusal; this preview creates no failure event.
+ * States saved before refusals recorded a failure keep only the decision: an
+ * item failed at validation with no failure record, whose last decision
+ * refused its exact tree, stopped on that refusal.
+ */
 export function savedResultRefusal(state: FactoryState, id: string) {
   const work = state.work[id];
   const refusal = work?.acceptanceDecisions?.at(-1);
@@ -263,7 +268,7 @@ export function savedResultRefusal(state: FactoryState, id: string) {
     refusal?.outcome !== "refuse" ||
     refusal.treeSha !== work.treeSha ||
     !item?.acceptance.includes(refusal.criterion) ||
-    work.error !== `Acceptance refused: ${refusal.criterion}` ||
+    !work.error ||
     state.error ||
     state.cancelRequested ||
     state.cancelledAt ||

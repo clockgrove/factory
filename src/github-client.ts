@@ -247,6 +247,45 @@ function pendingMerge(status: number, data: unknown): string | undefined {
     : undefined;
 }
 
+/**
+ * The documentation sections GitHub names in a secondary-limit response's
+ * `documentation_url`, as path#anchor with no locale or version prefix.
+ */
+const SECONDARY_LIMIT_DOCS = new Set([
+  "/rest/overview/resources-in-the-rest-api#secondary-rate-limits",
+  "/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits",
+  "/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits",
+  "/rest/guides/best-practices-for-integrators#dealing-with-secondary-rate-limits",
+  "/v3#abuse-rate-limits",
+]);
+
+/** Whether a rejection's `documentation_url` names GitHub's secondary-limit docs. */
+function secondaryLimitDoc(data: unknown): boolean {
+  const url = (data as { documentation_url?: unknown } | null | undefined)
+    ?.documentation_url;
+  if (typeof url !== "string") return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    !["docs.github.com", "developer.github.com"].includes(
+      parsed.hostname.toLowerCase(),
+    )
+  )
+    return false;
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  // Drop a locale (`en`) and a docs version (`free-pro-team@latest`).
+  if (/^[a-z]{2}(-[a-z]{2})?$/i.test(segments[0] ?? "")) segments.shift();
+  if (/^[\w-]+@[\w.-]+$/.test(segments[0] ?? "")) segments.shift();
+  return SECONDARY_LIMIT_DOCS.has(
+    `/${segments.join("/").toLowerCase()}${parsed.hash.toLowerCase()}`,
+  );
+}
+
 /** GitHub's documented minimum wait when a limit gives no reset time. */
 const RATE_LIMIT_FALLBACK_MS = 60_000;
 
@@ -534,6 +573,8 @@ export class GitHubClient {
   private observeRate(
     headers: Record<string, string | number | undefined>,
     status: number,
+    /** The rejection names GitHub's secondary-limit docs (`documentation_url`). */
+    secondaryLimit = false,
   ): number | undefined {
     const now = time.now();
     let limited = false;
@@ -560,10 +601,12 @@ export class GitHubClient {
       );
       limited = true;
     }
-    // A 429 is always a limit. A 403 is one only through GitHub's documented
-    // headers above (`retry-after`, or `x-ratelimit-remaining: 0`); without
-    // them it is a permission refusal.
-    if (!limited && status === 429) {
+    // A 429 is always a limit. A 403 is one through GitHub's documented
+    // headers above (`retry-after`, or `x-ratelimit-remaining: 0`), or when
+    // its body links the secondary-limit docs, which may come without either
+    // header; then GitHub's documented minimum wait applies. Otherwise a 403
+    // is a permission refusal.
+    if (!limited && (status === 429 || (status === 403 && secondaryLimit))) {
       this.notBefore = Math.max(this.notBefore, now + RATE_LIMIT_FALLBACK_MS);
       limited = true;
     }
@@ -1049,6 +1092,7 @@ export class GitHubClient {
         const limitedUntil = this.observeRate(
           error.response?.headers ?? {},
           error.status ?? 0,
+          secondaryLimitDoc(error.response?.data),
         );
         if (limitedUntil !== undefined) transport.category = "rate-limit";
         if (observation && method === "GET" && error.status === 304) {

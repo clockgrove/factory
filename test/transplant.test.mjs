@@ -1368,6 +1368,7 @@ test("settled planning conversation from an earlier source-read profile gets a f
       sourcePacketDigest: createHash("sha256")
         .update(JSON.stringify(sources))
         .digest("hex"),
+      approvedPlaybookPin: null,
     };
     const selection = { model: "gpt-6.1", reasoningEffort: "medium" };
     const transport = new CodexPlanningTransport(

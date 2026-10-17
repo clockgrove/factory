@@ -79,6 +79,7 @@ import {
   objectiveLockPath,
   readContinuation,
   readPreState,
+  resolveIssue,
   reconcileRestoredContinuation,
   restoreRecoveryCheckpoint,
 } from "./state-store.js";
@@ -139,8 +140,8 @@ function help(): void {
       "      The Objectives the background service runs, in order",
       "  supervisor start | check | stop [--disable] | upgrade --cli ABSOLUTE_INSTALLED_CLI | uninstall",
       "      Control the background service (stop drains and keeps state; --disable also stops it starting at login)",
-      "  status [--objective N] [--json]",
-      "      With --objective: the phase and the exact next command. Without: the service and the queue",
+      "  status [--objective N | --issue N|URL] [--json]",
+      "      With --objective: the phase and the exact next command. --issue finds the Objective, or Work Item, an issue names in local state. Without: the service and the queue",
       "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT] --reason TEXT",
       "      Decide a plan or a pending amendment's question (--answer is required to accept either) or a result criterion (--item names the Work Item; without it, the final acceptance)",
       "  retry --objective N [--item ITEM [--fresh]] [--rereview] [--review-artifacts FILE]",
@@ -512,8 +513,53 @@ function selectedForCommand(
   });
 }
 
-async function dispatchMain(): Promise<void> {
-  const [, , command, ...args] = process.argv;
+/** The issue `status --issue` was given, and what it names in local state. */
+interface IssueFocus {
+  issue: number;
+  objective: number;
+  item?: string;
+}
+
+/**
+ * `status --issue N|URL`: the Objective or Work Item an issue names, resolved
+ * from this installation's state, then that Objective's status.
+ */
+function statusForIssue(args: string[]): Promise<void> {
+  assertKnownFlags("status", args);
+  if (option(args, "objective") !== undefined)
+    throw new Error("--issue names the Objective; omit --objective");
+  const value = option(args, "issue") ?? "";
+  const { config } = readSelectedConfig(option(args, "config") ?? configPath());
+  const url =
+    /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)(?:[/?#].*)?$/.exec(
+      value,
+    );
+  if (url && url[1]!.toLowerCase() !== config.repository.toLowerCase())
+    throw new Error(
+      `${value} is not an issue of the configured target ${config.repository}`,
+    );
+  const digits = url ? url[2]! : value;
+  const issue = Number(digits);
+  if (!/^[1-9][0-9]*$/.test(digits) || !Number.isSafeInteger(issue))
+    throw new Error("--issue takes an issue number or its GitHub URL");
+  const focus = { issue, ...resolveIssue(config.repository, issue) };
+  const index = args.indexOf("--issue");
+  return dispatchMain(
+    [
+      "status",
+      ...args.filter((_, at) => at !== index && at !== index + 1),
+      "--objective",
+      String(focus.objective),
+    ],
+    focus,
+  );
+}
+
+async function dispatchMain(
+  argv = process.argv.slice(2),
+  focus?: IssueFocus,
+): Promise<void> {
+  const [command, ...args] = argv;
   if (!command || command === "help" || command === "--help") return help();
   assertKnownFlags(command, args);
   const path = option(args, "config") ?? configPath();
@@ -691,8 +737,20 @@ async function dispatchMain(): Promise<void> {
     const { document, secrets } = statusDocument(config, objective);
     const provider = { name: selected.provider, selectedBy: selected.source };
     if (args.includes("--json"))
-      console.log(JSON.stringify({ ...document, provider }));
+      console.log(
+        JSON.stringify({
+          ...document,
+          provider,
+          ...(focus ? { issue: focus } : {}),
+        }),
+      );
     else {
+      if (focus)
+        console.log(
+          focus.item
+            ? `Issue #${focus.issue}: Work Item ${focus.item} of Objective #${focus.objective}`
+            : `Issue #${focus.issue}: Objective #${focus.objective}`,
+        );
       for (const line of statusLines(document, secrets)) console.log(line);
       console.log(
         provider.selectedBy === "unmatched"
@@ -1030,6 +1088,8 @@ function reportRun(
 async function main(): Promise<void> {
   const enteredAt = Date.now();
   const [, , command, ...args] = process.argv;
+  if (command === "status" && args.includes("--issue"))
+    return statusForIssue(args);
   if (
     command === "queue" ||
     (command === "status" && !option(args, "objective"))
@@ -1040,7 +1100,7 @@ async function main(): Promise<void> {
     // CLI prints that exact outcome without a second terminal publication.
     return withIntakeCommandDeadline(
       enteredAt + (localStatus ? 1000 : QUEUE_COMMAND_TIMEOUT_MS),
-      dispatchMain,
+      () => dispatchMain(),
       (acknowledgment) => {
         const ack = acknowledgment as {
           kind?: string;
@@ -1093,7 +1153,7 @@ async function main(): Promise<void> {
           scope: config.gitPersistence?.scope ?? "private-history",
         }),
     },
-    dispatchMain,
+    () => dispatchMain(),
     {
       // These paths only print the application result after its full terminal
       // barrier. Other commands/custom operations retain their own full sync.

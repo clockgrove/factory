@@ -21,6 +21,8 @@ export interface ObjectiveStatusInput {
   view: StatusView;
   /** Cleared text only; never copy arbitrary diagnostics or model logs here. */
   nextAction: string;
+  /** The exact command `factory status` names while a human is needed; shown, never run. */
+  command?: string;
   blockers: string[];
   decisions: GitHubProgressDecision[];
 }
@@ -44,6 +46,15 @@ const markdown = (text: string): string =>
   text.replace(/[\\`*_{}[\]()<>#!|]/g, "\\$&").replace(/@/g, "@\u200b");
 const compact = (text: string): string =>
   markdown(text.replace(/\s+/g, " ").trim());
+/** A command as inline code; status commands carry no backtick or newline. */
+const code = (text: string): string => {
+  if (/[`\r\n]/.test(text) || Buffer.byteLength(text) > 1_000)
+    throw new Error("GitHub status requires a bounded single-line command");
+  return `\`${text}\``;
+};
+/** Where a human acts: the harness, reached from this issue's link. */
+const agentSession = (issue: number): string =>
+  `Paste this issue's link into your agent session, or run ${code(`factory status --issue ${issue}`)}.`;
 const issueLink = (repository: string, number: number): string =>
   `[#${number}](https://github.com/${repository}/issues/${number})`;
 const pullLink = (repository: string, number: number): string =>
@@ -143,6 +154,12 @@ export function objectiveStatusLines(
       : []),
     "",
     `**Next:** ${compact(input.nextAction)}`,
+    ...(input.command
+      ? [
+          `**Command:** ${code(input.command)}`,
+          agentSession(input.view.objective),
+        ]
+      : []),
     ...(input.blockers.length
       ? [
           "",
@@ -326,11 +343,13 @@ export function workItemStatusLines(input: WorkItemStatusInput): string[] {
       ? [
           "",
           "**Next:** Handle the decision through the supported local Factory decision path.",
+          agentSession(input.item.issue),
         ]
       : input.status === "failed"
         ? [
             "",
             "**Next:** Inspect local Factory status for the exact supported recovery.",
+            agentSession(input.item.issue),
           ]
         : []),
   ];

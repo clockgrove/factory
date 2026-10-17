@@ -171,6 +171,11 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     blockers.push("The coordinator is paused.");
   if (retained.coordinator?.mode === "draining")
     blockers.push("The coordinator is draining owned work.");
+  const command = publicCommand(
+    snapshot,
+    settings.includeQuestions,
+    args.secrets,
+  );
   const split =
     snapshot.state === "preparing" && snapshot.split?.enqueuedAt
       ? snapshot.split
@@ -197,6 +202,7 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     repository: config.repository,
     view,
     nextAction: next,
+    ...(command ? { command } : {}),
     blockers,
     decisions,
   };
@@ -270,6 +276,7 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
       digest: progressDigest(
         JSON.stringify({
           next,
+          command,
           blockers,
           decisions,
           coordinator: retained.coordinator?.mode,
@@ -280,6 +287,34 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
       items,
     },
   );
+}
+
+/**
+ * The exact next command status names, while a human is needed. A criterion
+ * argument is question text: without question disclosure it stays local.
+ */
+function publicCommand(
+  snapshot: { phase: string; nextAction: { command: string } | null },
+  includeQuestions: boolean,
+  secrets: string[],
+): string | undefined {
+  if (
+    !snapshot.nextAction ||
+    !["needs-decision", "needs-plan-decision", "failed"].includes(
+      snapshot.phase,
+    )
+  )
+    return;
+  let command = snapshot.nextAction.command;
+  const criterion = command.indexOf(" --criterion ");
+  if (criterion >= 0 && !includeQuestions) {
+    const rest = command.indexOf(" --outcome ", criterion);
+    command = `${command.slice(0, criterion)} --criterion "…"${rest >= 0 ? command.slice(rest) : ""}`;
+  }
+  command = redactDiagnosticDetail(command, secrets);
+  return /[`\r\n]/.test(command) || Buffer.byteLength(command) > 1_000
+    ? undefined
+    : command;
 }
 
 /** A started Work Item's public facts, from structured state only. */

@@ -306,6 +306,37 @@ export function readContinuation(
   return parsePreparation(value, repository, objective);
 }
 
+/**
+ * The Objective, and Work Item, a GitHub issue number names in this
+ * installation's own state; GitHub is not read. An Objective's issue number is
+ * its own; a Work Item's is in its Objective's `issueByItemId`.
+ */
+export function resolveIssue(
+  repository: string,
+  issue: number,
+): { objective: number; item?: string } {
+  if (existsSync(statePath(repository, issue))) return { objective: issue };
+  const root = join(stateRoot(repository), "objectives");
+  const unreadable: number[] = [];
+  for (const name of existsSync(root) ? readdirSync(root) : []) {
+    if (!/^[1-9][0-9]*$/.test(name)) continue;
+    let state: ContinuationState | undefined;
+    try {
+      state = readContinuation(repository, Number(name));
+    } catch {
+      unreadable.push(Number(name));
+      continue;
+    }
+    const item = Object.entries(state?.issueByItemId ?? {}).find(
+      ([, number]) => number === issue,
+    )?.[0];
+    if (item) return { objective: Number(name), item };
+  }
+  throw new Error(
+    `Issue #${issue} is not an Objective or Work Item with state in this installation${unreadable.length ? `; Objective state ${unreadable.map((n) => `#${n}`).join(", ")} could not be read` : ""}. A queued Objective that has not started: factory status --objective ${issue}`,
+  );
+}
+
 /** Validate a current-version snapshot of either kind. */
 function parseContinuation(
   value: ContinuationState,

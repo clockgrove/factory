@@ -7,6 +7,10 @@ import { isDeepStrictEqual } from "node:util";
 import { assertAgentSessionRef } from "../agent-session.js";
 import { type ClaudeAgentSdkConfig, withoutWorkerLimits } from "../config.js";
 import type {
+  SDKAssistantMessageError,
+  SDKResultMessage,
+} from "@anthropic-ai/claude-agent-sdk";
+import type {
   AgentHarness,
   AgentSessionRef,
   HarnessHandle,
@@ -82,6 +86,35 @@ export function claudeAuthenticationValues(
   return claudeLocalAuthenticationEnvironment
     .map((name) => environment[name])
     .filter((value): value is string => Boolean(value));
+}
+
+/** Claude Agent SDK assistant errors that mean the login cannot be used. */
+const claudeAuthenticationErrors = new Set<SDKAssistantMessageError>([
+  "authentication_failed",
+  "oauth_org_not_allowed",
+  "account_on_hold",
+  "verification_required",
+  "billing_error",
+  "cloud_credential_error",
+]);
+
+/**
+ * Whether a failed Claude Agent SDK result is an authentication failure,
+ * from its structured fields: API status 401, a login assistant error or a
+ * sign-in startup failure.
+ */
+export function claudeAuthenticationFailure(
+  result: SDKResultMessage,
+  assistantError: SDKAssistantMessageError | undefined,
+): boolean {
+  if (result.subtype === "success" && !result.is_error) return false;
+  return (
+    (result.subtype === "success"
+      ? result.api_error_status === 401
+      : result.startup_failure_reason === "gateway_signin_required") ||
+    (assistantError !== undefined &&
+      claudeAuthenticationErrors.has(assistantError))
+  );
 }
 
 /** Network settings a host may need to reach the Claude API. */

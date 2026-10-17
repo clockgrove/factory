@@ -193,7 +193,7 @@ export function modelFault(
     return { kind: "defect", detail };
   const authentication = authenticationFailure(
     codex ? "codex" : "claude",
-    detail,
+    error,
   );
   if (authentication)
     return {

@@ -37,6 +37,7 @@ import {
   type ModelInvocationContext,
 } from "./contracts.js";
 import {
+  claudeAuthenticationFailure,
   claudeAuthenticationValues,
   claudeWorkerEnvironment,
 } from "./execution/claude.js";
@@ -61,7 +62,7 @@ import {
   type ClaudeNativeProcess,
   type ClaudeOwnedSession,
 } from "./execution/claude-session.js";
-import { authenticationFailure, redact } from "./execution/harness-support.js";
+import { redact } from "./execution/harness-support.js";
 import { claudeCaptureEvents } from "./execution/interaction-capture.js";
 import {
   awaitCheckpointAdmission,
@@ -494,15 +495,6 @@ function assertPlanningInitialization(
   if (message.mcp_servers.length)
     throw new Error("Claude SDK initialized an unconfigured MCP server");
 }
-
-const authenticationErrors = new Set<SDKAssistantMessageError>([
-  "authentication_failed",
-  "oauth_org_not_allowed",
-  "account_on_hold",
-  "verification_required",
-  "billing_error",
-  "cloud_credential_error",
-]);
 
 /** The runtime's stand-in for a model message it produced itself. */
 const SYNTHETIC_MODEL = "<synthetic>";
@@ -1187,12 +1179,10 @@ class ClaudePlanningTransport implements PlanningTransport {
       result.subtype === "success" ? result.result : result.errors.join("; "),
       this.secrets,
     );
-    const authentication =
-      !succeeded &&
-      (status === 401 ||
-        (facts.assistantError !== undefined &&
-          authenticationErrors.has(facts.assistantError)) ||
-        authenticationFailure("claude", detail) !== undefined);
+    const authentication = claudeAuthenticationFailure(
+      result,
+      facts.assistantError,
+    );
     // Only a model message or an API error status is a provider verdict. The
     // runtime also reports startup, login and connection failures as results.
     state.ended =

@@ -9,7 +9,7 @@ import {
 } from "../codex-planning-isolation.js";
 import { DISCOVERY_CLASSIFICATION_SCHEMA } from "../discovery.js";
 import type { CodexModelSelection } from "../config.js";
-import { nativeCodexServiceTier } from "../codex-exec.js";
+import { codexAuthentication, nativeCodexServiceTier } from "../codex-exec.js";
 import type {
   AgentSessionRef,
   HarnessRequest,
@@ -318,13 +318,24 @@ export async function runCodexWorker(
       );
       let finalResponse = "";
       let turnCompleted = false;
-      let streamError: ProviderStreamError | undefined;
+      let streamError: Error | undefined;
       const commandOffsets = new Map<string, number>();
       const events = streamed.events[Symbol.asyncIterator]();
       let closeStarted = false;
       try {
         for (;;) {
-          const next = await turn.race(events.next());
+          const next = await turn.race(
+            events.next().catch((error: unknown) => {
+              // The SDK reports a failed native process as a plain Error
+              // carrying its stderr.
+              throw (
+                (error instanceof Error &&
+                  error.constructor === Error &&
+                  codexAuthentication(error)) ||
+                error
+              );
+            }),
+          );
           if (next.done) break;
           const event = next.value;
           turn.progress();
@@ -363,9 +374,13 @@ export async function runCodexWorker(
             observeUsage("progress");
           }
           if (event.type === "turn.failed")
-            throw new Error(event.error.message);
+            throw (
+              codexAuthentication(event.error) ?? new Error(event.error.message)
+            );
           if (event.type === "error")
-            streamError = new ProviderStreamError(event.message);
+            streamError =
+              codexAuthentication(event) ??
+              new ProviderStreamError(event.message);
           // Stream errors can precede a CLI-managed retry. Read through the
           // terminal turn and natural EOF to retain its usage and exit error.
         }

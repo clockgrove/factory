@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { ThreadEvent, Usage } from "@openai/codex-sdk";
+import type { ThreadError, ThreadEvent, Usage } from "@openai/codex-sdk";
 import { codexRuntimeDirectory } from "./codex-planning-isolation.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
 import {
@@ -641,15 +641,15 @@ export async function runCodexAppServer(
         resolveTerminal();
       } else {
         const error = turn.error == null ? undefined : object(turn.error);
-        args.event({
-          type: "turn.failed",
-          error: {
-            message:
-              typeof error?.message === "string"
-                ? error.message
-                : `Codex native turn ${terminal}`,
-          },
-        });
+        const failure: ThreadError & { codexErrorInfo: unknown } = {
+          message:
+            typeof error?.message === "string"
+              ? error.message
+              : `Codex native turn ${terminal}`,
+          // The native typed cause decides authentication (codexAuthentication).
+          codexErrorInfo: error?.codexErrorInfo ?? null,
+        };
+        args.event({ type: "turn.failed", error: failure });
         rejectTerminal(new Error(`Codex native turn ${terminal}`));
       }
     }

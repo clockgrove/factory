@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionEvent } from "@github/copilot-sdk";
 import { GITHUB_COPILOT_SDK_ADAPTER_IDENTITY } from "../config.js";
-import type { WorkerUsageObservation } from "../contracts.js";
+import {
+  AuthenticationRequiredError,
+  type WorkerUsageObservation,
+} from "../contracts.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnGuard,
@@ -63,6 +66,21 @@ function progressEvent(
     observation.shutdownType = event.data.shutdownType;
   }
   return observation;
+}
+
+const copilotAuthenticationRequired = (message: string) =>
+  new AuthenticationRequiredError(message, {
+    provider: "github-copilot",
+    command: "copilot",
+  });
+
+/** A session.error, typed as authentication from its errorType or status. */
+function copilotSessionError(
+  data: Extract<SessionEvent, { type: "session.error" }>["data"],
+): Error {
+  return data.errorType === "authentication" || data.statusCode === 401
+    ? copilotAuthenticationRequired(data.message)
+    : new Error(data.message);
 }
 
 async function release(
@@ -198,7 +216,7 @@ async function main(): Promise<void> {
     turn.race(Promise.race([operation, cancellation]));
   let providerCompleted = false;
   let captureFailure: unknown;
-  let providerFailure: string | undefined;
+  let providerFailure: Error | undefined;
   let authenticationDigest: string | undefined;
   const observeUsage = (type: WorkerUsageObservation["type"]): void => {
     if (progressLost) return;
@@ -262,7 +280,7 @@ async function main(): Promise<void> {
     await race(client.start());
     const authentication = await race(client.getAuthStatus());
     if (!authentication.isAuthenticated)
-      throw new Error(
+      throw copilotAuthenticationRequired(
         authentication.statusMessage ?? "Not authenticated with GitHub Copilot",
       );
     if (input.session) {
@@ -291,7 +309,8 @@ async function main(): Promise<void> {
         terminal = true;
         if (event.data.aborted === true) nativeAborted = true;
       }
-      if (event.type === "session.error") providerFailure = event.data.message;
+      if (event.type === "session.error")
+        providerFailure = copilotSessionError(event.data);
       if (event.type === "session.start" || event.type === "session.resume")
         sessionStart = event.data;
       if (
@@ -341,8 +360,8 @@ async function main(): Promise<void> {
     // dispatch the accepted Work Item until observed identity is checked.
     const initialized = await race(startup);
     if (initialized.type === "session.error")
-      throw new Error(initialized.data.message);
-    if (providerFailure) throw new Error(providerFailure);
+      throw copilotSessionError(initialized.data);
+    if (providerFailure) throw providerFailure;
     if (
       !sessionStart ||
       sessionStart.alreadyInUse ||
@@ -422,7 +441,7 @@ async function main(): Promise<void> {
       session.sendAndWait({ prompt }, input.config.timeoutSeconds * 1_000),
     );
     capture.response(response?.data.content, session.sessionId);
-    if (providerFailure) throw new Error(providerFailure);
+    if (providerFailure) throw providerFailure;
     if (cancelled) throw new Error("Copilot worker was cancelled");
     if (!terminal)
       throw new Error("GitHub Copilot SDK ended without session.idle");

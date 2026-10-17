@@ -7,7 +7,7 @@ import {
   readCodexAppServerTurn,
   runCodexAppServer,
 } from "../codex-app-server.js";
-import { runCodexExec } from "../codex-exec.js";
+import { codexAuthentication, runCodexExec } from "../codex-exec.js";
 import {
   assertOwnedCodexHome,
   CODEX_PLANNING_CONFIG,
@@ -1112,9 +1112,13 @@ export class CodexPlanningTransport implements PlanningTransport {
             // The app-server SDK projection can map an authenticated
             // interrupted terminal to turn.failed; preserve its native fact.
             if (session?.currentTurn) session.currentTurn.terminal ??= "failed";
-            throw new Error(event.error.message);
+            throw (
+              codexAuthentication(event.error) ?? new Error(event.error.message)
+            );
           }
-          if (event.type === "error") streamError = new Error(event.message);
+          if (event.type === "error")
+            streamError =
+              codexAuthentication(event) ?? new Error(event.message);
           // Stream errors can precede a CLI-managed retry. Native exit and
           // process-group settlement remain part of this owned invocation.
         },

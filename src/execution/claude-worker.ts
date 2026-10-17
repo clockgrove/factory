@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
+  SDKAssistantMessageError,
   SDKMessage,
   SDKResultMessage,
   SDKSystemMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
-import type { AgentSessionRef, WorkerUsageObservation } from "../contracts.js";
+import {
+  type AgentSessionRef,
+  AuthenticationRequiredError,
+  type WorkerUsageObservation,
+} from "../contracts.js";
 import {
   closeProviderEventStream,
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
@@ -16,6 +21,7 @@ import {
 } from "../provider-turn.js";
 import {
   type ClaudeWorkerInput,
+  claudeAuthenticationFailure,
   claudeAuthenticationValues,
 } from "./claude.js";
 import {
@@ -392,6 +398,7 @@ async function main(): Promise<void> {
     let result: SDKResultMessage | undefined;
     // The SDK reports a reached usage or session limit as structure.
     let limit: { retryAt?: string } | undefined;
+    let assistantError: SDKAssistantMessageError | undefined;
     let initialization: SDKSystemMessage | undefined;
     events = stream[Symbol.asyncIterator]();
     for (;;) {
@@ -400,6 +407,8 @@ async function main(): Promise<void> {
       const message = next.value;
       turn.progress();
       if (message.type === "result") result = message;
+      if (message.type === "assistant" && message.error)
+        assistantError = message.error;
       if (message.type === "rate_limit_event") {
         const { status, resetsAt } = message.rate_limit_info;
         // The SDK gives the reset as Unix seconds.
@@ -499,9 +508,14 @@ async function main(): Promise<void> {
     if (!result) throw new Error("Claude SDK ended without a result");
     const error = resultError(result);
     if (error)
-      throw limit
-        ? new ProviderLimitError(error, limit.retryAt)
-        : new Error(error);
+      throw claudeAuthenticationFailure(result, assistantError)
+        ? new AuthenticationRequiredError(error, {
+            provider: "claude",
+            command: "claude auth login",
+          })
+        : limit
+          ? new ProviderLimitError(error, limit.retryAt)
+          : new Error(error);
     turns.end();
     closeStarted = true;
     await closeProviderEventStream(events, turn, true);

@@ -1,7 +1,11 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { ThreadEvent, ThreadOptions } from "@openai/codex-sdk";
+import type {
+  ThreadError,
+  ThreadEvent,
+  ThreadOptions,
+} from "@openai/codex-sdk";
 import type { CodexServiceTier } from "./config.js";
 import { codexRuntimeDirectory } from "./codex-planning-isolation.js";
 import { attachFault } from "./fault.js";
@@ -13,7 +17,10 @@ import {
   codexJsonBoundaries,
 } from "./codex-boundary-telemetry.js";
 
-import type { ReviewImageInput } from "./contracts.js";
+import {
+  AuthenticationRequiredError,
+  type ReviewImageInput,
+} from "./contracts.js";
 import { assertReviewImages } from "./compiler/transport.js";
 import { assertProviderTurnDeadline } from "./provider-turn.js";
 
@@ -39,6 +46,54 @@ export function nativeCodexServiceTier(
   if (value === "standard") return "default";
   if (value === "fast") return "priority";
   throw new Error("Unsupported Codex service tier");
+}
+
+/**
+ * Codex exec (CLI and SDK 0.160.0) reports a failed turn, and a failed
+ * process, only as text: ThreadError has just `message` and the exit error
+ * just stderr. A rejected API request arrives as its JSON body with `status`.
+ * Credentials the CLI itself finds missing or unrefreshable carry no status,
+ * so for exec only, this narrowest fallback matches the CLI's own login
+ * remediation and its rendering of HTTP 401.
+ */
+const CODEX_EXEC_LOGIN =
+  /\bcodex login\b|\bsign in again\b|\b401 Unauthorized\b/;
+
+function jsonStatus(message: string): unknown {
+  try {
+    return (JSON.parse(message) as { status?: unknown } | null)?.status;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A failed Codex turn that is an authentication failure. The app-server
+ * projection carries the native `codexErrorInfo` ("unauthorized", or a
+ * variant with `httpStatusCode`), which alone decides; exec has none.
+ */
+export function codexAuthentication(
+  error: ThreadError & { codexErrorInfo?: unknown },
+): AuthenticationRequiredError | undefined {
+  const info = error.codexErrorInfo;
+  const authentication =
+    "codexErrorInfo" in error
+      ? info === "unauthorized" ||
+        (info !== null &&
+          typeof info === "object" &&
+          Object.values(info).some(
+            (variant) =>
+              (variant as { httpStatusCode?: unknown } | null)
+                ?.httpStatusCode === 401,
+          ))
+      : jsonStatus(error.message) === 401 ||
+        CODEX_EXEC_LOGIN.test(error.message);
+  return authentication
+    ? new AuthenticationRequiredError(error.message, {
+        provider: "codex",
+        command: "codex login",
+      })
+    : undefined;
 }
 
 /** One bounded observation per native attempt, never provider progress. */
@@ -239,9 +294,8 @@ export async function runCodexExec(args: {
         telemetry?.finish();
         stderr?.finish();
       }
-      throw new Error(
-        `Codex Exec exited with code ${result.status}: ${args.boundary ? filteredStderr : result.stderr}`,
-      );
+      const message = `Codex Exec exited with code ${result.status}: ${args.boundary ? filteredStderr : result.stderr}`;
+      throw codexAuthentication({ message }) ?? new Error(message);
     }
   } catch (error) {
     if (error instanceof UnsettledSubprocessError)

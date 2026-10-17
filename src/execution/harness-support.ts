@@ -16,13 +16,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import type {
-  AuthenticationRequest,
-  HarnessRequest,
-  ExecutionRequest,
-  ProducedAssetSet,
-  WorkHandoffNote,
-  WorkItem,
+import {
+  type AuthenticationRequest,
+  AuthenticationRequiredError,
+  type HarnessRequest,
+  type ExecutionRequest,
+  type ProducedAssetSet,
+  type WorkHandoffNote,
+  type WorkItem,
 } from "../contracts.js";
 import type { DiscoveryBody, DiscoveryOutputManifest } from "../discovery.js";
 import { networkFailure } from "../fault.js";
@@ -108,6 +109,27 @@ export function redact(value: string, secrets: string[]): string {
   return result;
 }
 
+/**
+ * Whether an error is an authentication failure, from structure only: the
+ * adapter's typed AuthenticationRequiredError or an HTTP 401 status on the
+ * error or one of its causes. Adapters turn their provider's own signals
+ * (result fields, error codes) into AuthenticationRequiredError; message text
+ * never decides.
+ */
+export function isAuthenticationFailure(error: unknown, depth = 0): boolean {
+  if (!(error instanceof Error) || depth > 5) return false;
+  if (error instanceof AuthenticationRequiredError) return true;
+  const { status, statusCode } = error as {
+    status?: unknown;
+    statusCode?: unknown;
+  };
+  return (
+    status === 401 ||
+    statusCode === 401 ||
+    isAuthenticationFailure(error.cause, depth + 1)
+  );
+}
+
 export function authenticationFailure(
   provider: "codex" | "claude" | "github-copilot",
   error: unknown,
@@ -118,13 +140,7 @@ export function authenticationFailure(
       authentication: { provider: string; command: string };
     }
   | undefined {
-  const detail = error instanceof Error ? error.message : String(error);
-  if (
-    !/(?:no authentication|not authenticated|not logged in|not signed in|login required|sign in required|authentication required|please (?:run )?(?:\/login|login)|authentication(?:_| )failed|unauthenticated|unauthorized|invalid authentication|oauth.*(?:expired|invalid)|\b401\b)/i.test(
-      detail,
-    )
-  )
-    return undefined;
+  if (!isAuthenticationFailure(error)) return undefined;
   const commands = {
     codex: "codex login",
     claude: "claude auth login",

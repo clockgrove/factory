@@ -261,14 +261,20 @@ const NETWORK_CODES = new Set([
   "UND_ERR_BODY_TIMEOUT",
 ]);
 
-/** Whether an error, or one of its causes, is a transport failure. */
+/**
+ * Whether an error, one of its causes or one of its aggregated errors is a
+ * transport failure, from its Node/undici `code` (fetch reports a failed
+ * request as a TypeError whose cause carries the code) or fetch's
+ * `AbortSignal.timeout()` deadline.
+ */
 export function networkFailure(error: unknown, depth = 0): boolean {
   if (!(error instanceof Error) || depth > 5) return false;
   const code = (error as { code?: unknown }).code;
   return (
-    error.message === "fetch failed" ||
-    /Connection|Timeout/.test(error.name) ||
     (typeof code === "string" && NETWORK_CODES.has(code)) ||
+    (error instanceof DOMException && error.name === "TimeoutError") ||
+    (error instanceof AggregateError &&
+      error.errors.some((inner) => networkFailure(inner, depth + 1))) ||
     networkFailure(error.cause, depth + 1)
   );
 }

@@ -797,9 +797,7 @@ export async function withRegistryFiles<T>(
 
 /**
  * Await one archive publisher across controllers, separately from Git's
- * registry lock. The original guard remains a compatibility reservation:
- * upgraded contenders wait on the async lock before taking it, and a live
- * older publisher cannot be ignored or race the protected operation.
+ * registry lock.
  */
 export async function withCheckpointPublication<T>(
   publicationGuard: string,
@@ -813,13 +811,7 @@ export async function withCheckpointPublication<T>(
     "exclusive",
     async () => {
       assertProcessActive();
-      takeGuard(guard);
-      try {
-        assertProcessActive();
-        return await run();
-      } finally {
-        releaseGuard(guard);
-      }
+      return await run();
     },
   );
 }

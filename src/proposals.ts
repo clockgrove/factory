@@ -34,7 +34,6 @@ import type {
   ModelInvocationObservation,
 } from "./contracts.js";
 import { LocalContentStore } from "./content/local.js";
-import { failedWithoutProviderEvidence } from "./compiler/observation.js";
 import { DiagnosticEmitter } from "./diagnostics.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
@@ -87,7 +86,7 @@ interface BindingSource {
 }
 /** The section bytes supplied to the model; never persisted in a journal or draft. */
 type HydratedSource = Omit<BindingSource, "digest"> & { content: string };
-/** A journal written before by-reference sources keeps content; read it as its digest. */
+/** A source's by-reference identity; supplied section bytes are read as their digest. */
 function sourceReference(
   source: BindingSource | HydratedSource,
 ): BindingSource {
@@ -105,7 +104,7 @@ interface Draft {
   objectives: ObjectiveDraft[];
 }
 interface ProposalState {
-  schemaVersion: 1 | 2;
+  schemaVersion: 2;
   binding: Binding;
   observations: ModelInvocationObservation[];
   draft?: Draft;
@@ -116,13 +115,8 @@ interface ProposalState {
       providerAttempt: number;
       providerMaxAttempts: number;
       at: string;
-      /** Set when the dispatch checkpoint admitted this attempt; absent on attempts recorded before it. */
-      dispatchAdmitted?: true;
-      outcome:
-        | "submitted-outcome-unobserved"
-        | "completed"
-        | "failed-settled"
-        | "failed-before-dispatch";
+      dispatchAdmitted: true;
+      outcome: "submitted-outcome-unobserved" | "completed" | "failed-settled";
     }[];
     returned?: ContentRef;
   };
@@ -234,7 +228,6 @@ export function proposalPersistenceReferences(
   journal: ProposalState;
   contentRefs: ContentRef[];
   baseSha: string;
-  gaps: RecoveryCheckpointClosure["gaps"];
 } {
   const row = record(jsonOriginal(bytes), "journal");
   fields(
@@ -250,7 +243,7 @@ export function proposalPersistenceReferences(
       "dependencyChecks",
     ],
   );
-  if (row.schemaVersion !== 1 && row.schemaVersion !== 2)
+  if (row.schemaVersion !== 2)
     throw new Error("Unsupported proposal journal schema");
   if (!/^[0-9a-f-]{36}$/.test(proposalId))
     throw new Error("Invalid proposal identity");
@@ -277,12 +270,9 @@ export function proposalPersistenceReferences(
     throw new Error("Proposal sources are missing");
   for (const source of binding.sources) {
     const entry = record(source, "source");
-    fields(entry, ["path", "heading", "purpose"], ["digest", "content"]);
+    fields(entry, ["path", "heading", "purpose", "digest"]);
     text(entry.path, "source path");
-    if ("content" in entry === "digest" in entry)
-      throw new Error("Proposal source needs exactly its digest");
-    if ("content" in entry) text(entry.content, "source content");
-    else if (!/^[a-f0-9]{64}$/.test(String(entry.digest)))
+    if (!/^[a-f0-9]{64}$/.test(String(entry.digest)))
       throw new Error("Invalid proposal source digest");
     if (
       typeof entry.heading !== "string" ||
@@ -377,15 +367,14 @@ export function proposalPersistenceReferences(
       throw new Error("Invalid proposal attempts");
     for (const [index, value] of generation.attempts.entries()) {
       const attempt = record(value, "attempt");
-      fields(
-        attempt,
-        ["providerAttempt", "providerMaxAttempts", "at", "outcome"],
-        ["dispatchAdmitted"],
-      );
-      if (
-        attempt.dispatchAdmitted !== undefined &&
-        attempt.dispatchAdmitted !== true
-      )
+      fields(attempt, [
+        "providerAttempt",
+        "providerMaxAttempts",
+        "at",
+        "dispatchAdmitted",
+        "outcome",
+      ]);
+      if (attempt.dispatchAdmitted !== true)
         throw new Error("Invalid proposal dispatch admission");
       positive(attempt.providerAttempt);
       positive(attempt.providerMaxAttempts);
@@ -412,22 +401,9 @@ export function proposalPersistenceReferences(
           "submitted-outcome-unobserved",
           "completed",
           "failed-settled",
-          "failed-before-dispatch",
         ].includes(String(attempt.outcome))
       )
         throw new Error("Invalid proposal charged attempt history");
-      if (
-        attempt.outcome === "failed-before-dispatch" &&
-        (attempt.dispatchAdmitted ||
-          !failedWithoutProviderEvidence(
-            journal.observations,
-            String(generation.invocationId),
-            attempt.providerAttempt as number,
-          ))
-      )
-        throw new Error(
-          "Proposal attempt settled before dispatch lacks its no-dispatch evidence",
-        );
       if (
         attempt.outcome === "completed" &&
         !journal.observations.some(
@@ -463,21 +439,19 @@ export function proposalPersistenceReferences(
   };
   if (journal.draft) {
     validateDraft(journal.draft);
-    if (journal.schemaVersion === 2 && !journal.generation?.returned)
+    if (!journal.generation?.returned)
       throw new Error(
         "Proposal draft lacks its exact returned generation original",
       );
-    if (journal.schemaVersion === 2) {
-      const returned = record(
-        jsonOriginal(read(journal.generation!.returned)),
-        "returned generation",
-      );
-      if (
-        JSON.stringify(objectives(returned.objectives, journal.binding)) !==
-        JSON.stringify(journal.draft.objectives)
-      )
-        throw new Error("Proposal draft differs from its returned generation");
-    }
+    const returned = record(
+      jsonOriginal(read(journal.generation.returned)),
+      "returned generation",
+    );
+    if (
+      JSON.stringify(objectives(returned.objectives, journal.binding)) !==
+      JSON.stringify(journal.draft.objectives)
+    )
+      throw new Error("Proposal draft differs from its returned generation");
   }
   if (journal.approval) {
     const approval = record(row.approval, "approval");
@@ -491,18 +465,17 @@ export function proposalPersistenceReferences(
     text(approval.actor, "approval actor");
     timestamp(approval.at);
     objectives(approval.objectives, journal.binding);
-    if (approval.draftRef !== undefined) {
-      const draftBytes = read(approval.draftRef);
-      if (
-        hash(draftBytes.toString("utf8")) !== approval.digest ||
-        JSON.stringify(validateDraft(jsonOriginal(draftBytes))) !==
-          JSON.stringify(approval.objectives)
-      )
-        throw new Error(
-          "Proposal approval differs from its exact reviewed draft bytes",
-        );
-    } else if (journal.schemaVersion === 2)
+    if (approval.draftRef === undefined)
       throw new Error("Proposal approval original is missing");
+    const draftBytes = read(approval.draftRef);
+    if (
+      hash(draftBytes.toString("utf8")) !== approval.digest ||
+      JSON.stringify(validateDraft(jsonOriginal(draftBytes))) !==
+        JSON.stringify(approval.objectives)
+    )
+      throw new Error(
+        "Proposal approval differs from its exact reviewed draft bytes",
+      );
   }
   const issues = record(row.issues, "issues");
   for (const [id, value] of Object.entries(issues)) {
@@ -658,8 +631,7 @@ export function proposalPersistenceReferences(
         throw new Error(
           "Proposal pending effect differs from its retained request",
         );
-    } else if (journal.schemaVersion === 2)
-      throw new Error("Proposal pending mutation has no exact request");
+    } else throw new Error("Proposal pending mutation has no exact request");
   }
   if (journal.published !== undefined && journal.published !== true)
     throw new Error("Invalid proposal publication flag");
@@ -670,64 +642,51 @@ export function proposalPersistenceReferences(
       Object.keys(journal.issues).length !== journal.approval.objectives.length)
   )
     throw new Error("Proposal publication lacks its complete settled batch");
-  if (journal.schemaVersion === 2) {
-    for (const [index, attempt] of (
-      journal.generation?.attempts ?? []
-    ).entries())
-      if (
-        attempt.outcome === "submitted-outcome-unobserved" &&
-        (journal.pending?.kind !== "provider" ||
-          journal.pending.id !== journal.generation!.invocationId ||
-          index !== journal.generation!.attempts.length - 1)
-      )
-        throw new Error(
-          "Unknown proposal provider submission lost its pending effect fence",
-        );
-    for (const [index, mutation] of (journal.mutations ?? []).entries())
-      if (
-        mutation.outcome === "submitted-outcome-unobserved" &&
-        journal.pending?.mutationIndex !== index
-      )
-        throw new Error(
-          "Unknown proposal mutation lost its pending effect fence",
-        );
-    if (journal.published)
-      for (const objective of journal.approval!.objectives) {
-        const issue = journal.issues[objective.id]!;
-        const check = journal.dependencyChecks
-          ?.filter(
-            (check) =>
-              check.route ===
-              `repos/${repository}/issues/${issue.number}/dependencies/blocked_by`,
-          )
-          .at(-1);
-        if (!check)
-          throw new Error(
-            "Proposal published dependencies lack their retained observations",
-          );
-        const actual = jsonOriginal(read(check.body)) as { id: number }[];
-        const expected = objective.dependencies.map(
-          (id) => journal.issues[id]!.id,
-        );
-        if (
-          actual.length !== expected.length ||
-          actual.some((dependency) => !expected.includes(dependency.id))
+  for (const [index, attempt] of (journal.generation?.attempts ?? []).entries())
+    if (
+      attempt.outcome === "submitted-outcome-unobserved" &&
+      (journal.pending?.kind !== "provider" ||
+        journal.pending.id !== journal.generation!.invocationId ||
+        index !== journal.generation!.attempts.length - 1)
+    )
+      throw new Error(
+        "Unknown proposal provider submission lost its pending effect fence",
+      );
+  for (const [index, mutation] of (journal.mutations ?? []).entries())
+    if (
+      mutation.outcome === "submitted-outcome-unobserved" &&
+      journal.pending?.mutationIndex !== index
+    )
+      throw new Error(
+        "Unknown proposal mutation lost its pending effect fence",
+      );
+  if (journal.published)
+    for (const objective of journal.approval!.objectives) {
+      const issue = journal.issues[objective.id]!;
+      const check = journal.dependencyChecks
+        ?.filter(
+          (check) =>
+            check.route ===
+            `repos/${repository}/issues/${issue.number}/dependencies/blocked_by`,
         )
-          throw new Error(
-            "Proposal published dependency observation differs from its approved batch",
-          );
-      }
-  }
-  const gaps: RecoveryCheckpointClosure["gaps"] = [];
-  if (journal.schemaVersion === 1)
-    gaps.push({
-      path: `proposals/${proposalId}.json`,
-      reason:
-        "Legacy proposal does not retain every exact generation, approval or mutation original",
-      availability: "unavailable",
-      required: false,
-    });
-  return { journal, contentRefs: refs, baseSha: journal.binding.baseSha, gaps };
+        .at(-1);
+      if (!check)
+        throw new Error(
+          "Proposal published dependencies lack their retained observations",
+        );
+      const actual = jsonOriginal(read(check.body)) as { id: number }[];
+      const expected = objective.dependencies.map(
+        (id) => journal.issues[id]!.id,
+      );
+      if (
+        actual.length !== expected.length ||
+        actual.some((dependency) => !expected.includes(dependency.id))
+      )
+        throw new Error(
+          "Proposal published dependency observation differs from its approved batch",
+        );
+    }
+  return { journal, contentRefs: refs, baseSha: journal.binding.baseSha };
 }
 /** Exact private journals and declared referenced originals; mutable draft files are excluded. */
 export function proposalPersistenceClosure(
@@ -771,7 +730,6 @@ export function proposalPersistenceClosure(
       commitSha: description.baseSha,
       role: "proposal-source",
     });
-    closure.gaps.push(...description.gaps);
   }
   return closure;
 }
@@ -1000,12 +958,9 @@ function outputPath(config: FactoryConfig, path: string | undefined): string {
 }
 /**
  * A later proposal may start only when no retained provider submission remains
- * unknown. An attempt recorded before any dispatch checkpoint whose only
- * evidence is a start and a failure never left the host, so it settles here.
+ * unknown.
  */
-export function settleOrRefuseUnknownProviderSubmissions(
-  repository: string,
-): void {
+export function refuseUnknownProviderSubmissions(repository: string): void {
   const directory = join(stateRoot(repository), "proposals");
   if (!existsSync(directory)) return;
   const store = new LocalContentStore(join(stateRoot(repository), "content"));
@@ -1019,22 +974,6 @@ export function settleOrRefuseUnknownProviderSubmissions(
       name.slice(0, -5),
       (ref) => store.readBytes(ref),
     ).journal;
-    const unsent = retained.generation?.attempts.at(-1);
-    if (
-      retained.pending?.kind === "provider" &&
-      retained.pending.id === retained.generation?.invocationId &&
-      unsent?.outcome === "submitted-outcome-unobserved" &&
-      !unsent.dispatchAdmitted &&
-      failedWithoutProviderEvidence(
-        retained.observations,
-        retained.generation.invocationId,
-        unsent.providerAttempt,
-      )
-    ) {
-      unsent.outcome = "failed-before-dispatch";
-      delete retained.pending;
-      save(path, retained);
-    }
     if (retained.pending?.kind === "provider")
       throw new Error(
         "A retained proposal provider submission remains unknown; inspect its original invocation before starting another proposal",
@@ -1051,7 +990,7 @@ async function generate(
     throw new Error(
       "propose requires --source DOC#HEADING or --file FILE --approve SHA256",
     );
-  settleOrRefuseUnknownProviderSubmissions(config.repository);
+  refuseUnknownProviderSubmissions(config.repository);
   const proposalId = randomUUID();
   const path = journalPath(config, proposalId);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });

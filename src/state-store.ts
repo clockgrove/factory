@@ -470,8 +470,7 @@ function parsePreparation(
     throw new Error(
       "Invalid preparation snapshot; operator direction required",
     );
-  if (Object.hasOwn(value, "approvedPlaybookPin"))
-    assertApprovedPlaybookPin(value.approvedPlaybookPin);
+  assertApprovedPlaybookPin(value.approvedPlaybookPin);
   if (
     value.plan &&
     JSON.stringify(value.plan.approvedPlaybookPin) !==
@@ -810,7 +809,6 @@ export function continuationConfigurationMatches(
   try {
     assertContinuationRestoration(state);
     return (
-      !!receipt.source &&
       receipt.original.configDigest === receipt.source.configDigest &&
       receipt.source.authorityDigest === factoryAuthorityDigest(config) &&
       receipt.installation.authorityDigest === factoryAuthorityDigest(config) &&
@@ -1270,10 +1268,6 @@ export async function restoreRecoveryCheckpoint(args: {
             return data;
           },
         );
-        if (description.gaps.some((gap) => gap.required !== false))
-          throw new Error(
-            "Proposal original has an unresolved required reference",
-          );
         gitObjects.set(`commit:${description.baseSha}`, {
           sha: description.baseSha,
           kind: "commit",
@@ -1408,6 +1402,9 @@ export async function restoreRecoveryCheckpoint(args: {
       reason: string;
     }[] = [];
     for (const { state, ref, retired } of originals) {
+      // Continuations travel only in private-history, whose manifest always
+      // carries its publisher authority.
+      const authority = source!;
       const previous = readContinuation(
         config.repository,
         state.objective,
@@ -1424,30 +1421,26 @@ export async function restoreRecoveryCheckpoint(args: {
           configDigest: state.configDigest,
           schemaVersion: state.schemaVersion,
         },
-        ...(source
-          ? {
-              source:
-                state.restoration &&
-                state.restoration.installation.configDigest ===
-                  source.configDigest &&
-                state.restoration.installation.checkout ===
-                  source.hostLayout.checkout &&
-                state.restoration.installation.authorityDigest ===
-                  source.authorityDigest &&
-                state.restoration.source?.authorityDigest ===
-                  source.authorityDigest &&
-                factoryConfigDigest({
-                  ...config,
-                  checkout: source.hostLayout.checkout,
-                }) === source.configDigest
-                  ? structuredClone(state.restoration.source)
-                  : {
-                      authorityDigest: source.authorityDigest,
-                      configDigest: source.configDigest,
-                      ...source.hostLayout,
-                    },
-            }
-          : {}),
+        source:
+          state.restoration &&
+          state.restoration.installation.configDigest ===
+            authority.configDigest &&
+          state.restoration.installation.checkout ===
+            authority.hostLayout.checkout &&
+          state.restoration.installation.authorityDigest ===
+            authority.authorityDigest &&
+          state.restoration.source.authorityDigest ===
+            authority.authorityDigest &&
+          factoryConfigDigest({
+            ...config,
+            checkout: authority.hostLayout.checkout,
+          }) === authority.configDigest
+            ? structuredClone(state.restoration.source)
+            : {
+                authorityDigest: authority.authorityDigest,
+                configDigest: authority.configDigest,
+                ...authority.hostLayout,
+              },
         installation: {
           identity: previous?.installation.identity ?? randomUUID(),
           configDigest: factoryConfigDigest(config),

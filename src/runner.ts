@@ -166,11 +166,7 @@ import {
   endProviderLimitWaits,
   waitOf,
 } from "./step.js";
-import {
-  applyWorkCorrection,
-  recordSavedResultRefusal,
-  recordWorkFailure,
-} from "./work-repair.js";
+import { applyWorkCorrection, recordWorkFailure } from "./work-repair.js";
 
 export type { ApplicationServices } from "./runner/ownership.js";
 export { CoordinatorHandoff } from "./runner/ownership.js";
@@ -1950,11 +1946,6 @@ export function repairWorkItem(
       throw new Error(
         "Operator corrections must declare their own provenance, not controller-checked readiness",
       );
-    if (recordSavedResultRefusal(state, input.item, config.checkout)) {
-      // This is a new authenticated observation of a retained refusal, not
-      // a historical command failure. Persist it even if the correction is refused.
-      saveState(statePath(config.repository, objective), state);
-    }
     applyWorkCorrection(state, input.item, input.correction);
     // The repair answers the stop the item's failure caused, as retry does.
     delete state.error;

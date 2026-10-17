@@ -248,81 +248,6 @@ export function recordWorkFailure(
 }
 
 /**
- * A retained current unpublished refusal; this preview creates no failure event.
- * States saved before refusals recorded a failure keep only the decision: an
- * item failed at validation with no failure record, whose last decision
- * refused its exact tree, stopped on that refusal.
- */
-export function savedResultRefusal(state: FactoryState, id: string) {
-  const work = state.work[id];
-  const refusal = work?.acceptanceDecisions?.at(-1);
-  const item = state.graph.items.find((item) => item.id === id);
-  if (
-    !work ||
-    work.recovery?.failure ||
-    work.status !== "failed" ||
-    work.step !== "validate" ||
-    work.integratedSha ||
-    work.pullRequest ||
-    work.acceptancePending ||
-    !work.attempt ||
-    !work.changeRef ||
-    !work.treeSha ||
-    work.validation?.treeSha !== work.treeSha ||
-    refusal?.outcome !== "refuse" ||
-    refusal.treeSha !== work.treeSha ||
-    !item ||
-    !resultReviewCriteria(state.graph, item).includes(refusal.criterion) ||
-    !work.error ||
-    state.error ||
-    state.cancelRequested ||
-    state.cancelledAt ||
-    state.finalAcceptance ||
-    state.finalValidation?.passed ||
-    state.objectiveClosure === "complete"
-  )
-    return undefined;
-  return { detail: work.error, digest: failureDigest(work.error) };
-}
-
-/** Reconcile a genuine saved refusal only during locked, settled operator repair. */
-export function recordSavedResultRefusal(
-  state: FactoryState,
-  id: string,
-  checkout: string,
-): boolean {
-  const refusal = savedResultRefusal(state, id);
-  if (!refusal) return false;
-  if (
-    !["paused", "draining"].includes(state.coordinator?.mode ?? "") ||
-    state.coordinator?.cancelError ||
-    state.coordinator?.processes?.length ||
-    Object.values(state.repeats ?? {}).some((record) => record.inFlight)
-  )
-    throw new Error("Saved refusal repair requires paused, settled ownership");
-  const work = state.work[id]!;
-  const tree = pinnedGitRaw(checkout, "rev-parse", `${work.changeRef}^{tree}`)
-    .toString("utf8")
-    .trim();
-  if (tree !== work.treeSha)
-    throw new Error("Saved refusal differs from the exact candidate tree");
-  // recordWorkFailure observes the failure now. The original decision and
-  // its time/reason stay in acceptanceDecisions; no command receipt is invented.
-  const decision = work.acceptanceDecisions!.at(-1)!;
-  recordWorkFailure(
-    state,
-    id,
-    new SemanticAcceptanceFailure(refusal.detail, {
-      treeSha: decision.treeSha,
-      criterion: decision.criterion,
-      source: "operator",
-      decision,
-    }),
-  );
-  return true;
-}
-
-/**
  * The correction for a model result review's refusal: its refused findings,
  * each with its criterion index and cited evidence. The reviewer already
  * stated each gap against the exact candidate, so a diagnosis call would only
@@ -367,16 +292,7 @@ export function reviewFindingsCorrection(
       finding: refusal.finding,
       evidence: refusal.evidence,
     },
-    // A refusal retained before each finding kept its own references
-    // resolves them from the first finding's, as that review recorded them.
-    ...(refusal.others ?? []).map((other) => ({
-      ...other,
-      evidence:
-        other.evidence ??
-        refusal.evidence.filter((entry) =>
-          other.finding.evidenceIds.includes(entry.id),
-        ),
-    })),
+    ...(refusal.others ?? []),
   ];
   const reviewed = resultReviewCriteria(state.graph, item);
   if (
@@ -1183,7 +1099,7 @@ export function diagnosisFiles(
     refusal?.source === "model"
       ? [
           ...refusal.evidence,
-          ...(refusal.others ?? []).flatMap((other) => other.evidence ?? []),
+          ...(refusal.others ?? []).flatMap((other) => other.evidence),
         ]
       : [];
   const failureText = [

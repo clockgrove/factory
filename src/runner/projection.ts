@@ -246,7 +246,6 @@ export function activateProjectedObjective(args: {
     approvedPlaybookAdmission,
     installationConfigDigest,
     plan.graphDigest,
-    preparation.approvedPlaybookPin !== undefined,
   );
   const workflowRecipeAdmission: WorkflowRecipeAdmission | undefined =
     plan.workflowRecipe
@@ -329,10 +328,8 @@ export function activateProjectedObjective(args: {
       ? { githubLiveStatus: preparation.githubLiveStatus }
       : {}),
     publicationContract: "exact-request-v1",
-    ...(approvedPlaybookAdmission ? { approvedPlaybookAdmission } : {}),
-    ...(preparation.approvedPlaybookPin !== undefined
-      ? { approvedPlaybookPin: preparation.approvedPlaybookPin }
-      : {}),
+    approvedPlaybookAdmission,
+    approvedPlaybookPin: preparation.approvedPlaybookPin,
     ...(preparation.planningRecovery
       ? { planningRecovery: preparation.planningRecovery }
       : {}),

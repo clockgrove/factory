@@ -533,6 +533,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     repository,
     objective: 1,
     runId: "cancelled-orchard-documentation",
+    approvedPlaybookPin: null,
     configDigest: factoryConfigDigest(config),
     baseSha: git("rev-parse", "HEAD"),
     objectiveBodyDigest: learningDigest("Observe orchard API documentation"),
@@ -797,14 +798,6 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     ),
     true,
   );
-  const legacyAssets = structuredClone(capturedAssets);
-  delete legacyAssets[0].manifestRef;
-  const legacyDescription = describeMemoryBodyReferences(
-    "attempt-observation",
-    Buffer.from(JSON.stringify({ assets: legacyAssets })),
-  );
-  assert.equal(legacyDescription.gaps[0].availability, "missing-legacy");
-  assert.equal(legacyDescription.gaps[0].required, false);
   const mismatchedAssets = structuredClone(capturedAssets);
   mismatchedAssets[0].manifestRef = sourceRef;
   assert.throws(
@@ -4305,6 +4298,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     repository: preparationRepository,
     objective: producer.objective,
     runId: "recipe-pre-provider-inputs",
+    approvedPlaybookPin: null,
     configDigest: createHash("sha256")
       .update(JSON.stringify(recipeAdmission))
       .digest("hex"),
@@ -5417,6 +5411,15 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     baseSha,
     graph: routeGraph,
     planGraphDigest: graphDigest(routeGraph),
+    approvedPlaybookPin: null,
+    approvedPlaybookAdmission: {
+      approvedPlaybookPin: null,
+      configDigest: "a".repeat(64),
+      graphDigest: graphDigest(routeGraph),
+      packetDigest: "c".repeat(64),
+      reviewDigest: "d".repeat(64),
+      sourcePacketDigest: "e".repeat(64),
+    },
     capacity: { concurrency: 1 },
     autonomy: resolveAutonomy(),
     coordinator: {
@@ -5545,6 +5548,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     (item) => item.id === "integration",
   ).dependencies = [inventory.id, "has-files"];
   emptyRoute.planGraphDigest = graphDigest(emptyRoute.graph);
+  emptyRoute.approvedPlaybookAdmission.graphDigest = emptyRoute.planGraphDigest;
   delete emptyRoute.issueByItemId["no-files"];
   delete emptyRoute.work["no-files"];
   emptyRoute.work["has-files"] = { status: "pending" };
@@ -6179,6 +6183,15 @@ test("checkpoint retains authenticated worker returns from a configured private 
     baseSha,
     graph,
     planGraphDigest: graphDigest(graph),
+    approvedPlaybookPin: null,
+    approvedPlaybookAdmission: {
+      approvedPlaybookPin: null,
+      configDigest: factoryConfigDigest(config),
+      graphDigest: graphDigest(graph),
+      packetDigest: "c".repeat(64),
+      reviewDigest: "d".repeat(64),
+      sourcePacketDigest: "e".repeat(64),
+    },
     capacity: { concurrency: 1 },
     autonomy: resolveAutonomy(),
     issueByItemId: { history: 2 },
@@ -6274,6 +6287,12 @@ test("checkpoint retains authenticated worker returns from a configured private 
     binding,
     sequence: 0,
     createdAt: new Date().toISOString(),
+    authority: {
+      schemaVersion: 1,
+      authorityDigest: factoryAuthorityDigest(config),
+      configDigest: factoryConfigDigest(config),
+      hostLayout: { checkout, stateRoot: privateRoot },
+    },
   };
   const bounds = { maxBytes: 64 * 1024 * 1024, maxFiles: 4096 };
   assertRecoveryCheckpointManifest(manifest, binding, bounds);
@@ -6453,6 +6472,15 @@ test("stopped collection freezes a completed owned local return before restart a
     baseSha,
     graph,
     planGraphDigest: graphDigest(graph),
+    approvedPlaybookPin: null,
+    approvedPlaybookAdmission: {
+      approvedPlaybookPin: null,
+      configDigest: factoryConfigDigest(config),
+      graphDigest: graphDigest(graph),
+      packetDigest: "c".repeat(64),
+      reviewDigest: "d".repeat(64),
+      sourcePacketDigest: "e".repeat(64),
+    },
     capacity: { concurrency: 1 },
     autonomy: resolveAutonomy(),
     issueByItemId: { local: 2 },
@@ -6569,6 +6597,7 @@ test("stopped collection freezes a completed owned local return before restart a
   writeFileSync(worker.resultPath, originalBytes, { mode: 0o600 });
   const foreign = structuredClone(state);
   foreign.configDigest = "f".repeat(64);
+  foreign.approvedPlaybookAdmission.configDigest = foreign.configDigest;
   for (const ref of Object.values(foreign.agentSessions))
     ref.scope.configDigest = foreign.configDigest;
   saveState(path, foreign);

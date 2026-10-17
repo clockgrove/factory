@@ -97,7 +97,6 @@ import {
   normalizeTokenUsage,
   tokenCategories,
 } from "./usage.js";
-import { savedResultRefusal } from "./work-repair.js";
 
 /** A scope's structured wait and failing step, redacted for status. */
 function waitStatus(
@@ -2395,16 +2394,13 @@ export function statusDocument(
     charges: state.charges ?? {},
     repairs: Object.fromEntries(
       Object.entries(state.work)
-        .filter(([id, work]) => work.recovery || savedResultRefusal(state, id))
+        .filter(([, work]) => work.recovery)
         .map(([id, work]) => [
           id,
           {
             phase: work.recovery?.phase ?? null,
             failureClass: work.recovery?.failure?.classification ?? null,
-            failureDigest:
-              work.recovery?.failure?.digest ??
-              savedResultRefusal(state, id)?.digest ??
-              null,
+            failureDigest: work.recovery?.failure?.digest ?? null,
             failureEvent: work.recovery?.failure?.event ?? null,
             blamedPredecessor:
               work.recovery?.failure?.predecessor?.item ?? null,

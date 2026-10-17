@@ -126,16 +126,16 @@ import {
  * diagnosis is bounded per failure by PAID_ATTEMPTS instead, never by both.
  * A plan step uses paidPlanningModel, which also counts an invalid review.
  */
-/** Load only the Objective's retained selection; legacy absence never selects current advice. */
+/** Load only the Objective's retained selection. */
 export function bindPlanningPlaybook(
   model: PlanningModel,
   repository: string,
-  pin: ApprovedPlaybookPin | undefined,
+  pin: ApprovedPlaybookPin,
 ): PlanningModel {
-  if (pin !== undefined) assertApprovedPlaybookPin(pin);
+  assertApprovedPlaybookPin(pin);
   let playbook: ApprovedPlaybook | undefined;
   try {
-    playbook = readPinnedPlaybook(repository, pin ?? null);
+    playbook = readPinnedPlaybook(repository, pin);
   } catch (error) {
     throw attachFault(
       error instanceof Error

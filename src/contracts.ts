@@ -440,21 +440,12 @@ export function assertApprovedPlaybookAdmission(
   admission: unknown,
   configDigest: unknown,
   originalGraphDigest: unknown,
-  pinPresent: boolean,
-): void {
-  if (admission === undefined) {
-    if (pinPresent)
-      throw new Error(
-        "Approved playbook pin lacks its original admission binding",
-      );
-    return; // Historical absence remains no learned input.
-  }
-  if (
-    !pinPresent ||
-    !admission ||
-    typeof admission !== "object" ||
-    Array.isArray(admission)
-  )
+): asserts admission is ApprovedPlaybookAdmission {
+  if (admission === undefined)
+    throw new Error(
+      "Approved playbook pin lacks its original admission binding",
+    );
+  if (!admission || typeof admission !== "object" || Array.isArray(admission))
     throw new Error("Approved playbook admission differs from the active pin");
   const receipt = admission as Record<string, unknown>;
   if (

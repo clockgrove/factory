@@ -25,22 +25,14 @@ import type {
   ModelInvocationUsage,
 } from "../contracts.js";
 import {
-  attachedFault,
   cancelledFault,
   classifyFaults,
   decision,
   StepFault,
 } from "../fault.js";
 import { packageManagerUpdate } from "../package-manager-update.js";
-import {
-  addWorktree,
-  hasUnresolvedSubprocesses,
-  removeWorktree,
-} from "../process.js";
-import {
-  isCheckpointAdmissionFailure,
-  privateCheckpointBounds,
-} from "../recovery-checkpoint.js";
+import { addWorktree } from "../process.js";
+import { isCheckpointAdmissionFailure } from "../recovery-checkpoint.js";
 import { endAttempt, stoppedFault, transportFailure } from "./attempt.js";
 import { verifyClaudeBootstrap } from "./claude-managed-bootstrap.js";
 import {
@@ -61,16 +53,16 @@ import {
   materializeClaudeSnapshot,
   parseClaudeResultSnapshot,
 } from "./claude-managed-transfer.js";
-import { executionFault } from "./fault.js";
 import {
-  workerSourceDelivery,
-  readProducedAssets,
-  workItemPrompt,
-} from "./harness-support.js";
+  collectManagedResult,
+  managedCessationContext,
+  saveManagedCessation,
+  saveManagedHandle,
+} from "./managed-base.js";
+import { executionFault } from "./fault.js";
+import { workerSourceDelivery, workItemPrompt } from "./harness-support.js";
 import {
   authenticateRejectedCollectionReceipt,
-  collectWorktreeResult,
-  freezeRejectedCollection,
   type RejectedCollectionReceipt,
 } from "./local.js";
 
@@ -201,60 +193,20 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
   private cessationContext(
     context?: ExecutionContext,
   ): ExecutionContext | undefined {
-    if (!context) return undefined;
-    return {
-      ...context,
-      admitEffect: async (reason) => {
-        try {
-          await context.admitEffect?.(reason);
-        } catch (error) {
-          if (!isCheckpointAdmissionFailure(error)) throw error;
-        }
-      },
-    };
+    return managedCessationContext(context);
   }
-  private async saveCessation(
+  private saveCessation(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<void> {
-    try {
-      await this.save(handle, context, "before-effect");
-    } catch (error) {
-      if (!isCheckpointAdmissionFailure(error)) throw error;
-      delete this.active(handle).checkpointAdmission;
-      context?.checkpoint(handle);
-    }
+    return saveManagedCessation(handle, this.active(handle), context);
   }
-  private async save(
+  private save(
     handle: ExecutionHandle,
     context?: ExecutionContext,
     reason: "before-effect" | "settled" = "settled",
   ): Promise<void> {
-    if (!context)
-      throw new Error(
-        "Managed execution requires controller checkpoint authority",
-      );
-    const data = this.active(handle);
-    if (
-      data.checkpointAdmission &&
-      data.checkpointAdmission.phase !== data.phase
-    )
-      delete data.checkpointAdmission;
-    context.checkpoint(handle);
-    try {
-      await context.admitEffect?.(reason);
-    } catch (error) {
-      if (isCheckpointAdmissionFailure(error) && context.checkpointedEffects) {
-        data.checkpointAdmission = {
-          phase: data.phase,
-          boundary: reason,
-          knownNotDispatched: reason === "before-effect",
-          at: new Date().toISOString(),
-        };
-        context.checkpoint(handle);
-      }
-      throw error;
-    }
+    return saveManagedHandle(handle, this.active(handle), context, reason);
   }
   private remaining(data: Active): number {
     const ms =
@@ -1163,87 +1115,40 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
     const stage = join(data.root, "result-files");
     materializeClaudeSnapshot(stage, snapshot);
     const worktree = join(data.root, "result");
-    let collectionAcknowledged = false;
     await addWorktree(this.args.checkout, worktree, data.request.baseSha);
-    try {
-      for (const name of readdirSync(worktree))
-        if (name !== ".git")
-          rmSync(join(worktree, name), { recursive: true, force: true });
-      for (const name of readdirSync(stage))
-        cpSync(join(stage, name), join(worktree, name), { recursive: true });
-      const evidenceBytes = readFileSync(
-        join(data.root, "provider-evidence.json"),
-      );
-      if (claudeByteDigest(evidenceBytes) !== data.evidenceDigest)
-        throw new Error("Captured Claude provider evidence changed locally");
-      writeFileSync(join(data.root, "result-evidence.json"), evidenceBytes, {
-        mode: 0o600,
-      });
-      const evidence = {
-        harness: "claude-managed-agents",
-        sessionId: data.sessionId,
-        bootstrap: data.bootstrap,
-        artifact: data.artifact,
-        providerEvidenceDigest: data.evidenceDigest,
-        providerEvidenceFile: "result-evidence.json",
-      };
-      return await collectWorktreeResult(
-        this.args.checkout,
-        worktree,
-        data.request,
-        this.args.contentStore,
-        {
-          assets: readProducedAssets({ item: data.request.item, worktree }),
-          evidence,
-        },
-        async (collected) => {
-          data.result = collected;
-          await this.save(handle, context);
-          await context.admitEffect?.("explicit");
-          collectionAcknowledged = true;
-        },
-        undefined,
-        async (assets) => {
-          if (!privateCheckpointBounds() || !assets.length) return;
-          data.collectedAssets = structuredClone(assets);
-          // Freeze source or rejection before requiring a complete remote ACK.
-          context.checkpoint(handle);
-        },
-      );
-    } catch (error) {
-      if (
-        privateCheckpointBounds() &&
-        attachedFault(error)?.kind === "work" &&
-        !hasUnresolvedSubprocesses()
-      ) {
-        data.rejectedCollection = await freezeRejectedCollection({
-          checkout: this.args.checkout,
-          worktree,
-          request: data.request,
-          store: this.args.contentStore,
-          error,
-          capturedAssets: data.collectedAssets,
-          rawReturn: {
-            provenance: "managed-original-artifact",
-            identity: data.artifact!.fileId,
-            bytes,
-          },
+    return collectManagedResult({
+      handle,
+      data,
+      context,
+      checkout: this.args.checkout,
+      contentStore: this.args.contentStore,
+      worktree,
+      artifact: { identity: data.artifact!.fileId, bytes },
+      save: () => this.save(handle, context),
+      populate: async () => {
+        for (const name of readdirSync(worktree))
+          if (name !== ".git")
+            rmSync(join(worktree, name), { recursive: true, force: true });
+        for (const name of readdirSync(stage))
+          cpSync(join(stage, name), join(worktree, name), { recursive: true });
+        const evidenceBytes = readFileSync(
+          join(data.root, "provider-evidence.json"),
+        );
+        if (claudeByteDigest(evidenceBytes) !== data.evidenceDigest)
+          throw new Error("Captured Claude provider evidence changed locally");
+        writeFileSync(join(data.root, "result-evidence.json"), evidenceBytes, {
+          mode: 0o600,
         });
-        await this.save(handle, context);
-        await context.admitEffect?.("explicit");
-        collectionAcknowledged = true;
-      }
-      throw error;
-    } finally {
-      if (
-        (data.result || data.rejectedCollection) &&
-        collectionAcknowledged &&
-        !hasUnresolvedSubprocesses()
-      ) {
-        await this.save(handle, context);
-        await context.admitEffect?.("explicit");
-        await removeWorktree(this.args.checkout, worktree);
-      }
-    }
+        const evidence = {
+          harness: "claude-managed-agents",
+          sessionId: data.sessionId,
+          bootstrap: data.bootstrap,
+          artifact: data.artifact,
+          providerEvidenceDigest: data.evidenceDigest,
+          providerEvidenceFile: "result-evidence.json",
+        };
+        return evidence;
+      },
+    });
   }
 }

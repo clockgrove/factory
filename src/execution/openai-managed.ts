@@ -12,25 +12,24 @@ import type {
   ExecutionResult,
 } from "../contracts.js";
 import {
-  attachedFault,
   cancelledFault,
   classifyFaults,
   decision,
   StepFault,
 } from "../fault.js";
-import { hasUnresolvedSubprocesses, removeWorktree } from "../process.js";
-import {
-  isCheckpointAdmissionFailure,
-  privateCheckpointBounds,
-} from "../recovery-checkpoint.js";
+import { isCheckpointAdmissionFailure } from "../recovery-checkpoint.js";
 import { refuseUnknownFields } from "../unknown-fields.js";
 import { endAttempt, stoppedFault, transportFailure } from "./attempt.js";
+import {
+  collectManagedResult,
+  managedCessationContext,
+  saveManagedCessation,
+  saveManagedHandle,
+} from "./managed-base.js";
 import { executionFault, missingCredential } from "./fault.js";
-import { readProducedAssets, workItemPrompt } from "./harness-support.js";
+import { workItemPrompt } from "./harness-support.js";
 import {
   authenticateRejectedCollectionReceipt,
-  collectWorktreeResult,
-  freezeRejectedCollection,
   type RejectedCollectionReceipt,
 } from "./local.js";
 import {
@@ -231,60 +230,20 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
   private cessationContext(
     context?: ExecutionContext,
   ): ExecutionContext | undefined {
-    if (!context) return undefined;
-    return {
-      ...context,
-      admitEffect: async (reason) => {
-        try {
-          await context.admitEffect?.(reason);
-        } catch (error) {
-          if (!isCheckpointAdmissionFailure(error)) throw error;
-        }
-      },
-    };
+    return managedCessationContext(context);
   }
-  private async saveCessation(
+  private saveCessation(
     handle: ExecutionHandle,
     context?: ExecutionContext,
   ): Promise<void> {
-    try {
-      await this.save(handle, context, "before-effect");
-    } catch (error) {
-      if (!isCheckpointAdmissionFailure(error)) throw error;
-      delete this.active(handle).checkpointAdmission;
-      context?.checkpoint(handle);
-    }
+    return saveManagedCessation(handle, this.active(handle), context);
   }
-  private async save(
+  private save(
     handle: ExecutionHandle,
     context?: ExecutionContext,
     reason: "before-effect" | "settled" = "settled",
   ): Promise<void> {
-    if (!context)
-      throw new Error(
-        "Managed execution requires controller checkpoint authority",
-      );
-    const data = this.active(handle);
-    if (
-      data.checkpointAdmission &&
-      data.checkpointAdmission.phase !== data.phase
-    )
-      delete data.checkpointAdmission;
-    context.checkpoint(handle);
-    try {
-      await context.admitEffect?.(reason);
-    } catch (error) {
-      if (isCheckpointAdmissionFailure(error) && context.checkpointedEffects) {
-        data.checkpointAdmission = {
-          phase: data.phase,
-          boundary: reason,
-          knownNotDispatched: reason === "before-effect",
-          at: new Date().toISOString(),
-        };
-        context.checkpoint(handle);
-      }
-      throw error;
-    }
+    return saveManagedHandle(handle, this.active(handle), context, reason);
   }
   private remaining(data: Active): number {
     const cleanup =
@@ -900,83 +859,36 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     };
     await this.save(handle, context);
     const worktree = join(data.root, "result");
-    let collectionAcknowledged = false;
-    try {
-      await importOpenAIResult({
-        file,
-        checkout: this.args.checkout,
-        worktree,
-        baseSha: data.request.baseSha,
-        attemptId: handle.identity,
-        inputDigest: data.inputDigest,
-      });
-      const evidence = {
-        harness: "openai-agents",
-        sessionId: data.sessionId,
-        turnId: data.turnId,
-        inputDigest: data.inputDigest,
-        artifact: data.artifact,
-        usage: data.usage ?? null,
-        model: this.args.config.model,
-      };
-      this.remaining(data);
-      return await collectWorktreeResult(
-        this.args.checkout,
-        worktree,
-        data.request,
-        this.args.contentStore,
-        {
-          assets: readProducedAssets({ item: data.request.item, worktree }),
-          evidence,
-        },
-        async (collected) => {
-          data.result = collected;
-          await this.save(handle, context);
-          await context.admitEffect?.("explicit");
-          collectionAcknowledged = true;
-        },
-        undefined,
-        async (assets) => {
-          if (!privateCheckpointBounds() || !assets.length) return;
-          data.collectedAssets = structuredClone(assets);
-          // Freeze source or rejection before requiring a complete remote ACK.
-          context.checkpoint(handle);
-        },
-      );
-    } catch (error) {
-      if (
-        privateCheckpointBounds() &&
-        attachedFault(error)?.kind === "work" &&
-        !hasUnresolvedSubprocesses()
-      ) {
-        data.rejectedCollection = await freezeRejectedCollection({
+    return collectManagedResult({
+      handle,
+      data,
+      context,
+      checkout: this.args.checkout,
+      contentStore: this.args.contentStore,
+      worktree,
+      artifact: { identity: data.artifact!.id, bytes },
+      save: () => this.save(handle, context),
+      populate: async () => {
+        await importOpenAIResult({
+          file,
           checkout: this.args.checkout,
           worktree,
-          request: data.request,
-          store: this.args.contentStore,
-          error,
-          capturedAssets: data.collectedAssets,
-          rawReturn: {
-            provenance: "managed-original-artifact",
-            identity: data.artifact!.id,
-            bytes,
-          },
+          baseSha: data.request.baseSha,
+          attemptId: handle.identity,
+          inputDigest: data.inputDigest,
         });
-        await this.save(handle, context);
-        await context.admitEffect?.("explicit");
-        collectionAcknowledged = true;
-      }
-      throw error;
-    } finally {
-      if (
-        (data.result || data.rejectedCollection) &&
-        collectionAcknowledged &&
-        !hasUnresolvedSubprocesses()
-      ) {
-        await this.save(handle, context);
-        await context.admitEffect?.("explicit");
-        await removeWorktree(this.args.checkout, worktree);
-      }
-    }
+        const evidence = {
+          harness: "openai-agents",
+          sessionId: data.sessionId,
+          turnId: data.turnId,
+          inputDigest: data.inputDigest,
+          artifact: data.artifact,
+          usage: data.usage ?? null,
+          model: this.args.config.model,
+        };
+        this.remaining(data);
+        return evidence;
+      },
+    });
   }
 }

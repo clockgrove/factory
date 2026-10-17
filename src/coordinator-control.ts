@@ -378,7 +378,7 @@ export async function requestControl(
 }
 
 /** How long a command waits for a live owner's missing endpoint. */
-const ENDPOINT_WAIT_MS = 10_000;
+const ENDPOINT_WAIT_MS = 30_000;
 
 /** One connection to `owner`; undefined when its endpoint is absent and nothing was sent. */
 function sendControl(

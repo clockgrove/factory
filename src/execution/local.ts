@@ -9,6 +9,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   rmSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -657,6 +658,16 @@ async function preserveControllerAssetDestinations(
 /** Beside the worktree: never among the files the worker returns. */
 function validationLfsStore(worktree: string): string {
   return `${worktree}.validation-lfs`;
+}
+
+/** Where worker Validate creates each run's checkout, beside the worktree. */
+export function workerValidationRoot(worktree: string): string {
+  return `${worktree}.validation`;
+}
+
+/** The worktree or its staged validation bytes remain to be removed. */
+function executionDirectoryRemains(worktree: string): boolean {
+  return existsSync(worktree) || existsSync(validationLfsStore(worktree));
 }
 
 /** Controller-owned staging that collection reads but never commits. */
@@ -1885,6 +1896,13 @@ export class LocalExecutionDriver implements ExecutionDriver {
       await removeWorktree(this.checkout, path);
     else rmSync(path, { recursive: true, force: true });
     rmSync(validationLfsStore(path), { recursive: true, force: true });
+    // Each run removes its own checkout; one it retained keeps the parent.
+    try {
+      rmdirSync(workerValidationRoot(path));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTEMPTY") throw error;
+    }
   }
 
   @classifyFaults(executionFault)
@@ -2423,7 +2441,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     const worktree = join(this.workRoot, attemptId);
     if (
       resolve(worktree).startsWith(`${resolve(this.workRoot)}${sep}`) &&
-      existsSync(worktree)
+      executionDirectoryRemains(worktree)
     ) {
       await context?.admitEffect?.("explicit");
       await this.removeExecutionDirectory(worktree);
@@ -2610,7 +2628,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     // An ended attempt: its worktree goes if a crash kept it.
     if (settled?.result || settled?.stopped !== undefined) {
       await context?.admitEffect?.("explicit");
-      if (settled.worktree && existsSync(settled.worktree))
+      if (settled.worktree && executionDirectoryRemains(settled.worktree))
         await this.removeExecutionDirectory(settled.worktree);
       if (settled.result) return structuredClone(settled.result);
       throw stoppedFault(settled.stopped!, true);
@@ -2625,7 +2643,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
         this.contentStore,
       );
       await context?.admitEffect?.("explicit");
-      if (existsSync(active.worktree))
+      if (executionDirectoryRemains(active.worktree))
         await this.removeExecutionDirectory(active.worktree);
       throw workFault(active.rejectedCollection.fault.detail);
     }

@@ -1,5 +1,5 @@
 import { rm } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { McpServerStatus } from "@anthropic-ai/claude-agent-sdk";
 import { validateToolConfigName } from "../config.js";
@@ -15,7 +15,11 @@ import { validateTree } from "../validation.js";
 import { CandidateValidationFailure } from "../work-repair.js";
 import type { HarnessRequest, WorkHandoffNote } from "../contracts.js";
 import { readWorkHandoff } from "./harness-support.js";
-import { FACTORY_EMAIL, privateStagingExclusions } from "./local.js";
+import {
+  FACTORY_EMAIL,
+  privateStagingExclusions,
+  workerValidationRoot,
+} from "./local.js";
 
 export const factoryValidationServerName = "factory-validation";
 const factoryValidationServerVersion = "1.0.0";
@@ -184,11 +188,7 @@ export async function runDeclaredValidation(
       "Factory worker validation snapshot",
     )
   ).trim();
-  const root = join(
-    dirname(worktree),
-    `${basename(worktree)}.validation`,
-    `${run}`,
-  );
+  const root = join(workerValidationRoot(worktree), `${run}`);
   try {
     const evidence = await validateTree(
       worktree,

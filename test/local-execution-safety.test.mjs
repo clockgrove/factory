@@ -493,6 +493,9 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       baseSha,
       graph,
       planGraphDigest: graphDigest(graph),
+      publicationContract: "exact-request-v1",
+      objectiveCommands: [],
+      objectiveBodyDigest: "b".repeat(64),
       approvedPlaybookPin: null,
       approvedPlaybookAdmission: {
         approvedPlaybookPin: null,
@@ -2073,6 +2076,9 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         baseSha: materialized.graph.baseSha,
         graph: structuredClone(materialized.graph),
         planGraphDigest: graphDigest(materialized.graph),
+        publicationContract: "exact-request-v1",
+        objectiveCommands: [],
+        objectiveBodyDigest: "b".repeat(64),
         approvedPlaybookPin: null,
         approvedPlaybookAdmission: {
           approvedPlaybookPin: null,

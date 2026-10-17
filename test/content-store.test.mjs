@@ -395,8 +395,8 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   const missing = memory.retain({
     ...record,
     kind: "episode",
-    bodies: [{ role: "legacy-source", availability: "missing-legacy" }],
-    sources: [{ identity: "legacy-native-session", complete: false }],
+    bodies: [{ role: "unretained-source", availability: "unavailable" }],
+    sources: [{ identity: "unretained-native-session", complete: false }],
   });
   assert.equal(
     memory.read({ access, id: missing.id, applicability }).disposition,
@@ -5405,6 +5405,9 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     baseSha,
     graph: routeGraph,
     planGraphDigest: graphDigest(routeGraph),
+    publicationContract: "exact-request-v1",
+    objectiveCommands: [],
+    objectiveBodyDigest: "b".repeat(64),
     approvedPlaybookPin: null,
     approvedPlaybookAdmission: {
       approvedPlaybookPin: null,
@@ -6176,6 +6179,9 @@ test("checkpoint retains authenticated worker returns from a configured private 
     baseSha,
     graph,
     planGraphDigest: graphDigest(graph),
+    publicationContract: "exact-request-v1",
+    objectiveCommands: [],
+    objectiveBodyDigest: "b".repeat(64),
     approvedPlaybookPin: null,
     approvedPlaybookAdmission: {
       approvedPlaybookPin: null,
@@ -6465,6 +6471,9 @@ test("stopped collection freezes a completed owned local return before restart a
     baseSha,
     graph,
     planGraphDigest: graphDigest(graph),
+    publicationContract: "exact-request-v1",
+    objectiveCommands: [],
+    objectiveBodyDigest: "b".repeat(64),
     approvedPlaybookPin: null,
     approvedPlaybookAdmission: {
       approvedPlaybookPin: null,

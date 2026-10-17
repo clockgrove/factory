@@ -102,6 +102,8 @@ test("final review receives actual fresh integrated checkout provenance", async 
       runId: "final-provenance",
       graph,
       planGraphDigest: graphDigest(graph),
+      publicationContract: "exact-request-v1",
+      objectiveBodyDigest: "b".repeat(64),
       approvedPlaybookPin: null,
       approvedPlaybookAdmission: {
         approvedPlaybookPin: null,

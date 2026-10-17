@@ -84,7 +84,7 @@ export interface RecoveryGitObject {
 }
 export interface RecoveryClosureGap {
   path: string;
-  availability: "missing-legacy" | "unavailable" | "transient" | "archived";
+  availability: "unavailable" | "transient" | "archived";
   reason: string;
   required?: boolean;
   /** For an `archived` gap: the commit that holds the complete evidence. */
@@ -143,7 +143,7 @@ function assetReferences(
 ): void {
   for (const set of sets ?? []) {
     if (
-      set.capture?.declarationDigest !== undefined &&
+      set.capture.declarationDigest !== undefined &&
       !/^[a-f0-9]{64}$/.test(set.capture.declarationDigest)
     )
       throw new Error("Asset declaration digest is invalid");
@@ -151,7 +151,7 @@ function assetReferences(
       assertRef(set.manifestRef);
       if (
         set.manifestRef.mediaType !== "application/json" ||
-        (set.capture?.declarationDigest !== undefined &&
+        (set.capture.declarationDigest !== undefined &&
           set.manifestRef.digest !== set.capture.declarationDigest)
       )
         throw new Error("Asset manifest differs from its original declaration");
@@ -160,7 +160,7 @@ function assetReferences(
     }
     for (const input of set.inputs ?? []) add(input.ref);
     for (const member of set.members) add(member.ref);
-    for (const input of set.capture?.inputs ?? []) add(input.ref);
+    for (const input of set.capture.inputs ?? []) add(input.ref);
   }
 }
 

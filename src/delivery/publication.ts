@@ -62,14 +62,10 @@ function fenced(detail: string): Error {
 
 /** Validate retained intent identity without granting execution or dispatch authority. */
 export function assertPublicationIntents(state: FactoryState): void {
-  if (
-    state.publicationContract !== undefined &&
-    state.publicationContract !== "exact-request-v1"
-  )
+  if (state.publicationContract !== "exact-request-v1")
     throw new Error("Unsupported publication contract");
   if (state.publicationIntents === undefined) return;
   if (
-    state.publicationContract !== "exact-request-v1" ||
     !state.publicationIntents ||
     typeof state.publicationIntents !== "object" ||
     Array.isArray(state.publicationIntents)

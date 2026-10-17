@@ -70,7 +70,7 @@ export interface RepositoryMemoryRecord {
   bodies: {
     role: string;
     ref?: ContentRef;
-    availability: "retained" | "missing-legacy" | "unavailable";
+    availability: "retained" | "unavailable";
   }[];
   sources: {
     identity: string;
@@ -309,9 +309,7 @@ export function assertRepositoryMemoryRecord(
     const body = keys(value, ["role", "ref", "availability"]);
     text(body.role);
     if (
-      !["retained", "missing-legacy", "unavailable"].includes(
-        String(body.availability),
-      ) ||
+      !["retained", "unavailable"].includes(String(body.availability)) ||
       (body.availability === "retained" && body.ref === undefined)
     )
       throw new Error("Memory body availability is invalid");
@@ -970,9 +968,7 @@ export class LocalRepositoryMemory {
     const content: MemoryResult["content"] = [];
     for (const body of record.bodies) {
       if (body.availability !== "retained" || !body.ref) {
-        gaps.push(
-          `${body.role}: ${body.availability === "missing-legacy" ? "missing legacy body" : "referenced bytes unavailable"}`,
-        );
+        gaps.push(`${body.role}: referenced bytes unavailable`);
         disposition = "unavailable";
         continue;
       }

@@ -94,8 +94,7 @@ export function assertNativePrerequisites(
       !sha(acceptance.graphDigest, 64) ||
       !sha(acceptance.configDigest, 64) ||
       !sha(acceptance.evidenceDigest, 64) ||
-      (acceptance.candidateBasis !== undefined &&
-        acceptance.candidateBasis !== "pinned-baseline" &&
+      (acceptance.candidateBasis !== "pinned-baseline" &&
         acceptance.candidateBasis !== "current-graph-integration") ||
       predecessor.baseRelationship !==
         (acceptance.commit === state.baseSha ? "equal" : "descendant")

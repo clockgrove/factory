@@ -2167,9 +2167,8 @@ export function parseFactoryState(
     const final = record(state.finalValidation, "finalValidation");
     const receiptCommands = validationEvidence(final, "finalValidation");
     if (
-      !Array.isArray(state.objectiveCommands) ||
       JSON.stringify(receiptCommands) !==
-        JSON.stringify(state.objectiveCommands)
+      JSON.stringify(state.objectiveCommands)
     )
       throw new Error(
         "Final validation receipts differ from declared Objective commands",
@@ -2223,10 +2222,8 @@ export function parseFactoryState(
       state.finalAcceptanceDecisions,
       "finalAcceptanceDecisions",
     );
-  if (state.objectiveCommands !== undefined)
-    strings(state.objectiveCommands, "objectiveCommands");
-  if (state.objectiveBodyDigest !== undefined)
-    sha(state.objectiveBodyDigest, "objectiveBodyDigest", 64);
+  strings(state.objectiveCommands, "objectiveCommands");
+  sha(state.objectiveBodyDigest, "objectiveBodyDigest", 64);
   if (
     state.objectiveClosure !== undefined &&
     (state.finalValidation === undefined ||

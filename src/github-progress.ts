@@ -1,6 +1,9 @@
 import { displayDateTime } from "./display-time.js";
+import { formatDuration } from "./efficiency.js";
+import { formatTokens } from "./worker-activity.js";
 import { attemptKindLabel } from "./repair-policy.js";
 import { PROGRESS_ITEM_ID, progressMarker } from "./github-progress-state.js";
+import type { ModelCallRow } from "./run-telemetry.js";
 import {
   itemAttempt,
   summarizeStatus,
@@ -31,6 +34,8 @@ export interface RunDetailsInput {
   runId: string;
   configDigest: string;
   decisions: GitHubProgressDecision[];
+  /** The run's recorded model calls, for the live comment. */
+  calls?: ModelCallRow[];
 }
 
 export interface GitHubProgressInput
@@ -200,8 +205,98 @@ export function runDetailsLines(input: RunDetailsInput): string[] {
       (decision, index) =>
         `Decision ${index + 1} binding: ${compact(decision.binding)}`,
     ),
+    ...modelCallLines(input.calls ?? []),
     "",
     "</details>",
+  ];
+}
+
+const CALL_LABEL: Record<string, string> = {
+  propose: "Propose",
+  dream: "Dream",
+  compile: "Plan",
+  diagnosis: "Diagnosis",
+  "graph-review": "Graph review",
+  implementation: "Worker",
+  "result-review": "Result review",
+  "objective-review": "Final review",
+};
+/** Listed calls: each item's last attempts, then the most recent overall. */
+const CALL_ATTEMPTS = 2;
+const CALL_ROWS = 30;
+const CALL_BYTES = 6_000;
+/** A recorded identity such as a model or SDK name; anything else is not shown. */
+const IDENTITY = /^[A-Za-z0-9@][\w@.:+/-]{0,95}$/;
+const identity = (value: string | undefined): string =>
+  value && IDENTITY.test(value) ? compact(value) : "-";
+const tokens = (value: number | undefined): string =>
+  value === undefined ? "-" : formatTokens(value);
+const usageText = (input?: number, cached?: number, output?: number) =>
+  `${tokens(input)} / ${tokens(cached)} / ${tokens(output)}`;
+const sum = (values: (number | undefined)[]): number | undefined =>
+  values.some((value) => value !== undefined)
+    ? values.reduce<number>((total, value) => total + (value ?? 0), 0)
+    : undefined;
+
+function callLine(call: ModelCallRow): string {
+  const label = CALL_LABEL[call.phase] ?? identity(call.phase);
+  const owner =
+    call.itemId && PROGRESS_ITEM_ID.test(call.itemId)
+      ? `${compact(call.itemId)}${call.attempt ? ` #${call.attempt}` : ""} ${label.toLowerCase()}`
+      : label;
+  const time =
+    call.durationMs === undefined ? "-" : formatDuration(call.durationMs);
+  return [
+    `- ${owner}${call.providerAttempt ? ` (try ${call.providerAttempt})` : ""}`,
+    identity(call.provider),
+    identity(call.harness),
+    identity(call.model),
+    identity(call.effort),
+    call.turns === undefined ? "-" : String(call.turns),
+    usageText(
+      call.usage.inputTokens,
+      call.usage.cachedInputTokens,
+      call.usage.outputTokens,
+    ),
+    call.outcome === "running"
+      ? `running ${time}`
+      : call.outcome === "failed"
+        ? `${time} failed`
+        : time,
+  ].join(" · ");
+}
+
+/** The run's model calls, bounded, with totals over every recorded call. */
+function modelCallLines(calls: ModelCallRow[]): string[] {
+  if (!calls.length) return [];
+  const lastAttempts = new Map<string, number>();
+  for (const call of calls)
+    if (call.itemId && call.attempt)
+      lastAttempts.set(
+        call.itemId,
+        Math.max(lastAttempts.get(call.itemId) ?? 0, call.attempt),
+      );
+  let listed = calls
+    .filter(
+      (call) =>
+        !call.itemId ||
+        !call.attempt ||
+        call.attempt > (lastAttempts.get(call.itemId) ?? 0) - CALL_ATTEMPTS,
+    )
+    .slice(-CALL_ROWS)
+    .map(callLine);
+  while (listed.length > 1 && Buffer.byteLength(listed.join("\n")) > CALL_BYTES)
+    listed = listed.slice(1);
+  const omitted = calls.length - listed.length;
+  const total = (key: "inputTokens" | "cachedInputTokens" | "outputTokens") =>
+    sum(calls.map((call) => call.usage[key]));
+  const time = sum(calls.map((call) => call.durationMs));
+  return [
+    "",
+    "**Model calls** (phase · provider · harness · model · effort · turns · tokens in / cached / out · time)",
+    ...(omitted ? [`- ${omitted} earlier, counted in the total`] : []),
+    ...listed,
+    `- **Total** · ${calls.length} call${calls.length === 1 ? "" : "s"} · ${usageText(total("inputTokens"), total("cachedInputTokens"), total("outputTokens"))} · ${time === undefined ? "-" : formatDuration(time)}`,
   ];
 }
 

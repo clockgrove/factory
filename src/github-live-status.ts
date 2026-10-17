@@ -25,6 +25,7 @@ import {
   awaitCheckpointAdmission,
   isCheckpointAdmissionFailure,
 } from "./recovery-checkpoint.js";
+import { type ModelCallRow, readRunTelemetry } from "./run-telemetry.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
 import { type PlanningStepView, planningActivity } from "./status-summary.js";
 import {
@@ -211,7 +212,10 @@ export async function projectLiveStatus(
                 at,
               )),
         ],
-        details: runDetailsLines(presentation.details),
+        details: runDetailsLines({
+          ...presentation.details,
+          calls: runCalls(args.config.repository, retained, at),
+        }),
       }),
     });
   const key = (target: LiveTarget) =>
@@ -322,6 +326,19 @@ async function editLiveStatus(
   if (JSON.stringify(target.read(state)) !== JSON.stringify(observed)) {
     target.write(state, observed);
     args.save();
+  }
+}
+
+/** The run's recorded model calls; unreadable telemetry only leaves them out. */
+function runCalls(
+  repository: string,
+  state: ContinuationState,
+  now: number,
+): ModelCallRow[] {
+  try {
+    return readRunTelemetry(repository, state, now);
+  } catch {
+    return [];
   }
 }
 

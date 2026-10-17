@@ -308,6 +308,23 @@ function projectionControl(
     ...(withdrawable
       ? {
           beforeWrites: admit,
+          // No new admission: the batch's own one covers this send.
+          beforeSend: (request: GraphProjectionEffectRequest) => {
+            assertStepAdmission();
+            check();
+            const effect = retained.effects.find(
+              (entry) => entry.id === request.id,
+            );
+            if (
+              !effect ||
+              effect.key !== request.key ||
+              effect.admission === "blocked" ||
+              effect.observation !== undefined
+            )
+              throw fence(
+                `Projection effect ${request.key} is not an admitted unsent request`,
+              );
+          },
           withdraw: (ids: string[], reason: string) => {
             check();
             const unsent = ids.map((id) => {

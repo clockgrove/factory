@@ -1104,13 +1104,22 @@ export class RealGitHubGateway implements GitHubGateway {
      * Independent writes whose exact requests are all known: every intent is
      * recorded under one checkpoint admission, then each is sent in order.
      * Writes not yet sent when one stops are withdrawn as never dispatched.
+     * `ready` (pause/cancel) and the control's owner check run before each
+     * send, so a stop between sends also withdraws the remainder.
      */
     const writes = async <T>(
       planned: ProjectionWrite[],
       each: (response: T, index: number) => void | Promise<void>,
+      ready?: (index: number) => void | Promise<void>,
     ): Promise<void> => {
-      if (!control?.beforeWrites || !control.withdraw || planned.length < 2) {
-        for (const [index, entry] of planned.entries())
+      if (
+        !control?.beforeWrites ||
+        !control.beforeSend ||
+        !control.withdraw ||
+        planned.length < 2
+      ) {
+        for (const [index, entry] of planned.entries()) {
+          await ready?.(index);
           await each(
             await write<T>(
               entry.key,
@@ -1121,14 +1130,18 @@ export class RealGitHubGateway implements GitHubGateway {
             ),
             index,
           );
+        }
         return;
       }
       const requests = planned.map(intended);
+      await ready?.(0);
       await control.beforeWrites(requests);
       for (const request of requests) effects.set(request.key, request);
       let dispatched = 0;
       try {
         for (const [index, entry] of planned.entries()) {
+          await ready?.(index);
+          await control.beforeSend(requests[index]!);
           dispatched = index + 1;
           await each(await send<T>(requests[index]!, entry), index);
         }
@@ -1433,7 +1446,6 @@ export class RealGitHubGateway implements GitHubGateway {
     if (missing.length) {
       taskType ??= availableIssueType(this.client, this.repository, "Task");
       const type = await taskType;
-      for (const item of missing) await request.beforeCreate?.(item.id);
       await writes<Issue>(
         missing.map((item) => ({
           key: `issue-create:${item.id}`,
@@ -1483,6 +1495,7 @@ export class RealGitHubGateway implements GitHubGateway {
           await reconcile(`issue-create:${item.id}`, "POST", "issues", created);
           createdAt.set(created.number, time.now());
         },
+        (index) => request.beforeCreate?.(missing[index]!.id),
       );
     }
     // Every link is observed before any is written; the missing ones are then

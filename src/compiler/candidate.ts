@@ -64,6 +64,11 @@ export interface PlanCandidate {
   controllerCapabilitiesDigest: string;
   graph: WorkGraph;
   graphDigest: string;
+  /**
+   * Child Objectives replacing this Objective's own graph: the parent creates
+   * them, and each runs as its own Objective. Reviewed with the plan.
+   */
+  split?: import("../objective-split.js").ChildObjectiveSpec[];
   commands: PlanCommandAuthorization[];
   finalCommands: string[];
   /** Digest of the complete immutable packet supplied to independent review. */

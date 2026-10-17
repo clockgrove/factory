@@ -1,3 +1,4 @@
+import { splitSettled } from "./objective-split.js";
 import { randomUUID } from "node:crypto";
 import { objectiveComplete } from "./completion.js";
 import { type FactoryConfig, githubProjectStatusSettings } from "./config.js";
@@ -28,6 +29,8 @@ export function projectPhase(state: ContinuationState): ProjectPhase {
   if (isExecutionState(state) && objectiveComplete(state)) return "accepted";
   if (state.cancelRequested || state.cancelledAt || state.error)
     return "stopped";
+  // A split parent is accepted only when it closes after its last child.
+  if (splitSettled(state)) return state.split.closedAt ? "accepted" : "running";
   if (isPreparationState(state)) {
     if (state.plan?.review.status === "needs-human") return "needs-human";
     return state.coordinator.mode === "running" ? "planning" : "stopped";

@@ -1,3 +1,4 @@
+import { splitSettled } from "./objective-split.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -3046,7 +3047,8 @@ function settledTerminalObjective(
   return (
     !!state &&
     (!!state.cancelledAt ||
-      (isExecutionState(state) && objectiveComplete(state)))
+      (isExecutionState(state) && objectiveComplete(state)) ||
+      splitSettled(state))
   );
 }
 function verifiedEntry(

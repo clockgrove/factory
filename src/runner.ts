@@ -117,6 +117,11 @@ import {
   repairScopes,
 } from "./repair-policy.js";
 import { runObjectivePass } from "./runner/execution.js";
+import {
+  type AdmitChildObjectives,
+  settleSplitParent,
+  splitParentOf,
+} from "./runner/split.js";
 import { graphExpansionPending } from "./runner/expansion.js";
 import {
   type ApplicationServices,
@@ -621,6 +626,7 @@ async function runObjectiveUnscoped(
     observeControl?: (
       handler: ((request: ControlRequest) => Promise<unknown>) | undefined,
     ) => void | Promise<void>;
+    admitChildObjectives?: AdmitChildObjectives;
   } = {},
 ): Promise<ContinuationState> {
   if (
@@ -787,6 +793,7 @@ async function runObjectiveOwned(
     },
     snapshot,
     deadlineAt: options.deadlineAt,
+    admitChildObjectives: options.admitChildObjectives,
   };
   if (snapshot?.coordinator?.mode !== "running" && snapshot?.coordinator)
     owner.pause.abort(new Error(`Coordinator ${snapshot.coordinator.mode}`));
@@ -1629,7 +1636,42 @@ async function runObjectiveOwned(
       "Controller execution/finalization and Project claim settlement failed",
       { cause: errors[0] },
     );
+  if (isExecutionState(runResult!) && objectiveComplete(runResult!))
+    await settleParentOfChild(config, services.github, objective, {
+      lockParent: !options.ownerLock,
+    });
   return runResult!;
+}
+
+/**
+ * A child Objective's acceptance can complete its split parent. The child's
+ * own result stands whatever happens here; a parent left open is closed by
+ * its next run or by the next child.
+ */
+async function settleParentOfChild(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objective: number,
+  options: { lockParent: boolean },
+): Promise<void> {
+  try {
+    const parent = splitParentOf(
+      config.repository,
+      objective,
+      (await github.objective(objective)).body,
+    );
+    if (parent !== undefined)
+      await settleSplitParent({
+        config,
+        github,
+        parent,
+        lockParent: options.lockParent,
+      });
+  } catch (error) {
+    process.stderr.write(
+      `Factory could not update the parent of Objective #${objective}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
 }
 
 async function cancelObjectiveUnscoped(

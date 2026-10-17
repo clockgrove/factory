@@ -17,6 +17,7 @@ import {
   withRecoveryCheckpointScope,
 } from "./recovery-checkpoint.js";
 import { assertGraphProjectionIntents } from "./graph-projection-control.js";
+import { assertObjectiveSplitRecord } from "./objective-split.js";
 import { assertPlanningLookupRecord } from "./compiler/context.js";
 import {
   assertRepositoryMemoryBindings,
@@ -396,6 +397,7 @@ function parsePreparation(
       );
   }
   assertGraphProjectionIntents(value);
+  assertObjectiveSplitRecord(value);
   assertGitHubProgressProjection(value.githubProgress, value);
   assertLiveStatusRecord(value.githubLiveStatus);
   assertGitHubPlanDecision(value.githubPlanDecision, value);

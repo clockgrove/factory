@@ -282,6 +282,8 @@ export interface PreparationState {
   changedSincePlanning?: true;
   /** Present once planning completed; preparation then projects it. */
   plan?: import("./compiler.js").PlanCandidate;
+  /** A reviewed split: child Objective issues, their queue admission and parent closure. */
+  split?: import("./objective-split.js").ObjectiveSplit;
   /** Issues already projected; projection reconciles the rest by marker. */
   issueByItemId: Record<string, number>;
   /** The login that authored Factory's first issue: its GitHub identity. */
@@ -329,11 +331,14 @@ export function isExecutionState(
  * an issue is recorded or the phase is entered. A plan cannot be refused then.
  */
 export function projectionStarted(
-  preparation: Pick<PreparationState, "issueByItemId" | "coordinator">,
+  preparation: Pick<PreparationState, "issueByItemId" | "coordinator"> &
+    Partial<Pick<PreparationState, "split">>,
 ): boolean {
   return (
     Object.keys(preparation.issueByItemId).length > 0 ||
-    preparation.coordinator.phase === "projection"
+    preparation.coordinator.phase === "projection" ||
+    // Child Objective issues may exist once a split starts.
+    preparation.split !== undefined
   );
 }
 

@@ -1,3 +1,4 @@
+import { childDispositions } from "./objective-split.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -2531,6 +2532,27 @@ function planningStepView(preparation: PreparationState): PlanningStepView {
   };
 }
 
+/** A split parent's children, each with its own current disposition. */
+function splitStatus(
+  preparation: PreparationState,
+  redact: (value: string | undefined) => string | null,
+) {
+  const split = preparation.split;
+  if (!split) return null;
+  const dispositions = childDispositions(preparation.repository, split);
+  return {
+    enqueuedAt: split.enqueuedAt ?? null,
+    closedAt: split.closedAt ?? null,
+    children: split.children.map((child) => ({
+      key: child.key,
+      title: redact(child.title),
+      issue: split.issues[child.key] ?? null,
+      dependsOn: child.dependsOn.map((key) => split.issues[key] ?? null),
+      disposition: dispositions[child.key]!,
+    })),
+  };
+}
+
 /** Status of an Objective still planning; no executable graph exists yet. */
 export function preparationStatusDocument(
   preparation: PreparationState,
@@ -2599,6 +2621,7 @@ export function preparationStatusDocument(
     planningStep: planningStepView(preparation),
     issueByItemId: preparation.issueByItemId,
     projectionStarted: projectionStarted(preparation),
+    split: splitStatus(preparation, redact),
     cancelledAt: preparation.cancelledAt ?? null,
     error: redact(preparation.error),
     waitReason: redact(preparation.coordinator.waitReason),

@@ -150,8 +150,22 @@ export interface PreparingStatusView extends WaitView {
   configurationChanged?: boolean;
   /** A run found the Objective or sources changed since planning and refused; the configuration is checked live (`configurationChanged`). */
   changedSincePlanning?: boolean;
+  /** A reviewed split: the child Objectives that carry this Objective's work. */
+  split?: SplitStatusView | null;
   cancelledAt: string | null;
   error?: string | null;
+}
+
+export interface SplitStatusView {
+  enqueuedAt: string | null;
+  closedAt: string | null;
+  children: {
+    key: string;
+    title: string | null;
+    issue: number | null;
+    dependsOn: (number | null)[];
+    disposition: import("./objective-split.js").ChildDisposition;
+  }[];
 }
 
 export interface PlanningStepView {
@@ -1023,6 +1037,54 @@ function progress(view: ExecutionStatusView): StatusSummary {
   };
 }
 
+/** A split parent: its children run as their own Objectives through the queue. */
+function summarizeSplit(
+  view: PreparingStatusView,
+  split: SplitStatusView,
+): StatusSummary {
+  const objective = view.objective;
+  const count = split.children.length;
+  if (split.closedAt)
+    return {
+      phase: "complete",
+      summary: `all ${count} child Objectives accepted; Objective closed`,
+      nextAction: null,
+    };
+  const tally = new Map<string, number>();
+  for (const child of split.children)
+    tally.set(child.disposition, (tally.get(child.disposition) ?? 0) + 1);
+  const counts = [...tally]
+    .map(([disposition, n]) => `${n} ${disposition.replaceAll("-", " ")}`)
+    .join(", ");
+  const cancelled = split.children.find(
+    (child) => child.disposition === "cancelled",
+  );
+  if (cancelled)
+    return {
+      phase: "needs-decision",
+      summary: `child Objective #${cancelled.issue} was cancelled, so this Objective cannot complete (${counts})`,
+      nextAction: {
+        command: `factory cancel --objective ${objective}`,
+        reason:
+          "Ends this split Objective; file a new Objective for the remaining work",
+      },
+    };
+  if (tally.get("accepted") === count)
+    return {
+      phase: "waiting",
+      summary: `all ${count} child Objectives accepted; the Objective issue is still open`,
+      nextAction: {
+        command: run(objective),
+        reason: "Closes the Objective issue",
+      },
+    };
+  return {
+    phase: "running",
+    summary: `split into ${count} child Objectives: ${counts}`,
+    nextAction: null,
+  };
+}
+
 function summarizePreparation(view: PreparingStatusView): StatusSummary {
   const objective = view.objective;
   if (view.cancelledAt)
@@ -1040,6 +1102,8 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: "Repeats cancellation of the recorded work",
       },
     };
+  // A split parent's run is over; only its children and closure remain.
+  if (view.split?.enqueuedAt) return summarizeSplit(view, view.split);
   // A pause or drain is the operator's, and refusing a plan would discard it
   // with the preparation: it is lifted first, and the run that follows names
   // a change if it still holds.
@@ -1426,6 +1490,13 @@ export function renderStatusText(
       );
     } else if (review?.question && !view.prerequisiteGuidance?.entries.length)
       lines.push("", `Question: ${review.question}`);
+    if (view.split?.children.length) {
+      lines.push("", "Child Objectives:");
+      for (const child of view.split.children)
+        lines.push(
+          `  ${child.issue === null ? child.key : `#${child.issue}`} ${child.title ?? ""} — ${child.disposition.replaceAll("-", " ")}${child.dependsOn.length ? ` (after ${child.dependsOn.map((issue) => (issue === null ? "?" : `#${issue}`)).join(", ")})` : ""}`,
+        );
+    }
     if (view.error) lines.push("", `Error: ${view.error}`);
     return lines;
   }

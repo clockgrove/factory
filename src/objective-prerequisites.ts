@@ -4,6 +4,7 @@ import type { FactoryConfig } from "./config.js";
 import type { GitHubGateway, PlanningPrerequisites } from "./contracts.js";
 import { objectiveComplete } from "./completion.js";
 import { decision, StepFault } from "./fault.js";
+import { expandSplitPredecessors } from "./objective-split.js";
 import { git, gitAsync } from "./process.js";
 import { readContinuation } from "./state-store.js";
 
@@ -15,8 +16,11 @@ export async function planningPrerequisites(
   baseSha: string,
   dependencies?: number[],
 ): Promise<PlanningPrerequisites | undefined> {
-  const predecessors =
-    dependencies ?? (await github.objectiveDependencies?.(objective)) ?? [];
+  // A split parent never has one accepted tree: its children stand for it.
+  const predecessors = expandSplitPredecessors(
+    config.repository,
+    dependencies ?? (await github.objectiveDependencies?.(objective)) ?? [],
+  );
   if (!predecessors.length) return;
   const evidence: PlanningPrerequisites = {
     provenance: "authenticated-native-dependencies-and-sealed-continuations",

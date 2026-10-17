@@ -6,6 +6,7 @@ import {
   graphExpansionPending,
 } from "./expansion.js";
 import { authenticateWorkRouting } from "./routing.js";
+import { settleSplitParent, splitObjective } from "./split.js";
 import { packageManagerUpdate } from "../package-manager-update.js";
 import { checkRequiredEnvironment } from "../repair-policy.js";
 import { stopRetryCommand } from "../run-outcome.js";
@@ -319,6 +320,17 @@ export async function runObjectivePass(
         : undefined;
     let state =
       continuation && isExecutionState(continuation) ? continuation : undefined;
+    // A split parent's own run ended when its children were admitted: a later
+    // run only closes it once every child is accepted.
+    if (preparation?.split?.enqueuedAt) {
+      await settleSplitParent({
+        config,
+        github,
+        parent: objective,
+        lockParent: false,
+      });
+      return readContinuation(config.repository, objective)!;
+    }
     if (issue.state === "closed" && !state)
       throw new Error(
         "Objective issue is confirmed closed; operator direction required",
@@ -462,6 +474,28 @@ export async function runObjectivePass(
       if ("schemaVersion" in prepared) return prepared;
       preparation = prepared.preparation;
       const { plan } = prepared;
+      if (plan.split) {
+        const splitting = preparation;
+        return await splitObjective({
+          config,
+          objective,
+          body: issue.body,
+          path,
+          github,
+          preparation: splitting,
+          plan,
+          admitChildObjectives: owner.admitChildObjectives,
+          objectiveStep,
+          waitWhileStopped: async () => {
+            while (
+              splitting.coordinator.mode !== "running" &&
+              !cancellationRequested()
+            )
+              await owner.waitForWake();
+            stopIfCancelled();
+          },
+        });
+      }
       const projected = await projectPreparedObjective({
         config,
         objective,

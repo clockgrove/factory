@@ -176,8 +176,17 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     isPreparationState(retained) && github.planDecisionComments
       ? planDecisionTemplate(config, retained)
       : undefined;
-  const next =
-    snapshot.phase === "complete"
+  const split =
+    snapshot.state === "preparing" && snapshot.split?.enqueuedAt
+      ? snapshot.split
+      : undefined;
+  const next = split
+    ? split.closedAt
+      ? "Every child Objective is accepted; this Objective is closed."
+      : snapshot.phase === "needs-decision"
+        ? "A child Objective was cancelled; inspect local Factory status for the supported way to end this Objective."
+        : "Factory runs each child Objective through the queue, after the children it builds on are accepted, and closes this Objective when every child is accepted."
+    : snapshot.phase === "complete"
       ? "The Objective is accepted and closed. Inspect linked delivery evidence."
       : snapshot.phase === "cancelled"
         ? "This run is cancelled; preserve its retained history."
@@ -205,13 +214,16 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     ...(template ? { planDecisionTemplate: template } : {}),
   };
   // A new comment only for what needs a phone notification; edits do not notify.
-  const notify = [
-    "complete",
-    "cancelled",
-    "failed",
-    "needs-decision",
-    "needs-plan-decision",
-  ].includes(snapshot.phase);
+  // A split notifies once, naming the children that now carry the work.
+  const notify =
+    split !== undefined ||
+    [
+      "complete",
+      "cancelled",
+      "failed",
+      "needs-decision",
+      "needs-plan-decision",
+    ].includes(snapshot.phase);
   const flushCurrent = await publishProgress(args, live, {
     label: `Objective #${objective}`,
     objective,
@@ -223,7 +235,12 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     },
     // A new question, answer path or outcome notifies again; nothing else does.
     presentationDigest: progressDigest(
-      JSON.stringify({ phase: snapshot.phase, decisions, template }),
+      JSON.stringify({
+        phase: snapshot.phase,
+        decisions,
+        template,
+        ...(split ? { split: split.children.map((child) => child.issue) } : {}),
+      }),
     ),
     notify,
     render: (snapshotId, observedAt) =>
@@ -267,6 +284,7 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
           template,
           coordinator: retained.coordinator?.mode,
           runActive: args.active,
+          ...(split ? { children: split.children } : {}),
         }),
       ),
       items,

@@ -183,6 +183,8 @@ export interface LocalOwner {
   save?: (state: FactoryState) => void;
   /** Bind the literal first canonical snapshot to the admitted Project claim. */
   recordSnapshot?: (state: ContinuationState) => void;
+  /** Admit a reviewed split's child Objectives to the Project queue. */
+  admitChildObjectives?: import("./split.js").AdmitChildObjectives;
 }
 /** Update the admitted-work signal from the coordinator's guarded mode. */
 export function synchronizeWorkItemPause(

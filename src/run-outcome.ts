@@ -1,3 +1,4 @@
+import { splitSettled } from "./objective-split.js";
 import {
   isExecutionState,
   isPreparationState,
@@ -106,6 +107,14 @@ export function runOutcome(
     return {
       code: EXIT_NEEDS_DECISION,
       message: `Objective #${objective} needs a decision: ${wait.detail}\nAnswer with \`${retry}\` (the step runs again on \`${rerun}\`), or \`${configurationCommand(`factory cancel --objective ${objective}`, configuration)}\``,
+    };
+  // A split ends the parent's own run: the queue runs its children.
+  if (splitSettled(state))
+    return {
+      code: EXIT_COMPLETE,
+      message: state.split.closedAt
+        ? `Objective #${objective} closed: all ${state.split.children.length} child Objectives were accepted`
+        : `Objective #${objective} was split into child Objectives ${state.split.children.map((child) => `#${state.split.issues[child.key]}`).join(", ")}; ${state.split.children.some((child) => child.dependsOn.length) ? "each waits in the queue until the children it builds on are accepted, and " : ""}Factory closes #${objective} when every child is accepted`,
     };
   if (isPreparationState(state))
     return {

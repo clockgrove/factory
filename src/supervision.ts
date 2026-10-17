@@ -1,3 +1,4 @@
+import { splitSettled } from "./objective-split.js";
 import {
   credentialFileBindings,
   optionalProviderCredentials,
@@ -485,14 +486,17 @@ function checkObjectiveServiceState(
   const state = readContinuation(config.repository, objective);
   if (
     state?.restoration &&
-    (state.cancelledAt || (isExecutionState(state) && objectiveComplete(state)))
+    (state.cancelledAt ||
+      (isExecutionState(state) && objectiveComplete(state)) ||
+      splitSettled(state))
   )
     return;
   if (state && !continuationConfigurationMatches(state, config)) {
     if (
       !state.restoration &&
       (state.cancelledAt ||
-        (isExecutionState(state) && objectiveComplete(state))) &&
+        (isExecutionState(state) && objectiveComplete(state)) ||
+        splitSettled(state)) &&
       canHandoff(state) &&
       !restoredContinuationOwnershipHold(state)
     )
@@ -513,8 +517,12 @@ export function queuedObjectiveConfig(
   config: FactoryConfig,
   objective: number,
   configPath: string,
+  /** The split parent of a child Objective that has no state yet. */
+  parent?: number,
 ): FactoryConfig {
   const state = readContinuation(config.repository, objective);
+  if (!state && parent !== undefined)
+    return queuedObjectiveConfig(config, parent, configPath);
   if (!state || continuationConfigurationMatches(state, config)) return config;
   return selectProvider(readConfigFile(configPath), { objective }).config;
 }

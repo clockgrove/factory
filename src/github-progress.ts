@@ -92,6 +92,8 @@ export function objectiveStatusLines(
   const active = work.filter((item) =>
     ["running", "published", "merging", "waiting"].includes(item.status),
   );
+  const children =
+    input.view.state === "preparing" ? (input.view.split?.children ?? []) : [];
   // Controller state is worth a line only when no controller is running.
   const ownership =
     input.view.runActive === false
@@ -129,6 +131,16 @@ export function objectiveStatusLines(
                 `- ${compact(item.id)} · ${compact(item.status)}${item.step && ACTIVE_STEPS.includes(item.step) ? ` (${item.step})` : ""}${itemAttempt(item)}${item.pullRequest ? ` · ${pullLink(input.repository, item.pullRequest)}` : ""}${options.activeNote?.(item.id) ?? ""}`,
             ),
           ...(active.length > 12 ? [`- ${active.length - 12} more`] : []),
+        ]
+      : []),
+    ...(children.length
+      ? [
+          "",
+          "**Child Objectives:**",
+          ...children.map(
+            (child) =>
+              `- ${child.issue === null ? compact(child.key) : issueLink(input.repository, child.issue)} ${compact(child.title ?? "")} · ${compact(child.disposition.replaceAll("-", " "))}${child.dependsOn.length ? ` · after ${child.dependsOn.map((issue) => (issue === null ? "?" : `#${issue}`)).join(", ")}` : ""}`,
+          ),
         ]
       : []),
     "",

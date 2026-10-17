@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as time from "./clock.js";
 import type {
+  ChildObjectiveProjection,
   GitHubGateway,
   GraphProjection,
   GraphProjectionEffectRequest,
@@ -53,6 +54,7 @@ import {
   withProjectQueueObservationOnGitHub,
 } from "./github-project-queue.js";
 import { availableIssueType } from "./issue-type.js";
+import { childMarker } from "./objective-split.js";
 import {
   CheckpointProducerInventoryChanged,
   isCheckpointAdmissionFailure,
@@ -586,6 +588,7 @@ export class RealGitHubGateway implements GitHubGateway {
   private async ownedWorkItemIssues(
     objective: number,
     author: string | undefined,
+    prefix = `<!-- factory:objective=${objective};item=`,
   ): Promise<Issue[]> {
     const byId = new Map<number, Issue>();
     for (const issue of await this.pages<Issue>(
@@ -612,7 +615,6 @@ export class RealGitHubGateway implements GitHubGateway {
         byId.set(issue.id, issue);
       }
     }
-    const prefix = `<!-- factory:objective=${objective};item=`;
     return [...byId.values()]
       .filter(
         (issue) =>
@@ -1035,38 +1037,11 @@ export class RealGitHubGateway implements GitHubGateway {
     return issue;
   }
 
-  async projectGraph(request: GraphProjection): Promise<ProjectedGraph> {
-    let result: ProjectedGraph;
-    try {
-      result = await this.projectGraphObserved(request);
-    } catch (error) {
-      // A refused admission keeps its original fence. Cleanup cannot retry it
-      // and manufacture a successful checkpoint for the stopped caller.
-      if (
-        request.expansionControl &&
-        !isCheckpointAdmissionFailure(error) &&
-        !(error instanceof CheckpointProducerInventoryChanged)
-      ) {
-        try {
-          await request.expansionControl.complete();
-        } catch (settlement) {
-          throw new AggregateError(
-            [error, settlement],
-            "Graph projection stopped with a pending Git checkpoint",
-            { cause: error },
-          );
-        }
-      }
-      throw error;
-    }
-    await request.expansionControl?.complete();
-    return result;
-  }
-
-  private async projectGraphObserved(
-    request: GraphProjection,
-  ): Promise<ProjectedGraph> {
-    const control = request.expansionControl;
+  /**
+   * Exact write receipts for one projection: with a control, each write is
+   * recorded before submission and only an authenticated readback settles it.
+   */
+  private projectionEffects(control: GraphProjection["expansionControl"]) {
     const effects = new Map(
       (control?.effects ?? []).map((effect) => [effect.key, effect]),
     );
@@ -1191,39 +1166,40 @@ export class RealGitHubGateway implements GitHubGateway {
     };
     const authenticated = (issue: Issue, number?: number) =>
       this.authenticatedIssue(issue, number);
-    const roles = ["factory:objective", "factory:work-item"];
-    const labels = await this.pages<{
-      name: string;
-      archived_at?: string | null;
-    }>("labels");
-    for (const role of roles) {
-      const matches = labels.filter((label) => label.name === role);
-      if (matches.length > 1 || matches[0]?.archived_at)
-        throw foreignChange(
-          `Required Factory role label is archived or ambiguous: ${role}`,
-        );
-      if (!matches.length) {
-        await write(`label-create:${role}`, "POST", "labels", {
-          name: role,
-          color: "ededed",
-        });
-        const observed = await this.pages<{
-          name: string;
-          archived_at?: string | null;
-        }>("labels");
-        const created = observed.filter((label) => label.name === role);
-        const key = `${this.repository}:label:${role}`;
-        if (created.length !== 1 || created[0]!.archived_at)
-          throw stillLagging(
-            key,
-            `Factory role label creation did not reconcile exactly: ${role}`,
+    const ensureRoleLabels = async (roles: string[]): Promise<void> => {
+      const labels = await this.pages<{
+        name: string;
+        archived_at?: string | null;
+      }>("labels");
+      for (const role of roles) {
+        const matches = labels.filter((label) => label.name === role);
+        if (matches.length > 1 || matches[0]?.archived_at)
+          throw foreignChange(
+            `Required Factory role label is archived or ambiguous: ${role}`,
           );
-        settled(key);
-        await reconcile(`label-create:${role}`, "POST", "labels", created[0]);
-      } else {
-        await reconcile(`label-create:${role}`, "POST", "labels", matches[0]);
+        if (!matches.length) {
+          await write(`label-create:${role}`, "POST", "labels", {
+            name: role,
+            color: "ededed",
+          });
+          const observed = await this.pages<{
+            name: string;
+            archived_at?: string | null;
+          }>("labels");
+          const created = observed.filter((label) => label.name === role);
+          const key = `${this.repository}:label:${role}`;
+          if (created.length !== 1 || created[0]!.archived_at)
+            throw stillLagging(
+              key,
+              `Factory role label creation did not reconcile exactly: ${role}`,
+            );
+          settled(key);
+          await reconcile(`label-create:${role}`, "POST", "labels", created[0]);
+        } else {
+          await reconcile(`label-create:${role}`, "POST", "labels", matches[0]);
+        }
       }
-    }
+    };
     const ensureRole = async (issue: Issue, role: string): Promise<Issue> => {
       const names = (issue.labels ?? []).map((label) =>
         typeof label === "string" ? label : label.name,
@@ -1263,6 +1239,47 @@ export class RealGitHubGateway implements GitHubGateway {
       await reconcile(key, "POST", `issues/${issue.number}/labels`, observed);
       return observed;
     };
+    return { write, reconcile, ensureRoleLabels, ensureRole };
+  }
+
+  async projectGraph(request: GraphProjection): Promise<ProjectedGraph> {
+    let result: ProjectedGraph;
+    try {
+      result = await this.projectGraphObserved(request);
+    } catch (error) {
+      // A refused admission keeps its original fence. Cleanup cannot retry it
+      // and manufacture a successful checkpoint for the stopped caller.
+      if (
+        request.expansionControl &&
+        !isCheckpointAdmissionFailure(error) &&
+        !(error instanceof CheckpointProducerInventoryChanged)
+      ) {
+        try {
+          await request.expansionControl.complete();
+        } catch (settlement) {
+          throw new AggregateError(
+            [error, settlement],
+            "Graph projection stopped with a pending Git checkpoint",
+            { cause: error },
+          );
+        }
+      }
+      throw error;
+    }
+    await request.expansionControl?.complete();
+    return result;
+  }
+
+  private async projectGraphObserved(
+    request: GraphProjection,
+  ): Promise<ProjectedGraph> {
+    const control = request.expansionControl;
+    const { write, reconcile, ensureRoleLabels, ensureRole } =
+      this.projectionEffects(control);
+    const authenticated = (issue: Issue, number?: number) =>
+      this.authenticatedIssue(issue, number);
+    const roles = ["factory:objective", "factory:work-item"];
+    await ensureRoleLabels(roles);
     const objective = authenticated(
       await this.api<Issue>("GET", `issues/${request.objectiveIssue}`),
       request.objectiveIssue,
@@ -1790,6 +1807,265 @@ export class RealGitHubGateway implements GitHubGateway {
       }
     }
     return { issueByItemId };
+  }
+
+  /**
+   * Child Objective issues of a split parent, under the same exact projection
+   * contract as Work Items: each child is found by its marker before any
+   * create, a create's intent is recorded first, and an unresolved write only
+   * reconciles by reading. Children become sub-issues of the parent, and a
+   * child with sibling dependencies is blocked by them, which holds it in the
+   * queue until they are accepted.
+   */
+  async projectChildObjectives(
+    request: ChildObjectiveProjection,
+  ): Promise<Record<string, number>> {
+    let result: Record<string, number>;
+    try {
+      result = await this.projectChildObjectivesObserved(request);
+    } catch (error) {
+      if (
+        request.control &&
+        !isCheckpointAdmissionFailure(error) &&
+        !(error instanceof CheckpointProducerInventoryChanged)
+      ) {
+        try {
+          await request.control.complete();
+        } catch (settlement) {
+          throw new AggregateError(
+            [error, settlement],
+            "Child Objective projection stopped with a pending Git checkpoint",
+            { cause: error },
+          );
+        }
+      }
+      throw error;
+    }
+    await request.control?.complete();
+    return result;
+  }
+
+  private async projectChildObjectivesObserved(
+    request: ChildObjectiveProjection,
+  ): Promise<Record<string, number>> {
+    const control = request.control;
+    const { write, reconcile, ensureRoleLabels, ensureRole } =
+      this.projectionEffects(control);
+    const authenticated = (issue: Issue, number?: number) =>
+      this.authenticatedIssue(issue, number);
+    const role = "factory:objective";
+    await ensureRoleLabels([role]);
+    const parent = authenticated(
+      await this.api<Issue>("GET", `issues/${request.parent}`),
+      request.parent,
+    );
+    if (parent.state !== "open")
+      throw foreignChange(
+        `Parent Objective #${request.parent} is closed; its children are not created`,
+      );
+    await ensureRole(parent, role);
+    let author = request.author;
+    let existing: Issue[] | undefined;
+    const issues = new Map<string, Issue>();
+    const createdAt = new Map<number, number>();
+    let featureType: Promise<string | undefined> | undefined;
+    for (const child of request.children) {
+      const marker = childMarker(request.parent, child.key);
+      const known = request.knownIssues?.[child.key];
+      let found: Issue | undefined;
+      if (known !== undefined) {
+        found = await this.api<Issue>("GET", `issues/${known}`);
+        if (found.number !== known || found.pull_request)
+          throw foreignChange(
+            `Known child Objective issue for ${child.key} changed identity`,
+          );
+      } else {
+        author ??= await this.viewer();
+        existing ??= await this.ownedWorkItemIssues(
+          request.parent,
+          author,
+          `<!-- factory:parent=${request.parent};child=`,
+        );
+        const candidates = existing.filter((issue) =>
+          (issue.body ?? "").startsWith(`${marker}\n`),
+        );
+        if (candidates.length > 1)
+          throw foreignChange(
+            `Child Objective ${child.key} has ${candidates.length} issues with its marker; operator direction required`,
+          );
+        found = candidates[0];
+      }
+      if (found) {
+        authenticated(found, known);
+        if (
+          found.body !== child.body ||
+          found.title !== child.title ||
+          found.state !== "open"
+        )
+          throw foreignChange(
+            `Child Objective ${child.key} issue #${found.number} changed; edits are proposals, not plan authority`,
+          );
+        found = await ensureRole(found, role);
+        await reconcile(`issue-create:${child.key}`, "POST", "issues", found);
+        issues.set(child.key, found);
+        request.projected?.(child.key, found.number);
+        continue;
+      }
+      featureType ??= availableIssueType(
+        this.client,
+        this.repository,
+        "Feature",
+      );
+      const type = await featureType;
+      await request.beforeCreate?.(child.key);
+      const created = await write<Issue>(
+        `issue-create:${child.key}`,
+        "POST",
+        "issues",
+        {
+          title: child.title,
+          body: child.body,
+          labels: [role],
+          ...(type ? { type } : {}),
+        },
+      );
+      if (
+        !created ||
+        !Number.isSafeInteger(created.number) ||
+        created.number <= 0
+      )
+        throw unverifiedCreate(
+          "Cannot parse created child Objective issue identity; outcome unknown",
+        );
+      authenticated(created);
+      if (!request.author && created.user?.login) {
+        author = created.user.login;
+        request.authored?.(created.user.login);
+      }
+      request.projected?.(child.key, created.number);
+      if (
+        created.title !== child.title ||
+        created.body !== child.body ||
+        created.state !== "open" ||
+        !(created.labels ?? []).some(
+          (label) => (typeof label === "string" ? label : label.name) === role,
+        )
+      )
+        throw new Error(
+          "Created child Objective issue did not reconcile exactly",
+        );
+      issues.set(child.key, created);
+      await reconcile(`issue-create:${child.key}`, "POST", "issues", created);
+      createdAt.set(created.number, time.now());
+      existing?.push(created);
+    }
+    const byNumber = new Map(
+      [...issues.values()].map((issue) => [issue.number, issue]),
+    );
+    for (const child of request.children) {
+      const number = issues.get(child.key)!.number;
+      const route = `issues/${number}/dependencies/blocked_by`;
+      const fresh = { createdAt: createdAt.get(number) };
+      const expected = child.dependsOn.map((key) => issues.get(key)!);
+      const observations = await this.pages<Issue>(route, fresh);
+      for (const issue of observations) {
+        authenticated(issue);
+        if (!expected.some((entry) => entry.id === issue.id))
+          throw foreignChange("Unreviewed remote dependency edit");
+      }
+      for (const [index, dependency] of expected.entries()) {
+        const key = `dependency-add:${child.key}:${child.dependsOn[index]}`;
+        if (observations.some((issue) => issue.id === dependency.id)) {
+          await reconcile(key, "POST", route, dependency);
+          continue;
+        }
+        const post = () =>
+          write(key, "POST", route, { issue_id: dependency.id }, fresh);
+        if (control) await post();
+        else await this.linked(post, route, dependency.id, fresh);
+      }
+      const observed = await this.pages<Issue>(route, fresh);
+      const lag = `${this.repository}:dependencies:${number}`;
+      if (
+        observed.length !== expected.length ||
+        observed.some((issue) => {
+          authenticated(issue);
+          return byNumber.get(issue.number)?.id !== issue.id;
+        }) ||
+        expected.some(
+          (dependency) => !observed.some((issue) => issue.id === dependency.id),
+        )
+      )
+        throw stillLagging(
+          lag,
+          `Child Objective #${number} dependencies did not reconcile exactly`,
+        );
+      settled(lag);
+      for (const [index, dependency] of expected.entries())
+        await reconcile(
+          `dependency-add:${child.key}:${child.dependsOn[index]}`,
+          "POST",
+          route,
+          dependency,
+        );
+    }
+    const hierarchy = `issues/${request.parent}/sub_issues`;
+    const current = await this.pages<Issue>(hierarchy);
+    for (const issue of current) {
+      authenticated(issue);
+      if (byNumber.get(issue.number)?.id !== issue.id)
+        throw foreignChange("Unreviewed remote hierarchy edit");
+    }
+    for (const child of request.children) {
+      const issue = issues.get(child.key)!;
+      const key = `hierarchy:${child.key}`;
+      if (current.some((entry) => entry.id === issue.id)) {
+        await reconcile(key, "POST", hierarchy, issue);
+        continue;
+      }
+      let observedParent: Issue | undefined;
+      try {
+        observedParent = authenticated(
+          await this.api<Issue>("GET", `issues/${issue.number}/parent`),
+        );
+      } catch (error) {
+        if (!(error instanceof GitHubRequestError && error.status === 404))
+          throw error;
+      }
+      if (observedParent)
+        throw foreignChange("Unreviewed remote hierarchy parent");
+      const call = { createdAt: createdAt.get(issue.number) };
+      const post = () =>
+        write(key, "POST", hierarchy, { sub_issue_id: issue.id }, call);
+      if (control) await post();
+      else await this.linked(post, hierarchy, issue.id, call);
+    }
+    const observed = await this.pages<Issue>(hierarchy);
+    const lag = `${this.repository}:sub-issues:${request.parent}`;
+    if (
+      observed.length !== issues.size ||
+      [...issues.values()].some(
+        (issue) => !observed.some((entry) => entry.id === issue.id),
+      )
+    )
+      throw stillLagging(
+        lag,
+        `Issue #${request.parent} child Objectives did not reconcile exactly`,
+      );
+    settled(lag);
+    for (const child of request.children)
+      await reconcile(
+        `hierarchy:${child.key}`,
+        "POST",
+        hierarchy,
+        issues.get(child.key)!,
+      );
+    return Object.fromEntries(
+      request.children.map((child) => [
+        child.key,
+        issues.get(child.key)!.number,
+      ]),
+    );
   }
 
   private assertPublicationPull(

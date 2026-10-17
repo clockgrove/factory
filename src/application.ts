@@ -44,6 +44,7 @@ import {
 import { profileBinding } from "./execution-profiles.js";
 import { RealGitHubGateway } from "./github.js";
 import {
+  admitChildObjectives,
   enqueueIntake,
   ensureProjectObjective,
   type IntakeAuthorization,
@@ -317,7 +318,16 @@ export function createApplication(
       ),
     runObjective: (objective, options) =>
       checkpoint.async(() =>
-        runObjective(config, objective, services, options),
+        runObjective(config, objective, services, {
+          ...options,
+          admitChildObjectives: (objectives, bodyDigests) =>
+            admitChildObjectives(
+              config,
+              services.github,
+              objectives,
+              bodyDigests,
+            ),
+        }),
       ),
     cancelObjective: (objective) =>
       checkpoint.async(() =>

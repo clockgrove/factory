@@ -8,6 +8,7 @@ import type {
 } from "./contracts.js";
 import { attachFault, decision } from "./fault.js";
 import { graphDigest } from "./graph-amendments.js";
+import { type ChildObjectiveSpec, splitDigest } from "./objective-split.js";
 import { isPreparationState, type ContinuationState } from "./state.js";
 import { assertStepAdmission } from "./step.js";
 import {
@@ -58,6 +59,9 @@ export function assertGraphProjectionIntents(state: ContinuationState): void {
         ),
       ];
   const admitted = new Set(graphs.map(graphDigest));
+  // A reviewed split projects child Objective issues under its own digest.
+  if (isPreparationState(state) && state.plan?.split)
+    admitted.add(splitDigest(state.plan.split));
   for (const [digest, intent] of Object.entries(intents)) {
     if (
       !intent ||
@@ -180,8 +184,25 @@ export function graphProjectionControl(
   graph: WorkGraph,
   save: () => void,
 ): NonNullable<GraphProjection["expansionControl"]> {
+  return projectionControl(state, () => graphDigest(graph), save);
+}
+
+/** The same exact write receipts for a reviewed split's child Objective issues. */
+export function splitProjectionControl(
+  state: ContinuationState,
+  children: ChildObjectiveSpec[],
+  save: () => void,
+): NonNullable<GraphProjection["expansionControl"]> {
+  return projectionControl(state, () => splitDigest(children), save);
+}
+
+function projectionControl(
+  state: ContinuationState,
+  desired: () => string,
+  save: () => void,
+): NonNullable<GraphProjection["expansionControl"]> {
   assertGraphProjectionIntents(state);
-  const digest = graphDigest(graph);
+  const digest = desired();
   if (![11, 12, 13, 14, 15, 16, 17, 18, 19, 20].includes(state.schemaVersion))
     throw fence("Expanded graph has no admitted projection semantics");
   state.graphProjectionIntents ??= {};
@@ -206,7 +227,7 @@ export function graphProjectionControl(
       state.objective !== retained.objective ||
       state.runId !== retained.runId ||
       state.configDigest !== retained.configDigest ||
-      graphDigest(graph) !== digest
+      desired() !== digest
     )
       throw fence(
         "Projection owner or desired graph changed during submission",

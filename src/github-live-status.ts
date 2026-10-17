@@ -123,9 +123,11 @@ export async function projectLiveStatus(
   const targets: LiveTarget[] = [];
   const itemDigests: string[] = [];
   // Planning has no Work Item yet: the Objective's comment shows its step.
-  const planning = isExecutionState(retained)
-    ? undefined
-    : planningActivity(retained.coordinator.phase, step);
+  // A split parent's planning is over; its comment lists the children instead.
+  const planning =
+    isExecutionState(retained) || retained.split?.enqueuedAt
+      ? undefined
+      : planningActivity(retained.coordinator.phase, step);
   if (isExecutionState(retained))
     for (const [id, issue] of Object.entries(retained.issueByItemId)) {
       const facts = presentation.items[id];

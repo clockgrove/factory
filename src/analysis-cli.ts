@@ -11,7 +11,7 @@ import {
   type AnalysisOptions,
 } from "./analysis.js";
 
-export function parseAnalysisOptions(
+function parseAnalysisOptions(
   args: string[],
 ): AnalysisOptions & { json: boolean; gantt?: boolean; output?: string } {
   const filters: NonNullable<AnalysisOptions["filters"]> = {};

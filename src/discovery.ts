@@ -62,13 +62,6 @@ export interface DiscoveryOutputManifest {
   disposition: "observation" | "advisory";
 }
 
-export interface DiscoveryExecutionInput {
-  manifest: DiscoveryOutputManifest;
-}
-export interface DiscoveryHarnessInput extends DiscoveryExecutionInput {
-  body: DiscoveryBody;
-}
-
 export const DISCOVERY_OUTPUT_FIELDS = [
   "path",
   "mode",

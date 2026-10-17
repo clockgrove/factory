@@ -88,7 +88,7 @@ interface LiveTarget {
 }
 
 /** The status the projection derives once per tick, for the live comments. */
-export interface LivePresentation {
+interface LivePresentation {
   status: ObjectiveStatusInput;
   details: RunDetailsInput;
   /** Next action, blockers, decisions and control mode. */

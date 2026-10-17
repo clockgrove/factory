@@ -695,7 +695,7 @@ export type AgentSessionScope = AgentObjectiveScope &
 export interface AgentSessionTurn {
   invocationId: string;
   requestDigest: string;
-  /** Admitted elapsed ceiling, immutable for this turn; absent on older receipts. */
+  /** Admitted elapsed ceiling, immutable for this turn; absent when there is no deadline. */
   deadlineAt?: string;
   graphDigest?: string;
   candidateDigest?: string;
@@ -908,12 +908,12 @@ export interface ExecutionResult {
   assets?: CapturedAssetSet[];
   evidence?: unknown;
 }
-/** Persist before each external mutation; callbacks are controller-owned, never serialized. */
 /** A provider resource a lost response may have created that Factory cannot find to delete. */
 export interface ExecutionOrphan {
   resource: string;
   detail: string;
 }
+/** Persist before each external mutation; callbacks are controller-owned, never serialized. */
 export interface ExecutionContext {
   /** Await durable admission after exact local checkpoint and before effects or result disposal. */
   checkpointedEffects?: true;

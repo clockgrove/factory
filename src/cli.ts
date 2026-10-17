@@ -135,7 +135,7 @@ function help(): void {
       "  persistence reconcile --objective N",
       "      Inspect local and verified Git durability, or synchronize to the explicitly configured archive",
       "  run --objective N [--deadline ISO_TIMESTAMP] [--provider NAME]",
-      "      Plan if needed and run the Objective until it is done or needs you; the first run checks readiness and fixes its provider (--provider, else the calling host, else defaultProvider)",
+      "      Plan if needed and run the Objective until it is done or needs you; the first run checks readiness and fixes its provider (--provider, else defaultProvider)",
       "  queue add N [N ...] | list | sync | remove N | pause | resume | drain",
       "      The Objectives the background service runs, in order",
       "  supervisor start | check | stop [--disable] | upgrade --cli ABSOLUTE_INSTALLED_CLI | uninstall",
@@ -1124,7 +1124,6 @@ async function main(): Promise<void> {
     "propose",
     "dream",
     "run",
-    "queue",
     "decide",
     "retry",
     "repair",
@@ -1154,16 +1153,6 @@ async function main(): Promise<void> {
         }),
     },
     () => dispatchMain(),
-    {
-      // These paths only print the application result after its full terminal
-      // barrier. Other commands/custom operations retain their own full sync.
-      queueControlVerification:
-        command === "queue" &&
-        ["pause", "resume", "drain"].includes(queueWords(args)[0] ?? ""),
-      forwardCompletedBarrier:
-        command === "queue" &&
-        ["pause", "resume", "drain"].includes(queueWords(args)[0] ?? ""),
-    },
   );
 }
 

@@ -32,7 +32,7 @@ export const SET_ADMISSION_FIELDS = `mutation FactoryQueueSetAdmissionFields($or
     clientMutationId projectV2Item { ${CARD} }
   }
 }`;
-export const BINDING = `query FactoryQueueBinding($project:ID!,$metadata:ID!,$order:ID!) {
+const BINDING = `query FactoryQueueBinding($project:ID!,$metadata:ID!,$order:ID!) {
   viewer { databaseId }
   project:node(id:$project) { __typename ... on ProjectV2 {
     id closed viewerCanUpdate
@@ -79,7 +79,7 @@ export const ITEMS = `query FactoryQueueItems($project:ID!,$after:String,$metada
     }
   } }
 }`;
-export const FIELDS = `query FactoryQueueItemFields($item:ID!,$after:String) {
+const FIELDS = `query FactoryQueueItemFields($item:ID!,$after:String) {
   node(id:$item) { __typename ... on ProjectV2Item {
     id project { id } fieldValues(first:100,after:$after) {
       nodes { ${VALUE} } pageInfo { hasNextPage endCursor }

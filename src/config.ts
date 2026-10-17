@@ -1039,16 +1039,13 @@ export interface Capacity {
 }
 
 /** The declared capacity, or this host's defaults when `execution.concurrency` is omitted. */
-export function resolveCapacity(
-  config: FactoryConfig,
-  hostFacts?: HostFacts,
-): Capacity {
+export function resolveCapacity(config: FactoryConfig): Capacity {
   if (config.execution.concurrency !== undefined)
     return {
       concurrency: config.execution.concurrency,
       ...(config.scheduling ? { scheduling: config.scheduling } : {}),
     };
-  const host = currentHostDefaults(hostFacts);
+  const host = currentHostDefaults();
   return {
     concurrency: host.concurrency,
     scheduling: config.scheduling ?? host.scheduling,
@@ -1058,29 +1055,27 @@ export function resolveCapacity(
   };
 }
 
-/** The host facts sizing reads; tests inject them, a run reads the live host. */
+/** The host facts sizing reads. */
 export interface HostFacts {
   cpus: number;
   memoryBytes: number;
 }
 
-function currentHostDefaults(hostFacts?: HostFacts) {
-  return hostSchedulingDefaults(
-    hostFacts ?? { cpus: availableParallelism(), memoryBytes: totalmem() },
-  );
+function currentHostDefaults() {
+  return hostSchedulingDefaults({
+    cpus: availableParallelism(),
+    memoryBytes: totalmem(),
+  });
 }
 
 /**
  * The capacity to schedule with now. Stored values bind plan bounds; a host-sized value never
  * exceeds what the current host offers, so a smaller host is not oversubscribed.
  */
-export function liveCapacity(
-  capacity: Capacity,
-  hostFacts?: HostFacts,
-): Capacity {
+export function liveCapacity(capacity: Capacity): Capacity {
   const sized = capacity.hostSized;
   if (!sized) return capacity;
-  const host = currentHostDefaults(hostFacts);
+  const host = currentHostDefaults();
   const least = (stored: number | undefined, live: number | undefined) =>
     stored === undefined || live === undefined
       ? stored

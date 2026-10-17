@@ -811,7 +811,8 @@ export function privateCheckpointBounds():
 }
 const hash = (bytes: Uint8Array | string) =>
   createHash("sha256").update(bytes).digest("hex");
-const canonical = (value: unknown): string => {
+/** Deterministic JSON: sorted keys, undefined members omitted. */
+export const canonical = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object")
     return `{${Object.entries(value)

@@ -19,7 +19,7 @@ import { isDeepStrictEqual } from "node:util";
  * and `live-work` are the kinds a command settles (`settlesFirst`); the rest
  * end in `factory cancel`.
  */
-export type RefusalKind =
+type RefusalKind =
   | "intake"
   | "not-replaceable"
   | "not-paused"

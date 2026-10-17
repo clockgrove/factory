@@ -27,7 +27,7 @@ function format(zone: string): Intl.DateTimeFormat {
 }
 
 /** The display zone: a valid FACTORY_DISPLAY_TIMEZONE, else the host's. */
-export function displayZone(): string {
+function displayZone(): string {
   const requested = process.env.FACTORY_DISPLAY_TIMEZONE?.trim();
   if (requested)
     try {

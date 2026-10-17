@@ -12,7 +12,8 @@ import type {
   WorkItem,
 } from "./contracts.js";
 
-function canonical(value: unknown): unknown {
+/** The value with object keys sorted, for order-independent JSON. */
+export function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === "object")
     return Object.fromEntries(

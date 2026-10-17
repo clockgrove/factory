@@ -69,7 +69,7 @@ function path(repository: string, objective: number): string {
   return join(directory(repository), `${objective}.json`);
 }
 
-export function readRetirement(
+function readRetirement(
   repository: string,
   objective: number,
 ): RetirementRecord | undefined {

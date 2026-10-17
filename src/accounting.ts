@@ -25,6 +25,7 @@ import type {
   WorkerUsageObservation,
 } from "./contracts.js";
 import {
+  canonical,
   checkpointOriginalInventory,
   checkpointRetentionGaps,
   markAccountingGap,
@@ -59,16 +60,6 @@ export type AccountingRecord = {
   | { kind: "interaction"; capture: InteractionMetadata }
 );
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object")
-    return `{${Object.entries(value)
-      .filter(([, child]) => child !== undefined)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .map(([key, child]) => `${JSON.stringify(key)}:${canonical(child)}`)
-      .join(",")}}`;
-  return JSON.stringify(value);
-}
 const digest = (bytes: Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
 const safeObject = (value: unknown): Record<string, unknown> => {

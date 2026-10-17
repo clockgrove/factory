@@ -40,7 +40,7 @@ type Schema = {
   required?: string[];
 };
 type ObjectValue = Record<string, unknown>;
-export interface CompilerCitationChoice {
+interface CompilerCitationChoice {
   path: string;
   heading: string;
   content: string;

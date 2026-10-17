@@ -480,6 +480,25 @@ export async function releaseCancelledSessions(
     }
     assertCurrent();
   }
+  // A stopped amendment or Work Item diagnosis turn whose adapter settled its
+  // local process has no outcome left to wait for once the Objective cancels:
+  // it becomes unavailable, then is disposed like any other session.
+  const stopped = isExecutionState(state)
+    ? Object.values(state.agentSessions ?? {}).find(
+        (ref) =>
+          ref.scope.role === "planning" &&
+          ref.status === "in-flight" &&
+          ref.currentTurn?.resources === "settled" &&
+          ref.currentTurn.terminal === undefined,
+      )
+    : undefined;
+  if (stopped) {
+    agentSessionContinuation(state, "planning", undefined, save).checkpoint({
+      ...structuredClone(stopped),
+      status: "unavailable",
+    });
+    assertCurrent();
+  }
   const planning = state.planningRecovery;
   const unresolvedPlanning =
     planning?.phase === "submitted" &&

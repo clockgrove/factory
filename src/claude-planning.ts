@@ -704,8 +704,14 @@ function structuredFault(
   return undefined;
 }
 
-/** Base of the complete request the retained conversation already holds. */
-type RequestBaseData = ClaudeOwnedSession["data"] & { requestBase?: string };
+/**
+ * Base of the complete request the retained conversation already holds, and
+ * whether it is a diagnosis conversation, which no later turn continues.
+ */
+type RequestBaseData = ClaudeOwnedSession["data"] & {
+  requestBase?: string;
+  diagnosis?: true;
+};
 
 interface SessionFacts {
   initialized: boolean;
@@ -886,13 +892,24 @@ class ClaudePlanningTransport implements PlanningTransport {
     const selection = this.selection(args.role);
     const { model, reasoningEffort } = selection;
     const started = Date.now();
+    const continuation = this.sessionRoot ? args.session : undefined;
+    const diagnosis = invocation.phase === "diagnosis";
     // A diagnosis carries its own complete request. Resuming the planner
     // conversation would resend that whole history under another output
-    // schema, which shares no cache prefix, so it runs as a fresh session.
-    const continuation =
-      this.sessionRoot && invocation.phase !== "diagnosis"
-        ? args.session
-        : undefined;
+    // schema, which shares no cache prefix, so it runs in a fresh recorded
+    // session, and no later turn continues it. The settled conversation it
+    // replaces is released; a revision after a diagnosis plans afresh anyway.
+    const retained = continuation?.retained;
+    if (
+      retained &&
+      (diagnosis || (retained.data as RequestBaseData | undefined)?.diagnosis)
+    ) {
+      await this.releaseSession(structuredClone(retained));
+      continuation!.checkpoint({
+        ...structuredClone(retained),
+        status: "released",
+      });
+    }
     let owned: ClaudeOwnedSession | undefined;
     let nativePrompt = args.prompt;
     let compacted = false;
@@ -913,9 +930,10 @@ class ClaudePlanningTransport implements PlanningTransport {
         this.adapter,
         claudeDigest([selection, this.config, Boolean(args.tree)]),
       );
+      const data = owned.data as RequestBaseData;
+      if (diagnosis) data.diagnosis = true;
       // The conversation holds an earlier complete request with this base:
       // send only what changed. Forget the base until this turn completes.
-      const data = owned.data as RequestBaseData;
       if (
         owned.resume &&
         args.continuation &&

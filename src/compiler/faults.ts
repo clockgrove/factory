@@ -122,6 +122,9 @@ export function modelFault(
       return transient(`Model provider is over capacity: ${detail}`, false);
     case "provider-rate-limit":
       return transient(`Model provider rate limit: ${detail}`, false);
+    // A retained conversation resumes with its reads under a fresh budget.
+    case "provider-turn-limit":
+      return transient(`Model call used its turn budget: ${detail}`, true);
     case "provider-authentication":
       return {
         kind: "config",

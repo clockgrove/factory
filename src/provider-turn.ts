@@ -115,7 +115,15 @@ export class ProviderTurnGuard {
     return this.controller.signal;
   }
 
-  progress(operation?: string, tool?: { id: string; active: boolean }): void {
+  /**
+   * `quietMs` is silence the provider announced, such as a retry backoff; the
+   * next inactivity window waits that much longer.
+   */
+  progress(
+    operation?: string,
+    tool?: { id: string; active: boolean },
+    quietMs = 0,
+  ): void {
     if (this.ended || this.controller.signal.aborted) return;
     if (operation) this.lastOperation = operation;
     if (tool) {
@@ -124,7 +132,7 @@ export class ProviderTurnGuard {
     }
     this.lastProgressAt = Date.now();
     if (this.timer) clearTimeout(this.timer);
-    this.reset();
+    this.reset(Number.isSafeInteger(quietMs) && quietMs > 0 ? quietMs : 0);
   }
 
   async race<T>(operation: Promise<T>): Promise<T> {
@@ -160,7 +168,7 @@ export class ProviderTurnGuard {
     this.timeoutWaiters.clear();
   }
 
-  private reset(): void {
+  private reset(quietMs = 0): void {
     // Progress reschedules inactivity without extending elapsed admission.
     // Settled waits remove their subscription instead of retaining payloads.
     const waitingFor =
@@ -181,7 +189,7 @@ export class ProviderTurnGuard {
           Date.now() - this.lastProgressAt,
         ),
       );
-    }, timeoutMs);
+    }, timeoutMs + quietMs);
   }
 }
 

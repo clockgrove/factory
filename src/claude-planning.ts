@@ -88,8 +88,14 @@ const CLAUDE_PLANNING_ADAPTER = CLAUDE_AGENT_SDK_ADAPTER_IDENTITY;
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
 /** One answer plus the SDK's bounded schema-repair turns. */
 const CLAUDE_PLANNING_MAX_TURNS = 4;
-/** Compile, graph review and result review also spend turns reading a tree. */
-const CLAUDE_TREE_REVIEW_MAX_TURNS = 40;
+/**
+ * Compile, graph review and result review also spend turns reading a tree. A
+ * result review of a Work Item with about 120 criteria used all of 40 turns
+ * (about 7 s each) and answered after 4 more; 100 leaves room for that and
+ * still ends before the fifteen-minute elapsed ceiling, so an exhausted
+ * budget stays a retryable continuation rather than an elapsed decision.
+ */
+const CLAUDE_TREE_REVIEW_MAX_TURNS = 100;
 /** Read-only tools a session gets over its exact tree. */
 const TREE_REVIEW_TOOLS = ["Read", "Grep", "Glob"];
 
@@ -432,6 +438,9 @@ function claudePlanningOptions(input: {
     systemPrompt: input.tree
       ? CLAUDE_TREE_REVIEW_SYSTEM_PROMPT
       : CLAUDE_PLANNING_SYSTEM_PROMPT,
+    // Assistant messages arrive only per completed block, so a long answer
+    // would be silent while it streams. Deltas keep the inactivity clock live.
+    includePartialMessages: true,
     // Prompts carry untrusted source text; never expand @paths or commands.
     verbatimPrompts: true,
     maxTurns: input.tree
@@ -652,8 +661,8 @@ function failureClass(
     return "provider-capacity";
   if (status === 429 || assistantError === "rate_limit")
     return "provider-rate-limit";
+  if (result.subtype === "error_max_turns") return "provider-turn-limit";
   if (
-    result.subtype === "error_max_turns" ||
     result.stop_reason === "max_tokens" ||
     assistantError === "max_output_tokens"
   )
@@ -1038,7 +1047,19 @@ class ClaudePlanningTransport implements PlanningTransport {
         const next = await guard.race(events.next());
         if (next.done) break;
         const message = next.value;
-        guard.progress(message.type);
+        // A retry announces its backoff; that silence is not inactivity.
+        guard.progress(
+          message.type,
+          undefined,
+          message.type === "system" && message.subtype === "api_retry"
+            ? message.retry_delay_ms + (message.no_response?.retry_wait_ms ?? 0)
+            : 0,
+        );
+        // Streamed deltas only show the call is alive; complete messages follow.
+        if (message.type === "stream_event") {
+          observeModelInvocation(invocation, { type: "progress" });
+          continue;
+        }
         if (message.type === "assistant" || message.type === "user") {
           const content = message.message.content;
           if (Array.isArray(content))

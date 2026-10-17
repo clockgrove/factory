@@ -15,6 +15,7 @@ import {
   LEARNING_ORIGINAL_KINDS,
   type LearningOriginal,
   learningOriginals,
+  snapshotStateRef,
   validateDreamInputOriginal,
   validateLearningOriginals,
 } from "./learning.js";
@@ -417,9 +418,14 @@ async function buildMemoryLearningClosureLocal(
         original.bytes,
       );
       if (kind === "snapshots") {
-        const described = await verifyContinuationReferenceClosure(value, {
-          readBytes,
-        });
+        const stateRef = snapshotStateRef(value);
+        if (stateRef) add(stateRef);
+        const described = await verifyContinuationReferenceClosure(
+          stateRef
+            ? JSON.parse(Buffer.from(readBytes(stateRef)).toString("utf8"))
+            : value,
+          { readBytes },
+        );
         for (const ref of described.contentRefs) add(ref);
         gaps.push(...described.gaps);
         typedGitObjects.push(...described.gitObjects);
@@ -593,9 +599,15 @@ export async function installExactMemoryLearning(
       original.path,
       original.bytes,
     );
-    if (kind === "snapshots")
-      await verifyContinuationReferenceClosure(value, { readBytes: load });
-    else if (kind === "returns") await load(value.responseRef as ContentRef);
+    if (kind === "snapshots") {
+      const stateRef = snapshotStateRef(value);
+      await verifyContinuationReferenceClosure(
+        stateRef
+          ? JSON.parse(Buffer.from(await load(stateRef)).toString("utf8"))
+          : value,
+        { readBytes: load },
+      );
+    } else if (kind === "returns") await load(value.responseRef as ContentRef);
     else if (kind === "checkpoints") {
       const checkpoint = value as unknown as DreamInputCheckpoint;
       validateDreamInputOriginal(

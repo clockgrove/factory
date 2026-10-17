@@ -237,12 +237,30 @@ function snapshotState(
   raw: string,
 ): { stateRef?: ContentRef; state: Record<string, unknown> } {
   const value = record(JSON.parse(raw));
-  if (value.stateRef === undefined) return { state: value };
-  const stateRef = value.stateRef as ContentRef;
+  const stateRef = snapshotStateRef(value);
+  if (!stateRef) return { state: value };
   return {
     stateRef,
     state: record(JSON.parse(store.readBytes(stateRef).toString("utf8"))),
   };
+}
+
+/** A decoded snapshot original's state reference; undefined for a legacy inline state. */
+export function snapshotStateRef(
+  value: Record<string, unknown>,
+): ContentRef | undefined {
+  if (value.stateRef === undefined) return undefined;
+  const ref = record(value.stateRef);
+  if (
+    Object.keys(ref).sort().join() !== "bytes,digest,mediaType" ||
+    typeof ref.digest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(ref.digest) ||
+    !Number.isSafeInteger(ref.bytes) ||
+    Number(ref.bytes) < 0 ||
+    ref.mediaType !== "application/json"
+  )
+    throw new Error("Invalid learning snapshot state reference");
+  return ref as unknown as ContentRef;
 }
 
 function encoded(value: unknown): string {
@@ -1117,6 +1135,7 @@ export function decodeLearningOriginal(
       learningDigest(JSON.stringify([repository, value.objective, value.runId]))
     )
       throw new Error("Learning original producer identity changed");
+    if (kind === "snapshots") snapshotStateRef(value);
     if (kind === "episodes") {
       hash(value.snapshotDigest);
       if (!["accepted", "cancelled"].includes(String(value.outcome)))

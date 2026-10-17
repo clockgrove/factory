@@ -181,22 +181,75 @@ export function resultReviewCriteria(
   return [...item.acceptance, ...new Set(owned)];
 }
 
-/** Final review judges the Objective criteria and every source obligation proved at the final phase. */
+/**
+ * Final review judges, on the integrated tree, the Objective criteria and
+ * every coverage obligation once per distinct statement, wherever the plan
+ * proved it: item reviews judge obligations one Work Item at a time. Then one
+ * fixed integration question per dependency edge between coding items, and
+ * per source whose obligations coding items without a direct edge deliver
+ * together, asks whether the consumer accepts the producer's real outputs and
+ * reuses its helpers and types. Each question names the criteria it bears on
+ * by index, so its refusal stays tied to them.
+ */
 export function finalReviewCriteria(
   graph: WorkGraph,
   criteria: string[],
 ): string[] {
-  return [
-    ...criteria,
-    ...graph.coverage
-      .filter(
-        (entry) =>
-          entry.source.lines &&
-          (entry.proof.kind === "final-review" ||
-            entry.proof.kind === "final-controller"),
-      )
-      .map(coverageCriterion),
+  const judged = [
+    ...new Set([...criteria, ...graph.coverage.map(coverageCriterion)]),
   ];
+  const coding = graph.items.filter((item) => (item.kind ?? "work") === "work");
+  const ids = new Set(coding.map((item) => item.id));
+  const linked = (a: WorkItem, b: WorkItem) =>
+    a.dependencies.includes(b.id) || b.dependencies.includes(a.id);
+  const bears = (items: string[], paths?: string[]) => {
+    const indices = [
+      ...new Set(
+        graph.coverage
+          .filter(
+            (entry) =>
+              items.includes(entry.itemId) &&
+              (!paths || paths.includes(entry.source.path)),
+          )
+          .map((entry) => judged.indexOf(coverageCriterion(entry))),
+      ),
+    ].sort((a, b) => a - b);
+    return indices.length ? ` It bears on criteria ${indices.join(", ")}.` : "";
+  };
+  const questions = coding.flatMap((consumer) =>
+    consumer.dependencies
+      .filter((id) => ids.has(id))
+      .map(
+        (producer) =>
+          `Integration of Work Item "${consumer.id}" with its dependency "${producer}" on the integrated tree: "${consumer.id}" accepts the real outputs and types "${producer}" produces, exactly as "${producer}" produces them (cite the producing and consuming file:lines), and reuses the helpers and types "${producer}" owns instead of redefining them.${bears([consumer.id, producer])}`,
+      ),
+  );
+  // Coding items delivering one source's obligations share its capability.
+  const groups = new Map<string, { items: string[]; paths: string[] }>();
+  for (const path of new Set(graph.coverage.map((entry) => entry.source.path)))
+    if (path !== "OBJECTIVE") {
+      const members = coding.filter((item) =>
+        graph.coverage.some(
+          (entry) => entry.itemId === item.id && entry.source.path === path,
+        ),
+      );
+      if (
+        members.every((a, index) =>
+          members.slice(index + 1).every((b) => linked(a, b)),
+        )
+      )
+        continue;
+      const items = members.map((item) => item.id);
+      const key = JSON.stringify(items);
+      const group = groups.get(key) ?? { items, paths: [] };
+      group.paths.push(path);
+      groups.set(key, group);
+    }
+  for (const { items, paths } of groups.values())
+    questions.push(
+      `Integration of Work Items ${items.map((id) => `"${id}"`).join(", ")}, which together deliver obligations from ${paths.join(", ")}, on the integrated tree: where one consumes another's outputs it accepts their real shape and types (cite the producing and consuming file:lines), and a helper or type more than one of them needs has one definition the others reuse instead of parallel redefinitions.${bears(items, paths)}`,
+    );
+  return [...new Set([...judged, ...questions])];
 }
 
 /**

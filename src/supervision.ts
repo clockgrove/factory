@@ -57,8 +57,6 @@ import {
 } from "./state-store.js";
 
 interface ServiceBinding {
-  /** Set by a unit that an earlier build bound to one Objective; only teardown reads it. */
-  objective?: number;
   /** One systemd LoadCredential per credential the configured providers need. */
   credentials?: { name: string; file: string }[];
   version: 1;
@@ -207,31 +205,10 @@ function privateFile(path: string): void {
   )
     throw new Error(`Expected an owner-private file: ${path}`);
 }
-export const LEGACY_SERVICE_BINDING =
-  "This service was bound to one Objective by an earlier Factory version; run `factory supervisor uninstall`, then `factory setup --background`";
-
-/** A unit bound to one Objective, as earlier Factory versions wrote it. */
-class LegacyServiceBinding extends Error {
-  constructor() {
-    super(LEGACY_SERVICE_BINDING);
-    this.name = "LegacyServiceBinding";
-  }
-}
-
-/**
- * Only stop and uninstall may act on a retired binding (one bound to an Objective), so an operator can remove it; nothing reuses or rewrites it.
- */
-function decodeBinding(text: string, teardown = false): ServiceBinding {
+function decodeBinding(text: string): ServiceBinding {
   if (!text.startsWith(marker))
     throw new Error("Refusing a service not registered by Factory");
   const value = JSON.parse(text.split("\n")[0]!.slice(marker.length));
-  if (
-    !teardown &&
-    value &&
-    typeof value === "object" &&
-    ("objective" in value || "intake" in value)
-  )
-    throw new LegacyServiceBinding();
   const path = (value: unknown) =>
     typeof value === "string" && isAbsolute(value) && !/[\n\r\0]/.test(value);
   if (
@@ -261,8 +238,8 @@ function decodeBinding(text: string, teardown = false): ServiceBinding {
     throw new Error("Malformed Factory service binding");
   return value as ServiceBinding;
 }
-function binding(config: FactoryConfig, teardown = false): ServiceBinding {
-  const value = decodeBinding(readFileSync(unitPath(config), "utf8"), teardown);
+function binding(config: FactoryConfig): ServiceBinding {
+  const value = decodeBinding(readFileSync(unitPath(config), "utf8"));
   if (
     value.stateHome !==
       resolve(
@@ -321,19 +298,12 @@ function inspectBinding(
   let value: ServiceBinding;
   try {
     value = decodeBinding(text);
-  } catch (error) {
-    if (error instanceof LegacyServiceBinding)
-      report(
-        "legacy-service-binding",
-        "The unit is bound to one Objective, as earlier Factory versions did.",
-        LEGACY_SERVICE_BINDING,
-      );
-    else
-      report(
-        "malformed-binding",
-        "The unit does not contain a valid Factory service binding.",
-        "Inspect the retained unit before any lifecycle operation. Do not delete continuation state or start this binding.",
-      );
+  } catch {
+    report(
+      "malformed-binding",
+      "The unit does not contain a valid Factory service binding.",
+      "Inspect the retained unit before any lifecycle operation. Do not delete continuation state or start this binding.",
+    );
     return { bindingHealth: health };
   }
   const available = (path: string, mode: number) => {
@@ -420,7 +390,7 @@ function inspectBinding(
     bindingHealth: health,
   };
 }
-export function renderService(value: ServiceBinding): string {
+function renderService(value: ServiceBinding): string {
   const args = [
     value.node,
     value.cli,
@@ -568,7 +538,7 @@ export function checkPreparedIntakeServiceState(
     );
   checkIntakeLocalServiceState(config, configPath, intake);
 }
-export async function checkIntakeServiceState(
+async function checkIntakeServiceState(
   config: FactoryConfig,
   configPath: string,
 ): Promise<IntakeAuthorization> {
@@ -580,22 +550,14 @@ export async function checkIntakeServiceState(
   );
 }
 
-/**
- * Ask the service to drain and release the installation. The queue is
- * objective 0; a service an earlier build bound to one Objective answers only
- * for that Objective.
- */
-export async function handoffService(
-  config: FactoryConfig,
-  timeoutMs = 30_000,
-  objective = 0,
-): Promise<void> {
+/** Ask the service to drain and release the installation. The queue is objective 0. */
+async function handoffService(config: FactoryConfig): Promise<void> {
   const reply = await requestControl(config.repository, {
-    objective,
+    objective: 0,
     action: "handoff",
   });
   if (!reply.handled) return;
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + 30_000;
   while (hasOwner(config)) {
     if (Date.now() >= deadline)
       throw new Error(
@@ -611,7 +573,7 @@ function awaitsDecision(name: string): boolean {
     inspect("show", name, "--property=ExecMainStatus", "--value") === "2"
   );
 }
-export type ServiceReadiness =
+type ServiceReadiness =
   | "starting"
   | "owned-ready"
   | "needs-decision"
@@ -814,7 +776,7 @@ export async function supervise(
   }
   if (!existsSync(path) && ["uninstall", "stop"].includes(action))
     return { registered: false };
-  const value = binding(config, ["stop", "uninstall"].includes(action));
+  const value = binding(config);
   if (action === "start") {
     const required = requiredProviderCredentials(config);
     const optional = optionalProviderCredentials(config);
@@ -861,7 +823,7 @@ export async function supervise(
       beforeIntake?.watch &&
       beforeIntake.mode === "running" &&
       (await intakeSettled(config));
-    await handoffService(config, undefined, value.objective);
+    await handoffService(config);
     systemctl("stop", name);
     if (candidate) {
       saveUnit(path, candidate);

@@ -5791,31 +5791,7 @@ async function freshArchiveOwnedStrict(
     }
     observed.start("queue-ancestry");
     for (const record of records) {
-      if (record.kind === "project-queue-operation") {
-        const retired = record.retiredWithdrawal?.retiredClaim;
-        if (retired) {
-          const claim = JSON.parse(readQueueOriginal(retired).toString("utf8"));
-          if (
-            claim.kind === "project-queue-owner" &&
-            claim.settled?.abandonment
-          ) {
-            const proof = claim.settled.abandonment;
-            await verifyReservationPrefix(
-              {
-                kind: "pre-snapshot",
-                objective: claim.objective,
-                claimId: claim.id,
-              },
-              {
-                checkpoints: proof.checkpoints,
-                generations: proof.generations,
-                originalClaim: proof.originalClaim,
-              },
-            );
-          }
-        }
-        continue;
-      }
+      if (record.kind === "project-queue-operation") continue;
       if (
         record.kind === "project-queue-owner" &&
         record.settled?.abandonment

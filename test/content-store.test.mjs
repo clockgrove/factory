@@ -1587,6 +1587,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     objective: 2,
     bodyDigest: cancelled.objectiveBodyDigest,
     ownerTokenDigest: learningDigest("original-owner"),
+    ownerProcess: { pid: 1, startTime: "1", namespace: "pid:[1]" },
     at: new Date().toISOString(),
     deadlineAt: new Date(Date.now() + 60_000).toISOString(),
   };

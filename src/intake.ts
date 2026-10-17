@@ -124,21 +124,11 @@ export interface IntakeAuthorization {
   watch?: true;
   bodyDigests: Record<string, string>;
   dequeued: number[];
-  retiredAdmissions?: {
-    objective: number;
-    itemId: string;
-    admissionId: string;
-    operationId: string;
-    state: "retired-remote-uncertain";
-    remoteSubmission: "unknown";
-    eligible: false;
-  }[];
   mode: QueueMode;
   remoteObservation?: {
     availability: "last-observed" | "unavailable";
     observedAt: string | null;
   };
-  legacyLocalQueueIgnored?: true;
   observation?: {
     at: string;
     reasons: Record<string, string>;
@@ -148,7 +138,7 @@ export interface IntakeAuthorization {
     unapproved?: number[];
   };
 }
-export const DEFAULT_QUEUE_POLL_SECONDS = 30;
+const DEFAULT_QUEUE_POLL_SECONDS = 30;
 export const QUEUE_COMMAND_TIMEOUT_MS = 180_000;
 /** The archive holds this installation's publication; only the operator can resolve it. */
 export class ColdPublicationHeld extends Error {}
@@ -304,28 +294,12 @@ function view(
     dequeued: entries
       .filter((entry) => entry.state === "withdrawn")
       .map((entry) => entry.objective),
-    ...(observed
-      ? {
-          retiredAdmissions: observed.retiredEntries.map((entry) => ({
-            objective: entry.objective,
-            itemId: entry.itemId,
-            admissionId: entry.admissionId,
-            operationId: entry.operationId,
-            state: entry.state,
-            remoteSubmission: entry.remoteSubmission,
-            eligible: false as const,
-          })),
-        }
-      : {}),
     mode: observed?.control.mode ?? "paused",
     remoteObservation: {
       availability: observed ? "last-observed" : "unavailable",
       observedAt: observed?.snapshot.observedAt ?? null,
     },
     ...(observed?.control.watch ? { watch: true } : {}),
-    ...(existsSync(join(stateRoot(config.repository), "intake.json"))
-      ? { legacyLocalQueueIgnored: true }
-      : {}),
     observation: {
       at: observed?.snapshot.observedAt ?? new Date().toISOString(),
       reasons: {},
@@ -340,10 +314,10 @@ function view(
     },
   };
 }
-/** Missing receipts hold execution; legacy file bytes are never parsed. */
+/** Missing receipts hold execution. */
 export async function readIntake(
   config: FactoryConfig,
-  options: { anyConfiguration?: boolean; github?: GitHubGateway } = {},
+  options: { github?: GitHubGateway } = {},
 ): Promise<IntakeAuthorization | undefined> {
   if (!config.queue?.project) return;
   try {
@@ -462,14 +436,9 @@ async function mutationSnapshot(
     ...(retained ? { itemId: retained.itemId } : {}),
     ...(includeIssue && objective !== undefined ? { objective } : {}),
   });
-  const current = verifyQueueInspection(config, inspection, history, true, {
+  return verifyQueueInspection(config, inspection, history, {
     allowUninitializedControl: true,
   });
-  if (current.retiredEntry)
-    throw new Error(
-      "This Objective has a permanently retired uncertain Project operation; it cannot be re-admitted or mutated",
-    );
-  return current;
 }
 function targetProof(
   inspection: ProjectQueueInspection,
@@ -485,7 +454,7 @@ function targetProof(
       }
     : undefined;
 }
-/** Authenticate the owner's protocol before sending any admission-changing action. */
+/** Find the live owner before sending any admission-changing action. */
 async function projectControlRequest(
   config: FactoryConfig,
   operation: "enqueue" | "watch" | "pause" | "resume" | "drain" | "dequeue",
@@ -502,25 +471,6 @@ async function projectControlRequest(
     { deadlineAt },
   );
   if (!observed.handled) return observed;
-  if (
-    !observed.result ||
-    typeof observed.result !== "object" ||
-    !("queueProtocol" in observed.result) ||
-    observed.result.queueProtocol !== "project-queue-v1"
-  ) {
-    if (operation === "pause" || operation === "drain")
-      return requestControl(
-        config.repository,
-        {
-          objective: 0,
-          action: operation,
-        },
-        { deadlineAt },
-      );
-    throw new Error(
-      "The existing service uses the retired local queue protocol; hand it off through factory supervisor stop, then set up the Project-bound installation. No admission was sent to that owner",
-    );
-  }
   const request: ControlRequest = {
     objective: 0,
     action: "project-queue",
@@ -814,10 +764,10 @@ function commandAcknowledgment(
     },
   };
 }
-export interface EnqueueOptions {
+interface EnqueueOptions {
   expectedBodyDigests?: Record<string, string>;
 }
-export interface ProjectPublicationProvenance {
+interface ProjectPublicationProvenance {
   kind: "proposal";
   proposalId: string;
   approvalDigest: string;
@@ -1180,20 +1130,25 @@ async function watchIntakeCommand(
 ): Promise<QueueCommandAcknowledgment> {
   const reply = await projectControlRequest(config, "watch");
   if (reply.handled) return reply.result as QueueCommandAcknowledgment;
-  return locked(config, () =>
-    projectMutation(config, github, async () => {
-      const current = await mutationSnapshot(config, github);
-      const completed = await writeControl(
-        config,
-        github,
-        current.control?.mode ?? "running",
-        true,
-        { kind: "background-setup" },
-        current,
-      );
-      return commandAcknowledgment(config, "watch", completed);
-    }),
-  );
+  return locked(config, () => writeWatch(config, github));
+}
+function writeWatch(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  cached?: IntakeAuthorization,
+): Promise<QueueCommandAcknowledgment> {
+  return projectMutation(config, github, async () => {
+    const current = await mutationSnapshot(config, github);
+    const completed = await writeControl(
+      config,
+      github,
+      current.control?.mode ?? "running",
+      true,
+      { kind: "background-setup" },
+      current,
+    );
+    return commandAcknowledgment(config, "watch", completed, [], cached);
+  });
 }
 async function applyControl(
   config: FactoryConfig,
@@ -1383,17 +1338,7 @@ async function intakeControlCommand(
       activeObjective: error.objective,
     };
   }
-  if (reply.handled) {
-    if (
-      action === "status" &&
-      (!reply.result ||
-        typeof reply.result !== "object" ||
-        !("queueProtocol" in reply.result) ||
-        reply.result.queueProtocol !== "project-queue-v1")
-    )
-      return { ...(await readIntake(config, { github })), legacyOwner: true };
-    return reply.result;
-  }
+  if (reply.handled) return reply.result;
   if (action === "status") return readIntake(config, { github });
   return locked(config, () => applyControl(config, github, action, objective));
 }
@@ -1489,6 +1434,13 @@ async function runIntakeOwned(
   const signalWake = () => {
     wakePending = true;
     wake?.();
+  };
+  const registerWake = (handler: (() => void) | undefined) => {
+    wake = handler;
+    if (handler && wakePending) {
+      wakePending = false;
+      handler();
+    }
   };
   let heldUntil = 0;
   // The provider configuration and services each Objective froze: the
@@ -1707,22 +1659,7 @@ async function runIntakeOwned(
         );
       }
     } else if (request.action === "watch") {
-      acknowledgment = await projectMutation(
-        config,
-        services.github,
-        async () => {
-          const prepared = await mutationSnapshot(config, services.github);
-          const completed = await writeControl(
-            config,
-            services.github,
-            prepared.control?.mode ?? "running",
-            true,
-            { kind: "background-setup" },
-            prepared,
-          );
-          return commandAcknowledgment(config, "watch", completed, [], record);
-        },
-      );
+      acknowledgment = await writeWatch(config, services.github, record);
     } else {
       try {
         acknowledgment = await applyControl(
@@ -1945,13 +1882,7 @@ async function runIntakeOwned(
         await pauseObservation(
           queuePollSeconds(config) * 1000,
           heldUntil,
-          (handler) => {
-            wake = handler;
-            if (handler && wakePending) {
-              wakePending = false;
-              handler();
-            }
-          },
+          registerWake,
         );
         continue;
       }
@@ -2186,13 +2117,7 @@ async function runIntakeOwned(
       await pauseObservation(
         queuePollSeconds(config) * 1000,
         heldUntil,
-        (handler) => {
-          wake = handler;
-          if (handler && wakePending) {
-            wakePending = false;
-            handler();
-          }
-        },
+        registerWake,
       );
     }
   } finally {
@@ -2207,20 +2132,19 @@ async function runIntakeOwned(
   }
 }
 /** Waking observation never creates dispatch authority. */
-export async function pauseObservation(
+async function pauseObservation(
   pollMs: number,
   heldUntil: number,
   register: (wake: (() => void) | undefined) => void,
-  clock: { now: () => number; realDelay: (ms: number) => number } = time,
 ): Promise<void> {
   let woken = false;
-  let wait = Math.max(pollMs, heldUntil - clock.now());
+  let wait = Math.max(pollMs, heldUntil - time.now());
   do {
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         register(undefined);
         resolve();
-      }, clock.realDelay(wait));
+      }, time.realDelay(wait));
       register(() => {
         clearTimeout(timer);
         register(undefined);
@@ -2228,6 +2152,6 @@ export async function pauseObservation(
         resolve();
       });
     });
-    wait = heldUntil - clock.now();
+    wait = heldUntil - time.now();
   } while (!woken && wait > 0);
 }

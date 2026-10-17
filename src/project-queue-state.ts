@@ -51,7 +51,6 @@ import {
 import {
   awaitCheckpointAdmission,
   assertRecoveryCheckpointManifest,
-  isCheckpointAdmissionFailure,
   hasPrivateCheckpointScope,
   markCheckpointDirty,
   type RecoveryCheckpointClosure,
@@ -161,54 +160,6 @@ interface QueueBeforeEffectFailure {
   checkpoint: ContentRef;
   sources: { path: string; ref: ContentRef }[];
 }
-interface RetiredWithdrawalProof {
-  schemaVersion: 1;
-  at: string;
-  originalOperation: ContentRef;
-  retiredClaim: ContentRef;
-  claimReferences: ContentRef[];
-  previousAdmission: ContentRef;
-  previousResponse: ContentRef;
-  operatorDecision: ContentRef;
-  ownerObservation: ContentRef;
-  installedPlan: ContentRef;
-  callerFailure: ContentRef;
-  sourceProtocolReview: ContentRef;
-  physicalClosure: ContentRef;
-  sourceInventory: ContentRef;
-  sourceModules: { path: string; ref: ContentRef }[];
-  observedTarget: ContentRef;
-}
-type RetiredAdmissionProof = Omit<
-  RetiredWithdrawalProof,
-  "retiredClaim" | "claimReferences" | "previousAdmission" | "previousResponse"
-> & {
-  knownResponses: ContentRef[];
-};
-export interface RetiredWithdrawalEvidence {
-  schemaVersion: 1;
-  kind: "operator-retired-withdrawal-unknown";
-  operationId: string;
-  originalInstallation: {
-    cli: string;
-    configPath: string;
-    configSha256: string;
-    ownFileInventory: OperatorOriginal;
-  };
-  originals: {
-    ownerObservation: OperatorOriginal;
-    installedPlan: OperatorOriginal;
-    callerFailure: OperatorOriginal;
-    sourceProtocolReview: OperatorOriginal;
-    physicalClosure: OperatorOriginal;
-  };
-}
-export type RetiredAdmissionEvidence = Omit<
-  RetiredWithdrawalEvidence,
-  "kind"
-> & {
-  kind: "operator-retired-admission-unknown";
-};
 export interface QueueOperation {
   schemaVersion: 1;
   kind: "project-queue-operation";
@@ -235,10 +186,6 @@ export interface QueueOperation {
   completed?: true;
   /** Positive creating-callback refusal; never an inferred unknown response. */
   beforeEffectFailure?: QueueBeforeEffectFailure;
-  /** Explicit operator retirement preserves UNKNOWN remote submission forever. */
-  retiredWithdrawal?: RetiredWithdrawalProof;
-  /** The original partial admission and its last unknown field remain permanently unaccepted. */
-  retiredAdmission?: RetiredAdmissionProof;
   /** All members use the first existing operation as their immutable command owner. */
   commandId?: string;
   commandRecipe?: QueueCommandRecipe;
@@ -248,12 +195,10 @@ type QueueOperationHeader = Omit<
   | "effects"
   | "completed"
   | "beforeEffectFailure"
-  | "retiredWithdrawal"
-  | "retiredAdmission"
   | "commandId"
   | "commandRecipe"
 >;
-export interface QueueCommandRecipe {
+interface QueueCommandRecipe {
   schemaVersion: 1;
   id: string;
   configDigest: string;
@@ -261,7 +206,7 @@ export interface QueueCommandRecipe {
   operations: QueueOperationHeader[];
   effects: ProjectQueuePlannedEffect[];
 }
-export interface QueueCommand {
+interface QueueCommand {
   operations: QueueOperation[];
   recipe: QueueCommandRecipe;
 }
@@ -276,8 +221,8 @@ export interface QueueOwnerClaim {
   objective: number;
   bodyDigest: string;
   ownerTokenDigest: string;
-  /** Original creating controller; unavailable in historical claims. */
-  ownerProcess?: { pid: number; startTime: string; namespace: string };
+  /** Original creating controller. */
+  ownerProcess: { pid: number; startTime: string; namespace: string };
   at: string;
   deadlineAt: string | null;
   priorRunId?: string;
@@ -298,7 +243,7 @@ export interface QueueOwnerClaim {
 }
 
 /** Explicit operator evidence, never an inferred historical controller receipt. */
-export interface QueueReservationAbandonmentProof {
+interface QueueReservationAbandonmentProof {
   schemaVersion: 1;
   originalClaim: ContentRef;
   operatorDecision: ContentRef;
@@ -310,7 +255,7 @@ export interface QueueReservationAbandonmentProof {
   checkpoints: VerifiedQueueReservationLineage["checkpoints"];
   generations: QueueCheckpointWitness[];
   lineageOriginals: ContentRef[];
-  originalProducerIdentity: "recorded" | "unavailable";
+  originalProducerIdentity: "recorded";
 }
 
 interface OperatorOriginal {
@@ -318,7 +263,7 @@ interface OperatorOriginal {
   sha256: string;
   bytes: number;
 }
-export interface FailedReservationOwnerEvidence {
+interface FailedReservationOwnerEvidence {
   schemaVersion: 1;
   kind: "operator-observed-pre-snapshot-failure";
   claimId: string;
@@ -523,10 +468,7 @@ function reservationObservedOwner(
     startTime: owner.startTime,
     namespace: observation.namespace,
   };
-  if (
-    claim.ownerProcess &&
-    JSON.stringify(bound) !== JSON.stringify(claim.ownerProcess)
-  )
+  if (JSON.stringify(bound) !== JSON.stringify(claim.ownerProcess))
     throw new Error(
       "Operator evidence differs from the recorded original producing process",
     );
@@ -619,7 +561,7 @@ function assertReservationSourceReview(
     );
 }
 /** A new recovery owner proves local cessation, never acceptance of the original run. */
-export interface QueueStoppedHandoffProof {
+interface QueueStoppedHandoffProof {
   schemaVersion: 1;
   originalClaim: ContentRef;
   stoppedSnapshot: ContentRef;
@@ -728,7 +670,7 @@ function assertStoppedClaimState(state: ContinuationState): void {
     );
 }
 
-export interface QueueCancellationProof {
+interface QueueCancellationProof {
   schemaVersion: 1;
   originalClaim: ContentRef;
   initialSnapshot: ContentRef;
@@ -831,19 +773,17 @@ export function parseQueueRecord(
       (row.priorRunId !== undefined && !uuid(row.priorRunId))
     )
       throw new Error("Invalid Project queue owner identity");
-    if (row.ownerProcess !== undefined) {
-      const owner = object(row.ownerProcess);
-      only(owner, ["pid", "startTime", "namespace"]);
-      if (
-        !Number.isSafeInteger(owner.pid) ||
-        Number(owner.pid) < 1 ||
-        typeof owner.startTime !== "string" ||
-        !/^\d+$/.test(owner.startTime) ||
-        typeof owner.namespace !== "string" ||
-        !/^pid:\[\d+\]$/.test(owner.namespace)
-      )
-        throw new Error("Invalid original Project controller identity");
-    }
+    const owner = object(row.ownerProcess);
+    only(owner, ["pid", "startTime", "namespace"]);
+    if (
+      !Number.isSafeInteger(owner.pid) ||
+      Number(owner.pid) < 1 ||
+      typeof owner.startTime !== "string" ||
+      !/^\d+$/.test(owner.startTime) ||
+      typeof owner.namespace !== "string" ||
+      !/^pid:\[\d+\]$/.test(owner.namespace)
+    )
+      throw new Error("Invalid original Project controller identity");
     if (row.runBinding !== undefined) {
       const binding = object(row.runBinding);
       only(binding, ["schemaVersion", "runId", "initialSnapshot"]);
@@ -906,9 +846,7 @@ export function parseQueueRecord(
           settled.handoff !== undefined ||
           settled.cancellation !== undefined ||
           settled.reservationFailure !== undefined ||
-          !["recorded", "unavailable"].includes(
-            String(proof.originalProducerIdentity),
-          ) ||
+          proof.originalProducerIdentity !== "recorded" ||
           ![
             proof.originalClaim,
             proof.operatorDecision,
@@ -954,7 +892,6 @@ export function parseQueueRecord(
           proof.schemaVersion !== 1 ||
           !ref(proof.originalClaim) ||
           !ref(proof.failure) ||
-          !row.ownerProcess ||
           row.priorRunId !== undefined ||
           row.runBinding !== undefined ||
           settled.runId !== undefined ||
@@ -1069,8 +1006,6 @@ export function parseQueueRecord(
       "effects",
       "completed",
       "beforeEffectFailure",
-      "retiredWithdrawal",
-      "retiredAdmission",
       "commandId",
       "commandRecipe",
     ]);
@@ -1188,143 +1123,6 @@ export function parseQueueRecord(
       )
         throw new Error("Project queue response intent differs");
     }
-    if (row.retiredWithdrawal !== undefined) {
-      const proof = object(row.retiredWithdrawal);
-      only(proof, [
-        "schemaVersion",
-        "at",
-        "originalOperation",
-        "retiredClaim",
-        "claimReferences",
-        "previousAdmission",
-        "previousResponse",
-        "operatorDecision",
-        "ownerObservation",
-        "installedPlan",
-        "callerFailure",
-        "sourceProtocolReview",
-        "physicalClosure",
-        "sourceInventory",
-        "sourceModules",
-        "observedTarget",
-      ]);
-      if (
-        row.completed ||
-        row.beforeEffectFailure ||
-        row.commandId ||
-        row.action !== "withdraw" ||
-        row.effects.length !== 1 ||
-        object(row.effects[0]).receipt ||
-        object(row.effects[0]).rejectedOriginal ||
-        proof.schemaVersion !== 1 ||
-        !date(proof.at) ||
-        Date.parse(proof.at) < Date.parse(String(row.at)) ||
-        !Array.isArray(proof.claimReferences) ||
-        !proof.claimReferences.every(ref) ||
-        !Array.isArray(proof.sourceModules)
-      )
-        throw new Error(
-          "Only one unknown withdrawal may be explicitly retired unaccepted",
-        );
-      for (const key of [
-        "originalOperation",
-        "retiredClaim",
-        "previousAdmission",
-        "previousResponse",
-        "operatorDecision",
-        "ownerObservation",
-        "installedPlan",
-        "callerFailure",
-        "sourceProtocolReview",
-        "physicalClosure",
-        "sourceInventory",
-        "observedTarget",
-      ])
-        if (!ref(proof[key]))
-          throw new Error("Retired withdrawal lacks its retained original");
-      const paths = new Set();
-      for (const raw of proof.sourceModules) {
-        const source = object(raw);
-        only(source, ["path", "ref"]);
-        if (
-          typeof source.path !== "string" ||
-          !source.path.startsWith("dist/") ||
-          source.path.includes("..") ||
-          paths.has(source.path) ||
-          !ref(source.ref)
-        )
-          throw new Error("Retired withdrawal source is ambiguous");
-        paths.add(source.path);
-      }
-    }
-    if (row.retiredAdmission !== undefined) {
-      const proof = object(row.retiredAdmission);
-      only(proof, [
-        "schemaVersion",
-        "at",
-        "originalOperation",
-        "knownResponses",
-        "operatorDecision",
-        "ownerObservation",
-        "installedPlan",
-        "callerFailure",
-        "sourceProtocolReview",
-        "physicalClosure",
-        "sourceInventory",
-        "sourceModules",
-        "observedTarget",
-      ]);
-      if (
-        row.completed ||
-        row.beforeEffectFailure ||
-        row.retiredWithdrawal ||
-        row.commandId ||
-        row.action !== "admit" ||
-        row.previousReceiptId !== null ||
-        row.effects.length !== 3 ||
-        proof.schemaVersion !== 1 ||
-        !date(proof.at) ||
-        Date.parse(proof.at) < Date.parse(String(row.at)) ||
-        !Array.isArray(proof.knownResponses) ||
-        proof.knownResponses.length !== 2 ||
-        !proof.knownResponses.every(ref) ||
-        !Array.isArray(proof.sourceModules) ||
-        object(row.effects[0]).receipt === undefined ||
-        object(row.effects[1]).receipt === undefined ||
-        object(row.effects[2]).receipt !== undefined ||
-        row.effects.some((raw) => object(raw).rejectedOriginal !== undefined)
-      )
-        throw new Error(
-          "Only the exact legacy partial admission with two original responses and one unknown final field may retire",
-        );
-      for (const key of [
-        "originalOperation",
-        "operatorDecision",
-        "ownerObservation",
-        "installedPlan",
-        "callerFailure",
-        "sourceProtocolReview",
-        "physicalClosure",
-        "sourceInventory",
-        "observedTarget",
-      ])
-        if (!ref(proof[key]))
-          throw new Error("Retired admission lacks its retained original");
-      const paths = new Set();
-      for (const raw of proof.sourceModules) {
-        const source = object(raw);
-        only(source, ["path", "ref"]);
-        if (
-          typeof source.path !== "string" ||
-          !source.path.startsWith("dist/") ||
-          source.path.includes("..") ||
-          paths.has(source.path) ||
-          !ref(source.ref)
-        )
-          throw new Error("Retired admission source is ambiguous");
-        paths.add(source.path);
-      }
-    }
     if (row.beforeEffectFailure !== undefined) {
       const proof = object(row.beforeEffectFailure);
       only(proof, [
@@ -1337,11 +1135,7 @@ export function parseQueueRecord(
       ]);
       if (
         row.completed ||
-        (!zeroIntentControl(row as unknown as QueueOperation) &&
-          (row.commandId ||
-            row.effects.length !== 1 ||
-            object(row.effects[0]).receipt ||
-            object(row.effects[0]).rejectedOriginal)) ||
+        !zeroIntentControl(row as unknown as QueueOperation) ||
         proof.schemaVersion !== 1 ||
         !date(proof.at) ||
         Date.parse(proof.at) < Date.parse(String(row.at)) ||
@@ -1361,9 +1155,7 @@ export function parseQueueRecord(
           ![
             "project-queue-state.js",
             "github-project-queue.js",
-            zeroIntentControl(row as unknown as QueueOperation)
-              ? "intake.js"
-              : "recovery-checkpoint.js",
+            "intake.js",
           ].includes(source.path) ||
           paths.has(source.path) ||
           !ref(source.ref)
@@ -1427,16 +1219,12 @@ function save(record: QueueRecord): void {
         effects: oldEffects,
         completed: oldCompleted,
         beforeEffectFailure: oldFailure,
-        retiredWithdrawal: oldRetirement,
-        retiredAdmission: oldAdmissionRetirement,
         ...oldBinding
       } = previous;
       const {
         effects: newEffects,
         completed: newCompleted,
         beforeEffectFailure: newFailure,
-        retiredWithdrawal: newRetirement,
-        retiredAdmission: newAdmissionRetirement,
         ...newBinding
       } = record;
       if (
@@ -1446,15 +1234,6 @@ function save(record: QueueRecord): void {
           JSON.stringify(oldFailure) !== JSON.stringify(newFailure)) ||
         (oldFailure &&
           JSON.stringify(oldEffects) !== JSON.stringify(newEffects)) ||
-        (oldRetirement &&
-          (JSON.stringify(oldRetirement) !== JSON.stringify(newRetirement) ||
-            JSON.stringify(oldEffects) !== JSON.stringify(newEffects) ||
-            newCompleted)) ||
-        (oldAdmissionRetirement &&
-          (JSON.stringify(oldAdmissionRetirement) !==
-            JSON.stringify(newAdmissionRetirement) ||
-            JSON.stringify(oldEffects) !== JSON.stringify(newEffects) ||
-            newCompleted)) ||
         newEffects.length < oldEffects.length
       )
         throw new Error(
@@ -1519,7 +1298,7 @@ function save(record: QueueRecord): void {
     kind: "project-queue-receipt",
   });
 }
-export function queueOwnerReferences(record: QueueOwnerClaim): ContentRef[] {
+function queueOwnerReferences(record: QueueOwnerClaim): ContentRef[] {
   const refs = [
     ...(record.runBinding ? [record.runBinding.initialSnapshot] : []),
     ...(record.settled?.reservationFailure
@@ -1616,8 +1395,7 @@ function assertQueueOwnerReferenceBodies(
       original.kind !== "project-queue-owner" ||
       original.settled ||
       JSON.stringify(binding) !== JSON.stringify(original) ||
-      proof.originalProducerIdentity !==
-        (original.ownerProcess ? "recorded" : "unavailable")
+      proof.originalProducerIdentity !== "recorded"
     )
       throw new Error(
         "Abandonment cannot reconstruct or change its original reservation",
@@ -1980,477 +1758,21 @@ export async function authenticateQueueOwnerReferences(
     return bytes;
   });
 }
-export function queueOperationReferences(
-  operation: QueueOperation,
-): ContentRef[] {
-  const failure = operation.beforeEffectFailure,
-    retirement = operation.retiredWithdrawal;
-  const admission = operation.retiredAdmission;
-  return [
-    ...(failure
-      ? [
-          failure.originalOperation,
-          failure.error,
-          failure.checkpoint,
-          ...failure.sources.map((row) => row.ref),
-        ]
-      : []),
-    ...(admission
-      ? [
-          admission.originalOperation,
-          ...admission.knownResponses,
-          admission.operatorDecision,
-          admission.ownerObservation,
-          admission.installedPlan,
-          admission.callerFailure,
-          admission.sourceProtocolReview,
-          admission.physicalClosure,
-          admission.sourceInventory,
-          ...admission.sourceModules.map((row) => row.ref),
-          admission.observedTarget,
-        ]
-      : []),
-    ...(retirement
-      ? [
-          retirement.originalOperation,
-          retirement.retiredClaim,
-          ...retirement.claimReferences,
-          retirement.previousAdmission,
-          retirement.previousResponse,
-          retirement.operatorDecision,
-          retirement.ownerObservation,
-          retirement.installedPlan,
-          retirement.callerFailure,
-          retirement.sourceProtocolReview,
-          retirement.physicalClosure,
-          retirement.sourceInventory,
-          ...retirement.sourceModules.map((row) => row.ref),
-          retirement.observedTarget,
-        ]
-      : []),
-  ];
+function queueOperationReferences(operation: QueueOperation): ContentRef[] {
+  const failure = operation.beforeEffectFailure;
+  return failure
+    ? [
+        failure.originalOperation,
+        failure.error,
+        failure.checkpoint,
+        ...failure.sources.map((row) => row.ref),
+      ]
+    : [];
 }
-function assertRetiredWithdrawalReferenceBodies(
-  operation: QueueOperation,
-  readReference: (ref: ContentRef) => Uint8Array,
-): void {
-  const proof = operation.retiredWithdrawal;
-  if (!proof) return;
-  const json = (reference: ContentRef) => {
-    const bytes = Buffer.from(readReference(reference));
-    if (
-      bytes.length !== reference.bytes ||
-      createHash("sha256").update(bytes).digest("hex") !== reference.digest
-    )
-      throw new Error("Retirement original bytes changed");
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  };
-  const original = parseQueueRecord(
-      Buffer.from(readReference(proof.originalOperation)),
-      operation.repository,
-      operation.id,
-    ),
-    { retiredWithdrawal: ignored, ...binding } = operation;
-  if (
-    original.kind !== "project-queue-operation" ||
-    original.completed ||
-    original.retiredWithdrawal ||
-    original.beforeEffectFailure ||
-    JSON.stringify(original) !== JSON.stringify(binding)
-  )
-    throw new Error("Retirement changed its unfinished original operation");
-  const claim = parseQueueRecord(
-      Buffer.from(readReference(proof.retiredClaim)),
-      operation.repository,
-      String(object(json(proof.retiredClaim)).id),
-    ),
-    previous = parseQueueRecord(
-      Buffer.from(readReference(proof.previousAdmission)),
-      operation.repository,
-      operation.previousReceiptId!,
-    );
-  if (
-    claim.kind !== "project-queue-owner" ||
-    claim.settled?.disposition !== "abandoned-unaccepted" ||
-    !claim.settled.abandonment ||
-    claim.runBinding ||
-    claim.priorRunId ||
-    previous.kind !== "project-queue-operation" ||
-    previous.action !== "admit" ||
-    !previous.completed ||
-    previous.id !== operation.previousReceiptId ||
-    previous.issueNodeId !== operation.issueNodeId ||
-    previous.bodyDigest !== operation.bodyDigest ||
-    previous.order !== operation.order ||
-    claim.objective !== operation.objective ||
-    claim.receiptId !== previous.id ||
-    claim.bodyDigest !== operation.bodyDigest ||
-    claim.authorityDigest !== operation.authorityDigest ||
-    JSON.stringify(previous.binding) !== JSON.stringify(operation.binding)
-  )
-    throw new Error(
-      "Unknown withdrawal must retire only its already permanently abandoned exact admission",
-    );
-  const claimRefs = assertQueueOwnerReferenceBodies(claim, readReference);
-  if (JSON.stringify(claimRefs) !== JSON.stringify(proof.claimReferences))
-    throw new Error("Retirement omitted original abandoned-claim authority");
-  const intent = operation.effects[0]!.intent,
-    last = previous.effects.at(-1),
-    priorMeta = previous.metadata
-      ? parseQueueMetadata(previous.metadata)
-      : undefined,
-    nextMeta = operation.metadata
-      ? parseQueueMetadata(operation.metadata)
-      : undefined;
-  if (
-    intent.action !== "set-metadata" ||
-    intent.fieldId !== operation.binding.metadataFieldId ||
-    intent.metadata !== operation.metadata ||
-    !last?.receipt ||
-    last.intent.action !== "set-metadata" ||
-    last.intent.itemId !== intent.itemId ||
-    priorMeta?.kind !== "admission" ||
-    priorMeta.state !== "queued" ||
-    nextMeta?.kind !== "admission" ||
-    nextMeta.state !== "withdrawn" ||
-    nextMeta.admissionId !== priorMeta.admissionId ||
-    priorMeta.admissionId !== claim.admissionId ||
-    JSON.stringify(last.original) !== JSON.stringify(proof.previousResponse)
-  )
-    throw new Error("Retirement cannot cover another field, mapping or effect");
-  assertProjectQueueWriteReceipt({
-    ...last.receipt,
-    original: json(proof.previousResponse),
-  });
-  assertRetiredOperatorOriginals(operation, proof, readReference, {
-    admission: false,
-    intent,
-    priorMetadata: previous.metadata!,
-    claimId: claim.id,
-    deadlineAt: claim.deadlineAt,
-  });
-}
-function assertRetiredOperatorOriginals(
-  operation: QueueOperation,
-  proof: RetiredWithdrawalProof | RetiredAdmissionProof,
-  readReference: (ref: ContentRef) => Uint8Array,
-  context: {
-    admission: boolean;
-    intent: ProjectQueueIntent;
-    priorMetadata: string | null;
-    claimId?: string;
-    deadlineAt: string | null;
-  },
-): void {
-  const intent = context.intent;
-  if (intent.action !== "set-metadata")
-    throw new Error("Retirement only covers its final unknown field");
-  const json = (reference: ContentRef) => {
-    const bytes = Buffer.from(readReference(reference));
-    if (
-      bytes.length !== reference.bytes ||
-      createHash("sha256").update(bytes).digest("hex") !== reference.digest
-    )
-      throw new Error("Retirement original bytes changed");
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  };
-  const text = (reference: ContentRef) => {
-    const value = json(reference);
-    if (typeof value !== "string")
-      throw new Error("Retirement original text missing");
-    return value;
-  };
-  const decision = object(json(proof.operatorDecision)),
-    ownerObservation = object(JSON.parse(text(proof.ownerObservation))),
-    ready = object(ownerObservation.ready),
-    owner = object(ready.owner),
-    plan = object(JSON.parse(text(proof.installedPlan))),
-    closure = object(JSON.parse(text(proof.physicalClosure))),
-    closedOwner = object(
-      context.admission ? closure.physicalAfter : closure.ownedController,
-    ),
-    caller = context.admission
-      ? object(JSON.parse(text(proof.callerFailure)))
-      : {},
-    review = object(JSON.parse(text(proof.sourceProtocolReview))),
-    inventory = JSON.parse(text(proof.sourceInventory));
-  if (
-    decision.kind !==
-      (context.admission
-        ? "explicit-operator-retired-admission-unknown"
-        : "explicit-operator-retired-withdrawal-unknown") ||
-    typeof decision.actor !== "string" ||
-    !decision.actor ||
-    decision.repository !== operation.repository ||
-    decision.operationId !== operation.id ||
-    decision.claimId !== context.claimId ||
-    decision.objective !== operation.objective ||
-    decision.bodyDigest !== operation.bodyDigest ||
-    decision.authorityDigest !== operation.authorityDigest ||
-    decision.previousReceiptId !== operation.previousReceiptId ||
-    decision.requestId !== intent.requestId ||
-    decision.remoteSubmission !== "unknown" ||
-    decision.originalOwnerTokenIdentity !== "unavailable" ||
-    decision.originalDeadlineAt !== context.deadlineAt ||
-    JSON.stringify(decision.originalOwner) !==
-      JSON.stringify({
-        pid: owner.pid,
-        startTime: owner.startTime,
-        namespace: plan.namespace,
-      })
-  )
-    throw new Error("Retirement has no scoped explicit operator decision");
-  if (
-    ownerObservation.outcome !== "owned-ready" ||
-    ready.protocol !== "controller-readiness-v1" ||
-    owner.intake !== true ||
-    !Number.isSafeInteger(owner.pid) ||
-    Number(owner.pid) < 1 ||
-    typeof owner.startTime !== "string" ||
-    !/^\d+$/.test(owner.startTime) ||
-    !date(ownerObservation.observedAt) ||
-    Date.parse(String(ownerObservation.observedAt)) >
-      Date.parse(operation.at) ||
-    plan.target !== operation.repository ||
-    typeof plan.namespace !== "string" ||
-    !/^pid:\[\d+\]$/.test(plan.namespace) ||
-    plan.installedModule !== dirname(dirname(String(decision.originalCli))) ||
-    plan.configPath !== decision.originalConfigPath ||
-    plan.configDigest !== decision.originalConfigDigest ||
-    object(plan.installedOwnInventory).sha256 !==
-      queueDigest(text(proof.sourceInventory)) ||
-    (context.admission
-      ? closure.passed !== true ||
-        object(closure.installedPlan).sha256 !==
-          queueDigest(text(proof.installedPlan)) ||
-        JSON.stringify(object(object(closure.coldReadiness).ready).owner) !==
-          JSON.stringify(owner) ||
-        closedOwner.originalOwnerCeased !== true ||
-        closedOwner.originalGroupAbsent !== true ||
-        closedOwner.cgroupEmptyOrAbsent !== true ||
-        closedOwner.installationOwner !== null ||
-        !Array.isArray(closedOwner.objectiveOwners) ||
-        closedOwner.objectiveOwners.length !== 0 ||
-        !Array.isArray(closedOwner.scopedProcesses) ||
-        closedOwner.scopedProcesses.length !== 0 ||
-        object(closedOwner.properties).MainPID !== "0" ||
-        !["inactive", "failed"].includes(
-          String(object(closedOwner.properties).ActiveState),
-        ) ||
-        object(caller.partialAdmission).operationId !== operation.id ||
-        object(caller.addRPC).submission !== "unknown" ||
-        !uuid(object(caller.addRPC).requestId) ||
-        !Number.isSafeInteger(object(caller.addRPC).deadlineAt) ||
-        new Date(Number(object(caller.addRPC).deadlineAt)).toISOString() !==
-          context.deadlineAt ||
-        decision.originalRPC !== object(caller.addRPC).requestId
-      : closure.namespace !== plan.namespace ||
-        closedOwner.pid !== owner.pid ||
-        closedOwner.startTime !== owner.startTime ||
-        closedOwner.ceased !== true ||
-        closedOwner.processGroupAbsent !== true ||
-        closedOwner.cgroupEmptyOrAbsent !== true ||
-        closedOwner.installationAndObjectiveLeasesClear !== true)
-  )
-    throw new Error(
-      "Known original supervisor/source/cessation facts are unavailable",
-    );
-  if (
-    review.schemaVersion !== 1 ||
-    review.kind !==
-      (context.admission
-        ? "operator-retired-admission-source-review"
-        : "operator-retired-withdrawal-source-review") ||
-    review.sourceProtocol !==
-      (context.admission
-        ? "legacy-two-responses-final-admission-field-unknown-v1"
-        : "single-withdrawal-field-unknown-v1") ||
-    review.repository !== operation.repository ||
-    review.operationId !== operation.id ||
-    review.requestId !== intent.requestId ||
-    review.claimId !== context.claimId ||
-    review.previousReceiptId !== operation.previousReceiptId ||
-    review.bodyDigest !== operation.bodyDigest ||
-    review.authorityDigest !== operation.authorityDigest ||
-    review.configDigest !== decision.originalConfigDigest ||
-    review.inventorySha256 !== queueDigest(text(proof.sourceInventory)) ||
-    review.installedPlanSha256 !== queueDigest(text(proof.installedPlan)) ||
-    review.ownerObservationSha256 !==
-      queueDigest(text(proof.ownerObservation)) ||
-    review.callerFailureSha256 !== queueDigest(text(proof.callerFailure)) ||
-    review.physicalClosureSha256 !== queueDigest(text(proof.physicalClosure)) ||
-    typeof review.reviewer !== "string" ||
-    !review.reviewer ||
-    !Array.isArray(review.modules) ||
-    !Array.isArray(inventory)
-  )
-    throw new Error(
-      "Scoped original withdrawal protocol review is unavailable",
-    );
-  const sources = new Map(
-    proof.sourceModules.map((module) => [module.path, text(module.ref)]),
-  );
-  for (const raw of review.modules) {
-    const module = object(raw),
-      row = (
-        inventory as { path: string; sha256: string; bytes: number }[]
-      ).find((r) => r.path === module.path),
-      source = sources.get(String(module.path));
-    if (
-      !row ||
-      !source ||
-      module.sha256 !== row.sha256 ||
-      module.bytes !== row.bytes ||
-      Buffer.byteLength(source) !== row.bytes ||
-      queueDigest(source) !== row.sha256
-    )
-      throw new Error("Original withdrawal protocol source changed or missing");
-  }
-  for (const path of [
-    "dist/project-queue-state.js",
-    "dist/github-project-queue.js",
-    "dist/intake.js",
-  ])
-    if (
-      !sources.has(path) ||
-      !(review.modules as { path: string }[]).some((row) => row.path === path)
-    )
-      throw new Error(
-        "Original callback/transport/controller route was not reviewed",
-      );
-  const observation = object(json(proof.observedTarget)),
-    target = object(observation.target),
-    control = object(observation.control);
-  if (
-    observation.scope !== "target" ||
-    JSON.stringify(observation.binding) !== JSON.stringify(operation.binding) ||
-    target.itemId !== intent.itemId ||
-    target.issueNodeId !== operation.issueNodeId ||
-    target.objective !== operation.objective ||
-    target.repository !== operation.repository ||
-    target.order !== operation.order ||
-    target.archived !== false ||
-    ![context.priorMetadata, operation.metadata].includes(
-      target.metadata as string | null,
-    ) ||
-    control.itemId !== operation.binding.controlItemId ||
-    parseQueueMetadata(String(control.metadata)).kind !== "control" ||
-    object(parseQueueMetadata(String(control.metadata))).mode !== "paused"
-  )
-    throw new Error(
-      "Retirement lacks its exact current literal mapping and paused control observation",
-    );
-}
-function assertRetiredAdmissionReferenceBodies(
-  operation: QueueOperation,
-  readReference: (ref: ContentRef) => Uint8Array,
-): void {
-  const proof = operation.retiredAdmission;
-  if (!proof) return;
-  const originalBytes = Buffer.from(readReference(proof.originalOperation));
-  if (
-    originalBytes.length !== proof.originalOperation.bytes ||
-    createHash("sha256").update(originalBytes).digest("hex") !==
-      proof.originalOperation.digest
-  )
-    throw new Error("Retired admission original changed");
-  const original = parseQueueRecord(
-      originalBytes,
-      operation.repository,
-      operation.id,
-    ),
-    { retiredAdmission: _proof, ...binding } = operation;
-  if (
-    original.kind !== "project-queue-operation" ||
-    original.retiredAdmission ||
-    original.retiredWithdrawal ||
-    original.beforeEffectFailure ||
-    JSON.stringify(original) !== JSON.stringify(binding)
-  )
-    throw new Error("Retirement cannot change original partial admission");
-  const [ensure, order, unknown] = operation.effects,
-    metadata = operation.metadata
-      ? parseQueueMetadata(operation.metadata)
-      : undefined;
-  if (
-    !ensure?.receipt ||
-    !order?.receipt ||
-    !ensure.original ||
-    !order.original ||
-    !unknown ||
-    unknown.receipt ||
-    unknown.rejectedOriginal ||
-    ensure.intent.action !== "ensure-card" ||
-    ensure.intent.issueNodeId !== operation.issueNodeId ||
-    order.intent.action !== "set-order" ||
-    order.intent.itemId !== ensure.receipt.itemId ||
-    order.intent.order !== operation.order ||
-    order.intent.fieldId !== operation.binding.orderFieldId ||
-    unknown.intent.action !== "set-metadata" ||
-    unknown.intent.itemId !== order.receipt.itemId ||
-    unknown.intent.fieldId !== operation.binding.metadataFieldId ||
-    unknown.intent.metadata !== operation.metadata ||
-    metadata?.kind !== "admission" ||
-    metadata.state !== "queued" ||
-    ensure.intent.actorId !== unknown.intent.actorId ||
-    order.intent.actorId !== unknown.intent.actorId ||
-    JSON.stringify(proof.knownResponses) !==
-      JSON.stringify([ensure.original, order.original])
-  )
-    throw new Error(
-      "Retirement requires two genuine ordered responses and only the unknown final admission field",
-    );
-  const receipts = [ensure, order].map((effect) => {
-    const bytes = Buffer.from(readReference(effect.original!));
-    if (
-      bytes.length !== effect.original!.bytes ||
-      createHash("sha256").update(bytes).digest("hex") !==
-        effect.original!.digest
-    )
-      throw new Error("Known admission response changed");
-    const receipt = {
-      ...effect.receipt!,
-      original: JSON.parse(bytes.toString("utf8")),
-    };
-    assertProjectQueueWriteReceipt(receipt);
-    return receipt;
-  });
-  const prior = projectQueueReceiptTarget(receipts[1]!);
-  if (
-    !("objective" in prior) ||
-    prior.objective !== operation.objective ||
-    prior.issueNodeId !== operation.issueNodeId ||
-    prior.order !== operation.order ||
-    prior.metadata !== null ||
-    receipts[0]!.kind !== "response"
-  )
-    throw new Error(
-      "Known admission mapping differs from the actual order response",
-    );
-  const caller = object(
-      JSON.parse(
-        JSON.parse(
-          Buffer.from(readReference(proof.callerFailure)).toString("utf8"),
-        ),
-      ),
-    ),
-    rpc = object(caller.addRPC);
-  if (!Number.isSafeInteger(rpc.deadlineAt))
-    throw new Error("Original caller deadline unavailable");
-  assertRetiredOperatorOriginals(operation, proof, readReference, {
-    admission: true,
-    intent: unknown.intent,
-    priorMetadata: prior.metadata,
-    deadlineAt: new Date(Number(rpc.deadlineAt)).toISOString(),
-  });
-}
-
 export function assertQueueOperationReferenceBodies(
   operation: QueueOperation,
   readReference: (ref: ContentRef) => Uint8Array,
 ): void {
-  assertRetiredWithdrawalReferenceBodies(operation, readReference);
-  assertRetiredAdmissionReferenceBodies(operation, readReference);
   const proof = operation.beforeEffectFailure;
   if (!proof) return;
   const json = (reference: ContentRef) => {
@@ -2478,17 +1800,13 @@ export function assertQueueOperationReferenceBodies(
   const error = object(json(proof.error)),
     checkpoint = object(json(proof.checkpoint));
   if (
-    (zeroIntentControl(operation)
-      ? error.kind !== "creating-owner-before-command-refusal"
-      : error.kind !== "typed-before-write-checkpoint-refusal") ||
+    error.kind !== "creating-owner-before-command-refusal" ||
     error.knownNotDispatched !== true ||
     error.boundary !== "before-effect" ||
     typeof error.message !== "string" ||
     object(checkpoint.binding).repository !== operation.repository ||
     !Number.isSafeInteger(checkpoint.sequence) ||
-    !Number.isSafeInteger(checkpoint.acknowledgedSequence) ||
-    (!zeroIntentControl(operation) &&
-      Number(checkpoint.acknowledgedSequence) >= Number(checkpoint.sequence))
+    !Number.isSafeInteger(checkpoint.acknowledgedSequence)
   )
     throw new Error(
       "Positive original callback/publication failure is unavailable",
@@ -2713,7 +2031,7 @@ export async function readQueueHistory(
   return readVerifiedProjectQueueHistory(config);
 }
 
-export interface VerifiedQueueEntry {
+interface VerifiedQueueEntry {
   objective: number;
   itemId: string;
   issueNodeId: string;
@@ -2724,86 +2042,17 @@ export interface VerifiedQueueEntry {
   order: number;
   state: "queued" | "withdrawn";
 }
-export interface VerifiedRetiredQueueEntry {
-  objective: number;
-  itemId: string;
-  issueNodeId: string;
-  admissionId: string;
-  order: number;
-  operationId: string;
-  currentMetadata: string | null;
-  state: "retired-remote-uncertain";
-  remoteSubmission: "unknown";
-}
-function retiredQueueEntry(
-  config: FactoryConfig,
-  card: ProjectQueueTarget,
-  history: QueueRecord[],
-): VerifiedRetiredQueueEntry | undefined {
-  const retired = history.filter(
-    (row): row is QueueOperation =>
-      row.kind === "project-queue-operation" &&
-      !!(row.retiredWithdrawal || row.retiredAdmission) &&
-      row.objective === card.objective,
-  );
-  if (retired.length > 1)
-    throw new Error("Competing retired withdrawal identities");
-  const operation = retired[0];
-  if (!operation) return undefined;
-  const previous = history.find(
-      (row): row is QueueOperation =>
-        row.kind === "project-queue-operation" &&
-        row.id === operation.previousReceiptId,
-    ),
-    intent = operation.effects[operation.retiredAdmission ? 2 : 0]!.intent,
-    priorMetadata = operation.retiredAdmission ? null : previous?.metadata;
-  if (
-    priorMetadata === undefined ||
-    intent.action !== "set-metadata" ||
-    JSON.stringify(operation.binding) !==
-      JSON.stringify(config.queue?.project) ||
-    card.repository !== operation.repository ||
-    card.itemId !== intent.itemId ||
-    card.issueNodeId !== operation.issueNodeId ||
-    card.order !== operation.order ||
-    ![priorMetadata, operation.metadata].includes(card.metadata)
-  )
-    throw new Error(
-      "Retired uncertain card differs from its exact preserved mapping",
-    );
-  const metadata = parseQueueMetadata(
-    operation.retiredAdmission ? operation.metadata! : previous!.metadata!,
-  );
-  if (metadata.kind !== "admission")
-    throw new Error("Retired mapping lacks its original admission");
-  return {
-    objective: card.objective,
-    itemId: card.itemId,
-    issueNodeId: card.issueNodeId,
-    admissionId: metadata.admissionId,
-    order: card.order!,
-    operationId: operation.id,
-    currentMetadata: card.metadata,
-    state: "retired-remote-uncertain",
-    remoteSubmission: "unknown",
-  };
-}
 export interface VerifiedQueueObservation {
   snapshot: ProjectQueueSnapshot;
   history: QueueRecord[];
   control: Extract<QueueMetadata, { kind: "control" }>;
   entries: VerifiedQueueEntry[];
-  retiredEntries: VerifiedRetiredQueueEntry[];
 }
 function completedQueueOperation(
   operation: QueueOperation,
   history: QueueRecord[],
 ): boolean {
   if (!operation.completed) return false;
-  if (!operation.commandId)
-    return !operation.effects.some(
-      (effect) => effect.intent.action === "set-admission-fields",
-    );
   const owner = history.find(
     (row): row is QueueOperation =>
       row.kind === "project-queue-operation" && row.id === operation.commandId,
@@ -2868,9 +2117,7 @@ function producer(
         entry.kind === "project-queue-operation" &&
         entry.scope === scope &&
         entry.previousReceiptId === record.id &&
-        !entry.beforeEffectFailure &&
-        !entry.retiredWithdrawal &&
-        !entry.retiredAdmission,
+        !entry.beforeEffectFailure,
     )
   )
     throw new Error(
@@ -2986,9 +2233,7 @@ function assertQueueHistorySettled(history: QueueRecord[]): void {
       (entry) =>
         entry.kind === "project-queue-operation" &&
         !entry.completed &&
-        !entry.beforeEffectFailure &&
-        !entry.retiredWithdrawal &&
-        !entry.retiredAdmission,
+        !entry.beforeEffectFailure,
     )
   )
     throw new Error(
@@ -3061,7 +2306,6 @@ function verifiedEntry(
   if (card.repository !== config.repository)
     throw new Error("Project queue target belongs to another repository");
   if (card.archived) return undefined;
-  if (retiredQueueEntry(config, card, history)) return undefined;
   if (card.metadata === null) return undefined;
   const metadata = parseQueueMetadata(card.metadata);
   const stale =
@@ -3110,14 +2354,12 @@ export interface VerifiedQueueInspection {
   control: Extract<QueueMetadata, { kind: "control" }> | undefined;
   uninitializedControl: boolean;
   entry?: VerifiedQueueEntry;
-  retiredEntry?: VerifiedRetiredQueueEntry;
 }
 /** A bounded command observation never grants whole-queue dispatch authority. */
 export function verifyQueueInspection(
   config: FactoryConfig,
   inspection: ProjectQueueInspection,
   history: QueueRecord[],
-  historical = false,
   options: { allowUninitializedControl?: boolean } = {},
 ): VerifiedQueueInspection {
   if (
@@ -3154,14 +2396,10 @@ export function verifyQueueInspection(
         inspection.binding,
         inspection.control,
         history,
-        historical,
+        true,
       );
-  const retiredEntry =
-    inspection.target && !inspection.target.archived
-      ? retiredQueueEntry(config, inspection.target, history)
-      : undefined;
   const entry = inspection.target
-    ? verifiedEntry(config, inspection.target, history, historical)
+    ? verifiedEntry(config, inspection.target, history, true)
     : undefined;
   if (inspection.issue) {
     const issue = inspection.issue;
@@ -3200,7 +2438,6 @@ export function verifyQueueInspection(
     control,
     uninitializedControl,
     ...(entry ? { entry } : {}),
-    ...(retiredEntry ? { retiredEntry } : {}),
   };
 }
 /** Exact completed receipt identity, never cached Project membership or spending authority. */
@@ -3208,18 +2445,8 @@ export function retainedQueueEntry(
   config: FactoryConfig,
   history: QueueRecord[],
   objective: number,
-  historical = true,
 ): VerifiedQueueEntry | undefined {
   assertQueueHistorySettled(history);
-  if (
-    history.some(
-      (row) =>
-        row.kind === "project-queue-operation" &&
-        (row.retiredWithdrawal || row.retiredAdmission) &&
-        row.objective === objective,
-    )
-  )
-    return undefined;
   const candidates = history.filter(
     (record): record is QueueOperation =>
       record.kind === "project-queue-operation" &&
@@ -3231,9 +2458,7 @@ export function retainedQueueEntry(
           next.kind === "project-queue-operation" &&
           next.scope === record.scope &&
           next.previousReceiptId === record.id &&
-          !next.beforeEffectFailure &&
-          !next.retiredWithdrawal &&
-          !next.retiredAdmission,
+          !next.beforeEffectFailure,
       ),
   );
   if (candidates.length > 1)
@@ -3265,10 +2490,10 @@ export function retainedQueueEntry(
       archived: false,
     },
     history,
-    historical,
+    true,
   );
 }
-/** Authenticated successful, uncertain and retired allocations are never recycled. */
+/** Authenticated successful and uncertain allocations are never recycled. */
 export function nextProjectQueueOrder(history: QueueRecord[]): number {
   const allocated = history.flatMap((record) =>
     record.kind === "project-queue-operation"
@@ -3277,16 +2502,12 @@ export function nextProjectQueueOrder(history: QueueRecord[]): number {
             ? [record.order!]
             : []),
           ...record.effects.flatMap((effect) =>
-            effect.intent.action === "set-order" ||
             effect.intent.action === "set-admission-fields"
               ? [effect.intent.order]
               : [],
           ),
           ...(record.commandRecipe?.effects.flatMap((effect) =>
-            effect.action === "set-order" ||
-            effect.action === "set-admission-fields"
-              ? [effect.order]
-              : [],
+            effect.action === "set-admission-fields" ? [effect.order] : [],
           ) ?? []),
         ]
       : [],
@@ -3300,18 +2521,17 @@ export function verifyQueueObservation(
   config: FactoryConfig,
   snapshot: ProjectQueueSnapshot,
   history: QueueRecord[],
-  historical = false,
 ): VerifiedQueueObservation {
   const control = verifiedControl(
     config,
     snapshot.binding,
     snapshot.control,
     history,
-    historical,
+    false,
   );
   const entries = snapshot.cards.flatMap((card) => {
     if (card.archived) return [];
-    const entry = verifiedEntry(config, card, history, historical, true);
+    const entry = verifiedEntry(config, card, history, false, true);
     return entry ? [entry] : [];
   });
   if (
@@ -3326,11 +2546,6 @@ export function verifyQueueObservation(
     history,
     control,
     entries: entries.sort((a, b) => a.order - b.order),
-    retiredEntries: snapshot.cards.flatMap((card) => {
-      if (card.archived) return [];
-      const retired = retiredQueueEntry(config, card, history);
-      return retired ? [retired] : [];
-    }),
   };
 }
 /** Original completed responses supply stable identities only, never live queue values. */
@@ -3366,7 +2581,6 @@ export function queueObservationTargets(
 export async function observeProjectQueue(
   config: FactoryConfig,
   github: GitHubGateway,
-  authority: "current" | "explicit-operation" = "current",
 ): Promise<VerifiedQueueObservation> {
   const binding = config.queue?.project;
   if (!binding || !github.projectQueueRead)
@@ -3378,12 +2592,7 @@ export async function observeProjectQueue(
     binding,
     queueObservationTargets(history),
   );
-  return verifyQueueObservation(
-    config,
-    snapshot,
-    history,
-    authority === "explicit-operation",
-  );
+  return verifyQueueObservation(config, snapshot, history);
 }
 export function createQueueOperation(
   config: FactoryConfig,
@@ -3412,8 +2621,6 @@ function commandHeader(operation: QueueOperation): QueueOperationHeader {
     effects: _effects,
     completed: _completed,
     beforeEffectFailure: _failure,
-    retiredWithdrawal: _retirement,
-    retiredAdmission: _admissionRetirement,
     commandId: _command,
     commandRecipe: _recipe,
     ...header
@@ -3541,9 +2748,6 @@ function assertCommandRecipe(
     if (
       (step.action === "ensure-card" &&
         step.issueNodeId !== operation.issueNodeId) ||
-      (step.action === "set-order" &&
-        (step.order !== operation.order ||
-          step.fieldId !== first.binding.orderFieldId)) ||
       (step.action === "set-metadata" &&
         (step.metadata !== operation.metadata ||
           step.fieldId !== first.binding.metadataFieldId)) ||
@@ -3574,9 +2778,7 @@ function assertCommandRecipe(
     const actualActions = steps.map((step) => step.action);
     const actions =
       operation.action === "admit"
-        ? actualActions.includes("set-admission-fields")
-          ? ["ensure-card", "set-admission-fields"]
-          : ["ensure-card", "set-order", "set-metadata"]
+        ? ["ensure-card", "set-admission-fields"]
         : operation.action === "roadmap"
           ? ["ensure-card"]
           : ["set-metadata"];
@@ -3832,8 +3034,6 @@ export function createQueueCommand(
         operation.completed ||
         operation.commandId ||
         operation.beforeEffectFailure ||
-        operation.retiredWithdrawal ||
-        operation.retiredAdmission ||
         operation.repository !== config.repository ||
         operation.authorityDigest !== factoryAuthorityDigest(config) ||
         JSON.stringify(operation.binding) !==
@@ -4075,44 +3275,16 @@ export async function completeQueueCommand(
   }
   await awaitCheckpointAdmission(config.repository, "explicit");
 }
-export async function performQueueEffect(
+async function performQueueEffect(
   config: FactoryConfig,
   github: GitHubGateway,
   operation: QueueOperation,
   action: ProjectQueueAction,
-  expectedTarget?: ProjectQueueExpectedTarget,
-  observation?: ProjectQueueInspection | ProjectQueueWriteReceipt,
-  commandEffect?: { command: QueueCommand; index: number },
+  expectedTarget: ProjectQueueExpectedTarget | undefined,
+  observation: ProjectQueueInspection | ProjectQueueWriteReceipt | undefined,
+  commandEffect: { command: QueueCommand; index: number },
 ): Promise<ProjectQueueWriteReceipt> {
   requireProjectQueueEffects(config);
-  // A permanent local retirement is a refusal, never cached admission authority.
-  // The command already authenticated all history; do not fetch the archive again.
-  if (
-    ["admit", "roadmap"].includes(operation.action) &&
-    operation.effects.length === 0
-  ) {
-    const directory = join(
-      stateRoot(config.repository),
-      "project-queue-history",
-    );
-    for (const name of existsSync(directory) ? readdirSync(directory) : []) {
-      if (!/^[a-f0-9-]{36}\.json$/.test(name))
-        throw new Error("Unrecognized queue receipt remains held");
-      const row = parseQueueRecord(
-        privateBytes(join(directory, name)),
-        config.repository,
-        name.slice(0, -5),
-      );
-      if (
-        row.kind === "project-queue-operation" &&
-        (row.retiredWithdrawal || row.retiredAdmission) &&
-        row.objective === operation.objective
-      )
-        throw new Error(
-          "Permanently retired Objective/admission cannot be published or admitted again",
-        );
-    }
-  }
   if (
     ["admit", "roadmap"].includes(operation.action) &&
     (!operation.issueNodeId || !operation.objective || !operation.bodyDigest)
@@ -4123,28 +3295,24 @@ export async function performQueueEffect(
   if (
     operation.completed ||
     operation.beforeEffectFailure ||
-    operation.retiredWithdrawal ||
-    operation.retiredAdmission ||
     !github.projectQueueWrite ||
     operation.effects.some((effect) => !effect.receipt)
   )
     throw new Error(
       "Project queue write is unavailable or held by an unknown prior effect",
     );
-  const commandOwner =
-    commandEffect && ownQueueCommand(config, commandEffect.command);
-  const planned = commandEffect?.command.recipe.effects[commandEffect.index];
+  const commandOwner = ownQueueCommand(config, commandEffect.command);
+  const planned = commandEffect.command.recipe.effects[commandEffect.index];
   if (
-    operation.commandId &&
-    (!planned ||
-      !commandOwner?.admitted ||
-      commandOwner.index !== commandEffect?.index ||
-      planned.operationId !== operation.id)
+    !planned ||
+    !commandOwner.admitted ||
+    commandOwner.index !== commandEffect.index ||
+    planned.operationId !== operation.id
   )
     throw new Error(
       "Grouped effects require the actual admitted creating command",
     );
-  const requestId = planned?.requestId ?? randomUUID();
+  const requestId = planned.requestId;
   const store = new LocalContentStore(
     join(stateRoot(config.repository), "content"),
   );
@@ -4154,9 +3322,8 @@ export async function performQueueEffect(
       ...action,
       binding: operation.binding,
       requestId,
-      ...(planned
-        ? { plannedEffect: planned, dependencyReceipts: commandOwner!.receipts }
-        : {}),
+      plannedEffect: planned,
+      dependencyReceipts: commandOwner.receipts,
       ...(expectedTarget ? { expectedTarget } : {}),
       ...(observation ? { observation } : {}),
       ...(["admit", "roadmap"].includes(operation.action) &&
@@ -4181,105 +3348,22 @@ export async function performQueueEffect(
         retained = { intent };
         operation.effects.push(retained);
         save(operation);
-        try {
-          if (planned) {
-            const concrete = resolveProjectQueuePlannedEffect(
-              operation.binding,
-              planned,
-              commandOwner!.receipts,
-            );
-            if (
-              intent.actorId !== planned.actorId ||
-              JSON.stringify(intent.request) !==
-                JSON.stringify(concrete.request) ||
-              Object.entries(concrete.action).some(
-                ([key, value]) => object(intent)[key] !== value,
-              )
-            )
-              throw new Error(
-                "Adapter intent differs from its acknowledged command recipe",
-              );
-            assertProcessActive();
-          } else
-            await awaitCheckpointAdmission(config.repository, "before-effect");
-        } catch (error) {
-          if (
-            isCheckpointAdmissionFailure(error) &&
-            error.knownNotDispatched &&
-            operation.effects.length === 1 &&
-            !operation.beforeEffectFailure
-          ) {
-            try {
-              const originalOperation = store.putBytes(
-                privateBytes(
-                  join(
-                    stateRoot(config.repository),
-                    "project-queue-history",
-                    `${operation.id}.json`,
-                  ),
-                ),
-                { mediaType: "application/json" },
-              );
-              const checkpoint = store.putBytes(
-                privateBytes(
-                  join(
-                    stateRoot(config.repository),
-                    "recovery",
-                    "checkpoint.json",
-                  ),
-                ),
-                { mediaType: "application/json" },
-              );
-              const sourceDirectory = dirname(fileURLToPath(import.meta.url));
-              const proof: QueueBeforeEffectFailure = {
-                schemaVersion: 1,
-                at: new Date().toISOString(),
-                originalOperation,
-                checkpoint,
-                error: store.putBytes(
-                  Buffer.from(
-                    JSON.stringify({
-                      kind: "typed-before-write-checkpoint-refusal",
-                      boundary: "before-effect",
-                      knownNotDispatched: true,
-                      name: error.name,
-                      message: error.message,
-                      stack: error.stack ?? null,
-                    }),
-                  ),
-                  { mediaType: "application/json" },
-                ),
-                sources: [
-                  "project-queue-state.js",
-                  "github-project-queue.js",
-                  "recovery-checkpoint.js",
-                ].map((path) => ({
-                  path,
-                  ref: store.putBytes(
-                    Buffer.from(
-                      JSON.stringify(
-                        readFileSync(join(sourceDirectory, path), "utf8"),
-                      ),
-                    ),
-                    { mediaType: "application/json" },
-                  ),
-                })),
-              };
-              operation.beforeEffectFailure = proof;
-              assertQueueOperationReferenceBodies(operation, (ref) =>
-                store.readBytes(ref),
-              );
-              save(operation);
-            } catch (retentionError) {
-              throw new AggregateError(
-                [error, retentionError],
-                "Original before-effect failure and its retention failure remain unresolved",
-                { cause: error },
-              );
-            }
-          }
-          throw error;
-        }
+        const concrete = resolveProjectQueuePlannedEffect(
+          operation.binding,
+          planned,
+          commandOwner.receipts,
+        );
+        if (
+          intent.actorId !== planned.actorId ||
+          JSON.stringify(intent.request) !== JSON.stringify(concrete.request) ||
+          Object.entries(concrete.action).some(
+            ([key, value]) => object(intent)[key] !== value,
+          )
+        )
+          throw new Error(
+            "Adapter intent differs from its acknowledged command recipe",
+          );
+        assertProcessActive();
       },
     });
     assertProjectQueueWriteReceipt(returned);
@@ -4302,7 +3386,7 @@ export async function performQueueEffect(
     });
     retained.receipt = receipt;
     // Retain every original locally. Group completion acknowledges all declared
-    // responses together; standalone operations retain their next intent barrier.
+    // responses together.
     save(operation);
     return returned;
   } catch (error) {
@@ -4321,23 +3405,6 @@ export async function performQueueEffect(
     }
     throw error;
   }
-}
-export async function completeQueueOperation(
-  config: FactoryConfig,
-  operation: QueueOperation,
-): Promise<void> {
-  if (
-    operation.commandId ||
-    operation.beforeEffectFailure ||
-    operation.retiredWithdrawal ||
-    operation.retiredAdmission
-  )
-    throw new Error(
-      "Grouped or permanently failed operation cannot complete or replay independently",
-    );
-  operation.completed = true;
-  save(operation);
-  await awaitCheckpointAdmission(config.repository, "explicit");
 }
 export async function claimProjectQueueRun(
   config: FactoryConfig,
@@ -4359,17 +3426,6 @@ export async function claimProjectQueueRun(
   // Existing archive without this host's verified baseline cannot be overwritten.
   await awaitCheckpointAdmission(config.repository, "explicit");
   let observed = await observeProjectQueue(config, github);
-  if (
-    observed.history.some(
-      (row) =>
-        row.kind === "project-queue-operation" &&
-        (row.retiredWithdrawal || row.retiredAdmission) &&
-        row.objective === objective,
-    )
-  )
-    throw new Error(
-      "Permanently retired uncertain admission can never dispatch a run",
-    );
   const approvedEntry = (current: typeof observed) => {
     const entry = current.entries.find(
       (candidate) =>
@@ -4509,7 +3565,7 @@ function creatingClaimOwner(
   config: FactoryConfig,
   objective: number,
   token: string,
-): NonNullable<QueueOwnerClaim["ownerProcess"]> {
+): QueueOwnerClaim["ownerProcess"] {
   const identity = ownIdentity();
   const owner = [
     objectiveLockPath(config.repository, objective),
@@ -4539,7 +3595,6 @@ export async function settleFailedProjectQueueReservation(
   requireProjectQueueEffects(config);
   const owner = creatingClaimOwner(config, claim.objective, ownerToken);
   if (
-    !claim.ownerProcess ||
     JSON.stringify(owner) !== JSON.stringify(claim.ownerProcess) ||
     claim.ownerTokenDigest !== queueDigest(ownerToken) ||
     claim.authorityDigest !== factoryAuthorityDigest(config) ||
@@ -4602,7 +3657,7 @@ export async function abandonFailedProjectQueueReservation(
   claimId: string;
   canonicalRunId: null;
   originalDeadlineAt: string | null;
-  originalProducerIdentity: "recorded" | "unavailable";
+  originalProducerIdentity: "recorded";
 }> {
   requireProjectQueueEffects(config);
   assertProcessActive();
@@ -4880,9 +3935,7 @@ export async function abandonFailedProjectQueueReservation(
       ),
       { mediaType: "application/json" },
     );
-  const originalProducerIdentity = claim.ownerProcess
-    ? "recorded"
-    : "unavailable";
+  const originalProducerIdentity = "recorded";
   const decision = {
     schemaVersion: 1,
     kind: "explicit-operator-reservation-abandonment",
@@ -4942,561 +3995,6 @@ export async function abandonFailedProjectQueueReservation(
     originalProducerIdentity,
   };
 }
-/** Explicit operator retirement; a synchronous remote field outcome remains UNKNOWN. */
-export function retireUnknownProjectWithdrawal(
-  config: FactoryConfig,
-  github: GitHubGateway,
-  objective: number,
-  evidenceValue: unknown,
-  actor: string,
-  lock: ControllerLock,
-) {
-  return retireUnknownProjectOperation(
-    config,
-    github,
-    objective,
-    evidenceValue,
-    actor,
-    lock,
-    false,
-  );
-}
-export function retireUnknownProjectAdmission(
-  config: FactoryConfig,
-  github: GitHubGateway,
-  objective: number,
-  evidenceValue: unknown,
-  actor: string,
-  lock: ControllerLock,
-) {
-  return retireUnknownProjectOperation(
-    config,
-    github,
-    objective,
-    evidenceValue,
-    actor,
-    lock,
-    true,
-  );
-}
-async function retireUnknownProjectOperation(
-  config: FactoryConfig,
-  github: GitHubGateway,
-  objective: number,
-  evidenceValue: unknown,
-  actor: string,
-  lock: ControllerLock,
-  admission: boolean,
-): Promise<{
-  retiredUnaccepted: true;
-  objective: number;
-  operationId: string;
-  remoteSubmission: "unknown";
-  canonicalRunId: null;
-}> {
-  requireProjectQueueEffects(config);
-  assertProcessActive();
-  if (
-    !actor ||
-    config.execution.kind !== "local" ||
-    config.planning.kind !== "codex-sdk" ||
-    (config.execution.profiles
-      ? Object.values(config.execution.profiles).some(
-          (profile) => profile.harness.kind !== "codex-sdk",
-        )
-      : config.execution.harness?.kind !== "codex-sdk")
-  )
-    throw new Error("Retirement refuses unknown provider resource protocols");
-  const leasePath = installationLockPath(config.repository),
-    lease = readControllerOwner(leasePath),
-    identity = ownIdentity(),
-    held = fstatSync(lock.fd),
-    current = lstatSync(leasePath);
-  if (
-    !lease ||
-    lease.pid !== identity.pid ||
-    lease.startTime !== identity.startTime ||
-    lease.token !== lock.token ||
-    lease.objective !== objective ||
-    held.ino !== current.ino ||
-    held.dev !== current.dev
-  )
-    throw new Error(
-      "Withdrawal retirement requires its actual exclusive stopped installation lease",
-    );
-  if (
-    readContinuation(config.repository, objective) ||
-    existsSync(
-      join(
-        stateRoot(config.repository),
-        "objectives",
-        String(objective),
-        "pre-state.json",
-      ),
-    )
-  )
-    throw new Error(
-      "A canonical run requires its own lifecycle; unknown withdrawal cannot retire it",
-    );
-  const raw = object(evidenceValue);
-  only(raw, [
-    "schemaVersion",
-    "kind",
-    "operationId",
-    "originalInstallation",
-    "originals",
-  ]);
-  if (
-    raw.schemaVersion !== 1 ||
-    raw.kind !==
-      (admission
-        ? "operator-retired-admission-unknown"
-        : "operator-retired-withdrawal-unknown") ||
-    !uuid(raw.operationId)
-  )
-    throw new Error(
-      "Explicit unknown withdrawal operator evidence is required",
-    );
-  const installation = object(raw.originalInstallation);
-  only(installation, ["cli", "configPath", "configSha256", "ownFileInventory"]);
-  const originals = object(raw.originals);
-  only(originals, [
-    "ownerObservation",
-    "installedPlan",
-    "callerFailure",
-    "sourceProtocolReview",
-    "physicalClosure",
-  ]);
-  if (
-    typeof installation.cli !== "string" ||
-    !isAbsolute(installation.cli) ||
-    typeof installation.configPath !== "string" ||
-    !isAbsolute(installation.configPath) ||
-    !digest(installation.configSha256)
-  )
-    throw new Error("Original installed/configuration identity is unavailable");
-  for (const descriptor of [
-    installation.ownFileInventory,
-    ...Object.values(originals),
-  ])
-    assertReservationOperatorOriginal(descriptor);
-  const evidence = raw as unknown as
-      | RetiredWithdrawalEvidence
-      | RetiredAdmissionEvidence,
-    configBytes = privateBytes(evidence.originalInstallation.configPath),
-    originalConfig = resolveMatchingProvider(
-      JSON.parse(configBytes.toString("utf8")),
-      config,
-    );
-  if (
-    queueDigest(configBytes.toString("utf8")) !==
-      evidence.originalInstallation.configSha256 ||
-    factoryConfigDigest(originalConfig) !== factoryConfigDigest(config) ||
-    factoryAuthorityDigest(originalConfig) !== factoryAuthorityDigest(config)
-  )
-    throw new Error("Original withdrawal configuration/authority changed");
-  const history = await readQueueHistory(config),
-    unresolved = history.filter(
-      (row): row is QueueOperation =>
-        row.kind === "project-queue-operation" &&
-        !row.completed &&
-        !row.beforeEffectFailure &&
-        !(row.retiredWithdrawal || row.retiredAdmission),
-    ),
-    operation = unresolved.find((row) => row.id === evidence.operationId);
-  if (
-    unresolved.length !== 1 ||
-    !operation ||
-    operation.commandId ||
-    operation.action !== (admission ? "admit" : "withdraw") ||
-    operation.objective !== objective ||
-    operation.authorityDigest !== factoryAuthorityDigest(config) ||
-    operation.effects.length !== (admission ? 3 : 1) ||
-    (!admission && operation.effects[0]!.receipt) ||
-    operation.effects.some((effect) => effect.rejectedOriginal) ||
-    history.some((row) => row.kind === "project-queue-owner" && !row.settled)
-  )
-    throw new Error("Other partial effects or active owners remain held");
-  const claim = history.find(
-      (row): row is QueueOwnerClaim =>
-        row.kind === "project-queue-owner" &&
-        row.objective === objective &&
-        row.receiptId === operation.previousReceiptId &&
-        row.settled?.disposition === "abandoned-unaccepted",
-    ),
-    previous = history.find(
-      (row): row is QueueOperation =>
-        row.kind === "project-queue-operation" &&
-        row.id === operation.previousReceiptId,
-    );
-  const intent = operation.effects[admission ? 2 : 0]!.intent;
-  let priorMetadata: string | null,
-    originalDeadlineAt: string | null,
-    originalRPC: string | undefined;
-  if (admission) {
-    const [ensure, order] = operation.effects;
-    if (
-      operation.commandId ||
-      operation.previousReceiptId !== null ||
-      !ensure?.receipt ||
-      !order?.receipt ||
-      !ensure.original ||
-      !order.original ||
-      ensure.intent.action !== "ensure-card" ||
-      ensure.intent.issueNodeId !== operation.issueNodeId ||
-      order.intent.action !== "set-order" ||
-      order.intent.itemId !== ensure.receipt.itemId ||
-      order.intent.order !== operation.order ||
-      order.intent.fieldId !== operation.binding.orderFieldId ||
-      intent.action !== "set-metadata" ||
-      intent.itemId !== order.receipt.itemId ||
-      intent.fieldId !== operation.binding.metadataFieldId ||
-      intent.metadata !== operation.metadata ||
-      operation.effects[2]!.receipt ||
-      ensure.intent.actorId !== intent.actorId ||
-      order.intent.actorId !== intent.actorId ||
-      history.some(
-        (row) =>
-          row.kind === "project-queue-owner" && row.objective === objective,
-      )
-    )
-      throw new Error(
-        "Only a never-run legacy admission with two real responses and one unknown final metadata effect may retire",
-      );
-    const content = new LocalContentStore(
-      join(stateRoot(config.repository), "content"),
-    );
-    const receipt = {
-      ...order.receipt,
-      original: JSON.parse(content.readBytes(order.original).toString("utf8")),
-    };
-    assertProjectQueueWriteReceipt(receipt);
-    const target = projectQueueReceiptTarget(receipt);
-    if (
-      !("objective" in target) ||
-      target.objective !== objective ||
-      target.issueNodeId !== operation.issueNodeId ||
-      target.metadata !== null ||
-      ensure.receipt.kind !== "response"
-    )
-      throw new Error("Original known card mapping differs");
-    priorMetadata = target.metadata;
-    originalDeadlineAt = null;
-  } else {
-    priorMetadata = previous?.metadata ?? null;
-    originalDeadlineAt = claim?.deadlineAt ?? null;
-  }
-  if (
-    !admission &&
-    (!claim?.settled?.abandonment ||
-      claim.runBinding ||
-      claim.priorRunId ||
-      !previous?.completed ||
-      previous.action !== "admit" ||
-      intent.action !== "set-metadata" ||
-      intent.fieldId !== operation.binding.metadataFieldId ||
-      intent.metadata !== operation.metadata ||
-      !operation.issueNodeId ||
-      !operation.metadata ||
-      !previous.metadata ||
-      !previous.effects.at(-1)?.original)
-  )
-    throw new Error(
-      "Retirement is restricted to one exact withdrawal of an already permanently abandoned admission",
-    );
-  const inventoryBytes = readReservationOperatorOriginal(
-      evidence.originalInstallation.ownFileInventory,
-    ),
-    originalBytes = Object.fromEntries(
-      Object.entries(evidence.originals).map(([key, value]) => [
-        key,
-        readReservationOperatorOriginal(value),
-      ]),
-    ) as Record<keyof RetiredWithdrawalEvidence["originals"], Buffer>;
-  const readyObservation = object(
-      JSON.parse(originalBytes.ownerObservation.toString("utf8")),
-    ),
-    ready = object(readyObservation.ready),
-    oldOwner = object(ready.owner),
-    plan = object(JSON.parse(originalBytes.installedPlan.toString("utf8")));
-  if (
-    readyObservation.outcome !== "owned-ready" ||
-    ready.protocol !== "controller-readiness-v1" ||
-    !date(readyObservation.observedAt) ||
-    Date.parse(String(readyObservation.observedAt)) >
-      Date.parse(operation.at) ||
-    !Number.isSafeInteger(oldOwner.pid) ||
-    Number(oldOwner.pid) < 1 ||
-    typeof oldOwner.startTime !== "string" ||
-    !/^\d+$/.test(oldOwner.startTime) ||
-    oldOwner.intake !== true ||
-    plan.namespace !== readlinkSync("/proc/self/ns/pid") ||
-    plan.target !== config.repository ||
-    plan.configPath !== evidence.originalInstallation.configPath ||
-    plan.installedModule !==
-      dirname(dirname(evidence.originalInstallation.cli)) ||
-    plan.stateHome !==
-      resolve(
-        process.env.XDG_STATE_HOME ??
-          join(process.env.HOME ?? "", ".local", "state"),
-      )
-  )
-    throw new Error(
-      "Original authenticated supervisor/namespace/installation facts are unavailable",
-    );
-  const oldIdentity = linuxProcessIdentity(Number(oldOwner.pid));
-  if (
-    (oldIdentity?.startTime === oldOwner.startTime &&
-      oldIdentity.state !== "Z") ||
-    processGroupExists(Number(oldOwner.pid))
-  )
-    throw new Error(
-      "Original supervisor/process group remains live or uncertain",
-    );
-  const { serviceName } = await import("./supervision.js"),
-    unitName = serviceName(config.repository),
-    unit = await subprocessAsync("systemctl", [
-      "--user",
-      "show",
-      unitName,
-      "--property=ActiveState,SubState,MainPID,ControlGroup,ExecStart",
-      "--no-pager",
-    ]);
-  if (
-    unit.status !== 0 ||
-    !/^ActiveState=(inactive|failed)$/m.test(unit.stdout) ||
-    !/^MainPID=0$/m.test(unit.stdout) ||
-    !/^ControlGroup=$/m.test(unit.stdout)
-  )
-    throw new Error("Registered service resources remain live or uncertain");
-  const command = reservationSupervisorCommand(
-    unit.stdout,
-    evidence.originalInstallation.cli,
-    evidence.originalInstallation.configPath,
-  );
-  const sourceBytes = authenticatedOriginalInstalledFiles(
-      evidence.originalInstallation.cli,
-      JSON.parse(inventoryBytes.toString("utf8")),
-    ),
-    review = object(
-      JSON.parse(originalBytes.sourceProtocolReview.toString("utf8")),
-    );
-  if (!Array.isArray(review.modules))
-    throw new Error("Original scoped protocol review is missing");
-  const archive = await readVerifiedRecoveryCheckpoint(config);
-  if (admission) {
-    if (
-      archive.manifest.files.some(
-        (file) =>
-          file.path.startsWith(`objectives/${objective}/`) &&
-          ["continuation", "objective-preparation"].includes(file.kind),
-      )
-    )
-      throw new Error("Historical canonical work requires its own lifecycle");
-    for (const file of archive.manifest.files.filter((file) =>
-      /^accounting\/[a-f0-9]{64}\.json$/.test(file.path),
-    ))
-      if (
-        decodeAccountingRecord(
-          config.repository,
-          file.path,
-          await archive.readVerifiedBlob(file.ref),
-        ).binding.objective === objective
-      )
-        throw new Error(
-          "Provider or execution admission cannot retire as an unknown queue field",
-        );
-  }
-  if (
-    archive.commitSha !== archive.remoteTip ||
-    archive.manifest.gaps.length ||
-    hasUnresolvedSubprocesses()
-  )
-    throw new Error(
-      "Current complete ACK and settled verification resources are required",
-    );
-  const originalRef = (id: string) => {
-    const file = archive.manifest.files.find(
-      (row) => row.path === `project-queue-history/${id}.json`,
-    );
-    if (!file || file.visibility !== "private" || file.kind !== "historical")
-      throw new Error("Original queue history is not acknowledged");
-    return file.ref;
-  };
-  const originalOperation = originalRef(operation.id),
-    retiredClaim = !admission ? originalRef(claim!.id) : undefined,
-    previousAdmission = !admission ? originalRef(previous!.id) : undefined;
-  const localOriginal = privateBytes(
-    join(
-      stateRoot(config.repository),
-      "project-queue-history",
-      `${operation.id}.json`,
-    ),
-  );
-  if (
-    !Buffer.from(await archive.readVerifiedBlob(originalOperation)).equals(
-      localOriginal,
-    )
-  )
-    throw new Error(
-      "Actual unknown intent differs from its acknowledged original",
-    );
-  if (!github.projectQueueInspect)
-    throw new Error("Genuine bounded Project inspection unavailable");
-  assertProcessActive();
-  const inspection = await github.projectQueueInspect(operation.binding, {
-      itemId: intent.action === "set-metadata" ? intent.itemId : undefined,
-      ...(admission ? { objective } : {}),
-    }),
-    target = inspection.target;
-  const control = verifiedControl(
-    config,
-    inspection.binding,
-    inspection.control,
-    history.filter((row) => row.id !== operation.id),
-    false,
-  );
-  if (
-    control.mode !== "paused" ||
-    (admission &&
-      (!inspection.issue ||
-        inspection.issue.state !== "open" ||
-        inspection.issue.issueNodeId !== operation.issueNodeId ||
-        inspection.issue.repository !== config.repository ||
-        queueDigest(inspection.issue.body) !== operation.bodyDigest)) ||
-    !target ||
-    target.archived ||
-    target.itemId !==
-      (intent.action === "set-metadata" ? intent.itemId : undefined) ||
-    target.issueNodeId !== operation.issueNodeId ||
-    target.objective !== objective ||
-    target.repository !== config.repository ||
-    target.order !== operation.order ||
-    ![priorMetadata, operation.metadata].includes(target.metadata)
-  )
-    throw new Error(
-      "Current target is not the exact paused original or requested withdrawal mapping",
-    );
-  const store = new LocalContentStore(
-    join(stateRoot(config.repository), "content"),
-  );
-  const refs = [
-    originalOperation,
-    ...(admission
-      ? operation.effects.slice(0, 2).map((effect) => effect.original!)
-      : [
-          retiredClaim!,
-          previousAdmission!,
-          previous!.effects.at(-1)!.original!,
-          ...queueOwnerReferences(claim!),
-        ]),
-  ];
-  for (const reference of refs)
-    retainProjectQueueOriginal(
-      store,
-      reference,
-      await archive.readVerifiedBlob(reference),
-    );
-  const originalText = (bytes: Buffer) =>
-    store.putBytes(
-      Buffer.from(
-        JSON.stringify(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
-      ),
-      { mediaType: "application/json" },
-    );
-  if (admission) {
-    const caller = object(
-        JSON.parse(originalBytes.callerFailure.toString("utf8")),
-      ),
-      rpc = object(caller.addRPC);
-    if (
-      !Number.isSafeInteger(rpc.deadlineAt) ||
-      !uuid(rpc.requestId) ||
-      rpc.submission !== "unknown"
-    )
-      throw new Error("Exact original caller clock/submission missing");
-    originalDeadlineAt = new Date(Number(rpc.deadlineAt)).toISOString();
-    originalRPC = rpc.requestId;
-  }
-  const decision = {
-    schemaVersion: 1,
-    kind: admission
-      ? "explicit-operator-retired-admission-unknown"
-      : "explicit-operator-retired-withdrawal-unknown",
-    actor,
-    repository: config.repository,
-    objective,
-    operationId: operation.id,
-    ...(!admission ? { claimId: claim!.id } : { originalRPC }),
-    previousReceiptId: operation.previousReceiptId,
-    requestId: intent.requestId,
-    bodyDigest: operation.bodyDigest,
-    authorityDigest: operation.authorityDigest,
-    originalConfigDigest: factoryConfigDigest(config),
-    originalCli: evidence.originalInstallation.cli,
-    originalConfigPath: evidence.originalInstallation.configPath,
-    originalOwner: {
-      pid: oldOwner.pid,
-      startTime: oldOwner.startTime,
-      namespace: plan.namespace,
-    },
-    originalOwnerTokenIdentity: "unavailable",
-    originalDeadlineAt,
-    remoteSubmission: "unknown",
-    currentRegisteredCommand: command,
-  };
-  const commonProof = {
-    schemaVersion: 1 as const,
-    at: new Date().toISOString(),
-    originalOperation,
-    operatorDecision: store.putBytes(Buffer.from(JSON.stringify(decision)), {
-      mediaType: "application/json",
-    }),
-    ownerObservation: originalText(originalBytes.ownerObservation),
-    installedPlan: originalText(originalBytes.installedPlan),
-    callerFailure: originalText(originalBytes.callerFailure),
-    sourceProtocolReview: originalText(originalBytes.sourceProtocolReview),
-    physicalClosure: originalText(originalBytes.physicalClosure),
-    sourceInventory: originalText(inventoryBytes),
-    sourceModules: (review.modules as { path: string }[]).map((row) => {
-      const bytes = sourceBytes.get(row.path);
-      if (!bytes) throw new Error("Original reviewed module is absent");
-      return { path: row.path, ref: originalText(bytes) };
-    }),
-    observedTarget: store.putBytes(Buffer.from(JSON.stringify(inspection)), {
-      mediaType: "application/json",
-    }),
-  };
-  if (admission)
-    operation.retiredAdmission = {
-      ...commonProof,
-      knownResponses: operation.effects
-        .slice(0, 2)
-        .map((effect) => effect.original!),
-    };
-  else
-    operation.retiredWithdrawal = {
-      ...commonProof,
-      retiredClaim: retiredClaim!,
-      claimReferences: queueOwnerReferences(claim!),
-      previousAdmission: previousAdmission!,
-      previousResponse: previous!.effects.at(-1)!.original!,
-    };
-  assertQueueOperationReferenceBodies(operation, (reference) =>
-    store.readBytes(reference),
-  );
-  assertProcessActive();
-  save(operation);
-  await awaitCheckpointAdmission(config.repository, "explicit");
-  return {
-    retiredUnaccepted: true,
-    objective,
-    operationId: operation.id,
-    remoteSubmission: "unknown",
-    canonicalRunId: null,
-  };
-}
-
 /** A fresh read can hold an actual owner; it never grants or releases ownership. */
 export async function assertProjectQueueRunLive(
   config: FactoryConfig,
@@ -5653,7 +4151,6 @@ export async function settleStoppedProjectQueueRun(
   if (isExecutionState(state)) {
     const originalOwner = claim.ownerProcess;
     if (
-      !originalOwner ||
       originalOwner.namespace !== readlinkSync("/proc/self/ns/pid") ||
       hasUnresolvedSubprocesses()
     )

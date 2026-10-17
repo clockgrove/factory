@@ -246,10 +246,6 @@ export async function setupTarget(
       };
       bindingHealth?: { diagnostics: { code: string; action: string }[] };
     };
-    const legacy = service.bindingHealth?.diagnostics.find(({ code }) =>
-      code.startsWith("legacy-"),
-    );
-    if (legacy) throw new Error(legacy.action);
     if (
       service.registered &&
       service.binding?.config !== realpathSync(configPath)

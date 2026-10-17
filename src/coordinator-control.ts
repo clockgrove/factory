@@ -330,26 +330,65 @@ export async function requestControl(
     if (options.deadlineAt <= Date.now())
       throw new ControllerReadinessPendingError("deadline");
   }
-  // The service answers for every Objective; otherwise an Objective's own owner does.
-  let owner = liveControllerOwner(installationLockPath(repository));
-  let directoryPath = stateRoot(repository);
-  if (owner) {
-    if (owner.objective !== request.objective && !owner.intake)
-      throw new ForegroundControllerError(owner.objective);
-  } else if (request.objective) {
-    owner = liveControllerOwner(
-      objectiveLockPath(repository, request.objective),
-    );
-    directoryPath = objectiveRoot(repository, request.objective);
-  } else {
-    const foreground = liveObjectiveOwner(repository);
-    if (foreground) throw new ForegroundControllerError(foreground.objective);
+  // A starting or exiting owner holds its record without an endpoint (#1486).
+  // Nothing was sent, so wait briefly and resolve the owner again: the owned
+  // path opens only once no live owner remains.
+  const waitUntil = Date.now() + ENDPOINT_WAIT_MS;
+  for (;;) {
+    // The service answers for every Objective; otherwise an Objective's own owner does.
+    let owner = liveControllerOwner(installationLockPath(repository));
+    let directoryPath = stateRoot(repository);
+    if (owner) {
+      if (owner.objective !== request.objective && !owner.intake)
+        throw new ForegroundControllerError(owner.objective);
+    } else if (request.objective) {
+      owner = liveControllerOwner(
+        objectiveLockPath(repository, request.objective),
+      );
+      directoryPath = objectiveRoot(repository, request.objective);
+    } else {
+      const foreground = liveObjectiveOwner(repository);
+      if (foreground) throw new ForegroundControllerError(foreground.objective);
+    }
+    if (!owner) return { handled: false };
+    currentProcessSignal()?.throwIfAborted();
+    const reply = await sendControl(directoryPath, owner, request, options);
+    if (reply) return reply;
+    if (options && Date.now() >= options.deadlineAt)
+      throw new ControllerCommandIncompleteError(
+        request.command?.id,
+        "not-sent",
+        options.deadlineAt,
+      );
+    if (Date.now() >= waitUntil) {
+      const error = new Error(
+        `Controller pid ${owner.pid} still owns ${owner.intake || !owner.objective ? "this installation" : `Objective #${owner.objective}`} without a control endpoint; run this again once it exits`,
+      );
+      throw request.command
+        ? new ControllerCommandIncompleteError(
+            request.command.id,
+            "not-sent",
+            options?.deadlineAt,
+            error,
+          )
+        : error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (!owner) return { handled: false };
-  const token = owner.token;
-  const expectedOwner = owner;
+}
+
+/** How long a command waits for a live owner's missing endpoint. */
+const ENDPOINT_WAIT_MS = 10_000;
+
+/** One connection to `owner`; undefined when its endpoint is absent and nothing was sent. */
+function sendControl(
+  directoryPath: string,
+  expectedOwner: NonNullable<ReturnType<typeof liveControllerOwner>>,
+  request: ControlRequest,
+  options?: { deadlineAt: number; onAcknowledgment?: (value: unknown) => void },
+): Promise<{ handled: true; result?: unknown } | undefined> {
+  const token = expectedOwner.token;
   const signal = currentProcessSignal();
-  signal?.throwIfAborted();
   const ownerPath = join(directoryPath, "controller.lock");
   return new Promise((resolve, reject) => {
     const directory = openSync(directoryPath, "r");
@@ -371,7 +410,7 @@ export async function requestControl(
     let settled = false;
     let submitted = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (error?: unknown, result?: unknown) => {
+    const finish = (error?: unknown, result?: unknown, absent = false) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
@@ -379,7 +418,7 @@ export async function requestControl(
       closeDirectory();
       socket.destroy();
       if (error) reject(error);
-      else resolve({ handled: true, result });
+      else resolve(absent ? undefined : { handled: true, result });
     };
     const incomplete = () =>
       new ControllerCommandIncompleteError(
@@ -463,16 +502,18 @@ export async function requestControl(
         finish(error);
       }
     });
-    socket.on("error", (error: NodeJS.ErrnoException) =>
+    socket.on("error", (error: NodeJS.ErrnoException) => {
+      const absent = ["ENOENT", "ECONNREFUSED"].includes(error.code ?? "");
+      if (absent && !submitted && request.action !== "readiness")
+        return finish(undefined, undefined, true);
       finish(
-        request.action === "readiness" &&
-          ["ENOENT", "ECONNREFUSED"].includes(error.code ?? "")
+        request.action === "readiness" && absent
           ? new ControllerReadinessPendingError("endpoint-unavailable")
           : request.command
             ? incomplete()
             : error,
-      ),
-    );
+      );
+    });
     socket.on("end", () => {
       try {
         const reply = terminalReply;

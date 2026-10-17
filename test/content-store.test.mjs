@@ -2699,8 +2699,8 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         }
         assert.equal(
           finalOriginalVerifications,
-          1,
-          "producer and publisher complete one fresh strict original union",
+          0,
+          "an incremental publication does not reread a body its verified base holds",
         );
         publicationWindows.push({
           base: pressured.commitSha,
@@ -2735,7 +2735,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           new RegExp(`have ${restoredRead.commitSha}\\b`),
         );
         // A nested producer may return its semantic description; altered actual
-        // bytes still refuse the publication owner's final union before transport.
+        // bytes still refuse a full publication's final union before transport.
         const beforeNestedFailure = gitPersistenceStatus(config);
         returnedClosureMutation = () => {
           const changed = Buffer.from(originalContent);
@@ -2746,6 +2746,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           await assert.rejects(
             synchronizeRecoveryCheckpoint(config, {
               reason: "explicit",
+              final: true,
               buildClosure,
             }),
             /failed digest verification/,
@@ -2758,6 +2759,8 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
           gitPersistenceStatus(config).lastAcknowledged,
           beforeNestedFailure.lastAcknowledged,
         );
+        // A full publication drops the verified base; a fresh read restores it.
+        await readVerifiedRecoveryCheckpoint(config);
         // The following changed payload uses a real newly retained opaque body,
         // without inventing another provider observation or changing a run.
         const nextSource = content.putBytes(

@@ -39,9 +39,10 @@ export function projectPhase(state: ContinuationState): ProjectPhase {
   )
     return "needs-human";
   if (state.coordinator?.mode !== "running") return "stopped";
+  // The coordinator's phase is only a summary of these work steps, so the
+  // step itself decides review.
   if (
     state.finalAcceptance ||
-    state.coordinator?.phase.includes("review") ||
     Object.values(state.work).some(
       (work) => work.status === "running" && work.step === "approve-result",
     )

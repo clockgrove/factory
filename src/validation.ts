@@ -23,6 +23,7 @@ import type {
 } from "./contracts.js";
 import type { FailedValidationEvidence } from "./failed-validation.js";
 import { StepFault, transient } from "./fault.js";
+import { lfsFiltered } from "./media.js";
 import { ownsPath } from "./ownership.js";
 import {
   assertPackageManagerUpdate,
@@ -89,14 +90,18 @@ function assertSelectedLfsPointer(
     throw new Error(
       `Validation LFS identity is invalid: ${member.destination}`,
     );
-  const filter = pinnedGit(
-    worktree,
-    "check-attr",
-    "filter",
-    "--",
-    member.destination,
-  );
-  if (!filter.endsWith(": lfs"))
+  if (
+    !lfsFiltered(
+      pinnedGit(
+        worktree,
+        "check-attr",
+        "-z",
+        "filter",
+        "--",
+        member.destination,
+      ),
+    )
+  )
     throw new Error(
       `Validation LFS policy does not cover ${member.destination}`,
     );
@@ -857,23 +862,26 @@ export function assertPinnedNpmScripts(
     authority.workspacePackageAdditions,
     authority.predecessorSha,
   );
-  const fileBytes = (revision: string, path: string): Buffer | undefined => {
+  // A failed Git read is an absent file unless a package-manager update
+  // needs it; a path that is not a regular file always blocks.
+  const read = <T>(run: () => T): T | undefined => {
     try {
-      const entry = pinnedGit(checkout, "ls-tree", revision, "--", path);
-      if (!entry) return undefined;
-      if (!/^100(?:644|755) blob /.test(entry))
-        throw new Error(
-          `Package script validation blocked: ${path} is not a regular file`,
-        );
-      return pinnedGitRaw(checkout, "show", `${revision}:${path}`);
+      return run();
     } catch (error) {
-      if (
-        authority.packageManagerUpdate !== undefined ||
-        (error instanceof Error && error.message.includes("not a regular file"))
-      )
-        throw error;
+      if (authority.packageManagerUpdate !== undefined) throw error;
       return undefined;
     }
+  };
+  const fileBytes = (revision: string, path: string): Buffer | undefined => {
+    const entry = read(() =>
+      pinnedGit(checkout, "ls-tree", revision, "--", path),
+    );
+    if (!entry) return undefined;
+    if (!/^100(?:644|755) blob /.test(entry))
+      throw new Error(
+        `Package script validation blocked: ${path} is not a regular file`,
+      );
+    return read(() => pinnedGitRaw(checkout, "show", `${revision}:${path}`));
   };
   const file = (revision: string, path: string): string | undefined =>
     fileBytes(revision, path)?.toString("utf8");

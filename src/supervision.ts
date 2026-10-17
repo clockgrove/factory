@@ -209,6 +209,14 @@ function privateFile(path: string): void {
 export const LEGACY_SERVICE_BINDING =
   "This service was bound to one Objective by an earlier Factory version; run `factory supervisor uninstall`, then `factory setup --background`";
 
+/** A unit bound to one Objective, as earlier Factory versions wrote it. */
+class LegacyServiceBinding extends Error {
+  constructor() {
+    super(LEGACY_SERVICE_BINDING);
+    this.name = "LegacyServiceBinding";
+  }
+}
+
 /**
  * Only stop and uninstall may act on a retired binding (one bound to an Objective), so an operator can remove it; nothing reuses or rewrites it.
  */
@@ -222,7 +230,7 @@ function decodeBinding(text: string, teardown = false): ServiceBinding {
     typeof value === "object" &&
     ("objective" in value || "intake" in value)
   )
-    throw new Error(LEGACY_SERVICE_BINDING);
+    throw new LegacyServiceBinding();
   const path = (value: unknown) =>
     typeof value === "string" && isAbsolute(value) && !/[\n\r\0]/.test(value);
   if (
@@ -313,7 +321,7 @@ function inspectBinding(
   try {
     value = decodeBinding(text);
   } catch (error) {
-    if (error instanceof Error && error.message === LEGACY_SERVICE_BINDING)
+    if (error instanceof LegacyServiceBinding)
       report(
         "legacy-service-binding",
         "The unit is bound to one Objective, as earlier Factory versions did.",

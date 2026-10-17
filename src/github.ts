@@ -82,7 +82,7 @@ type Pull = {
   body?: string | null;
   user?: { login?: string } | null;
   head: { sha: string; ref: string; repo?: { full_name?: string } | null };
-  base: { ref: string; repo?: { full_name?: string } | null };
+  base: { ref: string; sha: string; repo?: { full_name?: string } | null };
 };
 
 export function projectedIssueBody(item: WorkItem, objective: number): string {
@@ -2309,7 +2309,7 @@ export class RealGitHubGateway implements GitHubGateway {
         undefined,
         // GitHub refuses a head that moved (409). The PR held Factory's head
         // a moment ago, so a refusal is lag until the repeat observes it.
-        { head: "ours" },
+        { head: "ours", base: current.base.sha },
       );
     } catch (error) {
       // "Not mergeable" also answers a merge in progress, one a lost earlier

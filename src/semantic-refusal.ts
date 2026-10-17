@@ -230,13 +230,11 @@ export function assertSemanticRefusalRecord(
       !decision.actor.trim() ||
       typeof decision.reason !== "string" ||
       !decision.reason.trim() ||
+      // The recorded decision binds the refusal; the failure's detail is
+      // only its rendering, which differs by producer.
       !work.acceptanceDecisions?.some((entry) =>
         isDeepStrictEqual(entry, decision),
-      ) ||
-      ![
-        `Acceptance refused: ${value.criterion}`,
-        `Acceptance criterion refused by ${decision.actor}: ${value.criterion}`,
-      ].includes(failure.detail)
+      )
     )
       throw new Error("Semantic refusal lacks its exact operator decision");
   } else throw new Error("Semantic refusal producer is unknown");

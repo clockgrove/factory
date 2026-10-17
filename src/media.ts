@@ -60,6 +60,13 @@ const LFS_POINTER_HEADER = Buffer.from(
 const LFS_POINTER_MAX_BYTES = 1024;
 
 /**
+ * Whether `git check-attr -z filter -- <path>` output sets the LFS filter.
+ * The machine format is `<path> NUL filter NUL <value> NUL`.
+ */
+export function lfsFiltered(checkAttr: string): boolean {
+  return checkAttr.split("\0")[2] === "lfs";
+}
+/**
  * Whether `commit` adds or changes any Git LFS pointer relative to `base`.
  * Factory runs no repository hooks, so LFS's pre-push hook does not upload
  * the objects behind such pointers; delivery pushes them explicitly.
@@ -798,12 +805,15 @@ export async function materializeAssetSet(args: {
         member.destination,
       );
       const { destination } = destinationState;
-      const filter = await pinnedGitAsync(
-        worktree,
-        "check-attr",
-        "filter",
-        "--",
-        member.destination,
+      const lfs = lfsFiltered(
+        await pinnedGitAsync(
+          worktree,
+          "check-attr",
+          "-z",
+          "filter",
+          "--",
+          member.destination,
+        ),
       );
       if (destinationState.exists) {
         const source = args.set.inputs?.find(
@@ -827,7 +837,7 @@ export async function materializeAssetSet(args: {
         if (
           !source ||
           !args.item.requiredLfsRoles?.includes(member.role) ||
-          !filter.endsWith(": lfs") ||
+          !lfs ||
           source.ref.digest !== member.ref.digest ||
           source.ref.bytes !== member.ref.bytes ||
           source.ref.mediaType !== member.ref.mediaType ||
@@ -865,10 +875,7 @@ export async function materializeAssetSet(args: {
       } else {
         await args.store.materialize(member.ref, destination);
       }
-      if (
-        args.item.requiredLfsRoles?.includes(member.role) &&
-        !filter.endsWith(": lfs")
-      )
+      if (args.item.requiredLfsRoles?.includes(member.role) && !lfs)
         throw new Error(
           `Repository LFS policy does not cover ${member.destination}`,
         );
@@ -898,14 +905,17 @@ export async function materializeAssetSet(args: {
     );
     const changeRef = await pinnedGitAsync(worktree, "rev-parse", "HEAD");
     for (const member of args.set.members) {
-      const filter = await pinnedGitAsync(
-        worktree,
-        "check-attr",
-        "filter",
-        "--",
-        member.destination,
+      const lfs = lfsFiltered(
+        await pinnedGitAsync(
+          worktree,
+          "check-attr",
+          "-z",
+          "filter",
+          "--",
+          member.destination,
+        ),
       );
-      if (!filter.endsWith(": lfs")) continue;
+      if (!lfs) continue;
       const pointer = await pinnedGitAsync(
         worktree,
         "show",

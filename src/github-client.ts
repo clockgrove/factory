@@ -202,8 +202,9 @@ function transportFailure(
 }
 
 /**
- * GitHub refusals recognised by their documented message or error code.
- * Only this code is kept: the server's prose is never retained.
+ * GitHub refusals recognised from structure: the documented error code, or
+ * for a merge's 405 (which has no code) the repository and pull request facts
+ * read back after it. The server's prose is never read or retained.
  */
 export type GitHubRefusal =
   | "merge-method-not-allowed"
@@ -214,7 +215,8 @@ export type GitHubRefusal =
 export class GitHubRequestError extends Error {
   constructor(
     readonly status: number,
-    readonly refusal?: GitHubRefusal,
+    /** A merge's 405 is classified later, by `classifiedGitHubCall`. */
+    public refusal?: GitHubRefusal,
     /** A 409 to merge-async names the merge request already pending. */
     readonly pendingMerge?: string,
   ) {
@@ -258,32 +260,12 @@ const GITHUB_LOGIN: Extract<Fault, { kind: "config" }> = {
 };
 
 function refusal(status: number, data: unknown): GitHubRefusal | undefined {
-  const body = data as
-    | { message?: unknown; errors?: { code?: unknown; message?: unknown }[] }
-    | null
-    | undefined;
-  const message = typeof body?.message === "string" ? body.message : "";
+  const body = data as { errors?: { code?: unknown }[] } | null | undefined;
   const errors = Array.isArray(body?.errors) ? body.errors : [];
-  if (status === 405) {
-    if (
-      /\b(merge commits|squash merges|rebase merges) are not allowed\b/i.test(
-        message,
-      )
-    )
-      return "merge-method-not-allowed";
-    if (/\bbase branch was modified\b/i.test(message)) return "base-modified";
-  }
-  if (
-    status === 422 &&
-    errors.some(
-      (error) =>
-        error?.code === "already_exists" ||
-        (typeof error?.message === "string" &&
-          /\bpull request already exists\b/i.test(error.message)),
-    )
-  )
-    return "already-exists";
-  return undefined;
+  return status === 422 &&
+    errors.some((error) => error?.code === "already_exists")
+    ? "already-exists"
+    : undefined;
 }
 
 /** What a gateway method knows about one of its requests. */
@@ -295,6 +277,8 @@ export interface GitHubCall {
   createdAt?: number;
   /** For a merge refused over its head: whether GitHub holds the head Factory pushed. */
   head?: "ours" | "foreign";
+  /** For a merge: the base commit the pull request showed when it was sent. */
+  base?: string;
 }
 
 /**
@@ -442,6 +426,48 @@ async function lostAccess(
   }
 }
 
+/**
+ * Why GitHub answered a merge with 405, from facts read back rather than its
+ * message: Factory merges only with merge commits, so a repository that no
+ * longer allows them refused the method; a base commit that moved since the
+ * merge was sent refused it as stale. Otherwise the refusal stays unknown and
+ * the gateway re-observes the pull request. A failed read leaves it unknown.
+ */
+async function mergeRefusal(
+  client: GitHubClient,
+  repository: string,
+  error: unknown,
+  call: GitHubCall,
+): Promise<void> {
+  const pull = /^pulls\/(\d+)\/merge(-async)?$/.exec(
+    call.path.split("?")[0]!,
+  )?.[1];
+  if (!(error instanceof GitHubRequestError) || error.status !== 405 || !pull)
+    return;
+  try {
+    const settings = await client.request<{ allow_merge_commit?: unknown }>(
+      "GET",
+      `repos/${repository}/`,
+    );
+    if (settings?.allow_merge_commit !== true) {
+      error.refusal = "merge-method-not-allowed";
+      return;
+    }
+    if (call.base === undefined) return;
+    const current = await client.request<{ base?: { sha?: unknown } }>(
+      "GET",
+      `repos/${repository}/pulls/${pull}`,
+    );
+    if (
+      typeof current?.base?.sha === "string" &&
+      current.base.sha !== call.base
+    )
+      error.refusal = "base-modified";
+  } catch {
+    // Unknown: the gateway's own re-observation decides.
+  }
+}
+
 /** Run one gateway request and classify its rejection with the call's context. */
 export async function classifiedGitHubCall<T>(
   client: GitHubClient,
@@ -452,6 +478,7 @@ export async function classifiedGitHubCall<T>(
   try {
     return await run();
   } catch (error) {
+    await mergeRefusal(client, repository, error, call);
     throw attachFault(
       error,
       (await lostAccess(client, repository, error, call)) ??
@@ -507,7 +534,6 @@ export class GitHubClient {
   private observeRate(
     headers: Record<string, string | number | undefined>,
     status: number,
-    message = "",
   ): number | undefined {
     const now = time.now();
     let limited = false;
@@ -534,12 +560,10 @@ export class GitHubClient {
       );
       limited = true;
     }
-    if (
-      retry === undefined &&
-      String(headers["x-ratelimit-remaining"]) !== "0" &&
-      (status === 403 || status === 429) &&
-      (status === 429 || /secondary rate|abuse detection/i.test(message))
-    ) {
+    // A 429 is always a limit. A 403 is one only through GitHub's documented
+    // headers above (`retry-after`, or `x-ratelimit-remaining: 0`); without
+    // them it is a permission refusal.
+    if (!limited && status === 429) {
       this.notBefore = Math.max(this.notBefore, now + RATE_LIMIT_FALLBACK_MS);
       limited = true;
     }
@@ -1025,7 +1049,6 @@ export class GitHubClient {
         const limitedUntil = this.observeRate(
           error.response?.headers ?? {},
           error.status ?? 0,
-          error.message,
         );
         if (limitedUntil !== undefined) transport.category = "rate-limit";
         if (observation && method === "GET" && error.status === 304) {

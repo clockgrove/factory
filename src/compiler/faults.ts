@@ -9,7 +9,6 @@ import {
   decision,
   networkFailure,
 } from "../fault.js";
-import * as time from "../clock.js";
 import { CODEX_PLANNING_PROVIDER } from "./transport.js";
 import { authenticationFailure } from "../execution/harness-support.js";
 import {
@@ -37,6 +36,14 @@ export class ProviderCapacityFailure extends CompletedModelInvocationError {
   }
 }
 
+/** The provider reported that the request exceeds the model's context. */
+export class ProviderContextWindowFailure extends CompletedModelInvocationError {
+  constructor(cause: unknown) {
+    super(cause);
+    this.name = "ProviderContextWindowFailure";
+  }
+}
+
 /**
  * Output the decoder refused. It counts against the paid bound like a lost
  * answer, so the step re-asks with this detail a bounded number of times
@@ -48,29 +55,6 @@ export function invalidOutput(cause: unknown): MalformedPlannerOutput {
     error,
     transient(`Model output was invalid: ${error.message}`, true),
   );
-}
-
-/**
- * When a usage limit resets, read from the message only when the provider
- * gave no structured reset time.
- */
-function usageReset(detail: string, now: number): string | undefined {
-  // Claude: "Claude AI usage limit reached|<epoch seconds>".
-  const epoch = /usage limit reached\|(\d{10})\b/i.exec(detail);
-  if (epoch) return new Date(Number(epoch[1]) * 1000).toISOString();
-  // Codex: "... try again in 2 days 3 hours" (also minutes/seconds).
-  const relative =
-    /try again in ((?:\s*(?:and\s+)?\d+\s+(?:days?|hours?|minutes?|seconds?),?)+)/i.exec(
-      detail,
-    );
-  if (!relative) return undefined;
-  const unit = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 } as const;
-  let total = 0;
-  for (const [, count, name] of relative[1]!.matchAll(
-    /(\d+)\s+(day|hour|minute|second)/gi,
-  ))
-    total += Number(count) * unit[name!.toLowerCase()[0] as keyof typeof unit];
-  return total ? new Date(now + total).toISOString() : undefined;
 }
 
 /** Filesystem and process syscalls: their failures are local. */
@@ -87,7 +71,7 @@ const CONNECT_CODES = new Set([
 ]);
 
 /** The request failed before a connection opened (DNS, refused, unreachable). */
-function connectPhase(error: unknown, detail: string): boolean {
+function connectPhase(error: unknown): boolean {
   for (
     let current: unknown = error, depth = 0;
     current instanceof Error && depth < 6;
@@ -95,13 +79,8 @@ function connectPhase(error: unknown, detail: string): boolean {
   )
     if (CONNECT_CODES.has(String((current as NodeJS.ErrnoException).code)))
       return true;
-  return /can't reach the API|Could not resolve host|Connection refused|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(
-    detail,
-  );
+  return false;
 }
-
-const BILLING_FIX =
-  "Restore the provider plan, credits or billing for the configured login, then `factory run`";
 
 /**
  * Classify a failed structured model call, the paid effect behind planning,
@@ -115,45 +94,21 @@ export function modelFault(
     ended: boolean;
     /** A model turn began; network failures after this may have been paid. */
     started?: boolean;
+    /** The transport's class from structured provider facts. */
     failureClass: string;
-    /** The transport's classification from structured provider facts. */
+    /** The transport's fault from structured provider facts. */
     fault?: Fault;
   },
-  now = time.now(),
 ): Fault {
   if (call.fault) return call.fault;
   const detail = error instanceof Error ? error.message : String(error);
   const codex = call.provider === CODEX_PLANNING_PROVIDER;
-  // A usage limit that names when it resets is a wait, even when the
-  // message also suggests a plan upgrade.
-  if (
-    /usage limit|hit your limit/i.test(detail) &&
-    /try again (in|at)\b|\bresets?\b/i.test(detail)
-  )
-    return transient(
-      `Model provider usage limit: ${detail}`,
-      false,
-      usageReset(detail, now),
-    );
-  // Billing next: OpenAI reports exhausted quota as HTTP 429.
-  if (
-    /insufficient_quota|exceeded your current quota|quota exceeded|billing|credit balance|credits_required|spend limit|shared budget|usage not included|upgrade to plus/i.test(
-      detail,
-    )
-  )
-    return { kind: "config", detail, fix: BILLING_FIX };
   if (error instanceof AuthenticationRequiredError)
     return {
       kind: "config",
       detail,
       fix: `Run \`${error.authentication.command}\` on the controller host, then \`factory run\``,
     };
-  if (/usage limit|hit your limit/i.test(detail))
-    return transient(
-      `Model provider usage limit: ${detail}`,
-      false,
-      usageReset(detail, now),
-    );
   switch (call.failureClass) {
     case "structured-output-parse":
     case "provider-structured-output":
@@ -166,11 +121,7 @@ export function modelFault(
     case "provider-capacity":
       return transient(`Model provider is over capacity: ${detail}`, false);
     case "provider-rate-limit":
-      return transient(
-        `Model provider rate limit: ${detail}`,
-        false,
-        usageReset(detail, now),
-      );
+      return transient(`Model provider rate limit: ${detail}`, false);
     case "provider-authentication":
       return {
         kind: "config",
@@ -178,19 +129,6 @@ export function modelFault(
         fix: `Run \`${codex ? "codex login" : "claude auth login"}\` on the controller host, then \`factory run\``,
       };
   }
-  if (/selected model .*, expected /i.test(detail))
-    return {
-      kind: "config",
-      detail,
-      fix: "Choose a model the provider login can use in the Factory configuration",
-    };
-  // Fail-closed session checks are invariants, not provider weather.
-  if (
-    /unconfigured (tool|MCP server)|did not report its initialized session/i.test(
-      detail,
-    )
-  )
-    return { kind: "defect", detail };
   const authentication = authenticationFailure(
     codex ? "codex" : "claude",
     error,
@@ -203,7 +141,8 @@ export function modelFault(
     };
   // A connection that never opened before the turn started sent nothing,
   // so nothing was paid. Any other network failure may have been.
-  const connect = connectPhase(error, detail);
+  const connect =
+    call.failureClass === "provider-connect" || connectPhase(error);
   if (connect && !call.started)
     return transient(`Model provider unreachable: ${detail}`, false);
   if (connect || networkFailure(error))
@@ -264,15 +203,12 @@ function rejectedRequest(detail: string): string | undefined {
   return typeof error?.message === "string" ? error.message : detail;
 }
 
+/** Shared classes of typed errors; adapters supply provider classes. */
 export function providerFailureClass(error: unknown): string {
   if (error instanceof ProviderCapacityFailure) return "provider-capacity";
   if (error instanceof ProviderTurnTimeoutError) return "provider-timeout";
   if (error instanceof ProviderTurnIncompleteError)
     return "provider-interrupted";
-  const detail = error instanceof Error ? error.message : String(error);
-  if (/rate.?limit|\b429\b/i.test(detail)) return "provider-rate-limit";
-  if (/capacity|overloaded|temporarily unavailable/i.test(detail))
-    return "provider-capacity";
   return "provider";
 }
 

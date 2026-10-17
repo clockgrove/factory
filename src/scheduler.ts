@@ -28,6 +28,16 @@ export function assertWorkItemScheduling(value?: unknown): void {
     );
 }
 
+/** A refused plan, naming the Work Item ID or field that failed. */
+export class GraphValidationError extends Error {
+  constructor(
+    readonly field: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 /** Native item types must hold before proof, path, scheduler or review consumers. */
 export function assertWorkItemFields(
   value: unknown,
@@ -37,7 +47,10 @@ export function assertWorkItemFields(
   const item = value as Record<string, unknown>;
   for (const field of ["id", "title", "goal", "brief"])
     if (typeof item[field] !== "string" || !(item[field] as string).length)
-      throw new Error(`Work Item ${field} must be a nonempty string`);
+      throw new GraphValidationError(
+        field,
+        `Work Item ${field} must be a nonempty string`,
+      );
   for (const field of [
     "acceptance",
     "nonGoals",
@@ -62,7 +75,10 @@ export function assertWorkItemFields(
       !Array.isArray(item[field]) ||
       !(item[field] as unknown[]).every((entry) => typeof entry === "string")
     )
-      throw new Error(`Work Item ${field} must be a string array`);
+      throw new GraphValidationError(
+        field,
+        `Work Item ${field} must be a string array`,
+      );
   }
   if (
     !Array.isArray(item.citations) ||
@@ -175,10 +191,14 @@ export function validateAndOrderGraph(
   const byId = new Map<string, WorkItem>();
   for (const item of graph.items) {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(item.id) || byId.has(item.id))
-      throw new Error(`Invalid or duplicate Work Item ID: ${item.id}`);
+      throw new GraphValidationError(
+        item.id,
+        `Invalid or duplicate Work Item ID: ${item.id}`,
+      );
     for (const path of item.ownedPaths) {
       if (!validOwnershipPath(path))
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} has invalid ownership path ${JSON.stringify(path)}; use a literal repository-relative file or directory ending in /. Wildcards * and ? are unsupported; do not use globs or normalize paths.`,
         );
     }
@@ -193,7 +213,8 @@ export function validateAndOrderGraph(
       !item.citations.length ||
       !item.citations.every((citation) => sources.has(citation.path))
     ) {
-      throw new Error(
+      throw new GraphValidationError(
+        item.id,
         `Work Item ${item.id} lacks acceptance, non-goals, ownership, or source citations`,
       );
     }
@@ -232,7 +253,8 @@ export function validateAndOrderGraph(
       throw new Error("Only discovery nodes declare a discovery specification");
     for (const check of item.validation) {
       if (!validValidationCommand(check.command))
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} validation needs an executable command line, not Markdown or prose surrounding a code span`,
         );
       if (
@@ -241,13 +263,17 @@ export function validateAndOrderGraph(
         (check.provenance === "source-declared" &&
           !sources.has(check.source ?? ""))
       ) {
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} has invalid command provenance for ${JSON.stringify(check.command)} from ${JSON.stringify(check.source)}`,
         );
       }
     }
     if (item.priority !== undefined && !Number.isSafeInteger(item.priority))
-      throw new Error(`Work Item ${item.id} has invalid priority`);
+      throw new GraphValidationError(
+        item.id,
+        `Work Item ${item.id} has invalid priority`,
+      );
     byId.set(item.id, item);
   }
   const parents = new Set<string>();
@@ -320,7 +346,8 @@ export function validateAndOrderGraph(
     }
     for (const dependency of item.dependencies) {
       if (!byId.has(dependency) || dependency === item.id)
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} has invalid dependency ${dependency}`,
         );
     }

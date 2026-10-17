@@ -70,7 +70,7 @@ import {
   markCheckpointEffectDispatched,
 } from "./recovery-checkpoint.js";
 import { assertDurableValue } from "./execution/checkpoint.js";
-import { type Fault, transient } from "./fault.js";
+import { attachFault, type Fault, transient } from "./fault.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
   assertProviderTurnDeadline,
@@ -470,10 +470,14 @@ function assertPlanningInitialization(
     throw new Error(
       "Claude SDK initialized outside the supplied planning tree",
     );
-  if (message.model !== selection.model)
-    throw new Error(
-      `Claude SDK selected model ${message.model}, expected ${selection.model}`,
-    );
+  if (message.model !== selection.model) {
+    const detail = `Claude SDK selected model ${message.model}, expected ${selection.model}`;
+    throw attachFault(new Error(detail), {
+      kind: "config",
+      detail,
+      fix: "Choose a model the provider login can use in the Factory configuration",
+    });
+  }
   if (message.permissionMode !== "dontAsk")
     throw new Error(
       `Claude SDK selected permission mode ${message.permissionMode}, expected dontAsk`,
@@ -491,9 +495,14 @@ function assertPlanningInitialization(
     ...(tree ? TREE_REVIEW_TOOLS : []),
   ]);
   const tool = message.tools.find((name) => !allowed.has(name));
-  if (tool) throw new Error(`Claude SDK exposed unconfigured tool ${tool}`);
+  // Fail-closed session checks are invariants, not provider weather.
+  if (tool) sessionDefect(`Claude SDK exposed unconfigured tool ${tool}`);
   if (message.mcp_servers.length)
-    throw new Error("Claude SDK initialized an unconfigured MCP server");
+    sessionDefect("Claude SDK initialized an unconfigured MCP server");
+}
+
+function sessionDefect(detail: string): never {
+  throw attachFault(new Error(detail), { kind: "defect", detail });
 }
 
 /** The runtime's stand-in for a model message it produced itself. */
@@ -511,6 +520,8 @@ function failureClass(
   assistantError: SDKAssistantMessageError | undefined,
 ): string | undefined {
   const status = apiErrorStatus(result);
+  if (result.terminal_reason === "prompt_too_long")
+    return "provider-context-window";
   if (status === 529 || assistantError === "overloaded")
     return "provider-capacity";
   if (status === 429 || assistantError === "rate_limit")
@@ -1233,11 +1244,20 @@ class ClaudePlanningTransport implements PlanningTransport {
       state.failureClass = "provider-authentication";
       failure = `Claude planning is not authenticated (${detail || result.subtype}); run \`claude auth login\` on the controller host, or provide CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, then retry`;
     } else if (!succeeded) {
-      state.failureClass = failureClass(result, facts.assistantError);
+      // Claude Agent SDK 0.3.281 reports no network field. Its runtime ends
+      // a connection that never opened with the socket code, as "(ENOTFOUND)".
+      state.failureClass =
+        failureClass(result, facts.assistantError) ??
+        (/\((ECONNREFUSED|ConnectionRefused|ENOTFOUND|EAI_AGAIN|FailedToOpenSocket|ENETUNREACH|EHOSTUNREACH)\)/.test(
+          detail,
+        )
+          ? "provider-connect"
+          : undefined);
       failure = `Claude planning ended with ${result.subtype}${result.stop_reason ? ` (stop_reason ${result.stop_reason})` : ""}: ${detail || "no detail"}`;
-    } else if (!facts.initialized)
+    } else if (!facts.initialized) {
       failure = "Claude SDK did not report its initialized session";
-    else if (result.structured_output === undefined) {
+      state.fault = { kind: "defect", detail: failure };
+    } else if (result.structured_output === undefined) {
       state.failureClass = "provider-incomplete";
       failure = "Claude result carried no structured output";
     }
@@ -1258,7 +1278,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       },
     });
     if (failure !== undefined)
-      state.fault = structuredFault(failure, status, facts);
+      state.fault ??= structuredFault(failure, status, facts);
     if (authentication)
       throw new AuthenticationRequiredError(failure!, {
         provider: "claude",

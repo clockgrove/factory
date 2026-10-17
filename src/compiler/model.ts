@@ -73,6 +73,7 @@ import {
   modelFault,
   PlanValidationError,
   ProviderCapacityFailure,
+  ProviderContextWindowFailure,
   ProviderResponseTimeoutFailure,
   providerFailureClass,
 } from "./faults.js";
@@ -1100,6 +1101,8 @@ export class StructuredPlanningModel implements PlanningModel {
         });
         if (failureClass === "provider-capacity" && turn.ended)
           throw attachFault(new ProviderCapacityFailure(error), fault);
+        if (failureClass === "provider-context-window" && turn.ended)
+          throw attachFault(new ProviderContextWindowFailure(error), fault);
       }
       if (invalidStructuredOutput)
         throw attachFault(new MalformedPlannerOutput(error), fault);

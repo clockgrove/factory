@@ -12,6 +12,7 @@ import {
 } from "../workspace-membership.js";
 import type { PlanCandidate } from "./candidate.js";
 import { normalizedCommand } from "../qa.js";
+import { GraphValidationError } from "../scheduler.js";
 import {
   PINNED_PNPM_BOOTSTRAP,
   packageBootstrap,
@@ -94,7 +95,8 @@ function workerInputSources(graph: WorkGraph, sources: PlanningSource[]) {
           choice.heading === (citation.heading ?? ""),
       );
       if (!source)
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} cites an unavailable pinned section`,
         );
       return structuredClone(source);
@@ -261,7 +263,8 @@ export function assertWorkerInputSources(
   const inputs = workerInputSources(graph, sources);
   for (const [index, item] of workShapes(graph).entries()) {
     if (JSON.stringify(item.inputSources) !== JSON.stringify(inputs[index]))
-      throw new Error(
+      throw new GraphValidationError(
+        item.id,
         `Work Item ${item.id} inputs differ from pinned citation sections`,
       );
   }
@@ -285,7 +288,8 @@ export function validateCommandProvenance(
   for (const item of workShapes(graph)) {
     for (const check of item.validation) {
       if (!authorizedCommand(check, graph.baseSha, sources, checkout)) {
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} has no exact ${check.provenance} command authority in ${check.source ?? "unknown source"}: ${check.command}. Use one complete standalone command from the pinned source. For base-observed package.json, invoke an existing script by name, not its JSON body; commands this plan creates are not base-observed. Package scripts must use a supported root npm/pnpm invocation with fixed script bodies, hooks and configuration; a tool-version probe must use --version without extra package-manager options or script execution. Do not invent a replacement command or weaken acceptance.`,
         );
       }
@@ -760,14 +764,16 @@ export function validateCitations(
         (source) => source.path === citation.path,
       );
       if (!matching.length)
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} cites unavailable source ${citation.path}`,
         );
       const heading = citation.heading ?? "";
       if (
         !citationChoices(matching).some((choice) => choice.heading === heading)
       )
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} cites missing heading ${citation.heading === undefined ? "<missing>" : citation.heading === "" ? '""' : boundedDiagnosticText(citation.heading)} in ${boundedDiagnosticText(citation.path)}; expected exact bare heading ${boundedAllowedHeadings(matching)}`,
         );
     }
@@ -817,7 +823,8 @@ export function validateGraphSources(
       new Set(item.expectedOutputRoles ?? []).size !==
       (item.expectedOutputRoles ?? []).length
     )
-      throw new Error(
+      throw new GraphValidationError(
+        item.id,
         `Work Item ${item.id} has duplicate expected output roles`,
       );
     if (
@@ -826,18 +833,25 @@ export function validateGraphSources(
       ((item.expectedOutputRoles?.length ?? 0) > 0 &&
         (item.minimumAssetSets ?? 0) < 1)
     )
-      throw new Error(`Work Item ${item.id} has an invalid candidate count`);
+      throw new GraphValidationError(
+        item.id,
+        `Work Item ${item.id} has an invalid candidate count`,
+      );
     if (
       (item.requiredLfsRoles ?? []).some(
         (role) => !item.expectedOutputRoles?.includes(role),
       )
     )
-      throw new Error(
+      throw new GraphValidationError(
+        item.id,
         `Work Item ${item.id} requires LFS for an unknown output role`,
       );
     for (const source of item.sourceAssets ?? []) {
       if (typeof source === "string")
-        throw new Error(`Work Item ${item.id} needs a structured source asset`);
+        throw new GraphValidationError(
+          item.id,
+          `Work Item ${item.id} needs a structured source asset`,
+        );
       const { path, role, mediaType, visibility } = source;
       const kind = source.kind ?? "repository";
       const repositoryPath =
@@ -868,7 +882,8 @@ export function validateGraphSources(
         !["private", "repository"].includes(visibility) ||
         !available
       )
-        throw new Error(
+        throw new GraphValidationError(
+          item.id,
           `Work Item ${item.id} cites an unavailable or invalid source asset: ${path}`,
         );
     }

@@ -28,6 +28,17 @@ export interface CodexAppServerCheckpoint {
   terminal?: "completed" | "failed" | "interrupted";
 }
 
+/**
+ * A failed turn's structured facts from app-server protocol v2 `TurnError`.
+ * The exec projection supplies only `message`, so both fields are absent there.
+ */
+export interface CodexTurnError extends ThreadError {
+  /** Native `CodexErrorInfo`: a category string, or a one-key object with `httpStatusCode`; null when unreported. */
+  codexErrorInfo?: unknown;
+  /** The latest `account/rateLimits/updated` snapshot per limit, merged as the protocol directs. */
+  rateLimits?: Record<string, unknown>[];
+}
+
 /** Payload-free observations, not lifecycle, acceptance or billing authority. */
 export interface CodexAppServerProgress {
   event: string;
@@ -494,6 +505,7 @@ export async function runCodexAppServer(
   let terminal: CodexAppServerCheckpoint["terminal"];
   let usage: Record<string, number> | undefined;
   const messages = new Map<string, ObjectValue>();
+  const rateLimits = new Map<string, ObjectValue>();
   const earlyNotifications: { method: string; params: ObjectValue }[] = [];
   let completed = false;
   let resolveTerminal: () => void = () => undefined;
@@ -547,6 +559,22 @@ export async function runCodexAppServer(
   client.notification = (method, params) => {
     // Thread-global warnings/config notices do not establish generation progress.
     if (!params.threadId) {
+      const update = params.rateLimits;
+      if (
+        method === "account/rateLimits/updated" &&
+        typeof update === "object" &&
+        update !== null &&
+        !Array.isArray(update)
+      ) {
+        // Sparse update: a null field is unavailable, not cleared.
+        const { limitId } = update as ObjectValue;
+        const key = typeof limitId === "string" ? limitId : "";
+        const merged = { ...rateLimits.get(key) };
+        for (const [field, value] of Object.entries(update as ObjectValue))
+          if (value !== null) merged[field] = value;
+        rateLimits.set(key, merged);
+        return;
+      }
       if (
         ["error", "warning", "configWarning", "deprecationNotice"].includes(
           method,
@@ -641,13 +669,15 @@ export async function runCodexAppServer(
         resolveTerminal();
       } else {
         const error = turn.error == null ? undefined : object(turn.error);
-        const failure: ThreadError & { codexErrorInfo: unknown } = {
+        const failure: CodexTurnError = {
           message:
             typeof error?.message === "string"
               ? error.message
               : `Codex native turn ${terminal}`,
-          // The native typed cause decides authentication (codexAuthentication).
+          // The native typed cause decides authentication (codexAuthentication)
+          // and the provider fault class (codexFailure).
           codexErrorInfo: error?.codexErrorInfo ?? null,
+          rateLimits: [...rateLimits.values()],
         };
         args.event({ type: "turn.failed", error: failure });
         rejectTerminal(new Error(`Codex native turn ${terminal}`));

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
+  type CodexTurnError,
   readCodexAppServerTurn,
   runCodexAppServer,
 } from "../codex-app-server.js";
@@ -29,6 +30,7 @@ import type {
 } from "../contracts.js";
 import { codexCaptureEvent } from "../execution/interaction-capture.js";
 import { currentProcessSignal, UnsettledSubprocessError } from "../process.js";
+import { transient } from "../fault.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
   ProviderTurnGuard,
@@ -70,6 +72,163 @@ import {
 } from "./transport.js";
 
 const LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
+
+const codexBilling = (detail: string): CodexFailure => ({
+  failureClass: "provider-billing",
+  fault: {
+    kind: "config",
+    detail,
+    fix: "Restore the Codex plan, credits or billing for the controller login, then `factory run`",
+  },
+});
+const CREDITS_DEPLETED = new Set([
+  "workspace_owner_credits_depleted",
+  "workspace_member_credits_depleted",
+]);
+
+type CodexFailure = Pick<PlanningTurn, "failureClass" | "fault">;
+
+/** The connection never opened. Codex reports no phase (see codexFailure). */
+const codexConnectText = (message: string) =>
+  /Could not resolve host|Connection refused/i.test(message);
+
+/**
+ * Typed facts for a failed Codex turn. The app-server reports `CodexErrorInfo`
+ * and the account's rate-limit windows. The pinned exec JSONL protocol
+ * (@openai/codex-sdk 0.160.0 `ThreadError`) carries only `message`, so exec
+ * falls back to the exact codex-cli 0.160.0 texts of those error variants.
+ * The app-server's connection-failure categories omit whether the connection
+ * opened, so only they keep the connect text check.
+ */
+function codexFailure(
+  error: CodexTurnError,
+  transport: "exec" | "app-server",
+): CodexFailure {
+  const { message, codexErrorInfo: info } = error;
+  if (transport === "exec") return codexExecFailure(message);
+  const [category, value] =
+    typeof info === "string"
+      ? [info, undefined]
+      : info !== null && typeof info === "object"
+        ? (Object.entries(info)[0] ?? [])
+        : [];
+  switch (category) {
+    case "contextWindowExceeded":
+      return { failureClass: "provider-context-window" };
+    case "usageLimitExceeded":
+      return codexUsageLimit(message, error.rateLimits ?? []);
+    case "rateLimitExceeded":
+      return { failureClass: "provider-rate-limit" };
+    case "serverOverloaded":
+    case "flexUnavailable":
+      return { failureClass: "provider-capacity" };
+    case "httpConnectionFailed":
+    case "responseStreamConnectionFailed":
+      if (codexConnectText(message))
+        return { failureClass: "provider-connect" };
+  }
+  if (
+    (value as { httpStatusCode?: unknown } | undefined)?.httpStatusCode === 429
+  )
+    return { failureClass: "provider-rate-limit" };
+  return {};
+}
+
+/**
+ * `usageLimitExceeded` also covers an exhausted API quota and a plan without
+ * Codex. A reported rate-limit window settles which: an exhausted window is a
+ * wait until its latest reset (epoch seconds). Without one, codex-cli 0.160.0
+ * gives no other field, so the exact texts decide, and an unknown one halts.
+ */
+function codexUsageLimit(
+  message: string,
+  snapshots: Record<string, unknown>[],
+): CodexFailure {
+  if (
+    snapshots.some(
+      (limit) =>
+        limit.spendControlReached === true ||
+        CREDITS_DEPLETED.has(String(limit.rateLimitReachedType)),
+    )
+  )
+    return codexBilling(message);
+  const exhausted = snapshots
+    .flatMap((limit) => [limit.primary, limit.secondary])
+    .filter(
+      (window): window is { usedPercent: number; resetsAt?: unknown } =>
+        typeof (window as { usedPercent?: unknown } | undefined)
+          ?.usedPercent === "number" &&
+        (window as { usedPercent: number }).usedPercent >= 100,
+    );
+  if (
+    !exhausted.length &&
+    !snapshots.some((limit) => typeof limit.rateLimitReachedType === "string")
+  ) {
+    const failure = codexExecFailure(message);
+    return failure.fault ? failure : codexBilling(message);
+  }
+  const resets = exhausted
+    .map((window) => window.resetsAt)
+    .filter(
+      (at): at is number => typeof at === "number" && Number.isFinite(at),
+    );
+  return {
+    failureClass: "provider-rate-limit",
+    fault: transient(
+      `Model provider usage limit: ${message}`,
+      false,
+      resets.length
+        ? new Date(Math.max(...resets) * 1000).toISOString()
+        : undefined,
+    ),
+  };
+}
+
+/** Exact codex-cli 0.160.0 error texts; exec reports no structured kind. */
+function codexExecFailure(message: string): CodexFailure {
+  const text = message.toLowerCase();
+  const has = (...phrases: string[]) =>
+    phrases.some((phrase) => text.includes(phrase));
+  if (
+    has(
+      "codex ran out of room in the model's context window",
+      "context window exceeded",
+    )
+  )
+    return { failureClass: "provider-context-window" };
+  const usageLimit = /you[\u2019']ve hit your usage limit\b/.test(text);
+  // A limit naming its reset is a wait even beside a plan upgrade offer.
+  // 0.160.0 renders the reset as zoneless local wall-clock time: no retryAt.
+  if (
+    usageLimit &&
+    (has("try again at ") || !has("upgrade to plus to continue using codex"))
+  )
+    return {
+      failureClass: "provider-rate-limit",
+      fault: transient(`Model provider usage limit: ${message}`, false),
+    };
+  if (
+    usageLimit ||
+    has(
+      "quota exceeded. check your plan and billing details.",
+      "to use codex with your chatgpt plan, upgrade to plus",
+      "usage not included",
+    )
+  )
+    return codexBilling(message);
+  if (has("rate limit exceeded") || /\bstatus:? 429\b/.test(text))
+    return { failureClass: "provider-rate-limit" };
+  if (
+    has(
+      "selected model is at capacity.",
+      "flex capacity unavailable",
+      "server overloaded",
+    )
+  )
+    return { failureClass: "provider-capacity" };
+  if (codexConnectText(message)) return { failureClass: "provider-connect" };
+  return {};
+}
 
 /**
  * Codex native transport with isolated review continuations. Compilation and
@@ -1112,6 +1271,7 @@ export class CodexPlanningTransport implements PlanningTransport {
             // The app-server SDK projection can map an authenticated
             // interrupted terminal to turn.failed; preserve its native fact.
             if (session?.currentTurn) session.currentTurn.terminal ??= "failed";
+            Object.assign(state, codexFailure(event.error, selectedTransport));
             throw (
               codexAuthentication(event.error) ?? new Error(event.error.message)
             );
@@ -1124,7 +1284,13 @@ export class CodexPlanningTransport implements PlanningTransport {
         },
       });
       state.stopped = true;
-      if (!turnCompleted && streamError) throw streamError;
+      if (!turnCompleted && streamError) {
+        Object.assign(
+          state,
+          codexFailure({ message: streamError.message }, selectedTransport),
+        );
+        throw streamError;
+      }
       requireCompletedProviderTurn(turnCompleted);
     } catch (error) {
       checkpointRejected = isCheckpointAdmissionFailure(error);

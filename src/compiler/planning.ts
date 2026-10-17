@@ -62,11 +62,15 @@ import {
   type ResolvedGraphFinding,
   reviewPacket,
 } from "../review-evidence.js";
-import { validateAndOrderGraph } from "../scheduler.js";
+import { GraphValidationError, validateAndOrderGraph } from "../scheduler.js";
 import { isExecutionState, type ContinuationState } from "../state.js";
 import type { StepContext } from "../step.js";
 import { assertStepAdmission, StepPaused } from "../step.js";
-import { invalidOutput, PlanValidationError } from "./faults.js";
+import {
+  invalidOutput,
+  PlanValidationError,
+  ProviderContextWindowFailure,
+} from "./faults.js";
 import { observeModelInvocation } from "./observation.js";
 import { planningReviewEvidence, planReviewDigest } from "./packets.js";
 import {
@@ -364,14 +368,9 @@ export function validateGraph(
 }
 
 function planningFailure(error: unknown): never {
-  const detail = error instanceof Error ? error.message : String(error);
-  if (
-    /context (window|length)|token limit|too (many|long) tokens|input too long/i.test(
-      detail,
-    )
-  )
+  if (error instanceof ProviderContextWindowFailure)
     throw new Error(
-      `Complete planning source packet exceeds the selected model context; narrow the named headings or choose a model with more context. If the Objective still cannot fit, split it explicitly. ${detail}`,
+      `Complete planning source packet exceeds the selected model context; narrow the named headings or choose a model with more context. If the Objective still cannot fit, split it explicitly. ${error.message}`,
     );
   throw error;
 }
@@ -635,11 +634,9 @@ export function validateCompiledGraph(args: {
 }
 
 function semanticFailureField(error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  const match = detail.match(
-    /(?:Work Item ([^ ]+)|cites (?:unavailable source|missing heading) ([^ ]+)|invalid ([A-Za-z -]+))/i,
-  );
-  return (match?.slice(1).find(Boolean) ?? "response").slice(0, 120);
+  return (
+    error instanceof GraphValidationError ? error.field : "response"
+  ).slice(0, 120);
 }
 
 function observeInvalidReview(invocation?: ModelInvocationContext): void {

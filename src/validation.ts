@@ -472,7 +472,14 @@ export async function validateCheckout(
   // Every run gets its own empty TMPDIR, which a locator's files stay inside:
   // no other run's temporary files reach the commands. Under tmpdir(), not
   // the state root, so socket paths inside it stay short.
-  const temporaryRoot = mkdtempSync(join(tmpdir(), "factory-validation-"));
+  let temporaryRoot: string;
+  try {
+    temporaryRoot = mkdtempSync(join(tmpdir(), "factory-validation-"));
+  } catch (error) {
+    throw new CandidateEnvironmentFailure(
+      `Validation environment unavailable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   try {
     for (const [sequenceIndex, check] of sequence.entries()) {
       const preparing = sequenceIndex < preparation.commands.length;

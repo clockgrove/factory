@@ -198,51 +198,48 @@ export function workItemReviewObservations(
   selectedAsset?: CapturedAssetSet,
 ): string {
   const current = state.work[item.id]!;
-  const captureReceipt = (asset: CapturedAssetSet) =>
-    asset.capture
-      ? {
-          authority: "factory-controller" as const,
-          ...(asset.capture.declarationPath &&
-            asset.capture.declarationDigest &&
-            asset.capture.declarationProvenance && {
-              declarationPath: asset.capture.declarationPath,
-              declarationDigest: asset.capture.declarationDigest,
-              declarationProvenance: {
-                source: asset.capture.declarationProvenance.source,
-                rights: asset.capture.declarationProvenance.rights,
-                visibility: asset.capture.declarationProvenance.visibility,
-                lineage: [...asset.capture.declarationProvenance.lineage],
-              },
-            }),
-          mediaRoot: ".factory-media" as const,
-          complete: true as const,
-          setId: asset.id,
-          ...(asset.capture.inputs && {
-            inputs: asset.capture.inputs.map((input) => ({
-              binding: {
-                kind: input.binding.kind,
-                path: input.binding.path,
-                role: input.binding.role,
-                mediaType: input.binding.mediaType,
-                visibility: input.binding.visibility,
-              },
-              ref: {
-                digest: input.ref.digest,
-                bytes: input.ref.bytes,
-                mediaType: input.ref.mediaType,
-              },
-            })),
-          }),
-          members: asset.capture.members.map((member) => ({
-            role: member.role,
-            stagingPath: member.stagingPath,
-            destination: member.destination,
-            digest: member.digest,
-            bytes: member.bytes,
-            mediaType: member.mediaType,
-          })),
-        }
-      : null;
+  const captureReceipt = (asset: CapturedAssetSet) => ({
+    authority: "factory-controller" as const,
+    ...(asset.capture.declarationPath &&
+      asset.capture.declarationDigest &&
+      asset.capture.declarationProvenance && {
+        declarationPath: asset.capture.declarationPath,
+        declarationDigest: asset.capture.declarationDigest,
+        declarationProvenance: {
+          source: asset.capture.declarationProvenance.source,
+          rights: asset.capture.declarationProvenance.rights,
+          visibility: asset.capture.declarationProvenance.visibility,
+          lineage: [...asset.capture.declarationProvenance.lineage],
+        },
+      }),
+    mediaRoot: ".factory-media" as const,
+    complete: true as const,
+    setId: asset.id,
+    ...(asset.capture.inputs && {
+      inputs: asset.capture.inputs.map((input) => ({
+        binding: {
+          kind: input.binding.kind,
+          path: input.binding.path,
+          role: input.binding.role,
+          mediaType: input.binding.mediaType,
+          visibility: input.binding.visibility,
+        },
+        ref: {
+          digest: input.ref.digest,
+          bytes: input.ref.bytes,
+          mediaType: input.ref.mediaType,
+        },
+      })),
+    }),
+    members: asset.capture.members.map((member) => ({
+      role: member.role,
+      stagingPath: member.stagingPath,
+      destination: member.destination,
+      digest: member.digest,
+      bytes: member.bytes,
+      mediaType: member.mediaType,
+    })),
+  });
   const contentRef = (ref: CapturedAssetSet["members"][number]["ref"]) => ({
     digest: ref.digest,
     bytes: ref.bytes,
@@ -303,7 +300,7 @@ export function workItemReviewObservations(
       harnessIdentity: asset.evidence.harnessIdentity,
       resultDigest: asset.evidence.resultDigest,
     },
-    ...(asset.capture && { capture: captureReceipt(asset) }),
+    capture: captureReceipt(asset),
   });
   const criterionText = item.acceptance.join("\n");
   const namedByCriterion = (id: string): boolean => {

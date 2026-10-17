@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { githubEmptyField, markdownLines } from "../markdown.js";
 import type {
+  RequiredPreIntegrationCheck,
   WorkGraph,
   WorkItemSource,
   WorkItemSourceRef,
@@ -374,20 +375,17 @@ export function planningGraphView(
     ...(graph.requiredPreIntegrationChecks && {
       requiredPreIntegrationChecks: graph.requiredPreIntegrationChecks.map(
         (check) => {
-          const text =
-            check.source.text ??
-            sources.find(
-              (source) =>
-                source.path === check.source.path &&
-                createHash("sha256").update(source.content).digest("hex") ===
-                  check.source.digest,
-            )?.content;
+          const text = sources.find(
+            (source) =>
+              source.path === check.source.path &&
+              createHash("sha256").update(source.content).digest("hex") ===
+                check.source.digest,
+          )?.content;
           const sourceSpan =
             text !== undefined && span(check.source.path, text);
           if (!sourceSpan || sourceSpan.sourceDigest !== check.source.digest)
             return check;
-          const { text: _text, ...identity } = check.source;
-          return { ...check, source: { ...identity, sourceSpan } };
+          return { ...check, source: { ...check.source, sourceSpan } };
         },
       ),
     }),
@@ -460,8 +458,13 @@ export function reviewGraphView(
     ...(view.requiredPreIntegrationChecks && {
       requiredPreIntegrationChecks: view.requiredPreIntegrationChecks.map(
         (check) => {
-          if (!("sourceSpan" in check.source)) return check;
-          const { sourceSpan, ...identity } = check.source;
+          const {
+            sourceSpan,
+            ...identity
+          }: RequiredPreIntegrationCheck["source"] & {
+            sourceSpan?: SourceSpan;
+          } = check.source;
+          if (!sourceSpan) return check;
           return {
             ...check,
             source: {
@@ -593,31 +596,6 @@ export function commandAuthorizations(
 }
 
 /**
- * Headings whose content Factory would otherwise silently not act on: their
- * old structural meaning (acceptance, commands, pinned sources) now lives in
- * another section. Prose sections (Goal, Outcome, Context, Non-goals,
- * Required checks, Constraints) are read by the planner as written.
- */
-const REMOVED_OBJECTIVE_FIELDS: Record<string, string> = {
-  "final validation":
-    "write each command as an Acceptance bullet that is exactly one backticked command",
-  "planning sources": "rename it to Sources",
-  "what must be true": "rename it to Acceptance",
-};
-
-/** Refuse an Objective whose structured content sits under a retired heading. */
-export function assertObjectiveTemplate(body: string): void {
-  for (const { heading } of markdownLines(body)) {
-    if (!heading || ![2, 3].includes(heading.level)) continue;
-    const advice = REMOVED_OBJECTIVE_FIELDS[heading.text.toLowerCase()];
-    if (advice)
-      throw new Error(
-        `Objective field "${heading.text}" is no longer read structurally; ${advice} (see the Objective format in docs/USER-GUIDE.md)`,
-      );
-  }
-}
-
-/**
  * Commands the integrated result must pass: the Acceptance bullets that are
  * exactly one backticked command. Any other bullet is a fact for review.
  */
@@ -629,7 +607,6 @@ export function finalObjectiveCommands(body: string): string[] {
 }
 
 export function objectiveCriteria(body: string): string[] {
-  assertObjectiveTemplate(body);
   const section = objectiveSection(body, ["Acceptance"]);
   return section.split(/\n\s*\n/).flatMap((paragraph) => {
     const criteria: string[] = [];
@@ -895,7 +872,6 @@ export function planningSources(
   baseSha: string,
   checkout: string,
 ): PlanningSource[] {
-  assertObjectiveTemplate(body);
   finalObjectiveCommands(body);
   workspacePackageAdditions(body);
   plannedPackageManager(body, checkout, baseSha);

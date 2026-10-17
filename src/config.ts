@@ -634,10 +634,6 @@ export function validateScheduling(
   }
 }
 
-/** The sandbox (Daytona) backend was removed in #720; the tag keeps its last source. */
-const SANDBOX_REMOVED =
-  'execution.kind "sandbox" is no longer supported: use "local" (Codex, Claude or GitHub Copilot on this host) or "managed-agent" (provider "claude-managed-agents" or "openai-agents")';
-
 export function validateConfig(value: unknown): FactoryConfig {
   assertObject(value, "configuration");
   if (value.schemaVersion !== 1)
@@ -781,9 +777,7 @@ export function validateConfig(value: unknown): FactoryConfig {
     value.execution.kind !== "managed-agent"
   ) {
     throw new Error(
-      value.execution.kind === "sandbox"
-        ? SANDBOX_REMOVED
-        : `Execution mode ${String(value.execution.kind)} is not implemented; select local`,
+      `Execution mode ${String(value.execution.kind)} is not implemented; select local`,
     );
   }
   if (
@@ -1381,8 +1375,7 @@ const providerName = /^[a-z][a-z0-9-]{0,31}$/;
 
 /**
  * The FactoryConfig for one provider. Its planning and execution take the place of
- * `providers` in the file's key order, so a file converted from the flat layout keeps
- * the configuration digest its Objectives froze.
+ * `providers` in the file's key order, which keeps configuration digests stable.
  */
 export function resolveProvider(
   file: FactoryConfigFile,

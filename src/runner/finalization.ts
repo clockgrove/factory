@@ -8,11 +8,7 @@ import {
   reviewObjectiveKnowledge,
 } from "../objective-knowledge.js";
 import { join } from "node:path";
-import {
-  finalObjectiveCommands,
-  objectiveCriteria,
-  planningSources,
-} from "../compiler.js";
+import { objectiveCriteria, planningSources } from "../compiler.js";
 import { closeObjectiveIssue, sealFinalAcceptance } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
 import type {
@@ -204,8 +200,7 @@ export async function finalizeObjective(args: {
         treeSha: finalTree,
       },
     });
-    const finalCommands =
-      state.objectiveCommands ?? finalObjectiveCommands(issue.body);
+    const finalCommands = state.objectiveCommands;
     const declaredPreparation = objectivePreparationCommands(graph);
     // Only an exact current-phase prefix executes the full declared sequence
     // before later acceptance. Historical/other-checkout success never dedupes.
@@ -247,7 +242,7 @@ export async function finalizeObjective(args: {
           join(objectiveDirectory, "final-validation"),
           candidateCommitSha,
           finalTree,
-          state.objectiveCommands ?? finalObjectiveCommands(issue.body),
+          finalCommands,
           (entry) =>
             diagnostics.emit({
               runId: state.runId,

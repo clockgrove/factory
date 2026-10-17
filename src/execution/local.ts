@@ -1511,7 +1511,7 @@ export async function collectWorktreeResult(
 
 const retainedFailedUnavailable =
   "\nRetained failed committed-result context is unavailable or could not be authenticated in this checkout. Do not infer prior source contents; unfinished uncommitted edits remain unavailable.";
-/** The retained result as inspect-only context; workers launched before #1313 received exactly this. */
+/** The retained result as inspect-only context. */
 const retainedFailedReachable = (
   retained: NonNullable<ExecutionRequest["retainedFailedResult"]>,
 ): string =>
@@ -1533,7 +1533,6 @@ export function retainedFailedResultBriefs(
     ? [
         retainedFailedContinued(retainedResult),
         retainedFailedNotContinued(retainedResult),
-        retainedFailedReachable(retainedResult),
         retainedFailedUnavailable,
       ]
     : [""];
@@ -1825,10 +1824,6 @@ export class LocalExecutionDriver implements ExecutionDriver {
     )
       throw new Error(
         `Harness adapter ${adapterIdentity} does not satisfy the local AgentHarness capability contract`,
-      );
-    if ("sessionContinuation" in harness)
-      throw new Error(
-        `Harness adapter ${adapterIdentity} uses the removed sessionContinuation declaration; declare sessionCapabilities.resumeRoles instead`,
       );
     if (harness.sessionCapabilities !== undefined) {
       assertAgentSessionCapabilities(harness.sessionCapabilities);

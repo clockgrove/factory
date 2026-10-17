@@ -7,7 +7,6 @@ import {
 } from "./expansion.js";
 import { authenticateWorkRouting } from "./routing.js";
 import { settleSplitParent, splitObjective } from "./split.js";
-import { packageManagerUpdate } from "../package-manager-update.js";
 import { checkRequiredEnvironment } from "../repair-policy.js";
 import { stopRetryCommand } from "../run-outcome.js";
 import {
@@ -15,7 +14,6 @@ import {
   failedItemOf,
   resumeDiagnoses,
 } from "../work-repair.js";
-import { workspacePackageAdditions } from "../workspace-membership.js";
 import {
   AmendmentRejection,
   amendmentBlocksDispatch,
@@ -269,9 +267,8 @@ export async function runObjectivePass(
       const changed =
         issue.state === "closed" && !state.finalValidation?.passed
           ? "The Objective issue was closed"
-          : state.objectiveBodyDigest &&
-              createHash("sha256").update(issue.body).digest("hex") !==
-                state.objectiveBodyDigest
+          : createHash("sha256").update(issue.body).digest("hex") !==
+              state.objectiveBodyDigest
             ? "The Objective issue body changed"
             : undefined;
       return changed
@@ -369,14 +366,6 @@ export async function runObjectivePass(
       if (state.error)
         throw new Error(
           `Objective stopped: ${state.error}. Fix the cause, then run \`${stopRetryCommand(state)}\``,
-        );
-      if (
-        !state.objectiveBodyDigest &&
-        (workspacePackageAdditions(issue.body).length ||
-          packageManagerUpdate(issue.body))
-      )
-        throw new Error(
-          "Package update authority requires a digest-bound Objective; create a new plan",
         );
       // A decision, as when delivery observes the change: the observe
       // step saves the question, and `factory retry` asks it again.

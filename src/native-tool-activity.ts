@@ -1,7 +1,5 @@
-import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { readInteractionContent, type InteractionMetadata } from "./capture.js";
-import { nativeToolObservation } from "./codex-native-capture.js";
+import type { InteractionMetadata } from "./capture.js";
 
 type Observation = {
   event: "call" | "output";
@@ -63,37 +61,8 @@ function metadataObservation(
   };
 }
 
-/** Explicit opt-in reads only complete authenticated tool payloads; returns no raw content. */
-function retainedObservation(
-  record: InteractionMetadata,
-): Observation | undefined {
-  const content = record.content;
-  if (
-    content.status !== "captured" ||
-    !content.reference ||
-    content.redacted ||
-    content.truncated
-  )
-    return;
-  try {
-    const text = readInteractionContent(record.repository, content.reference);
-    if (
-      Buffer.byteLength(text) !== content.retainedBytes ||
-      content.originalBytes !== content.retainedBytes ||
-      createHash("sha256").update(text).digest("hex") !== content.originalDigest
-    )
-      return;
-    return metadataObservation(nativeToolObservation(JSON.parse(text)));
-  } catch {
-    return;
-  }
-}
-
 /** Native model-visible calls only: SDK shell callbacks are alternate observations. */
-export function summarizeNativeTools(
-  records: InteractionMetadata[],
-  includeContent = false,
-) {
+export function summarizeNativeTools(records: InteractionMetadata[]) {
   const snapshot = records
     .filter((record) => record.nativeRollout)
     .at(-1)?.nativeRollout;
@@ -106,15 +75,8 @@ export function summarizeNativeTools(
   const identity = (record: InteractionMetadata, callId: string) =>
     JSON.stringify([record.providerSessionId, callId]);
   const observed = new Map<string, Observation>();
-  let contentReads = 0;
-  let unavailableContentReads = 0;
   for (const record of tools) {
-    let observation = metadataObservation(record.nativeTool);
-    if (!observation && includeContent) {
-      contentReads++;
-      observation = retainedObservation(record);
-      if (!observation) unavailableContentReads++;
-    }
+    const observation = metadataObservation(record.nativeTool);
     const expected =
       record.providerEvent === "codex.native-tool-call" ? "call" : "output";
     if (observation?.event === expected)
@@ -340,8 +302,6 @@ export function summarizeNativeTools(
     },
     observedSerializedCallBytes: bytes("codex.native-tool-call"),
     observedSerializedOutputBytes: bytes("codex.native-tool-output"),
-    contentReads,
-    unavailableContentReads,
     truncatedContentRecords: tools.filter((record) => record.content.truncated)
       .length,
     redactedContentRecords: tools.filter((record) => record.content.redacted)

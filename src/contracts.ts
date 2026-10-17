@@ -120,8 +120,7 @@ export interface CoverageObligation {
   /**
    * An Objective criterion carries its text. A source exit item is a
    * reference: path, content digest and line range, re-sliced from the
-   * pinned source when needed. Graphs retained from before this reference
-   * form also carry the line text, which is never written now.
+   * pinned source when needed.
    */
   source: {
     path: string;
@@ -134,11 +133,10 @@ export interface CoverageObligation {
 
 /** A located source exit item the plan leaves out, justified by Objective lines. */
 export interface SourceExclusion {
-  /** A reference to the excluded lines; retained graphs may also carry their text. */
+  /** A reference to the excluded lines. */
   source: {
     path: string;
     digest: string;
-    text?: string;
     lines: [number, number];
   };
   statement: string;
@@ -174,10 +172,9 @@ export interface RequiredPreIntegrationCheck {
   checkName: string;
   /**
    * The pinned source authorizing this gate, by reference: its path, heading
-   * and content digest at the graph base. Graphs retained from before this
-   * reference form also carry the source text, which is never written now.
+   * and content digest at the graph base.
    */
-  source: { path: string; heading?: string; digest: string; text?: string };
+  source: { path: string; heading?: string; digest: string };
 }
 
 /** Reviewed authority for one deterministic inventory-driven graph addition. */
@@ -1276,11 +1273,9 @@ export interface CapturedAssetSet {
   /**
    * Controller-generated from the imported source identities after every
    * declared member has been verified as a regular file beneath the private
-   * media staging root and imported into the content store. Older snapshots
-   * may not contain this receipt and therefore cannot use it as automatic
-   * review evidence.
+   * media staging root and imported into the content store.
    */
-  capture?: AssetCaptureReceipt;
+  capture: AssetCaptureReceipt;
 }
 
 export interface AssetCaptureReceipt {

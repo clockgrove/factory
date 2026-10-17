@@ -176,8 +176,7 @@ interface Active {
     | "running"
     | "cancel-submitted"
     | "delete-submitted"
-    | "delete-acknowledged"
-    | "disposed";
+    | "delete-acknowledged";
   sessionId?: string;
   environmentId?: string;
   turnId?: string;
@@ -572,7 +571,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<ExecutionObservation> {
     const data = this.active(handle);
-    if (data.phase === "disposed" || data.phase === "delete-acknowledged")
+    if (data.phase === "delete-acknowledged")
       this.physicalCessationUnconfirmed(handle);
     // This API surface cannot list sessions by attempt tag, so a lost create
     // response cannot be resolved; any session it made never received input.
@@ -690,9 +689,8 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<void> {
     const data = this.active(handle);
-    // Legacy `disposed` checkpoints used API disappearance as their proof.
-    // Neither those checkpoints nor a DELETE acknowledgment prove cessation.
-    if (data.phase === "disposed" || data.phase === "delete-acknowledged")
+    // A DELETE acknowledgment does not prove cessation.
+    if (data.phase === "delete-acknowledged")
       this.physicalCessationUnconfirmed(handle);
     data.cleanupStartedAt ??= Date.now();
     if (data.sessionId) {
@@ -739,7 +737,7 @@ export class OpenAIManagedExecutionDriver implements ExecutionDriver {
     context?: ExecutionContext,
   ): Promise<void> {
     const data = this.active(handle);
-    if (data.phase === "disposed" || data.phase === "delete-acknowledged")
+    if (data.phase === "delete-acknowledged")
       this.physicalCessationUnconfirmed(handle);
     // Each cleanup gets a fresh window, so cleanup resumed after an outage
     // longer than the window still runs.

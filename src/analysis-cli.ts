@@ -19,7 +19,6 @@ function parseAnalysisOptions(
   let output: string | undefined;
   let json = false;
   let gantt = false;
-  let includeNativeToolContent = false;
   const field = (value: string): AnalysisField => {
     if (!analysisFields.includes(value as AnalysisField))
       throw new Error(
@@ -29,12 +28,6 @@ function parseAnalysisOptions(
   };
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
-    if (flag === "--native-tool-content") {
-      if (includeNativeToolContent)
-        throw new Error("Duplicate --native-tool-content option");
-      includeNativeToolContent = true;
-      continue;
-    }
     if (flag === "--gantt") {
       if (gantt) throw new Error("Duplicate --gantt option");
       gantt = true;
@@ -76,7 +69,6 @@ function parseAnalysisOptions(
     throw new Error("--gantt requires --output ABSOLUTE_NEW_FILE");
   return {
     ...(gantt ? { gantt } : {}),
-    ...(includeNativeToolContent ? { includeNativeToolContent } : {}),
     filters,
     ...(groupBy.length ? { groupBy } : {}),
     json,

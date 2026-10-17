@@ -21,8 +21,6 @@ export function assertPreIntegrationCheckShape(graph: WorkGraph): void {
       !gate.source.path ||
       (gate.source.heading !== undefined &&
         typeof gate.source.heading !== "string") ||
-      (gate.source.text !== undefined &&
-        (typeof gate.source.text !== "string" || !gate.source.text)) ||
       !/^[a-f0-9]{64}$/.test(gate.source.digest)
     )
       throw new Error(

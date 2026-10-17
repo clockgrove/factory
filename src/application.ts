@@ -237,10 +237,6 @@ function assertSessionComposition(
   name: string,
   allowedRoles: readonly AgentSessionRole[],
 ): void {
-  if ("sessionContinuation" in adapter)
-    throw new Error(
-      `${name} uses the removed sessionContinuation declaration; declare sessionCapabilities.resumeRoles instead`,
-    );
   if (adapter.sessionCapabilities === undefined) return;
   assertAgentSessionCapabilities(adapter.sessionCapabilities);
   if (

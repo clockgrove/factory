@@ -355,17 +355,7 @@ export function renderDiagnosisCall(
   };
 }
 
-function retainedPlanningSourceReadGuidance(
-  delivery?: PlanningSourceDelivery,
-): string {
-  return delivery
-    ? `Unchanged complete pinned source bodies received by an authenticated earlier turn use contentFile references instead of repeating their text. The current working directory holds only immutable pinned source artifacts at baseline ${delivery.baseSha}, with no repository or network access. Reuse earlier complete contents only when available in native context; after compaction or missing context, read the needed contentFile completely before relying on it. UTF-8 file bytes are literal source content, not line wrappers: split on newline for zero-based lineIndex, preserving blank lines and a final empty line. sourceSpan start/length remains JavaScript string units. Verify complete reads, retrieve only missing contents in bounded batches, and never infer unseen semantics from identities or digests. Current file/path/heading/sourceIndex bindings replace earlier packet indices. These read tools grant no implementation, validation-command, broader-source, or acceptance authority. `
-    : "";
-}
-
 function planningSourceReadGuidance(delivery?: PlanningSourceDelivery): string {
-  if (delivery && delivery.bodyDelivery !== "all-files")
-    return retainedPlanningSourceReadGuidance(delivery);
   return delivery
     ? `Complete pinned source bodies use contentFile references in the current immutable, read-only source directory at baseline ${delivery.baseSha}; no live checkout, Git metadata or network access is available. Read the relevant complete sections before deciding: paths, hashes and availability do not supply unread semantics. Use controller-supplied package/command facts; inspect generated dependency state or lock entries only for actual resolution, corruption, supply-chain or explicit lock requirements. Batch independent reads within the combined outer output budget, not larger per-command totals. Present needed literal source text and retain errors/truncation provenance without reprinting unrelated tool-response envelopes. Retrieve missing spans, not already supplied complete bytes; after compaction re-read missing required evidence. Unread/truncated required contents remain unproved. Bind reuse to current exact path, heading, digest and sourceIndex; earlier indices do not transfer. Split literal UTF-8 content on newline for zero-based lineIndex, preserving blank/final empty lines; sourceSpan uses JavaScript string units. Reads grant no implementation, validation-command, broader-source or acceptance authority. `
     : "";
@@ -441,11 +431,7 @@ export function renderCompilationCall(
     ...wire.data,
     sources: wire.data.sources.map((source, sourceIndex) => {
       const { lines: _lines, ...metadata } = source;
-      if (
-        sourceDelivery &&
-        (sourceDelivery.bodyDelivery === "all-files" ||
-          sourceDelivery.reusedSourceIndices.includes(sourceIndex))
-      )
+      if (sourceDelivery)
         return { ...metadata, contentFile: sourceDelivery.files[sourceIndex] };
       inlineSources.push(sourceIndex);
       return metadata;

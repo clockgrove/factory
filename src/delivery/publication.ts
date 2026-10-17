@@ -233,10 +233,6 @@ export function publicationControl(
   save: () => void,
 ): PublicationControl {
   assertPublicationIntents(state);
-  if (state.publicationContract !== "exact-request-v1")
-    throw fenced(
-      "Historical unpublished delivery has no recorded publication contract; its outcome is unrecorded/unknown",
-    );
   const work = state.work[itemId];
   if (
     !work?.attempt ||

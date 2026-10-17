@@ -1122,6 +1122,11 @@ else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.
       selectors[1].text.locator.stdoutPathPrefix,
     );
     assert.equal(dirname(locator.directory), locator.temporaryRoot);
+    // The run's own TMPDIR is under the system temporary directory, not the
+    // state root, and goes once the run settles.
+    assert.equal(dirname(locator.temporaryRoot), tmpdir());
+    assert.match(basename(locator.temporaryRoot), /^factory-validation-/);
+    assert.equal(existsSync(locator.temporaryRoot), false);
     // A match captures every matching file in sorted order, nothing else.
     assert.deepEqual(
       artifacts[1].text.bodies.slice(1).map((body) => basename(body.path)),

@@ -344,6 +344,14 @@ export async function runWorker(
       attemptId,
       objectiveBody: args.objectiveBody,
       selectedAssets: selectedInputsForItem(state, item),
+      ...(item.validation.length && {
+        validationLfsMembers: validationLfsMembersForItem(
+          state,
+          item,
+          args.config.checkout,
+          baseSha,
+        ),
+      }),
       ...(readinessIndices.length
         ? {
             environmentReadiness: {

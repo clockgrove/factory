@@ -20,6 +20,7 @@ import {
   assertAgentSessionScope,
 } from "../agent-session.js";
 import { releaseCodexHome } from "../codex-planning-isolation.js";
+import { LocalContentStore } from "../content/local.js";
 import type {
   CodexModelSelection,
   ExecutionProfileEnvironment,
@@ -651,6 +652,11 @@ async function preserveControllerAssetDestinations(
     await verifyBoundInput(path, source.ref);
   }
   return destinations;
+}
+
+/** Beside the worktree: never among the files the worker returns. */
+function validationLfsStore(worktree: string): string {
+  return `${worktree}.validation-lfs`;
 }
 
 /** Controller-owned staging that collection reads but never commits. */
@@ -1878,6 +1884,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
     if (existsSync(join(path, ".git")))
       await removeWorktree(this.checkout, path);
     else rmSync(path, { recursive: true, force: true });
+    rmSync(validationLfsStore(path), { recursive: true, force: true });
   }
 
   @classifyFaults(executionFault)
@@ -2151,6 +2158,27 @@ export class LocalExecutionDriver implements ExecutionDriver {
           return { ...asset, path };
         }),
       );
+      // Worker validation restores the selected LFS bytes controller
+      // validation restores. Only those objects are staged, verified, in a
+      // private store outside the worktree; the worker verifies them again.
+      const lfsStore = validationLfsStore(worktree);
+      rmSync(lfsStore, { recursive: true, force: true });
+      const lfsMembers = request.validationLfsMembers ?? [];
+      if (lfsMembers.length) {
+        const staged = new LocalContentStore(lfsStore);
+        for (const member of lfsMembers) {
+          const ref = {
+            digest: member.digest,
+            bytes: member.bytes,
+            mediaType: member.mediaType,
+          };
+          const copy = await staged.put(await this.contentStore.open(ref), ref);
+          if (copy.digest !== ref.digest || copy.bytes !== ref.bytes)
+            throw new Error(
+              `Selected LFS bytes differ from their reference: ${member.destination}`,
+            );
+        }
+      }
       const environment =
         !request.discovery && request.item.executionProfile
           ? this.profiles?.get(request.item.executionProfile.id)?.environment
@@ -2279,6 +2307,12 @@ export class LocalExecutionDriver implements ExecutionDriver {
             source,
         ),
         selectedAssets: boundSelected,
+        ...(lfsMembers.length && {
+          validationLfs: {
+            members: structuredClone(lfsMembers),
+            store: lfsStore,
+          },
+        }),
       };
       const preparedHandle: ExecutionHandle = {
         provider: "local",

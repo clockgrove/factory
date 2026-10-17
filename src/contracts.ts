@@ -856,6 +856,8 @@ export interface ExecutionRequest {
   sourceAssets?: { binding: SourceAssetBinding; ref: ContentRef }[];
   objectiveBody?: string;
   selectedAssets?: SelectedAssetInput[];
+  /** The selected LFS bytes controller validation restores for this item at its base. */
+  validationLfsMembers?: ValidationLfsMember[];
   /** Archived failed commit only; never an accepted execution base or proof. */
   retainedFailedResult?: {
     attemptId: string;
@@ -1057,6 +1059,8 @@ export interface HarnessRequest {
     path?: string;
   }[];
   selectedAssets?: (SelectedAssetInput & { path: string })[];
+  /** The controller's private store of exactly these members' verified bytes, outside the worktree. */
+  validationLfs?: { members: ValidationLfsMember[]; store: string };
 }
 export interface HarnessHandle {
   /** Provider attempt identity, stable across controller restarts. */

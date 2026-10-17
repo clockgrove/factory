@@ -6576,6 +6576,14 @@ async function publishCheckpoint(
       closureObservation.complete();
       const { closure, manifest, refs, store } = local;
       record = local.record;
+      // A save during a clean-start explicit build would leave this manifest
+      // at the acknowledged sequence, a second archive commit with the same
+      // sequence. Start over: the dirty journal takes the ordinary path.
+      if (
+        sequence === record.acknowledgedSequence &&
+        record.sequence !== sequence
+      )
+        throw new CheckpointRestart();
       if (
         input.reason === "explicit" &&
         record.lastAcknowledged &&

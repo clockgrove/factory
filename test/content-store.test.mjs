@@ -6784,6 +6784,32 @@ test("stopped collection freezes a completed owned local return before restart a
   assert.equal(explicitRace.pendingChanges, false);
   assert(explicitRace.lastAcknowledged.sequence > priorAck.sequence);
   assert((await archivedAccounting()).includes(raced));
+  // A sibling's scoped save during a clean-start explicit build dirties the
+  // journal; the admission starts over and publishes it under a new sequence.
+  const cleanAck = gitPersistenceStatus(config).lastAcknowledged;
+  duringBuild = () => {
+    duringBuild = undefined;
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { retainWorkerAccounting } from ${JSON.stringify(
+          new URL("../dist/accounting.js", import.meta.url).href,
+        )};import { withRecoveryCheckpointScope } from ${JSON.stringify(
+          new URL("../dist/recovery-checkpoint.js", import.meta.url).href,
+        )};withRecoveryCheckpointScope({config:${JSON.stringify(
+          config,
+        )},buildClosure:async()=>{throw new Error("unused")}},()=>retainWorkerAccounting(${JSON.stringify(
+          binding,
+        )},${JSON.stringify(usage("sibling-scoped"))}));`,
+      ],
+      { stdio: "pipe", timeout: 10000 },
+    );
+  };
+  const siblingRace = await publish("explicit");
+  assert.equal(siblingRace.status, "acknowledged");
+  assert(siblingRace.lastAcknowledged.sequence > cleanAck.sequence);
   // A parent producer write in its own scope dirties the journal; a worker
   // append during that publication's build stays outside its manifest.
   duringBuild = undefined;

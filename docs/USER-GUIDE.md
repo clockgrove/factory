@@ -58,7 +58,7 @@ factory setup --config-only --provider claude --planning claude-agent-sdk \
 Each command picks one provider:
 
 1. An Objective that has started keeps its provider. Its configuration digest is frozen, so resuming, deciding or retrying it from another host uses the same models. Editing that provider's settings strands the Objective until they are restored. A stranded Objective can still be cancelled: name the provider it ran with, `factory cancel --objective N --provider NAME`. Status says when its frozen configuration matches no provider.
-2. `--provider NAME` on `run`, `propose`, `dream` or `recipe` chooses for new work.
+2. `--provider NAME` on `run`, `propose`, `dream` or `recipe` chooses for new work. `cancel` also accepts it, only to name a stranded Objective's provider; other commands reject it.
 3. Otherwise `defaultProvider`. The agent host running Factory never chooses, so overriding the default is always explicit.
 
 Queue and persistence commands use `defaultProvider`, and so does the background service for new work. The service continues a queued Objective that has already started on the provider it froze, exactly as its foreground run would. Queue approvals and their receipts bind the default provider whichever provider a command runs, so switching hosts keeps the queue readable. Changing `defaultProvider` changes the queue's authority, like any other change to queued settings; do it only with an empty queue. `factory status --objective N` ends with the provider it used and why.

@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { assertKnownFlags } from "../dist/cli-flags.js";
 import {
   factoryAuthorityDigest,
   factoryConfigDigest,
@@ -202,6 +203,8 @@ test("the service continues a started Objective on the provider it froze", () =>
   };
   assert.equal(select(), "codex/unmatched");
   assert.equal(select("claude"), "claude/flag");
+  // The remedy status prints must parse (#1426).
+  assertKnownFlags("cancel", ["--objective", "8", "--provider", "claude"]);
 
   // New work runs with the service's own provider.
   assert.equal(queuedObjectiveConfig(service, 9, path), service);

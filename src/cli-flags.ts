@@ -78,7 +78,7 @@ const commandFlags: Record<string, string[]> = {
   pause: ["objective"],
   drain: ["objective"],
   resume: ["objective"],
-  cancel: ["objective"],
+  cancel: ["objective", "provider"],
   handoff: [
     "objective",
     "failed-reservation-evidence",

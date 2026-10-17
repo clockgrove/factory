@@ -17,7 +17,7 @@ import { readWorkHandoff } from "./harness-support.js";
 import { FACTORY_EMAIL, privateStagingExclusions } from "./local.js";
 
 export const factoryValidationServerName = "factory-validation";
-export const factoryValidationServerVersion = "1.0.0";
+const factoryValidationServerVersion = "1.0.0";
 export const factoryValidationToolName =
   "mcp__factory-validation__run_validation";
 
@@ -34,7 +34,7 @@ interface ValidationEnvironmentInput {
 }
 
 /** A completed worker validation run: counts and identities, never output. */
-export interface ValidationRunFacts {
+interface ValidationRunFacts {
   run: number;
   /** The worker was told it passed: declared commands and its handoff. */
   passed: boolean;
@@ -55,7 +55,7 @@ interface HandoffContext {
 /** Enough of a note to see which criterion and sub-clauses it answers. */
 const maxNoteExcerptChars = 600;
 
-export function validationAuthorized(input: {
+function validationAuthorized(input: {
   config: { tools: readonly string[]; allowedTools: readonly string[] };
 }): boolean {
   return (
@@ -102,7 +102,7 @@ export function factoryValidationToolAllowed(
   );
 }
 
-export function assertFactoryValidationReady(status: McpServerStatus): void {
+function assertFactoryValidationReady(status: McpServerStatus): void {
   if (
     status.name !== factoryValidationServerName ||
     status.source !== "sdk" ||

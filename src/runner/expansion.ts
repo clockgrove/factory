@@ -30,7 +30,7 @@ import { canHandoff } from "./ownership.js";
 import { assertExpansionsSettled } from "../expansion-readiness.js";
 import { step, type StepOptions } from "../step.js";
 
-export interface GraphExpansionReceipt {
+interface GraphExpansionReceipt {
   schemaVersion: 1;
   id: string;
   envelopeId: string;

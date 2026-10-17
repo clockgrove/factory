@@ -5,7 +5,7 @@ import { ownsPath } from "../ownership.js";
 import { privateStagingPath } from "./local.js";
 
 export const factoryFilesServerName = "factory-files";
-export const factoryFilesServerVersion = "1.0.0";
+const factoryFilesServerVersion = "1.0.0";
 export const factoryFilesToolName = "mcp__factory-files__delete_file";
 
 interface FilesEnvironmentInput {
@@ -54,7 +54,7 @@ export function factoryFilesToolAllowed(
   );
 }
 
-export function assertFactoryFilesReady(status: McpServerStatus): void {
+function assertFactoryFilesReady(status: McpServerStatus): void {
   if (
     status.name !== factoryFilesServerName ||
     status.source !== "sdk" ||
@@ -72,7 +72,7 @@ export function assertFactoryFilesReady(status: McpServerStatus): void {
  * must be a real directory under the worktree, so no symlink redirects the
  * unlink; the final entry is a file or a link, and unlink never follows it.
  */
-export function ownedDeletionTarget(
+function ownedDeletionTarget(
   worktree: string,
   ownedPaths: readonly string[],
   path: string,

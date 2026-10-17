@@ -10,10 +10,9 @@ import type {
 import { attachedFault, attachFault, decision, transient } from "../fault.js";
 import { addsLfsPointers } from "../media.js";
 import { gitAsync, pushRefusal } from "../process.js";
-import { deliveryDescription } from "./description.js";
 
 /** The commit a remote branch holds, or undefined when it does not exist. */
-export async function remoteHead(
+async function remoteHead(
   checkout: string,
   branch: string,
 ): Promise<string | undefined> {
@@ -107,7 +106,6 @@ export class RegularDelivery implements DeliveryStrategy {
         ),
       );
     const commit = request.changeRef;
-    const body = request.body ?? deliveryDescription(this.checkout, request);
     const base = request.baseBranch ?? (await this.github.defaultBranch());
     const pullRequest = {
       branch: request.branch,
@@ -116,7 +114,7 @@ export class RegularDelivery implements DeliveryStrategy {
       earlierHeads: request.earlierHeads,
       treeSha: request.treeSha,
       title: request.item.title,
-      body,
+      body: request.body,
     };
     publication.assertRequest(pullRequest);
     const reconcileOnly = publication.reconcileOnly;

@@ -175,14 +175,11 @@ export class ClaudeManagedExecutionDriver implements ExecutionDriver {
       workRoot: string;
       contentStore: ContentStore;
       config: ClaudeManagedConfig;
-      client?: ClaudeManagedClient;
       apiKey?: string;
     },
   ) {
     validateClaudeManagedConfig(args.config);
-    this.client =
-      args.client ??
-      new ClaudeManagedClient(args.config, { apiKey: args.apiKey });
+    this.client = new ClaudeManagedClient(args.config, { apiKey: args.apiKey });
   }
   @classifyFaults(executionFault)
   async availableSlots(): Promise<"unknown"> {

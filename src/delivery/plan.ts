@@ -1,7 +1,7 @@
 import type { WorkGraph, WorkItem } from "../contracts.js";
 import { expansionBlocksItem } from "../expansion-readiness.js";
 
-export interface DeliveryUnit {
+interface DeliveryUnit {
   id: string;
   items: WorkItem[];
   externalDependencies: string[];

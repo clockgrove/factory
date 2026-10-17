@@ -5,7 +5,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
  * the tool's name and, at most, the repository-relative file it targets or a
  * shell command's program name. Never arguments, file contents or output.
  */
-export interface ToolActivity {
+interface ToolActivity {
   tool: string;
   target?: string;
 }

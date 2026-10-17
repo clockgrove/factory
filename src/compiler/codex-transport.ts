@@ -883,8 +883,8 @@ export class CodexPlanningTransport implements PlanningTransport {
     // Native exec JSON omits text/reasoning deltas. A healthy structured
     // answer can stay silent until its final agent_message, at any effort.
     // Keep that quiet window for compilation and high effort. Lower-effort
-    // reviews get a finite five-minute outlier bound, above the old 120s
-    // cutoff; a quiet timeout still does not prove provider inactivity.
+    // reviews get a finite five-minute outlier bound; a quiet timeout still
+    // does not prove provider inactivity.
     const lowerEffortReview =
       ["graph-review", "result-review", "objective-review"].includes(
         invocation.phase,

@@ -120,12 +120,6 @@ import {
   WORK_ITEM_PLANNING_RULES,
 } from "./work-item-rubric.js";
 
-/**
- * The planning model with its calls made as its step's paid calls (see
- * src/step.ts), so only the model's own faults count toward the bound. A
- * diagnosis is bounded per failure by PAID_ATTEMPTS instead, never by both.
- * A plan step uses paidPlanningModel, which also counts an invalid review.
- */
 /** Load only the Objective's retained selection; legacy absence never selects current advice. */
 export function bindPlanningPlaybook(
   model: PlanningModel,
@@ -205,10 +199,6 @@ const MAX_REVIEW_CAPACITY_RETRIES = 2;
 
 const MAX_REVIEW_CAPACITY_RETRY_DELAY_MS = 10_000;
 
-/**
- * The provider-neutral PlanningModel: one prompt and schema contract for
- * compile, graph review, result review, final review and diagnosis.
- */
 const humanPrerequisiteGuidance = (fields: string) =>
   `When human-owned accounts, credentials, environments or approvals block the plan, consolidate every known prerequisite in the ${fields}: cite its requirement, explain why it is needed, give only source-supported setup steps and verification commands, and distinguish observed readiness from missing or unknown facts. Ask precise questions for unknown setup requirements; never invent vendor instructions or ask for secret values in chat. Identify independent work only when the supplied evidence establishes its existing admission and independence; a proposed plan admits no Work Item. Checklist guidance grants no execution, deployment, spending or credential authority.`;
 
@@ -382,7 +372,7 @@ function planningSourceReadGuidance(delivery?: PlanningSourceDelivery): string {
 }
 
 /** What the planner or graph reviewer can see of the repository at the base. */
-export interface RepositoryView {
+interface RepositoryView {
   /** Deterministic path map of the base tree (repositoryMap). */
   map: string;
   /** `repository/` in the working directory holds the exported base files. */
@@ -703,6 +693,10 @@ Objective:\n`;
   };
 }
 
+/**
+ * The provider-neutral PlanningModel: one prompt and schema contract for
+ * compile, graph review, result review, final review and diagnosis.
+ */
 export class StructuredPlanningModel implements PlanningModel {
   readonly providerAttemptAdmission = "controller-checkpoint-v1" as const;
   readonly providerDispatchAdmission = "after-attempt-admission-v1" as const;

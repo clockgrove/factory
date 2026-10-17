@@ -3,7 +3,7 @@ import type { ContentRef, ContentStore, WorkGraph } from "../contracts.js";
 import { memorySourceHeading } from "../repository-memory.js";
 import type { PlanningSource } from "./sources.js";
 
-export type ContextDisposition =
+type ContextDisposition =
   | "complete"
   | "no-match"
   | "unavailable"
@@ -28,7 +28,7 @@ export const DEFAULT_CONTEXT_LOOKUP_BOUNDS: Readonly<ContextLookupBounds> =
     maxElapsedMs: 30000,
     maxProviderCalls: 5,
   });
-export interface ContextCollection {
+interface ContextCollection {
   id: string;
   selectors: string[];
   operations: ("read" | "search" | "inventory")[];
@@ -52,14 +52,14 @@ export interface ContextMatch {
   bytes: number;
 }
 /** Reuse closes over exact bytes in this result or its separately supplied source packet. */
-export interface SuppliedSourceReuse {
+interface SuppliedSourceReuse {
   kind: "supplied-source";
   sourceIndex: number;
   path: string;
   heading?: string;
   digest: string;
 }
-export type PlanningMemoryBody =
+type PlanningMemoryBody =
   | { role: string; ref: ContentRef; text: string }
   | {
       role: string;
@@ -113,7 +113,7 @@ export interface PlanningLookupRecord {
   /** Exact packet bytes are also retained in the installation's existing content store. */
   packetRef?: ContentRef;
 }
-export type ContextLookupPurpose = "automatic" | "requested";
+type ContextLookupPurpose = "automatic" | "requested";
 export interface PlanningContextResolver {
   binding: string;
   catalog: ContextCollection[];
@@ -133,7 +133,7 @@ export function contextDigest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 /** Recipe inputs carry frozen controller scopes; equal query text does not merge those facts. */
-export function contextRequestIdentity(
+function contextRequestIdentity(
   request: ContextRequest,
   purpose: ContextLookupPurpose = "requested",
 ): string {

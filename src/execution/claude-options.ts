@@ -172,10 +172,7 @@ const longContextCompactWindow = 400_000;
  * gain. It is not configuration, so config digests and started Objectives
  * are unaffected.
  */
-export function claudeSdkModel(
-  model: string,
-  environment: NodeJS.ProcessEnv,
-): string {
+function claudeSdkModel(model: string, environment: NodeJS.ProcessEnv): string {
   return environment.FACTORY_CLAUDE_1M === "1" && longContextModels.has(model)
     ? `${model}[1m]`
     : model;

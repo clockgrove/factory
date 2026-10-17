@@ -40,7 +40,7 @@ export function claudeCost(value: unknown): number | undefined {
 }
 
 /** SDK 0.3.281 modelUsage totals cover this fresh query's model pipeline. */
-export function claudeTokenUsage(value: unknown): ModelInvocationUsage {
+function claudeTokenUsage(value: unknown): ModelInvocationUsage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const models = Object.values(value).map((entry) =>
     pickTokenCounters(entry, modelFields),
@@ -85,7 +85,7 @@ export interface ClaudeUsageBaseline {
 }
 
 /** Compare only authenticated categories; transcript resets never become negative or free usage. */
-export function claudeUsageDelta(
+function claudeUsageDelta(
   current: ClaudeUsageBaseline,
   baseline?: ClaudeUsageBaseline,
   resumed = false,

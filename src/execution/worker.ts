@@ -123,7 +123,7 @@ export function codexWorkerConfiguration(
   };
 }
 
-export async function runCodexWorker(
+async function runCodexWorker(
   inputPath: string,
   resultPath: string,
 ): Promise<boolean> {

@@ -24,7 +24,7 @@ import {
   processGroupExists,
   UnsettledSubprocessError,
 } from "../process.js";
-import { killGroup } from "./worker-process.js";
+import { killGroup, type WorkerHandleData } from "./worker-process.js";
 import type { ClaudeUsageBaseline } from "./claude-usage.js";
 
 export interface ClaudeNativeProcess {
@@ -44,13 +44,7 @@ export interface ClaudeSessionData {
   settled?: true;
   process?: ClaudeNativeProcess;
   pendingWorkerIdentity?: string;
-  worker?: {
-    pid: number;
-    startTime: string;
-    requestPath: string;
-    resultPath: string;
-    logPath: string;
-  };
+  worker?: WorkerHandleData;
   profileId?: string;
 }
 export interface ClaudeOwnedSession {

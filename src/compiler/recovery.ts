@@ -96,7 +96,7 @@ export interface PlanningReviewRecord {
   response?: Awaited<ReturnType<PlanningModel["reviewGraph"]>>;
 }
 
-export interface PlanningInvocationReceipt {
+interface PlanningInvocationReceipt {
   id: string;
   phase: string;
   resultDigest?: string;

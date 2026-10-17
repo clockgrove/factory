@@ -36,7 +36,7 @@ type Stack = {
   pull_requests: Pull[];
 };
 
-export interface StackLayer {
+interface StackLayer {
   pullRequest: number;
   branch: string;
   headSha: string;
@@ -173,11 +173,6 @@ export class NativeStackDelivery {
     return created.number;
   }
 
-  /**
-   * Merge the stack through its top PR, observing first: a merged stack is
-   * confirmed, and a merge request already pending (recorded, or named by
-   * GitHub's 409 after a lost response) is polled instead of sent again.
-   */
   /** The stack's merge commit when every layer already merged, else undefined. */
   private async alreadyMerged(
     layers: StackLayer[],
@@ -198,6 +193,11 @@ export class NativeStackDelivery {
     return this.stackMergeCommit(layers);
   }
 
+  /**
+   * Merge the stack through its top PR, observing first: a merged stack is
+   * confirmed, and a merge request already pending (recorded, or named by
+   * GitHub's 409 after a lost response) is polled instead of sent again.
+   */
   async mergeStack(
     layers: StackLayer[],
     baseBranch: string,

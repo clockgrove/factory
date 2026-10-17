@@ -44,15 +44,8 @@ import {
   launchWorker,
   observeWorker,
   stopUnrecordedWorker,
+  type WorkerHandleData,
 } from "./worker-process.js";
-
-interface ClaudeWorkerHandleData {
-  pid: number;
-  startTime: string;
-  requestPath: string;
-  resultPath: string;
-  logPath: string;
-}
 
 export interface ClaudeWorkerInput {
   request: HarnessRequest;
@@ -70,7 +63,7 @@ const claudeLocalAuthenticationEnvironment = [
   "CLAUDE_CONFIG_DIR",
 ];
 
-export function claudeWorkerInput(
+function claudeWorkerInput(
   request: HarnessRequest,
   config: ClaudeAgentSdkConfig,
 ): ClaudeWorkerInput {
@@ -118,7 +111,7 @@ export function claudeAuthenticationFailure(
 }
 
 /** Network settings a host may need to reach the Claude API. */
-export const claudeNetworkEnvironment = [
+const claudeNetworkEnvironment = [
   "HTTPS_PROXY",
   "HTTP_PROXY",
   "NO_PROXY",
@@ -194,7 +187,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   }
 
   private sessionReceipt(
-    data: ClaudeWorkerHandleData,
+    data: WorkerHandleData,
     supplied: unknown,
   ): AgentSessionRef {
     assertAgentSessionRef(supplied);
@@ -306,11 +299,11 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     };
   }
 
-  private require(handle: HarnessHandle): ClaudeWorkerHandleData {
+  private require(handle: HarnessHandle): WorkerHandleData {
     const data = handle.data;
     if (!data || typeof data !== "object" || Array.isArray(data))
       throw new Error("Invalid Claude harness handle");
-    const value = data as Partial<ClaudeWorkerHandleData>;
+    const value = data as Partial<WorkerHandleData>;
     const root = resolve(this.root);
     if (
       !Number.isSafeInteger(value.pid) ||
@@ -324,7 +317,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
       )
     )
       throw new Error("Invalid Claude harness handle");
-    return value as ClaudeWorkerHandleData;
+    return value as WorkerHandleData;
   }
 
   private get harnessRoot(): string {

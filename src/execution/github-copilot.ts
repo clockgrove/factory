@@ -37,15 +37,8 @@ import {
   launchWorker,
   observeWorker,
   stopUnrecordedWorker,
+  type WorkerHandleData,
 } from "./worker-process.js";
-
-interface GitHubCopilotWorkerHandleData {
-  pid: number;
-  startTime: string;
-  requestPath: string;
-  resultPath: string;
-  logPath: string;
-}
 
 /** Exact SDK 1.0.13 requires Node >=22.12 on Factory's Node >=22 surface. */
 export function requireCopilotRuntime(version = process.versions.node): void {
@@ -74,7 +67,7 @@ const copilotAuthenticationEnvironment = [
   "COPILOT_PROVIDER_BEARER_TOKEN",
 ];
 
-export function githubCopilotWorkerInput(
+function githubCopilotWorkerInput(
   request: HarnessRequest,
   config: GitHubCopilotSdkConfig,
 ): GitHubCopilotWorkerInput {
@@ -104,7 +97,7 @@ export function githubCopilotAuthenticationSelection(
   ]);
 }
 
-export function githubCopilotWorkerEnvironment(
+function githubCopilotWorkerEnvironment(
   credentialDirectory: string,
 ): Record<string, string> {
   const environment = sanitizedWorkerEnvironment(
@@ -144,11 +137,11 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
     private config: GitHubCopilotSdkConfig,
   ) {}
 
-  private require(handle: HarnessHandle): GitHubCopilotWorkerHandleData {
+  private require(handle: HarnessHandle): WorkerHandleData {
     const data = handle.data;
     if (!data || typeof data !== "object" || Array.isArray(data))
       throw new Error("Invalid GitHub Copilot harness handle");
-    const value = data as Partial<GitHubCopilotWorkerHandleData>;
+    const value = data as Partial<WorkerHandleData>;
     const root = resolve(this.root);
     if (
       !Number.isSafeInteger(value.pid) ||
@@ -163,7 +156,7 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
       )
     )
       throw new Error("Invalid GitHub Copilot harness handle");
-    return value as GitHubCopilotWorkerHandleData;
+    return value as WorkerHandleData;
   }
 
   private get harnessRoot(): string {
@@ -246,7 +239,7 @@ export class GitHubCopilotSdkHarness implements AgentHarness {
   }
 
   private sessionReceipt(
-    data: GitHubCopilotWorkerHandleData,
+    data: WorkerHandleData,
     supplied: unknown,
   ): AgentSessionRef {
     assertAgentSessionRef(supplied);

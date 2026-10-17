@@ -781,10 +781,7 @@ function authorizedCommand(
       return false;
     }
   }
-  if (
-    check.provenance === "source-declared" &&
-    check.source !== "OPERATOR_DECISION"
-  )
+  if (check.provenance === "source-declared")
     return sources.some(
       (source) =>
         source.path === check.source &&
@@ -1099,11 +1096,6 @@ export function validateGraphSources(
         `Work Item ${item.id} requires LFS for an unknown output role`,
       );
     for (const source of item.sourceAssets ?? []) {
-      if (typeof source === "string")
-        throw new GraphValidationError(
-          item.id,
-          `Work Item ${item.id} needs a structured source asset`,
-        );
       const { path, role, mediaType, visibility } = source;
       const kind = source.kind ?? "repository";
       const repositoryPath =

@@ -116,21 +116,8 @@ import {
   launchWorker,
   observeWorker,
   stopUnrecordedWorker,
+  type WorkerHandleData,
 } from "./worker-process.js";
-
-/**
- * A harness that can stop what a start of an identity spawned before its
- * handle was recorded (#585). Optional until AgentHarness declares it.
- */
-type RecoverableHarness = AgentHarness & {
-  cancelUnrecorded?(identity: string): Promise<void>;
-  originalCollectionReturn?(handle: HarnessHandle): {
-    provenance: "controller-worker-result";
-    path: string;
-    root: string;
-    attemptId: string;
-  };
-};
 
 export interface LocalProfileRegistration {
   environment?: ExecutionProfileEnvironment;
@@ -155,14 +142,6 @@ type Active = {
     evidence: ValidationEvidence;
   };
 };
-
-interface WorkerHandleData {
-  pid: number;
-  startTime: string;
-  requestPath: string;
-  resultPath: string;
-  logPath: string;
-}
 
 interface CodexSessionData {
   selectionDigest: string;
@@ -760,7 +739,7 @@ function noChangeDetail(evidence: unknown): string {
 }
 
 /** A failed collection observation grants no result, validation or reuse authority. */
-export interface RejectedCollectionBody {
+interface RejectedCollectionBody {
   availability: "available" | "unavailable";
   digest?: string;
   bytes?: number;
@@ -1600,7 +1579,7 @@ function retainedResultAuthentic(
  * change never makes the attempt fail after a paid run. Undefined when the
  * result cannot continue on this base.
  */
-export function continuedRetainedTree(
+function continuedRetainedTree(
   checkout: string,
   worktree: string,
   request: Pick<ExecutionRequest, "retainedFailedResult" | "baseSha" | "item">,
@@ -1651,7 +1630,7 @@ export function continuedRetainedTree(
  * Render only authenticated local Git context, never an execution base or
  * proof, and the tree the attempt continues from when it can.
  */
-export function retainedFailedResultStart(
+function retainedFailedResultStart(
   checkout: string,
   worktree: string,
   request: Pick<ExecutionRequest, "retainedFailedResult" | "baseSha" | "item">,
@@ -1782,11 +1761,19 @@ export class LocalExecutionDriver implements ExecutionDriver {
       JSON.stringify(persisted) !== JSON.stringify(registration.binding)
     )
       throw new Error("Durable execution profile binding changed");
-    let harness = this.profileHarnesses.get(id!);
+    return this.profileHarness(id!, registration);
+  }
+
+  /** The profile's harness, created and checked on first use. */
+  private profileHarness(
+    id: string,
+    registration: LocalProfileRegistration,
+  ): AgentHarness {
+    let harness = this.profileHarnesses.get(id);
     if (!harness) {
       harness = registration.createHarness();
       this.assertCapabilities(harness, registration.binding.adapter);
-      this.profileHarnesses.set(id!, harness);
+      this.profileHarnesses.set(id, harness);
     }
     return harness;
   }
@@ -2028,7 +2015,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
         throw new Error(
           "Prepared local checkout is retained; reconcile or cancel its owner before another launch",
         );
-      await (harness as RecoverableHarness).cancelUnrecorded?.(identity);
+      await harness.cancelUnrecorded?.(identity);
       await this.removeExecutionDirectory(worktree);
     }
     if (context?.cancelled())
@@ -2415,17 +2402,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
   }
 
   /** Every harness this driver can start a worker with. */
-  private harnesses(): RecoverableHarness[] {
-    if (!this.profiles) return [this.harness as RecoverableHarness];
-    return [...this.profiles].map(([id, registration]) => {
-      let harness = this.profileHarnesses.get(id);
-      if (!harness) {
-        harness = registration.createHarness();
-        this.assertCapabilities(harness, registration.binding.adapter);
-        this.profileHarnesses.set(id, harness);
-      }
-      return harness as RecoverableHarness;
-    });
+  private harnesses(): AgentHarness[] {
+    if (!this.profiles) return [this.harness as AgentHarness];
+    return [...this.profiles].map(([id, registration]) =>
+      this.profileHarness(id, registration),
+    );
   }
 
   /**
@@ -2767,7 +2748,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
           const harness = this.resolveHarness(
             active.request.item,
             active.executionBinding,
-          ) as RecoverableHarness;
+          );
           const source =
             harness instanceof CodexHarness ||
             harness instanceof ClaudeAgentSdkHarness
@@ -2921,7 +2902,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
         );
       await harness.cancel(active.handle);
     }
-    let harnesses: RecoverableHarness[];
+    let harnesses: AgentHarness[];
     if (this.profiles) {
       const profileId = (session.data as CodexSessionData | undefined)
         ?.profileId;
@@ -2930,15 +2911,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
         throw new Error(
           "The retained session execution profile is unavailable for cleanup",
         );
-      let harness = this.profileHarnesses.get(profileId!);
-      if (!harness) {
-        harness = registration.createHarness();
-        this.assertCapabilities(harness, registration.binding.adapter);
-        this.profileHarnesses.set(profileId!, harness);
-      }
-      harnesses = [harness];
+      harnesses = [this.profileHarness(profileId!, registration)];
     } else {
-      harnesses = [this.harness as RecoverableHarness];
+      harnesses = [this.harness as AgentHarness];
     }
     harnesses = harnesses.filter(
       (harness) => harness.sessionAdapter === session.adapter,

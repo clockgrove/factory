@@ -4,7 +4,7 @@ export interface ClaudeAttemptBoundary {
   inputEventId: string;
   interruptEventId?: string;
 }
-export type ClaudeTurnDisposition =
+type ClaudeTurnDisposition =
   | { state: "running"; detail: string }
   | { state: "failed"; detail: string; endEventId?: string }
   | { state: "output-pending"; endEventId: string }

@@ -117,7 +117,7 @@ export function redact(value: string, secrets: string[]): string {
  * (result fields, error codes) into AuthenticationRequiredError; message text
  * never decides.
  */
-export function isAuthenticationFailure(error: unknown, depth = 0): boolean {
+function isAuthenticationFailure(error: unknown, depth = 0): boolean {
   if (!(error instanceof Error) || depth > 5) return false;
   if (error instanceof AuthenticationRequiredError) return true;
   const { status, statusCode } = error as {
@@ -418,7 +418,7 @@ function checkoutHoldsSource(
 }
 
 /** Each criterion as "[n] text": n is the criterionIndex its verification note names. */
-export function numberedAcceptance(acceptance: readonly string[]): string {
+function numberedAcceptance(acceptance: readonly string[]): string {
   return acceptance
     .map((criterion, index) => `[${index}] ${criterion}`)
     .join("\n");

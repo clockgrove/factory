@@ -34,9 +34,7 @@ export interface CopilotUsageObservation {
 }
 
 /** Raw SDK input counters lack a pinned inclusive-input contract. Do not manufacture a denominator. */
-export function copilotTokenUsage(
-  raw: Record<string, number>,
-): ModelInvocationUsage {
+function copilotTokenUsage(raw: Record<string, number>): ModelInvocationUsage {
   return normalizeTokenUsage({
     outputTokens: raw.outputTokens,
     cachedInputTokens: raw.cacheReadTokens,

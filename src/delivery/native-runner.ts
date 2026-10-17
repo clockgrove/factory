@@ -1217,7 +1217,6 @@ export async function runNativeGraph(args: {
     let merged: { merge: string; integrated: string };
     // The layer whose published result is wrong, when one is.
     let failedLayer: number | undefined;
-    /** Observe every layer; return them when the unit may merge, else wait for CI. */
     /**
      * Strict protection: GitHub updates a layer's branch with its base from
      * exactly `from`. The new head is that layer's delivered head; its
@@ -1244,6 +1243,7 @@ export async function runNativeGraph(args: {
         detail: `Awaiting checks on PR #${layer.pullRequest} after GitHub updated it with its base`,
       });
     };
+    /** Observe every layer; return them when the unit may merge, else wait for CI. */
     const ready = async (context: StepContext) => {
       failedLayer = undefined;
       // An update already requested is finished before the layers are read:

@@ -197,7 +197,7 @@ export function summarizeNativeTools(records: InteractionMetadata[]) {
     snapshot.readBytes > 0;
   const currentMetadata = snapshot?.toolMetadata === "available";
   const available =
-    (currentMetadata || tools.length > 0) &&
+    currentMetadata &&
     readableView &&
     snapshot?.status === "available" &&
     completeIdentity &&

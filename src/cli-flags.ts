@@ -133,13 +133,6 @@ export function assertKnownFlags(command: string, args: string[]): void {
     const name = arg.slice(2);
     // `--objective=5` is the same mistake as `--objective 5`.
     const [flag, inline] = name.split("=", 2) as [string, string | undefined];
-    if (
-      flag === "objective" &&
-      (command === "setup" || command === "supervisor")
-    )
-      throw new Error(
-        `${arg} was removed from factory ${command}; queue Objectives with factory queue add N`,
-      );
     if (flag === "objective" && command === "queue") {
       // The number to name: the inline value, else the next word if it is one, else a placeholder.
       const value = inline ?? args[args.indexOf(arg) + 1];

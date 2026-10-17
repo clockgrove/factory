@@ -1294,6 +1294,12 @@ export function parseFactoryState(
         planned.validation.map((check) => check.command),
       );
     }
+    // Records Factory no longer keeps; an in-flight effect must not be dropped.
+    for (const field of ["pendingEffect", "interruptions", "waitingReason"])
+      if (item[field] !== undefined)
+        throw new Error(
+          `Work Item ${id} records ${field}, which Factory no longer keeps; start the Objective fresh`,
+        );
     if (!statuses.has(item.status as WorkStatus))
       throw new Error(`Work Item ${id} has an invalid status`);
     for (const field of ["phaseReservation", "requestedPhase"])

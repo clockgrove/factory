@@ -658,6 +658,12 @@ export function assertRepairLedger(
   },
 ): void {
   const autonomy = validateAutonomy(state.autonomy);
+  // Charges replaced these counters; refuse rather than silently reset them.
+  for (const counter of ["allowanceConsumption", "repairConsumption"])
+    if (Object.hasOwn(state, counter))
+      throw new Error(
+        `State records ${counter}, which Factory no longer keeps; start the Objective fresh`,
+      );
   if (state.charges !== undefined) {
     if (
       !state.charges ||
@@ -701,6 +707,11 @@ export function assertRepairLedger(
     if (!failure) return;
     if (!failureClasses.includes(failure.classification))
       throw new Error("Invalid failure classification");
+    if (
+      failure.continuation !== "new-attempt-from-accepted-base" &&
+      failure.continuation !== "operator-decision"
+    )
+      throw new Error("Invalid failure continuation");
     if (CHARGED.includes(failure.classification) !== Boolean(failure.event))
       throw new Error("Failure event does not match its classification");
     if (
@@ -713,6 +724,14 @@ export function assertRepairLedger(
   for (const work of Object.values(state.work ?? {})) {
     const recovery = work.recovery;
     if (!recovery) continue;
+    for (const correction of [
+      recovery.correction,
+      ...(Array.isArray(recovery.history) ? recovery.history : []).map(
+        (entry) => entry.correction,
+      ),
+    ])
+      if (correction && !repairClasses.includes(correction.kind))
+        throw new Error("Invalid repair correction kind");
     // A record pairs a failure with the correction admitted for it, bound by
     // the failure's event.
     const bound = (

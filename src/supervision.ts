@@ -205,6 +205,16 @@ function privateFile(path: string): void {
   )
     throw new Error(`Expected an owner-private file: ${path}`);
 }
+const bindingKeys = [
+  "credentials",
+  "version",
+  "node",
+  "cli",
+  "config",
+  "stateHome",
+  "environment",
+];
+
 function decodeBinding(text: string): ServiceBinding {
   if (!text.startsWith(marker))
     throw new Error("Refusing a service not registered by Factory");
@@ -214,6 +224,7 @@ function decodeBinding(text: string): ServiceBinding {
   if (
     !value ||
     typeof value !== "object" ||
+    Object.keys(value).some((key) => !bindingKeys.includes(key)) ||
     value.version !== 1 ||
     ![value.node, value.cli, value.config, value.stateHome].every(path) ||
     !value.environment ||

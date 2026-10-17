@@ -365,7 +365,7 @@ Start from [the template](https://github.com/clockgrove/factory/blob/main/docs/t
 - **Sources:** optional. Exact repository files every worker must receive verbatim, one per bullet: `- path` or `- path#Exact Heading`. Anything else on a Sources line (prose, Markdown links) is refused with the offending line and this expected form; move it to Context. The planner can also cite any other repository file it reads, so list only what must be pinned.
 - **Constraints:** non-goals and limits workers must respect. A Non-goals section is read the same way.
 
-Prose sections are read as written, so any other heading is fine.
+Prose sections are read as written, so any other heading is fine. Factory refuses only headings whose old structural meaning would otherwise be silently lost, and says where the content goes: Final validation (an Acceptance command bullet), Planning sources (Sources) and What must be true (Acceptance).
 
 The Markdown template contains the core sections. Add an optional authority section only for a change this Objective actually requests; its examples are syntax guidance, not default package or version choices. The issue form keeps those fields optional.
 

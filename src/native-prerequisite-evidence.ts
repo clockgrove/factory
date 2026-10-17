@@ -22,7 +22,13 @@ export function assertNativePrerequisites(
   >,
 ): void {
   const facts = state.prerequisites;
-  if (facts === undefined) return;
+  if (facts === undefined) {
+    if (state.prerequisitesDigest !== undefined)
+      throw new Error(
+        "Native Objective prerequisite digest has no recorded facts",
+      );
+    return;
+  }
   const fail = () => {
     throw new Error(
       "Native Objective prerequisite facts differ from their activation binding",

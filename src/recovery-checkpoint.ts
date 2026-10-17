@@ -120,8 +120,9 @@ export interface RecoveryCheckpointManifest extends RecoveryCheckpointClosure {
   createdAt: string;
   sequence: number;
   /**
-   * Publisher authority, on every private-history manifest and never on
-   * repository knowledge; individual historical records retain their original bindings.
+   * Publisher authority: written on every private-history manifest (absent on
+   * ones published before it existed) and never on repository knowledge;
+   * individual historical records retain their original bindings.
    */
   authority?: RecoveryCheckpointAuthority;
 }
@@ -3222,9 +3223,12 @@ function assertManifest(
     throw new Error(
       "Checkpoint manifest is incomplete or outside its admitted binding",
     );
-  if (options.scope === "private-history")
-    assertRecoveryCheckpointAuthority(value.authority);
-  else if (value.authority !== undefined)
+  // Archive history is immutable: manifests published before publisher
+  // authority existed stay readable; restoring their continuations is refused.
+  if (options.scope === "private-history") {
+    if (value.authority !== undefined)
+      assertRecoveryCheckpointAuthority(value.authority);
+  } else if (value.authority !== undefined)
     throw new Error(
       "Publisher host authority is private-history metadata only",
     );

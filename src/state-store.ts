@@ -1300,6 +1300,10 @@ export async function restoreRecoveryCheckpoint(args: {
           throw new Error("Recovery source Git object has the wrong type");
       pinnedGit(config.checkout, "rev-parse", "--git-dir");
     }
+    if (originals.length && !source)
+      throw new Error(
+        "Recovery checkpoint has no publisher authority; its continuations cannot be restored",
+      );
     // Refuse mutable path conflicts before canonical replicas or operational snapshots are installed.
     for (const file of replicaFiles) {
       assertRecoveryReplicaPath(
@@ -1387,8 +1391,7 @@ export async function restoreRecoveryCheckpoint(args: {
       reason: string;
     }[] = [];
     for (const { state, ref, retired } of originals) {
-      // Continuations travel only in private-history, whose manifest always
-      // carries its publisher authority.
+      // Refused above when the manifest carries no publisher authority.
       const authority = source!;
       const previous = readContinuation(
         config.repository,

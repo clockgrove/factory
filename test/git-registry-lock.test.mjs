@@ -68,6 +68,7 @@ import {
   createQueueCommand,
   createQueueOperation,
   nextProjectQueueOrder,
+  observeProjectQueue,
   queueDigest,
   parseQueueRecord,
   performQueueCommandEffect,
@@ -1504,6 +1505,28 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       else process.env.FACTORY_TEST_LOCAL_ORIGINS = priorLocalOrigins;
     }
     if (!preSnapshotFailure && !collectedExecution) {
+      // A queued-settings change leaves the completed Objective's settled
+      // admission historical: re-authorizing the control alone makes the
+      // queue readable again, without withdrawing its card (#1398).
+      const reauthorized = {
+        ...config,
+        autonomy: { allowances: { implementationRepairs: 0 } },
+      };
+      assert.notEqual(
+        factoryAuthorityDigest(reauthorized),
+        factoryAuthorityDigest(config),
+      );
+      await intakeControl(reauthorized, "resume", undefined, github);
+      const historical = await observeProjectQueue(reauthorized, github);
+      assert.deepEqual(
+        historical.entries.map((entry) => [entry.objective, entry.state]),
+        [[1, "queued"]],
+      );
+      assert.equal(
+        historical.entries[0].authorityDigest,
+        factoryAuthorityDigest(config),
+      );
+      await intakeControl(config, "drain", undefined, github);
       // A foreground removal returns its Project effect, then another
       // publisher holds the archive acknowledgment past the command deadline.
       const writesBefore = writes;

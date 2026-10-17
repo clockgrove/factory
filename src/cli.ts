@@ -693,7 +693,9 @@ async function dispatchMain(): Promise<void> {
     else {
       for (const line of statusLines(document, secrets)) console.log(line);
       console.log(
-        `Provider: ${provider.name} (${providerSummary(config)}; selected by ${provider.selectedBy})`,
+        provider.selectedBy === "unmatched"
+          ? `Provider: ${provider.name} (${providerSummary(config)}; default, because the Objective's frozen configuration matches no configured provider: restore its settings to continue it, or name the provider it ran with to cancel it: factory cancel --objective ${objective} --provider NAME)`
+          : `Provider: ${provider.name} (${providerSummary(config)}; selected by ${provider.selectedBy})`,
       );
     }
   } else if (command === "watch") {
@@ -709,6 +711,12 @@ async function dispatchMain(): Promise<void> {
       objective,
       action: "cancel",
     });
+    // Cancel releases the Objective's own sessions and workers, so it needs the
+    // adapters it ran with; a default guess would refuse their bindings.
+    if (!reply.handled && selected.source === "unmatched")
+      throw new Error(
+        `Objective #${objective}'s frozen configuration matches no configured provider; cancel it with the provider it ran with: factory cancel --objective ${objective} --provider NAME`,
+      );
     const result = reply.handled
       ? reply.result
       : await requireApplication().cancelObjective(objective);

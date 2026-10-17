@@ -88,7 +88,7 @@ The opt-in designates that one field as Factory-managed. Concurrent human edits 
 
 Issues retain definitions; Project supplies current membership, order and controls. Private Git checkpoints preserve immutable original admission, mutation and owner receipts. A current field value must match the original approved body and semantic configuration. Manual edits and ordinary roadmap cards grant no provider-spending authority. Complete authenticated Project reads are required; unavailable or ambiguous observations never fall back to a local queue.
 
-Withdrawn admissions retain their original receipts and authority after an approved stopped configuration change. They remain historical and cannot dispatch work; current control and queued admissions must match the current authority.
+Withdrawn admissions, and admissions of completed or cancelled Objectives whose owner claims are all settled, retain their original receipts and authority after an approved stopped configuration change. They remain historical and cannot dispatch work; current control and queued admissions of unfinished Objectives must match the current authority.
 
 GitHub field updates supply no conditional-version input. Before dispatch, Factory claims the exact admission through independently acknowledged Git fast-forward publication. A competing or foreign unfinished claim holds execution. Original returned mutation receipts settle writes; later observations never confirm an unknown submission or permit replay. `queue sync` rereads current data without admitting or reordering work. Restoring receipts grants neither service activation nor foreign-resource cessation.
 

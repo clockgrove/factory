@@ -194,6 +194,14 @@ test("the service continues a started Objective on the provider it froze", () =>
     () => checkServiceState(unmatched, 8, path),
     /different configuration binding/,
   );
+  // Only an explicit --provider names the one it ran with, so cancel can
+  // release its own sessions after its settings changed (#1398).
+  const select = (flag) => {
+    const { provider, source } = selectProvider(file, { objective: 8, flag });
+    return `${provider}/${source}`;
+  };
+  assert.equal(select(), "codex/unmatched");
+  assert.equal(select("claude"), "claude/flag");
 
   // New work runs with the service's own provider.
   assert.equal(queuedObjectiveConfig(service, 9, path), service);

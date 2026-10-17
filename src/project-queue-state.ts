@@ -78,6 +78,7 @@ import { canHandoff } from "./runner/ownership.js";
 import { collectedLocalWorkerSessionSettled } from "./execution/checkpoint.js";
 import { objectiveWorkflowRecipeSelector } from "./workflow-recipes.js";
 import { isExecutionState, isPreparationState } from "./state.js";
+import { objectiveComplete } from "./completion.js";
 import {
   assertProcessActive,
   currentProcessDeadlineAt,
@@ -2856,7 +2857,9 @@ function producer(
     );
   if (!historical && record.authorityDigest !== factoryAuthorityDigest(config))
     throw refusal(
-      `receipt ${record.id} was approved under a different queue authority (queued settings such as autonomy, provider or the Project binding changed); re-authorize with factory queue resume, and withdraw and re-add queued Objectives with factory queue remove N and factory queue add N`,
+      record.objective === undefined
+        ? `control receipt ${record.id} was approved under a different queue authority (queued settings such as autonomy, provider or the Project binding changed); re-authorize with factory queue resume`
+        : `receipt ${record.id} for Objective #${record.objective} was approved under a different queue authority (queued settings such as autonomy, provider or the Project binding changed); re-authorize with factory queue resume, then withdraw and re-add it with factory queue remove ${record.objective} and factory queue add ${record.objective} (if it stopped unfinished, cancel it first with factory cancel --objective ${record.objective})`,
     );
   if (
     history.some(
@@ -3019,11 +3022,39 @@ function verifiedControl(
     throw new Error("Project control card contains admission metadata");
   return metadata;
 }
+/**
+ * A finished or cancelled Objective whose owner claims are all settled can
+ * never dispatch again: its admission is history, so a later configuration
+ * change never requires withdrawing it (#1398). Claimed or unfinished work
+ * keeps the exact current-authority check.
+ */
+function settledTerminalObjective(
+  config: FactoryConfig,
+  history: QueueRecord[],
+  objective: number,
+): boolean {
+  if (
+    history.some(
+      (record) =>
+        record.kind === "project-queue-owner" &&
+        record.objective === objective &&
+        !record.settled,
+    )
+  )
+    return false;
+  const state = readContinuation(config.repository, objective);
+  return (
+    !!state &&
+    (!!state.cancelledAt ||
+      (isExecutionState(state) && objectiveComplete(state)))
+  );
+}
 function verifiedEntry(
   config: FactoryConfig,
   card: ProjectQueueTarget,
   history: QueueRecord[],
   historical: boolean,
+  terminalHistory = false,
 ): VerifiedQueueEntry | undefined {
   if (card.repository !== config.repository)
     throw new Error("Project queue target belongs to another repository");
@@ -3031,6 +3062,15 @@ function verifiedEntry(
   if (retiredQueueEntry(config, card, history)) return undefined;
   if (card.metadata === null) return undefined;
   const metadata = parseQueueMetadata(card.metadata);
+  const stale =
+    terminalHistory &&
+    metadata.kind === "admission" &&
+    history.some(
+      (record) =>
+        record.kind === "project-queue-operation" &&
+        record.id === metadata.receiptId &&
+        record.authorityDigest !== factoryAuthorityDigest(config),
+    );
   const operation = producer(
     config,
     history,
@@ -3038,7 +3078,8 @@ function verifiedEntry(
     card.issueNodeId,
     card.itemId,
     historical ||
-      (metadata.kind === "admission" && metadata.state === "withdrawn"),
+      (metadata.kind === "admission" && metadata.state === "withdrawn") ||
+      (stale && settledTerminalObjective(config, history, card.objective)),
   );
   if (
     metadata.kind !== "admission" ||
@@ -3268,7 +3309,7 @@ export function verifyQueueObservation(
   );
   const entries = snapshot.cards.flatMap((card) => {
     if (card.archived) return [];
-    const entry = verifiedEntry(config, card, history, historical);
+    const entry = verifiedEntry(config, card, history, historical, true);
     return entry ? [entry] : [];
   });
   if (
@@ -4343,6 +4384,11 @@ export async function claimProjectQueueRun(
     )
       throw new Error(
         `Foreground and queue dispatch require a current open, exact-content approved Project admission and running control; use factory queue add ${objective}, or factory queue resume for an intentionally paused queue`,
+      );
+    // Historical admissions of settled terminal Objectives never dispatch.
+    if (entry.authorityDigest !== factoryAuthorityDigest(config))
+      throw new Error(
+        `Objective #${objective} was admitted under a different queue authority; withdraw and re-add it with factory queue remove ${objective} and factory queue add ${objective}`,
       );
     return entry;
   };

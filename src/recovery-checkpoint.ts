@@ -51,6 +51,8 @@ import {
   assertProcessActive,
   currentProcessDeadlineAt,
   currentProcessSignal,
+  GitFailure,
+  GitTraces,
   gitFault,
   linuxProcessIdentity,
   pinnedGitCommand,
@@ -2964,15 +2966,28 @@ async function gitRemote(
         }
       : undefined;
   // A read from a networked archive may be tried again after a failure in
-  // transit, classified by the existing Git transport classifier. A push is
-  // never repeated, and a local archive has no transit.
-  const transient =
-    (kind === "fetch" || kind === "ls-remote") && !isAbsolute(options.remote)
-      ? (failure: TransportFailure) =>
-          failure.timedOut ||
-          gitFault(args, new Error(failure.stderr))?.kind === "transient"
-      : undefined;
+  // transit, classified by the existing Git transport classifier from that
+  // try's own traces. A push is never repeated, and a local archive has no
+  // transit.
+  const read =
+    (kind === "fetch" || kind === "ls-remote") && !isAbsolute(options.remote);
   const run = async (attempt: number) => {
+    const traces = read ? GitTraces.open(args) : undefined;
+    const transient =
+      traces &&
+      ((failure: TransportFailure) =>
+        failure.timedOut ||
+        gitFault(
+          args,
+          new GitFailure(
+            `git ${kind} failed`,
+            directory,
+            failure.status,
+            failure.stdout,
+            failure.stderr,
+            traces.facts(),
+          ),
+        )?.kind === "transient");
     let failure: ArchiveTransportFailure | undefined;
     const observed = scope
       ? checkpointObservation(
@@ -2995,7 +3010,11 @@ async function gitRemote(
         "git",
         command.args,
         options,
-        observeTrace ? { ...command.env, GIT_TRACE2_EVENT: "1" } : command.env,
+        observeTrace
+          ? { ...command.env, GIT_TRACE2_EVENT: "1" }
+          : traces
+            ? traces.env(command.env)
+            : command.env,
         input,
         observeTrace,
         {
@@ -3009,9 +3028,11 @@ async function gitRemote(
       if (error instanceof ArchiveTransportFailure) failure = error;
       observed?.fail(error);
       throw error;
+    } finally {
+      traces?.close();
     }
   };
-  return transient ? readTransport(run) : run(1);
+  return read ? readTransport(run) : run(1);
 }
 /** Structured failure facts for a transport observation. */
 function transportFacts(

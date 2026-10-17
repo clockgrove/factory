@@ -5,6 +5,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -13,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Fault, transient, withFault } from "./fault.js";
@@ -73,25 +75,247 @@ const GIT_REMOTE = new Set([
   "lfs pull",
 ]);
 
+/** A git command exited non-zero; what it showed, as structure. */
+export class GitFailure extends Error {
+  constructor(
+    message: string,
+    /** The directory the command ran in (`-C`). */
+    readonly directory: string,
+    readonly status: number | null,
+    readonly stdout: string,
+    readonly stderr: string,
+    readonly trace: GitTraceFacts = { errors: [], unanswered: false },
+  ) {
+    super(message);
+  }
+}
+
+/** What a remote command's traces showed (see GitTraces). */
+export interface GitTraceFacts {
+  /** Format strings of git's `error` trace2 events, from git and its helpers. */
+  errors: string[];
+  /** The last final HTTP status the transport received. */
+  httpStatus?: number;
+  /** A request was sent after the last response and never answered. */
+  unanswered: boolean;
+}
+
 /**
- * Classify a failed git command (the arguments after `-C <checkout>`).
- * Remote transport, credentials and remote refusals are classified; other
- * local failures are defects.
+ * Trace files a remote command writes, read once it ends. Git reports why a
+ * transfer failed as structure only in its traces: trace2 `error` events carry
+ * each message's format string (git's own source text, since Factory pins the
+ * C locale), and the curl trace (git) or Git LFS's trace carries every HTTP
+ * request and status line. The directory is private and removed after the
+ * read; the curl trace omits bodies and redacts credentials, and only request
+ * and status lines are read.
+ */
+export class GitTraces {
+  private readonly directory = mkdtempSync(join(tmpdir(), "factory-git-"));
+  private constructor(private readonly lfs: boolean) {}
+
+  /** Traces for a remote command; other commands have none. */
+  static open(args: string[]): GitTraces | undefined {
+    const subcommand = gitSubcommand(args);
+    return GIT_REMOTE.has(subcommand)
+      ? new GitTraces(subcommand.startsWith("lfs "))
+      : undefined;
+  }
+
+  env(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    return this.lfs
+      ? { ...env, GIT_TRACE: join(this.directory, "lfs") }
+      : {
+          ...env,
+          GIT_TRACE2_EVENT: join(this.directory, "trace2"),
+          GIT_TRACE_CURL: join(this.directory, "curl"),
+          GIT_TRACE_CURL_NO_DATA: "1",
+          GIT_TRACE_REDACT: "1",
+        };
+  }
+
+  facts(): GitTraceFacts {
+    const read = (name: string) => {
+      try {
+        return readFileSync(join(this.directory, name), "utf8").split("\n");
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") return [];
+        throw error;
+      }
+    };
+    const errors: string[] = [];
+    for (const line of read("trace2")) {
+      try {
+        const event = JSON.parse(line);
+        if (event?.event === "error" && typeof event.fmt === "string")
+          errors.push(event.fmt);
+      } catch {
+        /* A partial line from a killed process carries nothing. */
+      }
+    }
+    // Request and status lines: the curl trace's `=> Send header: GET /path
+    // HTTP/2` and `<= Recv header: HTTP/2 403`, or Git LFS's `HTTP: POST
+    // <url>` and `HTTP: 403`.
+    const [request, response] = this.lfs
+      ? [/ trace git-lfs: HTTP: [A-Z]+ \S+$/, / trace git-lfs: HTTP: (\d{3})$/]
+      : [
+          /=> Send header: [A-Z]+ \S+ HTTP\/[\d.]+$/,
+          /<= Recv header: HTTP\/[\d.]+ (\d{3})\b/,
+        ];
+    let httpStatus: number | undefined;
+    let unanswered = false;
+    for (const line of read(this.lfs ? "lfs" : "curl")) {
+      const status = Number(response.exec(line)?.[1]);
+      // An informational (1xx) status does not answer the request.
+      if (status >= 200) {
+        httpStatus = status;
+        unanswered = false;
+      } else if (request.test(line)) unanswered = true;
+    }
+    return { errors, unanswered, ...(httpStatus && { httpStatus }) };
+  }
+
+  close(): void {
+    rmSync(this.directory, { recursive: true, force: true });
+  }
+}
+
+/** The failure of a git command that exited non-zero. */
+function gitFailure(
+  directory: string,
+  args: string[],
+  result: { status: number | null; stdout: string; stderr: string },
+  traces: GitTraces | undefined,
+): GitFailure {
+  return new GitFailure(
+    `git -C ${directory} ${args.join(" ")} failed (${result.status}): ${result.stderr || result.stdout}`,
+    directory,
+    result.status,
+    result.stdout,
+    result.stderr,
+    traces?.facts(),
+  );
+}
+
+/**
+ * Git's own messages for a transfer that broke in transit (trace2 format
+ * strings in the C locale): no connection or response, a failed RPC, or a
+ * connection that ended early.
+ */
+const IN_TRANSIT = new Set([
+  "unable to access '%s': %s",
+  "RPC failed; %s",
+  "the remote end hung up unexpectedly",
+  "unexpected disconnect while reading sideband packet",
+  "early EOF",
+]);
+/**
+ * Git's messages when the first exchange with the remote failed. Over SSH,
+ * git and ssh give no structure that tells a network failure from a refused
+ * key or repository (ssh exits 255 for both, before git records it), so this
+ * is treated as transient: a refusal surfaces as an outage, then escalates.
+ */
+const INITIAL_CONTACT = new Set([
+  "Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.",
+  "the remote end hung up upon initial contact",
+]);
+
+/** A lock file another git process holds in `directory`'s repository. */
+function heldGitLock(directory: string): string | undefined {
+  const result = spawnSync(
+    "git",
+    [
+      "-C",
+      directory,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-dir",
+      "--git-common-dir",
+    ],
+    { env: pinnedGitEnvironment(), encoding: "utf8" },
+  );
+  if (result.status !== 0) return undefined;
+  const [gitDir, commonDir] = result.stdout.trim().split("\n");
+  if (!gitDir || !commonDir) return undefined;
+  const candidates = [
+    join(gitDir, "index.lock"),
+    join(gitDir, "HEAD.lock"),
+    ...["packed-refs.lock", "config.lock", "shallow.lock"].map((name) =>
+      join(commonDir, name),
+    ),
+  ];
+  try {
+    for (const name of readdirSync(join(commonDir, "refs"), {
+      recursive: true,
+    }))
+      if (String(name).endsWith(".lock"))
+        candidates.push(join(commonDir, "refs", String(name)));
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
+  return candidates.find((path) => existsSync(path));
+}
+
+/** Whether Git LFS runs at all on this host. */
+function lfsInstalled(): boolean {
+  return (
+    spawnSync("git", ["lfs", "version"], {
+      env: pinnedGitEnvironment(),
+      stdio: "ignore",
+    }).status === 0
+  );
+}
+
+/** One ref's line in `git push --porcelain` output. */
+interface PushedRef {
+  flag: string;
+  summary: string;
+  reason?: string;
+}
+
+/** `<flag> TAB <from>:<to> TAB <summary> (<reason>)` lines (git-push OUTPUT). */
+function pushedRefs(stdout: string): PushedRef[] {
+  const refs: PushedRef[] = [];
+  for (const line of stdout.split("\n")) {
+    const fields = line.split("\t");
+    if (fields.length !== 3 || fields[0]!.length !== 1) continue;
+    const status = /^(\[[^\]]*\]|\S+)(?: \((.*)\))?$/.exec(fields[2]!);
+    if (status)
+      refs.push({
+        flag: fields[0]!,
+        summary: status[1]!,
+        ...(status[2] !== undefined && { reason: status[2] }),
+      });
+  }
+  return refs;
+}
+
+/**
+ * The remote refused a `git push --porcelain` outright: the ref was not
+ * updated. `[rejected]` is git's own refusal (a lease or fast-forward check),
+ * `[remote rejected]` the remote's (a hook or branch protection).
+ */
+export function pushRefusal(error: unknown): PushedRef | undefined {
+  if (!(error instanceof GitFailure)) return undefined;
+  return pushedRefs(error.stdout).find(
+    (ref) =>
+      ref.flag === "!" &&
+      (ref.summary === "[rejected]" || ref.summary === "[remote rejected]"),
+  );
+}
+
+/**
+ * Classify a failed git command (the arguments after `-C <checkout>`) from
+ * structure: exit status, the push's porcelain ref status, its traces and the
+ * filesystem. Remote transport, credentials and remote refusals are
+ * classified; other local failures are defects.
  */
 export function gitFault(args: string[], error: unknown): Fault | undefined {
-  const detail = error instanceof Error ? error.message : String(error);
   const subcommand = gitSubcommand(args);
   if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT")
     return {
       kind: "config",
       detail: "git is not installed on the controller host",
       fix: "Install git, then `factory run`",
-    };
-  if (/git: 'lfs' is not a git command/.test(detail))
-    return {
-      kind: "config",
-      detail: "Git LFS is not installed on the controller host",
-      fix: "Install Git LFS, then `factory run`",
     };
   if (error instanceof OriginBindingChanged)
     return {
@@ -108,56 +332,59 @@ export function gitFault(args: string[], error: unknown): Fault | undefined {
   // A stalled fetch was stopped so it does not hold the repository lock.
   if (error instanceof GitDeadlineExceeded)
     return transient(`git ${subcommand} stalled in transit`, false);
-  // Another git process holds the repository lock; it releases it shortly.
-  if (/Unable to create '[^']*\.lock': File exists/.test(detail))
+  if (!(error instanceof GitFailure)) return undefined;
+  if (subcommand.startsWith("lfs ") && !lfsInstalled())
+    return {
+      kind: "config",
+      detail: "Git LFS is not installed on the controller host",
+      fix: "Install Git LFS, then `factory run`",
+    };
+  // Another git process holds a repository lock; it releases it shortly.
+  // Git dies (exit 128) when it cannot take a lock; Factory's fetches lock
+  // only their own private ref (see fetchHead).
+  if (error.status === 128 && heldGitLock(error.directory))
     return transient(`git ${subcommand} found the repository locked`, false);
   if (!GIT_REMOTE.has(subcommand)) return undefined;
   const push = subcommand === "push" || subcommand === "lfs push";
-  if (
-    /Authentication failed|could not read (Username|Password)|terminal prompts disabled|Permission denied \(publickey\)|Permission to \S+ denied|Repository not found|returned error: 40[13]\b|HTTP 40[13]\b|LFS: Authorization error/i.test(
-      detail,
-    )
-  )
+  const refused = pushedRefs(error.stdout).find((ref) => ref.flag === "!");
+  if (refused?.summary === "[remote failure]")
+    return transient("git push got no status from the remote", true);
+  if (refused?.summary === "[remote rejected]") {
+    // GitHub names an oversized file only in its hook's message, which
+    // reaches git as remote stderr with no structure; its stable error code
+    // is matched, never the prose around it.
+    if (/\bGH001\b/.test(error.stderr))
+      return {
+        kind: "work",
+        evidence: {
+          detail: `git push refused a file over the size limit: ${error.message}`,
+        },
+      };
+  }
+  // Whose head the remote holds is known only at the push site, which
+  // checks it with ls-remote (see pushBranch).
+  if (pushRefusal(error)) return undefined;
+  const { errors, httpStatus, unanswered } = error.trace;
+  if (httpStatus === 401 || httpStatus === 403 || httpStatus === 404)
     return {
       kind: "config",
-      detail: `git ${subcommand} was refused credentials or access`,
+      detail: `git ${subcommand} was refused credentials or access (HTTP ${httpStatus})`,
       fix: "Check `gh auth status` and the origin remote's credentials, then `factory run`",
     };
-  if (push && /\bGH001\b|exceeds GitHub's file size limit/i.test(detail))
-    return {
-      kind: "work",
-      evidence: {
-        detail: `git push refused a file over the size limit: ${detail}`,
-      },
-    };
   if (
-    push &&
-    /\bGH006\b|GH013|protected branch|pre-receive hook declined|push declined/i.test(
-      detail,
-    )
-  )
-    return {
-      kind: "config",
-      detail: `The remote refused Factory's branch push: ${detail}`,
-      fix: "Allow the Factory login to push its own branches, then `factory run`",
-    };
-  // Whose head the remote holds is known only at the push site, which
-  // checks it with ls-remote (see RegularDelivery.publish).
-  if (push && pushRejected(error)) return undefined;
-  if (
-    /Could not resolve host|Temporary failure in name resolution|Connection (timed out|refused|reset)|Operation timed out|Failed to connect|Network is unreachable|Empty reply from server|early EOF|unexpected disconnect|remote end hung up|Remote side unexpectedly closed|RPC failed|returned error: (5\d\d|429)\b|HTTP (5\d\d|429)\b|gnutls_handshake|SSL_ERROR|SSL_connect|TLS connection|rate limit/i.test(
-      detail,
-    )
+    httpStatus === 408 ||
+    httpStatus === 429 ||
+    (httpStatus !== undefined && httpStatus >= 500) ||
+    unanswered ||
+    errors.some((format) => IN_TRANSIT.has(format))
   )
     return transient(`git ${subcommand} failed in transit`, push);
+  if (errors.some((format) => INITIAL_CONTACT.has(format)))
+    return transient(
+      `git ${subcommand} could not reach origin, or origin refused its credentials`,
+      false,
+    );
   return undefined;
-}
-
-/** The remote refused a push because its branch moved. */
-export function pushRejected(error: unknown): boolean {
-  return /\[rejected\]|\(stale info\)|\(fetch first\)|non-fast-forward|\(reference already exists\)/.test(
-    error instanceof Error ? error.message : String(error),
-  );
 }
 
 function classifiedGit<T>(args: string[], run: () => T): T {
@@ -793,9 +1020,12 @@ function factoryGit(
       env = withGitConfig(env, [["protocol.file.allow", "never"]]);
     assertBoundOrigin(directory, args, env);
   }
+  // Git's messages and trace2 format strings follow the locale; pin git's own
+  // wording so what Factory reads of them (see gitFault) cannot vary.
+  const { LANGUAGE: _, ...unlocalized } = env;
   return {
     args: ["-C", directory, ...withoutDiffPrograms(args)],
-    env,
+    env: { ...unlocalized, LC_ALL: "C" },
   };
 }
 /** A stalled transfer must not hold the repository lock indefinitely. */
@@ -852,16 +1082,15 @@ function gitProcess(
     const deadline = network
       ? AbortSignal.timeout(lockedNetworkDeadline.milliseconds)
       : undefined;
+    let traces: GitTraces | undefined;
     try {
       const command = factoryGit(checkout, args, pinned, overrides);
+      traces = GitTraces.open(args);
       const result = await subprocessAsync("git", command.args, {
-        env: command.env,
+        env: traces ? traces.env(command.env) : command.env,
         ...(deadline && { signal: deadline }),
       });
-      if (result.status !== 0)
-        throw new Error(
-          `git -C ${checkout} ${args.join(" ")} failed (${result.status}): ${result.stderr || result.stdout}`,
-        );
+      if (result.status !== 0) throw gitFailure(checkout, args, result, traces);
       return result.stdout.trim();
     } catch (error) {
       if (deadline?.aborted && !currentProcessSignal()?.aborted)
@@ -870,6 +1099,8 @@ function gitProcess(
           { cause: error },
         );
       throw error;
+    } finally {
+      traces?.close();
     }
   };
   return classifiedGit(args, () => {
@@ -987,11 +1218,7 @@ export async function removeWorktree(
 }
 
 export function git(checkout: string, ...args: string[]): string {
-  assertUnlocked(args);
-  return classifiedGit(args, () => {
-    const factory = factoryGit(checkout, args, false);
-    return command("git", factory.args, undefined, factory.env);
-  });
+  return syncGit(checkout, args, false, undefined).toString("utf8").trim();
 }
 
 /** Keep inherited Git overrides from redirecting a pinned local tree operation. */
@@ -1012,23 +1239,44 @@ export function pinnedGitRawWithin(
   timeoutMs: number | undefined,
   ...args: string[]
 ): Buffer {
+  return syncGit(checkout, args, true, timeoutMs);
+}
+
+function syncGit(
+  checkout: string,
+  args: string[],
+  pinned: boolean,
+  timeoutMs: number | undefined,
+): Buffer {
   assertUnlocked(args);
   return classifiedGit(args, () => {
-    const factory = factoryGit(checkout, args, true);
-    const result = spawnSync("git", factory.args, {
-      env: factory.env,
-      maxBuffer: Number.MAX_SAFE_INTEGER,
-      ...(timeoutMs !== undefined && {
-        timeout: timeoutMs,
-        killSignal: "SIGKILL" as const,
-      }),
-    });
-    if (result.error) throw result.error;
-    if (result.status !== 0)
-      throw new Error(
-        `git ${args.join(" ")} failed (${result.status}): ${result.stderr.toString("utf8")}`,
-      );
-    return result.stdout;
+    const factory = factoryGit(checkout, args, pinned);
+    const traces = GitTraces.open(args);
+    try {
+      const result = spawnSync("git", factory.args, {
+        env: traces ? traces.env(factory.env) : factory.env,
+        maxBuffer: Number.MAX_SAFE_INTEGER,
+        ...(timeoutMs !== undefined && {
+          timeout: timeoutMs,
+          killSignal: "SIGKILL" as const,
+        }),
+      });
+      if (result.error) throw result.error;
+      if (result.status !== 0)
+        throw gitFailure(
+          checkout,
+          args,
+          {
+            status: result.status,
+            stdout: result.stdout.toString("utf8"),
+            stderr: result.stderr.toString("utf8"),
+          },
+          traces,
+        );
+      return result.stdout;
+    } finally {
+      traces?.close();
+    }
   });
 }
 

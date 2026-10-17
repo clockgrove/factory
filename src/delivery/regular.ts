@@ -7,9 +7,9 @@ import type {
   MergeControl,
   MergeResult,
 } from "../contracts.js";
-import { attachFault, decision, transient } from "../fault.js";
+import { attachedFault, attachFault, decision, transient } from "../fault.js";
 import { addsLfsPointers } from "../media.js";
-import { gitAsync, pushRejected } from "../process.js";
+import { gitAsync, pushRefusal } from "../process.js";
 import { deliveryDescription } from "./description.js";
 
 /** The commit a remote branch holds, or undefined when it does not exist. */
@@ -57,6 +57,7 @@ export async function pushBranch(
     await gitAsync(
       checkout,
       "push",
+      "--porcelain",
       `--force-with-lease=refs/heads/${branch}:${remote ?? ""}`,
       "origin",
       `${commit}:refs/heads/${branch}`,
@@ -67,17 +68,18 @@ export async function pushBranch(
       );
     await effect?.observed();
   } catch (error) {
-    if (pushRejected(error)) {
-      // The branch moved after it was observed: observe it again. If it did
-      // not move, the remote refuses the lease itself (no force pushes).
+    const refusal = pushRefusal(error);
+    if (refusal && !attachedFault(error)) {
+      // The ref was not updated. If the branch moved after it was observed,
+      // observe it again; if it did not, the remote refuses the push itself.
       const after = await remoteHead(checkout, branch);
       attachFault(
         error,
         after === remote
           ? {
               kind: "config",
-              detail: `The remote refused a leased push of ${branch} although the branch did not move`,
-              fix: "Allow Factory's login to force-push its own branches (factory/*), then `factory run`",
+              detail: `The remote refused Factory's push of ${branch} (${refusal.summary}${refusal.reason ? ` ${refusal.reason}` : ""}) although the branch did not move`,
+              fix: "Allow Factory's login to push and force-push its own branches (factory/*), then `factory run`",
             }
           : transient(`Remote branch ${branch} moved during the push`, false),
       );

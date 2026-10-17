@@ -189,6 +189,23 @@ A `reviewArtifacts` text selector selects an exact command and a tracked candida
 }
 ```
 
+Instead of `locator.files`, a locator may declare `match` to capture every regular file directly in the located directory whose name matches one `*` pattern:
+
+```json
+"locator": {
+  "stdoutPathPrefix": "Runtime evidence: ",
+  "match": {
+    "pattern": "*.json",
+    "mediaType": "application/json",
+    "maxBytes": 1048576,
+    "maxTotalBytes": 16777216,
+    "maxFiles": 64
+  }
+}
+```
+
+`maxBytes` bounds each file, `maxTotalBytes` all matched files (at most 64 MiB) and `maxFiles` their count (at most 256). Files are captured in sorted name order. A new matching evidence file then needs no configuration change. No match, more files than `maxFiles`, an oversized file or total, and a matching symlink, directory or other non-regular entry all refuse capture; non-matching entries are ignored. Reviews list the files actually captured.
+
 `stdout` and `stderr` retain complete original UTF-8 command bytes. `files` select explicit checkout-relative UTF-8 or JSON files, including dependency aliases whose real targets stay inside the owned checkout. A locator selects exactly one absolute directory printed after its literal prefix within a stdout line. Factory sets `TMPDIR`, `TMP` and `TEMP` to a fresh owned directory; located files must stay inside it. New captures retain that actual temporary-root value, the literal stdout prefix and parsed directory, and their resolved containment paths for result and Objective review. Historical captures without these facts remain without them. Stale external paths, invalid text/JSON, missing or oversized bodies refuse capture. Nothing scans shared temporary directories or dependencies. Each body may select at most 16 MiB, with the existing eight-selector and 64 MiB combined artifact limits. The controller records the exact command, tree, declaring source digest and verified body identities before cleanup. Command success and retained bytes do not establish cache freshness or semantic acceptance.
 
 Coding Work Item validation selects text proof only when the item owns the declared `text.source`, using exact file ownership or a trailing-slash directory prefix. This lets earlier setup items run before a later item implements the report producer. A selected producer still must supply every required report from its exact candidate. Image selectors and read-only QA selection are unchanged. Final Objective validation applies every configured selector, regardless of Work Item ownership.

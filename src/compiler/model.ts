@@ -415,7 +415,7 @@ function reviewRepositoryGuidance(
 }
 
 const REVIEW_ARTIFACT_GUIDANCE =
-  "Configured review artifact selectors are installation configuration: when an item validation, read-only QA validation or final Acceptance command exactly equals a selector command and passes, Factory captures that selector's declared bodies and supplies them to that item's result review and to final Objective review. A work item captures a text selector only when it owns the selector's text.source.";
+  "Configured review artifact selectors are installation configuration: when an item validation, read-only QA validation or final Acceptance command exactly equals a selector command and passes, Factory captures that selector's declared bodies and supplies them to that item's result review and to final Objective review. A work item captures a text selector only when it owns the selector's text.source. A locator match captures every regular file directly in the located directory whose name matches its pattern, so a new matching file needs no configuration change; reviews list the files actually captured.";
 
 /** The installation's exact selectors, bound by its config digest. */
 function configuredReviewArtifacts(

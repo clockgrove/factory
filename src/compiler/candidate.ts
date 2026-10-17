@@ -346,7 +346,7 @@ export function verifyReviewedGraph(
   graph: WorkGraph,
   objective: number,
   baseSha: string,
-  sources: PlanningSource[],
+  sources: ReturnType<typeof planningSources>,
   body: string,
   finalCommands: string[],
   checkout: string,

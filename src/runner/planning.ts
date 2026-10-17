@@ -227,7 +227,7 @@ function adoptedPlan(args: {
   objective: number;
   body: string;
   baseSha: string;
-  sources: PlanCandidate["sources"];
+  sources: ReturnType<typeof planningSources>;
   prerequisites: PlanCandidate["prerequisites"];
   localExecutables: PlanCandidate["localExecutables"];
   approvedPlaybookPin: PlanCandidate["approvedPlaybookPin"];

@@ -114,7 +114,7 @@ export function runOutcome(
       code: EXIT_COMPLETE,
       message: state.split.closedAt
         ? `Objective #${objective} closed: all ${state.split.children.length} child Objectives were accepted`
-        : `Objective #${objective} was split into child Objectives ${state.split.children.map((child) => `#${state.split.issues[child.key]}`).join(", ")}; ${state.split.children.some((child) => child.dependsOn.length) ? "each waits in the queue until the children it builds on are accepted, and " : ""}Factory closes #${objective} when every child is accepted`,
+        : `Objective #${objective} was split into child Objectives ${state.split.children.map((child) => `#${state.split.issues[child.key]}`).join(", ")}; ${state.split.queued ? "the queue runs each child once the children it builds on are accepted" : `run each child with \`${configurationCommand("factory run --objective N", configuration)}\` once the children it builds on are accepted`}. Factory closes #${objective} when every child is accepted`,
     };
   if (isPreparationState(state))
     return {

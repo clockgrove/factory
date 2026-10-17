@@ -27,7 +27,9 @@ export function graphItems(graph: WorkGraph): WorkGraph["items"] {
  * child's graph is validated against its own issue body, sources and
  * Acceptance at the same base, with exactly the checks a compile of that
  * child would apply. Its coverage moves from the parent's obligations to
- * the child's own, which are the same criteria in the same order.
+ * the child's own, which are the same criteria in the same order. Nothing
+ * the parent's plan requires may fall between the children: every required
+ * check and source exclusion stays with a child that cites its source.
  */
 export function validateSplitGraph(args: {
   graph: WorkGraph;
@@ -37,23 +39,50 @@ export function validateSplitGraph(args: {
 }): WorkGraph {
   const { graph, request, body, checkout } = args;
   const objective = request.compileContext!.objectiveNumber;
-  for (const child of graph.split!.children) {
+  const children = graph.split!.children;
+  const refused = (key: string, error: unknown) =>
+    new PlanValidationError(
+      new Error(
+        `Child Objective ${key}: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+  const prepared = children.map((child) => {
     const childBody = childIssueBody(objective, body, child);
-    const refused = (error: unknown) =>
-      new PlanValidationError(
+    try {
+      return {
+        child,
+        childBody,
+        // Every child's issue must already be a valid Objective at the base.
+        sources: planningSources(childBody, request.baseSha, checkout),
+      };
+    } catch (error) {
+      throw refused(child.key, error);
+    }
+  });
+  const cites = (
+    sources: { path: string; content: string }[],
+    source: { path: string; digest: string },
+  ) =>
+    sources.some(
+      (entry) =>
+        entry.path === source.path &&
+        sourceDigest(entry.content) === source.digest,
+    );
+  // The decoder gave every ready child the whole plan's checks and exclusions.
+  const ready = children.find((child) => child.graph)!.graph!;
+  for (const required of [
+    ...(ready.requiredPreIntegrationChecks ?? []),
+    ...(ready.sourceExclusions ?? []),
+  ])
+    if (!prepared.some(({ sources }) => cites(sources, required.source)))
+      throw new PlanValidationError(
         new Error(
-          `Child Objective ${child.key}: ${error instanceof Error ? error.message : String(error)}`,
+          `No child Objective cites ${required.source.path}, so the split would drop what it requires`,
         ),
       );
-    if (!child.graph) {
-      // A stub plans later, but its issue must already be a valid Objective.
-      try {
-        planningSources(childBody, request.baseSha, checkout);
-      } catch (error) {
-        throw refused(error);
-      }
-      continue;
-    }
+  const parentLines = body.split("\n");
+  for (const { child, childBody, sources } of prepared) {
+    if (!child.graph) continue;
     let childRequest: PlanningRequest<WorkGraph>;
     try {
       childRequest = prepareCompilationRequest({
@@ -73,7 +102,7 @@ export function validateSplitGraph(args: {
         ...(request.invocation ? { invocation: request.invocation } : {}),
       });
     } catch (error) {
-      throw refused(error);
+      throw refused(child.key, error);
     }
     const obligations = childRequest.coverageObligations ?? [];
     let next = 0;
@@ -82,21 +111,37 @@ export function validateSplitGraph(args: {
       const { itemId, proof, environment } = entry;
       const obligation = obligations[next++];
       if (!obligation)
-        throw refused(new Error("covers more outcomes than it has"));
+        throw refused(child.key, new Error("covers more outcomes than it has"));
       return { ...structuredClone(obligation), itemId, proof, environment };
     });
     if (next !== obligations.length)
-      throw refused(new Error("leaves an Acceptance outcome uncovered"));
-    // A required check stays with a child that cites the source requiring it.
+      throw refused(
+        child.key,
+        new Error("leaves an Acceptance outcome uncovered"),
+      );
     child.graph.requiredPreIntegrationChecks = (
       child.graph.requiredPreIntegrationChecks ?? []
-    ).filter((check) =>
-      childRequest.sources.some(
-        (source) =>
-          source.path === check.source.path &&
-          sourceDigest(source.content) === check.source.digest,
-      ),
-    );
+    ).filter((check) => cites(sources, check.source));
+    // An exclusion's reason cites Objective lines the child carries verbatim.
+    const childLines = childBody.split("\n");
+    const exclusions = (child.graph.sourceExclusions ?? [])
+      .filter((exclusion) => cites(sources, exclusion.source))
+      .map((exclusion) => ({
+        ...exclusion,
+        objectiveLines: exclusion.objectiveLines.map((line) => {
+          const moved = childLines.indexOf(parentLines[line] ?? "\0");
+          if (moved < 0)
+            throw refused(
+              child.key,
+              new Error(
+                `excludes ${exclusion.source.path} for Objective text it does not carry`,
+              ),
+            );
+          return moved;
+        }),
+      }));
+    if (exclusions.length) child.graph.sourceExclusions = exclusions;
+    else delete child.graph.sourceExclusions;
     try {
       child.graph = validateCompiledGraph({
         graph: child.graph,
@@ -105,7 +150,10 @@ export function validateSplitGraph(args: {
         checkout,
       });
     } catch (error) {
-      throw refused(error instanceof PlanValidationError ? error.cause : error);
+      throw refused(
+        child.key,
+        error instanceof PlanValidationError ? error.cause : error,
+      );
     }
   }
   return graph;

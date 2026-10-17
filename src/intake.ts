@@ -37,6 +37,7 @@ import {
 } from "./github-project-queue.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import { expandSplitPredecessors, splitSettled } from "./objective-split.js";
+import { settleSplitParent, splitReadyToClose } from "./runner/split.js";
 import {
   currentProcessSignal,
   currentProcessDeadlineAt,
@@ -102,6 +103,7 @@ import {
   queuedObjectiveConfig,
 } from "./supervision.js";
 import {
+  acquireControllerLock,
   acquireInstallationLock,
   asInstallationOwner,
   assertRestoredInstallationDispatchReady,
@@ -1017,11 +1019,29 @@ export async function admitChildObjectives(
   objectives: number[],
   expectedBodyDigests: Record<string, string>,
 ): Promise<void> {
-  await queueOperation(config, () =>
-    scoped(config, () =>
-      enqueueOwned(config, github, objectives, { expectedBodyDigests }),
-    ),
-  );
+  // Foreground owners of different Objectives can run side by side, so their
+  // admissions take turns: each allocates queue order from the same history.
+  const path = join(stateRoot(config.repository), "child-admission.lock");
+  let lock: ReturnType<typeof acquireControllerLock> | undefined;
+  for (let waited = 0; !lock; waited += 1) {
+    try {
+      lock = acquireControllerLock(path, objectives[0]!, {
+        owned: "a child Objective admission",
+      });
+    } catch (error) {
+      if (waited >= 120) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
+  try {
+    await queueOperation(config, () =>
+      scoped(config, () =>
+        enqueueOwned(config, github, objectives, { expectedBodyDigests }),
+      ),
+    );
+  } finally {
+    releaseControllerLock(path, lock);
+  }
 }
 export async function ensureProjectObjective(
   config: FactoryConfig,
@@ -1971,7 +1991,24 @@ async function runIntakeOwned(
           (entry) => entry.state === "queued",
         )) {
           const state = readContinuation(config.repository, entry.objective);
-          if (terminal(state)) continue;
+          if (terminal(state)) {
+            // A split parent whose last child settle failed closes here; it
+            // needs only local state and the parent's own provider.
+            if (splitReadyToClose(config.repository, state))
+              try {
+                const runtime = objectiveRuntime(entry.objective);
+                await settleSplitParent({
+                  config: runtime.config,
+                  github: runtime.services.github,
+                  parent: entry.objective,
+                  lockParent: false,
+                });
+              } catch (error) {
+                reasons[entry.objective] =
+                  `Closing the split Objective failed: ${error instanceof Error ? error.message : String(error)}`;
+              }
+            continue;
+          }
           const card = observed.snapshot.cards.find(
             (candidate) => candidate.objective === entry.objective,
           )!;

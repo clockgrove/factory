@@ -46,10 +46,14 @@ export interface ObjectiveSplit {
   reviewDigest: string;
   /** The reviewed children without their graphs, which stay in the plan. */
   children: ChildObjectiveSpec[];
+  /** Each child's exact issue body digest; only that body adopts its graph. */
+  bodyDigests: Record<string, string>;
   /** Child issue number by key, recorded as each issue is created or found. */
   issues: Record<string, number>;
-  /** Set once every child issue is in the queue. */
+  /** Set once every child issue exists and, with a Project queue, is admitted. */
   enqueuedAt?: string;
+  /** The children were admitted to the Project queue. */
+  queued?: true;
   /** The child dispositions the parent's status last showed. */
   shown?: Record<string, ChildDisposition>;
   /** Set once the parent issue is closed after every child closed. */
@@ -243,15 +247,24 @@ export function childDispositions(
   const result: Record<string, ChildDisposition> = {};
   for (const child of split.children) {
     const number = split.issues[child.key];
-    const state =
-      number === undefined ? undefined : readContinuation(repository, number);
+    let state: ContinuationState | undefined;
+    try {
+      state =
+        number === undefined ? undefined : readContinuation(repository, number);
+    } catch {
+      // An unreadable child needs the operator; its siblings still show.
+      result[child.key] = "needs-decision";
+      continue;
+    }
     result[child.key] = !state
       ? child.dependsOn.some((key) => result[key] !== "accepted")
         ? "waiting-for-dependencies"
         : "queued"
       : state.cancelledAt
         ? "cancelled"
-        : isExecutionState(state) && objectiveComplete(state)
+        : (isExecutionState(state) && objectiveComplete(state)) ||
+            // A child that split again is accepted once it closed.
+            (splitSettled(state) && state.split.closedAt)
           ? "accepted"
           : awaitsDecision(state)
             ? "needs-decision"
@@ -322,6 +335,17 @@ export function assertObjectiveSplitRecord(state: PreparationState): void {
     Object.keys(state.issueByItemId).length
   )
     throw new Error("Invalid child Objective issue record");
+  if (
+    !split.bodyDigests ||
+    typeof split.bodyDigests !== "object" ||
+    Object.keys(split.bodyDigests).sort().join() !== [...keys].sort().join() ||
+    Object.values(split.bodyDigests).some(
+      (value) => typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value),
+    ) ||
+    (split.queued !== undefined &&
+      (split.queued !== true || split.enqueuedAt === undefined))
+  )
+    throw new Error("Invalid child Objective body or queue record");
   for (const time of [split.enqueuedAt, split.closedAt])
     if (time !== undefined && !Number.isFinite(Date.parse(time)))
       throw new Error("Invalid child Objective time");
@@ -363,15 +387,19 @@ export function recordedSplitParent(
     if (!Number.isSafeInteger(parent) || parent <= 0 || parent === objective)
       continue;
     const path = join(root, name, "state.json");
-    // Only a preparation that split can name children.
-    if (!existsSync(path) || !readFileSync(path, "utf8").includes('"split"'))
-      continue;
-    const state = readContinuation(repository, parent);
-    if (
-      isPreparationState(state) &&
-      Object.values(state.split?.issues ?? {}).includes(objective)
-    )
-      return parent;
+    try {
+      // Only a preparation that split can name children.
+      if (!existsSync(path) || !readFileSync(path, "utf8").includes('"split"'))
+        continue;
+      const state = readContinuation(repository, parent);
+      if (
+        isPreparationState(state) &&
+        Object.values(state.split?.issues ?? {}).includes(objective)
+      )
+        return parent;
+    } catch {
+      // Another Objective's unreadable record names no parent for this one.
+    }
   }
   return undefined;
 }

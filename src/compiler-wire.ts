@@ -592,11 +592,9 @@ export function compilerWire(
                     },
                     sources: {
                       type: "array",
-                      items: strict({
-                        choiceIndex: integer(citations.length),
-                      }),
+                      items: itemSchema.properties!.citations!.items!,
                       description:
-                        "Cited sections this child needs, including every section its Work Items cite; never the OBJECTIVE.",
+                        "The sections and files this child's own Objective cites as its Sources, by reference; never the OBJECTIVE.",
                     },
                     dependsOn: {
                       type: "array",
@@ -1221,7 +1219,7 @@ export function compilerWire(
       // Obligations a stub child carries, by obligation index, and the stub
       // keys source obligations name; only a split can have them.
       const stubObligations = new Map<number, string>();
-      const stubSourceKeys: string[] = [];
+      const stubSourceKeys: { key: string; path: string }[] = [];
       const stubOwner = (entry: ObjectValue, label: string) => {
         const proof = object(entry.proof, "proof");
         if (proof.kind !== "child-objective") return undefined;
@@ -1295,7 +1293,7 @@ export function compilerWire(
           // A stub compiles later from its own sources and extracts this again.
           const stub = stubOwner(disposition, `source obligation ${position}`);
           if (stub !== undefined) {
-            stubSourceKeys.push(stub);
+            stubSourceKeys.push({ key: stub, path: source.path });
             continue;
           }
           graph.coverage!.push({
@@ -1400,7 +1398,7 @@ export function compilerWire(
     union: WorkGraph,
     raw: unknown,
     stubObligations: Map<number, string>,
-    stubSourceKeys: string[],
+    stubSourceKeys: { key: string; path: string }[],
   ): WorkGraph {
     const split = object(raw, "split");
     keys(split, ["children"], "split");
@@ -1420,13 +1418,14 @@ export function compilerWire(
         !Array.isArray(child.sources)
       )
         throw new Error("Planner split child is invalid");
-      const sources = child.sources.map((choice) => {
-        const selected = object(choice, "split child source");
-        keys(selected, ["choiceIndex"], "split child source");
-        const { path, heading } =
-          citations[
-            index(selected.choiceIndex, citations.length, "choiceIndex")
-          ]!;
+      const sources = child.sources.map((value) => {
+        const selected = object(value, "split child source");
+        keys(selected, ["path", "heading"], "split child source");
+        const { path, heading } = selected;
+        if (typeof path !== "string" || !path || typeof heading !== "string")
+          throw new Error(
+            "Planner split child source needs a path and heading",
+          );
         if (path === "OBJECTIVE")
           throw new PlannerChoiceError(
             `Child ${child.key} cites the OBJECTIVE as a source; its own Objective replaces it`,
@@ -1478,10 +1477,23 @@ export function compilerWire(
     const stubs = new Set(
       children.filter((child) => child.dependsOn.length).map(({ key }) => key),
     );
-    for (const key of [...stubObligations.values(), ...stubSourceKeys])
+    for (const key of [
+      ...stubObligations.values(),
+      ...stubSourceKeys.map(({ key }) => key),
+    ])
       if (!stubs.has(key))
         throw new PlannerChoiceError(
           `A child-objective proof names ${key}, which is not a stub child`,
+        );
+    // A stub extracts its source obligations again from its own sources.
+    for (const { key, path } of stubSourceKeys)
+      if (
+        !children
+          .find((child) => child.key === key)!
+          .sources.some((source) => source.path === path)
+      )
+        throw new PlannerChoiceError(
+          `Stub ${key} carries a source obligation in ${path}, which is not among its sources`,
         );
     const assigned = new Map<string, number[]>(
       children.map(({ key }) => [key, []]),
@@ -1520,9 +1532,15 @@ export function compilerWire(
                 coverage: union.coverage.filter(
                   (entry) => owner.get(entry.itemId) === child.key,
                 ),
+                // Planning keeps each with the children whose sources need it.
                 requiredPreIntegrationChecks: structuredClone(
                   union.requiredPreIntegrationChecks ?? [],
                 ),
+                ...(union.sourceExclusions
+                  ? {
+                      sourceExclusions: structuredClone(union.sourceExclusions),
+                    }
+                  : {}),
               },
             }
           : {}),

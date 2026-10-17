@@ -1075,7 +1075,8 @@ function summarizeSplit(
       summary: `all ${count} child Objectives accepted; the Objective issue is still open`,
       nextAction: {
         command: run(objective),
-        reason: "Closes the Objective issue",
+        reason:
+          "Closes the Objective issue; a running service closes it on its next poll",
       },
     };
   return {

@@ -15,7 +15,11 @@ import {
   type ObjectiveSplit,
   splitSettled,
 } from "../objective-split.js";
-import { isPreparationState, type PreparationState } from "../state.js";
+import {
+  type ContinuationState,
+  isPreparationState,
+  type PreparationState,
+} from "../state.js";
 import { readContinuation, saveState, statePath } from "../state-store.js";
 import type { StepContext } from "../step.js";
 import {
@@ -62,10 +66,14 @@ export async function splitObjective(args: {
   if (!github.projectChildObjectives)
     throw new Error("GitHub adapter cannot create child Objective issues");
   const save = () => saveState(path, preparation);
+  const bodies = planned.map((child) => childIssueBody(objective, body, child));
   if (!preparation.split) {
     preparation.split = {
       reviewDigest: plan.reviewDigest,
       children: planned.map(childSummary),
+      bodyDigests: Object.fromEntries(
+        planned.map((child, index) => [child.key, digest(bodies[index]!)]),
+      ),
       issues: {},
     };
     preparation.coordinator.phase = "splitting";
@@ -73,11 +81,11 @@ export async function splitObjective(args: {
     delete preparation.coordinator.waitReason;
     save();
   }
-  const split = preparation.split;
-  const children = split.children.map((child) => ({
+  const split: ObjectiveSplit = preparation.split;
+  const children = split.children.map((child, index) => ({
     key: child.key,
     title: child.title,
-    body: childIssueBody(objective, body, child),
+    body: bodies[index]!,
     dependsOn: child.dependsOn,
   }));
   const controlled = [12, 14, 16, 18, 20].includes(preparation.schemaVersion);
@@ -124,6 +132,7 @@ export async function splitObjective(args: {
         ]),
       ),
     );
+    split.queued = true;
   }
   split.enqueuedAt = new Date().toISOString();
   split.shown = childDispositions(config.repository, split);
@@ -149,6 +158,7 @@ export async function settleSplitParent(args: {
 }): Promise<void> {
   const { config, github, parent } = args;
   const lock = args.lockParent ? mutationLock(config, parent) : undefined;
+  let closedBody: string | undefined;
   try {
     const path = statePath(config.repository, parent);
     const state = readContinuation(config.repository, parent);
@@ -173,10 +183,9 @@ export async function settleSplitParent(args: {
         },
       );
       split.closedAt = new Date().toISOString();
+      closedBody = issue.body;
     }
-    if (JSON.stringify(split.shown) !== JSON.stringify(dispositions)) {
-      split.shown = dispositions;
-    }
+    split.shown = dispositions;
     saveState(path, state);
     await projectGitHubProjectStatus({
       config,
@@ -197,6 +206,26 @@ export async function settleSplitParent(args: {
   } finally {
     if (lock) releaseMutationLock(config, parent, lock);
   }
+  // A parent that was itself a child may complete its own parent in turn.
+  const grandparent =
+    closedBody === undefined
+      ? undefined
+      : splitParentOf(config.repository, parent, closedBody);
+  if (grandparent !== undefined)
+    await settleSplitParent({ ...args, parent: grandparent });
+}
+
+/** A split parent whose children are all accepted but which is still open. */
+export function splitReadyToClose(
+  repository: string,
+  state: ContinuationState | undefined,
+): boolean {
+  if (!splitSettled(state) || state.cancelledAt || state.split.closedAt)
+    return false;
+  const dispositions = childDispositions(repository, state.split);
+  return state.split.children.every(
+    (child) => dispositions[child.key] === "accepted",
+  );
 }
 
 /** The parent of a child Objective issue body, when its split record names this child. */
@@ -221,6 +250,8 @@ export interface ChildAdoption {
   parentBase: string;
   reviewDigest: string;
   graph: WorkGraph;
+  /** Files the child's sources and its items' citations read at the base. */
+  sourcePaths: string[];
 }
 
 /**
@@ -239,6 +270,8 @@ export function childAdoption(
   if (!isPreparationState(state) || !state.plan || !state.split)
     return undefined;
   const identity = childIdentity(body)!;
+  // Only the exact body the parent created carries its reviewed graph.
+  if (state.split.bodyDigests[identity.key] !== digest(body)) return undefined;
   const child = state.plan.graph.split?.children.find(
     (entry) => entry.key === identity.key,
   );
@@ -249,13 +282,22 @@ export function childAdoption(
     parentBase: state.baseSha,
     reviewDigest: state.split.reviewDigest,
     graph: child.graph,
+    sourcePaths: [
+      "AGENTS.md",
+      "README.md",
+      ...child.sources.map((source) => source.path),
+      ...child.graph.items.flatMap((item) =>
+        item.citations.map((citation) => citation.path),
+      ),
+    ].filter((path) => path !== "OBJECTIVE"),
   };
 }
 
 /**
  * The parent's base stays this child's base while nothing the child's Work
- * Items own has changed on the default branch since: the reviewed graph then
- * still describes current code. Otherwise the child plans afresh at `head`.
+ * Items own or cite has changed on the default branch since: the reviewed
+ * graph then still describes current code. Otherwise the child plans afresh
+ * at `head`.
  */
 export async function adoptionBase(
   checkout: string,
@@ -284,8 +326,11 @@ export async function adoptionBase(
   )
     .split("\n")
     .filter(Boolean);
-  const owned = adoption.graph.items.flatMap((item) => item.ownedPaths);
-  return changed.some((path) => ownsPath(path, owned))
+  const read = [
+    ...adoption.graph.items.flatMap((item) => item.ownedPaths),
+    ...adoption.sourcePaths,
+  ];
+  return changed.some((path) => ownsPath(path, read))
     ? head
     : adoption.parentBase;
 }

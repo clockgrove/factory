@@ -4,7 +4,10 @@ import {
   assertRestoredContinuationReady,
 } from "../state-store.js";
 import { markCheckpointDirty } from "../recovery-checkpoint.js";
-import { settleRefusedProjectQueueRun } from "../project-queue-state.js";
+import {
+  handOffStoppedRefusal,
+  settleRefusedProjectQueueRun,
+} from "../project-queue-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import {
@@ -486,6 +489,8 @@ export async function decidePlan(
         throw new Error(
           "Work Item projection has started; cancel the Objective instead",
         );
+      // A stopped run's original controller must have ceased before any effect.
+      await handOffStoppedRefusal(config, preparation, lock, true);
       await settleAbandonedPlanningTurn(
         preparation,
         services.planningModel,
@@ -509,6 +514,7 @@ export async function decidePlan(
         throw new Error(
           "Retained planner disposal requires its authenticated planning adapter",
         );
+      await handOffStoppedRefusal(config, preparation, lock);
       await releaseAgentSessions(
         preparation,
         undefined,
@@ -528,7 +534,12 @@ export async function decidePlan(
         throw new Error(
           "Planner disposal did not authenticate every retained receipt; preparation is preserved",
         );
-      await settleRefusedProjectQueueRun(config, preparation, lock);
+      await settleRefusedProjectQueueRun(
+        config,
+        objective,
+        preparation.runId,
+        lock,
+      );
       rmSync(path);
       markCheckpointDirty(config.repository, { path, kind: "continuation" });
     } else {

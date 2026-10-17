@@ -71,7 +71,11 @@ import {
 } from "./state-store.js";
 import { canHandoff } from "./runner/ownership.js";
 import { collectedLocalWorkerSessionSettled } from "./execution/checkpoint.js";
-import { isExecutionState, isPreparationState } from "./state.js";
+import {
+  isExecutionState,
+  isPreparationState,
+  projectionStarted,
+} from "./state.js";
 import { objectiveComplete } from "./completion.js";
 import {
   assertProcessActive,
@@ -328,6 +332,7 @@ function assertStoppedClaimState(state: ContinuationState): void {
     !isPreparationState(state) ||
     state.cancelRequested ||
     state.cancelledAt ||
+    projectionStarted(state) ||
     (state.planningRecovery?.phase !== "stopped" &&
       state.planningRecovery?.phase !== "ready") ||
     !canHandoff(state) ||
@@ -3197,6 +3202,60 @@ export function bindProjectQueueRun(
   save(claim);
 }
 
+function assertCeased(pid: number, startTime: string): void {
+  const current = linuxProcessIdentity(pid);
+  if (
+    (current?.startTime === startTime && current.state !== "Z") ||
+    processGroupExists(pid)
+  )
+    throw new Error(
+      "Original Project controller or local worker remains active or uncertain",
+    );
+}
+
+function assertClaimOwnerCeased(claim: QueueOwnerClaim): void {
+  const originalOwner = claim.ownerProcess;
+  if (
+    originalOwner.namespace !== readlinkSync("/proc/self/ns/pid") ||
+    hasUnresolvedSubprocesses()
+  )
+    throw new Error(
+      "Stopped Project handoff requires the original source-host namespace and settled subprocess ownership",
+    );
+  assertCeased(originalOwner.pid, originalOwner.startTime);
+}
+
+async function unfinishedObjectiveClaims(
+  config: FactoryConfig,
+  objective: number,
+): Promise<QueueOwnerClaim[]> {
+  return (await readQueueHistory(config)).filter(
+    (record): record is QueueOwnerClaim =>
+      record.kind === "project-queue-owner" &&
+      record.objective === objective &&
+      !record.settled,
+  );
+}
+
+/**
+ * A plan refusal may follow a run that stopped without settling its claim.
+ * `check` only authenticates that its original controller has ceased, before
+ * any refusal effect; otherwise the stopped claim is handed off under the
+ * stopped-run rules, before the refusal disposes planner storage.
+ */
+export async function handOffStoppedRefusal(
+  config: FactoryConfig,
+  state: ContinuationState,
+  lock: ControllerLock,
+  check = false,
+): Promise<void> {
+  if (!config.queue?.project) return;
+  const unfinished = await unfinishedObjectiveClaims(config, state.objective);
+  if (!unfinished.length) return;
+  if (check) for (const claim of unfinished) assertClaimOwnerCeased(claim);
+  else await settleStoppedProjectQueueRun(config, state, lock);
+}
+
 /** Neutral stopped-owner handoff; never cancels, resumes or retries the original run. */
 export async function settleStoppedProjectQueueRun(
   config: FactoryConfig,
@@ -3253,25 +3312,7 @@ export async function settleStoppedProjectQueueRun(
   const claim = pending[0]!;
   // Execution and planning hand off under the same rule: the original
   // controller and every local process it owned have ceased on this host.
-  const originalOwner = claim.ownerProcess;
-  if (
-    originalOwner.namespace !== readlinkSync("/proc/self/ns/pid") ||
-    hasUnresolvedSubprocesses()
-  )
-    throw new Error(
-      "Stopped Project handoff requires the original source-host namespace and settled subprocess ownership",
-    );
-  const assertCeased = (pid: number, startTime: string) => {
-    const current = linuxProcessIdentity(pid);
-    if (
-      (current?.startTime === startTime && current.state !== "Z") ||
-      processGroupExists(pid)
-    )
-      throw new Error(
-        "Original Project controller or local worker remains active or uncertain",
-      );
-  };
-  assertCeased(originalOwner.pid, originalOwner.startTime);
+  assertClaimOwnerCeased(claim);
   if (isExecutionState(state)) {
     for (const work of Object.values(state.work).flatMap((entry) => [
       entry,
@@ -3386,11 +3427,11 @@ export async function settleStoppedProjectQueueRun(
  */
 export async function settleRefusedProjectQueueRun(
   config: FactoryConfig,
-  state: ContinuationState,
+  objective: number,
+  runId: string,
   lock: ControllerLock,
 ): Promise<void> {
   if (!config.queue?.project) return;
-  const { objective, runId } = state;
   requireProjectQueueEffects(config);
   const identity = linuxProcessIdentity(process.pid);
   const owner = [
@@ -3410,18 +3451,10 @@ export async function settleRefusedProjectQueueRun(
       "Project plan refusal requires its actual exclusive controller identity",
     );
   await awaitCheckpointAdmission(config.repository, "explicit");
-  const objectiveClaims = async () =>
-    (await readQueueHistory(config)).filter(
-      (record): record is QueueOwnerClaim =>
-        record.kind === "project-queue-owner" && record.objective === objective,
-    );
-  let claims = await objectiveClaims();
-  // A run that stopped without settling its claim is handed off first,
-  // under the stopped-run rules, before its plan is refused.
-  if (claims.some((claim) => !claim.settled)) {
-    await settleStoppedProjectQueueRun(config, state, lock);
-    claims = await objectiveClaims();
-  }
+  const claims = (await readQueueHistory(config)).filter(
+    (record): record is QueueOwnerClaim =>
+      record.kind === "project-queue-owner" && record.objective === objective,
+  );
   if (claims.some((claim) => !claim.settled))
     throw new Error(
       "This Objective has an unfinished or foreign Project owner; settle it before refusing the plan",

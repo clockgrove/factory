@@ -121,10 +121,7 @@ function mutationRequest(
           projectId: intent.binding.projectId,
           itemId: intent.itemId,
           fieldId: intent.fieldId,
-          value:
-            intent.action === "set-order"
-              ? { number: intent.order }
-              : { text: intent.metadata },
+          value: { text: intent.metadata },
         };
   return {
     query: intent.action === "ensure-card" ? ADD : UPDATE,
@@ -180,10 +177,7 @@ function plannedMutationRequest(
               ? effect.target.itemId
               : { resultOf: effect.target.resultOf },
           fieldId: effect.fieldId,
-          value:
-            effect.action === "set-order"
-              ? { number: effect.order }
-              : { text: effect.metadata },
+          value: { text: effect.metadata },
         };
   return {
     query: effect.action === "ensure-card" ? ADD : UPDATE,
@@ -225,13 +219,11 @@ export function assertProjectQueuePlannedEffect(
     "action",
     ...(effect.action === "ensure-card"
       ? ["issueNodeId"]
-      : effect.action === "set-order"
-        ? ["target", "fieldId", "order"]
-        : effect.action === "set-metadata"
-          ? ["target", "fieldId", "metadata"]
-          : effect.action === "set-admission-fields"
-            ? ["target", "orderFieldId", "metadataFieldId", "order", "metadata"]
-            : []),
+      : effect.action === "set-metadata"
+        ? ["target", "fieldId", "metadata"]
+        : effect.action === "set-admission-fields"
+          ? ["target", "orderFieldId", "metadataFieldId", "order", "metadata"]
+          : []),
   ]);
   if (
     !requestId(effect.operationId) ||
@@ -278,7 +270,6 @@ export function assertProjectQueuePlannedEffect(
     )
       throw new Error("Invalid declared Project queue Issue admission");
   } else if (
-    effect.action === "set-order" ||
     effect.action === "set-metadata" ||
     effect.action === "set-admission-fields"
   ) {
@@ -313,19 +304,15 @@ export function assertProjectQueuePlannedEffect(
         "Compound admission requires its same earlier ensure original for target and prior proof",
       );
     if (
-      effect.action === "set-order"
-        ? effect.fieldId !== binding.orderFieldId ||
+      effect.action === "set-metadata"
+        ? effect.fieldId !== binding.metadataFieldId ||
+          typeof effect.metadata !== "string"
+        : effect.orderFieldId !== binding.orderFieldId ||
+          effect.metadataFieldId !== binding.metadataFieldId ||
           !positiveInteger(effect.order) ||
+          typeof effect.metadata !== "string" ||
+          !effect.expectedIssue ||
           target.itemId === binding.controlItemId
-        : effect.action === "set-metadata"
-          ? effect.fieldId !== binding.metadataFieldId ||
-            typeof effect.metadata !== "string"
-          : effect.orderFieldId !== binding.orderFieldId ||
-            effect.metadataFieldId !== binding.metadataFieldId ||
-            !positiveInteger(effect.order) ||
-            typeof effect.metadata !== "string" ||
-            !effect.expectedIssue ||
-            target.itemId === binding.controlItemId
     )
       throw new Error("Invalid declared Project queue field update");
   } else throw new Error("Unsupported declared Project queue action");
@@ -433,16 +420,14 @@ export function resolveProjectQueuePlannedEffect(
     if (!prior || prior.itemId !== itemId)
       throw new Error("Declared field update lacks its exact previous target");
     action =
-      effect.action === "set-order"
-        ? { action: effect.action, itemId, order: effect.order }
-        : effect.action === "set-admission-fields"
-          ? {
-              action: effect.action,
-              itemId,
-              order: effect.order,
-              metadata: effect.metadata,
-            }
-          : { action: effect.action, itemId, metadata: effect.metadata };
+      effect.action === "set-admission-fields"
+        ? {
+            action: effect.action,
+            itemId,
+            order: effect.order,
+            metadata: effect.metadata,
+          }
+        : { action: effect.action, itemId, metadata: effect.metadata };
   }
   const request = mutationRequest({
     ...action,
@@ -478,13 +463,11 @@ export function assertProjectQueueIntent(
     "request",
     ...(action === "ensure-card"
       ? ["issueNodeId"]
-      : action === "set-order"
-        ? ["itemId", "order"]
-        : action === "set-metadata"
-          ? ["itemId", "metadata"]
-          : action === "set-admission-fields"
-            ? ["itemId", "order", "metadata"]
-            : []),
+      : action === "set-metadata"
+        ? ["itemId", "metadata"]
+        : action === "set-admission-fields"
+          ? ["itemId", "order", "metadata"]
+          : []),
   ]);
   assertProjectQueueBinding(intent.binding);
   if (
@@ -500,14 +483,6 @@ export function assertProjectQueueIntent(
   if (action === "ensure-card") {
     if (!nodeId(intent.issueNodeId) || intent.fieldId !== undefined)
       throw new Error("Invalid Project queue Issue admission target");
-  } else if (action === "set-order") {
-    if (
-      !nodeId(intent.itemId) ||
-      intent.itemId === intent.binding.controlItemId ||
-      !positiveInteger(intent.order) ||
-      intent.fieldId !== intent.binding.orderFieldId
-    )
-      throw new Error("Invalid Project queue order target");
   } else if (action === "set-metadata") {
     if (
       !nodeId(intent.itemId) ||
@@ -727,11 +702,7 @@ export function assertProjectQueueWriteReceipt(
     if (page.hasNextPage)
       throw new Error("Project queue mutation response is truncated");
     const fields = fieldValues(page.nodes, intent.binding);
-    if (
-      intent.action === "set-order"
-        ? fields.order !== intent.order
-        : fields.metadata !== intent.metadata
-    )
+    if (fields.metadata !== intent.metadata)
       throw new Error(
         "Project queue original response does not contain the requested value",
       );
@@ -1842,24 +1813,18 @@ export async function projectQueueWriteOnGitHub(
   const action =
     request.action === "ensure-card"
       ? { action: request.action, issueNodeId: request.issueNodeId }
-      : request.action === "set-order"
+      : request.action === "set-admission-fields"
         ? {
             action: request.action,
             itemId: request.itemId,
             order: request.order,
+            metadata: request.metadata,
           }
-        : request.action === "set-admission-fields"
-          ? {
-              action: request.action,
-              itemId: request.itemId,
-              order: request.order,
-              metadata: request.metadata,
-            }
-          : {
-              action: request.action,
-              itemId: request.itemId,
-              metadata: request.metadata,
-            };
+        : {
+            action: request.action,
+            itemId: request.itemId,
+            metadata: request.metadata,
+          };
   if (
     declared &&
     (!same(action, declared.action) ||
@@ -1877,12 +1842,7 @@ export async function projectQueueWriteOnGitHub(
     ...(request.action === "ensure-card" ||
     request.action === "set-admission-fields"
       ? {}
-      : {
-          fieldId:
-            request.action === "set-order"
-              ? request.binding.orderFieldId
-              : request.binding.metadataFieldId,
-        }),
+      : { fieldId: request.binding.metadataFieldId }),
   } as IntentBase;
   const intent = {
     ...base,

@@ -1496,7 +1496,6 @@ export interface ProjectQueueExpectedTarget {
 }
 export type ProjectQueueAction =
   | { action: "ensure-card"; issueNodeId: string }
-  | { action: "set-order"; itemId: string; order: number }
   | { action: "set-metadata"; itemId: string; metadata: string }
   | {
       action: "set-admission-fields";
@@ -1519,12 +1518,6 @@ export type ProjectQueueItemSelector =
   | { resultOf: string };
 export type ProjectQueuePlannedAction =
   | { action: "ensure-card"; issueNodeId: string }
-  | {
-      action: "set-order";
-      target: ProjectQueueItemSelector;
-      fieldId: string;
-      order: number;
-    }
   | {
       action: "set-metadata";
       target: ProjectQueueItemSelector;

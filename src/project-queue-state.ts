@@ -2126,10 +2126,11 @@ function producer(
   const last = record.effects.at(-1);
   if (
     !last ||
-    (last.intent.action !== "set-metadata" &&
-      (last.intent.action !== "set-admission-fields" ||
-        record.action !== "admit" ||
-        last.intent.order !== record.order)) ||
+    last.intent.action === "ensure-card" ||
+    (record.action === "admit"
+      ? last.intent.action !== "set-admission-fields" ||
+        last.intent.order !== record.order
+      : last.intent.action !== "set-metadata") ||
     last.intent.itemId !== itemId ||
     last.intent.metadata !== text ||
     last.receipt?.kind !== "response"
@@ -2217,8 +2218,7 @@ export function assertProjectQueueClaimAdmission(
     metadata.state !== "queued" ||
     metadata.admissionId !== claim.admissionId ||
     metadata.receiptId !== claim.receiptId ||
-    (effect?.intent.action !== "set-metadata" &&
-      effect?.intent.action !== "set-admission-fields") ||
+    effect?.intent.action !== "set-admission-fields" ||
     effect.intent.metadata !== admission.metadata ||
     effect.receipt?.kind !== "response" ||
     !effect.original
@@ -2470,10 +2470,11 @@ export function retainedQueueEntry(
     !record.metadata ||
     !record.issueNodeId ||
     !last ||
-    (last.intent.action !== "set-metadata" &&
-      (last.intent.action !== "set-admission-fields" ||
-        record.action !== "admit" ||
-        last.intent.order !== record.order)) ||
+    last.intent.action === "ensure-card" ||
+    (record.action === "admit"
+      ? last.intent.action !== "set-admission-fields" ||
+        last.intent.order !== record.order
+      : last.intent.action !== "set-metadata") ||
     !last.intent.itemId ||
     last.receipt?.kind !== "response"
   )
@@ -2801,18 +2802,7 @@ export function assertQueueCommandHistory(
       .map((row) => [row.id, row]),
   );
   for (const row of operations.values()) {
-    if (!row.commandId) {
-      if (
-        row.effects.some(
-          (effect) => effect.intent.action === "set-admission-fields",
-        )
-      )
-        throw new Error(
-          "Compound admission requires its declared command membership",
-        );
-      continue;
-    }
-    const owner = operations.get(row.commandId);
+    const owner = row.commandId ? operations.get(row.commandId) : undefined;
     if (!owner?.commandRecipe)
       throw new Error("Command member lacks its exact original recipe owner");
     assertCommandRecipe(owner.commandRecipe, owner.repository, owner.id);

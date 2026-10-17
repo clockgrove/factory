@@ -2135,7 +2135,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       state: "withdrawn",
     });
     const binding = config.queue.project;
-    const unknown = {
+    const header = {
       schemaVersion: 1,
       kind: "project-queue-operation",
       id: operationId,
@@ -2152,6 +2152,20 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       bodyDigest: claim.bodyDigest,
       order: 1,
       metadata,
+    };
+    const planned = createProjectQueuePlannedEffect(binding, {
+      operationId,
+      requestId,
+      actorId: 1,
+      action: "set-metadata",
+      target: { itemId: "PVTI_storage" },
+      fieldId: binding.metadataFieldId,
+      metadata,
+      prior: { target: { itemId: "PVTI_storage", metadata: null } },
+      control: { metadata: null },
+    });
+    const unknown = {
+      ...header,
       effects: [
         {
           intent: {
@@ -2178,6 +2192,15 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           },
         },
       ],
+      commandId: operationId,
+      commandRecipe: {
+        schemaVersion: 1,
+        id: operationId,
+        configDigest: "1".repeat(64),
+        deadlineAt: null,
+        operations: [header],
+        effects: [planned],
+      },
     };
     const unknownBytes = Buffer.from(`${JSON.stringify(unknown)}\n`);
     await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
@@ -2840,7 +2863,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       );
       assert.throws(
         () => assertQueueCommandHistory([stripped], readOriginal),
-        /declared command membership/,
+        /exact original recipe owner/,
       );
       assert.throws(
         () => retainedQueueEntry(config, [stripped], 6),

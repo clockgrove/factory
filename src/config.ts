@@ -262,7 +262,6 @@ export interface FactoryConfig {
    * `githubProgressSettings` and `githubProjectStatusSettings`); `{ enabled: false }` opts out.
    */
   githubManagement?: {
-    decisions?: { enabled: true; actorIds: number[] };
     projectStatus?: GitHubProjectStatusConfig | { enabled: false };
     progress?:
       | {
@@ -734,7 +733,7 @@ export function validateConfig(value: unknown): FactoryConfig {
     assertObject(value.githubManagement, "githubManagement");
     assertOnlyKeys(
       value.githubManagement,
-      ["progress", "decisions", "projectStatus"],
+      ["progress", "projectStatus"],
       "githubManagement",
     );
     const optedOut = (setting: unknown): boolean =>
@@ -771,34 +770,6 @@ export function validateConfig(value: unknown): FactoryConfig {
       )
         throw new Error(
           "GitHub progress requires explicit target and question disclosure choices",
-        );
-    }
-    if (value.githubManagement.decisions !== undefined) {
-      assertObject(
-        value.githubManagement.decisions,
-        "githubManagement.decisions",
-      );
-      assertOnlyKeys(
-        value.githubManagement.decisions,
-        ["enabled", "actorIds"],
-        "githubManagement.decisions",
-      );
-      const actors = value.githubManagement.decisions.actorIds;
-      if (
-        value.githubManagement.decisions.enabled !== true ||
-        (
-          value.githubManagement.progress as
-            | { includeQuestions?: unknown }
-            | undefined
-        )?.includeQuestions !== true ||
-        !Array.isArray(actors) ||
-        !actors.length ||
-        actors.length > 16 ||
-        new Set(actors).size !== actors.length ||
-        actors.some((id) => !Number.isSafeInteger(id) || id <= 0)
-      )
-        throw new Error(
-          "GitHub plan decisions require explicit human account IDs and question disclosure",
         );
     }
   }

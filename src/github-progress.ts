@@ -29,8 +29,6 @@ export interface RunDetailsInput {
   runId: string;
   configDigest: string;
   decisions: GitHubProgressDecision[];
-  /** Fully filled identities; the operator changes only answer and reason. */
-  planDecisionTemplate?: import("./github-plan-decisions.js").PlanDecisionEnvelope;
 }
 
 export interface GitHubProgressInput
@@ -170,7 +168,7 @@ function decisionLines(decisions: GitHubProgressDecision[]): string[] {
     : [];
 }
 
-/** The collapsed run identity, decision bindings and the plan-decision template. */
+/** The collapsed run identity and decision bindings. */
 export function runDetailsLines(input: RunDetailsInput): string[] {
   if (
     !/^[a-zA-Z0-9-]{1,128}$/.test(input.runId) ||
@@ -185,16 +183,6 @@ export function runDetailsLines(input: RunDetailsInput): string[] {
       (decision, index) =>
         `Decision ${index + 1} binding: ${compact(decision.binding)}`,
     ),
-    ...(input.planDecisionTemplate
-      ? [
-          "",
-          "To answer this planning question, copy this JSON into a new comment on this Objective issue. Change only answer and reason. Refusal and other actions use the local supported path.",
-          "",
-          "```json",
-          JSON.stringify(input.planDecisionTemplate, null, 2),
-          "```",
-        ]
-      : []),
     "",
     "</details>",
   ];

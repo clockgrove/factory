@@ -3,9 +3,7 @@ import {
   type PlanCandidate,
 } from "./compiler/candidate.js";
 import { reviewResultDigest } from "./compiler/packets.js";
-import type { GitHubPlanDecisionReceipt } from "./github-plan-decisions.js";
 import type { FactoryState } from "./state.js";
-import { isDeepStrictEqual } from "node:util";
 
 /** The verified original plan clarification, not an implementation acceptance. */
 export interface AcceptedPlanningDecision {
@@ -43,17 +41,13 @@ export function retainAcceptedPlanningDecision(
 export function assertAcceptedPlanningDecision(
   value: unknown,
   graphDigest: string,
-  githubDecision?: GitHubPlanDecisionReceipt,
 ): asserts value is AcceptedPlanningDecision | undefined {
   const invalid = (): never => {
     throw new Error(
       "Accepted planning decision differs from its original plan/review",
     );
   };
-  if (value === undefined) {
-    if (githubDecision) invalid();
-    return;
-  }
+  if (value === undefined) return;
   if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
   const context = value as AcceptedPlanningDecision;
   if (
@@ -105,29 +99,12 @@ export function assertAcceptedPlanningDecision(
       context.reviewDigest
   )
     invalid();
-  if (
-    githubDecision &&
-    (githubDecision.planGraphDigest !== context.graphDigest ||
-      githubDecision.questionPacket.reviewDigest !== context.reviewDigest ||
-      context.review.failure !== undefined ||
-      context.review.findings.length !== 1 ||
-      !isDeepStrictEqual(
-        githubDecision.questionPacket.finding,
-        context.review.findings[0],
-      ) ||
-      !isDeepStrictEqual(githubDecision.decision, context.decision))
-  )
-    invalid();
 }
 
 /** Supply the actual choice with its original identity; never reconstruct an old answer. */
 export function acceptedPlanningDecisionContext(state: FactoryState): object {
   const context = state.acceptedPlanningDecision;
-  assertAcceptedPlanningDecision(
-    context,
-    state.planGraphDigest,
-    state.githubPlanDecision,
-  );
+  assertAcceptedPlanningDecision(context, state.planGraphDigest);
   if (!context)
     return {
       availability: "unavailable",

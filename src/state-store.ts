@@ -65,7 +65,6 @@ import {
   type RepeatRecord,
   type Wait,
 } from "./fault.js";
-import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
 import {
   assertGitHubProgressProjection,
   assertLiveStatusRecord,
@@ -400,7 +399,6 @@ function parsePreparation(
   assertObjectiveSplitRecord(value);
   assertGitHubProgressProjection(value.githubProgress, value);
   assertLiveStatusRecord(value.githubLiveStatus);
-  assertGitHubPlanDecision(value.githubPlanDecision, value);
   assertGitHubProjectStatusProjection(value.githubProjectStatus, value);
   if (
     (value.schemaVersion !== 8 &&

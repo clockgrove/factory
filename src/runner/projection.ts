@@ -322,9 +322,6 @@ export function activateProjectedObjective(args: {
     ...(preparation.githubProjectStatus
       ? { githubProjectStatus: preparation.githubProjectStatus }
       : {}),
-    ...(preparation.githubPlanDecision
-      ? { githubPlanDecision: preparation.githubPlanDecision }
-      : {}),
     ...(preparation.githubProgress
       ? { githubProgress: preparation.githubProgress }
       : {}),

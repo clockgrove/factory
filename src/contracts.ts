@@ -1652,11 +1652,6 @@ export interface GitHubGateway {
   }): Promise<
     import("./github-project-state.js").GitHubProjectStatusConfig | undefined
   >;
-  /** Actual GitHub human identities/edit facts, never comment-inferred authority. */
-  planDecisionComments?(
-    objective: number,
-    actorIds: number[],
-  ): Promise<import("./github-plan-decisions.js").GitHubDecisionComment[]>;
   /** Owned Objective or Work Item progress; an unresolved prior write permits reads only. */
   progressComment?(request: {
     objective: number;

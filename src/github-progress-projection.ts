@@ -6,7 +6,6 @@ import {
   redactDiagnosticDetail,
 } from "./diagnostics.js";
 import { projectLiveStatus } from "./github-live-status.js";
-import { planDecisionTemplate } from "./github-plan-decisions.js";
 import {
   type GitHubProgressDecision,
   renderObjectiveNotification,
@@ -172,10 +171,6 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     blockers.push("The coordinator is paused.");
   if (retained.coordinator?.mode === "draining")
     blockers.push("The coordinator is draining owned work.");
-  const template =
-    isPreparationState(retained) && github.planDecisionComments
-      ? planDecisionTemplate(config, retained)
-      : undefined;
   const split =
     snapshot.state === "preparing" && snapshot.split?.enqueuedAt
       ? snapshot.split
@@ -192,9 +187,7 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
         ? "This run is cancelled; preserve its retained history."
         : snapshot.phase === "needs-decision" ||
             snapshot.phase === "needs-plan-decision"
-          ? template
-            ? "Copy the filled decision template from Run details below into a new comment on this Objective, replacing only answer and reason."
-            : "Handle the listed questions through the supported local Factory decision path."
+          ? "Handle the listed questions through the supported local Factory decision path."
           : snapshot.phase === "failed"
             ? "Inspect local Factory status for the exact supported recovery or prerequisite."
             : retained.coordinator?.mode !== "running"
@@ -211,7 +204,6 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
     runId: retained.runId,
     configDigest: retained.configDigest,
     decisions,
-    ...(template ? { planDecisionTemplate: template } : {}),
   };
   // A new comment only for what needs a phone notification; edits do not notify.
   // A split notifies once, naming the children that now carry the work.
@@ -238,7 +230,6 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
       JSON.stringify({
         phase: snapshot.phase,
         decisions,
-        template,
         ...(split ? { split: split.children.map((child) => child.issue) } : {}),
       }),
     ),
@@ -281,7 +272,6 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
           next,
           blockers,
           decisions,
-          template,
           coordinator: retained.coordinator?.mode,
           runActive: args.active,
           ...(split ? { children: split.children } : {}),

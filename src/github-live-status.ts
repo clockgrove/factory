@@ -91,7 +91,7 @@ interface LiveTarget {
 export interface LivePresentation {
   status: ObjectiveStatusInput;
   details: RunDetailsInput;
-  /** Next action, blockers, decisions, template and control mode. */
+  /** Next action, blockers, decisions and control mode. */
   digest: string;
   /** Each started Work Item's public facts and its own pending criteria. */
   items: Record<

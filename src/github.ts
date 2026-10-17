@@ -33,8 +33,6 @@ import {
   sharedGitHubClient,
   timelineMergeCommit,
 } from "./github-client.js";
-import type { GitHubDecisionComment } from "./github-plan-decisions.js";
-import { parsePlanDecision } from "./github-plan-decisions.js";
 import {
   type LiveStatusRecord,
   liveStatusMarker,
@@ -244,94 +242,6 @@ export class RealGitHubGateway implements GitHubGateway {
       discovery,
       this.statusGraphql,
     );
-  }
-
-  async planDecisionComments(
-    objective: number,
-    actorIds: number[],
-  ): Promise<GitHubDecisionComment[]> {
-    if (
-      !Number.isSafeInteger(objective) ||
-      objective <= 0 ||
-      !actorIds.length ||
-      actorIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
-    )
-      throw new Error("Invalid GitHub decision observation scope");
-    type Comment = {
-      id: number;
-      node_id?: string;
-      body?: string;
-      issue_url?: string;
-      created_at?: string;
-      updated_at?: string;
-      user?: { id?: number; type?: string };
-    };
-    const candidates = (
-      await this.pages<Comment>(`issues/${objective}/comments`)
-    ).filter(
-      (comment) =>
-        comment.user?.type === "User" &&
-        actorIds.includes(comment.user.id ?? 0) &&
-        typeof comment.body === "string" &&
-        parsePlanDecision(comment.body),
-    );
-    if (candidates.length > 32)
-      throw new Error(
-        "GitHub decision candidate count exceeds its observation bound",
-      );
-    const observed: GitHubDecisionComment[] = [];
-    for (const candidate of candidates) {
-      if (
-        !Number.isSafeInteger(candidate.id) ||
-        candidate.id <= 0 ||
-        !candidate.node_id ||
-        candidate.issue_url !==
-          `https://api.github.com/repos/${this.repository}/issues/${objective}` ||
-        candidate.created_at !== candidate.updated_at
-      )
-        continue;
-      const node = await classifiedGitHubCall(
-        this.client,
-        this.repository,
-        { method: "POST", path: "graphql" },
-        () => this.client.decisionComment(candidate.node_id!),
-      );
-      if (
-        !node ||
-        node.id !== candidate.node_id ||
-        typeof node.fullDatabaseId !== "string" ||
-        !/^[1-9][0-9]*$/.test(node.fullDatabaseId) ||
-        !Number.isSafeInteger(Number(node.fullDatabaseId)) ||
-        Number(node.fullDatabaseId) !== candidate.id ||
-        node.body !== candidate.body ||
-        node.author?.__typename !== "User" ||
-        node.author.databaseId !== candidate.user?.id ||
-        !actorIds.includes(node.author.databaseId ?? 0) ||
-        !node.author.login ||
-        node.author.login.endsWith("[bot]") ||
-        node.issue?.number !== objective ||
-        node.issue.repository?.nameWithOwner !== this.repository ||
-        node.createdAt !== candidate.created_at ||
-        node.updatedAt !== candidate.updated_at ||
-        node.lastEditedAt !== null ||
-        node.editor !== null ||
-        node.includesCreatedEdit !== false
-      )
-        continue;
-      observed.push({
-        id: candidate.id,
-        nodeId: node.id,
-        actorId: node.author.databaseId!,
-        login: node.author.login,
-        body: node.body,
-        createdAt: node.createdAt,
-        updatedAt: node.updatedAt,
-        lastEditedAt: null,
-        editor: null,
-        includesCreatedEdit: false,
-      });
-    }
-    return observed;
   }
 
   async progressComment(

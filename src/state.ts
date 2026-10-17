@@ -48,7 +48,6 @@ import {
   type RepeatRecord,
   type Wait,
 } from "./fault.js";
-import { assertGitHubPlanDecision } from "./github-plan-decisions.js";
 import {
   assertGitHubProgressProjection,
   assertLiveStatusRecord,
@@ -249,7 +248,6 @@ export interface PreparationState {
   agentSessions?: Record<string, import("./contracts.js").AgentSessionRef>;
   agentSessionHistory?: import("./contracts.js").AgentSessionRef[];
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
-  githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
   githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
   /** The Objective's live status comment while it plans; execution keeps the same record. */
   githubLiveStatus?: import("./github-progress-state.js").LiveStatusRecord;
@@ -423,7 +421,6 @@ export interface FactoryState {
   agentSessionHistory?: import("./contracts.js").AgentSessionRef[];
   acceptedPlanningDecision?: import("./planning-decision-context.js").AcceptedPlanningDecision;
   githubProjectStatus?: import("./github-project-state.js").GitHubProjectStatusProjection;
-  githubPlanDecision?: import("./github-plan-decisions.js").GitHubPlanDecisionReceipt;
   githubProgress?: import("./github-progress-state.js").GitHubProgressProjection;
   /** The Objective's live status comment, edited in place while it runs (#1325). */
   githubLiveStatus?: import("./github-progress-state.js").LiveStatusRecord;
@@ -969,13 +966,6 @@ export function parseFactoryState(
     runId: state.runId as string,
     configDigest: state.configDigest as string,
   });
-  assertGitHubPlanDecision(state.githubPlanDecision, {
-    repository,
-    objective,
-    runId: state.runId as string,
-    configDigest: state.configDigest as string,
-    planGraphDigest: state.planGraphDigest as string,
-  });
   assertGitHubProjectStatusProjection(state.githubProjectStatus, {
     repository,
     objective,
@@ -1029,7 +1019,6 @@ export function parseFactoryState(
   assertAcceptedPlanningDecision(
     state.acceptedPlanningDecision,
     state.planGraphDigest as string,
-    state.githubPlanDecision as FactoryState["githubPlanDecision"],
   );
   assertApprovedPlaybookAdmission(
     state.approvedPlaybookPin,

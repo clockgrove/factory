@@ -9,11 +9,7 @@ import {
   agentSessionContinuation,
   releaseAgentSessions,
 } from "./agent-session.js";
-import {
-  bindPlanningPlaybook,
-  resolvePlan,
-  verifyPlanCandidate,
-} from "./compiler.js";
+import { bindPlanningPlaybook, resolvePlan } from "./compiler.js";
 import { objectiveComplete } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest, stateRoot } from "./config.js";
@@ -47,14 +43,9 @@ import {
   withGitHubTransportObserver,
 } from "./github-client.js";
 import {
-  matchesPlanDecision,
-  phonePlanEligible,
-} from "./github-plan-decisions.js";
-import {
   progressOffered,
   projectGitHubProgress,
 } from "./github-progress-projection.js";
-import { progressDigest } from "./github-progress-state.js";
 import {
   projectGitHubProjectStatus,
   projectStatusOffered,
@@ -1020,8 +1011,9 @@ async function runObjectiveOwned(
             "Cancellation is in progress; inspect ownership before another action",
           );
         const input = request.input ?? {};
-        // A plan waiting under this live owner (a phone-eligible hold): the
-        // owner's snapshot is the state, so the decision lands there (#1290).
+        // A plan waiting under this live owner (a paused or draining
+        // planning owner): the owner's snapshot is the state, so the decision
+        // lands there (#1290).
         if (request.action === "decide" && isPreparationState(owner.snapshot)) {
           const decision = parseDecisionInput(input);
           const current = owner.snapshot;
@@ -1252,123 +1244,6 @@ async function runObjectiveOwned(
         void projectProgress();
       }, 30_000)
     : undefined;
-  const observePhoneDecision = async (): Promise<boolean> => {
-    const state = owner.snapshot;
-    if (
-      !isPreparationState(state) ||
-      !phonePlanEligible(config, state) ||
-      !services.github.planDecisionComments ||
-      owner.handoff ||
-      owner.abort.signal.aborted ||
-      owner.pause.signal.aborted
-    )
-      return false;
-    try {
-      return await withProcessCancellation(
-        AbortSignal.any([
-          owner.abort.signal,
-          owner.pause.signal,
-          AbortSignal.timeout(30_000),
-        ]),
-        async () => {
-          const comments = await services.github.planDecisionComments!(
-            objective,
-            config.githubManagement!.decisions!.actorIds,
-          );
-          const selected = comments.find((comment) =>
-            matchesPlanDecision(config, state, comment),
-          );
-          if (!selected) return false;
-          const issue = await services.github.objective(objective);
-          if (issue.state !== "open") return false;
-          const apply = async () => {
-            const current = owner.snapshot;
-            if (
-              !isPreparationState(current) ||
-              current !== state ||
-              !current.plan ||
-              owner.handoff ||
-              owner.abort.signal.aborted ||
-              owner.pause.signal.aborted
-            )
-              return false;
-            const envelope = matchesPlanDecision(config, current, selected);
-            if (!envelope) return false;
-            verifyPlanCandidate(
-              current.plan,
-              objective,
-              issue.body,
-              current.baseSha,
-              config.checkout,
-              current.configDigest,
-              true,
-              current.capacity.concurrency,
-            );
-            const actor = `github:user:${selected.actorId} (${selected.login})`;
-            const accepted = await resolvePlan(
-              current.plan,
-              objective,
-              issue.body,
-              current.baseSha,
-              config.checkout,
-              {
-                actor,
-                outcome: "accept",
-                answer: envelope.answer,
-                reason: envelope.reason,
-              },
-              current.configDigest,
-            );
-            // Pause/drain handlers may run during any await even under the same
-            // installation lease. Recheck at the atomic consumption boundary.
-            if (
-              owner.snapshot !== current ||
-              owner.handoff ||
-              owner.abort.signal.aborted ||
-              owner.pause.signal.aborted ||
-              !matchesPlanDecision(config, current, selected)
-            )
-              return false;
-            current.plan = accepted;
-            current.githubPlanDecision = {
-              ...selected,
-              observedAt: accepted.humanDecision!.at,
-              bodyDigest: progressDigest(selected.body),
-              envelope,
-              planGraphDigest: accepted.graphDigest,
-              questionPacket: {
-                reviewDigest: accepted.reviewDigest,
-                finding: accepted.review.findings[0]!,
-              },
-              decision: accepted.humanDecision!,
-            };
-            delete current.coordinator.waitReason;
-            persist();
-            new DiagnosticEmitter(config.repository, objective).emit({
-              runId: current.runId,
-              operation: "github-plan-decision",
-              outcome: "completed",
-              metadata: {
-                comment: selected.id,
-                actorId: selected.actorId,
-                reviewDigest: envelope.planReviewDigest,
-              },
-            });
-            wake();
-            return true;
-          };
-          const result = controlTail.then(apply);
-          controlTail = result.catch(() => undefined);
-          return await result;
-        },
-      );
-    } catch {
-      process.stderr.write(
-        `Factory GitHub planning decision observation for Objective #${objective} is unavailable; no decision was recorded.\n`,
-      );
-      return false;
-    }
-  };
   let runResult: ContinuationState | undefined;
   let runFailed = false;
   let runFailure: unknown;
@@ -1423,12 +1298,6 @@ async function runObjectiveOwned(
           await wait();
           continue;
         }
-        if (isPreparationState(state) && phonePlanEligible(config, state)) {
-          await projectProgress();
-          if (await observePhoneDecision()) continue;
-          await wait(30_000);
-          continue;
-        }
         const result = await withProcessCancellation(
           owner.abort.signal,
           () => runObjectivePass(config, objective, services, owner),
@@ -1464,9 +1333,6 @@ async function runObjectiveOwned(
         owner.snapshot = result;
         // A pass that stopped for the cancel request: the loop records it.
         if (result.cancelRequested && !owner.handoff) continue;
-        if (isPreparationState(result) && phonePlanEligible(config, result)) {
-          continue;
-        }
         // A preparation comes back only when its plan needs a human decision.
         if (
           isPreparationState(result) ||

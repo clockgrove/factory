@@ -1,5 +1,5 @@
 import { graphItems } from "./split.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { COMPILER_READINESS_GUIDANCE } from "../compiler-wire.js";
@@ -120,9 +120,9 @@ export interface PlanningRecoveryRecord {
   response?: unknown;
   responseFailure?: string;
   /** The current round's complete compiler answer, when one decoded. */
-  answer?: unknown;
+  answer?: ContentRef;
   /** The plan this revision round changes: the previous round's answer. */
-  revision?: unknown;
+  revision?: ContentRef;
   diagnosisResponse?: { kind: string; diagnosis: string; correction: string };
   review?: PlanningReviewRecord;
   history: {
@@ -178,6 +178,37 @@ export async function retainPlanningNativeReturn(
 }
 
 class PlanningReviewBindingError extends Error {}
+
+/** A complete compiler answer, retained by reference in the content store. */
+async function retainPlanAnswer(
+  store: ContentStore,
+  answer: unknown,
+): Promise<ContentRef> {
+  return store.put(
+    Readable.toWeb(
+      Readable.from([Buffer.from(JSON.stringify(answer))]),
+    ) as ReadableStream<Uint8Array>,
+    { mediaType: "application/json" },
+  );
+}
+
+/** The exact retained answer a revision changes, verified against its reference. */
+async function readPlanAnswer(
+  store: ContentStore,
+  ref: ContentRef,
+): Promise<unknown> {
+  const bytes = Buffer.from(
+    await new Response(await store.open(ref)).arrayBuffer(),
+  );
+  if (
+    bytes.length !== ref.bytes ||
+    createHash("sha256").update(bytes).digest("hex") !== ref.digest
+  )
+    throw new PlanningReviewBindingError(
+      "Retained plan answer differs from its reference; preserve it and use supported cancellation before a corrected successor",
+    );
+  return JSON.parse(bytes.toString("utf8"));
+}
 
 /** A review as history keeps it; a retained packet's inline content is dropped. */
 function reviewByReference(review: PlanningReviewRecord): PlanningReviewRecord {
@@ -408,6 +439,16 @@ async function compilePlanAdmitted(
     );
     return structuredClone(state.plan);
   }
+  // Retained bodies (native returns, plan answers) persist by reference.
+  const contentStore: ContentStore | undefined =
+    context.contextResolver?.contentStore ??
+    (context.sessionState
+      ? new LocalContentStore(
+          join(stateRoot(context.sessionState.repository), "content"),
+        )
+      : undefined);
+  // This round's complete compiler answer, until it is retained by reference.
+  let answered: unknown;
   const last = record.history.at(-1);
   let corrections: PlanCorrection[] = last
     ? (last.corrections ?? [{ source: "diagnosis", detail: last.correction }])
@@ -463,14 +504,7 @@ async function compilePlanAdmitted(
                 invocationId: id,
                 phase,
                 repository: context.sessionState!.repository,
-                store:
-                  context.contextResolver?.contentStore ??
-                  new LocalContentStore(
-                    join(
-                      stateRoot(context.sessionState!.repository),
-                      "content",
-                    ),
-                  ),
+                store: contentStore!,
                 save,
               },
               receipt,
@@ -575,6 +609,11 @@ async function compilePlanAdmitted(
         return structuredClone(record.response) as never;
       if (record.responseFailure) throw invalidOutput(record.responseFailure);
       let result;
+      answered = undefined;
+      const retainAnswer = async () => {
+        if (answered !== undefined && contentStore)
+          record.answer = await retainPlanAnswer(contentStore, answered);
+      };
       try {
         // A revision round plans in a fresh conversation.
         if (corrections.length && context.sessionState)
@@ -595,6 +634,7 @@ async function compilePlanAdmitted(
           error instanceof MalformedPlannerOutput ||
           error instanceof PlanValidationError
         ) {
+          await retainAnswer();
           retainResult(error.message);
           record.responseFailure = error.message;
           record.phase = "ready";
@@ -602,6 +642,7 @@ async function compilePlanAdmitted(
         }
         throw error;
       }
+      await retainAnswer();
       retainResult(result);
       record.response = structuredClone(result);
       record.phase = "ready";
@@ -634,6 +675,10 @@ async function compilePlanAdmitted(
     // Where the failure came from when it already states what to fix.
     let stated: "check" | "review" | undefined;
     try {
+      const revised =
+        corrections.length && record.revision && contentStore
+          ? await readPlanAnswer(contentStore, record.revision)
+          : undefined;
       graph = await compileObjective(
         objective,
         body,
@@ -655,9 +700,9 @@ async function compilePlanAdmitted(
         record.contextLookup?.packet,
         workflowRecipe,
         {
-          ...(corrections.length && { answer: record.revision }),
+          ...(revised !== undefined && { answer: revised }),
           retain: (answer) => {
-            record.answer = structuredClone(answer);
+            answered = structuredClone(answer);
           },
         },
       );

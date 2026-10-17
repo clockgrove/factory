@@ -926,6 +926,18 @@ export function assertRepairLedger(
       )
         throw new Error("Invalid original planning invocation receipt");
     }
+    // Retained compiler answers persist only as content-store references.
+    for (const ref of [value.answer, value.revision])
+      if (
+        ref !== undefined &&
+        (!ref ||
+          Object.keys(ref).sort().join() !== "bytes,digest,mediaType" ||
+          !/^[a-f0-9]{64}$/.test(ref.digest) ||
+          !Number.isSafeInteger(ref.bytes) ||
+          ref.bytes < 0 ||
+          ref.mediaType !== "application/json")
+      )
+        throw new Error("Invalid retained planning answer reference");
     // Each accepted planning correction was charged as its round.
     for (const round of value.history.keys())
       if (

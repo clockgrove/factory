@@ -157,11 +157,6 @@ export async function runObjectivePass(
   owner: LocalOwner,
 ): Promise<ContinuationState> {
   validateTarget(config.repository, config.checkout);
-  if (
-    config.execution.kind !== "local" &&
-    config.execution.kind !== "managed-agent"
-  )
-    throw new Error("Execution mode is not implemented");
   const root = stateRoot(config.repository);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const path = statePath(config.repository, objective);

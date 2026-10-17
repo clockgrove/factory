@@ -134,7 +134,7 @@ export async function withPlannerAdmission<T>(
 }
 
 /** Fresh-only adapters may not silently replace a previously unsettled owner. */
-export function plannerSession(
+function plannerSession(
   model: PlanningModel,
   state: ContinuationState,
   save: () => void,
@@ -254,6 +254,12 @@ export async function generatePlannerStructured<T>(
   });
 }
 
+/**
+ * The planning model with its calls made as its step's paid calls (see
+ * src/step.ts), so only the model's own faults count toward the bound. A
+ * diagnosis is bounded per failure by PAID_ATTEMPTS instead, never by both.
+ * A plan step uses paidPlanningModel, which also counts an invalid review.
+ */
 export function paidModel(
   model: PlanningModel,
   step: Pick<StepContext, "paid">,

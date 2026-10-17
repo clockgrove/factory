@@ -1155,7 +1155,7 @@ export interface DeliveryRequest {
   /** Required by ordinary publication; created by the exclusive snapshot owner. */
   publication?: PublicationControl;
   /** Controller-rendered publication text from public intent and exact candidate facts. */
-  body?: string;
+  body: string;
   lfs?: boolean;
   /** Commits earlier attempts of this Work Item produced for this branch. */
   earlierHeads?: string[];

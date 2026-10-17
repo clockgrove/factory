@@ -19,7 +19,7 @@ import type {
 import { importSourceAssets } from "../media.js";
 import { addWorktree, pinnedGitRaw } from "../process.js";
 
-export const OPENAI_INPUT_MAX_BYTES = 5 * 1024 * 1024;
+const OPENAI_INPUT_MAX_BYTES = 5 * 1024 * 1024;
 export const OPENAI_OUTPUT_MAX_BYTES = 200 * 1024 * 1024;
 export const sha256 = (bytes: Buffer): string =>
   createHash("sha256").update(bytes).digest("hex");

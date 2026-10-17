@@ -27,7 +27,7 @@ export async function bounded<T>(
 }
 
 /** Require a confirmed graceful stop; force cleanup before reporting failure. */
-export async function stopCopilotClient(
+async function stopCopilotClient(
   client: StoppableCopilotClient,
   timeoutMs = 2_000,
 ): Promise<void> {

@@ -37,7 +37,7 @@ export interface CopilotWorkerSession {
 }
 export const copilotDigest = (value: unknown): string =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
-export const copilotSessionOwner = (ref: AgentSessionRef): string =>
+const copilotSessionOwner = (ref: AgentSessionRef): string =>
   copilotDigest([ref.scope, ref.adapter, ref.identity]);
 export function copilotSessionRoot(root: string, identity: string): string {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(identity))

@@ -7,6 +7,7 @@ import {
   CaptureWriter,
   type InteractionMetadata,
 } from "../capture.js";
+import { codexJsonBoundaries } from "../codex-boundary-telemetry.js";
 import type { HarnessRequest, ModelInvocationUsage } from "../contracts.js";
 import type { PromptSection } from "../prompt-bytes.js";
 import {
@@ -283,8 +284,6 @@ function safePartialText(text: string, secrets: string[]): string {
   return text.slice(0, end);
 }
 
-import { codexJsonBoundaries } from "../codex-boundary-telemetry.js";
-
 /** Adapter observations only: these records never decide a worker outcome. */
 export class WorkerInteractionCapture {
   private writer?: CaptureWriter;
@@ -529,13 +528,9 @@ export class WorkerInteractionCapture {
   ): void {
     this.safely(() => {
       if (message.type === "result") {
-        // Supplied null is an unavailable current-turn delta, never a fallback
-        // to lifetime transcript cost. Omitted accounting retains fresh callers.
-        const cost = claudeCost(
-          accounting === undefined
-            ? message.total_cost_usd
-            : accounting.costUsd,
-        );
+        // Null is an unavailable current-turn delta, never a fallback to
+        // lifetime transcript cost.
+        const cost = claudeCost(accounting?.costUsd);
         this.terminalCost =
           cost === undefined || message.subtype === "error_during_execution"
             ? undefined
@@ -547,10 +542,7 @@ export class WorkerInteractionCapture {
                   message.subtype === "success" && !message.is_error
                     ? "available"
                     : "partial",
-                provenance:
-                  accounting === undefined
-                    ? "Claude SDK total_cost_usd"
-                    : "Claude SDK current-turn total_cost_usd delta",
+                provenance: "Claude SDK current-turn total_cost_usd delta",
               };
       }
       for (const { event, content } of claudeCaptureEvents(

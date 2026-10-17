@@ -1,5 +1,5 @@
 import { attachFault, type Fault, transient } from "../fault.js";
-import * as time from "../clock.js";
+import { now } from "../clock.js";
 import { GITHUB_LAG_MS } from "../github-client.js";
 
 /**
@@ -8,17 +8,6 @@ import { GITHUB_LAG_MS } from "../github-client.js";
  * attempt never inherits a window.
  */
 const firstSeen = new Map<string, number>();
-
-let now = time.now;
-
-/** Replace the lag window's clock; returns a restore. Tests only. */
-export function setLagClock(clock: () => number): () => void {
-  const previous = now;
-  now = clock;
-  return () => {
-    now = previous;
-  };
-}
 
 /**
  * A delivery postcondition that does not hold yet (a merge GitHub has not

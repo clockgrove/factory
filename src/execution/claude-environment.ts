@@ -11,7 +11,7 @@ import type { McpServerStatus } from "@anthropic-ai/claude-agent-sdk";
 import { pathInsideRoot } from "./harness-support.js";
 
 export const factoryMcpServerName = "factory-worktree";
-export const factoryMcpServerVersion = "1.0.0";
+const factoryMcpServerVersion = "1.0.0";
 export const factoryMcpToolName = "mcp__factory-worktree__read_file";
 
 interface ReadEnvironmentInput {
@@ -56,7 +56,7 @@ export function factoryMcpToolAllowed(
 }
 
 /** Fail closed before accepting model output from an unexpected inventory. */
-export function assertFactoryMcpReady(statuses: McpServerStatus[]): void {
+function assertFactoryMcpReady(statuses: McpServerStatus[]): void {
   const status = statuses[0];
   if (
     statuses.length !== 1 ||

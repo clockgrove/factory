@@ -13,8 +13,7 @@ import type {
   BetaManagedAgentsEventParams,
 } from "@anthropic-ai/sdk/resources/beta/sessions/events";
 
-export const CLAUDE_MANAGED_ADAPTER = "@anthropic-ai/sdk@0.129.0";
-export const CLAUDE_MANAGED_BETA = "managed-agents-2026-04-01";
+const CLAUDE_MANAGED_BETA = "managed-agents-2026-04-01";
 export interface ClaudeManagedConfig {
   agentId: string;
   agentVersion: number;
@@ -199,7 +198,7 @@ export class ClaudeManagedClient {
   readonly sdk: Anthropic;
   constructor(
     readonly config: ClaudeManagedConfig,
-    options: { apiKey?: string; fetch?: typeof fetch } = {},
+    options: { apiKey?: string } = {},
   ) {
     const apiKey = options.apiKey ?? process.env[config.credentialEnv];
     if (!apiKey)
@@ -212,7 +211,6 @@ export class ClaudeManagedClient {
       baseURL: "https://api.anthropic.com",
       maxRetries: 0,
       timeout: (config.timeoutSeconds ?? 900) * 1000,
-      ...(options.fetch && { fetch: options.fetch }),
     });
   }
   private get headers() {

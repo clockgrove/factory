@@ -36,7 +36,7 @@ function permissionHandler(input: GitHubCopilotWorkerInput): PermissionHandler {
 }
 
 /** SDK 1.0.13 exposes the configured grep file-search capability as rg. */
-export function canonicalCopilotTools(tools: readonly string[]): string[] {
+function canonicalCopilotTools(tools: readonly string[]): string[] {
   return tools.map((name) => (name === "grep" ? "rg" : name));
 }
 

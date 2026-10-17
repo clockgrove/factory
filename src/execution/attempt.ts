@@ -1,8 +1,7 @@
 /**
- * How execution drivers end an attempt (recovery v2.3, #515). These replace
- * Interruption, SettledAttemptFailure, retryTransient and failAttempt: a
- * driver throws the raw error and its classifier attaches the fault, or it
- * throws a StepFault it built from structure.
+ * How execution drivers end an attempt (recovery v2.3, #515): a driver
+ * throws the raw error and its classifier attaches the fault, or it throws a
+ * StepFault it built from structure.
  */
 import { AuthenticationRequiredError } from "../contracts.js";
 import { attachedFault, StepFault, transient, workFault } from "../fault.js";

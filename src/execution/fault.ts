@@ -7,15 +7,7 @@ import {
 } from "../provider-turn.js";
 
 /** Methods whose effect may have happened when their response was lost. */
-const EFFECTS = new Set([
-  "start",
-  "cancel",
-  "create",
-  "prepareRepository",
-  "upload",
-  "execute",
-  "destroy",
-]);
+const EFFECTS = new Set(["start", "cancel"]);
 
 const CREDENTIAL_FIX =
   "Set the named credential in the controller environment, then `factory run`";

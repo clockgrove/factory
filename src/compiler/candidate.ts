@@ -196,7 +196,7 @@ export function verifyPlanCandidate(
   body: string,
   baseSha: string,
   checkout: string,
-  configDigest = digest("unbound-test-configuration"),
+  configDigest: string,
   allowPending = false,
   configuredConcurrency?: number,
 ): void {
@@ -382,7 +382,7 @@ export async function resolvePlan(
     answer: string;
     reason: string;
   },
-  configDigest = digest("unbound-test-configuration"),
+  configDigest: string,
 ): Promise<PlanCandidate> {
   verifyPlanCandidate(
     candidate,

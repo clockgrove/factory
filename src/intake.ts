@@ -110,8 +110,8 @@ import {
   installationContinuations,
   readContinuation,
   releaseControllerLock,
+  readScannedContinuation,
   retargetControllerLock,
-  retiredContinuation,
 } from "./state-store.js";
 
 /** A fresh in-memory Project view; never persisted or restored as a queue. */
@@ -1195,10 +1195,9 @@ async function applyControlMutation(
         entry.state !== "queued"
       )
         throw new Error(`Objective #${objectives[index]} is not admitted`);
-      // Retired terminal history is settled and never read (#1457).
-      const state = retiredContinuation(config.repository, entry.objective)
-        ? undefined
-        : readContinuation(config.repository, entry.objective);
+      // Retired terminal history is settled and never acted on (#1457).
+      const read = readScannedContinuation(config.repository, entry.objective);
+      const state = read === "history" ? undefined : read;
       if (
         (state && !terminal(state)) ||
         current.history.some(
@@ -1907,9 +1906,13 @@ async function runIntakeOwned(
         for (const entry of observed.entries.filter(
           (entry) => entry.state === "queued",
         )) {
-          // Retired terminal history needs nothing and is never read (#1457).
-          if (retiredContinuation(config.repository, entry.objective)) continue;
-          const state = readContinuation(config.repository, entry.objective);
+          // Retired terminal history needs nothing and is never acted on (#1457).
+          const read = readScannedContinuation(
+            config.repository,
+            entry.objective,
+          );
+          if (read === "history") continue;
+          const state = read;
           if (terminal(state)) {
             // A split parent whose last child settle failed closes here; it
             // needs only local state and the parent's own provider.
@@ -2097,8 +2100,9 @@ async function runIntakeOwned(
           observed.entries.every(
             (entry) =>
               entry.state === "withdrawn" ||
-              retiredContinuation(config.repository, entry.objective) ||
-              terminal(readContinuation(config.repository, entry.objective)),
+              ((read) => read === "history" || terminal(read))(
+                readScannedContinuation(config.repository, entry.objective),
+              ),
           )
         )
           return record;

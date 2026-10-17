@@ -6100,23 +6100,21 @@ export function acknowledgedArchiveOriginal(
   const directory = paths(config.repository).git;
   let known = acknowledgedFiles.get(directory);
   if (known?.commit !== last) {
-    let manifest: RecoveryCheckpointManifest;
+    let files: Map<string, string>;
     try {
-      manifest = JSON.parse(
+      const manifest = JSON.parse(
         git(directory, options, ["show", `${last}:checkpoint.json`]).toString(
           "utf8",
         ),
+      ) as RecoveryCheckpointManifest;
+      files = new Map(
+        manifest.files.map((file) => [file.path, file.ref.digest]),
       );
     } catch {
       // An unreadable manifest proves nothing now and is not cached.
       return false;
     }
-    known = {
-      commit: last,
-      files: new Map(
-        manifest.files.map((file) => [file.path, file.ref.digest]),
-      ),
-    };
+    known = { commit: last, files };
     acknowledgedFiles.set(directory, known);
   }
   return known.files.get(path) === hash(bytes);

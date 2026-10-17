@@ -957,6 +957,7 @@ function queueOwnerReferences(record: QueueOwnerClaim): ContentRef[] {
 function assertQueueOwnerReferenceBodies(
   record: QueueOwnerClaim,
   readReference: (ref: ContentRef) => Uint8Array,
+  persisted = false,
 ): ContentRef[] {
   parseQueueRecord(
     Buffer.from(JSON.stringify(record)),
@@ -974,33 +975,25 @@ function assertQueueOwnerReferenceBodies(
   };
   const json = (ref: ContentRef) =>
     JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes(ref)));
-  const snapshot = (ref: ContentRef) =>
-    parsePortableContinuation(json(ref), record.repository, record.objective);
-  // A settled claim is history. Its run snapshots match their digests, so one
-  // this version does not parse is an earlier version's shape, not
-  // corruption: every original is still read and checked, but those shapes
-  // are not (#1457).
-  if (
-    record.settled &&
-    [
-      record.runBinding?.initialSnapshot,
-      record.settled.handoff?.stoppedSnapshot,
-      record.settled.cancellation?.initialSnapshot,
-      record.settled.cancellation?.cancelledSnapshot,
-    ].some((ref) => {
-      if (!ref) return false;
-      try {
-        snapshot(ref);
-        return false;
-      } catch {
-        return true;
-      }
-    })
-  ) {
-    const refs = queueOwnerReferences(record);
-    for (const reference of refs) bytes(reference);
-    return refs;
-  }
+  // A settled claim already persisted is history. Its run snapshots match
+  // their digests, so one this version does not parse is an earlier
+  // version's shape, not corruption: only the comparisons that need that
+  // snapshot are skipped; every original and binding is still checked
+  // (#1457). A claim being settled now is always read in full.
+  const history = persisted && record.settled !== undefined;
+  const snapshot = (ref: ContentRef): ContinuationState | undefined => {
+    const value = json(ref);
+    try {
+      return parsePortableContinuation(
+        value,
+        record.repository,
+        record.objective,
+      );
+    } catch (error) {
+      if (!history) throw error;
+      return undefined;
+    }
+  };
   const matches = (state: ContinuationState, runId: string) => {
     if (
       state.runId !== runId ||
@@ -1032,11 +1025,10 @@ function assertQueueOwnerReferenceBodies(
     if (typeof failure !== "string" || !failure)
       throw new Error("Reservation failure requires its original error");
   }
-  if (record.runBinding)
-    matches(
-      snapshot(record.runBinding.initialSnapshot),
-      record.runBinding.runId,
-    );
+  if (record.runBinding) {
+    const initial = snapshot(record.runBinding.initialSnapshot);
+    if (initial) matches(initial, record.runBinding.runId);
+  }
   if (record.settled?.handoff) {
     const proof = record.settled.handoff;
     const original = parseQueueRecord(
@@ -1057,16 +1049,16 @@ function assertQueueOwnerReferenceBodies(
       );
     const initial = snapshot(original.runBinding.initialSnapshot);
     const stopped = snapshot(proof.stoppedSnapshot);
-    matches(initial, original.runBinding.runId);
-    matches(stopped, original.runBinding.runId);
+    if (initial) matches(initial, original.runBinding.runId);
+    if (stopped) matches(stopped, original.runBinding.runId);
     if (
-      initial.configDigest !== proof.configDigest ||
-      stopped.configDigest !== proof.configDigest
+      (initial && initial.configDigest !== proof.configDigest) ||
+      (stopped && stopped.configDigest !== proof.configDigest)
     )
       throw new Error(
         "Stopped handoff configuration differs from its original run",
       );
-    assertStoppedClaimState(stopped);
+    if (stopped) assertStoppedClaimState(stopped);
   }
   const proof = record.settled?.cancellation;
   if (proof) {
@@ -1089,16 +1081,17 @@ function assertQueueOwnerReferenceBodies(
       throw new Error("Cancellation cannot rewrite the original Project claim");
     const initial = snapshot(proof.initialSnapshot);
     const terminal = snapshot(proof.cancelledSnapshot);
-    matches(initial, record.settled!.runId!);
-    matches(terminal, record.settled!.runId!);
+    if (initial) matches(initial, record.settled!.runId!);
+    if (terminal) matches(terminal, record.settled!.runId!);
     if (
-      initial.configDigest !== proof.configDigest ||
-      terminal.configDigest !== proof.configDigest ||
-      !terminal.cancelledAt ||
-      !terminal.cancelRequested ||
-      Date.parse(record.settled!.at) < Date.parse(terminal.cancelledAt) ||
-      (isExecutionState(terminal) && terminal.finalAcceptance) ||
-      cancelledContinuationResourceHold(terminal)
+      (initial && initial.configDigest !== proof.configDigest) ||
+      (terminal &&
+        (terminal.configDigest !== proof.configDigest ||
+          !terminal.cancelledAt ||
+          !terminal.cancelRequested ||
+          Date.parse(record.settled!.at) < Date.parse(terminal.cancelledAt) ||
+          (isExecutionState(terminal) && terminal.finalAcceptance) ||
+          cancelledContinuationResourceHold(terminal)))
     )
       throw new Error(
         "Project cancellation has no authenticated terminal quiescent continuation",
@@ -1119,11 +1112,12 @@ function assertQueueOwnerReferenceBodies(
         record.deadlineAt === null ||
         original.priorRunId ||
         original.runBinding ||
-        !initial.coordinator?.phaseStartedAt ||
-        Date.parse(initial.coordinator.phaseStartedAt) <
-          Date.parse(record.at) ||
-        Date.parse(initial.coordinator.phaseStartedAt) >
-          Date.parse(record.deadlineAt)
+        (initial &&
+          (!initial.coordinator?.phaseStartedAt ||
+            Date.parse(initial.coordinator.phaseStartedAt) <
+              Date.parse(record.at) ||
+            Date.parse(initial.coordinator.phaseStartedAt) >
+              Date.parse(record.deadlineAt)))
       )
         throw new Error("Historical first-run Project provenance is ambiguous");
       const { checkpoints } = proof.lineage;
@@ -1184,8 +1178,9 @@ function assertQueueOwnerReferenceBodies(
           record.authorityDigest ||
         Date.parse(manifests.before.createdAt) > Date.parse(record.at) ||
         Date.parse(manifests.claimed.createdAt) < Date.parse(record.at) ||
-        Date.parse(manifests.initial.createdAt) <
-          Date.parse(initial.coordinator.phaseStartedAt)
+        (initial &&
+          Date.parse(manifests.initial.createdAt) <
+            Date.parse(initial.coordinator!.phaseStartedAt))
       )
         throw new Error(
           "Historical cancellation witnesses differ from original claim/run cohort",
@@ -1199,16 +1194,21 @@ function assertQueueOwnerReferenceBodies(
 export async function authenticateQueueOwnerReferences(
   record: QueueOwnerClaim,
   readReference: (ref: ContentRef) => Promise<Uint8Array> | Uint8Array,
+  persisted = false,
 ): Promise<ContentRef[]> {
   const refs = queueOwnerReferences(record);
   const bodies = new Map<string, Uint8Array>();
   for (const reference of refs)
     bodies.set(reference.digest, await readReference(reference));
-  return assertQueueOwnerReferenceBodies(record, (reference) => {
-    const bytes = bodies.get(reference.digest);
-    if (!bytes) throw new Error("Project ownership original is unavailable");
-    return bytes;
-  });
+  return assertQueueOwnerReferenceBodies(
+    record,
+    (reference) => {
+      const bytes = bodies.get(reference.digest);
+      if (!bytes) throw new Error("Project ownership original is unavailable");
+      return bytes;
+    },
+    persisted,
+  );
 }
 function queueOperationReferences(operation: QueueOperation): ContentRef[] {
   const failure = operation.beforeEffectFailure;
@@ -1386,7 +1386,7 @@ export function checkpointQueueRecordReferences(
   };
   const contentRefs = [source.ref];
   if (record.kind === "project-queue-owner")
-    contentRefs.push(...assertQueueOwnerReferenceBodies(record, read));
+    contentRefs.push(...assertQueueOwnerReferenceBodies(record, read, true));
   else {
     assertQueueOperationReferenceBodies(record, read);
     contentRefs.push(...queueOperationReferences(record));

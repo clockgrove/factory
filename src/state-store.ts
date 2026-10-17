@@ -306,10 +306,23 @@ export function retiredContinuation(
 }
 
 /**
- * Every Objective snapshot a scan of the installation acts on, in Objective
- * order. Retired terminal history is skipped unread (#1457); any other
- * snapshot that does not parse fails loudly.
+ * An Objective's snapshot for a scan of the installation, or "history" when
+ * this version does not read it and it is retired terminal history, which is
+ * never acted on (#1457). Any other snapshot that does not parse fails loudly.
  */
+export function readScannedContinuation(
+  repository: string,
+  objective: number,
+): ContinuationState | "history" | undefined {
+  try {
+    return readContinuation(repository, objective);
+  } catch (error) {
+    if (retiredContinuation(repository, objective)) return "history";
+    throw error;
+  }
+}
+
+/** Every Objective snapshot a scan of the installation acts on, in Objective order. */
 export function installationContinuations(
   repository: string,
 ): ContinuationState[] {
@@ -320,9 +333,8 @@ export function installationContinuations(
     .map(Number)
     .sort((left, right) => left - right)
     .flatMap((objective) => {
-      if (retiredContinuation(repository, objective)) return [];
-      const state = readContinuation(repository, objective);
-      return state ? [state] : [];
+      const state = readScannedContinuation(repository, objective);
+      return state && state !== "history" ? [state] : [];
     });
 }
 
@@ -1127,7 +1139,8 @@ export async function restoreRecoveryCheckpoint(args: {
   );
   const assertProjectQueueWriteReceipt: typeof import("./github-project-queue.js").assertProjectQueueWriteReceipt =
     (await import("./github-project-queue.js")).assertProjectQueueWriteReceipt;
-  const { proposalPersistenceReferences } = await import("./proposals.js");
+  const { noPendingSubmission, originalReader, proposalPersistenceReferences } =
+    await import("./proposals.js");
   const { verifyContinuationReferenceClosure } = await import(
     "./recovery-checkpoint-closure.js"
   );
@@ -1291,33 +1304,34 @@ export async function restoreRecoveryCheckpoint(args: {
             if (effect.rejectedOriginal)
               await readBytes(effect.rejectedOriginal);
           }
-        else await authenticateQueueOwnerReferences(record, readBytes);
+        else await authenticateQueueOwnerReferences(record, readBytes, true);
         replicaFiles.push(file);
       } else if (
         file.kind === "historical" &&
         /^proposals\/[a-f0-9-]{36}\.json$/.test(file.path)
       ) {
         const journal = await readBytes(file.ref);
+        const read = originalReader((ref) => {
+          const data = bytes.get(key(ref));
+          if (!data)
+            throw new Error(
+              "Required proposal original is absent from the verified closure",
+            );
+          return data;
+        });
         let description: ReturnType<typeof proposalPersistenceReferences>;
         try {
           description = proposalPersistenceReferences(
             journal,
             config.repository,
             file.path.split("/")[1]!.slice(0, -5),
-            (ref) => {
-              const data = bytes.get(key(ref));
-              if (!data)
-                throw new Error(
-                  "Required proposal original is absent from the verified closure",
-                );
-              return data;
-            },
+            read,
           );
         } catch (error) {
-          // An archived journal an earlier version wrote, with no submission
-          // pending, is history: installed as its exact bytes (#1457).
-          if (JSON.parse(journal.toString("utf8")).pending !== undefined)
-            throw error;
+          // An archived journal whose shape an earlier version wrote, with no
+          // submission pending, is history: installed as its exact bytes. A
+          // missing original is a read failure and still fails (#1457).
+          if (read.failed || !noPendingSubmission(journal)) throw error;
           replicaFiles.push(file);
           continue;
         }
@@ -1433,6 +1447,17 @@ export async function restoreRecoveryCheckpoint(args: {
       ],
       readVerifiedBlob: readBytes,
     });
+    // Its evidence stays in the archive history, as the source kept it. The
+    // record precedes the bytes, so an interrupted restore never leaves an
+    // earlier-shape snapshot unretired (#1457).
+    for (const entry of history)
+      recordRetirement(
+        config.repository,
+        entry.objective,
+        entry.bytes,
+        entry.evidenceCommit,
+        [],
+      );
     for (const file of replicaFiles) {
       const path = join(root, file.path);
       if (!existsSync(path)) {
@@ -1452,15 +1477,6 @@ export async function restoreRecoveryCheckpoint(args: {
         }
       }
     }
-    // Its evidence stays in the archive history, as the source kept it.
-    for (const entry of history)
-      recordRetirement(
-        config.repository,
-        entry.objective,
-        entry.bytes,
-        entry.evidenceCommit,
-        [],
-      );
     const objectives: {
       objective: number;
       runId: string;

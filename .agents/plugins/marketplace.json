@@ -9,7 +9,7 @@
       "source": {
         "source": "url",
         "url": "https://github.com/clockgrove/factory.git",
-        "ref": "v0.3.42"
+        "ref": "v0.3.43"
       },
       "policy": {
         "installation": "AVAILABLE",

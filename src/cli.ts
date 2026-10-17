@@ -44,6 +44,7 @@ import {
 } from "./intake.js";
 import { runDreamCommand } from "./learning.js";
 import { operatorName } from "./operator.js";
+import { QueueAuthorityChanged } from "./project-queue-state.js";
 import { runProposeCommand } from "./proposals.js";
 import {
   loadServiceLoginCredentials,
@@ -315,11 +316,22 @@ async function supervisorCommand(args: string[], path: string): Promise<void> {
         : [],
     );
     loadServiceLoginCredentials(config, loaded);
-    reportIntake(
-      await compose(config, loaded).runIntake({
+    let record: IntakeAuthorization;
+    try {
+      record = await compose(config, loaded).runIntake({
         backgroundConfigurationPath: path,
-      }),
-    );
+      });
+    } catch (error) {
+      // Queue metadata approved under this installation's earlier queue
+      // authority waits for the operator's re-authorization (#1305).
+      if (!(error instanceof QueueAuthorityChanged)) throw error;
+      console.error(
+        `Factory: ${error.message}; then start the service with factory supervisor start`,
+      );
+      process.exitCode = EXIT_NEEDS_DECISION;
+      return;
+    }
+    reportIntake(record);
     return;
   }
   if (

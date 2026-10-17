@@ -1538,6 +1538,12 @@ function completedQueueOperation(
     )
   );
 }
+/**
+ * An authenticated receipt of this installation's queue that its earlier
+ * queue authority approved. It authorizes nothing; only the operator's
+ * re-authorization replaces it, so a service waits for them (#1305).
+ */
+export class QueueAuthorityChanged extends Error {}
 function producer(
   config: FactoryConfig,
   history: QueueRecord[],
@@ -1553,8 +1559,11 @@ function producer(
       entry.id === metadata.receiptId,
   );
   // Each refusal names its cause and the operator's next step (#1298).
-  const refusal = (reason: string) =>
-    new Error(
+  const refusal = (
+    reason: string,
+    Kind: new (message: string) => Error = Error,
+  ) =>
+    new Kind(
       `Project queue metadata lacks its exact authenticated explicit producer receipt: ${reason}`,
     );
   if (!record)
@@ -1578,6 +1587,7 @@ function producer(
       record.objective === undefined
         ? `control receipt ${record.id} was approved under a different queue authority (queued settings such as autonomy, provider or the Project binding changed); re-authorize with factory queue resume`
         : `receipt ${record.id} for Objective #${record.objective} was approved under a different queue authority (queued settings such as autonomy, provider or the Project binding changed); re-authorize with factory queue resume, then withdraw and re-add it with factory queue remove ${record.objective} and factory queue add ${record.objective} (if it stopped unfinished, cancel it first with factory cancel --objective ${record.objective})`,
+      QueueAuthorityChanged,
     );
   if (
     history.some(

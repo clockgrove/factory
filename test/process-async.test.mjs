@@ -3911,6 +3911,7 @@ test("source readiness prepares each real fresh checkout before its phase checks
       decisionRequired: null,
       requiredPreIntegrationChecks: [],
       sourceObligations: [],
+      split: null,
       items: [
         {
           ...item,

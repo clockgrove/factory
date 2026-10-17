@@ -197,9 +197,16 @@ async function readPlanAnswer(
   store: ContentStore,
   ref: ContentRef,
 ): Promise<unknown> {
-  const bytes = Buffer.from(
-    await new Response(await store.open(ref)).arrayBuffer(),
-  );
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(
+      await new Response(await store.open(ref)).arrayBuffer(),
+    );
+  } catch {
+    throw new PlanningReviewBindingError(
+      "Retained plan answer is unavailable from the content store; preserve the planning record and use supported cancellation before a corrected successor",
+    );
+  }
   if (
     bytes.length !== ref.bytes ||
     createHash("sha256").update(bytes).digest("hex") !== ref.digest
@@ -660,10 +667,10 @@ async function compilePlanAdmitted(
       return result;
     },
   };
-  // The next round revises this round's answer; without one it plans anew.
+  // The next round revises this round's answer. Without one (a change-list
+  // that did not apply, or an unreadable answer) it revises the same plan.
   const nextRevision = () => {
-    if (record.answer === undefined) delete record.revision;
-    else record.revision = record.answer;
+    if (record.answer !== undefined) record.revision = record.answer;
     delete record.answer;
   };
   while (true) {

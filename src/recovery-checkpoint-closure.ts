@@ -490,6 +490,8 @@ function continuationReferences(value: unknown): ContinuationReferences & {
   git(state.baseSha, "commit", "objective-base");
   recipe(state.workflowRecipePin);
   add(state.planningRecovery?.contextLookup?.packetRef);
+  add(state.planningRecovery?.answer);
+  add(state.planningRecovery?.revision);
   for (const receipt of [
     ...(state.planningRecovery?.invocations ?? []),
     ...(state.planningRecovery?.history ?? []).flatMap(
@@ -704,6 +706,8 @@ function memoryReferences(
       const recovery = object(value.planningRecovery);
       if (recovery.contextLookup !== undefined)
         add(object(recovery.contextLookup).packetRef as ContentRef);
+      for (const key of ["answer", "revision"])
+        if (recovery[key] !== undefined) add(recovery[key] as ContentRef);
       for (const receipt of [
         ...((recovery.invocations as
           | { nativeReturns?: ContentRef[] }[]

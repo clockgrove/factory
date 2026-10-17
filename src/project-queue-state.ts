@@ -294,6 +294,8 @@ export interface QueueOwnerClaim {
       failure: ContentRef;
     };
     abandonment?: QueueReservationAbandonmentProof;
+    /** The settled run's unprojected plan was refused; it never dispatches again. */
+    refusal?: { schemaVersion: 1; at: string };
   };
 }
 
@@ -864,6 +866,7 @@ export function parseQueueRecord(
         "handoff",
         "reservationFailure",
         "abandonment",
+        "refusal",
       ]);
       if (
         !date(settled.at) ||
@@ -946,6 +949,18 @@ export function parseQueueRecord(
           )
             throw new Error("Invalid reservation ancestry original");
         }
+      }
+      if (settled.refusal !== undefined) {
+        const refusal = object(settled.refusal);
+        only(refusal, ["schemaVersion", "at"]);
+        if (
+          refusal.schemaVersion !== 1 ||
+          !date(refusal.at) ||
+          !uuid(settled.runId) ||
+          settled.cancellation !== undefined ||
+          Date.parse(String(refusal.at)) < Date.parse(String(settled.at))
+        )
+          throw new Error("Invalid Project plan refusal settlement");
       }
       if (settled.reservationFailure !== undefined) {
         const proof = object(settled.reservationFailure);
@@ -1488,11 +1503,16 @@ function save(record: QueueRecord): void {
         ...oldBinding
       } = previous;
       const { settled: newSettled, runBinding: newRun, ...newBinding } = record;
+      // A plan refusal is the only later addition to a settlement.
+      const { refusal: oldRefusal, ...oldTerms } = oldSettled ?? {};
+      const { refusal: newRefusal, ...newTerms } = newSettled ?? {};
       if (
         JSON.stringify(oldBinding) !== JSON.stringify(newBinding) ||
         (oldRun && !sameRunBinding(oldRun, newRun)) ||
         (oldSettled &&
-          JSON.stringify(oldSettled) !== JSON.stringify(newSettled))
+          (JSON.stringify(oldTerms) !== JSON.stringify(newTerms) ||
+            (oldRefusal &&
+              JSON.stringify(oldRefusal) !== JSON.stringify(newRefusal))))
       )
         throw new Error(
           "Original Project owner claim and settlement are immutable",
@@ -4413,9 +4433,12 @@ export async function claimProjectQueueRun(
     observed = await observeProjectQueue(config, github);
     entry = approvedEntry(observed);
   }
+  // A refused plan's run ended before projection; the next run plans afresh.
   const prior = observed.history.filter(
     (record): record is QueueOwnerClaim =>
-      record.kind === "project-queue-owner" && record.objective === objective,
+      record.kind === "project-queue-owner" &&
+      record.objective === objective &&
+      !record.settled?.refusal,
   );
   if (
     observed.history.some(
@@ -5774,6 +5797,54 @@ export async function settleStoppedProjectQueueRun(
   )
     throw new Error("Stopped handoff originals changed before settlement");
   save(claim);
+  await awaitCheckpointAdmission(config.repository, "explicit");
+}
+
+/**
+ * A refused, unprojected plan ends its run: every settled claim of that run
+ * records the refusal so the next run of the Objective plans again. Called by
+ * the exclusive decision owner before it removes the preparation.
+ */
+export async function settleRefusedProjectQueueRun(
+  config: FactoryConfig,
+  objective: number,
+  runId: string,
+  lock: ControllerLock,
+): Promise<void> {
+  if (!config.queue?.project) return;
+  requireProjectQueueEffects(config);
+  const identity = linuxProcessIdentity(process.pid);
+  const owner = [
+    objectiveLockPath(config.repository, objective),
+    installationLockPath(config.repository),
+  ]
+    .map((path) => readControllerOwner(path))
+    .find((candidate) => candidate?.token === lock.token);
+  if (
+    !identity ||
+    !owner ||
+    owner.pid !== process.pid ||
+    owner.startTime !== identity.startTime ||
+    owner.objective !== objective
+  )
+    throw new Error(
+      "Project plan refusal requires its actual exclusive controller identity",
+    );
+  await awaitCheckpointAdmission(config.repository, "explicit");
+  const claims = (await readQueueHistory(config)).filter(
+    (record): record is QueueOwnerClaim =>
+      record.kind === "project-queue-owner" && record.objective === objective,
+  );
+  if (claims.some((claim) => !claim.settled))
+    throw new Error(
+      "This Objective has an unfinished or foreign Project owner; settle it before refusing the plan",
+    );
+  const at = new Date().toISOString();
+  for (const claim of claims) {
+    if (claim.settled!.runId !== runId || claim.settled!.refusal) continue;
+    claim.settled!.refusal = { schemaVersion: 1, at };
+    save(claim);
+  }
   await awaitCheckpointAdmission(config.repository, "explicit");
 }
 

@@ -28,6 +28,7 @@ import { packageManagerUpdate } from "../package-manager-update.js";
 import { fetchHead, git } from "../process.js";
 import {
   assertCompletedCoverage,
+  finalReviewCriteria,
   objectiveCandidate,
   objectivePreparationCommands,
 } from "../qa.js";
@@ -431,7 +432,10 @@ export async function finalizeObjective(args: {
               evidence: acceptanceEvidence,
               contentStore,
               ...(adaptive ? { adaptiveContext: adaptive.packet } : {}),
-              criteria: objectiveCriteria(issue.body),
+              criteria: finalReviewCriteria(
+                state.graph,
+                objectiveCriteria(issue.body),
+              ),
               sources: finalSources,
               evidenceSources: [
                 ...objectiveEvidence.evidence,

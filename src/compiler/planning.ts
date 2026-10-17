@@ -565,7 +565,16 @@ export function prepareCompilationRequest(args: {
       }),
     },
     ...(scripts.length ? { fixedScripts: scripts } : {}),
-    coverageObligations: coverageObligations(body, objectiveCriteria(body)),
+    // Source obligations an earlier graph extracted stay controller
+    // obligations, so an amendment keeps proving them.
+    coverageObligations: [
+      ...coverageObligations(body, objectiveCriteria(body)),
+      ...(amendment?.currentGraph.coverage ?? [])
+        .filter((entry) => entry.source.lines)
+        .map(({ criterionId, source, statement }) =>
+          structuredClone({ criterionId, source, statement }),
+        ),
+    ],
     checkNames: workflowCheckNames(checkout, baseSha),
     baseSha,
     sources,
@@ -594,10 +603,8 @@ export function validateCompiledGraph(args: {
     if (request.workflowRecipe && !request.compileContext?.previousGraph)
       assertWorkflowRecipeGraph(graph, request.workflowRecipe);
     assertDiscoveryContextScope(graph, request.contextLookup);
-    hydrateCoverageSources(
-      graph,
-      coverageObligations(body, objectiveCriteria(body)),
-    );
+    const obligations = request.coverageObligations ?? [];
+    hydrateCoverageSources(graph, obligations);
     hydrateWorkerInputSources(graph, sources);
     normalizeExecutionProfiles(graph, executionProfiles);
     assertGraphExpansions(graph, { executionProfiles });
@@ -615,7 +622,7 @@ export function validateCompiledGraph(args: {
     assertCoverageSources(
       graph,
       sources,
-      coverageObligations(body, objectiveCriteria(body)),
+      obligations,
       finalObjectiveCommands(body),
       commandAuthority(body),
     );

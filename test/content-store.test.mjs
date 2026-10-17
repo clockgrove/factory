@@ -5240,6 +5240,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     contextId: compilation.wire.data.contextId,
     decisionRequired: null,
     requiredPreIntegrationChecks: [],
+    sourceObligations: [],
     expansions: [],
     conditions: [],
     items: graph.items

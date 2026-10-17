@@ -1086,6 +1086,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       contextId: wire.data.contextId,
       decisionRequired: null,
       requiredPreIntegrationChecks: [],
+      sourceObligations: [],
       items: currentGraph.items.map((item, index) => ({
         kind: "retained",
         id: item.id,

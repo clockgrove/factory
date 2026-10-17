@@ -89,9 +89,35 @@ export interface WorkItem {
   requiredLfsRoles?: string[];
 }
 
+/**
+ * One thing the delivered result must satisfy: an Objective Acceptance
+ * criterion (path OBJECTIVE, controller-enumerated) or an exit item the
+ * planner extracted from a cited source, located by its exact zero-based
+ * inclusive line range and restated in `statement`.
+ */
 export interface CoverageObligation {
   criterionId: string;
-  source: { path: string; digest: string; text: string };
+  source: {
+    path: string;
+    digest: string;
+    text: string;
+    lines?: [number, number];
+  };
+  statement?: string;
+}
+
+/** A located source exit item the plan leaves out, justified by Objective lines. */
+export interface SourceExclusion {
+  source: {
+    path: string;
+    digest: string;
+    text: string;
+    lines: [number, number];
+  };
+  statement: string;
+  reason: string;
+  /** Zero-based OBJECTIVE lines whose constraints or out-of-scope text justify it. */
+  objectiveLines: number[];
 }
 
 export type CoverageProof =
@@ -174,6 +200,8 @@ export interface WorkGraph {
   requiredPreIntegrationChecks?: RequiredPreIntegrationCheck[];
   /** Complete Objective-wide mapping from source obligations to executable proof. */
   coverage: AcceptanceCoverage[];
+  /** Cited-source exit items the plan leaves out of scope; absent means none. */
+  sourceExclusions?: SourceExclusion[];
   objective: number;
   baseSha: string;
   items: WorkItem[];

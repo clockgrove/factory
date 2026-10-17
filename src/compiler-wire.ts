@@ -13,13 +13,20 @@ import {
 } from "./compiler/context.js";
 import {
   assertPlanningExecutionBounds,
+  type CoverageObligation,
   type CoverageProof,
   type PlanningRequest,
   type WorkGraph,
 } from "./contracts.js";
 import { PlannerDecision } from "./fault.js";
 import { ownsPath } from "./ownership.js";
-import { aggregateAcceptance } from "./qa.js";
+import {
+  aggregateAcceptance,
+  coverageCriterion,
+  sourceDigest,
+  sourceLines,
+  sourceObligationId,
+} from "./qa.js";
 import { assertWorkItemFields, validValidationCommand } from "./scheduler.js";
 
 type Schema = {
@@ -356,27 +363,59 @@ export function compilerWire(
       "final-controller",
     ],
   };
+  const proofFields: Record<string, Schema> = {
+    itemId: { ...text, minLength: 1 },
+    proof: {
+      description:
+        "Choose a kind allowed for the owner's item kind by proofModesByItemKind in the compiler choices.",
+      anyOf: Object.keys(proofForms)
+        .filter((form) => !form.endsWith("-ci") || checkNames.length)
+        .map((form) =>
+          strict({
+            kind: { type: "string", enum: [form] },
+            ...proofForms[form],
+          }),
+        ),
+    },
+    environment,
+  };
   // Array position selects the controller obligation. The model chooses its
   // owner once; it cannot repeat or omit an obligation index across items.
   const coverageSchema: Schema = {
     type: "array",
     minItems: obligations.length,
     maxItems: obligations.length,
+    items: strict(proofFields),
+  };
+  // Exit items the planner extracts from cited sources. Each names its exact
+  // line range and is either proved like an Objective obligation or left out
+  // with a reason that cites Objective lines.
+  const sourceObligationsSchema: Schema = {
+    type: "array",
     items: strict({
-      itemId: { ...text, minLength: 1 },
-      proof: {
-        description:
-          "Choose a kind allowed for the owner's item kind by proofModesByItemKind in the compiler choices.",
-        anyOf: Object.keys(proofForms)
-          .filter((form) => !form.endsWith("-ci") || checkNames.length)
-          .map((form) =>
-            strict({
-              kind: { type: "string", enum: [form] },
-              ...proofForms[form],
-            }),
-          ),
+      sourceIndex: integer(request.sources.length),
+      firstLineIndex: integer(),
+      lastLineIndex: integer(),
+      statement: { ...text, minLength: 1 },
+      disposition: {
+        anyOf: [
+          strict({
+            kind: { type: "string", enum: ["covered"] },
+            ...proofFields,
+          }),
+          strict({
+            kind: { type: "string", enum: ["out-of-scope"] },
+            reason: { ...text, minLength: 1 },
+            objectiveLineIndices: {
+              type: "array",
+              minItems: 1,
+              items: integer(),
+              description:
+                "Lines of the OBJECTIVE source whose constraints or out-of-scope text justify leaving this exit item out.",
+            },
+          }),
+        ],
       },
-      environment,
     }),
   };
   const readonlyConstants = {
@@ -491,6 +530,7 @@ export function compilerWire(
       },
     },
     coverage: coverageSchema,
+    sourceObligations: sourceObligationsSchema,
     decisionRequired: {
       description:
         "null when the graph covers every obligation. Otherwise the one obligation the Objective as written does not let you cover (for example, it needs a change the Objective forbids or a human-owned choice) and the concrete question the operator must answer; Factory asks it before using this graph.",
@@ -596,7 +636,10 @@ export function compilerWire(
     proofModesByItemKind: structuredClone(modes),
     obligations: obligations.map((entry, obligationIndex) => ({
       obligationIndex,
-      text: entry.source.text,
+      text: coverageCriterion(entry),
+      ...(entry.source.lines
+        ? { source: entry.source.path, lines: entry.source.lines }
+        : {}),
     })),
     citations: citations.map(
       ({ content: _content, ...entry }, choiceIndex) => ({
@@ -646,6 +689,7 @@ export function compilerWire(
           "contextId",
           "items",
           "coverage",
+          "sourceObligations",
           "requiredPreIntegrationChecks",
           "decisionRequired",
           ...(request.contextLookup ? ["expansions", "conditions"] : []),
@@ -667,7 +711,9 @@ export function compilerWire(
           asked.question.length > 4096
         )
           throw new Error("A required decision must state its question");
-        const criterion = obligation.source.text.replace(/\s+/g, " ").trim();
+        const criterion = coverageCriterion(obligation)
+          .replace(/\s+/g, " ")
+          .trim();
         throw new PlannerDecision(
           `${asked.question.trim()} (criterion: "${criterion.length > 160 ? `${criterion.slice(0, 157)}...` : criterion}")`,
         );
@@ -681,6 +727,8 @@ export function compilerWire(
         throw new PlannerChoiceError(
           "Planner requires one coverage entry per obligation in supplied order",
         );
+      if (!Array.isArray(wire.sourceObligations))
+        throw new Error("Planner source obligations must be an array");
       if (!Array.isArray(wire.requiredPreIntegrationChecks))
         throw new Error("Planner pre-integration checks must be an array");
       const requiredPreIntegrationChecks =
@@ -917,9 +965,13 @@ export function compilerWire(
         }
         graph.items.push(item as unknown as WorkGraph["items"][number]);
       }
-      for (const [obligationIndex, value] of wire.coverage.entries()) {
-        const entry = object(value, "coverage");
-        keys(entry, ["itemId", "proof", "environment"], "coverage");
+      const proved = (
+        entry: ObjectValue,
+        label: string,
+      ): Omit<
+        NonNullable<WorkGraph["coverage"]>[number],
+        keyof CoverageObligation
+      > => {
         const owners = graph.items.filter((item) => item.id === entry.itemId);
         if (owners.length !== 1)
           throw new PlannerChoiceError(
@@ -928,14 +980,13 @@ export function compilerWire(
         const owner = owners[0]!;
         const ownerKind = owner.kind ?? "work";
         const allowedProofModes = modes[ownerKind]!;
-        const obligation = obligations[obligationIndex]!;
         const proof = object(entry.proof, "proof");
         if (
           typeof proof.kind !== "string" ||
           !allowedProofModes.includes(proof.kind)
         )
           throw new PlannerChoiceError(
-            `Planner coverage ${obligationIndex} selects ${JSON.stringify(proof.kind)} for ${owner.id} (${ownerKind}); allowed proof kinds: ${allowedProofModes.join(", ")}`,
+            `Planner ${label} selects ${JSON.stringify(proof.kind)} for ${owner.id} (${ownerKind}); allowed proof kinds: ${allowedProofModes.join(", ")}`,
           );
         keys(proof, ["kind", ...Object.keys(proofForms[proof.kind]!)], "proof");
         let canonicalProof: CoverageProof;
@@ -1076,8 +1127,7 @@ export function compilerWire(
                   "probeValidationIndex",
                 )
               ]!.command;
-        graph.coverage!.push({
-          ...structuredClone(obligation),
+        return {
           itemId: owner.id,
           proof: canonicalProof,
           environment: {
@@ -1085,8 +1135,95 @@ export function compilerWire(
             probe,
             ...(prerequisites.length ? { prerequisites } : {}),
           } as NonNullable<WorkGraph["coverage"]>[number]["environment"],
+        };
+      };
+      for (const [obligationIndex, value] of wire.coverage.entries()) {
+        const entry = object(value, "coverage");
+        keys(entry, ["itemId", "proof", "environment"], "coverage");
+        graph.coverage!.push({
+          ...structuredClone(obligations[obligationIndex]!),
+          ...proved(entry, `coverage ${obligationIndex}`),
         });
       }
+      const objectiveSource = request.sources.find(
+        (source) => source.path === "OBJECTIVE",
+      );
+      const objectiveLines = objectiveSource?.content.split("\n").length ?? 0;
+      const exclusions: NonNullable<WorkGraph["sourceExclusions"]> = [];
+      for (const [position, value] of wire.sourceObligations.entries()) {
+        const entry = object(value, "source obligation");
+        keys(
+          entry,
+          [
+            "sourceIndex",
+            "firstLineIndex",
+            "lastLineIndex",
+            "statement",
+            "disposition",
+          ],
+          "source obligation",
+        );
+        const pinned =
+          request.sources[
+            index(entry.sourceIndex, request.sources.length, "sourceIndex")
+          ]!;
+        const lines: [number, number] = [
+          entry.firstLineIndex as number,
+          entry.lastLineIndex as number,
+        ];
+        const spanText = sourceLines(pinned.content, lines);
+        if (pinned.path === "OBJECTIVE" || spanText === undefined)
+          throw new PlannerChoiceError(
+            `Planner source obligation ${position} must select an existing line range of a cited source, not the Objective`,
+          );
+        if (typeof entry.statement !== "string" || !entry.statement.trim())
+          throw new Error("Planner source obligation must state its exit item");
+        const source = {
+          path: pinned.path,
+          digest: sourceDigest(pinned.content),
+          text: spanText,
+          lines,
+        };
+        const disposition = object(entry.disposition, "disposition");
+        if (disposition.kind === "covered") {
+          keys(
+            disposition,
+            ["kind", "itemId", "proof", "environment"],
+            "covered disposition",
+          );
+          graph.coverage!.push({
+            criterionId: sourceObligationId(source),
+            source,
+            statement: entry.statement,
+            ...proved(disposition, `source obligation ${position}`),
+          });
+          continue;
+        }
+        keys(
+          disposition,
+          ["kind", "reason", "objectiveLineIndices"],
+          "out-of-scope disposition",
+        );
+        if (
+          disposition.kind !== "out-of-scope" ||
+          typeof disposition.reason !== "string" ||
+          !disposition.reason.trim() ||
+          !Array.isArray(disposition.objectiveLineIndices) ||
+          !disposition.objectiveLineIndices.length
+        )
+          throw new Error(
+            "Planner out-of-scope source obligation needs a reason and Objective lines",
+          );
+        exclusions.push({
+          source,
+          statement: entry.statement,
+          reason: disposition.reason,
+          objectiveLines: disposition.objectiveLineIndices.map((line) =>
+            index(line, objectiveLines, "objectiveLineIndices"),
+          ),
+        });
+      }
+      if (exclusions.length) graph.sourceExclusions = exclusions;
       if (referenced.size !== retainedItems.size)
         throw new PlannerChoiceError("Planner omitted retained Work Items");
       if (

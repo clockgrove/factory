@@ -3908,6 +3908,7 @@ test("source readiness prepares each real fresh checkout before its phase checks
       contextId: wire.data.contextId,
       decisionRequired: null,
       requiredPreIntegrationChecks: [],
+      sourceObligations: [],
       items: [
         {
           ...item,

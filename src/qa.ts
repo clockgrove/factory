@@ -123,7 +123,61 @@ export function coverageObligations(
   }));
 }
 
-/** Canonical criterion references resolve only against controller-owned obligations. */
+/** A source exit item's identity binds its exact pinned source and line range. */
+export function sourceObligationId(source: {
+  path: string;
+  digest: string;
+  lines: [number, number];
+}): string {
+  return sourceDigest(
+    JSON.stringify([source.digest, source.path, ...source.lines]),
+  );
+}
+
+/** The exact text of a zero-based inclusive line range, or undefined when out of range. */
+export function sourceLines(
+  content: string,
+  lines: [number, number],
+): string | undefined {
+  const all = content.split("\n");
+  const [first, last] = lines;
+  return Number.isSafeInteger(first) &&
+    Number.isSafeInteger(last) &&
+    first >= 0 &&
+    first <= last &&
+    last < all.length
+    ? all.slice(first, last + 1).join("\n")
+    : undefined;
+}
+
+/** What review judges for an obligation: its statement, or the criterion itself. */
+export function coverageCriterion(entry: CoverageObligation): string {
+  return entry.statement ?? entry.source.text;
+}
+
+/** Final review judges the Objective criteria and every source obligation proved at the final phase. */
+export function finalReviewCriteria(
+  graph: WorkGraph,
+  criteria: string[],
+): string[] {
+  return [
+    ...criteria,
+    ...graph.coverage
+      .filter(
+        (entry) =>
+          entry.source.lines &&
+          (entry.proof.kind === "final-review" ||
+            entry.proof.kind === "final-controller"),
+      )
+      .map(coverageCriterion),
+  ];
+}
+
+/**
+ * Controller obligations resolve against controller-owned identities. A
+ * planner-extracted source obligation has no controller identity yet;
+ * assertCoverageSources verifies its span against the pinned source.
+ */
 export function hydrateCoverageSources(
   graph: WorkGraph,
   obligations: CoverageObligation[],
@@ -133,10 +187,17 @@ export function hydrateCoverageSources(
   const seen = new Set<string>();
   for (const entry of graph.coverage) {
     const obligation = byId.get(entry?.criterionId);
-    if (!obligation || seen.has(entry.criterionId))
+    if (
+      seen.has(entry?.criterionId) ||
+      (!obligation &&
+        (!entry?.source?.lines || entry.source.path === "OBJECTIVE"))
+    )
       throw new Error("Coverage criterion identity is unknown or duplicated");
     seen.add(entry.criterionId);
-    entry.source = { ...obligation.source };
+    if (!obligation) continue;
+    entry.source = structuredClone(obligation.source);
+    if (obligation.statement !== undefined)
+      entry.statement = obligation.statement;
   }
 }
 
@@ -182,7 +243,7 @@ function assertProofShape(entry: AcceptanceCoverage): void {
 function missingEnvironmentDecision(
   entry: AcceptanceCoverage,
 ): PlannerDecision {
-  const criterion = entry.source.text.replace(/\s+/g, " ").trim();
+  const criterion = coverageCriterion(entry).replace(/\s+/g, " ").trim();
   const named =
     criterion.length > 160 ? `${criterion.slice(0, 157)}...` : criterion;
   const environment = entry.environment;
@@ -213,6 +274,7 @@ export function assertCoverageShape(graph: WorkGraph): void {
       !/^[a-f0-9]{64}$/.test(entry.source.digest)
     )
       throw new Error("Coverage lacks pinned source identity");
+    assertSourceObligationShape(entry);
     const item = graph.items.find((item) => item.id === entry.itemId);
     if (!item) throw new Error("Coverage owner is absent from the graph");
     if (item.kind === "discovery")
@@ -374,6 +436,51 @@ export function assertCoverageShape(graph: WorkGraph): void {
   for (const item of graph.items.filter((item) => item.kind === "qa"))
     if (!graph.coverage.some((entry) => entry.itemId === item.id))
       throw new Error("QA node has no acceptance coverage");
+  if (graph.sourceExclusions !== undefined) {
+    if (!Array.isArray(graph.sourceExclusions))
+      throw new Error("Source exclusions must be a collection");
+    for (const exclusion of graph.sourceExclusions) {
+      if (
+        !exclusion ||
+        typeof exclusion !== "object" ||
+        Object.keys(exclusion).sort().join() !==
+          "objectiveLines,reason,source,statement" ||
+        typeof exclusion.reason !== "string" ||
+        !exclusion.reason.trim() ||
+        !Array.isArray(exclusion.objectiveLines) ||
+        !exclusion.objectiveLines.length ||
+        exclusion.objectiveLines.some(
+          (line) => !Number.isSafeInteger(line) || line < 0,
+        ) ||
+        !exclusion.source?.lines
+      )
+        throw new Error("Source exclusion is invalid");
+      assertSourceObligationShape(exclusion);
+    }
+  }
+}
+
+/** A located source obligation names a non-Objective line range and its statement. */
+function assertSourceObligationShape(entry: {
+  source: CoverageObligation["source"];
+  statement?: string;
+}): void {
+  const lines = entry.source.lines;
+  if (lines === undefined && entry.statement === undefined) return;
+  if (
+    !Array.isArray(lines) ||
+    lines.length !== 2 ||
+    !lines.every((line) => Number.isSafeInteger(line) && line >= 0) ||
+    lines[0] > lines[1] ||
+    entry.source.path === "OBJECTIVE" ||
+    typeof entry.statement !== "string" ||
+    !entry.statement.trim() ||
+    typeof entry.source.text !== "string" ||
+    !/^[a-f0-9]{64}$/.test(entry.source.digest)
+  )
+    throw new Error(
+      "Source obligation needs a cited source line range and a statement",
+    );
 }
 
 export function normalizedCommand(command: string): string {
@@ -447,7 +554,50 @@ export function assertCoverageSources(
     )
       throw new Error(`Uncovered Objective obligation ${required.criterionId}`);
   }
+  const objective = sources.find((source) => source.path === "OBJECTIVE");
+  const spans: CoverageObligation["source"][] = [];
+  const located = (entry: { source: CoverageObligation["source"] }) => {
+    const { path, digest, text, lines } = entry.source;
+    const source = sources.find(
+      (source) =>
+        source.path === path && sourceDigest(source.content) === digest,
+    );
+    if (!lines || !source || sourceLines(source.content, lines) !== text)
+      throw new Error(
+        "Source obligation line range differs from its pinned source",
+      );
+    if (
+      spans.some(
+        (span) =>
+          span.path === path &&
+          span.digest === digest &&
+          span.lines![0] <= lines[1] &&
+          lines[0] <= span.lines![1],
+      )
+    )
+      throw new Error("Source obligations repeat or overlap a source span");
+    spans.push(entry.source);
+  };
+  for (const exclusion of graph.sourceExclusions ?? []) {
+    located(exclusion);
+    const objectiveLines = objective?.content.split("\n").length ?? 0;
+    if (exclusion.objectiveLines.some((line) => line >= objectiveLines))
+      throw new Error(
+        "Source exclusion must cite existing Objective lines for its reason",
+      );
+  }
   for (const entry of graph.coverage) {
+    if (entry.source.lines) {
+      located(entry);
+      if (
+        entry.criterionId !==
+        sourceObligationId(
+          entry.source as Parameters<typeof sourceObligationId>[0],
+        )
+      )
+        throw new Error("Source obligation identity differs from its span");
+      continue;
+    }
     const source = sources.find(
       (source) =>
         source.path === entry.source.path &&
@@ -501,7 +651,7 @@ export function assertCompletedCoverage(state: FactoryState): void {
         state.finalValidation?.passed &&
         !state.finalValidation.criteria?.some(
           (criterion) =>
-            criterion.criterion === entry.source.text &&
+            criterion.criterion === coverageCriterion(entry) &&
             ["pass", "human-accept"].includes(criterion.verdict),
         )
       )

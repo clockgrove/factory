@@ -641,7 +641,8 @@ export async function settleAbandonedReviewTurns(
       ref.scope.graphDigest !== current
     )
       continue;
-    const receipt = await stoppedTurnReceipt(ref, model);
+    // A turn whose reconciliation fails stays held; the others still settle.
+    const receipt = await stoppedTurnReceipt(ref, model).catch(() => undefined);
     if (receipt)
       agentSessionContinuation(state, role, itemId, save).checkpoint(receipt);
   }

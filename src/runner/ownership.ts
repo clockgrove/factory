@@ -500,11 +500,7 @@ export async function releaseCancelledSessions(
     );
     assertCurrent();
   }
-  try {
-    await settleAbandonedReviewTurns(state, model, save);
-  } catch {
-    // The turn stays held; disposal below refuses it.
-  }
+  await settleAbandonedReviewTurns(state, model, save);
   assertCurrent();
   const planning = state.planningRecovery;
   const unresolvedPlanning =

@@ -152,7 +152,8 @@ export function sourceLines(
 
 /** What review judges for an obligation: its statement, or the criterion itself. */
 export function coverageCriterion(entry: CoverageObligation): string {
-  return entry.statement ?? entry.source.text;
+  // A source exit item always has a statement; an Objective criterion its text.
+  return entry.statement ?? entry.source.text!;
 }
 
 /** Final review judges the Objective criteria and every source obligation proved at the final phase. */
@@ -270,7 +271,7 @@ export function assertCoverageShape(graph: WorkGraph): void {
     if (
       !entry.source ||
       !entry.source.path ||
-      !entry.source.text ||
+      (!entry.source.lines && !entry.source.text) ||
       !/^[a-f0-9]{64}$/.test(entry.source.digest)
     )
       throw new Error("Coverage lacks pinned source identity");
@@ -475,8 +476,8 @@ function assertSourceObligationShape(entry: {
     entry.source.path === "OBJECTIVE" ||
     typeof entry.statement !== "string" ||
     !entry.statement.trim() ||
-    typeof entry.source.text !== "string" ||
-    !entry.source.text.trim() ||
+    (entry.source.text !== undefined &&
+      (typeof entry.source.text !== "string" || !entry.source.text.trim())) ||
     !/^[a-f0-9]{64}$/.test(entry.source.digest)
   )
     throw new Error(
@@ -524,10 +525,24 @@ export function assertCoverageSources(
   ]);
   const authority =
     isCommand ?? ((command: string) => planned.has(normalizedCommand(command)));
+  // A located exit item is re-sliced from its pinned source; an Objective
+  // criterion (or a retained graph's span) carries its text.
+  const spanText = (source: CoverageObligation["source"]) => {
+    if (!source.lines) return source.text;
+    const pinned = sources.find(
+      (entry) =>
+        entry.path === source.path &&
+        sourceDigest(entry.content) === source.digest,
+    );
+    return pinned && sourceLines(pinned.content, source.lines);
+  };
   for (const { itemId, proof, source } of graph.coverage) {
     // A command obligation is proved by running exactly that command, on
     // its owning item or among the Acceptance commands.
-    const command = commandObligation(source.text, authority);
+    const text = spanText(source);
+    // An unlocatable span is refused below with its source identity.
+    if (text === undefined) continue;
+    const command = commandObligation(text, authority);
     if (
       command === undefined ||
       finals.includes(command) ||
@@ -563,7 +578,8 @@ export function assertCoverageSources(
       (source) =>
         source.path === path && sourceDigest(source.content) === digest,
     );
-    if (!lines || !source || sourceLines(source.content, lines) !== text)
+    const actual = lines && source && sourceLines(source.content, lines);
+    if (!lines || !actual?.trim() || (text !== undefined && actual !== text))
       throw new Error(
         "Source obligation line range differs from its pinned source",
       );
@@ -607,7 +623,7 @@ export function assertCoverageSources(
     if (
       !source ||
       (entry.source.path !== "OBJECTIVE" &&
-        !source.content.includes(entry.source.text))
+        !source.content.includes(entry.source.text!))
     )
       throw new Error("Coverage source differs from pinned content");
     if (
@@ -748,7 +764,9 @@ export function reusableEnvironmentValidationIndices(
   return indices.filter((index) => {
     const command = normalizedCommand(item.validation[index]!.command);
     return !coverage.some((entry) => {
-      const explicitCommand = entry.source.text
+      // State checks this without the pinned sources, so a located exit item
+      // is matched by its statement; a retained graph keeps its span text.
+      const explicitCommand = (entry.source.text ?? coverageCriterion(entry))
         .trim()
         .replace(/^`([^`]+)`$/, "$1");
       return (

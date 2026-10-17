@@ -1232,6 +1232,7 @@ export {
   gitChangeEvidence,
   gitChangeEvidenceSources,
   objectiveReviewEvidence,
+  retainedReviewLiterals,
   ReviewDeliveryObservation,
   validStoppedLeftovers,
   workItemMaterializationEvidence,

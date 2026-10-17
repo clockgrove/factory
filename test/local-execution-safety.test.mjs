@@ -1605,8 +1605,17 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         });
         const episode = recordRetrospective(config, reflected.objective);
         assert.equal(episode.outcome, "cancelled");
+        // The snapshot record names the terminal state by reference.
+        const snapshotRecord = readFileSync(
+          episode.sourceLinks.find((link) => link.includes("/snapshots/")),
+          "utf8",
+        );
         assert.equal(
           episode.snapshotDigest,
+          createHash("sha256").update(snapshotRecord).digest("hex"),
+        );
+        assert.equal(
+          JSON.parse(snapshotRecord).stateRef.digest,
           createHash("sha256").update(terminalBytes).digest("hex"),
         );
         assert.deepEqual(
@@ -1745,7 +1754,13 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
           entry.path.startsWith("learning/snapshots/"),
         );
         assert.equal(
-          restartedStore.readBytes(original.ref).toString("utf8"),
+          restartedStore
+            .readBytes(
+              JSON.parse(
+                restartedStore.readBytes(original.ref).toString("utf8"),
+              ).stateRef,
+            )
+            .toString("utf8"),
           terminalBytes,
         );
         assert.ok(

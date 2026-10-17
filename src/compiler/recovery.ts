@@ -45,7 +45,9 @@ import {
   assertReviewPacketBinding,
   decodeGraphReview,
   type ReviewPacket,
+  type ReviewPacketRecord,
   reviewPacket,
+  reviewPacketRecord,
 } from "../review-evidence.js";
 import type { ContinuationState } from "../state.js";
 import {
@@ -88,7 +90,8 @@ import { planningSources } from "./sources.js";
 /** Compile and independently review a candidate without GitHub or run-state writes. */
 export interface PlanningReviewRecord {
   contextDigest: string;
-  packet: ReviewPacket;
+  /** Row digests only; the content is re-derived from the request's inputs. */
+  packet: ReviewPacketRecord;
   response?: Awaited<ReturnType<PlanningModel["reviewGraph"]>>;
 }
 
@@ -170,11 +173,20 @@ export async function retainPlanningNativeReturn(
 
 class PlanningReviewBindingError extends Error {}
 
+/** A review as history keeps it; a retained packet's inline content is dropped. */
+function reviewByReference(review: PlanningReviewRecord): PlanningReviewRecord {
+  return structuredClone({
+    ...review,
+    packet: reviewPacketRecord(review.packet),
+  });
+}
+
+/** The retained review (by reference) and its packet with the re-derived content. */
 function retainedPlanningReview(
   record: PlanningRecoveryRecord,
   packet: PlanReviewRequest,
   configDigest: string,
-): PlanningReviewRecord {
+): { review: PlanningReviewRecord; packet: ReviewPacket } {
   const contextDigest = digest(JSON.stringify([configDigest, packet]));
   if (record.review) {
     if (record.review.contextDigest !== contextDigest)
@@ -182,21 +194,24 @@ function retainedPlanningReview(
         "Retained planning review context changed; preserve its evidence and use supported cancellation before a corrected successor",
       );
     try {
-      assertReviewPacketBinding(
-        record.review.packet,
-        [],
-        planningReviewEvidence(packet),
-      );
+      return {
+        review: record.review,
+        packet: assertReviewPacketBinding(
+          record.review.packet,
+          [],
+          planningReviewEvidence(packet),
+        ),
+      };
     } catch {
       throw new PlanningReviewBindingError(
         "Retained planning review request binding is invalid; do not reconstruct or replay it",
       );
     }
-    return record.review;
   }
+  const evidence = reviewPacket([], planningReviewEvidence(packet));
   return {
-    contextDigest,
-    packet: reviewPacket([], planningReviewEvidence(packet)),
+    review: { contextDigest, packet: reviewPacketRecord(evidence) },
+    packet: evidence,
   };
 }
 
@@ -370,11 +385,11 @@ async function compilePlanAdmitted(
       record.contextLookup?.packet,
       workflowRecipe,
     );
-    retainedPlanningReview(record, packet, configDigest);
+    const retained = retainedPlanningReview(record, packet, configDigest);
     if (
       decodeGraphReview(
         record.review.response,
-        record.review.packet,
+        retained.packet,
         state.plan.graph.items.map((item) => item.id),
       ).length
     )
@@ -641,14 +656,15 @@ async function compilePlanAdmitted(
         record.contextLookup?.packet,
         workflowRecipe,
       );
-      record.review = retainedPlanningReview(record, packet, configDigest);
+      const retained = retainedPlanningReview(record, packet, configDigest);
+      record.review = retained.review;
       save();
       reviewing = true;
       review = await checkedPlanReview(
         observedModel,
         packet,
         invocation("graph-review"),
-        record.review.packet,
+        retained.packet,
       );
       if (!review.findings.length && !review.failure) {
         const candidate = buildPlanCandidate(
@@ -883,7 +899,7 @@ async function compilePlanAdmitted(
             : "The independent plan review refused the compiled graph",
         correction: stating.map((entry) => entry.detail).join("\n"),
         corrections: structuredClone(stating),
-        ...(record.review ? { review: structuredClone(record.review) } : {}),
+        ...(record.review ? { review: reviewByReference(record.review) } : {}),
       });
       record.invocations = [];
       corrections = stating;
@@ -984,7 +1000,7 @@ async function compilePlanAdmitted(
       kind: diagnosis.kind as RepairClass,
       diagnosis: diagnosis.diagnosis,
       correction: diagnosis.correction,
-      ...(record.review ? { review: structuredClone(record.review) } : {}),
+      ...(record.review ? { review: reviewByReference(record.review) } : {}),
     });
     record.invocations = [];
     corrections = [{ source: "diagnosis", detail: diagnosis.correction }];

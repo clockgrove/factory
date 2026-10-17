@@ -85,12 +85,17 @@ import {
 } from "./fault.js";
 import { preflightObjective } from "./local-preflight.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
-import { assertCoverageSources, coverageObligations } from "./qa.js";
+import {
+  assertCoverageSources,
+  coverageObligations,
+  sourceObligationId,
+} from "./qa.js";
 import { amendmentImplementationEvidence } from "./result-evidence.js";
 import {
   assertReviewPacketBinding,
   decodeGraphReview,
   reviewPacket,
+  reviewPacketRecord,
 } from "./review-evidence.js";
 import type { FactoryState, WorkState } from "./state.js";
 import { refuseUnknownFields } from "./unknown-fields.js";
@@ -128,7 +133,8 @@ export interface PendingAmendment {
     id: string;
     requestDigest: string;
     adaptiveContextId?: string;
-    packet: import("./review-evidence.js").ReviewPacket;
+    /** Row digests only; the content is re-derived from the review's inputs. */
+    packet: import("./review-evidence.js").ReviewPacketRecord;
     response?: Awaited<ReturnType<PlanningModel["reviewGraph"]>>;
     nativeReturns?: ContentRef[];
   };
@@ -857,8 +863,11 @@ export function validateAmendment(
   // An excluded source exit item stays accounted for: still excluded, or now covered.
   for (const exclusion of state.graph.sourceExclusions ?? [])
     if (
-      ![...(graph.sourceExclusions ?? []), ...graph.coverage].some((entry) =>
-        isDeepStrictEqual(entry.source, exclusion.source),
+      ![...(graph.sourceExclusions ?? []), ...graph.coverage].some(
+        (entry) =>
+          entry.source.lines !== undefined &&
+          sourceObligationId({ ...entry.source, lines: entry.source.lines }) ===
+            sourceObligationId(exclusion.source),
       )
     )
       throw new Error("Amendment drops an excluded source obligation");
@@ -1513,10 +1522,12 @@ async function advanceAmendment(args: {
             "Amendment review inputs changed after submission; preserve the exact submitted review",
           ),
         );
-      const evidence =
-        pending.reviewInvocation?.packet ??
-        reviewPacket([], planningReviewEvidence(packet));
-      assertReviewPacketBinding(evidence, [], planningReviewEvidence(packet));
+      const inputs = planningReviewEvidence(packet);
+      const evidence = assertReviewPacketBinding(
+        pending.reviewInvocation?.packet ?? reviewPacket([], inputs),
+        [],
+        inputs,
+      );
       calling = "review";
       if (
         pending.reviewInvocation &&
@@ -1531,7 +1542,7 @@ async function advanceAmendment(args: {
         id: randomUUID(),
         requestDigest,
         ...(selected ? { adaptiveContextId: selected.packet.id } : {}),
-        packet: evidence,
+        packet: reviewPacketRecord(evidence),
       };
       save();
       const response =

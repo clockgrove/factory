@@ -228,6 +228,23 @@ function append(path: string, text: string, repository?: string): void {
     });
 }
 
+/**
+ * The terminal state a snapshot record names, read from the content store
+ * (which verifies its exact bytes). A legacy snapshot is the state itself.
+ */
+function snapshotState(
+  store: LocalContentStore,
+  raw: string,
+): { stateRef?: ContentRef; state: Record<string, unknown> } {
+  const value = record(JSON.parse(raw));
+  if (value.stateRef === undefined) return { state: value };
+  const stateRef = value.stateRef as ContentRef;
+  return {
+    stateRef,
+    state: record(JSON.parse(store.readBytes(stateRef).toString("utf8"))),
+  };
+}
+
 function encoded(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
@@ -347,9 +364,11 @@ export function retainLearningMemory(
       const snapshot = privateRead(snapshotPath);
       if (learningDigest(snapshot) !== episode.snapshotDigest)
         throw new Error("Retrospective memory snapshot changed");
-      snapshotRef = store.putBytes(Buffer.from(snapshot), {
-        mediaType: "application/json",
-      });
+      snapshotRef =
+        snapshotState(store, snapshot).stateRef ??
+        store.putBytes(Buffer.from(snapshot), {
+          mediaType: "application/json",
+        });
       bodies.push({
         role: "original-snapshot",
         ref: snapshotRef,
@@ -489,8 +508,20 @@ export function recordRetrospective(
     directory(config.repository, "snapshots"),
     `${id}.json`,
   );
-  if (!existsSync(snapshot)) append(snapshot, raw, config.repository);
-  else if (privateRead(snapshot) !== raw)
+  // The terminal state is retained by reference in the content store; the
+  // snapshot record names it, so the original is never copied by value.
+  const snapshotRecord = encoded({
+    schemaVersion: 1,
+    repository: config.repository,
+    objective,
+    runId: state.runId,
+    stateRef: new LocalContentStore(
+      join(stateRoot(config.repository), "content"),
+    ).putBytes(Buffer.from(raw), { mediaType: "application/json" }),
+  });
+  if (!existsSync(snapshot))
+    append(snapshot, snapshotRecord, config.repository);
+  else if (privateRead(snapshot) !== snapshotRecord)
     throw new Error(
       "Retrospective snapshot identity already exists with other bytes",
     );
@@ -543,7 +574,7 @@ export function recordRetrospective(
       ? (state.objectiveClosure ?? "unobserved")
       : "unobserved",
     sourceLinks: [...new Set(links)],
-    snapshotDigest: learningDigest(raw),
+    snapshotDigest: learningDigest(snapshotRecord),
     experiences: {
       items: experiences,
       planning: state.planningRecovery ?? null,
@@ -2012,14 +2043,15 @@ export async function prepareDreamInput(
         continue;
       }
       const supporting: ContentRef[] = [];
-      const snapshot = JSON.parse(
+      const snapshot = snapshotState(
+        store,
         privateRead(
           join(
             directory(config.repository, "snapshots"),
             `${source.episodeId}.json`,
           ),
         ),
-      ) as {
+      ).state as {
         workflowReflection?: {
           records?: import("./workflow-reflection.js").WorkflowReflectionRecord[];
         };

@@ -41,8 +41,21 @@ export interface ValidationEvidence {
   worktreeObservation?: ValidationWorktreeObservation;
   criteria?: CriterionEvidence[];
   /** Bounded complete literal entries cited by this tree's successful review. */
-  reviewEvidence?: ReviewPacket["evidence"];
+  reviewEvidence?: RetainedReviewLiteral[];
 }
+
+/**
+ * A cited review body by reference: the row keeps its packet identity and
+ * the exact UTF-8 bytes are in the content store under `ref`. Rows retained
+ * before this carry `content` inline; they still load and are read as is.
+ */
+export type RetainedReviewLiteral = Omit<
+  ReviewPacket["evidence"][number],
+  "content"
+> & { ref?: ContentRef; content?: string };
+
+/** The content-store media type of a retained review body. */
+export const REVIEW_LITERAL_MEDIA_TYPE = "text/plain; charset=utf-8";
 
 /** Validate observed scope only; an absent control remains unknown. */
 export function assertValidationExecutionControl(value: unknown): void {
@@ -113,7 +126,17 @@ export function assertRetainedReviewEvidence(
   }
   const seen = new Set<string>();
   for (const entry of value.reviewEvidence) {
-    if (!entry || typeof entry.content !== "string")
+    const ref = entry?.ref;
+    if (
+      !entry ||
+      (ref === undefined) === (typeof entry.content !== "string") ||
+      (ref !== undefined &&
+        (Object.keys(ref).sort().join() !== "bytes,digest,mediaType" ||
+          ref.digest !== entry.digest ||
+          !Number.isSafeInteger(ref.bytes) ||
+          ref.bytes < 0 ||
+          ref.mediaType !== REVIEW_LITERAL_MEDIA_TYPE))
+    )
       throw new Error("Retained review literal body is invalid");
     const { content, reusableBody } = entry;
     // A citation carries its declared reference (#1254); a retained body keeps
@@ -136,8 +159,9 @@ export function assertRetainedReviewEvidence(
           ),
       ) ||
       entry.complete !== true ||
-      Buffer.from(content).toString("utf8") !== content ||
-      createHash("sha256").update(content).digest("hex") !== entry.digest
+      (content !== undefined &&
+        (Buffer.from(content).toString("utf8") !== content ||
+          createHash("sha256").update(content).digest("hex") !== entry.digest))
     )
       throw new Error(
         "Retained review body differs from its complete citation",
@@ -148,15 +172,16 @@ export function assertRetainedReviewEvidence(
         !Number.isSafeInteger(reusableBody.length) ||
         reusableBody.start < 0 ||
         reusableBody.length < 0 ||
-        reusableBody.start + reusableBody.length > content.length ||
-        createHash("sha256")
-          .update(
-            content.slice(
-              reusableBody.start,
-              reusableBody.start + reusableBody.length,
-            ),
-          )
-          .digest("hex") !== reusableBody.digest)
+        (content !== undefined &&
+          (reusableBody.start + reusableBody.length > content.length ||
+            createHash("sha256")
+              .update(
+                content.slice(
+                  reusableBody.start,
+                  reusableBody.start + reusableBody.length,
+                ),
+              )
+              .digest("hex") !== reusableBody.digest)))
     )
       throw new Error("Retained review body selector differs from its bytes");
     seen.add(entry.id);

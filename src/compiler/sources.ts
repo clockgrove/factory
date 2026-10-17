@@ -374,7 +374,16 @@ export function planningGraphView(
     ...(graph.requiredPreIntegrationChecks && {
       requiredPreIntegrationChecks: graph.requiredPreIntegrationChecks.map(
         (check) => {
-          const sourceSpan = span(check.source.path, check.source.text);
+          const text =
+            check.source.text ??
+            sources.find(
+              (source) =>
+                source.path === check.source.path &&
+                createHash("sha256").update(source.content).digest("hex") ===
+                  check.source.digest,
+            )?.content;
+          const sourceSpan =
+            text !== undefined && span(check.source.path, text);
           if (!sourceSpan || sourceSpan.sourceDigest !== check.source.digest)
             return check;
           const { text: _text, ...identity } = check.source;

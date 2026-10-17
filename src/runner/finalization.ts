@@ -37,6 +37,7 @@ import { awaitsOperator } from "../step.js";
 import {
   assertPinnedNpmScripts,
   objectiveReviewEvidence,
+  retainedReviewLiterals,
   reviewAcceptance,
   validateTree,
 } from "../validation.js";
@@ -355,6 +356,7 @@ export async function finalizeObjective(args: {
       checkout: config.checkout,
       candidateCommitSha,
       candidateTreeSha: finalTree,
+      literals: await retainedReviewLiterals(state, contentStore),
     });
     // A paid step, like item review: the call and the decoding of its
     // answer count toward the bound together, so a lost answer and an

@@ -117,10 +117,16 @@ export interface WorkItemSource {
  */
 export interface CoverageObligation {
   criterionId: string;
+  /**
+   * An Objective criterion carries its text. A source exit item is a
+   * reference: path, content digest and line range, re-sliced from the
+   * pinned source when needed. Graphs retained from before this reference
+   * form also carry the line text, which is never written now.
+   */
   source: {
     path: string;
     digest: string;
-    text: string;
+    text?: string;
     lines?: [number, number];
   };
   statement?: string;
@@ -128,10 +134,11 @@ export interface CoverageObligation {
 
 /** A located source exit item the plan leaves out, justified by Objective lines. */
 export interface SourceExclusion {
+  /** A reference to the excluded lines; retained graphs may also carry their text. */
   source: {
     path: string;
     digest: string;
-    text: string;
+    text?: string;
     lines: [number, number];
   };
   statement: string;
@@ -165,8 +172,12 @@ export interface AcceptanceCoverage extends CoverageObligation {
 
 export interface RequiredPreIntegrationCheck {
   checkName: string;
-  /** Exact pinned source span authorizing this gate, hydrated by the controller. */
-  source: { path: string; digest: string; text: string };
+  /**
+   * The pinned source authorizing this gate, by reference: its path, heading
+   * and content digest at the graph base. Graphs retained from before this
+   * reference form also carry the source text, which is never written now.
+   */
+  source: { path: string; heading?: string; digest: string; text?: string };
 }
 
 /** Reviewed authority for one deterministic inventory-driven graph addition. */

@@ -75,12 +75,28 @@ interface Binding {
   baseSha: string;
   source: string;
   additionalSources: string[];
-  sources: {
-    path: string;
-    heading: string;
-    content: string;
-    purpose: "primary-wave" | "context";
-  }[];
+  /** Pinned sections by reference: their bytes stay in Git at baseSha. */
+  sources: BindingSource[];
+}
+interface BindingSource {
+  path: string;
+  heading: string;
+  /** SHA-256 of the exact section bytes at the binding's baseSha. */
+  digest: string;
+  purpose: "primary-wave" | "context";
+}
+/** The section bytes supplied to the model; never persisted in a journal or draft. */
+type HydratedSource = Omit<BindingSource, "digest"> & { content: string };
+/** A journal written before by-reference sources keeps content; read it as its digest. */
+function sourceReference(
+  source: BindingSource | HydratedSource,
+): BindingSource {
+  const { path, heading, purpose } = source;
+  const digest = "digest" in source ? source.digest : hash(source.content);
+  return { path, heading, digest, purpose };
+}
+function sourceReferences(binding: Binding): string {
+  return JSON.stringify(binding.sources.map(sourceReference));
 }
 interface Draft {
   schemaVersion: 1;
@@ -261,9 +277,13 @@ export function proposalPersistenceReferences(
     throw new Error("Proposal sources are missing");
   for (const source of binding.sources) {
     const entry = record(source, "source");
-    fields(entry, ["path", "heading", "content", "purpose"]);
+    fields(entry, ["path", "heading", "purpose"], ["digest", "content"]);
     text(entry.path, "source path");
-    text(entry.content, "source content");
+    if ("content" in entry === "digest" in entry)
+      throw new Error("Proposal source needs exactly its digest");
+    if ("content" in entry) text(entry.content, "source content");
+    else if (!/^[a-f0-9]{64}$/.test(String(entry.digest)))
+      throw new Error("Invalid proposal source digest");
     if (
       typeof entry.heading !== "string" ||
       !["primary-wave", "context"].includes(String(entry.purpose))
@@ -327,9 +347,25 @@ export function proposalPersistenceReferences(
       "generation input",
     );
     fields(input, ["invocationId", "prompt", "schema", "sourcePacket"]);
+    let supplied: unknown;
+    try {
+      supplied = JSON.parse(String(input.sourcePacket));
+    } catch {
+      supplied = undefined;
+    }
     if (
       input.invocationId !== generation.invocationId ||
-      input.sourcePacket !== JSON.stringify(binding.sources) ||
+      !Array.isArray(supplied) ||
+      supplied.some(
+        (row) =>
+          !row ||
+          typeof row !== "object" ||
+          Object.keys(row).join() !== "path,heading,content,purpose" ||
+          typeof row.content !== "string",
+      ) ||
+      input.sourcePacket !== JSON.stringify(supplied) ||
+      JSON.stringify(supplied.map(sourceReference)) !==
+        sourceReferences(journal.binding) ||
       JSON.stringify(input.schema) !==
         JSON.stringify(proposalSchema(binding.sources.length))
     )
@@ -898,7 +934,7 @@ function issueBody(draft: ObjectiveDraft, binding: Binding): string {
 async function sourceBinding(
   config: FactoryConfig,
   selectors: string[],
-): Promise<Binding> {
+): Promise<{ binding: Binding; sources: HydratedSource[] }> {
   if (
     !selectors.length ||
     selectors.some(
@@ -931,20 +967,26 @@ async function sourceBinding(
       JSON.stringify([path, heading]),
     ),
   );
-  return {
-    repository: config.repository,
-    configDigest: factoryConfigDigest(config),
-    baseSha,
-    source: selectors[0]!,
-    additionalSources: selectors.slice(1),
-    sources: choices.map(({ path, heading, content }) => ({
+  const hydrated = choices.map(
+    ({ path, heading, content }): HydratedSource => ({
       path,
       heading,
       content,
       purpose: primaryChoices.has(JSON.stringify([path, heading]))
         ? "primary-wave"
         : "context",
-    })),
+    }),
+  );
+  return {
+    binding: {
+      repository: config.repository,
+      configDigest: factoryConfigDigest(config),
+      baseSha,
+      source: selectors[0]!,
+      additionalSources: selectors.slice(1),
+      sources: hydrated.map(sourceReference),
+    },
+    sources: hydrated,
   };
 }
 function outputPath(config: FactoryConfig, path: string | undefined): string {
@@ -1017,7 +1059,7 @@ async function generate(
     config,
     option(args, "output") ?? join(dirname(path), `${proposalId}.draft.json`),
   );
-  const binding = await sourceBinding(config, selectors);
+  const { binding, sources } = await sourceBinding(config, selectors);
   const journal: ProposalState = {
     schemaVersion: 2,
     binding,
@@ -1030,7 +1072,7 @@ async function generate(
     throw new Error(
       "Configured provider does not support structured proposals",
     );
-  const sourcePacket = JSON.stringify(binding.sources);
+  const sourcePacket = JSON.stringify(sources);
   const store = new LocalContentStore(
     join(stateRoot(config.repository), "content"),
   );
@@ -1258,14 +1300,11 @@ async function publish(
   if (journal.approval && journal.approval.digest !== approval)
     throw new Error("This proposal already has a different immutable approval");
   if (!journal.approval) {
-    const current = await sourceBinding(config, [
+    const { binding: current } = await sourceBinding(config, [
       journal.binding.source,
       ...journal.binding.additionalSources,
     ]);
-    if (
-      JSON.stringify(current.sources) !==
-      JSON.stringify(journal.binding.sources)
-    )
+    if (sourceReferences(current) !== sourceReferences(journal.binding))
       throw new Error(
         "Source changed since drafting; generate and review a new proposal",
       );

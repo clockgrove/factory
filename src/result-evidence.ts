@@ -7,6 +7,7 @@ import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
 import type {
   CapturedAssetSet,
+  ContentStore,
   ResultReviewEvidenceSource,
   ValidationCommandReceipt,
   WorkDiscovery,
@@ -2538,11 +2539,38 @@ export function workItemReviewEvidence(args: {
  * Accepted findings are historical context with their original literal evidence;
  * they never replace independent judgment of the integrated original criteria.
  */
+/** Accepted Work Item review bodies retained by reference, by digest. */
+export async function retainedReviewLiterals(
+  state: FactoryState,
+  store: ContentStore,
+): Promise<Map<string, string>> {
+  const literals = new Map<string, string>();
+  for (const work of Object.values(state.work))
+    for (const entry of work.validation?.reviewEvidence ?? []) {
+      if (!entry.ref || literals.has(entry.digest)) continue;
+      await store.verify(entry.ref);
+      const bytes = Buffer.from(
+        await new Response(await store.open(entry.ref)).arrayBuffer(),
+      );
+      const content = bytes.toString("utf8");
+      if (
+        bytes.length !== entry.ref.bytes ||
+        !Buffer.from(content, "utf8").equals(bytes) ||
+        createHash("sha256").update(bytes).digest("hex") !== entry.digest
+      )
+        throw new Error("Retained review body differs from its reference");
+      literals.set(entry.digest, content);
+    }
+  return literals;
+}
+
 export function objectiveReviewEvidence(args: {
   state: FactoryState;
   checkout: string;
   candidateCommitSha: string;
   candidateTreeSha: string;
+  /** `retainedReviewLiterals`; a body absent here is not supplied. */
+  literals?: ReadonlyMap<string, string>;
 }): {
   observations: string;
   evidence: ResultReviewEvidenceSource[];
@@ -2583,7 +2611,18 @@ export function objectiveReviewEvidence(args: {
     itemId: string,
     entry: NonNullable<ValidationEvidence["reviewEvidence"]>[number],
   ) => {
-    const { id, digest: _digest, ...literal } = entry;
+    const content = entry.content ?? args.literals?.get(entry.digest);
+    if (content === undefined) return;
+    // The retained row in its original field order, with its body in place.
+    const {
+      id,
+      digest: _digest,
+      ...literal
+    } = Object.fromEntries(
+      Object.entries(entry).map(([key, value]) =>
+        key === "ref" ? ["content", content] : [key, value],
+      ),
+    ) as typeof entry & { content: string };
     const key = JSON.stringify(literal);
     if (!retainedLiterals.has(key)) {
       const bytes = Buffer.byteLength(key) + 1;
@@ -2746,7 +2785,12 @@ export function objectiveReviewEvidence(args: {
         findings,
         // Absent legacy or bounded-out bodies are not reconstructed from logs.
         literalEvidence: (current.validation.reviewEvidence ?? []).map(
-          ({ content: _content, reusableBody: _body, ...reference }) => ({
+          ({
+            content: _content,
+            ref: _ref,
+            reusableBody: _body,
+            ...reference
+          }) => ({
             ...reference,
             supplied: supplied.has(reference.id),
           }),

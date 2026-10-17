@@ -46,6 +46,8 @@ import {
   assertRetainedReviewEvidence,
   assertValidationWorktreeObservation,
   type CriterionEvidence,
+  REVIEW_LITERAL_MEDIA_TYPE,
+  type RetainedReviewLiteral,
   type ValidationEvidence,
 } from "./validation-evidence.js";
 
@@ -537,20 +539,40 @@ export async function reviewAcceptance(args: {
       .map(([, question]) => question);
     return { pending: more.length ? { ...pending!, more } : pending! };
   }
-  if (args.reviewPhase !== "objective-review") {
+  if (args.reviewPhase !== "objective-review" && args.contentStore) {
     const cited = new Set(
       proven.flatMap(
         (finding) => finding.evidence?.map((entry) => entry.id) ?? [],
       ),
     );
+    // The same bounded selection as when bodies were inline; each body is
+    // retained by reference, in place of its content.
     let remaining = configuredResultReviewTextBudget() - 2;
-    evidence.reviewEvidence = packet.evidence.flatMap((entry) => {
-      if (!cited.has(entry.id)) return [];
+    const retained: RetainedReviewLiteral[] = [];
+    for (const entry of packet.evidence) {
+      if (!cited.has(entry.id)) continue;
       const bytes = Buffer.byteLength(JSON.stringify(entry)) + 1;
-      if (bytes > remaining) return [];
+      if (bytes > remaining) continue;
       remaining -= bytes;
-      return [structuredClone(entry)];
-    });
+      const body = Buffer.from(entry.content, "utf8");
+      const ref = await args.contentStore.put(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(body);
+            controller.close();
+          },
+        }),
+        { mediaType: REVIEW_LITERAL_MEDIA_TYPE },
+      );
+      retained.push(
+        Object.fromEntries(
+          Object.entries(entry).map(([key, value]) =>
+            key === "content" ? ["ref", ref] : [key, structuredClone(value)],
+          ),
+        ) as RetainedReviewLiteral,
+      );
+    }
+    evidence.reviewEvidence = retained;
     assertRetainedReviewEvidence(evidence);
   }
   return { evidence: { ...evidence, criteria: proven } };

@@ -141,26 +141,64 @@ function packetWithIdentity(
   };
 }
 
-/** Check a retained request; never assign its identity to a different request. */
+/**
+ * A packet as Factory state keeps it: each row's identity, provenance and
+ * content digest, never the content. The rows' producers re-derive the
+ * content (pinned sources from Git at the base, controller facts from state)
+ * and `assertReviewPacketBinding` checks it against these digests.
+ */
+export interface ReviewPacketRecord {
+  id: string;
+  criteria: ReviewPacket["criteria"];
+  evidence: (ReviewEvidenceReference &
+    Omit<ReviewPacket["evidence"][number], "content">)[];
+}
+
+/** The persisted form of a packet. A retained packet's inline content is dropped. */
+export function reviewPacketRecord(
+  packet: ReviewPacket | ReviewPacketRecord,
+): ReviewPacketRecord {
+  return {
+    id: packet.id,
+    criteria: structuredClone(packet.criteria),
+    evidence: packet.evidence.map((entry) => {
+      const { content: _content, ...row } =
+        entry as ReviewPacket["evidence"][number];
+      return structuredClone(row);
+    }),
+  };
+}
+
+/**
+ * Check a retained request against its re-derived inputs and return the
+ * packet with their exact content; never assign its identity to a different
+ * request.
+ */
 export function assertReviewPacketBinding(
-  packet: ReviewPacket,
+  retained: ReviewPacket | ReviewPacketRecord,
   criteria: string[],
   sources: ReviewEvidenceInput[],
-): void {
+): ReviewPacket {
   if (
-    !packet ||
-    typeof packet.id !== "string" ||
-    !packet.id ||
+    !retained ||
+    typeof retained.id !== "string" ||
+    !retained.id ||
+    !Array.isArray(retained.evidence)
+  )
+    throw new ReviewProtocolError(
+      "Retained review packet differs from its inputs",
+    );
+  const packet = packetWithIdentity(retained.id, criteria, sources);
+  if (
     !isDeepStrictEqual(
-      JSON.parse(JSON.stringify(packet)),
-      JSON.parse(
-        JSON.stringify(packetWithIdentity(packet.id, criteria, sources)),
-      ),
+      JSON.parse(JSON.stringify(reviewPacketRecord(retained))),
+      JSON.parse(JSON.stringify(reviewPacketRecord(packet))),
     )
   )
     throw new ReviewProtocolError(
       "Retained review packet differs from its inputs",
     );
+  return packet;
 }
 
 /**

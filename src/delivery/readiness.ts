@@ -19,8 +19,10 @@ export function assertPreIntegrationCheckShape(graph: WorkGraph): void {
       !gate.source ||
       typeof gate.source.path !== "string" ||
       !gate.source.path ||
-      typeof gate.source.text !== "string" ||
-      !gate.source.text ||
+      (gate.source.heading !== undefined &&
+        typeof gate.source.heading !== "string") ||
+      (gate.source.text !== undefined &&
+        (typeof gate.source.text !== "string" || !gate.source.text)) ||
       !/^[a-f0-9]{64}$/.test(gate.source.digest)
     )
       throw new Error(
@@ -30,9 +32,10 @@ export function assertPreIntegrationCheckShape(graph: WorkGraph): void {
   }
 }
 
+/** The gate's pinned source, by path, heading and digest at the base; never a quote. */
 export function assertPreIntegrationCheckSources(
   graph: WorkGraph,
-  sources: { path: string; content: string }[],
+  sources: { path: string; content: string; heading?: string }[],
 ): void {
   assertPreIntegrationCheckShape(graph);
   for (const gate of graph.requiredPreIntegrationChecks ?? []) {
@@ -40,9 +43,10 @@ export function assertPreIntegrationCheckSources(
       !sources.some(
         (source) =>
           source.path === gate.source.path &&
+          (gate.source.heading === undefined ||
+            source.heading === gate.source.heading) &&
           createHash("sha256").update(source.content).digest("hex") ===
-            gate.source.digest &&
-          source.content.includes(gate.source.text),
+            gate.source.digest,
       )
     )
       throw new Error(

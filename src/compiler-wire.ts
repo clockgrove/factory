@@ -753,8 +753,10 @@ export function compilerWire(
               ]!,
             source: {
               path: source.path,
+              ...(source.heading === undefined
+                ? {}
+                : { heading: source.heading }),
               digest: createHash("sha256").update(source.content).digest("hex"),
-              text: source.content,
             },
           };
         });
@@ -1185,7 +1187,6 @@ export function compilerWire(
         const source = {
           path: pinned.path,
           digest: sourceDigest(pinned.content),
-          text: spanText,
           lines,
         };
         const disposition = object(entry.disposition, "disposition");

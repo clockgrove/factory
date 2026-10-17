@@ -342,6 +342,7 @@ function continuationReferences(value: unknown): ContinuationReferences & {
     if (!evidence) return;
     git(evidence.treeSha, "tree", "validation-candidate");
     for (const ref of evidence.nativeReturns ?? []) add(ref);
+    for (const entry of evidence.reviewEvidence ?? []) add(entry.ref);
     for (const artifact of evidence.reviewArtifacts ?? []) {
       if ("text" in artifact) {
         for (const body of artifact.text.bodies) add(body.ref);
@@ -687,6 +688,7 @@ function memoryReferences(
     const evidence = object(entry) as unknown as ValidationEvidence;
     git(evidence.treeSha, "tree", "memory-validation");
     for (const ref of evidence.nativeReturns ?? []) add(ref);
+    for (const entry of evidence.reviewEvidence ?? []) add(entry.ref);
     for (const artifact of evidence.reviewArtifacts ?? []) {
       if ("text" in artifact) {
         for (const body of artifact.text.bodies) add(body.ref);

@@ -1075,9 +1075,22 @@ export class CodexPlanningTransport implements PlanningTransport {
                 native: import("../codex-app-server.js").CodexAppServerProgress,
               ) => {
                 if (native.activity) turn.progress(native.event);
+                // Thread totals so far, less a resumed thread's earlier turns.
+                const live = native.usage
+                  ? codexInvocationUsage(native.usage, captureBoundary?.usage)
+                  : undefined;
                 observeModelInvocation(invocation, {
                   type: "progress",
                   providerEvent: native.event,
+                  ...(live?.inputTokens !== undefined && {
+                    liveInputTokens: live.inputTokens,
+                  }),
+                  ...(live?.cachedInputTokens !== undefined && {
+                    liveCachedInputTokens: live.cachedInputTokens,
+                  }),
+                  ...(live?.outputTokens !== undefined && {
+                    liveOutputTokens: live.outputTokens,
+                  }),
                   providerThreadId: native.threadId,
                   providerItemId: native.itemId,
                   providerItemType: native.itemType,
@@ -1236,6 +1249,10 @@ export class CodexPlanningTransport implements PlanningTransport {
                 : item?.type === "file_change"
                   ? "apply_patch"
                   : undefined;
+          if (tool && event.type === "item.completed")
+            state.toolCalls = (state.toolCalls ?? 0) + 1;
+          if (event.type === "turn.completed" || event.type === "turn.failed")
+            state.turns = (state.turns ?? 0) + 1;
           const captured = codexCaptureEvent(
             event,
             thread.id ?? undefined,
@@ -1265,6 +1282,8 @@ export class CodexPlanningTransport implements PlanningTransport {
             ...(state.usage
               ? { usage: state.usage, usageAvailable: true }
               : {}),
+            ...(state.turns !== undefined && { turns: state.turns }),
+            toolCalls: state.toolCalls ?? 0,
           });
           if (event.type === "turn.failed") {
             state.ended = true;

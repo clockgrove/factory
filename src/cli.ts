@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
 import { itemActivities, renderWatch } from "./worker-activity.js";
+import {
+  type ModelCallRow,
+  readRunTelemetry,
+  runningCallText,
+} from "./run-telemetry.js";
 import { displayDateTime } from "./display-time.js";
 import {
   readSelectedConfig,
@@ -918,6 +923,16 @@ async function watchObjective(
     const items = continuation
       ? itemActivities(config.repository, continuation)
       : [];
+    const now = Date.now();
+    let running: ModelCallRow[] = [];
+    try {
+      if (continuation)
+        running = readRunTelemetry(config.repository, continuation, now).filter(
+          (call) => call.outcome === "running",
+        );
+    } catch {
+      // Telemetry only: an unreadable record leaves the calls out.
+    }
     if (args.includes("--json")) {
       console.log(
         redactDiagnosticDetail(
@@ -930,6 +945,7 @@ async function watchObjective(
             observedAt: new Date().toISOString(),
             staleMinutes: staleMs / 60_000,
             items,
+            modelCalls: running,
           }),
           secrets,
         ),
@@ -941,8 +957,12 @@ async function watchObjective(
       renderStatusText(document, option(process.argv.slice(3), "config"))[0] ??
         `Objective #${objective}`,
       ...(pending ? [pending] : []),
+      ...running.map(
+        (call) =>
+          `model: ${call.itemId ? `${call.itemId} ` : ""}${runningCallText(call, now)}`,
+      ),
     ];
-    for (const line of renderWatch(headline, items, Date.now(), staleMs))
+    for (const line of renderWatch(headline, items, now, staleMs))
       console.log(redactDiagnosticDetail(line, secrets));
   };
   print();

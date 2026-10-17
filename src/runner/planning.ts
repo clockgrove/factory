@@ -4,6 +4,7 @@ import {
   assertRestoredContinuationReady,
 } from "../state-store.js";
 import { markCheckpointDirty } from "../recovery-checkpoint.js";
+import { settleRefusedProjectQueueRun } from "../project-queue-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { releaseAgentSessions } from "../agent-session.js";
@@ -519,6 +520,12 @@ export async function decidePlan(
         throw new Error(
           "Planner disposal did not authenticate every retained receipt; preparation is preserved",
         );
+      await settleRefusedProjectQueueRun(
+        config,
+        objective,
+        preparation.runId,
+        lock,
+      );
       rmSync(path);
       markCheckpointDirty(config.repository, { path, kind: "continuation" });
     } else {

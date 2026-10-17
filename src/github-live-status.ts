@@ -25,6 +25,13 @@ import {
   awaitCheckpointAdmission,
   isCheckpointAdmissionFailure,
 } from "./recovery-checkpoint.js";
+import {
+  callLabel,
+  callProgressText,
+  type ModelCallRow,
+  readRunTelemetry,
+  runningCallText,
+} from "./run-telemetry.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
 import { type PlanningStepView, planningActivity } from "./status-summary.js";
 import {
@@ -122,6 +129,10 @@ export async function projectLiveStatus(
   const stamp = `<sub>Updated ${displayDateTime(now)}</sub>`;
   const targets: LiveTarget[] = [];
   const itemDigests: string[] = [];
+  // Read once per pass, only when a due comment renders.
+  let recorded: ModelCallRow[] | undefined;
+  const calls = (at: number) =>
+    (recorded ??= runCalls(args.config.repository, retained, at));
   // Planning has no Work Item yet: the Objective's comment shows its step.
   // A split parent's planning is over; its comment lists the children instead.
   const planning =
@@ -167,7 +178,7 @@ export async function projectLiveStatus(
                 item: { id, issue },
                 ...facts,
               }),
-              ...(item ? workerLines(item, at) : []),
+              ...workerLines(item, at, runningCallLines(calls(at), at, id)),
             ],
             details: facts.decisions.length
               ? runDetailsLines({
@@ -203,7 +214,7 @@ export async function projectLiveStatus(
             activeNote: (id) => workerAge(items, id, at),
           }),
           ...(planning === undefined
-            ? []
+            ? runningCallLines(calls(at), at)
             : planningLines(
                 planning,
                 retained.coordinator?.phaseStartedAt,
@@ -211,7 +222,10 @@ export async function projectLiveStatus(
                 at,
               )),
         ],
-        details: runDetailsLines(presentation.details),
+        details: runDetailsLines({
+          ...presentation.details,
+          calls: calls(at),
+        }),
       }),
     });
   const key = (target: LiveTarget) =>
@@ -325,18 +339,61 @@ async function editLiveStatus(
   }
 }
 
+/** The run's recorded model calls; unreadable telemetry only leaves them out. */
+function runCalls(
+  repository: string,
+  state: ContinuationState,
+  now: number,
+): ModelCallRow[] {
+  try {
+    return readRunTelemetry(repository, state, now);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Each running worker call's recorded progress, or one item's. Planning calls
+ * have their own line from this process's live observations.
+ */
+function runningCallLines(
+  calls: ModelCallRow[],
+  now: number,
+  itemId?: string,
+): string[] {
+  const lines = calls
+    .filter(
+      (call) =>
+        call.outcome === "running" &&
+        call.phase === "implementation" &&
+        call.itemId &&
+        PROGRESS_ITEM_ID.test(call.itemId) &&
+        (itemId === undefined || call.itemId === itemId),
+    )
+    .map(
+      (call) =>
+        `- Model: ${itemId === undefined ? `${code(call.itemId!)} ` : ""}${runningCallText(call, now)}`,
+    );
+  return lines.length && itemId === undefined ? ["", ...lines] : lines;
+}
+
 /** A code span that cannot be broken out of: no backtick, line break or control character. */
 const code = (text: string) =>
   `\`${text.replaceAll("`", "'").replace(/[\p{Cc}\u2028\u2029]/gu, "")}\``;
 
-/** A running worker's liveness, changed paths and recent tool calls. */
-function workerLines(item: ItemActivity, now: number): string[] {
+/** A running worker's liveness, model progress, changed paths and recent tool calls. */
+function workerLines(
+  item: ItemActivity | undefined,
+  now: number,
+  model: string[],
+): string[] {
   const lines: string[] = [];
-  const activity = activityLine(item.activity, now, STALE_MS);
+  const activity = activityLine(item?.activity, now, STALE_MS);
   if (activity) lines.push(`- Worker: ${activity}`);
-  const changes = changesLine(item.changes?.map(code));
+  lines.push(...model);
+  const changes = changesLine(item?.changes?.map(code));
   if (changes) lines.push(`- Files changed ${changes}`);
-  const recent = item.activity?.recent
+  const recent = item?.activity?.recent
     .map((event) =>
       event.target ? `${event.tool} ${code(event.target)}` : event.tool,
     )
@@ -369,7 +426,7 @@ function planningLines(
   if (Number.isFinite(since))
     lines.push(`- In this phase ${shortAge(now - since)}`);
   if (model) {
-    const call = `${model.phase} call`;
+    const call = `${callLabel(model.phase, model.ordinal) ?? model.phase} call`;
     const usage = [
       ...(model.inputTokens !== undefined
         ? [`${formatTokens(model.inputTokens)} input`]
@@ -378,14 +435,27 @@ function planningLines(
         ? [`${formatTokens(model.outputTokens)} output tokens`]
         : []),
     ];
+    const counts = callProgressText({
+      turns: model.turns,
+      toolCalls: model.toolCalls,
+      ...(model.endedAt === undefined && {
+        inputTokens: model.liveInputTokens,
+      }),
+    });
     if (model.endedAt !== undefined)
       lines.push(
-        `- Model: last ${call} ${model.outcome} after ${shortAge(model.endedAt - model.startedAt)}${usage.length ? ` · ${usage.join(" · ")}` : ""}`,
+        `- Model: last ${call} ${model.outcome} after ${shortAge(model.endedAt - model.startedAt)}${[
+          counts,
+          ...usage,
+        ]
+          .filter(Boolean)
+          .map((part) => ` · ${part}`)
+          .join("")}`,
       );
     else {
       const quiet = now - model.lastEventAt;
       lines.push(
-        `- Model: ${call} running ${shortAge(now - model.startedAt)} · last event ${shortAge(quiet)} ago${quiet > STALE_MS ? " (stale)" : ""} · ${model.events} event${model.events === 1 ? "" : "s"}`,
+        `- Model: ${call} running ${shortAge(now - model.startedAt)} · last event ${shortAge(quiet)} ago${quiet > STALE_MS ? " (stale)" : ""}${counts ? ` · ${counts} so far` : ""}`,
       );
     }
   }

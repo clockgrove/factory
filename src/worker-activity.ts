@@ -66,7 +66,10 @@ export interface ItemActivity {
 const ATTEMPT =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-function workerProgressPath(repository: string, attempt: string): string {
+export function workerProgressPath(
+  repository: string,
+  attempt: string,
+): string {
   if (!ATTEMPT.test(attempt)) throw new Error("Invalid worker attempt ID");
   return join(stateRoot(repository), "harness", `${attempt}.progress.ndjson`);
 }

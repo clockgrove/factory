@@ -86,6 +86,7 @@ import { objectiveCandidate } from "./qa.js";
 import {
   awaitCheckpointAdmission,
   CheckpointProducerInventoryChanged,
+  gitPersistenceStatus,
   isCheckpointAdmissionFailure,
   isCheckpointCollectionPending,
   privateCheckpointBounds,
@@ -1087,15 +1088,32 @@ async function runObjectiveOwned(
   process.on("SIGUSR1", cancel);
   let progressTask: Promise<void> | undefined;
   // Presentation never decides the controller's fate (#1276). When one of its
-  // checkpoint admissions fails, it stops for the rest of this run, so it adds
-  // no GitHub effect on unacknowledged durability; the controller's own
-  // admissions before its effects and at stop remain the durability authority.
-  let presentationHeld = false;
+  // checkpoint admissions fails for a reason that is not waited out, it holds,
+  // so it adds no GitHub effect on unacknowledged durability; the controller's
+  // own admissions before its effects and at stop remain the durability
+  // authority. The hold records the checkpoint last acknowledged when it
+  // began and lasts until a later admission acknowledges another (#1445).
+  let presentationHold: { acknowledged: string | undefined } | undefined;
+  const acknowledgedCheckpoint = () =>
+    gitPersistenceStatus(config).lastAcknowledged?.commitSha;
   const githubPresentation =
     progressOffered(config, services.github) ||
     projectStatusOffered(config, services.github);
   const projectProgress = (): Promise<void> => {
-    if (presentationHeld || !githubPresentation) return Promise.resolve();
+    if (!githubPresentation) return Promise.resolve();
+    if (presentationHold) {
+      try {
+        if (acknowledgedCheckpoint() === presentationHold.acknowledged)
+          return Promise.resolve();
+      } catch {
+        // An unreadable journal acknowledges nothing; the hold stands.
+        return Promise.resolve();
+      }
+      presentationHold = undefined;
+      process.stderr.write(
+        `Factory GitHub progress for Objective #${objective} resumed: a later checkpoint admission was acknowledged.\n`,
+      );
+    }
     if (progressTask) return progressTask;
     const parentSignal = currentProcessSignal();
     const deadlines = [owner.deadlineAt, currentProcessDeadlineAt()].filter(
@@ -1147,9 +1165,15 @@ async function runObjectiveOwned(
         )
           return;
         if (isCheckpointAdmissionFailure(error)) {
-          presentationHeld = true;
+          let acknowledged: string | undefined;
+          try {
+            acknowledged = acknowledgedCheckpoint();
+          } catch {
+            // Unreadable now: any later readable acknowledgment resumes.
+          }
+          presentationHold = { acknowledged };
           process.stderr.write(
-            `Factory GitHub progress for Objective #${objective} stopped for this run: a checkpoint admission failed (${error instanceof Error ? error.message : String(error)}). The run continues; inspect Factory status.\n`,
+            `Factory GitHub progress for Objective #${objective} is held: a checkpoint admission failed (${error instanceof Error ? error.message : String(error)}). The run continues, and progress resumes once a later checkpoint is acknowledged; Factory status shows the checkpoint's durability.\n`,
           );
           return;
         }

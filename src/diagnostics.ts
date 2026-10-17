@@ -664,13 +664,9 @@ export class DiagnosticEmitter {
             semanticStatus: semantic.status,
           },
         });
-      // A capture-only evaluation is not another provider progress observation.
-      if (
-        observation.capture &&
-        observation.type === "progress" &&
-        !observation.providerEvent
-      )
-        return;
+      // A capture-only evaluation, or a provider heartbeat that only shows
+      // liveness, is not another provider progress observation.
+      if (observation.type === "progress" && !observation.providerEvent) return;
       if (
         observation.type === "completed" ||
         observation.type === "failed" ||
@@ -740,6 +736,11 @@ export class DiagnosticEmitter {
         providerItemType: observation.providerItemType,
         tool: observation.tool,
         usageAvailable: observation.usageAvailable,
+        turns: observation.turns,
+        toolCalls: observation.toolCalls,
+        liveInputTokens: observation.liveInputTokens,
+        liveCachedInputTokens: observation.liveCachedInputTokens,
+        liveOutputTokens: observation.liveOutputTokens,
         failureClass: observation.failureClass,
         failureField: observation.failureField,
         failureReason: observation.failureReason,
@@ -2447,9 +2448,16 @@ export function statusDocument(
  */
 export interface ModelActivity {
   phase: string;
+  /** The phase's invocation ordinal in its scope: 1 is the first revision. */
+  ordinal: number;
   startedAt: number;
+  /** Any provider observation, heartbeats included. */
   lastEventAt: number;
-  events: number;
+  /** The current provider attempt's model turns and tool calls so far. */
+  turns?: number;
+  toolCalls?: number;
+  /** Input tokens streamed so far while the call runs. */
+  liveInputTokens?: number;
   /** Set when the call returned or failed; a provider retry clears it. */
   endedAt?: number;
   outcome?: "returned" | "failed";
@@ -2471,18 +2479,28 @@ function noteModelActivity(
     current = {
       invocationId: observation.invocationId,
       phase: observation.phase,
+      ordinal: observation.ordinal,
       startedAt: now,
       lastEventAt: now,
-      events: 0,
     };
     modelActivities.set(key, current);
   }
   current.lastEventAt = now;
+  // A provider retry counts its own turns again.
+  if (observation.type === "started") {
+    delete current.turns;
+    delete current.toolCalls;
+    delete current.liveInputTokens;
+  }
+  if (observation.turns !== undefined) current.turns = observation.turns;
+  if (observation.toolCalls !== undefined)
+    current.toolCalls = observation.toolCalls;
+  if (observation.liveInputTokens !== undefined)
+    current.liveInputTokens = observation.liveInputTokens;
   if (["completed", "failed", "response-invalid"].includes(observation.type)) {
     current.endedAt = now;
     current.outcome = observation.type === "completed" ? "returned" : "failed";
   } else {
-    current.events += observation.type === "progress" ? 1 : 0;
     delete current.endedAt;
     delete current.outcome;
   }

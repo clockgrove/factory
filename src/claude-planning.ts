@@ -492,6 +492,60 @@ function sessionDefect(detail: string): never {
 /** The runtime's stand-in for a model message it produced itself. */
 const SYNTHETIC_MODEL = "<synthetic>";
 
+/**
+ * System messages whose facts are recorded. The rest (per-frame thinking-token
+ * estimates, request status, hook, task and session-state progress) only show
+ * the call is alive.
+ */
+const RECORDED_SYSTEM_MESSAGES = new Set([
+  "init",
+  "compact_boundary",
+  "api_retry",
+  "model_refusal_fallback",
+  "model_refusal_no_fallback",
+  "permission_denied",
+  "mirror_error",
+]);
+
+/** What the stream showed so far: model turns, tool calls and per-turn input usage. */
+class LiveProgress {
+  private turns = new Set<string>();
+  private tools = new Set<string>();
+  private input?: number;
+  private cached?: number;
+
+  observe(message: SDKMessage, observed?: Record<string, unknown>): void {
+    if (message.type !== "assistant") return;
+    for (const block of message.message.content)
+      if (block.type === "tool_use" && block.name !== STRUCTURED_OUTPUT_TOOL)
+        this.tools.add(block.id);
+    // The SDK yields one message per content block; usage repeats per turn.
+    if (!observed || message.message.model === SYNTHETIC_MODEL) return;
+    this.turns.add(message.message.id);
+    const usage = observed.usage as Record<string, number | undefined>;
+    const read = usage.cache_read_input_tokens ?? 0;
+    this.input =
+      (this.input ?? 0) +
+      (usage.input_tokens ?? 0) +
+      read +
+      (usage.cache_creation_input_tokens ?? 0);
+    this.cached = (this.cached ?? 0) + read;
+  }
+
+  toolCalls(): number {
+    return this.tools.size;
+  }
+
+  fields() {
+    return {
+      turns: this.turns.size,
+      toolCalls: this.tools.size,
+      ...(this.input !== undefined && { liveInputTokens: this.input }),
+      ...(this.cached !== undefined && { liveCachedInputTokens: this.cached }),
+    };
+  }
+}
+
 function apiErrorStatus(result: SDKResultMessage): number | undefined {
   return result.subtype === "success" &&
     typeof result.api_error_status === "number"
@@ -814,6 +868,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       owned?.resume,
     );
     const facts: SessionFacts = { initialized: false, modelResponded: false };
+    const live = new LiveProgress();
     let root: string | undefined;
     let events: AsyncIterator<SDKMessage> | undefined;
     let closeStarted = false;
@@ -929,25 +984,36 @@ class ClaudePlanningTransport implements PlanningTransport {
             state.started = true;
           }
         }
-        const captures = claudeCaptureEvents(
-          message,
-          this.secrets,
-          usage.observe(message),
-        );
-        for (const [index, capture] of [
-          ...(captures.length ? captures : [undefined]),
-        ].entries())
-          observeModelInvocation(invocation, {
-            type: "progress",
-            ...(capture && { capture }),
-            ...(index === 0 && {
-              provider: this.provider,
-              model,
-              reasoningEffort,
-              providerThreadId: state.providerThreadId,
-              providerEvent: message.type,
-            }),
-          });
+        const observed = usage.observe(message);
+        live.observe(message, observed);
+        state.turns = live.fields().turns;
+        state.toolCalls = live.toolCalls();
+        if (
+          message.type === "system" &&
+          !RECORDED_SYSTEM_MESSAGES.has(message.subtype)
+        )
+          observeModelInvocation(invocation, { type: "progress" });
+        else {
+          const captures = claudeCaptureEvents(message, this.secrets, observed);
+          for (const [index, capture] of [
+            ...(captures.length ? captures : [undefined]),
+          ].entries())
+            observeModelInvocation(invocation, {
+              type: "progress",
+              ...(capture && { capture }),
+              ...(index === 0 && {
+                provider: this.provider,
+                model,
+                reasoningEffort,
+                providerThreadId: state.providerThreadId,
+                providerEvent:
+                  message.type === "system"
+                    ? `system.${message.subtype}`
+                    : message.type,
+                ...live.fields(),
+              }),
+            });
+        }
         if (message.type === "system" && message.subtype === "compact_boundary")
           compacted = true;
         if (message.type === "system" && message.subtype === "init") {
@@ -1179,6 +1245,9 @@ class ClaudePlanningTransport implements PlanningTransport {
       (status !== undefined || facts.modelResponded);
     const totals = context.usage.totals();
     state.usage = Object.keys(totals).length ? totals : undefined;
+    // The SDK's own count of this query's model round trips.
+    if (Number.isSafeInteger(result.num_turns) && result.num_turns >= 0)
+      state.turns = result.num_turns;
     const models = Object.keys(result.modelUsage ?? {});
     const cost = context.usage.cost();
     observeModelInvocation(invocation, {

@@ -7,7 +7,10 @@ import { markCheckpointDirty } from "../recovery-checkpoint.js";
 import { settleRefusedProjectQueueRun } from "../project-queue-state.js";
 import { createHash, randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
-import { releaseAgentSessions } from "../agent-session.js";
+import {
+  releaseAgentSessions,
+  settleAbandonedPlanningTurn,
+} from "../agent-session.js";
 import { adaptiveWorkflowEnabled } from "../adaptive-workflow.js";
 import {
   bindPlanningPlaybook,
@@ -483,6 +486,11 @@ export async function decidePlan(
         throw new Error(
           "Work Item projection has started; cancel the Objective instead",
         );
+      await settleAbandonedPlanningTurn(
+        preparation,
+        services.planningModel,
+        () => saveState(path, preparation),
+      );
       if (!canHandoff(preparation))
         throw new Error(
           "Planning owns an unsettled invocation or resource; use supported cancellation before refusing the preparation",
@@ -520,12 +528,7 @@ export async function decidePlan(
         throw new Error(
           "Planner disposal did not authenticate every retained receipt; preparation is preserved",
         );
-      await settleRefusedProjectQueueRun(
-        config,
-        objective,
-        preparation.runId,
-        lock,
-      );
+      await settleRefusedProjectQueueRun(config, preparation, lock);
       rmSync(path);
       markCheckpointDirty(config.repository, { path, kind: "continuation" });
     } else {

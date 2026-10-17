@@ -608,6 +608,63 @@ export function settleAbandonedReviewTurns(
   }
 }
 
+/**
+ * A planning call that ended without a native outcome (an elapsed deadline)
+ * leaves its invocation submitted and its turn in flight after its adapter
+ * settled the local process. When the adapter cannot authenticate an outcome
+ * from the retained turn, settle both as abandoned in one save: the turn
+ * becomes unavailable (terminal unknown, resources settled) and the receipt
+ * is kept, marked abandoned, so the next call is a fresh invocation in a
+ * fresh conversation. A live or recoverable turn stays held for its owner.
+ */
+export async function settleAbandonedPlanningTurn(
+  state: ContinuationState,
+  model: PlanningModel | undefined,
+  save: () => void,
+): Promise<void> {
+  const planning = state.planningRecovery;
+  const invocation = planning?.invocation;
+  if (
+    !isPreparationState(state) ||
+    state.restoration ||
+    state.cancelledAt ||
+    state.coordinator?.processes?.length ||
+    !model?.reconcileSession ||
+    planning?.phase !== "submitted" ||
+    planning.response !== undefined ||
+    !invocation
+  )
+    return;
+  const receipt = planning.invocations?.find(
+    (entry) => entry.id === invocation.id && entry.phase === invocation.phase,
+  );
+  if (!receipt || receipt.resultDigest) return;
+  const session = agentSessionContinuation(state, "planning", undefined, save);
+  const retained = session.retained;
+  if (
+    retained?.status !== "in-flight" ||
+    retained.currentTurn?.invocationId !== invocation.id ||
+    retained.currentTurn.resources !== "settled" ||
+    retained.currentTurn.terminal !== undefined
+  )
+    return;
+  const { disposition } = await model.reconcileSession(
+    structuredClone(retained),
+  );
+  if (disposition !== "unknown") return;
+  receipt.abandoned = true;
+  delete planning.invocation;
+  planning.phase = "ready";
+  try {
+    session.checkpoint({ ...retained, status: "unavailable" });
+  } catch (error) {
+    delete receipt.abandoned;
+    planning.invocation = invocation;
+    planning.phase = "submitted";
+    throw error;
+  }
+}
+
 /** Exact settled source receipts remain historical; they grant no destination adapter ownership. */
 export function restoredSessionIsHistorical(
   state: ContinuationState,

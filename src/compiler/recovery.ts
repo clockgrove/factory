@@ -1,4 +1,5 @@
 import { graphItems } from "./split.js";
+import { settleAbandonedPlanningTurn } from "../agent-session.js";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -101,6 +102,8 @@ interface PlanningInvocationReceipt {
   id: string;
   phase: string;
   resultDigest?: string;
+  /** Submitted, then settled without an authenticated native outcome; its answer is never used. */
+  abandoned?: true;
   /** Exact adapter-native bodies; these are evidence, never a reconstructed response. */
   nativeReturns?: ContentRef[];
 }
@@ -369,6 +372,10 @@ async function compilePlanAdmitted(
     );
     save();
   }
+  // A retried call whose turn its adapter settled without an outcome is
+  // abandoned here too, so a live owner plans afresh instead of stopping.
+  if (context.sessionState)
+    await settleAbandonedPlanningTurn(context.sessionState, model, save);
   const recoverInvocationId =
     record.phase === "submitted" ? record.invocation?.id : undefined;
   // Submitted calls retain their original owner until authenticated settlement.

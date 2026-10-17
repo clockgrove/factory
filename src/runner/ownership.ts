@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   agentSessionContinuation,
   releaseAgentSessions,
+  settleAbandonedPlanningTurn,
 } from "../agent-session.js";
 import { closeCancelledWorkItems } from "../completion.js";
 import type { FactoryConfig } from "../config.js";
@@ -458,6 +459,10 @@ export async function releaseCancelledSessions(
         "Cancellation disposal lost its current atomic scope or exclusive owner",
       );
   };
+  assertCurrent();
+  // A planning turn its adapter settled without a native outcome needs no
+  // cancellation coverage: it is abandoned, then disposed like any other.
+  await settleAbandonedPlanningTurn(state, model, save);
   assertCurrent();
   const planning = state.planningRecovery;
   const unresolvedPlanning =

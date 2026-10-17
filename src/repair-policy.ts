@@ -912,6 +912,8 @@ export function assertRepairLedger(
         !receipt.id ||
         typeof receipt.phase !== "string" ||
         !receipt.phase ||
+        (receipt.abandoned !== undefined &&
+          (receipt.abandoned !== true || receipt.resultDigest !== undefined)) ||
         (receipt.nativeReturns !== undefined &&
           (!Array.isArray(receipt.nativeReturns) ||
             receipt.nativeReturns.some(

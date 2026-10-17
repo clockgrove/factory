@@ -3,6 +3,7 @@ import { join, resolve, sep } from "node:path";
 import { stateRoot } from "./config.js";
 import { privateRecords } from "./diagnostics.js";
 import { displayClock } from "./display-time.js";
+import { factoryFilesToolName } from "./execution/claude-files.js";
 import { factoryValidationToolName } from "./execution/claude-validation.js";
 import { ownsPath } from "./ownership.js";
 import {
@@ -75,8 +76,14 @@ export function workerProgressPath(
 
 const CONTROL = /\p{Cc}/u;
 
-/** Claude tools that change a file's content. */
-const EDIT_TOOLS = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+/** Claude tools that change a file's content, including Factory's owned-file delete. */
+const EDIT_TOOLS = [
+  "Edit",
+  "MultiEdit",
+  "Write",
+  "NotebookEdit",
+  factoryFilesToolName,
+];
 
 /** How long a worker may emit events without progress before it is called out. */
 export const PROGRESS_QUIET_MS = 15 * 60_000;

@@ -8,6 +8,12 @@ import {
   type PreparedClaudeEnvironment,
 } from "./claude-environment.js";
 import {
+  factoryFilesServerName,
+  factoryFilesToolAllowed,
+  factoryFilesToolName,
+  type PreparedClaudeFiles,
+} from "./claude-files.js";
+import {
   claudeResumeOptions,
   claudeSessionEnvironment,
 } from "./claude-session.js";
@@ -70,23 +76,30 @@ function claudeToolAllowed(
   mcpServer: unknown,
   prepared?: PreparedClaudeEnvironment,
   validation?: PreparedClaudeValidation,
+  files?: PreparedClaudeFiles,
 ): boolean {
   if (toolName === factoryValidationToolName)
     return (
       !!validation?.isReady() &&
       factoryValidationToolAllowed(input, toolName, toolInput, mcpServer)
     );
-  if (input.request.environment?.mcp) {
-    // Readiness is an attempt-wide gate, including native reads and writes.
-    if (!prepared?.isReady()) return false;
-    if (toolName.startsWith("mcp__") || mcpServer)
-      return factoryMcpToolAllowed(
-        { worktree: input.request.worktree, config: input.config },
-        toolName,
-        toolInput,
-        mcpServer,
-      );
-  }
+  // Readiness is an attempt-wide gate, including native reads and writes.
+  if (input.request.environment?.mcp && !prepared?.isReady()) return false;
+  if (toolName === factoryFilesToolName)
+    return (
+      !!files?.isReady() &&
+      factoryFilesToolAllowed(input, toolName, toolInput, mcpServer)
+    );
+  if (
+    input.request.environment?.mcp &&
+    (toolName.startsWith("mcp__") || mcpServer)
+  )
+    return factoryMcpToolAllowed(
+      { worktree: input.request.worktree, config: input.config },
+      toolName,
+      toolInput,
+      mcpServer,
+    );
   if (
     !toolInput ||
     typeof toolInput !== "object" ||
@@ -119,6 +132,7 @@ function preToolUseDecision(
   >[0],
   prepared?: PreparedClaudeEnvironment,
   validation?: PreparedClaudeValidation,
+  files?: PreparedClaudeFiles,
 ): HookJSONOutput {
   const allowed =
     hookInput.hook_event_name === "PreToolUse" &&
@@ -129,6 +143,7 @@ function preToolUseDecision(
       hookInput.mcp_server,
       prepared,
       validation,
+      files,
     );
   return {
     hookSpecificOutput: {
@@ -171,6 +186,7 @@ export function claudeQueryOptions(
   abortController: AbortController,
   prepared?: PreparedClaudeEnvironment,
   validation?: PreparedClaudeValidation,
+  files?: PreparedClaudeFiles,
 ): Options {
   const { config, request } = input;
   const model = claudeSdkModel(config.model, environment);
@@ -193,7 +209,7 @@ export function claudeQueryOptions(
         {
           hooks: [
             async (hookInput) =>
-              preToolUseDecision(input, hookInput, prepared, validation),
+              preToolUseDecision(input, hookInput, prepared, validation, files),
           ],
         },
       ],
@@ -207,6 +223,7 @@ export function claudeQueryOptions(
           permission.mcpServer,
           prepared,
           validation,
+          files,
         )
       )
         return {
@@ -244,6 +261,7 @@ export function claudeQueryOptions(
     mcpServers: {
       ...(prepared && { [factoryMcpServerName]: prepared.server }),
       ...(validation && { [factoryValidationServerName]: validation.server }),
+      ...(files && { [factoryFilesServerName]: files.server }),
     },
     strictMcpConfig: true,
     agents: {},

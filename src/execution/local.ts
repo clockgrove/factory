@@ -681,6 +681,12 @@ const PRIVATE_STAGING = [
   ".factory-inputs",
   ".factory-assets.json",
 ];
+/** Whether a Git-relative path is private staging, which is never a delivery candidate. */
+export function privateStagingPath(path: string): boolean {
+  return [...PRIVATE_STAGING, ".factory-media"].some(
+    (name) => path === name || path.startsWith(`${name}/`),
+  );
+}
 /**
  * Pathspecs that keep present private staging out of `git add -A -- .`.
  * Git rejects an explicit ignored path even when it is an exclusion, and

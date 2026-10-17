@@ -50,6 +50,13 @@ import {
   workerValidationCommands,
 } from "./claude-validation.js";
 import {
+  createFactoryFilesMcp,
+  deletionAuthorized,
+  factoryFilesServerName,
+  factoryFilesToolName,
+  type PreparedClaudeFiles,
+} from "./claude-files.js";
+import {
   harnessFailure,
   ProviderLimitError,
   privateProgress,
@@ -140,6 +147,8 @@ function assertInitialization(
   const configuredTools = new Set(config.tools);
   if (request.environment?.mcp) configuredTools.add(factoryMcpToolName);
   if (validating) configuredTools.add(factoryValidationToolName);
+  const deleting = deletionAuthorized(input);
+  if (deleting) configuredTools.add(factoryFilesToolName);
   const unexpectedTool = message.tools.find(
     (tool) => !configuredTools.has(tool),
   );
@@ -148,6 +157,7 @@ function assertInitialization(
   const expectedServers = [
     ...(request.environment?.mcp ? [factoryMcpServerName] : []),
     ...(validating ? [factoryValidationServerName] : []),
+    ...(deleting ? [factoryFilesServerName] : []),
   ];
   if (
     message.mcp_servers.length !== expectedServers.length ||
@@ -261,6 +271,7 @@ async function main(): Promise<void> {
   let providerCompleted = false;
   let prepared: PreparedClaudeEnvironment | undefined;
   let validation: PreparedClaudeValidation | undefined;
+  let files: PreparedClaudeFiles | undefined;
   let events: AsyncIterator<SDKMessage> | undefined;
   let closeStarted = false;
   let progressLost = false;
@@ -358,6 +369,21 @@ async function main(): Promise<void> {
         }),
       );
     }
+    if (deletionAuthorized(input)) {
+      files = await turn.race(
+        createFactoryFilesMcp({
+          worktree: input.request.worktree,
+          ownedPaths: input.request.item.ownedPaths,
+          config: input.config,
+        }).then(async (environment) => {
+          if (controller.signal.aborted) {
+            await environment.close();
+            throw new Error("Claude environment preparation interrupted");
+          }
+          return environment;
+        }),
+      );
+    }
     const rendered = renderWorkItemPrompt(
       input.request,
       input.request.worktree,
@@ -369,6 +395,7 @@ async function main(): Promise<void> {
       controller,
       prepared,
       validation,
+      files,
     );
     capture.request(
       prompt,
@@ -448,7 +475,7 @@ async function main(): Promise<void> {
         }
       if (message.type === "system" && message.subtype === "init") {
         assertInitialization(message, input, options.model!);
-        if (prepared || validation) {
+        if (prepared || validation || files) {
           const statuses = await turn.race(stream.mcpServerStatus());
           prepared?.markReady(
             statuses.filter((status) => status.name === factoryMcpServerName),
@@ -462,6 +489,16 @@ async function main(): Promise<void> {
                 "Factory validation MCP readiness verification failed",
               );
             validation.markReady(owned[0]!);
+          }
+          if (files) {
+            const owned = statuses.filter(
+              (status) => status.name === factoryFilesServerName,
+            );
+            if (owned.length !== 1)
+              throw new Error(
+                "Factory files MCP readiness verification failed",
+              );
+            files.markReady(owned[0]!);
           }
         }
         if (
@@ -521,6 +558,7 @@ async function main(): Promise<void> {
     await closeProviderEventStream(events, turn, true);
     if (prepared) await turn.race(prepared.close());
     if (validation) await turn.race(validation.close());
+    if (files) await turn.race(files.close());
     turn.finish();
     providerCompleted = true;
     capture.providerCompleted();
@@ -605,7 +643,7 @@ async function main(): Promise<void> {
     turns.end();
     if (events && !closeStarted)
       void closeProviderEventStream(events, turn, false);
-    for (const owned of [prepared, validation]) {
+    for (const owned of [prepared, validation, files]) {
       if (!owned) continue;
       const closing = owned.close();
       if (!turn.signal.aborted) {

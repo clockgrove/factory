@@ -1133,7 +1133,9 @@ async function runObjectiveOwned(
     );
     progressTask = withProcessCancellation(
       AbortSignal.any([
-        owner.abort.signal,
+        // Recorded cancellation ended the owned work this abort stopped; its
+        // final projection shows that outcome, so the abort does not stop it (#1429).
+        ...(owner.snapshot?.cancelledAt ? [] : [owner.abort.signal]),
         ...(parentSignal ? [parentSignal] : []),
       ]),
       () =>
@@ -1572,6 +1574,7 @@ async function cancelObjectiveOwned(
         lockHandle,
       );
       saveState(statePath(config.repository, objective), continuation);
+      await projectCancellation(config, objective, github, continuation);
       await settleCancelledProjectQueueRun(config, continuation, lockHandle);
       return "cancelled";
     }
@@ -1645,6 +1648,7 @@ async function cancelObjectiveOwned(
     continuation.cancelledAt = new Date().toISOString();
     clearAllRepeats(continuation);
     saveState(statePath(config.repository, objective), continuation);
+    await projectCancellation(config, objective, github, continuation);
     // Reconcile retained historical attempts as well as the active attempt.
     if (config.queue?.project)
       await cancelKnownWork(
@@ -1664,6 +1668,35 @@ async function cancelObjectiveOwned(
   } finally {
     observeRetrospective(config, objective);
     releaseMutationLock(config, objective, lockHandle);
+  }
+}
+
+/**
+ * Show a cancellation recorded without a controller on GitHub, as a
+ * controller's final projection does (#1429). Presentation only: a failure is
+ * reported and never changes the recorded cancellation.
+ */
+async function projectCancellation(
+  config: FactoryConfig,
+  objective: number,
+  github: GitHubGateway,
+  continuation: ContinuationState,
+): Promise<void> {
+  try {
+    await projectGitHubProgress({
+      config,
+      objective,
+      github,
+      current: () => continuation,
+      save: () =>
+        saveState(statePath(config.repository, objective), continuation),
+      active: false,
+      secrets: configuredDiagnosticSecrets(config),
+    });
+  } catch {
+    process.stderr.write(
+      `Factory GitHub progress for Objective #${objective} is unavailable; inspect Factory status.\n`,
+    );
   }
 }
 

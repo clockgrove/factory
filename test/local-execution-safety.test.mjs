@@ -3644,7 +3644,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       const path=objectiveLockPath(repository,objective);
       const lock=acquireControllerLock(path,objective);
       const server=await serveControl(repository,lock,async()=>{throw new Error("Unexpected ordinary control handler")},objective);
-      process.on("SIGTERM",async()=>{await new Promise(resolve=>server.close(resolve));releaseControllerLock(path,lock);process.exit(0)});
+      process.on("SIGTERM",async()=>{await new Promise(resolve=>server.close(resolve));setTimeout(()=>{releaseControllerLock(path,lock);process.exit(0)},300)});
       process.stdout.write("ready\n");
     `,
       ],
@@ -3694,6 +3694,18 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       assert.equal(resumed.handled, true);
       assert.equal(resumed.result.owner.pid, controller.pid);
       assert.equal(resumed.result.protocol, "controller-readiness-v1");
+      // An exiting owner removes its endpoint before its record (#1486): a
+      // command waits for it to finish, then takes the owned path.
+      controller.kill("SIGTERM");
+      while (existsSync(join(lockPath, "..", "control.sock")))
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.deepEqual(
+        await requestControl(activated.repository, {
+          objective: activated.objective,
+          action: "status",
+        }),
+        { handled: false },
+      );
     } finally {
       controller.kill("SIGCONT");
       controller.kill("SIGTERM");

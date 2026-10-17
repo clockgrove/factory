@@ -12,6 +12,7 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
@@ -342,6 +343,7 @@ export async function validateTree(
   retainFailedValidation = true,
   preparation: ValidationPreparation = { commands: [] },
   reviewArtifacts: readonly ReviewArtifactSelector[] = [],
+  freshTemporaryDirectory = false,
 ): Promise<ValidationEvidence> {
   const worktree = join(root, "worktree");
   try {
@@ -368,6 +370,7 @@ export async function validateTree(
       retainFailedValidation,
       preparation,
       reviewArtifacts,
+      freshTemporaryDirectory,
     );
     evidence.worktreeObservation!.checkoutPreparation = {
       kind: "fresh-detached-worktree",
@@ -396,6 +399,8 @@ export async function validateCheckout(
   retainFailedValidation = true,
   preparation: ValidationPreparation = { commands: [] },
   reviewArtifacts: readonly ReviewArtifactSelector[] = [],
+  /** Give the run its own empty TMPDIR even without a locator selector. */
+  freshTemporaryDirectory = false,
 ): Promise<ValidationEvidence> {
   assertReviewArtifactSelectors(reviewArtifacts);
   if (reviewArtifacts.length && !contentStore)
@@ -472,7 +477,9 @@ export async function validateCheckout(
     (selector) => "text" in selector && selector.text.locator,
   )
     ? mkdtempSync(join(root, "validation-artifacts-"))
-    : undefined;
+    : freshTemporaryDirectory
+      ? mkdtempSync(join(tmpdir(), "factory-validation-"))
+      : undefined;
   try {
     for (const [sequenceIndex, check] of sequence.entries()) {
       const preparing = sequenceIndex < preparation.commands.length;

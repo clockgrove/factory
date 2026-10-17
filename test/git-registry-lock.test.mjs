@@ -72,6 +72,7 @@ import {
   queueDigest,
   parseQueueRecord,
   performQueueCommandEffect,
+  QueueAuthorityChanged,
   readQueueHistory,
   queueObservationTargets,
   verifyQueueObservation,
@@ -1511,6 +1512,12 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       assert.notEqual(
         factoryAuthorityDigest(reauthorized),
         factoryAuthorityDigest(config),
+      );
+      // Until then the control receipt authorizes nothing, and a starting
+      // service waits for that re-authorization rather than failing (#1305).
+      await assert.rejects(
+        observeProjectQueue(reauthorized, github),
+        QueueAuthorityChanged,
       );
       await intakeControl(reauthorized, "resume", undefined, github);
       const historical = await observeProjectQueue(reauthorized, github);

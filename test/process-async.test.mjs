@@ -1031,9 +1031,17 @@ setTimeout(() => {
           (stream) => {
             if (stream !== "stdout") return;
             echoReceipts++;
+            // An echo already in flight can arrive after the turn ends; only
+            // the elapsed deadline, never inactivity, may have ended it.
+            if (activeTurn.signal.aborted) {
+              assert.ok(
+                activeTurn.signal.reason instanceof
+                  ProviderTurnElapsedTimeoutError,
+              );
+              return;
+            }
             activeTurn.progress("cat-echo");
             if (Date.now() - activeStarted > idleWindow) {
-              assert.equal(activeTurn.signal.aborted, false);
               const owner = interactiveOwners.findLast(
                 (entry) => !entry.settled,
               );

@@ -53,8 +53,9 @@ export function nativeCodexServiceTier(
  * process, only as text: ThreadError has just `message` and the exit error
  * just stderr. A rejected API request arrives as its JSON body with `status`.
  * Credentials the CLI itself finds missing or unrefreshable carry no status,
- * so for exec only, this narrowest fallback matches the CLI's own login
- * remediation and its rendering of HTTP 401.
+ * so this narrowest fallback matches the CLI's own login remediation and its
+ * rendering of HTTP 401. It applies to exec and to an app-server failure
+ * without a typed cause.
  */
 const CODEX_EXEC_LOGIN =
   /\bcodex login\b|\bsign in again\b|\b401 Unauthorized\b/;
@@ -70,24 +71,26 @@ function jsonStatus(message: string): unknown {
 /**
  * A failed Codex turn that is an authentication failure. The app-server
  * projection carries the native `codexErrorInfo` ("unauthorized", or a
- * variant with `httpStatusCode`), which alone decides; exec has none.
+ * variant with `httpStatusCode`). When it gives no typed cause (null or
+ * "other", as for an API 401 it did not map) or on exec, which has none, the
+ * JSON body status and the exec fallback above apply.
  */
 export function codexAuthentication(
   error: ThreadError & { codexErrorInfo?: unknown },
 ): AuthenticationRequiredError | undefined {
   const info = error.codexErrorInfo;
   const authentication =
-    "codexErrorInfo" in error
-      ? info === "unauthorized" ||
-        (info !== null &&
-          typeof info === "object" &&
-          Object.values(info).some(
-            (variant) =>
-              (variant as { httpStatusCode?: unknown } | null)
-                ?.httpStatusCode === 401,
-          ))
-      : jsonStatus(error.message) === 401 ||
-        CODEX_EXEC_LOGIN.test(error.message);
+    info === "unauthorized" ||
+    (info !== null &&
+      typeof info === "object" &&
+      Object.values(info).some(
+        (variant) =>
+          (variant as { httpStatusCode?: unknown } | null)?.httpStatusCode ===
+          401,
+      )) ||
+    ((info === undefined || info === null || info === "other") &&
+      (jsonStatus(error.message) === 401 ||
+        CODEX_EXEC_LOGIN.test(error.message)));
   return authentication
     ? new AuthenticationRequiredError(error.message, {
         provider: "codex",

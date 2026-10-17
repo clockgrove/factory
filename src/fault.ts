@@ -244,17 +244,29 @@ export function withFault<T>(
 const message = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** Node, undici and fetch codes for a request that failed in transit. */
+/**
+ * Node, libuv, undici and TLS codes for a request that failed in transit.
+ * fetch reports these on the cause of its TypeError.
+ */
 const NETWORK_CODES = new Set([
+  // libuv socket and DNS errors.
   "ECONNRESET",
   "ECONNREFUSED",
   "ECONNABORTED",
   "ETIMEDOUT",
   "EPIPE",
+  "EPROTO",
   "EAI_AGAIN",
   "ENOTFOUND",
+  "ENETDOWN",
   "ENETUNREACH",
+  "EHOSTDOWN",
   "EHOSTUNREACH",
+  // Node: TLS handshake and autoSelectFamily connect timeouts.
+  "ERR_TLS_HANDSHAKE_TIMEOUT",
+  "ERR_SOCKET_CONNECTION_TIMEOUT",
+  // undici (fetch).
+  "UND_ERR_CLOSED",
   "UND_ERR_SOCKET",
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_HEADERS_TIMEOUT",

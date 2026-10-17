@@ -774,6 +774,8 @@ export interface PlanningModel {
     adaptiveContext?: import("./adaptive-context.js").AdaptiveContextPacket;
     reviewPhase?: "result-review" | "objective-review";
     criteria: string[];
+    /** Result review: criteria from this index on are Objective criteria the item proves. */
+    itemCriteria?: number;
     reviewPacket: ReviewPacket;
     baseSha: string;
     treeSha: string;

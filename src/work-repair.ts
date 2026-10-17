@@ -37,6 +37,7 @@ import { graphDigest, recordWorkerDiscovery } from "./graph-amendments.js";
 import { completeObjectiveKnowledge } from "./objective-knowledge.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
 import { pinnedGitRaw } from "./process.js";
+import { resultReviewCriteria } from "./qa.js";
 import { literalBodyBlocks } from "./prompt-bytes.js";
 import { awaitCheckpointAdmission } from "./recovery-checkpoint.js";
 import {
@@ -270,7 +271,8 @@ export function savedResultRefusal(state: FactoryState, id: string) {
     work.validation?.treeSha !== work.treeSha ||
     refusal?.outcome !== "refuse" ||
     refusal.treeSha !== work.treeSha ||
-    !item?.acceptance.includes(refusal.criterion) ||
+    !item ||
+    !resultReviewCriteria(state.graph, item).includes(refusal.criterion) ||
     !work.error ||
     state.error ||
     state.cancelRequested ||
@@ -376,10 +378,11 @@ export function reviewFindingsCorrection(
         ),
     })),
   ];
+  const reviewed = resultReviewCriteria(state.graph, item);
   if (
     refused.some(
       ({ criterion, finding }) =>
-        finding.question.trim() || !item.acceptance.includes(criterion),
+        finding.question.trim() || !reviewed.includes(criterion),
     )
   )
     return undefined;
@@ -388,9 +391,11 @@ export function reviewFindingsCorrection(
     failureDigest: failure.digest,
     event: failure.event,
     diagnosis: `The independent result review refused ${refused.length} acceptance ${refused.length === 1 ? "criterion" : "criteria"} of candidate tree ${refusal.treeSha} after its validation commands passed. Each finding states the gap the candidate must close.`,
-    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's position in the Work Item's acceptance; evidence is what the reviewer cited.\n${JSON.stringify(
+    correction: `Close every refused finding below within the owned paths, keeping what the review did not refuse. criterionIndex is the criterion's position in the Work Item's acceptance; a finding without one refuses an Objective criterion this Work Item proves, quoted verbatim. evidence is what the reviewer cited.\n${JSON.stringify(
       refused.map(({ criterion, finding, evidence }) => ({
-        criterionIndex: item.acceptance.indexOf(criterion),
+        ...(item.acceptance.includes(criterion) && {
+          criterionIndex: item.acceptance.indexOf(criterion),
+        }),
         criterion,
         finding: finding.detail,
         // Each finding's own resolved references, as the reviewer cited them.

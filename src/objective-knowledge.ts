@@ -645,10 +645,14 @@ export function objectiveKnowledgeView(
     const acceptedPublished =
       work?.status === "published" &&
       work.validation?.treeSha === work.treeSha &&
-      work.validation?.criteria?.length === peer.acceptance.length &&
+      // Result review judges the item's acceptance first, then the
+      // Objective criteria it proves; every one must be accepted.
+      work.validation?.criteria !== undefined &&
+      work.validation.criteria.length >= peer.acceptance.length &&
       work.validation.criteria.every(
         (finding, index) =>
-          finding.criterion === peer.acceptance[index] &&
+          (index >= peer.acceptance.length ||
+            finding.criterion === peer.acceptance[index]) &&
           (finding.verdict === "pass" ||
             (finding.verdict === "human-accept" &&
               work.acceptanceDecisions?.some(

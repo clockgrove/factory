@@ -33,6 +33,7 @@ import { materializeAssetSet, validationLfsMembersForItem } from "../media.js";
 import { packageManagerUpdate } from "../package-manager-update.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { currentProcessSignal } from "../process.js";
+import { resultReviewCriteria } from "../qa.js";
 import { runQaItem } from "../qa-execution.js";
 import {
   awaitCheckpointAdmission,
@@ -992,7 +993,8 @@ export async function runNativeGraph(args: {
                 commit: work.changeRef!,
                 evidence: work.validation!,
                 contentStore: args.contentStore,
-                criteria: item.acceptance,
+                criteria: resultReviewCriteria(state.graph, item),
+                itemCriteria: item.acceptance.length,
                 sources: planningSources(
                   args.objectiveBody,
                   state.baseSha,

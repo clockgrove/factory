@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { StepFault } from "./fault.js";
 import { graphDigest } from "./graph-amendments.js";
+import { resultReviewCriteria } from "./qa.js";
 import type { FailureDisposition } from "./repair-policy.js";
 import { assertCommandReceipts } from "./result-evidence.js";
 import type {
@@ -115,7 +116,8 @@ export function assertSemanticRefusalRecord(
     failure.validationCaptureDigest ||
     value.treeSha !== work.treeSha ||
     !/^[a-f0-9]{40}$/.test(value.treeSha) ||
-    !item?.acceptance.includes(value.criterion) ||
+    !item ||
+    !resultReviewCriteria(graph!, item).includes(value.criterion) ||
     !validation ||
     value.validationDigest !== semanticValidationDigest(validation) ||
     validation.commands.length !== item.validation.length ||
@@ -173,7 +175,7 @@ export function assertSemanticRefusalRecord(
         );
         if (
           seen.has(other.criterion) ||
-          !item.acceptance.includes(other.criterion) ||
+          !resultReviewCriteria(graph!, item).includes(other.criterion) ||
           other.finding.verdict !== "refuse" ||
           typeof other.finding.criterionId !== "string" ||
           !other.finding.criterionId ||

@@ -2106,10 +2106,11 @@ function workItemResultEvidence(args: {
       automaticPass:
         Boolean(current.pullRequest) &&
         item.acceptance.length > 0 &&
-        current.validation.criteria?.length === item.acceptance.length &&
-        current.validation.criteria.every(
+        (current.validation.criteria?.length ?? 0) >= item.acceptance.length &&
+        current.validation.criteria!.every(
           (criterion, index) =>
-            criterion.criterion === item.acceptance[index] &&
+            (index >= item.acceptance.length ||
+              criterion.criterion === item.acceptance[index]) &&
             criterion.verdict === "pass",
         ),
     },
@@ -2702,10 +2703,11 @@ export function objectiveReviewEvidence(args: {
     const findings = current.validation.criteria ?? [];
     if (
       current.validation.reviewEvidence !== undefined &&
-      (findings.length !== item.acceptance.length ||
+      (findings.length < item.acceptance.length ||
         findings.some(
           (finding, index) =>
-            finding.criterion !== item.acceptance[index] ||
+            (index < item.acceptance.length &&
+              finding.criterion !== item.acceptance[index]) ||
             !["pass", "human-accept"].includes(finding.verdict),
         ))
     )

@@ -25,6 +25,7 @@ import {
   environmentValidationIndices,
   itemCoverage,
   objectiveCandidate,
+  resultReviewCriteria,
 } from "./qa.js";
 import type { FactoryState } from "./state.js";
 import { clearWait, StepPaused, setWait, step, waitOf } from "./step.js";
@@ -413,7 +414,8 @@ export async function runQaItem(args: {
         commit,
         evidence: validation,
         contentStore: args.store,
-        criteria: item.acceptance,
+        criteria: resultReviewCriteria(state.graph, item),
+        itemCriteria: item.acceptance.length,
         sources: planningSources(
           args.objectiveBody,
           state.baseSha,

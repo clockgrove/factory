@@ -60,6 +60,8 @@ export async function reviewAcceptance(args: {
   contentStore?: ContentStore;
   acceptedWorkItemImages?: AcceptedWorkItemImageObservation[];
   criteria: string[];
+  /** Result review: the first criteria are the item's own acceptance; the rest are Objective criteria it proves. */
+  itemCriteria?: number;
   sources: { path: string; content: string }[];
   evidenceSources?: ResultReviewEvidenceSource[];
   decisions?: AcceptanceDecision[];
@@ -252,6 +254,11 @@ export async function reviewAcceptance(args: {
   const request: Parameters<NonNullable<PlanningModel["reviewResult"]>>[0] = {
     reviewPhase,
     criteria,
+    ...(args.itemCriteria !== undefined &&
+    reviewPhase === "result-review" &&
+    args.itemCriteria < criteria.length
+      ? { itemCriteria: args.itemCriteria }
+      : {}),
     reviewPacket: packet,
     baseSha,
     treeSha: evidence.treeSha,

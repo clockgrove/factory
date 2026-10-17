@@ -155,6 +155,31 @@ export function coverageCriterion(entry: CoverageObligation): string {
   return entry.statement ?? entry.source.text;
 }
 
+/**
+ * Result review judges the item's own acceptance, then verbatim every
+ * Objective criterion and source obligation that the item's review proves:
+ * its semantic coverage, plus, when it is the graph's only item, the
+ * obligations left to final review, because its result is then the whole
+ * Objective. A gap is then refused and repaired before delivery; final review
+ * still judges them again on the integrated tree.
+ */
+export function resultReviewCriteria(
+  graph: WorkGraph,
+  item: WorkItem,
+): string[] {
+  const whole = graph.items.length === 1 && graph.items[0]!.id === item.id;
+  const owned = itemCoverage(graph, item.id)
+    .filter(
+      (entry) =>
+        entry.proof.kind === "result-semantic" ||
+        entry.proof.kind === "integrated-semantic" ||
+        (whole && entry.proof.kind === "final-review"),
+    )
+    .map(coverageCriterion)
+    .filter((criterion) => !item.acceptance.includes(criterion));
+  return [...item.acceptance, ...new Set(owned)];
+}
+
 /** Final review judges the Objective criteria and every source obligation proved at the final phase. */
 export function finalReviewCriteria(
   graph: WorkGraph,

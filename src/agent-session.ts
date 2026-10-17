@@ -649,14 +649,18 @@ export async function settleAbandonedReviewTurns(
 }
 
 /**
- * A planning call that ended without a native outcome (an elapsed deadline,
- * or a stopped controller) leaves its invocation submitted and its turn in
- * flight. Once its adapter settled the local process or proves it ceased,
- * and cannot authenticate an outcome from the retained turn, settle both as
- * abandoned in one save: the turn becomes unavailable (terminal unknown,
- * resources settled) and the receipt is kept, marked abandoned, so the next
- * call is a fresh invocation in a fresh conversation. During execution the owner is a Work Item diagnosis.
- * A live or recoverable turn stays held for its owner.
+ * A planning call that ended without a usable outcome leaves its invocation
+ * submitted. Settle it as abandoned so the next call is a fresh invocation and
+ * retry, refuse and cancel proceed:
+ * - a turn left in flight (an elapsed deadline, or a stopped controller), once
+ *   its adapter settled the local process or proves it ceased and cannot
+ *   authenticate an outcome: the turn becomes unavailable (terminal unknown,
+ *   resources settled) in the same save;
+ * - a turn that ended with an authenticated failure, or whose session is
+ *   unavailable or released so no outcome can be recovered from it: the turn
+ *   already holds no resource and stays as it is.
+ * The receipt is kept, marked abandoned. During execution the owner is a Work
+ * Item diagnosis. A live or recoverable turn stays held for its owner.
  */
 export async function settleAbandonedPlanningTurn(
   state: ContinuationState,
@@ -670,6 +674,12 @@ export async function settleAbandonedPlanningTurn(
     !model?.reconcileSession
   )
     return;
+  // The planning session whose current turn is the invocation's.
+  const owner = (id: string) =>
+    Object.values(state.agentSessions ?? {}).find(
+      (ref) =>
+        ref.scope.role === "planning" && ref.currentTurn?.invocationId === id,
+    );
   let invocationId: string;
   let abandon: () => void;
   let restore: () => void;
@@ -685,27 +695,34 @@ export async function settleAbandonedPlanningTurn(
     const receipt = planning.invocations?.find(
       (entry) => entry.id === invocation.id && entry.phase === invocation.phase,
     );
-    if (!receipt || receipt.resultDigest) return;
+    if (receipt?.resultDigest) return;
     invocationId = invocation.id;
     abandon = () => {
-      receipt.abandoned = true;
+      // A submitted invocation an earlier build left without its receipt.
+      if (receipt) receipt.abandoned = true;
+      else {
+        planning.invocations ??= [];
+        planning.invocations.push({
+          id: invocation.id,
+          phase: invocation.phase,
+          abandoned: true,
+        });
+      }
       delete planning.invocation;
       planning.phase = "ready";
     };
     restore = () => {
-      delete receipt.abandoned;
+      if (receipt) delete receipt.abandoned;
+      else planning.invocations!.pop();
       planning.invocation = invocation;
       planning.phase = "submitted";
     };
   } else {
     if (state.finalAcceptance || state.objectiveClosure === "complete") return;
-    const current = Object.values(state.agentSessions ?? {}).find(
-      (ref) => ref.scope.role === "planning" && ref.status === "in-flight",
-    )?.currentTurn?.invocationId;
-    if (!current) return;
-    const recovery = Object.values(state.work).find(
-      (work) => work.recovery?.diagnosisInvocation?.id === current,
-    )?.recovery;
+    const recovery = Object.values(state.work).find((work) => {
+      const id = work.recovery?.diagnosisInvocation?.id;
+      return id !== undefined && owner(id) !== undefined;
+    })?.recovery;
     const invocation = recovery?.diagnosisInvocation;
     if (
       !recovery ||
@@ -728,6 +745,16 @@ export async function settleAbandonedPlanningTurn(
     restore = () => {
       recovery.diagnosisInvocation = invocation;
     };
+  }
+  const turn = owner(invocationId);
+  if (!turn) return;
+  if (turn.status !== "in-flight") {
+    // A completed turn its adapter still holds is recovered by its owner.
+    if (turn.status === "ready" && turn.currentTurn!.terminal === "completed")
+      return;
+    abandon();
+    save();
+    return;
   }
   const session = agentSessionContinuation(state, "planning", undefined, save);
   const retained = session.retained;

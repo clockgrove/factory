@@ -567,10 +567,15 @@ async function compilePlanAdmitted(
         "Frozen planning lookup provider allowance is exhausted",
       );
     }
+    // Only this round's own unanswered receipt is a prepared dispatch. A
+    // finished round's invocation stays current with its receipt in history,
+    // so the next round (a revision) gets its own identity and receipt.
     const prepared =
       record.invocation?.phase === phase &&
-      !record.invocations?.some(
-        (entry) => entry.id === record.invocation!.id && entry.resultDigest,
+      Boolean(
+        record.invocations?.some(
+          (entry) => entry.id === record.invocation!.id && !entry.resultDigest,
+        ),
       );
     const id = prepared ? record.invocation!.id : randomUUID();
     if (model.providerDispatchAdmission !== "after-attempt-admission-v1")

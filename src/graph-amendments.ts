@@ -1224,7 +1224,7 @@ async function advanceAmendment(args: {
     /**
      * Observe the predecessor evidence. A gateway fault keeps its kind; a
      * missing, unaccepted or changed predecessor is the operator's decision,
-     * and the amendment waits at its phase (contract 2).
+     * and the amendment waits at its phase (step rule 7).
      */
     const observePrerequisites = async () => {
       try {
@@ -1257,7 +1257,7 @@ async function advanceAmendment(args: {
         !isDeepStrictEqual(current, prerequisites)
       )
         // The predecessor's evidence changed: the operator decides, and the
-        // amendment waits at its phase (contract 2); nothing is refused.
+        // amendment waits at its phase (step rule 7); nothing is refused.
         throw new StepFault(
           decision(
             `Amendment native prerequisites differ from those the plan was made with. Restore the predecessor evidence, then factory retry --objective ${state.objective}; or factory cancel --objective ${state.objective}`,

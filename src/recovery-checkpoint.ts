@@ -63,6 +63,7 @@ import {
   takeGuard,
   UnsettledSubprocessError,
   withCheckpointPublication,
+  withProcessCancellation,
 } from "./process.js";
 import type { QueueRecord } from "./project-queue-state.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
@@ -2848,7 +2849,9 @@ function startSettledPublication(
   )
     return;
   // Only the controller's verifier and closure carry over: the publication
-  // belongs to no caller's operation or disposal call.
+  // belongs to no caller's operation, disposal call or process scope. A
+  // caller's abort or deadline (a progress tick, a control command) must not
+  // stop its push; Git's own timeout bounds it, and the verifier waits for it.
   const owned = {
     config: scope.config,
     buildClosure: scope.buildClosure,
@@ -2856,14 +2859,15 @@ function startSettledPublication(
   };
   // One attempt: a pending collection or any other failure stays in the
   // journal, and the next admission tries again or reports it.
-  const publication: Promise<void> = scopes
-    .run(owned, () =>
+  const publication: Promise<void> = withProcessCancellation(undefined, () =>
+    scopes.run(owned, () =>
       synchronizeRecoveryCheckpoint(owned.config, {
         reason: "settled",
         coveredSequence: record.sequence,
         buildClosure: owned.buildClosure,
       }),
-    )
+    ),
+  )
     .then(
       () => undefined,
       () => undefined,
@@ -4968,9 +4972,11 @@ function verifierMaterialFingerprint(objects: Map<string, string>): string {
  * FULL_CHECKPOINT_PUBLICATIONS publications or FULL_CHECKPOINT_INTERVAL_MS,
  * whichever comes first, and at its final admission, those facts are dropped
  * first, so the build rescans every local body and the base is fetched and
- * verified again in full. A controller's first publication is full by
- * construction: its verifier starts empty. An uncertain verifier drops the
- * base identity and these facts itself, which also disables the reuse.
+ * verified again in full. Until a full publication completes, none reuses
+ * the base: a controller's first publication rereads every body (reusing
+ * only facts verified earlier in the same verifier, which a borrowed
+ * long-lived verifier may hold). An uncertain verifier drops the base
+ * identity and these facts itself, which also disables the reuse.
  *
  * 25 publications is about 15 minutes of a busy Objective. A full publication
  * rehashes the closure (some 360 MB here) and the base, a few seconds, so this
@@ -4995,8 +5001,8 @@ function checkpointBasis(
   )
     return false;
   delete context.incremental;
-  // Without a basis nothing was reused yet: the verifier's facts all come
-  // from this controller's own full verification.
+  // Without a basis, no publication has skipped a body yet: keep facts this
+  // verifier already established (for example at controller startup).
   if (basis || final) {
     context.content.clear();
     context.contentBytes = 0;

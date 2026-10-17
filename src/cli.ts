@@ -1,12 +1,6 @@
 #!/usr/bin/env node
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readFileSync,
-} from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
 import { itemActivities, renderWatch } from "./worker-activity.js";
@@ -24,7 +18,6 @@ import {
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
-import { NativeStackDelivery } from "./delivery/native-stack.js";
 import {
   ControllerCommandIncompleteError,
   requestControl,
@@ -38,7 +31,6 @@ import {
   runDiagnosticsScorecardCommand,
 } from "./diagnostics-cli.js";
 import { compose, composeIntake, composePlanning } from "./index.js";
-import { RealGitHubGateway } from "./github.js";
 import {
   ColdPublicationHeld,
   type IntakeAuthorization,
@@ -168,8 +160,6 @@ function help(): void {
       "  pause|drain|resume --objective N",
       "  cancel --objective N [--provider NAME]",
       "      Cancel the Objective; --provider names the provider it ran with when its frozen configuration matches none",
-      "  handoff --objective N --failed-reservation-evidence ABSOLUTE_PRIVATE_FILE",
-      "      Permanently stop an authenticated failed pre-snapshot reservation and preserve its unaccepted evidence",
     ].join("\n"),
   );
 }
@@ -584,7 +574,6 @@ async function dispatchMain(
       "export-captures",
       "select",
       "cancel",
-      "handoff",
       "propose-amendment",
       "decline-discovery",
       "collect",
@@ -606,53 +595,6 @@ async function dispatchMain(
   let application: ReturnType<typeof compose> | undefined;
   const requireApplication = (): ReturnType<typeof compose> =>
     (application ??= compose(config));
-  if (command === "handoff") {
-    const evidencePath = option(args, "failed-reservation-evidence");
-    if (evidencePath === undefined)
-      throw new Error(
-        "handoff requires its private evidence file: --failed-reservation-evidence",
-      );
-    if (!isAbsolute(evidencePath))
-      throw new Error(
-        "Handoff evidence requires an absolute private file path",
-      );
-    const file = openSync(
-      evidencePath,
-      constants.O_RDONLY | constants.O_NOFOLLOW,
-    );
-    let evidence: unknown;
-    try {
-      const observed = fstatSync(file);
-      if (
-        !observed.isFile() ||
-        observed.uid !== process.getuid?.() ||
-        (observed.mode & 0o077) !== 0
-      )
-        throw new Error(
-          "Handoff evidence must be an owned private regular file",
-        );
-      evidence = JSON.parse(readFileSync(file, "utf8"));
-    } finally {
-      closeSync(file);
-    }
-    const result = await controlObjective(
-      config,
-      {
-        objective,
-        action: "handoff",
-        input: {
-          failedReservationEvidence: evidence,
-          actor: operatorName(),
-        },
-      },
-      new RealGitHubGateway(
-        config.repository,
-        new NativeStackDelivery(config.repository),
-      ),
-    );
-    console.log(JSON.stringify(result, null, 2));
-    return;
-  }
   if (command === "decide") return decideCommand(config, objective, args);
   if (command === "collect") {
     const item = option(args, "item"),

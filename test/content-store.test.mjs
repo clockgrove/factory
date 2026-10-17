@@ -1593,8 +1593,6 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     buildClosure,
   });
   const claimInitial = {
-    // The same real archive supplies a positive pre-snapshot witness before
-    // the workflow records its actual canonical continuation below.
     ...structuredClone(cancelled),
     objective: 2,
     runId: randomUUID(),
@@ -1606,41 +1604,12 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     },
   };
   delete claimInitial.cancelledAt;
-  const reserved = await readVerifiedRecoveryCheckpoint(config, undefined, {
-    kind: "pre-snapshot",
-    objective: claim.objective,
-    claimId: claim.id,
-  });
-  const reservation = reserved.queueReservationLineage;
-  assert(reservation);
-  assert.equal(reserved.queueOwnerLineage, undefined);
-  assert.equal(reservation.checkpoints.current.commitSha, reserved.commitSha);
-  assert.deepEqual(
-    reservation.generations.at(-1),
-    reservation.checkpoints.current,
-  );
-  assert.deepEqual(
-    Buffer.from(
-      reservation.bodies.find(
-        ({ ref }) => ref.digest === reservation.originalClaim.digest,
-      ).bytes,
-    ),
-    readFileSync(claimPath),
-  );
   saveState(statePath(repository, 2), claimInitial);
   const initialBytes = readFileSync(statePath(repository, 2));
   await synchronizeRecoveryCheckpoint(config, {
     reason: "explicit",
     buildClosure,
   });
-  await assert.rejects(
-    readVerifiedRecoveryCheckpoint(config, undefined, {
-      kind: "pre-snapshot",
-      objective: 2,
-      claimId: claim.id,
-    }),
-    /continuation/,
-  );
   const claimTerminal = {
     // A started continuation can never be reshaped into an orphan reservation.
     ...structuredClone(claimInitial),

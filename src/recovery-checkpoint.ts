@@ -144,7 +144,6 @@ export interface VerifiedRecoveryCheckpoint {
   readVerifiedBlob(ref: ContentRef): Promise<Uint8Array>;
   /** Exact first-dispatch ancestry, requested only by supported cancellation. */
   queueOwnerLineage?: VerifiedQueueOwnerLineage;
-  queueReservationLineage?: VerifiedQueueReservationLineage;
 }
 export interface QueueCheckpointWitness {
   commitSha: string;
@@ -164,22 +163,6 @@ export interface QueueOwnerLineageRequest {
   objective: number;
   claimId: string;
   runId: string;
-}
-export interface QueueReservationLineageRequest {
-  kind: "pre-snapshot";
-  objective: number;
-  claimId: string;
-}
-export interface VerifiedQueueReservationLineage {
-  checkpoints: {
-    before: QueueCheckpointWitness;
-    claimed: QueueCheckpointWitness;
-    current: QueueCheckpointWitness;
-  };
-  /** Complete authenticated first-parent sequence from first claim to current. */
-  generations: QueueCheckpointWitness[];
-  originalClaim: ContentRef;
-  bodies: { ref: ContentRef; bytes: Uint8Array }[];
 }
 export interface RecoveryCheckpointRestoredBaseline {
   schemaVersion: 1;
@@ -749,8 +732,6 @@ interface QueueVerificationContext {
     records: QueueRecord[];
   };
   queueValidationBytes?: number;
-  reservationPrefixes: Map<string, string>;
-  reservationPrefixBytes: number;
   gitPack?: {
     roots: { sha: string; kind: "commit" | "tree" | "blob" }[];
     refs: ContentRef[];
@@ -1565,8 +1546,6 @@ export function withQueueControlVerification<T>(
       pendingReferenceBytes: 0,
       lineages: new Map(),
       lineageBytes: 0,
-      reservationPrefixes: new Map(),
-      reservationPrefixBytes: 0,
       objectBytes: 0,
     };
     let result: T | undefined;
@@ -1595,7 +1574,6 @@ export function withQueueControlVerification<T>(
       verification.lineages.clear();
       delete verification.queueValidation;
       delete verification.queueValidationBytes;
-      verification.reservationPrefixes.clear();
       delete verification.objects;
       delete verification.negotiationTip;
       delete verification.baseIdentity;
@@ -2078,7 +2056,6 @@ function verificationMetadataBytes(context: QueueVerificationContext): number {
     context.contentBytes +
     context.lineageBytes +
     (context.queueValidationBytes ?? 0) +
-    context.reservationPrefixBytes +
     context.pendingReferenceBytes +
     (context.objects ? context.objectBytes : 0) +
     negotiationTipCharge(context.negotiationTip) +
@@ -4419,168 +4396,6 @@ function queueOwnerLineage(
     }),
   };
 }
-async function queueReservationLineage(
-  directory: string,
-  options: GitPersistenceConfig,
-  config: FactoryConfig,
-  tip: string,
-  request: QueueReservationLineageRequest,
-  existing?: QueueAncestryObservation,
-  throughCommit?: string,
-): Promise<VerifiedQueueReservationLineage> {
-  keys(request, ["kind", "objective", "claimId"]);
-  if (
-    request.kind !== "pre-snapshot" ||
-    options.scope !== "private-history" ||
-    !Number.isSafeInteger(request.objective) ||
-    request.objective < 1 ||
-    !/^[a-f0-9-]{36}$/.test(request.claimId)
-  )
-    throw new Error("Invalid pre-snapshot queue reservation request");
-  const { parseQueueRecord } = await import("./project-queue-state.js");
-  const { decodeAccountingRecord } = await import("./accounting.js");
-  const observed =
-    existing ?? observeQueueAncestry(directory, options, config, tip);
-  if (observed.key !== verificationKey(config, options) || observed.tip !== tip)
-    throw new Error("Queue reservation ancestry has a different binding");
-  const end =
-    throughCommit === undefined
-      ? observed.entries.length - 1
-      : observed.entries.findIndex((entry) => entry.commit === throughCommit);
-  if (end < 0)
-    throw new Error(
-      "Reservation witness is not an actual first-parent ancestor checkpoint",
-    );
-  const bodies = new Map<string, { ref: ContentRef; bytes: Uint8Array }>();
-  let charged = observed.manifestTransportBytes;
-  const retain = (ref: ContentRef, bytes: Uint8Array) => {
-    if (bytes.length !== ref.bytes || hash(bytes) !== ref.digest)
-      throw new Error("Queue reservation original differs from exact bytes");
-    if (!bodies.has(ref.digest)) {
-      charged += bytes.length;
-      if (charged > options.maxBytes || bodies.size >= options.maxFiles)
-        throw materializedBoundsExceeded({
-          files: bodies.size + 1,
-          maxFiles: options.maxFiles,
-          bytes: charged,
-          maxBytes: options.maxBytes,
-        });
-      bodies.set(ref.digest, {
-        ref: { ...ref },
-        bytes: Uint8Array.from(bytes),
-      });
-    }
-  };
-  let before: QueueCheckpointWitness | undefined;
-  let claimed: QueueCheckpointWitness | undefined;
-  let originalClaim: ContentRef | undefined;
-  let originalBinding: string | undefined;
-  let previousSequence = -1;
-  let previousDigest: string | undefined;
-  const generations: QueueCheckpointWitness[] = [];
-  for (const entry of observed.entries.slice(0, end + 1)) {
-    const manifest = JSON.parse(
-      entry.bytes.toString("utf8"),
-    ) as RecoveryCheckpointManifest;
-    assertManifest(manifest, binding(config, options), options);
-    if (
-      canonical(manifest) !== entry.bytes.toString("utf8") ||
-      manifest.sequence < previousSequence ||
-      (manifest.sequence === previousSequence &&
-        entry.ref.digest !== previousDigest)
-    )
-      throw new Error("Queue reservation manifest ancestry is ambiguous");
-    previousSequence = manifest.sequence;
-    previousDigest = entry.ref.digest;
-    const witness = { commitSha: entry.commit, manifest: { ...entry.ref } };
-    const claim = manifest.files.find(
-      (file) => file.path === `project-queue-history/${request.claimId}.json`,
-    );
-    if (!claim && !claimed) {
-      before = witness;
-      continue;
-    }
-    if (
-      !claim ||
-      claim.kind !== "historical" ||
-      claim.visibility !== "private" ||
-      !before
-    )
-      throw new Error(
-        "Queue reservation original was removed or has no pre-claim witness",
-      );
-    if (
-      manifest.gaps.some((gap) => gap.required) ||
-      manifest.files.some(
-        (file) =>
-          /^objectives\/[0-9]+\/(?:pre-state|state)\.json$/.test(file.path) &&
-          file.path.startsWith(`objectives/${request.objective}/`),
-      )
-    )
-      throw new Error(
-        "Queue reservation has a continuation or unavailable required history",
-      );
-    const claimBytes = observed.readOriginal(entry.commit, claim.ref);
-    const owner = parseQueueRecord(
-      claimBytes,
-      config.repository,
-      request.claimId,
-    );
-    if (
-      owner.kind !== "project-queue-owner" ||
-      owner.repository !== config.repository ||
-      owner.objective !== request.objective ||
-      owner.id !== request.claimId ||
-      owner.runBinding ||
-      owner.settled
-    )
-      throw new Error(
-        "Queue reservation is started, settled or differently bound",
-      );
-    if (!claimed) {
-      claimed = witness;
-      originalClaim = claim.ref;
-      originalBinding = canonical(owner);
-      retain(
-        before.manifest,
-        observed.entries.find(
-          (candidate) => candidate.commit === before!.commitSha,
-        )!.bytes,
-      );
-    } else if (canonical(owner) !== originalBinding)
-      throw new Error("Queue reservation immutable original changed");
-    retain(claim.ref, claimBytes);
-    // Authenticate actual accounting originals rather than infer provider
-    // cessation from an absent state file or a destination process table.
-    for (const file of manifest.files.filter((file) =>
-      /^accounting\/[a-f0-9]{64}\.json$/.test(file.path),
-    )) {
-      const bytes = observed.readOriginal(entry.commit, file.ref);
-      const record = decodeAccountingRecord(
-        config.repository,
-        file.path,
-        bytes,
-      );
-      if (record.binding.objective === request.objective)
-        throw new Error(
-          "Queue reservation has provider or accounting admission history",
-        );
-      retain(file.ref, bytes);
-    }
-    retain(entry.ref, entry.bytes);
-    generations.push(witness);
-  }
-  if (!before || !claimed || !originalClaim || !generations.length)
-    throw new Error(
-      "Authenticated pre-snapshot queue reservation is unavailable",
-    );
-  return {
-    checkpoints: { before, claimed, current: generations.at(-1)! },
-    generations,
-    originalClaim,
-    bodies: [...bodies.values()],
-  };
-}
 function reuseQueueLineage(
   config: FactoryConfig,
   options: GitPersistenceConfig,
@@ -4882,7 +4697,7 @@ async function freshArchive(
   options: GitPersistenceConfig,
   expectedCommit?: string,
   inspectHistory = false,
-  lineageRequest?: QueueOwnerLineageRequest | QueueReservationLineageRequest,
+  lineageRequest?: QueueOwnerLineageRequest,
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   /** The independent ACK of this controller's own pushed candidate. */
   candidateAck = false,
@@ -5236,7 +5051,7 @@ async function freshArchiveOwned(
   options: GitPersistenceConfig,
   expectedCommit?: string,
   inspectHistory = false,
-  lineageRequest?: QueueOwnerLineageRequest | QueueReservationLineageRequest,
+  lineageRequest?: QueueOwnerLineageRequest,
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   context?: QueueVerificationContext,
   candidateAck = false,
@@ -5343,7 +5158,7 @@ async function freshArchiveOwnedStrict(
   options: GitPersistenceConfig,
   expectedCommit?: string,
   inspectHistory = false,
-  lineageRequest?: QueueOwnerLineageRequest | QueueReservationLineageRequest,
+  lineageRequest?: QueueOwnerLineageRequest,
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   context?: QueueVerificationContext,
   candidateAck = false,
@@ -5573,82 +5388,8 @@ async function freshArchiveOwnedStrict(
       }
       return verified;
     };
-    let lineage =
-      lineageRequest && !("kind" in lineageRequest)
-        ? verifyLineage(lineageRequest)
-        : undefined;
-    const verifyReservationPrefix = async (
-      request: QueueReservationLineageRequest,
-      expected: Pick<
-        VerifiedQueueReservationLineage,
-        "checkpoints" | "generations" | "originalClaim"
-      >,
-    ) => {
-      const key = hash(canonical([request, expected]));
-      const cached = context?.objects
-        ? context.reservationPrefixes.get(key)
-        : undefined;
-      if (cached) {
-        if (cached === tip) return;
-        const commits = git(directory, options, [
-          "rev-list",
-          "--first-parent",
-          tip,
-        ])
-          .toString("utf8")
-          .trim()
-          .split("\n");
-        // Commits are not checkpoint files; see observeQueueAncestry.
-        if (commits.some((commit) => !/^[a-f0-9]{40,64}$/.test(commit)))
-          throw new Error("Queue reservation ancestor inventory is invalid");
-        if (commits.includes(cached)) return;
-      }
-      if (!observation)
-        observation = observeQueueAncestry(directory, options, config, tip);
-      // Select a packet from the actual fetched first-parent chain, never from
-      // retained manifest text or a caller's well-formed commit identifier.
-      const actual = await queueReservationLineage(
-        directory,
-        options,
-        config,
-        tip,
-        request,
-        observation,
-        expected.checkpoints.current.commitSha,
-      );
-      if (
-        canonical(actual.checkpoints) !== canonical(expected.checkpoints) ||
-        canonical(actual.generations) !== canonical(expected.generations) ||
-        canonical(actual.originalClaim) !== canonical(expected.originalClaim)
-      )
-        throw new Error(
-          "Retained queue reservation abandonment differs from actual Git ancestry",
-        );
-      if (context?.objects) {
-        const charge = Buffer.byteLength(key) + Buffer.byteLength(tip);
-        const prior = context.reservationPrefixes.get(key);
-        const priorCharge = prior
-          ? Buffer.byteLength(key) + Buffer.byteLength(prior)
-          : 0;
-        if (
-          reserveVerificationMetadata(
-            context,
-            options,
-            charge,
-            priorCharge,
-            true,
-          )
-        ) {
-          const previous = context.reservationPrefixes.get(key);
-          if (previous)
-            context.reservationPrefixBytes -=
-              Buffer.byteLength(key) + Buffer.byteLength(previous);
-          context.reservationPrefixes.set(key, tip);
-          context.reservationPrefixBytes += charge;
-        }
-      }
-    };
-    // Retained cancellation/abandonment witnesses must be actual ancestor packets,
+    let lineage = lineageRequest ? verifyLineage(lineageRequest) : undefined;
+    // Retained cancellation witnesses must be actual ancestor packets,
     // rather than manually shaped manifest text in the current body store.
     const {
       checkpointQueueRecordReferences,
@@ -5794,24 +5535,6 @@ async function freshArchiveOwnedStrict(
     observed.start("queue-ancestry");
     for (const record of records) {
       if (record.kind === "project-queue-operation") continue;
-      if (
-        record.kind === "project-queue-owner" &&
-        record.settled?.abandonment
-      ) {
-        const proof = record.settled.abandonment;
-        await verifyReservationPrefix(
-          {
-            kind: "pre-snapshot",
-            objective: record.objective,
-            claimId: record.id,
-          },
-          {
-            checkpoints: proof.checkpoints,
-            generations: proof.generations,
-            originalClaim: proof.originalClaim,
-          },
-        );
-      }
       const proof =
         record.kind === "project-queue-owner"
           ? record.settled?.cancellation
@@ -5838,22 +5561,10 @@ async function freshArchiveOwnedStrict(
       if (lineageRequest?.claimId === record.id) lineage = verified;
     }
     observed.start("requested-lineage");
-    const reservation =
-      lineageRequest && "kind" in lineageRequest
-        ? await queueReservationLineage(
-            directory,
-            options,
-            config,
-            tip,
-            lineageRequest,
-            observation,
-          )
-        : undefined;
     const result = {
       ...archive,
       queueRecords: records,
       ...(lineage ? { queueOwnerLineage: lineage } : {}),
-      ...(reservation ? { queueReservationLineage: reservation } : {}),
       ...(inspectHistory
         ? {
             reachableHistory: await inspectReachableHistory(
@@ -5887,8 +5598,6 @@ async function freshArchiveOwnedStrict(
       context.lineageBytes = 0;
       delete context.queueValidation;
       delete context.queueValidationBytes;
-      context.reservationPrefixes.clear();
-      context.reservationPrefixBytes = 0;
       context.summaries.clear();
       context.summaryBytes = 0;
       context.content.clear();
@@ -5908,9 +5617,7 @@ async function freshArchiveOwnedStrict(
         context.lineages.clear();
         delete context.queueValidation;
         delete context.queueValidationBytes;
-        context.reservationPrefixes.clear();
         context.lineageBytes = 0;
-        context.reservationPrefixBytes = 0;
         context.summaryBytes = 0;
         context.content.clear();
         context.contentBytes = 0;
@@ -5929,8 +5636,6 @@ async function freshArchiveOwnedStrict(
       context.lineageBytes = 0;
       delete context.queueValidation;
       delete context.queueValidationBytes;
-      context.reservationPrefixes.clear();
-      context.reservationPrefixBytes = 0;
       delete context.objects;
       delete context.negotiationTip;
       delete context.baseIdentity;
@@ -5953,7 +5658,7 @@ async function freshArchiveOwnedStrict(
 export async function readVerifiedRecoveryCheckpoint(
   config: FactoryConfig,
   commitSha?: string,
-  lineageRequest?: QueueOwnerLineageRequest | QueueReservationLineageRequest,
+  lineageRequest?: QueueOwnerLineageRequest,
 ): Promise<VerifiedRecoveryCheckpoint> {
   const options = settings(config);
   if (!options) throw new Error("Git persistence is not configured");
@@ -5975,9 +5680,6 @@ export async function readVerifiedRecoveryCheckpoint(
     manifestBytes: Uint8Array.from(archive.originalManifestBytes),
     ...(archive.queueOwnerLineage
       ? { queueOwnerLineage: archive.queueOwnerLineage }
-      : {}),
-    ...(archive.queueReservationLineage
-      ? { queueReservationLineage: archive.queueReservationLineage }
       : {}),
     async readVerifiedBlob(ref) {
       assertRef(ref);

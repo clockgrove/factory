@@ -73,7 +73,6 @@ import {
   withProcessCancellation,
 } from "./process.js";
 import {
-  abandonFailedProjectQueueReservation,
   assertProjectQueueRunLive,
   bindProjectQueueRun,
   claimProjectQueueRun,
@@ -91,7 +90,6 @@ import {
   isCheckpointCollectionPending,
   privateCheckpointBounds,
   trackCollection,
-  withQueueControlVerification,
   withRecoveryCheckpointControllerVerification,
   withRecoveryCheckpointScope,
 } from "./recovery-checkpoint.js";
@@ -427,47 +425,9 @@ function assertRejectionAllows(
   );
 }
 
-/** A stopped disposition owns verification and settlement until lease release. */
-async function stoppedOperatorHandoff(
-  config: FactoryConfig,
-  request: ControlRequest,
-  github?: GitHubGateway,
-): Promise<unknown> {
-  const input = request.input;
-  if (!input || !github || typeof input.actor !== "string" || !input.actor)
-    throw new Error(
-      "Stopped operator disposition requires its explicit local operator and genuine Project gateway",
-    );
-  const actor = input.actor;
-  const lockPath = installationLockPath(config.repository),
-    lock = acquireInstallationLock(config.repository, request.objective);
-  try {
-    return await withQueueControlVerification(
-      {
-        config,
-        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
-      },
-      () =>
-        checkpointController(config, () =>
-          abandonFailedProjectQueueReservation(
-            config,
-            github,
-            request.objective,
-            input.failedReservationEvidence,
-            actor,
-            lock,
-          ),
-        ),
-    );
-  } finally {
-    releaseControllerLock(lockPath, lock);
-  }
-}
-
 async function controlObjectiveUnscoped(
   config: FactoryConfig,
   request: ControlRequest,
-  _github?: GitHubGateway,
 ): Promise<unknown> {
   const retained = readContinuation(config.repository, request.objective);
   if (retained && request.action !== "status")
@@ -2881,12 +2841,7 @@ export function decideStoppedObjective(
 export function controlObjective(
   ...args: Parameters<typeof controlObjectiveUnscoped>
 ): ReturnType<typeof controlObjectiveUnscoped> {
-  const [config, request, github] = args;
-  if (
-    request.action === "handoff" &&
-    request.input?.failedReservationEvidence !== undefined
-  )
-    return stoppedOperatorHandoff(config, request, github);
+  const [config] = args;
   return checkpointController(
     config,
     () => controlObjectiveUnscoped(...args),

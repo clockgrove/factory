@@ -99,7 +99,7 @@ import {
   ITEMS,
   INSPECT,
 } from "../dist/github-project-queue-wire.js";
-import { controlObjective, runObjective } from "../dist/runner.js";
+import { runObjective } from "../dist/runner.js";
 import {
   acquireInstallationLock,
   acquireObjectiveLock,
@@ -113,30 +113,6 @@ import {
   statePath,
   saveState,
 } from "../dist/state-store.js";
-
-/** The configuration file for a flat test config: one provider in planning's place. */
-function toConfigFile(config) {
-  return Object.fromEntries(
-    Object.entries(config).flatMap(([key, value]) =>
-      key === "planning"
-        ? [
-            [
-              "providers",
-              {
-                test: {
-                  planning: config.planning,
-                  execution: config.execution,
-                },
-              },
-            ],
-            ["defaultProvider", "test"],
-          ]
-        : key === "execution"
-          ? []
-          : [[key, value]],
-    ),
-  );
-}
 
 const processUrl = new URL("../dist/process.js", import.meta.url).href;
 
@@ -1880,18 +1856,11 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       original = Buffer.from(`${JSON.stringify(claim)}\n`);
     await writeFile(path, original, { mode: 0o600 });
     const error = new Error("original before-effect failure");
-    const maintenanceBuildOwners = [];
-    let observingMaintenance = false;
-    const buildClosure = () => {
-      if (observingMaintenance)
-        maintenanceBuildOwners.push(
-          readControllerOwner(installationLockPath(repository)),
-        );
-      return buildRecoveryCheckpointClosure({
+    const buildClosure = () =>
+      buildRecoveryCheckpointClosure({
         config,
         scope: "private-history",
       });
-    };
     await withRecoveryCheckpointScope({ config, buildClosure }, async () => {
       await assert.rejects(
         settleFailedProjectQueueReservation(
@@ -3142,143 +3111,6 @@ test("the actual creating lease settles only a fresh failed reservation and arch
           maintenanceLock,
         );
       }
-      // Exercise the real stopped-controller entry and its error settlement.
-      // These deliberately incomplete descriptors claim no operator observation,
-      // provider response or permission to abandon any preserved reservation.
-      const configPath = join(directory, "maintenance-config.json"),
-        configBytes = Buffer.from(JSON.stringify(toConfigFile(config))),
-        refusedProofPath = join(directory, "not-an-operator-proof.json"),
-        refusedProofBytes = Buffer.from("{}\n");
-      await writeFile(configPath, configBytes, { mode: 0o600 });
-      await writeFile(refusedProofPath, refusedProofBytes, { mode: 0o600 });
-      const refusedOriginal = {
-        path: refusedProofPath,
-        sha256: hash(refusedProofBytes),
-        bytes: refusedProofBytes.length,
-      };
-      const refusedEvidence = {
-        schemaVersion: 1,
-        kind: "operator-observed-pre-snapshot-failure",
-        claimId: randomUUID(),
-        originalInstallation: {
-          cli: process.execPath,
-          configPath,
-          configSha256: hash(configBytes),
-          ownFileInventory: refusedOriginal,
-        },
-        originals: Object.fromEntries(
-          [
-            "ownerObservation",
-            "sourceProtocolReview",
-            "failureObservation",
-          ].map((name) => [name, refusedOriginal]),
-        ),
-        sourceProtocol: "canonical-snapshot-before-provider-v1",
-      };
-      const maintenanceOffset = (await readFile(diagnosticPath(repository, 0)))
-        .length;
-      // An actual rewritten retained original makes error settlement durable;
-      // the old unknown intent itself remains byte-for-byte unchanged.
-      await writeFile(join(history, `${operationId}.json`), unknownBytes);
-      markCheckpointDirty(repository, {
-        path: `project-queue-history/${operationId}.json`,
-        kind: "historical",
-      });
-      observingMaintenance = true;
-      try {
-        await assert.rejects(
-          controlObjective(
-            config,
-            {
-              objective: 4,
-              action: "handoff",
-              input: {
-                actor: "Fixture",
-                failedReservationEvidence: refusedEvidence,
-              },
-            },
-            {},
-          ),
-          /Competing, started or uncertain external queue effects remain held/,
-        );
-      } finally {
-        observingMaintenance = false;
-      }
-      assert(maintenanceBuildOwners.length > 0);
-      assert(
-        maintenanceBuildOwners.every(
-          (owner) => owner?.pid === process.pid && owner.objective === 4,
-        ),
-        "terminal error settlement retains the exclusive installation lease",
-      );
-      const maintenanceEvents = (await readFile(diagnosticPath(repository, 0)))
-        .subarray(maintenanceOffset)
-        .toString("utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      const maintenanceReads = maintenanceEvents.filter(
-        (event) =>
-          event.operation === "recovery-checkpoint-verify" &&
-          event.outcome === "started",
-      );
-      assert(maintenanceReads.length >= 2);
-      assert(maintenanceReads.every((event) => event.metadata.owned === true));
-      assert.equal(maintenanceReads[0].metadata.objectsRetained, false);
-      assert(
-        maintenanceReads
-          .slice(1)
-          .every((event) => event.metadata.objectsRetained),
-        "terminal error settlement reuses the same authenticated verifier",
-      );
-      assert.equal(existsSync(installationLockPath(repository)), false);
-      // The normal compiled CLI delegates this complete guarded controller;
-      // rejection must not trigger an unowned, duplicate cold synchronization.
-      const evidencePath = join(directory, "refused-maintenance-evidence.json");
-      await writeFile(evidencePath, JSON.stringify(refusedEvidence), {
-        mode: 0o600,
-      });
-      const cliOffset = (await readFile(diagnosticPath(repository, 0))).length;
-      assert.throws(
-        () =>
-          execFileSync(
-            process.execPath,
-            [
-              new URL("../dist/cli.js", import.meta.url).pathname,
-              "handoff",
-              "--objective",
-              "4",
-              "--failed-reservation-evidence",
-              evidencePath,
-              "--config",
-              configPath,
-            ],
-            { env: process.env, encoding: "utf8", timeout: 30_000 },
-          ),
-        (error) =>
-          error.status === 1 &&
-          /Competing, started or uncertain external queue effects remain held/.test(
-            error.stderr,
-          ),
-      );
-      const cliReads = (await readFile(diagnosticPath(repository, 0)))
-        .subarray(cliOffset)
-        .toString("utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line))
-        .filter(
-          (event) =>
-            event.operation === "recovery-checkpoint-verify" &&
-            event.outcome === "started",
-        );
-      assert(cliReads.length > 0);
-      assert(
-        cliReads.every((event) => event.metadata.owned === true),
-        "CLI error propagation never reopens an unowned verifier",
-      );
-      assert.equal(existsSync(installationLockPath(repository)), false);
-
       assert.deepEqual(
         await readFile(join(history, `${operationId}.json`)),
         unknownBytes,

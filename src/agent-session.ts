@@ -568,8 +568,8 @@ export function agentSessionContinuation(
   return continuation;
 }
 
-/** The ceased turn's unavailable receipt; the adapter may settle only its resources. */
-function ceasedReceipt(
+/** The reconciled receipt of the admitted turn, with its resources settled. */
+function reconciledReceipt(
   ref: AgentSessionRef,
   session: AgentSessionRef,
 ): AgentSessionRef {
@@ -578,9 +578,18 @@ function ceasedReceipt(
     session.adapter !== ref.adapter ||
     session.turn !== ref.turn ||
     session.currentTurn?.invocationId !== ref.currentTurn?.invocationId ||
-    session.currentTurn?.resources !== "settled" ||
-    session.currentTurn.terminal !== undefined
+    session.currentTurn?.resources !== "settled"
   )
+    throw new Error("Reconciled agent turn differs from its admitted owner");
+  return session;
+}
+
+/** The ceased turn's unavailable receipt; the adapter may settle only its resources. */
+function ceasedReceipt(
+  ref: AgentSessionRef,
+  session: AgentSessionRef,
+): AgentSessionRef {
+  if (reconciledReceipt(ref, session).currentTurn!.terminal !== undefined)
     throw new Error("Ceased agent turn differs from its admitted owner");
   return { ...session, status: "unavailable" };
 }
@@ -589,23 +598,24 @@ function ceasedReceipt(
  * The unavailable receipt for an in-flight turn that ended without a native
  * outcome, or undefined while one may still arrive: its adapter settled the
  * local process, or proves that the process a stopped controller left behind
- * has ceased.
+ * has ceased. With `settled` (cancellation, which disposes the session next),
+ * an outcome the adapter recovers for the turn is also its settled receipt.
  */
 export async function stoppedTurnReceipt(
   ref: AgentSessionRef,
   model: PlanningModel | undefined,
+  settled = false,
 ): Promise<AgentSessionRef | undefined> {
-  if (
-    ref.status !== "in-flight" ||
-    !ref.currentTurn ||
-    ref.currentTurn.terminal !== undefined
-  )
-    return undefined;
-  if (ref.currentTurn.resources === "settled")
-    return { ...ref, status: "unavailable" };
+  if (ref.status !== "in-flight" || !ref.currentTurn) return undefined;
+  if (ref.currentTurn.terminal === undefined) {
+    if (ref.currentTurn.resources === "settled")
+      return { ...ref, status: "unavailable" };
+  } else if (!settled) return undefined;
   const reconciled = await model?.reconcileSession?.(structuredClone(ref));
-  return reconciled?.disposition === "ceased"
-    ? ceasedReceipt(ref, reconciled.session)
+  if (reconciled?.disposition === "ceased")
+    return ceasedReceipt(ref, reconciled.session);
+  return settled && reconciled?.disposition === "settled"
+    ? reconciledReceipt(ref, reconciled.session)
     : undefined;
 }
 

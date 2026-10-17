@@ -482,18 +482,20 @@ export async function releaseCancelledSessions(
     }
     assertCurrent();
   }
-  // A stopped amendment, Work Item diagnosis or review turn whose adapter
-  // settled its local process, or proves it ceased, has no outcome left to
-  // wait for once the Objective cancels: it becomes unavailable, then is
-  // disposed like any other session. A turn that stays held is refused below.
-  const planningTurn = isExecutionState(state)
-    ? Object.values(state.agentSessions ?? {}).find(
-        (ref) => ref.scope.role === "planning" && ref.status === "in-flight",
-      )
-    : undefined;
+  // A stopped compile, amendment, Work Item diagnosis or review turn whose
+  // adapter settled its local process, or proves it ceased, has no outcome
+  // left to wait for once the Objective cancels: it becomes unavailable (or
+  // settled with an outcome its adapter recovered), then is disposed like any
+  // other session. A covered pending compile keeps its submitted invocation
+  // for the disposal receipt below. A turn that stays held is refused below.
+  const planningTurn = Object.values(state.agentSessions ?? {}).find(
+    (ref) => ref.scope.role === "planning" && ref.status === "in-flight",
+  );
   const stopped =
     planningTurn &&
-    (await stoppedTurnReceipt(planningTurn, model).catch(() => undefined));
+    (await stoppedTurnReceipt(planningTurn, model, true).catch(
+      () => undefined,
+    ));
   if (stopped) {
     agentSessionContinuation(state, "planning", undefined, save).checkpoint(
       stopped,

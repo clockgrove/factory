@@ -19,6 +19,7 @@ import {
   assertAgentSessionScope,
 } from "../agent-session.js";
 import {
+  isNativeProcessOwner,
   type NativeProcessOwner,
   nativeProcessDisposition,
   nativeProcessOwner,
@@ -103,7 +104,8 @@ export function requireClaudeSession(
     ref.adapter !== adapter ||
     data?.root !== join(resolve(storage), ref.identity) ||
     !/^[a-f0-9]{64}$/.test(data.selectionDigest) ||
-    !/^[a-f0-9-]{36}$/.test(data.nativeSessionId)
+    !/^[a-f0-9-]{36}$/.test(data.nativeSessionId) ||
+    (data.process !== undefined && !isNativeProcessOwner(data.process))
   )
     throw new Error("Claude conversation differs from its adapter binding");
   privateDirectory(resolve(storage));
@@ -289,13 +291,13 @@ export function claudeOwnedSpawn(
     });
     // Ensure process errors always have a listener even if ownership/checkpointing throws.
     child.on("error", () => undefined);
-    let owner: NativeProcessOwner;
+    let owner: NativeProcessOwner | undefined;
     try {
-      if (!child.pid)
+      owner = child.pid ? nativeProcessOwner(child.pid) : undefined;
+      if (!owner)
         throw new UnsettledSubprocessError(
           "Claude native process ownership is unresolved",
         );
-      owner = nativeProcessOwner(child.pid);
       onSpawn(owner);
     } catch (error) {
       child.kill("SIGKILL");

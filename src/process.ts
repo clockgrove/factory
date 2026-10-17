@@ -1532,7 +1532,8 @@ export function isNativeProcessOwner(
     typeof owner === "object" &&
     owner !== null &&
     Number.isSafeInteger(owner.pid) &&
-    Number.isSafeInteger(owner.group) &&
+    owner.pid! > 0 &&
+    owner.group === owner.pid &&
     Number.isSafeInteger(owner.uid) &&
     typeof owner.startTime === "string" &&
     typeof owner.namespace === "string" &&
@@ -1545,14 +1546,16 @@ function currentBoot(): string {
   kernelBoot ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   return kernelBoot;
 }
-/** The identity of `pid`, a just-spawned child that leads its own group. */
-export function nativeProcessOwner(pid: number): NativeProcessOwner {
+/**
+ * The identity of `pid`, a just-spawned child, or undefined unless it leads
+ * its own group.
+ */
+export function nativeProcessOwner(
+  pid: number,
+): NativeProcessOwner | undefined {
   const boot = currentBoot();
   const identity = linuxProcessIdentity(pid);
-  if (!identity || identity.group !== pid)
-    throw new UnsettledSubprocessError(
-      "Native process ownership is unresolved",
-    );
+  if (!identity || identity.group !== pid) return undefined;
   return {
     pid,
     group: identity.group,
@@ -1573,7 +1576,8 @@ export function nativeProcessOwner(pid: number): NativeProcessOwner {
 export function nativeProcessDisposition(
   owner: NativeProcessOwner | undefined,
 ): "active" | "settled" | "unknown" {
-  if (!owner || owner.uid !== process.getuid?.()) return "unknown";
+  if (!isNativeProcessOwner(owner) || owner.uid !== process.getuid?.())
+    return "unknown";
   if (owner.boot !== undefined && owner.boot !== currentBoot())
     return "settled";
   if (owner.namespace !== readlinkSync("/proc/self/ns/pid")) return "unknown";
@@ -1809,9 +1813,11 @@ export async function subprocessAsync(
       );
     if (owned) scope?.observe?.(owned, false);
     if (spawned) {
-      if (!owned)
+      // The child is stopped and settled below: a plain failure, not unknown.
+      const owner = owned && nativeProcessOwner(owned.pid);
+      if (!owner)
         throw new Error("Subprocess ownership could not be established");
-      spawned(nativeProcessOwner(owned.pid));
+      spawned(owner);
     }
     if (interactive) {
       const channel: SubprocessInputChannel = {

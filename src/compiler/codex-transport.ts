@@ -606,6 +606,13 @@ export class CodexPlanningTransport implements PlanningTransport {
       if (runningTurns.has(data.sessionRoot)) return { disposition: "active" };
       const disposition = nativeProcessDisposition(data.process);
       if (disposition !== "settled") return { disposition };
+      // Only this host's own retained home proves the receipt is local; a
+      // receipt observed elsewhere stays unknown, whatever its boot.
+      try {
+        assertOwnedCodexHome(data.sessionRoot, this.sessionOwner(session));
+      } catch {
+        return { disposition: "unknown" };
+      }
       ceased = true;
     }
     const unrecovered = (
@@ -640,26 +647,34 @@ export class CodexPlanningTransport implements PlanningTransport {
       const guard = new ProviderTurnGuard(
         this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
       );
+      const caller = stepCancellationSignal();
       try {
-        const caller = stepCancellationSignal();
-        const snapshot = await readCodexAppServerTurn({
-          env: home.env,
-          options: {
-            workingDirectory: this.checkout,
-            sandboxMode: "read-only",
-            approvalPolicy: "never",
-            model: selection.model,
-            modelReasoningEffort: selection.reasoningEffort,
-            ...(selection.serviceTier && {
-              serviceTier: selection.serviceTier,
-            }),
-          },
-          threadId: data.threadId,
-          turnId: data.turnId,
-          signal: caller
-            ? AbortSignal.any([guard.signal, caller])
-            : guard.signal,
-        });
+        let snapshot: Awaited<ReturnType<typeof readCodexAppServerTurn>>;
+        try {
+          snapshot = await readCodexAppServerTurn({
+            env: home.env,
+            options: {
+              workingDirectory: this.checkout,
+              sandboxMode: "read-only",
+              approvalPolicy: "never",
+              model: selection.model,
+              modelReasoningEffort: selection.reasoningEffort,
+              ...(selection.serviceTier && {
+                serviceTier: selection.serviceTier,
+              }),
+            },
+            threadId: data.threadId,
+            turnId: data.turnId,
+            signal: caller
+              ? AbortSignal.any([guard.signal, caller])
+              : guard.signal,
+          });
+        } catch (error) {
+          // No process can finish a ceased turn, so a thread that cannot be
+          // read holds no outcome to recover. A cancelled read still fails.
+          if (!ceased || caller?.aborted) throw error;
+          return unrecovered("unknown");
+        }
         if (snapshot.status === "inProgress") return unrecovered("active");
         if (snapshot.status === "unknown") return unrecovered("unknown");
         const recovered = structuredClone(session);

@@ -773,7 +773,54 @@ async function verifyDescription(
     source === knownStore &&
     Object.getPrototypeOf(source) === LocalContentStore.prototype &&
     knownStore.readBytes === LocalContentStore.prototype.readBytes;
-  const signature = concrete && JSON.stringify([description, bounds]);
+  // Only the roots need traversal. Direct references are verified here on
+  // every call, so a snapshot that only adds them (a new native return or
+  // review artifact) reuses its unchanged roots' expansion instead of
+  // reading every root again.
+  const expansion = await verifyRoots(
+    description.roots,
+    source,
+    bounds,
+    knownStore,
+  );
+  const refs = new Map(
+    description.contentRefs.map((ref) => [refKey(ref), ref]),
+  );
+  for (const ref of description.contentRefs)
+    if (concrete) knownStore!.verifyPrivateBytes(ref);
+    else await readReference(source, ref, knownStore);
+  for (const ref of expansion.contentRefs) refs.set(refKey(ref), ref);
+  const objects = new Map(
+    [...description.gitObjects, ...expansion.gitObjects].map((entry) => [
+      `${entry.kind}:${entry.sha}`,
+      entry,
+    ]),
+  );
+  return {
+    contentRefs: [...refs.values()],
+    gitObjects: [...objects.values()],
+    gaps: [...description.gaps, ...expansion.gaps],
+  };
+}
+async function verifyRoots(
+  initialRoots: BodyRoot[],
+  source: ContentStore | RecoveryReferenceReader,
+  bounds: { maxBytes: number; maxFiles: number },
+  knownStore?: LocalContentStore,
+): Promise<ContinuationReferences> {
+  const description = {
+    contentRefs: [] as ContentRef[],
+    gitObjects: [] as RecoveryGitObject[],
+    gaps: [] as RecoveryClosureGap[],
+    roots: initialRoots,
+  };
+  if (!initialRoots.length) return description;
+  const concrete =
+    knownStore &&
+    source === knownStore &&
+    Object.getPrototypeOf(source) === LocalContentStore.prototype &&
+    knownStore.readBytes === LocalContentStore.prototype.readBytes;
+  const signature = concrete && JSON.stringify([initialRoots, bounds]);
   const cached = signature && knownStore.checkpointReferences(signature);
   if (cached) {
     for (const ref of [...cached.contentRefs, ...cached.originals])

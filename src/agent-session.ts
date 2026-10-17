@@ -24,6 +24,7 @@ import type {
 import { assertApprovedPlaybookPin } from "./contracts.js";
 import { assertDurableValue } from "./execution/checkpoint.js";
 import { graphDigest } from "./graph-amendments.js";
+import { withCheckpointDisposals } from "./recovery-checkpoint.js";
 import type { ContinuationState } from "./state.js";
 
 function object(value: unknown): Record<string, unknown> {
@@ -642,32 +643,35 @@ export async function releaseAgentSessions(
     ].some((ref) => ref.currentTurn && ref.currentTurn.resources !== "settled")
   )
     throw new Error("Agent session disposal requires settled native resources");
-  for (const [entryKey, ref] of Object.entries(state.agentSessions ?? {})) {
-    if (ref.status === "released" || restoredSessionIsHistorical(state, ref))
-      continue;
-    const owner = ref.scope.role === "implementation" ? driver : model;
-    if (!owner?.releaseSession)
-      throw new Error(
-        "Agent session disposal requires its authenticated adapter",
-      );
-    assertCurrent?.();
-    await owner.releaseSession(ref);
-    assertCurrent?.();
-    state.agentSessions![entryKey] = { ...ref, status: "released" };
-    save();
-  }
-  for (const [index, ref] of (state.agentSessionHistory ?? []).entries()) {
-    if (ref.status === "released" || restoredSessionIsHistorical(state, ref))
-      continue;
-    const owner = ref.scope.role === "implementation" ? driver : model;
-    if (!owner?.releaseSession)
-      throw new Error(
-        "Agent session disposal requires its authenticated adapter",
-      );
-    assertCurrent?.();
-    await owner.releaseSession(ref);
-    assertCurrent?.();
-    state.agentSessionHistory![index] = { ...ref, status: "released" };
-    save();
-  }
+  // Every session is settled, so one acknowledgment covers all their storage.
+  await withCheckpointDisposals(async () => {
+    for (const [entryKey, ref] of Object.entries(state.agentSessions ?? {})) {
+      if (ref.status === "released" || restoredSessionIsHistorical(state, ref))
+        continue;
+      const owner = ref.scope.role === "implementation" ? driver : model;
+      if (!owner?.releaseSession)
+        throw new Error(
+          "Agent session disposal requires its authenticated adapter",
+        );
+      assertCurrent?.();
+      await owner.releaseSession(ref);
+      assertCurrent?.();
+      state.agentSessions![entryKey] = { ...ref, status: "released" };
+      save();
+    }
+    for (const [index, ref] of (state.agentSessionHistory ?? []).entries()) {
+      if (ref.status === "released" || restoredSessionIsHistorical(state, ref))
+        continue;
+      const owner = ref.scope.role === "implementation" ? driver : model;
+      if (!owner?.releaseSession)
+        throw new Error(
+          "Agent session disposal requires its authenticated adapter",
+        );
+      assertCurrent?.();
+      await owner.releaseSession(ref);
+      assertCurrent?.();
+      state.agentSessionHistory![index] = { ...ref, status: "released" };
+      save();
+    }
+  });
 }

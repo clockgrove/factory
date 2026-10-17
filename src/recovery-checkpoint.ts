@@ -352,7 +352,11 @@ function transitFault(error: unknown, detail: string): Fault | undefined {
     current instanceof Error && depth < 8;
     current = current.cause, depth++
   ) {
-    if (current instanceof CheckpointPushUnobserved)
+    if (
+      current instanceof CheckpointPushUnobserved ||
+      current instanceof CheckpointEntryUnacknowledged ||
+      current instanceof CheckpointRestart
+    )
       return transient(detail, false);
     if (current instanceof ArchiveTransportFailure)
       return current.transient ? transient(detail, false) : undefined;
@@ -680,6 +684,12 @@ class CheckpointPushUnobserved extends Error {
   }
 }
 /**
+ * An explicit admission returned without an acknowledgment covering the state
+ * as of its entry. Nothing local may be disposed yet; the next admission
+ * publishes that state, so this is waited out (#1456).
+ */
+class CheckpointEntryUnacknowledged extends Error {}
+/**
  * Whether `commit` is reachable from `tip` in this repository. A missing object
  * is not reachable: the exact fetch brings every commit the tip reaches. Exit 1
  * from merge-base is a definite "no"; any other failure stays an error.
@@ -774,7 +784,7 @@ const scopes = new AsyncLocalStorage<{
   };
   verification?: QueueVerificationContext;
   /** See withCheckpointDisposals. */
-  disposals?: { covered: boolean };
+  disposals?: { covered: boolean; closed: boolean };
   closureReads?: {
     publicationLocal: boolean;
     scope: object;
@@ -2631,10 +2641,18 @@ export function acceptForwardedCheckpointCompletion(
  * admission; until then a lost host restores the archived material, whose
  * disposal is safe to repeat.
  */
-export function withCheckpointDisposals<T>(task: () => Promise<T>): Promise<T> {
+export async function withCheckpointDisposals<T>(
+  task: () => Promise<T>,
+): Promise<T> {
   const scope = scopes.getStore();
   if (!scope) return task();
-  return scopes.run({ ...scope, disposals: { covered: false } }, task);
+  // Work that outlives the call keeps this context but not its coverage.
+  const disposals = { covered: false, closed: false };
+  try {
+    return await scopes.run({ ...scope, disposals }, task);
+  } finally {
+    disposals.closed = true;
+  }
 }
 export async function awaitCheckpointAdmission(
   repository: string | undefined,
@@ -2646,12 +2664,24 @@ export async function awaitCheckpointAdmission(
     throw new CheckpointAdmissionFailure(
       "Checkpoint scope differs from external-effect repository",
     );
-  if (reason === "explicit" && scope.disposals?.covered) return;
   if (
-    reason === "before-effect" &&
-    settings(scope.config)?.scope === "repository-knowledge"
+    reason === "explicit" &&
+    scope.disposals?.covered &&
+    !scope.disposals.closed
   )
     return;
+  const persistence = settings(scope.config);
+  if (
+    reason === "before-effect" &&
+    persistence?.scope === "repository-knowledge"
+  )
+    return;
+  // An explicit admission precedes disposing local material, so it must
+  // acknowledge everything recorded when it began.
+  const entrySequence =
+    reason === "explicit" && persistence
+      ? journal(scope.config, persistence).sequence
+      : undefined;
   let acknowledged: RecoveryCheckpointStatus;
   const deadline = Date.now() + COLLECTION_WAIT_MS;
   for (;;) {
@@ -2682,8 +2712,16 @@ export async function awaitCheckpointAdmission(
       );
     }
   }
+  if (
+    entrySequence !== undefined &&
+    (acknowledged.lastAcknowledged?.sequence ?? -1) < entrySequence
+  )
+    throw new CheckpointAdmissionFailure(
+      "Explicit checkpoint admission did not acknowledge the state as of its entry",
+      "explicit",
+      new CheckpointEntryUnacknowledged(acknowledged.status),
+    );
   const fingerprint = checkpointCompletionFingerprint(scope.config);
-  const persistence = settings(scope.config);
   const current = persistence
     ? journal(scope.config, persistence).lastAcknowledged
     : undefined;
@@ -6266,8 +6304,15 @@ async function settleLateLanding(
   );
   return true;
 }
-/** A late landing was acknowledged mid-publication; publication starts over. */
-class CheckpointLateLandingSettled extends Error {}
+/**
+ * The journal moved mid-publication, by a settled late landing or a concurrent
+ * save; publication starts over from the current journal.
+ */
+class CheckpointRestart extends Error {
+  constructor() {
+    super("Checkpoint journal kept moving during publication");
+  }
+}
 function acknowledgeObserved(
   config: FactoryConfig,
   options: GitPersistenceConfig,
@@ -6311,11 +6356,13 @@ export async function synchronizeRecoveryCheckpoint(
 ): Promise<RecoveryCheckpointStatus> {
   return serializePublication(config.repository, async () => {
     try {
-      try {
-        return await publishCheckpoint(config, input);
-      } catch (error) {
-        if (!(error instanceof CheckpointLateLandingSettled)) throw error;
-        return await publishCheckpoint(config, input);
+      for (let restarts = 0; ; restarts++) {
+        try {
+          return await publishCheckpoint(config, input);
+        } catch (error) {
+          if (!(error instanceof CheckpointRestart) || restarts === 2)
+            throw error;
+        }
       }
     } catch (error) {
       if (isCheckpointAdmissionFailure(error)) throw error;
@@ -6445,10 +6492,13 @@ async function publishCheckpoint(
         // grants a blind second push: a new one is a fast-forward from the base.
         const landed = await observeAttempt(config, options, previous);
         record = journal(config, options);
+        // An explicit admission still covers its own state: material written
+        // after the landed candidate was built, marked or not (#1456).
         if (
           landed &&
-          (record.sequence === record.acknowledgedSequence ||
-            input.reason !== "before-effect")
+          (input.reason === "settled" ||
+            (input.reason === "before-effect" &&
+              record.sequence === record.acknowledgedSequence))
         )
           return status(record, options);
       }
@@ -6539,7 +6589,7 @@ async function publishCheckpoint(
         );
         if (acknowledged.remoteTip !== record.lastAcknowledged.commitSha) {
           if (await settleLateLanding(config, options, acknowledged.remoteTip))
-            throw new CheckpointLateLandingSettled();
+            throw new CheckpointRestart();
           throw new CheckpointConflict(
             "Remote archive advanced outside the acknowledged writer; conflict requires inspection",
           );
@@ -6593,9 +6643,10 @@ async function publishCheckpoint(
             kind: "historical",
           });
         });
-        // Later local material keeps the next sequence. This captured subset
-        // has no distinct sequence; the next ordinary publication carries both.
-        if (observedSequence === undefined) return status(record, options);
+        // A concurrent save marked the journal while this closure was built,
+        // so the closure may lack it. Start over: the dirty journal now takes
+        // the ordinary path, which publishes both (#1456).
+        if (observedSequence === undefined) throw new CheckpointRestart();
         sequence = observedSequence;
         manifest.sequence = sequence;
         assertManifest(manifest, manifest.binding, options);
@@ -6647,7 +6698,7 @@ async function publishCheckpoint(
         }
         if (base !== record.lastAcknowledged.commitSha) {
           if (await settleLateLanding(config, options, base))
-            throw new CheckpointLateLandingSettled();
+            throw new CheckpointRestart();
           throw new CheckpointConflict(
             "Remote archive advanced outside the acknowledged writer; conflict requires inspection",
           );
@@ -6786,7 +6837,7 @@ async function publishCheckpoint(
         mutate(config, options, (current) => {
           current.attempts.at(-1)!.status = "not-landed";
         });
-        throw new CheckpointLateLandingSettled();
+        throw new CheckpointRestart();
       }
       if (prePushTip !== base) {
         mutate(config, options, (current) => {
@@ -6870,7 +6921,7 @@ async function publishCheckpoint(
       coverDisposals();
       return acknowledged;
     } catch (error) {
-      if (error instanceof CheckpointLateLandingSettled) throw error;
+      if (error instanceof CheckpointRestart) throw error;
       try {
         mutate(config, options, (record) => {
           if (

@@ -689,6 +689,8 @@ async function watcherWorkflow(
       baseSha,
       graph,
       planGraphDigest: graphDigest(graph),
+      publicationContract: "exact-request-v1",
+      objectiveCommands: [],
       approvedPlaybookPin: null,
       approvedPlaybookAdmission: {
         approvedPlaybookPin: null,
@@ -1291,6 +1293,7 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
     objectiveCommands: ["git diff --exit-code"],
     graph,
     planGraphDigest: graphDigest(graph),
+    publicationContract: "exact-request-v1",
     approvedPlaybookPin: null,
     approvedPlaybookAdmission: {
       approvedPlaybookPin: null,

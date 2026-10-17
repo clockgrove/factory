@@ -1271,6 +1271,9 @@ test("cancellation stops an owned shell and its process group", async () => {
       configDigest: factoryConfigDigest(config),
       baseSha,
       planGraphDigest: graphDigest(graph),
+      publicationContract: "exact-request-v1",
+      objectiveCommands: [],
+      objectiveBodyDigest: "b".repeat(64),
       approvedPlaybookPin: null,
       approvedPlaybookAdmission: {
         approvedPlaybookPin: null,
@@ -1407,6 +1410,8 @@ test("cancellation stops an owned shell and its process group", async () => {
             preparation.approvedPlaybookAdmission = structuredClone(
               snapshot.approvedPlaybookAdmission,
             );
+            preparation.publicationContract = snapshot.publicationContract;
+            preparation.objectiveCommands = snapshot.objectiveCommands;
             preparation.issueByItemId = snapshot.issueByItemId;
             preparation.work = {
               local: {
@@ -2303,6 +2308,8 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       objective: 1,
       runId: "actual-local-validation",
       planGraphDigest: graphDigest(graph),
+      objectiveCommands: [],
+      objectiveBodyDigest: "b".repeat(64),
       approvedPlaybookPin: null,
       approvedPlaybookAdmission: {
         approvedPlaybookPin: null,
@@ -3480,6 +3487,8 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       objective: 2,
       runId: "actual-local-publication",
       planGraphDigest: graphDigest(publicationGraph),
+      objectiveCommands: [],
+      objectiveBodyDigest: "b".repeat(64),
       approvedPlaybookPin: null,
       approvedPlaybookAdmission: {
         approvedPlaybookPin: null,
@@ -4277,6 +4286,8 @@ test("source readiness prepares each real fresh checkout before its phase checks
         objective: 1,
         runId: "recorded-readiness-checkout",
         planGraphDigest: originalDigest,
+        objectiveCommands: [],
+        objectiveBodyDigest: "b".repeat(64),
         approvedPlaybookPin: null,
         approvedPlaybookAdmission: {
           approvedPlaybookPin: null,

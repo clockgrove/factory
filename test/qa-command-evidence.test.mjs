@@ -441,6 +441,8 @@ test("an exact operator decline preserves a real result and permits ordinary com
       baseSha: base,
       graph,
       planGraphDigest: graphDigest(graph),
+      objectiveCommands: [],
+      objectiveBodyDigest: "b".repeat(64),
       approvedPlaybookPin: null,
       approvedPlaybookAdmission: {
         approvedPlaybookPin: null,
@@ -924,6 +926,8 @@ else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.
       baseSha: base,
       graph,
       planGraphDigest: graphDigest(graph),
+      objectiveCommands: [],
+      objectiveBodyDigest: "b".repeat(64),
       approvedPlaybookPin: null,
       approvedPlaybookAdmission: {
         approvedPlaybookPin: null,

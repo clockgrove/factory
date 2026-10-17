@@ -280,6 +280,46 @@ function repositoryCitation(
   return { path, heading, content };
 }
 
+/** Bound of the cited repository bytes one plan revision carries inline. */
+const MAX_REVISION_CITATION_BYTES = 262_144;
+
+/**
+ * Exact base bytes of the repository sections a revision's affected items
+ * cite, in order and once each, within the citation bounds. A citation that
+ * does not resolve at the base, or past the total bound, is left to the
+ * planner's read tools.
+ */
+export function revisionCitedSections(
+  checkout: string,
+  baseSha: string,
+  citations: { path: string; heading: string }[],
+): { path: string; heading: string; content: string }[] {
+  const sections: { path: string; heading: string; content: string }[] = [];
+  const seen = new Set<string>();
+  let bytes = 0;
+  for (const { path, heading } of citations) {
+    const key = JSON.stringify([path, heading]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let content: string;
+    try {
+      content = repositoryCitation(
+        checkout,
+        baseSha,
+        "revision",
+        path,
+        heading,
+      ).content;
+    } catch {
+      continue;
+    }
+    bytes += Buffer.byteLength(content);
+    if (bytes > MAX_REVISION_CITATION_BYTES) break;
+    sections.push({ path, heading, content });
+  }
+  return sections;
+}
+
 /** Source text is controller-owned regardless of the planning adapter. */
 export function hydrateWorkerInputSources(
   graph: WorkGraph,

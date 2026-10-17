@@ -3958,13 +3958,15 @@ test("source readiness prepares each real fresh checkout before its phase checks
         },
       })),
     };
-    // The transient ordinary-work choice omits canonical media defaults.
+    // The transient ordinary-work choice replaces canonical media defaults
+    // with media null.
     for (const field of [
       "expectedOutputRoles",
       "minimumAssetSets",
       "requiredLfsRoles",
     ])
       delete generated.items[0][field];
+    generated.items[0].media = null;
     assert.ok(call.prompt.includes("Same-owner source-authorized setup"));
     // The rejected relationship stays rejected; no decoder rewrites it into
     // available or fabricates a dependency. The authorized sequence is real.

@@ -159,6 +159,9 @@ const indexKeys = (length: number) =>
  * The shared planning schema in the Claude structured-output subset.
  * Unsupported constraints move into `description`, as the SDK's own
  * transform does, but `enum` and `const` discriminators stay enforced.
+ * The SDK validates the answer against this schema and returns its errors
+ * to the model, so a discriminated `anyOf` becomes if/then on its
+ * discriminator: errors then name only the branch the entry chose.
  * The grammar enforces no array length above one, so an exact-length array
  * becomes an object with one required key per index; claudeOutputValue
  * turns it back into the canonical array before any Factory decoder sees it.
@@ -174,11 +177,96 @@ function claudeOutputSchema(schema: unknown): unknown {
   return result;
 }
 
+/** A single-value `enum` or `const` property value, when the branch fixes one. */
+function fixedValue(branch: unknown, property: string): unknown[] | undefined {
+  if (!isRecord(branch) || !isRecord(branch.properties)) return undefined;
+  const value = branch.properties[property];
+  if (!isRecord(value)) return undefined;
+  if (Object.hasOwn(value, "const")) return [value.const];
+  return Array.isArray(value.enum) && value.enum.length === 1
+    ? [value.enum[0]]
+    : undefined;
+}
+
+/** The property every object branch fixes to one value, not all the same one. */
+function discriminator(branches: unknown[]): string | undefined {
+  if (branches.length < 2 || !branches.every(isRecord)) return undefined;
+  const first = branches[0] as Record<string, unknown>;
+  const candidates = Object.keys(
+    isRecord(first.properties) ? first.properties : {},
+  ).sort((a, b) => Number(b === "kind") - Number(a === "kind"));
+  return candidates.find((property) => {
+    const values = branches.map((branch) => fixedValue(branch, property));
+    return (
+      values.every((value) => value !== undefined) &&
+      new Set(values.map((value) => JSON.stringify(value![0]))).size > 1
+    );
+  });
+}
+
+/**
+ * An `anyOf` of object branches told apart by one fixed property becomes
+ * if/then on that property, so a malformed entry is reported against the
+ * branch its own discriminator selects instead of against every branch.
+ */
+function discriminatedUnion(
+  schema: Record<string, unknown>,
+  indexed: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const branches = schema.anyOf;
+  if (!Array.isArray(branches)) return undefined;
+  const property = discriminator(branches);
+  if (!property) return undefined;
+  const values = [
+    ...new Map(
+      branches.map((branch) => {
+        const value = fixedValue(branch, property)![0];
+        return [JSON.stringify(value), value];
+      }),
+    ).values(),
+  ];
+  const { anyOf: _anyOf, ...rest } = schema;
+  return {
+    ...rest,
+    type: "object",
+    properties: {
+      [property]: {
+        ...(values.every((value) => typeof value === "string") && {
+          type: "string",
+        }),
+        enum: values,
+      },
+    },
+    required: [property],
+    allOf: values.map((value) => {
+      const group = branches.filter(
+        (branch) =>
+          JSON.stringify(fixedValue(branch, property)![0]) ===
+          JSON.stringify(value),
+      );
+      return {
+        if: {
+          type: "object",
+          properties: { [property]: { const: value } },
+          required: [property],
+        },
+        // biome-ignore lint/suspicious/noThenProperty: the JSON Schema keyword.
+        then: claudeSchemaNode(
+          group.length === 1 ? group[0] : { anyOf: group },
+          indexed,
+        ),
+      };
+    }),
+  };
+}
+
 function claudeSchemaNode(
   schema: unknown,
   indexed: Record<string, unknown>,
 ): unknown {
   if (!isRecord(schema)) return schema;
+  const union = discriminatedUnion(schema, indexed);
+  if (union) return union;
   const length = exactLength(schema);
   if (length !== undefined) {
     // One definition per array keeps the grammar the size of the original.

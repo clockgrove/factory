@@ -444,6 +444,11 @@ export function renderCompilationCall(
     })),
     true,
   );
+  const cited = literalBodyBlocks(
+    (request.compileContext?.revision?.citations ?? []).map(
+      ({ content }, at) => ({ label: `section ${at}`, content }),
+    ),
+  );
   const instructions = `${WORK_ITEM_PLANNING_RULES}
 
 How to answer:
@@ -464,9 +469,9 @@ ${request.contextLookup ? "- Adaptive expansion: only when contextLookup is enab
 ${request.contextLookup ? "- Declared routing: adaptive graph outcomes also supply conditions (empty [] when unused), and ordinary work uses condition null unless it is an approved branch. A condition has schemaVersion 1, stable id, an unconditional discovery input (producerItemId, role, inventory schema), and literal inventory-empty or has-classification predicate. has-classification declares the selected classification plus exhaustive otherClassifications negative labels and requires a semantic producer; missing or unrecognized labels remain unknown. Classifications must be complete, known observations. Branch work declares conditionId and when true/false and directly depends on its producer. Unknown, missing, stale or partial evidence is a hold, never a false result or successful skip. Conditional items cannot own original Objective coverage; retain unconditional integration/QA/final proof for every original requirement and direct dependencies for required outputs. Published CI targetItem and mandatory environment preparedBy must be unconditional producers; skipped branches supply no PR, delivery-head checks or completed preparation. Proof/aggregate/discovery nodes, expansion templates and integration barriers remain unconditional. Do not put conditional implementation in aggregate children, because every explicit aggregate child must complete acceptance; join alternative branches through an unconditional QA dependency barrier instead. A skipped branch is a recorded disposition with bound facts, not an accepted implementation, missing result, passing check, PR or permission. Missing producer outputs or classifications require the existing supported recovery/decision path. Do not use routing to skip failed work or change acceptance." : ""}
 - Resources are exact identities; give a higher priority to work the source says must run first. ${request.contextLookup ? "Return scheduling null when a useful batch duration is unknown. A supported advisory estimate uses a positive decimal estimatedDurationMs and a concise reason grounded in available workload or observations, including preparation, validation and review; it never grants resources, changes a deadline or authorizes nested agents. Factory ranks eligible remaining work by downstream dependency value while preserving actual ownership and recorded capacity. " : ""}Give explicit non-goals.
 - Architecture risks: derive material risks from actual flows, not a universal checklist. Where asynchronous work outlives intent, assign result/error/metadata/cleanup ownership and identify superseding user transitions for shared state. Per-operation freshness alone does not establish shared-state ownership. Prove source-required interacting transitions, including failure or late cleanup; isolated happy paths may miss them. Use allowed real journeys, production tests and source ownership proof without making every interleaving a browser test. Explicit HTTP/browser, failure, ordering and negative controls retain their required proof. Do not invent framework, acceptance or split requirements from this guidance.
-- Media: workers stage candidates/manifests; Factory captures, selects, uploads and hydrates. Preserve asset path/kind/role/media type/visibility and required/LFS roles and counts. Ordinary work omits expectedOutputRoles, minimumAssetSets and requiredLfsRoles; code hydrates empty roles/zero candidates. Media declares a staged role and positive decimal candidate-count string, decoded strictly to a safe integer. Code, tests and docs are ordinary deliverables, not media roles.
+- Media: workers stage candidates/manifests; Factory captures, selects, uploads and hydrates. Preserve asset path/kind/role/media type/visibility and required/LFS roles and counts. Ordinary work uses media null; code hydrates empty roles/zero candidates. Media work declares media with a staged role and positive decimal candidate-count string, decoded strictly to a safe integer. Code, tests and docs are ordinary deliverables, not media roles.
 ${request.executionProfiles ? "- Execution profiles: honor explicit compatible source assignments, otherwise choose an eligible offered profile suited to the work with a short reason. Missing environment summary means unknown, not empty. Never change providers, permissions or reviewers.\n" : ""}
-${wire.data.retainedItems?.length ? "- Retained amendments: include every retainedItems entry once as kind retained with its original id, without regenerating its definition; select its owner in coverage as needed. Fully define pending/new work and preserve every never-started obligation.\n" : ""}
+${wire.revision ? `- Revision answer: currentPlan is your earlier complete answer, without its contextId, and stays the plan except for what you change. Answer with only the changes: items holds new items and complete replacements (same id) of current items; itemEdits replaces single fields of a current item, null keeping a field, and its acceptanceReplace rewrites single acceptance entries by index while acceptanceAppend adds entries at the end, so existing acceptance indices keep their meaning (prefer these to replacing a long acceptance list); removedItemIds drops items; coverage replaces the entries its obligationIndex selects; ${request.contextLookup ? "sourceObligations, requiredPreIntegrationChecks, expansions and conditions are" : "sourceObligations and requiredPreIntegrationChecks are"} null to keep the current list or the complete new list; decisionRequired and any split are given in full, as in a complete answer. Name each item id at most once. Keep indices consistent: when a change moves an item's acceptance or validation entries, also replace the coverage entries and source obligations that refer to them. citedSections holds the exact base bytes of the repository sections the affected items cite; read other files only when the findings need them.\n` : ""}${wire.data.retainedItems?.length ? "- Retained amendments: include every retainedItems entry once as kind retained with its original id, without regenerating its definition; select its owner in coverage as needed. Fully define pending/new work and preserve every never-started obligation.\n" : ""}
 ${reviewArtifacts?.length ? `- ${REVIEW_ARTIFACT_GUIDANCE} When an obligation needs such runtime bodies as review evidence, plan a proof that runs the exact selector command in the phase whose review judges it, and name the captured bodies in that owner's brief. A selector grants no command authority; its command still needs ordinary source or base authority.\n` : ""}
 Examples (illustrations, not command or source authority):
 - An Acceptance bullet that is exactly \`npm test\` already runs on the integrated result. Do not invent a worker just to duplicate it. A requirement for a particular negative control still needs the source-required control and its real evidence.
@@ -484,7 +489,17 @@ Examples (illustrations, not command or source authority):
       instructions: request.compileContext?.previousGraph
         ? "follow-up"
         : "instructions",
+      currentPlan: "follow-up",
+      citedSections: "follow-up",
     }),
+    ...(cited.text
+      ? ([
+          [
+            "follow-up",
+            `\nCited repository sections. ${cited.guidance} A citedSections content {"block": LABEL} is the complete literal body in that block.\n${cited.text}`,
+          ],
+        ] as const)
+      : []),
   ]);
   const call: StructuredCall = {
     role: "planner",
@@ -1286,9 +1301,18 @@ export class StructuredPlanningModel implements PlanningModel {
     wire: ReturnType<typeof compilerWire>,
     result: unknown,
   ): T {
+    let answer: unknown;
     try {
-      return wire.decode(result) as T;
+      // A revision's changes apply to the current plan before the full decode.
+      const expanded = wire.expand(result);
+      answer = wire.answer(expanded);
+      const decoded = wire.decode(expanded) as T;
+      if (answer !== undefined) request.retainCompilerAnswer?.(answer);
+      return decoded;
     } catch (error) {
+      // A refused choice is revised against this answer; a wrong shape is not.
+      if (error instanceof PlannerChoiceError && answer !== undefined)
+        request.retainCompilerAnswer?.(answer);
       // A required decision is the planner's answer for the operator.
       if (error instanceof PlannerDecision) throw error;
       observeModelInvocation(request.invocation, {

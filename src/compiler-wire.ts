@@ -246,17 +246,26 @@ export function compilerWire(
         visibility: { type: "string", enum: ["private", "repository"] },
       }),
     },
-    expectedOutputRoles: {
-      type: "array",
-      minItems: 1,
-      items: text,
+    media: {
       description:
-        "Roles of staged media outputs, never code, tests or documentation categories.",
+        "null for ordinary work. Media work declares its staged outputs.",
+      anyOf: [
+        { type: "null" },
+        strict({
+          expectedOutputRoles: {
+            type: "array",
+            minItems: 1,
+            items: text,
+            description:
+              "Roles of staged media outputs, never code, tests or documentation categories.",
+          },
+          // Numeric bounds are not supported by every structured-output grammar.
+          // A decimal pattern enforces positivity before strict safe-integer decoding.
+          minimumAssetSets: { type: "string", pattern: "^[1-9][0-9]*$" },
+          requiredLfsRoles: { type: "array", items: text },
+        }),
+      ],
     },
-    // Numeric bounds are not supported by every structured-output grammar.
-    // A decimal pattern enforces positivity before strict safe-integer decoding.
-    minimumAssetSets: { type: "string", pattern: "^[1-9][0-9]*$" },
-    requiredLfsRoles: { type: "array", items: text },
   });
   if (request.contextLookup) {
     itemSchema.properties!.scheduling = {
@@ -459,7 +468,9 @@ export function compilerWire(
     minimumAssetSets: 0,
   };
   const readonlyFields = [
-    ...Object.keys(readonlyConstants),
+    "ownedPaths",
+    "sourceAssets",
+    "media",
     "newPackages",
     "executionProfile",
     "condition",
@@ -528,14 +539,7 @@ export function compilerWire(
                 (field) => field !== "acceptance",
               );
             }
-            if (kind !== "work") return [item];
-            const ordinary = structuredClone(item);
-            for (const field of outputFields)
-              delete ordinary.properties![field];
-            ordinary.required = ordinary.required!.filter(
-              (field) => !outputFields.includes(field),
-            );
-            return [ordinary, item];
+            return [item];
           }),
           ...Object.keys(modes).flatMap((kind) => {
             const ids = [...retainedItems.values()]
@@ -646,10 +650,7 @@ export function compilerWire(
       maxItems: 0,
       items: strict({ producerItemId: text }),
     };
-    for (const field of outputFields) delete template.properties![field];
-    template.required = template.required!.filter(
-      (field) => !outputFields.includes(field),
-    );
+    template.properties!.media = { type: "null" };
     schema.properties!.expansions = {
       type: "array",
       items: strict({
@@ -713,6 +714,172 @@ export function compilerWire(
     };
     schema.required!.push("conditions");
   }
+  // A revision answers with only its changes to the current plan. Factory
+  // applies them by id and index alone; the full decode below still judges
+  // every resulting choice.
+  const revision = context.revision;
+  const nullable = (entry: Schema): Schema =>
+    Array.isArray(entry.anyOf) &&
+    (entry.anyOf as Schema[]).some((branch) => branch.type === "null")
+      ? entry
+      : { anyOf: [{ type: "null" }, entry] };
+  const replaceable = [
+    "sourceObligations",
+    "requiredPreIntegrationChecks",
+    ...(request.contextLookup ? ["expansions", "conditions"] : []),
+  ];
+  const changeSchema = strict({
+    contextId: contextIdSchema,
+    items: {
+      type: "array",
+      description:
+        "New Work Items in full, and complete replacements of current items with the same id.",
+      items: schema.properties!.items!.items!,
+    },
+    itemEdits: {
+      type: "array",
+      description:
+        "Field replacements for current items: null keeps that field's current value.",
+      items: strict({
+        id: { ...text, minLength: 1 },
+        ...Object.fromEntries(
+          Object.entries(itemSchema.properties!)
+            .filter(([field]) => field !== "id" && field !== "kind")
+            .map(([field, entry]) => [field, nullable(entry)]),
+        ),
+        acceptanceReplace: {
+          type: "array",
+          description:
+            "Rewrites single acceptance entries in place; the other indices keep their meaning.",
+          items: strict({ index: integer(), text: { ...text, minLength: 1 } }),
+        },
+        acceptanceAppend: {
+          type: "array",
+          description:
+            "New acceptance entries after the current ones; existing indices keep their meaning.",
+          items: { ...text, minLength: 1 },
+        },
+      }),
+    },
+    removedItemIds: { type: "array", items: text },
+    coverage: {
+      type: "array",
+      description:
+        "Replaced coverage entries; obligationIndex selects the entry, and the rest stay.",
+      items: strict({
+        obligationIndex: integer(obligations.length),
+        ...proofFields,
+      }),
+    },
+    ...Object.fromEntries(
+      replaceable.map((field) => [
+        field,
+        {
+          ...nullable(schema.properties![field]!),
+          description:
+            "null keeps the current list; otherwise the complete new list.",
+        },
+      ]),
+    ),
+    decisionRequired: schema.properties!.decisionRequired!,
+    ...(splittable ? { split: schema.properties!.split! } : {}),
+  });
+  const graphSchema = revision ? changeSchema : schema;
+  /** The current plan with these changes applied; structure only. */
+  const applyRevision = (value: unknown): unknown => {
+    const plan = structuredClone(object(revision!.answer, "current plan"));
+    const change = object(value, "revision");
+    keys(change, Object.keys(changeSchema.properties!), "revision");
+    if (!Array.isArray(plan.items) || !Array.isArray(plan.coverage))
+      throw new Error("Planner current plan is invalid");
+    for (const field of ["items", "itemEdits", "coverage"])
+      if (!Array.isArray(change[field]))
+        throw new Error(`Planner revision ${field} must be an array`);
+    const items = plan.items as unknown[];
+    const coverage = plan.coverage as unknown[];
+    const touched = new Set<string>();
+    const position = (id: unknown, label: string) => {
+      if (typeof id !== "string" || touched.has(id))
+        throw new PlannerChoiceError(
+          `Planner revision ${label} must name each item id at most once`,
+        );
+      touched.add(id);
+      return items.findIndex((entry) => object(entry, "item").id === id);
+    };
+    for (const raw of change.items as unknown[]) {
+      const item = object(raw, "item");
+      const at = position(item.id, "items");
+      if (at < 0) items.push(item);
+      else items[at] = item;
+    }
+    for (const raw of change.itemEdits as unknown[]) {
+      const edit = object(raw, "item edit");
+      const at = position(edit.id, "itemEdits");
+      if (at < 0)
+        throw new PlannerChoiceError(
+          `Planner revision edits ${JSON.stringify(edit.id)}, which is not a current item`,
+        );
+      const item = object(items[at], "item");
+      const { acceptanceReplace, acceptanceAppend, ...fields } = edit;
+      if (!Array.isArray(acceptanceReplace) || !Array.isArray(acceptanceAppend))
+        throw new Error("Planner acceptance edits must be arrays");
+      if (acceptanceReplace.length || acceptanceAppend.length) {
+        if (!Array.isArray(item.acceptance) || fields.acceptance !== null)
+          throw new PlannerChoiceError(
+            `Planner revision edits acceptance entries of ${String(edit.id)} without exactly one current acceptance list`,
+          );
+        const acceptance = [...item.acceptance];
+        const rewritten = new Set<number>();
+        for (const raw of acceptanceReplace) {
+          const entry = object(raw, "acceptance edit");
+          const at = index(entry.index, acceptance.length, "acceptance index");
+          if (rewritten.has(at) || typeof entry.text !== "string")
+            throw new PlannerChoiceError(
+              "Planner revision rewrites one acceptance entry more than once",
+            );
+          rewritten.add(at);
+          acceptance[at] = entry.text;
+        }
+        item.acceptance = [...acceptance, ...acceptanceAppend];
+      }
+      for (const [field, entry] of Object.entries(fields)) {
+        if (field === "id" || entry === null) continue;
+        if (!Object.hasOwn(item, field))
+          throw new PlannerChoiceError(
+            `Planner revision sets ${field} on ${String(edit.id)}, whose kind has no such field; replace the item in items instead`,
+          );
+        item[field] = entry;
+      }
+    }
+    for (const id of strings(change.removedItemIds, "removedItemIds")) {
+      const at = position(id, "removedItemIds");
+      if (at < 0)
+        throw new PlannerChoiceError(
+          `Planner revision removes ${JSON.stringify(id)}, which is not a current item`,
+        );
+      items.splice(at, 1);
+    }
+    const replaced = new Set<number>();
+    for (const raw of change.coverage as unknown[]) {
+      const { obligationIndex, ...entry } = object(raw, "coverage");
+      const at = index(obligationIndex, coverage.length, "obligationIndex");
+      if (replaced.has(at))
+        throw new PlannerChoiceError(
+          "Planner revision replaces one coverage entry more than once",
+        );
+      replaced.add(at);
+      coverage[at] = entry;
+    }
+    for (const field of replaceable)
+      if (change[field] !== null) plan[field] = change[field];
+    plan.decisionRequired = change.decisionRequired;
+    if (splittable) plan.split = change.split;
+    plan.contextId = change.contextId;
+    return plan;
+  };
+  /** The complete answer a response stands for, before decoding. */
+  const expandGraph = (value: unknown): unknown =>
+    revision ? applyRevision(value) : value;
   // Stable content first, so repeated and revised compilations share a
   // provider-cache prefix; the revision-specific parts and the context
   // identity, which hashes them, come last.
@@ -755,11 +922,28 @@ export function compilerWire(
           })),
         }
       : {}),
+    ...(revision
+      ? {
+          currentPlan: (({ contextId: _contextId, ...plan }) => plan)(
+            object(revision.answer, "current plan"),
+          ),
+          // Bodies render as literal blocks after the choices.
+          citedSections: revision.citations.map(({ path, heading }, at) => ({
+            path,
+            heading,
+            content: { block: `section ${at}` },
+          })),
+        }
+      : {}),
     contextId,
   };
   const graphWire = {
-    schema,
+    schema: graphSchema,
     data,
+    revision: Boolean(revision),
+    expand: expandGraph,
+    /** The complete graph-level answer, retained as a later revision's base. */
+    answer: (expanded: unknown): unknown => expanded,
     decode(value: unknown): WorkGraph {
       const wire = object(value, "response");
       keys(
@@ -878,13 +1062,9 @@ export function compilerWire(
             );
           if (typeof item.kind !== "string" || !modes[item.kind])
             throw new Error("Planner Work Item kind is invalid");
-          const hasOutputs = Object.hasOwn(item, "expectedOutputRoles");
           const expected = itemSchema.required!.filter(
             (field) =>
               (item.kind === "work" || !readonlyFields.includes(field)) &&
-              (item.kind !== "work" ||
-                hasOutputs ||
-                !outputFields.includes(field)) &&
               (item.kind !== "aggregate" || field !== "acceptance"),
           );
           if (item.kind === "discovery") expected.push("discovery");
@@ -906,19 +1086,24 @@ export function compilerWire(
             Object.assign(item, structuredClone(readonlyConstants));
           else {
             newPackages = strings(item.newPackages, "newPackages");
-            if (hasOutputs) {
+            if (item.media !== null) {
+              const media = object(item.media, "media");
+              keys(media, outputFields, "media");
               if (
-                !strings(item.expectedOutputRoles, "expectedOutputRoles")
+                !strings(media.expectedOutputRoles, "expectedOutputRoles")
                   .length ||
-                typeof item.minimumAssetSets !== "string" ||
-                !/^[1-9][0-9]*$/.test(item.minimumAssetSets) ||
-                !Number.isSafeInteger(Number(item.minimumAssetSets)) ||
-                String(Number(item.minimumAssetSets)) !== item.minimumAssetSets
+                typeof media.minimumAssetSets !== "string" ||
+                !/^[1-9][0-9]*$/.test(media.minimumAssetSets) ||
+                !Number.isSafeInteger(Number(media.minimumAssetSets)) ||
+                String(Number(media.minimumAssetSets)) !==
+                  media.minimumAssetSets
               )
                 throw new Error(
                   "Planner media outputs need a positive safe-integer candidate count",
                 );
-              item.minimumAssetSets = Number(item.minimumAssetSets);
+              item.expectedOutputRoles = media.expectedOutputRoles;
+              item.minimumAssetSets = Number(media.minimumAssetSets);
+              item.requiredLfsRoles = media.requiredLfsRoles;
             } else {
               item.expectedOutputRoles = [];
               item.minimumAssetSets = 0;
@@ -926,6 +1111,7 @@ export function compilerWire(
             }
           }
           delete item.newPackages;
+          delete item.media;
           if (request.contextLookup) {
             if (item.scheduling === null) delete item.scheduling;
             else {
@@ -1578,7 +1764,10 @@ export function compilerWire(
       contextId: contextIdSchema,
       outcome: {
         anyOf: [
-          strict({ kind: { type: "string", enum: ["graph"] }, graph: schema }),
+          strict({
+            kind: { type: "string", enum: ["graph"] },
+            graph: graphSchema,
+          }),
           strict({
             kind: { type: "string", enum: ["context-request"] },
             requests: {
@@ -1606,6 +1795,25 @@ export function compilerWire(
       },
     }),
     data: { ...data, contextLookup: request.contextLookup },
+    revision: Boolean(revision),
+    expand(value: unknown): unknown {
+      const outer = value as { outcome?: { kind?: unknown; graph?: unknown } };
+      return revision && outer?.outcome?.kind === "graph"
+        ? {
+            ...outer,
+            outcome: {
+              ...outer.outcome,
+              graph: expandGraph(outer.outcome.graph),
+            },
+          }
+        : value;
+    },
+    answer(expanded: unknown): unknown {
+      const outcome = (
+        expanded as { outcome?: { kind?: unknown; graph?: unknown } }
+      )?.outcome;
+      return outcome?.kind === "graph" ? outcome.graph : undefined;
+    },
     decode(value: unknown): PlanningTurnResponse {
       const outer = object(value, "context response");
       keys(outer, ["contextId", "outcome"], "context response");

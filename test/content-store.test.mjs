@@ -5230,6 +5230,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
         priority: 0,
         resources: [],
         sourceAssets: [],
+        media: null,
         scheduling: null,
         condition: null,
       })),

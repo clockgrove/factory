@@ -520,7 +520,19 @@ export interface PlanningRequest<T> {
     reattemptItemId?: string;
     /** Observed current code; never normative sources or command authority. */
     currentImplementationEvidence?: ResultReviewEvidenceSource[];
+    /**
+     * A revision of the current plan: the planner answers with only its
+     * changes, which Factory applies to `answer` before the full decode.
+     */
+    revision?: {
+      /** The current plan as the planner's last complete compiler answer. */
+      answer: unknown;
+      /** Exact base bytes of the repository sections the affected items cite. */
+      citations: { path: string; heading: string; content: string }[];
+    };
   };
+  /** Receives the complete compiler answer (a revision already applied) before decoding. */
+  retainCompilerAnswer?: (answer: unknown) => void;
   /** Package scripts the acceptance commands run, as the base defines them; validation keeps them fixed. */
   fixedScripts?: { name: string; body: string }[];
   prerequisites?: PlanningPrerequisites;

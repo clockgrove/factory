@@ -749,9 +749,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       assert.match(emitted.call.prompt, /Read-only QA has no implementation/);
       const kinds = emitted.wire.schema.properties.items.items.anyOf;
       assert.ok(kinds.some((kind) => kind.properties.kind.enum.includes("qa")));
-      assert.ok(
-        kinds.some((kind) => kind.required.includes("minimumAssetSets")),
-      );
+      assert.ok(kinds.some((kind) => kind.required.includes("media")));
     }
     assert.deepEqual(initialFiles.wire.schema, initial.wire.schema);
     assert.equal(initialFiles.wire.data.contextId, initial.wire.data.contextId);

@@ -80,6 +80,7 @@ import { digest, planningReviewEvidence, planReviewPacket } from "./packets.js";
 import {
   checkedPlanReview,
   compileObjective,
+  freshPlannerSession,
   generatePlannerStructured,
   type PlanCorrection,
   PlanningContextResponse,
@@ -118,6 +119,10 @@ export interface PlanningRecoveryRecord {
   invocations?: PlanningInvocationReceipt[];
   response?: unknown;
   responseFailure?: string;
+  /** The current round's complete compiler answer, when one decoded. */
+  answer?: unknown;
+  /** The plan this revision round changes: the previous round's answer. */
+  revision?: unknown;
   diagnosisResponse?: { kind: string; diagnosis: string; correction: string };
   review?: PlanningReviewRecord;
   history: {
@@ -571,6 +576,11 @@ async function compilePlanAdmitted(
       if (record.responseFailure) throw invalidOutput(record.responseFailure);
       let result;
       try {
+        // A revision round plans in a fresh conversation.
+        if (corrections.length && context.sessionState)
+          await freshPlannerSession(model, context.sessionState, save, (id) =>
+            Boolean(record.invocations?.some((entry) => entry.id === id)),
+          );
         result = context.sessionState
           ? await generatePlannerStructured(
               model,
@@ -609,6 +619,12 @@ async function compilePlanAdmitted(
       return result;
     },
   };
+  // The next round revises this round's answer; without one it plans anew.
+  const nextRevision = () => {
+    if (record.answer === undefined) delete record.revision;
+    else record.revision = record.answer;
+    delete record.answer;
+  };
   while (true) {
     let graph: WorkGraph | undefined;
     let packet: PlanReviewRequest | undefined;
@@ -638,6 +654,12 @@ async function compilePlanAdmitted(
         undefined,
         record.contextLookup?.packet,
         workflowRecipe,
+        {
+          ...(corrections.length && { answer: record.revision }),
+          retain: (answer) => {
+            record.answer = structuredClone(answer);
+          },
+        },
       );
       packet = planReviewPacket(
         body,
@@ -679,6 +701,8 @@ async function compilePlanAdmitted(
         state.plan = candidate;
         delete record.response;
         delete record.responseFailure;
+        delete record.answer;
+        delete record.revision;
         record.phase = "complete";
         save();
         return candidate;
@@ -897,6 +921,7 @@ async function compilePlanAdmitted(
           ? [{ source: "check", detail: failure }]
           : fixes.map((finding) => ({
               source: "review" as const,
+              itemIds: finding.itemIds,
               detail: finding.detail,
               question: finding.question,
               evidence: finding.evidence,
@@ -917,6 +942,7 @@ async function compilePlanAdmitted(
       });
       record.invocations = [];
       corrections = stating;
+      nextRevision();
       delete record.response;
       delete record.responseFailure;
       delete record.review;
@@ -1007,6 +1033,7 @@ async function compilePlanAdmitted(
     });
     record.invocations = [];
     corrections = [{ source: "diagnosis", detail: diagnosis.correction }];
+    nextRevision();
     delete record.response;
     delete record.responseFailure;
     delete record.review;

@@ -6771,16 +6771,19 @@ test("stopped collection freezes a completed owned local return before restart a
     /source inventory changed during its build: accounting/,
   );
   writeFileSync(join(privateRoot, quiet), quietBytes, { mode: 0o600 });
-  // On a clean journal the explicit build has no sequence of its own below
-  // the later append: it reports pending without a duplicate-sequence ACK.
+  // On a clean journal an append during the explicit build moves the journal:
+  // the explicit admission starts over and acknowledges that append (#1456).
   const priorAck = gitPersistenceStatus(config).lastAcknowledged;
   let raced;
   duringBuild = () => {
+    duringBuild = undefined;
     raced = appendFromWorker("concurrent-explicit");
   };
   const explicitRace = await publish("explicit");
-  assert.equal(explicitRace.pendingChanges, true);
-  assert.deepEqual(explicitRace.lastAcknowledged, priorAck);
+  assert.equal(explicitRace.status, "acknowledged");
+  assert.equal(explicitRace.pendingChanges, false);
+  assert(explicitRace.lastAcknowledged.sequence > priorAck.sequence);
+  assert((await archivedAccounting()).includes(raced));
   // A parent producer write in its own scope dirties the journal; a worker
   // append during that publication's build stays outside its manifest.
   duringBuild = undefined;

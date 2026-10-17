@@ -6492,13 +6492,12 @@ async function publishCheckpoint(
         // grants a blind second push: a new one is a fast-forward from the base.
         const landed = await observeAttempt(config, options, previous);
         record = journal(config, options);
-        // An explicit admission still covers its own state: material written
-        // after the landed candidate was built, marked or not (#1456).
+        // With changes pending, only a settled admission returns: an explicit
+        // one precedes disposing material the landed candidate may lack (#1456).
         if (
           landed &&
-          (input.reason === "settled" ||
-            (input.reason === "before-effect" &&
-              record.sequence === record.acknowledgedSequence))
+          (record.sequence === record.acknowledgedSequence ||
+            input.reason === "settled")
         )
           return status(record, options);
       }

@@ -845,11 +845,23 @@ export function validateAmendment(
     const next = graph.coverage.find(
       (candidate) => candidate.criterionId === entry.criterionId,
     );
-    if (!next || !isDeepStrictEqual(next.source, entry.source))
+    if (
+      !next ||
+      !isDeepStrictEqual(next.source, entry.source) ||
+      next.statement !== entry.statement
+    )
       throw new Error(
         "Amendment deletes or changes source acceptance coverage",
       );
   }
+  // An excluded source exit item stays accounted for: still excluded, or now covered.
+  for (const exclusion of state.graph.sourceExclusions ?? [])
+    if (
+      ![...(graph.sourceExclusions ?? []), ...graph.coverage].some((entry) =>
+        isDeepStrictEqual(entry.source, exclusion.source),
+      )
+    )
+      throw new Error("Amendment drops an excluded source obligation");
   if (config.delivery.kind === "native-stack") {
     const nextUnits = linearDeliveryUnits(graph);
     for (const unit of linearDeliveryUnits(state.graph)) {

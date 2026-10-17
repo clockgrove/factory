@@ -1172,9 +1172,9 @@ export function compilerWire(
           entry.lastLineIndex as number,
         ];
         const spanText = sourceLines(pinned.content, lines);
-        if (pinned.path === "OBJECTIVE" || spanText === undefined)
+        if (pinned.path === "OBJECTIVE" || !spanText?.trim())
           throw new PlannerChoiceError(
-            `Planner source obligation ${position} must select an existing line range of a cited source, not the Objective`,
+            `Planner source obligation ${position} must select an existing nonblank line range of a cited source, not the Objective`,
           );
         if (typeof entry.statement !== "string" || !entry.statement.trim())
           throw new Error("Planner source obligation must state its exit item");

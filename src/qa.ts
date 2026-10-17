@@ -476,6 +476,7 @@ function assertSourceObligationShape(entry: {
     typeof entry.statement !== "string" ||
     !entry.statement.trim() ||
     typeof entry.source.text !== "string" ||
+    !entry.source.text.trim() ||
     !/^[a-f0-9]{64}$/.test(entry.source.digest)
   )
     throw new Error(

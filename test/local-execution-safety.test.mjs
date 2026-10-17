@@ -6,6 +6,7 @@ import { paidPlanningModel } from "../dist/compiler/planning.js";
 import {
   planningSources,
   hydrateWorkerInputSources,
+  resolveWorkItemSources,
 } from "../dist/compiler/sources.js";
 import { step, repeatKey } from "../dist/step.js";
 import assert from "node:assert/strict";
@@ -457,6 +458,10 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       ),
       checkout,
     );
+    const producerSources = resolveWorkItemSources(producer.inputSources, {
+      checkout,
+      baseSha,
+    });
     const graph = {
       objective: 1,
       baseSha,
@@ -565,10 +570,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       originalLock,
     );
     const sectionFile = join(sourceDelivery.root, sourceDelivery.files[1].file);
-    assert.equal(
-      readFileSync(sectionFile, "utf8"),
-      producer.inputSources[1].content,
-    );
+    assert.equal(readFileSync(sectionFile, "utf8"), producerSources[1].content);
     assert.equal(
       readFileSync(sectionFile, "utf8").includes("Unselected private-scope"),
       false,
@@ -604,7 +606,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     writeFileSync(join(checkout, "package-lock.json"), originalLock);
     assert(
       renderWorkItemPrompt(references, checkout).prompt.includes(
-        `"path":"package-lock.json","file":"${sourceDelivery.files[0].file}","lines":${sourceDelivery.files[0].lineCount},"bytes":${sourceDelivery.files[0].bytes},"inCheckout":true}`,
+        `"path":"package-lock.json","file":"${sourceDelivery.files[0].file}","bytes":${sourceDelivery.files[0].bytes},"inCheckout":true}`,
       ),
     );
     writeFileSync(join(checkout, "package-lock.json"), pinnedLockChanged);
@@ -816,7 +818,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       () => materializeWorkerSources(checkout, request),
       /Immutable planning source file differs/,
     );
-    writeFileSync(sectionFile, producer.inputSources[1].content);
+    writeFileSync(sectionFile, producerSources[1].content);
     chmodSync(sectionFile, 0o400);
     const script = join(root, "export.mjs");
     const bindingPath = join(root, "binding.json");

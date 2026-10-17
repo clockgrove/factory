@@ -10,7 +10,7 @@ import {
   retainedAdaptiveDispatchContext,
 } from "./adaptive-context.js";
 import { adaptiveWorkflowEnabled } from "./adaptive-workflow.js";
-import { createHash } from "node:crypto";
+import { resolveWorkItemSources } from "./compiler/sources.js";
 import type { FactoryConfig } from "./config.js";
 import type {
   ContentStore,
@@ -173,6 +173,14 @@ export async function runWorker(
         "The original ownership and accounting remain unchanged; no new dispatch context was selected.",
       ),
     );
+  // Dispatch context binds the exact source bytes, re-derived at the graph base.
+  const sources = item.inputSources
+    ? resolveWorkItemSources(item.inputSources, {
+        checkout: args.config.checkout,
+        baseSha: state.baseSha,
+        objectiveBody: args.objectiveBody,
+      })
+    : undefined;
   let context: Awaited<ReturnType<typeof retainedAdaptiveDispatchContext>>;
   if (adaptive) {
     try {
@@ -181,7 +189,7 @@ export async function runWorker(
         item,
         baseSha,
         store: args.store,
-        sources: item.inputSources,
+        sources,
       });
     } catch (error) {
       throw new StepFault(
@@ -236,9 +244,7 @@ export async function runWorker(
           store: args.store,
           suppliedDigests: [
             ...discoveryBodies.map((body) => body.ref.digest),
-            ...(item.inputSources ?? []).map((source) =>
-              createHash("sha256").update(source.content).digest("hex"),
-            ),
+            ...(item.inputSources ?? []).map((source) => source.sha256),
           ],
         })
       : undefined;
@@ -250,7 +256,7 @@ export async function runWorker(
       checkout: args.config.checkout,
       store: args.store,
       config: args.config,
-      sources: item.inputSources,
+      sources,
       suppliedBodies: [
         ...discoveryBodies,
         ...(knowledge?.suppliedBodies ?? []),

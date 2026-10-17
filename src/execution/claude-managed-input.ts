@@ -56,7 +56,7 @@ export async function prepareClaudeInput(
       asset.ref,
       join(repo, ".factory-inputs", `selected-${index}`),
     );
-  materializeWorkerSources(repo, request);
+  materializeWorkerSources(repo, request, repo, checkout);
   const files: ClaudeFile[] = [];
   const visit = (directory: string) => {
     for (const name of readdirSync(directory).sort()) {

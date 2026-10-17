@@ -171,7 +171,11 @@ test("independent prepared change is replayed on the observed integration head",
         },
       ],
       brief: "Implement the original note contract.",
-      inputSources: sources,
+      inputSources: sources.map(({ content, ...source }) => ({
+        ...source,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        bytes: Buffer.byteLength(content),
+      })),
     };
     const graph = { objective: 1, baseSha: base, items: [item], coverage: [] };
     const validation = await validateWorkItem(
@@ -933,7 +937,11 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     const rejectedGraph = structuredClone(currentGraph);
     rejectedGraph.items[0].inputSources.push({
       path: "unmatched.txt",
-      content: "An unmatched source remains complete literal evidence.\n",
+      heading: "",
+      sha256: createHash("sha256")
+        .update("An unmatched source remains its exact identity.\n")
+        .digest("hex"),
+      bytes: 48,
     });
     const diagnosisRequest = {
       ...request,
@@ -966,18 +974,17 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
         const span = referenced.sourceSpan;
         assert.equal(referenced.content, undefined);
         assert.equal(
-          sources[span.sourceIndex].content.slice(
-            span.start,
-            span.start + span.length,
-          ),
-          original.inputSources[0].content,
-        );
-        assert.equal(
-          span.contentDigest,
           createHash("sha256")
-            .update(original.inputSources[0].content)
+            .update(
+              sources[span.sourceIndex].content.slice(
+                span.start,
+                span.start + span.length,
+              ),
+            )
             .digest("hex"),
+          original.inputSources[0].sha256,
         );
+        assert.equal(span.contentDigest, original.inputSources[0].sha256);
         assert.deepEqual(
           { ...item, inputSources: original.inputSources },
           original,
@@ -996,10 +1003,6 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
         rejectedGraph,
       );
       assert.equal(JSON.stringify(diagnosisRequest), canonicalDiagnosis);
-      assert.ok(
-        Buffer.byteLength(JSON.stringify(graphView)) <
-          Buffer.byteLength(JSON.stringify(rejectedGraph)) / 10,
-      );
       assert.equal(
         validPromptSections(
           emitted.promptSections,
@@ -1028,8 +1031,6 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       controllerCapabilities: installedControllerCapabilities(),
       controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
     });
-    // The old duplicated amendment alone exceeded the demonstrated adapter ceiling.
-    assert.ok(Buffer.byteLength(before) > 1_048_576);
     for (const request of [call, review]) {
       assert.ok(
         Buffer.byteLength(request.prompt) +
@@ -1066,7 +1067,10 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
         span.start,
         span.start + span.length,
       );
-      assert.equal(selected, currentGraph.items[index].inputSources[0].content);
+      assert.equal(
+        createHash("sha256").update(selected).digest("hex"),
+        currentGraph.items[index].inputSources[0].sha256,
+      );
       assert.equal(input.heading, "API");
       assert.ok(span.length < sources[span.sourceIndex].content.length);
       assert.equal(
@@ -1125,8 +1129,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       wrongHeading.items[0].inputSources,
     );
     const unmatched = structuredClone(currentGraph);
-    unmatched.items[0].inputSources[0].content +=
-      "not supplied by the pinned source";
+    unmatched.items[0].inputSources[0].sha256 = "0".repeat(64);
     assert.deepEqual(
       planningGraphView(unmatched, sources).items[0].inputSources,
       unmatched.items[0].inputSources,
@@ -2236,7 +2239,13 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
     items: [
       {
         id: "selected",
-        inputSources: [{ path: "api/contract.txt", content: originalBody }],
+        inputSources: [
+          {
+            path: "api/contract.txt",
+            sha256: createHash("sha256").update(originalBody).digest("hex"),
+            bytes: Buffer.byteLength(originalBody),
+          },
+        ],
       },
     ],
   };
@@ -2286,7 +2295,7 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
       {
         id: "unmatched",
         inputSources: [
-          { path: "missing.txt", content: "unmatched literal body" },
+          { path: "missing.txt", sha256: "0".repeat(64), bytes: 22 },
         ],
       },
     ],

@@ -3151,7 +3151,10 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
         span.start + span.length,
       );
       assert.equal(source.path, input.path);
-      assert.equal(selected, item.inputSources[index].content);
+      assert.equal(
+        createHash("sha256").update(selected).digest("hex"),
+        item.inputSources[index].sha256,
+      );
       assert.equal(
         createHash("sha256").update(source.content).digest("hex"),
         span.sourceDigest,
@@ -3202,7 +3205,7 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       pinnedSources,
     );
     const unmatchedItem = structuredClone(item);
-    unmatchedItem.inputSources[1].content += "An additional unavailable fact.";
+    unmatchedItem.inputSources[1].sha256 = "0".repeat(64);
     const unmatchedRequest = workRepairDiagnosisRequest({
       state: refusedState,
       item: unmatchedItem,
@@ -3213,14 +3216,13 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       .slice(unmatchedRequest.objective.lastIndexOf("\n{") + 1)
       .split("\nWork Item input bodies. ");
     const unmatchedDiagnosis = JSON.parse(unmatchedPayload);
-    // An input no pinned source holds renders once as a literal block.
-    const { content: unmatchedContent, ...unmatchedIdentity } =
-      unmatchedItem.inputSources[1];
-    assert.deepEqual(unmatchedDiagnosis.item.inputSources[1], {
-      ...unmatchedIdentity,
-      content: { block: "input 0" },
-    });
-    assert.ok(unmatchedBodies.includes(` input 0>>>\n${unmatchedContent}\n`));
+    // Without a checkout to re-derive it, an input no pinned source holds
+    // renders as its exact identity, never as substituted bytes.
+    assert.deepEqual(
+      unmatchedDiagnosis.item.inputSources[1],
+      unmatchedItem.inputSources[1],
+    );
+    assert.equal(unmatchedBodies, undefined);
     assert.equal(JSON.stringify(refusedState), beforeDiagnosis);
     // A declared correction exercises the shared admission gate over actual
     // workflow evidence; it is not a generated or scripted provider response.

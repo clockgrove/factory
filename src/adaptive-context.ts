@@ -305,10 +305,15 @@ export async function retainedAdaptiveDispatchContext(input: {
     throw new Error(
       "Retained dispatch context differs from the admitted attempt and source binding",
     );
-  const supplied = (input.sources ?? item.inputSources ?? []).map(
-    (source) =>
-      `supplied:${source.path}#${source.heading ?? ""}:${byteHash(source.content)}`,
-  );
+  const supplied = input.sources
+    ? input.sources.map(
+        (source) =>
+          `supplied:${source.path}#${source.heading ?? ""}:${byteHash(source.content)}`,
+      )
+    : (item.inputSources ?? []).map(
+        (source) =>
+          `supplied:${source.path}#${source.heading ?? ""}:${source.sha256}`,
+      );
   if (
     JSON.stringify(
       packet.selections

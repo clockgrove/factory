@@ -81,12 +81,32 @@ export interface WorkItem {
     source?: string;
   }[];
   brief: string;
-  /** Exact controller-selected pinned inputs, separate from authored instructions. */
-  inputSources?: { path: string; heading?: string; content: string }[];
+  /**
+   * Exact controller-selected inputs by reference, bound to the graph's base
+   * commit: the Objective body (path OBJECTIVE) or a tracked file, whole
+   * (heading "") or one exact heading. Bytes are re-derived and verified
+   * against sha256 and length wherever they are needed (resolveWorkItemSources).
+   */
+  inputSources?: WorkItemSourceRef[];
   sourceAssets?: SourceAssetBinding[];
   expectedOutputRoles?: string[];
   minimumAssetSets?: number;
   requiredLfsRoles?: string[];
+}
+
+/** A Work Item source by reference: exact identity of bytes at the graph base. */
+export interface WorkItemSourceRef {
+  path: string;
+  heading?: string;
+  sha256: string;
+  bytes: number;
+}
+
+/** A Work Item source's verified bytes, re-derived for one use and never persisted. */
+export interface WorkItemSource {
+  path: string;
+  heading?: string;
+  content: string;
 }
 
 /**

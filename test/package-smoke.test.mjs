@@ -160,6 +160,7 @@ try {
         `
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { planningSources, hydrateWorkerInputSources, validateGraphSources } from ${JSON.stringify(pathToFileURL(join(installedRoot, "dist", "compiler.js")).href)};
@@ -189,7 +190,8 @@ const item = { id: "tooling", kind: "qa", title: "Verify tooling", acceptance: [
 const graph = { objective: 1, baseSha, items: [item], coverage: [] };
 hydrateWorkerInputSources(graph, sources, checkout);
 // A file outside Sources is citable: its exact base bytes travel in the Work Item inputs.
-assert.equal(item.inputSources[1].content, execFileSync("git", ["-C", checkout, "show", baseSha + ":package.json"], { encoding: "utf8" }));
+assert.equal(item.inputSources[1].sha256, createHash("sha256").update(execFileSync("git", ["-C", checkout, "show", baseSha + ":package.json"])).digest("hex"));
+assert.equal("content" in item.inputSources[1], false);
 validateGraphSources(graph, sources, checkout, body, baseSha);
 const evidence = await validateWorkItem(checkout, ${JSON.stringify(join(root, "command-validation"))}, item, baseSha, git("rev-parse", "HEAD^{tree}"), baseSha);
 assert.equal(evidence.commands.length, 2);

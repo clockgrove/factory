@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { githubEmptyField, markdownLines } from "../markdown.js";
-import type { WorkGraph } from "../contracts.js";
+import type {
+  WorkGraph,
+  WorkItemSource,
+  WorkItemSourceRef,
+} from "../contracts.js";
 import type { ReviewPacket } from "../review-evidence.js";
 import {
   plannedPackageManager,
@@ -85,6 +89,107 @@ export function compilerCitationChoices(sources: PlanningSource[]) {
   });
 }
 
+const sha256 = (content: string) =>
+  createHash("sha256").update(content).digest("hex");
+
+/** The persisted identity of one Work Item source's exact bytes. */
+function workItemSourceRef(source: WorkItemSource): WorkItemSourceRef {
+  return {
+    path: source.path,
+    ...(source.heading === undefined ? {} : { heading: source.heading }),
+    sha256: sha256(source.content),
+    bytes: Buffer.byteLength(source.content),
+  };
+}
+
+/**
+ * Re-derive the exact bytes of Work Item source references bound to
+ * `baseSha`: OBJECTIVE from the pinned Objective body, any other path from the
+ * tracked file at the base (whole, one heading of it, or one heading of a
+ * section the Objective pins under Sources). Each result must match its
+ * recorded sha256 and length; anything else is a defect, never a fallback.
+ */
+export function resolveWorkItemSources(
+  refs: readonly WorkItemSourceRef[],
+  args: { checkout: string; baseSha: string; objectiveBody?: string },
+): WorkItemSource[] {
+  const pinnedSections = (path: string) => {
+    if (args.objectiveBody === undefined) return [];
+    try {
+      return selectedHeadings(args.objectiveBody).filter(
+        (selector) => selector.path === path && selector.heading,
+      );
+    } catch {
+      return [];
+    }
+  };
+  return refs.map((ref) => {
+    const label = `${ref.path}${ref.heading ? `#${ref.heading}` : ""}`;
+    const defect = (reason: string): never => {
+      throw new Error(
+        `Work Item source ${JSON.stringify(label)} cannot be re-derived at base ${args.baseSha}: ${reason}`,
+      );
+    };
+    if (
+      !ref ||
+      typeof ref.path !== "string" ||
+      typeof ref.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(ref.sha256) ||
+      !Number.isSafeInteger(ref.bytes)
+    )
+      defect("the graph does not record its sha256 and byte length");
+    let candidates: string[];
+    if (ref.path === "OBJECTIVE") {
+      if (args.objectiveBody === undefined)
+        defect("the pinned Objective body is not available");
+      candidates = [args.objectiveBody!];
+    } else {
+      let text = "";
+      try {
+        text = pinnedText(args.checkout, args.baseSha, ref.path);
+      } catch (error) {
+        defect(error instanceof Error ? error.message : String(error));
+      }
+      candidates = [text];
+      for (const selector of pinnedSections(ref.path))
+        try {
+          candidates.push(sectionText(ref.path, text, selector.heading!));
+        } catch {
+          // An unselectable pinned section supplies no candidate.
+        }
+    }
+    for (const candidate of candidates) {
+      let content: string;
+      try {
+        content = ref.heading
+          ? sectionText(ref.path, candidate, ref.heading)
+          : candidate;
+      } catch {
+        continue;
+      }
+      if (
+        Buffer.byteLength(content) === ref.bytes &&
+        sha256(content) === ref.sha256
+      )
+        return {
+          path: ref.path,
+          ...(ref.heading === undefined ? {} : { heading: ref.heading }),
+          content,
+        };
+    }
+    return defect("no derivation matches its recorded sha256 and byte length");
+  });
+}
+
+/** One verified resolver per use; planner, reviewer and worker views share it. */
+export function workItemSourceResolver(args: {
+  checkout: string;
+  baseSha: string;
+  objectiveBody?: string;
+}): (refs: readonly WorkItemSourceRef[]) => WorkItemSource[] {
+  return (refs) => resolveWorkItemSources(refs, args);
+}
+
 /** Exact worker inputs: a pinned citation choice, else the cited file at the graph base. */
 function workerInputSources(
   graph: WorkGraph,
@@ -115,14 +220,15 @@ function workerInputSources(
 const MAX_REPOSITORY_CITATION_BYTES = 131_072;
 /** A heading citation reads at most a file the read tree exports. */
 const MAX_REPOSITORY_SECTION_FILE_BYTES = 1_048_576;
-/** Distinct repository-cited bytes one graph may carry inline. */
+/** Distinct repository-cited bytes one graph may cite; review views inline them. */
 const MAX_REPOSITORY_CITED_BYTES = 524_288;
 
 /**
  * A citation outside the Objective's pinned Sources: the exact UTF-8 bytes of
  * a regular tracked file (or one exact Markdown heading of it) at the graph
- * base. The bytes travel inline in the Work Item's inputSources, so the graph
- * digest, the independent reviewer and the worker all bind the same content.
+ * base. The Work Item's inputSources record it by reference (sha256 and
+ * length), so the graph digest binds the exact content and every reader
+ * re-derives and verifies the same bytes.
  * Repository citations carry no command authority.
  */
 function repositoryCitation(
@@ -181,14 +287,37 @@ export function hydrateWorkerInputSources(
 ): void {
   const inputs = workerInputSources(graph, sources, checkout);
   workShapes(graph).forEach((item, index) => {
-    item.inputSources = inputs[index]!;
+    item.inputSources = inputs[index]!.map(workItemSourceRef);
   });
 }
 
+interface SourceSpan {
+  sourceIndex: number;
+  sourceDigest: string;
+  start: number;
+  length: number;
+  contentDigest: string;
+  heading?: string;
+}
+
+/** A source reference in a model view: a span of supplied bytes, its verified bytes, or identity alone. */
+type InputSourceView = WorkItemSourceRef & {
+  sourceSpan?: SourceSpan;
+  content?: string;
+};
+
 /** Transient model data: refer to exact supplied bytes without changing the canonical graph. */
-export function planningGraphView(graph: WorkGraph, sources: PlanningSource[]) {
+export function planningGraphView(
+  graph: WorkGraph,
+  sources: PlanningSource[],
+  resolve?: (refs: readonly WorkItemSourceRef[]) => WorkItemSource[],
+) {
   const choices = compilerCitationChoices(sources);
-  const span = (path: string, content: string, heading?: string) => {
+  const span = (
+    path: string,
+    content: string,
+    heading?: string,
+  ): SourceSpan | undefined => {
     const sourceIndex = sources.findIndex(
       (source) => source.path === path && source.content.includes(content),
     );
@@ -203,21 +332,31 @@ export function planningGraphView(graph: WorkGraph, sources: PlanningSource[]) {
       ...(heading === undefined ? {} : { heading }),
     };
   };
-  const itemView = (item: WorkGraph["items"][number]) => ({
+  const itemView = (
+    item: WorkGraph["items"][number],
+  ): Omit<WorkGraph["items"][number], "inputSources"> & {
+    inputSources?: InputSourceView[];
+  } => ({
     ...item,
     ...(item.inputSources && {
-      inputSources: item.inputSources.map((input) => {
-        const matched = choices.some(
+      inputSources: item.inputSources.map((input): InputSourceView => {
+        const choice = choices.find(
           (choice) =>
             choice.path === input.path &&
             choice.heading === (input.heading ?? "") &&
-            choice.content === input.content,
+            Buffer.byteLength(choice.content) === input.bytes &&
+            sha256(choice.content) === input.sha256,
         );
         const sourceSpan =
-          matched && span(input.path, input.content, input.heading);
-        if (!sourceSpan) return input;
-        const { content: _content, ...identity } = input;
-        return { ...identity, sourceSpan };
+          choice && span(input.path, choice.content, input.heading);
+        if (sourceSpan) return { ...input, sourceSpan };
+        // A repository citation: its verified bytes, or its identity alone.
+        const content = choice
+          ? choice.content
+          : resolve
+            ? resolve([input])[0]!.content
+            : undefined;
+        return content === undefined ? input : { ...input, content };
       }),
     }),
   });
@@ -250,8 +389,9 @@ export function planningGraphView(graph: WorkGraph, sources: PlanningSource[]) {
 export function reviewGraphView(
   graph: WorkGraph,
   evidence: ReviewPacket["evidence"],
+  resolve?: (refs: readonly WorkItemSourceRef[]) => WorkItemSource[],
 ) {
-  const view = planningGraphView(graph, evidence);
+  const view = planningGraphView(graph, evidence, resolve);
   const reference = (
     span: {
       sourceIndex: number;
@@ -293,7 +433,7 @@ export function reviewGraphView(
     ...item,
     ...(item.inputSources && {
       inputSources: item.inputSources.map((input) => {
-        if (!("sourceSpan" in input)) return input;
+        if (!input.sourceSpan) return input;
         const { sourceSpan, ...identity } = input;
         return { ...identity, evidenceSpan: reference(sourceSpan, input.path) };
       }),
@@ -333,7 +473,10 @@ export function assertWorkerInputSources(
 ): void {
   const inputs = workerInputSources(graph, sources, checkout);
   for (const [index, item] of workShapes(graph).entries()) {
-    if (JSON.stringify(item.inputSources) !== JSON.stringify(inputs[index]))
+    if (
+      JSON.stringify(item.inputSources) !==
+      JSON.stringify(inputs[index]!.map(workItemSourceRef))
+    )
       throw new GraphValidationError(
         item.id,
         `Work Item ${item.id} inputs differ from its cited sections at the base`,

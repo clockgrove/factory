@@ -26,6 +26,8 @@ import {
   type ResultReviewFinding,
   type ReviewImageInput,
   type ValidationCommandReceipt,
+  type WorkItemSource,
+  type WorkItemSourceRef,
 } from "../contracts.js";
 import {
   attachedFault,
@@ -95,6 +97,7 @@ import {
   compilerCitationChoices,
   planningGraphView,
   reviewGraphView,
+  workItemSourceResolver,
 } from "./sources.js";
 import type {
   CodexPlanningModelOptions,
@@ -224,6 +227,7 @@ function exportedPlanningFileBytes(delivery: PlanningSourceDelivery): number {
 export function renderDiagnosisCall(
   request: PlanningRequest<unknown>,
   sourceDelivery?: PlanningSourceDelivery,
+  resolveSources?: (refs: readonly WorkItemSourceRef[]) => WorkItemSource[],
 ): StructuredCall {
   if (!request.schema)
     throw new Error("Diagnosis requires an explicit output schema");
@@ -316,7 +320,7 @@ export function renderDiagnosisCall(
     // retried or later diagnosis of this Objective shares its prefix.
     [
       "evidence",
-      `\n${inlineSources.length ? `Pinned source bodies. ${bodies.guidance} A source content {"block": LABEL} is the complete literal body in that block.\n${bodies.text}` : ""}Pinned sources:\n${JSON.stringify(sourceView)}\nWork Item diagnosis delivery:\n${JSON.stringify(delivery ?? null)}\nController capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nNative Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\nController execution bounds:\n${JSON.stringify(request.executionBounds ?? null)}\nRejected canonical graph (null when unavailable):\n${JSON.stringify(request.rejectedGraph ? planningGraphView(request.rejectedGraph, request.sources) : null)}\n`,
+      `\n${inlineSources.length ? `Pinned source bodies. ${bodies.guidance} A source content {"block": LABEL} is the complete literal body in that block.\n${bodies.text}` : ""}Pinned sources:\n${JSON.stringify(sourceView)}\nWork Item diagnosis delivery:\n${JSON.stringify(delivery ?? null)}\nController capabilities:\n${JSON.stringify(request.controllerCapabilities)}\nNative Objective prerequisites:\n${JSON.stringify(request.prerequisites ?? null)}\nController local executable observations:\n${JSON.stringify(request.localExecutables ?? null)}\nController execution bounds:\n${JSON.stringify(request.executionBounds ?? null)}\nRejected canonical graph (null when unavailable):\n${JSON.stringify(request.rejectedGraph ? planningGraphView(request.rejectedGraph, request.sources, resolveSources) : null)}\n`,
     ],
     ["objective", request.objective],
   ]);
@@ -581,6 +585,7 @@ export function renderGraphReviewCall(
   evidenceRoot?: string,
   reviewArtifacts?: readonly ReviewArtifactSelector[],
   repository?: RepositoryView,
+  resolveSources?: (refs: readonly WorkItemSourceRef[]) => WorkItemSource[],
 ): StructuredCall {
   if (
     reviewFiles &&
@@ -655,7 +660,7 @@ Objective:\n`;
   // the prefix.
   const { currentImplementationEvidence: _currentCode, ...amendmentContext } =
     request.amendment ?? {};
-  const callTail = `\nBase: ${request.baseSha}\nAmendment context (proposal data is not authority):\n${JSON.stringify(request.amendment ? { ...amendmentContext, previousGraph: reviewGraphView(request.amendment.previousGraph, packet.evidence) } : null)}\nGraph:\n${JSON.stringify(reviewGraphView(request.graph, packet.evidence))}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}\nReview packet id:\n${renderReviewPacketId(packet)}`;
+  const callTail = `\nBase: ${request.baseSha}\nAmendment context (proposal data is not authority):\n${JSON.stringify(request.amendment ? { ...amendmentContext, previousGraph: reviewGraphView(request.amendment.previousGraph, packet.evidence, resolveSources) } : null)}\nGraph:\n${JSON.stringify(reviewGraphView(request.graph, packet.evidence, resolveSources))}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}\nReview packet id:\n${renderReviewPacketId(packet)}`;
   return {
     role: "reviewer",
     prompt: `${rendered.prompt}${callTail}`,
@@ -782,6 +787,33 @@ export class StructuredPlanningModel implements PlanningModel {
       map: repositoryMap(this.checkout, baseSha),
       reads: Boolean(readRoot) || this.transport.repositoryTree === true,
     };
+  }
+
+  /** Verified Work Item source bytes for model views, re-derived at the request base. */
+  private sourceResolver(request: {
+    baseSha: string;
+    sources: { path: string; content: string }[];
+  }) {
+    return this.checkout
+      ? workItemSourceResolver({
+          checkout: this.checkout,
+          baseSha: request.baseSha,
+          objectiveBody: request.sources.find(
+            (source) => source.path === "OBJECTIVE",
+          )?.content,
+        })
+      : undefined;
+  }
+
+  /** The reviewer sees the exact bytes of repository citations, verified at the base. */
+  private reviewSourceResolver(request: PlanReviewRequest) {
+    return this.checkout
+      ? workItemSourceResolver({
+          checkout: this.checkout,
+          baseSha: request.baseSha,
+          objectiveBody: request.objective,
+        })
+      : undefined;
   }
 
   private async withRepositoryReads<T>(
@@ -1235,7 +1267,11 @@ export class StructuredPlanningModel implements PlanningModel {
       );
     if (request.purpose === "diagnosis") {
       return this.runStructured<T>(
-        renderDiagnosisCall(request, this.transport.sourceDelivery?.(request)),
+        renderDiagnosisCall(
+          request,
+          this.transport.sourceDelivery?.(request),
+          this.sourceResolver(request),
+        ),
       );
     }
     const run = async (delivery?: PlanningSourceDelivery) => {
@@ -1304,6 +1340,7 @@ export class StructuredPlanningModel implements PlanningModel {
             call: renderDiagnosisCall(
               request,
               this.transport.sourceDelivery?.(request, true),
+              this.sourceResolver(request),
             ),
             wire: undefined,
           }
@@ -1367,6 +1404,7 @@ export class StructuredPlanningModel implements PlanningModel {
         undefined,
         this.reviewArtifacts,
         repository,
+        this.reviewSourceResolver(request),
       );
       return this.withRepositoryReads(
         request.baseSha,
@@ -1394,6 +1432,7 @@ export class StructuredPlanningModel implements PlanningModel {
               root || undefined,
               this.reviewArtifacts,
               repository,
+              this.reviewSourceResolver(request),
             ),
           ),
       );

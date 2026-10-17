@@ -9,7 +9,10 @@ import {
   generatePlannerStructured,
   withPlannerAdmission,
 } from "./compiler/planning.js";
-import { planningGraphView } from "./compiler/sources.js";
+import {
+  planningGraphView,
+  workItemSourceResolver,
+} from "./compiler/sources.js";
 import type {
   ContentRef,
   ContentStore,
@@ -1335,7 +1338,7 @@ function focusedDiagnosisSources(
     planningGraphView(
       { ...state.graph, items: [item] },
       sources,
-    ).items[0]!.inputSources?.some((input) => !("sourceSpan" in input)) ||
+    ).items[0]!.inputSources?.some((input) => !input.sourceSpan) ||
     state.graph.coverage.some(
       (entry) =>
         entry.itemId === item.id &&
@@ -1493,7 +1496,7 @@ function itemSourceIndices(
   ];
   const spans = new Set(
     (view.inputSources ?? []).flatMap((input) =>
-      "sourceSpan" in input ? [input.sourceSpan.sourceIndex] : [],
+      input.sourceSpan ? [input.sourceSpan.sourceIndex] : [],
     ),
   );
   return sources.flatMap((source, index) =>
@@ -1541,8 +1544,18 @@ export function workRepairDiagnosisRequest(args: {
       : [],
   );
   const { inputSources: historicalInputs, ...focusedItem } = item;
-  const view = planningGraphView({ ...state.graph, items: [item] }, sources)
-    .items[0]!;
+  const view = planningGraphView(
+    { ...state.graph, items: [item] },
+    sources,
+    args.checkout
+      ? workItemSourceResolver({
+          checkout: args.checkout,
+          baseSha: state.graph.baseSha,
+          objectiveBody: sources.find((source) => source.path === "OBJECTIVE")
+            ?.content,
+        })
+      : undefined,
+  ).items[0]!;
   // Inputs no pinned source holds render once as literal blocks, not as
   // escaped JSON strings.
   const inputBodies: { label: string; content: string }[] = [];
@@ -1552,7 +1565,7 @@ export function workRepairDiagnosisRequest(args: {
         ...view,
         ...(view.inputSources && {
           inputSources: view.inputSources.map((input) => {
-            if (!("content" in input)) return input;
+            if (input.content === undefined) return input;
             const { content, ...identity } = input;
             const label = `input ${inputBodies.length}`;
             inputBodies.push({ label, content });

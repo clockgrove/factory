@@ -2,6 +2,7 @@ import { ownsPath } from "./ownership.js";
 import { isDeepStrictEqual } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { WorkGraph } from "./contracts.js";
+import { resolveWorkItemSources } from "./compiler/sources.js";
 import { githubEmptyField, markdownLines } from "./markdown.js";
 import { pinnedGit, pinnedGitRaw } from "./process.js";
 
@@ -228,9 +229,11 @@ export function validateWorkspacePackagePlan(
       !owners.some(
         (item) =>
           (item.brief.includes(entry) ||
-            item.inputSources?.some((source) =>
-              source.content.includes(entry),
-            )) &&
+            resolveWorkItemSources(item.inputSources ?? [], {
+              checkout,
+              baseSha: graph.baseSha,
+              objectiveBody: body,
+            }).some((source) => source.content.includes(entry))) &&
           ownsPath(manifest, item.ownedPaths),
       )
     )

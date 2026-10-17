@@ -44,6 +44,7 @@ import {
   type PlanningSourceDelivery,
 } from "../compiler/source-delivery.js";
 import { pinnedGit } from "../process.js";
+import { resolveWorkItemSources } from "../compiler/sources.js";
 import { fixedPackageScripts } from "../validation.js";
 import {
   currentWorkerReadiness,
@@ -287,7 +288,11 @@ export function writeHarnessResult(path: string, value: unknown): void {
   }
 }
 
-/** Current presentation of original accepted bodies, never current checkout substitutes. */
+/**
+ * Current presentation of original accepted bodies, never current checkout
+ * substitutes. It derives from the Work Item's source references alone; the
+ * bytes are re-derived from Git and verified when the files are written.
+ */
 export function workerSourceDelivery(
   request: Pick<ExecutionRequest, "item" | "sourceBaseSha">,
   worktree: string,
@@ -307,31 +312,29 @@ export function workerSourceDelivery(
     sourcesDigest: createHash("sha256")
       .update(JSON.stringify(sources))
       .digest("hex"),
-    files: sources.map(({ content }, sourceIndex) => {
-      const bytes = Buffer.from(content, "utf8");
-      if (bytes.toString("utf8") !== content)
-        throw new Error("Worker source is not complete UTF-8 text");
-      const digest = createHash("sha256").update(bytes).digest("hex");
-      return {
-        sourceIndex,
-        file: `pinned/${digest}.txt`,
-        encoding: "utf-8" as const,
-        bytes: bytes.length,
-        digest,
-        lineCount: content.split("\n").length,
-        complete: true as const,
-      };
-    }),
+    files: sources.map(({ sha256, bytes }, sourceIndex) => ({
+      sourceIndex,
+      file: `pinned/${sha256}.txt`,
+      encoding: "utf-8" as const,
+      bytes,
+      digest: sha256,
+      complete: true as const,
+    })),
     reusedSourceIndices: [],
     bodyDelivery: "all-files",
   };
 }
 
-/** Reuse the authenticated file producer inside already owned private input staging. */
+/**
+ * Write the exact cited bodies (whole files or heading slices) into owned
+ * private input staging, re-derived from `repository` (a local Git
+ * repository holding the source base) and verified against each reference.
+ */
 export function materializeWorkerSources(
   worktree: string,
-  request: Pick<ExecutionRequest, "item" | "sourceBaseSha">,
+  request: Pick<ExecutionRequest, "item" | "sourceBaseSha" | "objectiveBody">,
   presentedWorktree = worktree,
+  repository = worktree,
 ): PlanningSourceDelivery | undefined {
   const delivery = workerSourceDelivery(request, worktree);
   if (!delivery) return;
@@ -343,12 +346,24 @@ export function materializeWorkerSources(
     recursive: true,
     mode: 0o700,
   });
+  const sources = resolveWorkItemSources(request.item.inputSources!, {
+    checkout: repository,
+    baseSha: delivery.baseSha,
+    objectiveBody: request.objectiveBody,
+  });
   const actual = materializePlanningSources(
     delivery.root,
     delivery.baseSha,
-    request.item.inputSources!,
+    sources,
   );
-  if (!isDeepStrictEqual(actual, delivery))
+  if (
+    actual.files.some(
+      (file, index) =>
+        file.file !== delivery.files[index]!.file ||
+        file.bytes !== delivery.files[index]!.bytes ||
+        file.digest !== delivery.files[index]!.digest,
+    )
+  )
     throw new Error(
       "Worker source files differ from their canonical presentation",
     );
@@ -375,12 +390,9 @@ export function assertWorkerSourceFiles(request: HarnessRequest): void {
       !stat.isFile() ||
       stat.nlink !== 1 ||
       realpathSync(path) !== path ||
-      !readFileSync(path).equals(
-        Buffer.from(
-          request.item.inputSources![file.sourceIndex]!.content,
-          "utf8",
-        ),
-      )
+      stat.size !== file.bytes ||
+      createHash("sha256").update(readFileSync(path)).digest("hex") !==
+        file.digest
     )
       throw new Error("Worker source file is missing, redirected or changed");
   }
@@ -389,14 +401,16 @@ export function assertWorkerSourceFiles(request: HarnessRequest): void {
 /** Whether a whole-file source's checkout file still holds its pinned body. */
 function checkoutHoldsSource(
   checkout: string,
-  source: { path: string; heading?: string; content: string },
+  source: { path: string; heading?: string; sha256: string; bytes: number },
 ): boolean {
   if (source.heading) return false;
   const path = join(checkout, source.path);
   try {
     return (
       lstatSync(path).isFile() &&
-      readFileSync(path).equals(Buffer.from(source.content, "utf8"))
+      lstatSync(path).size === source.bytes &&
+      createHash("sha256").update(readFileSync(path)).digest("hex") ===
+        source.sha256
     );
   } catch {
     return false;
@@ -438,7 +452,6 @@ export function renderWorkItemPrompt(
         path: source.path,
         ...(source.heading ? { heading: source.heading } : {}),
         file: file.file,
-        lines: file.lineCount,
         bytes: file.bytes,
         ...(checkout &&
           checkoutHoldsSource(checkout, source) && { inCheckout: true }),

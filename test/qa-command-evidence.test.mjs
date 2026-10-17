@@ -374,7 +374,12 @@ test("an exact operator decline preserves a real result and permits ordinary com
       minimumAssetSets: 0,
       citations: [{ path: "README.md", heading: "" }],
       inputSources: [
-        { path: "README.md", heading: "", content: "# Result contract\n" },
+        {
+          path: "README.md",
+          heading: "",
+          sha256: hash("# Result contract\n"),
+          bytes: 18,
+        },
       ],
       validation: [{ command, provenance: "source-declared" }],
     };

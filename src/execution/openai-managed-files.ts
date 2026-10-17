@@ -105,6 +105,7 @@ export async function prepareOpenAIInput(args: {
     repo,
     request,
     "/workspace/repo",
+    checkout,
   );
   const file = join(root, "input.tar");
   await create({ cwd: root, file, portable: true, noMtime: true }, ["repo"]);

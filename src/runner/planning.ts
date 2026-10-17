@@ -178,7 +178,7 @@ async function preflightWorkflowRecipe(
 
 /** One controller-derived binding for the immutable preparation inputs. */
 function preparationSourceDigest(
-  sources: PlanCandidate["sources"],
+  sources: { path: string; heading?: string; content: string }[],
   prerequisites: PlanCandidate["prerequisites"],
   localExecutables: PlanCandidate["localExecutables"],
   approvedPlaybookPin?: PlanCandidate["approvedPlaybookPin"],

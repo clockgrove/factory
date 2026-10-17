@@ -46,7 +46,10 @@ import {
 import { createPlanningContextResolver } from "../dist/compiler/context-runtime.js";
 import { admitNativeReturn } from "../dist/compiler/native-return.js";
 import { retainPlanningNativeReturn } from "../dist/compiler/recovery.js";
-import { hydrateWorkerInputSources } from "../dist/compiler/sources.js";
+import {
+  hydrateWorkerInputSources,
+  resolveWorkItemSources,
+} from "../dist/compiler/sources.js";
 import {
   factoryAuthorityDigest,
   factoryConfigDigest,
@@ -4589,7 +4592,18 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     ],
   };
   hydrateWorkerInputSources(citedGraph, pinnedSources, checkout);
-  const sources = citedGraph.items[0].inputSources.slice(0, 2);
+  // The graph keeps references; the bytes re-derive from the base and verify.
+  assert.ok(
+    citedGraph.items[0].inputSources.every(
+      (source) =>
+        /^[a-f0-9]{64}$/.test(source.sha256) && !("content" in source),
+    ),
+  );
+  const resolvedSources = resolveWorkItemSources(
+    citedGraph.items[0].inputSources,
+    { checkout, baseSha },
+  );
+  const sources = resolvedSources.slice(0, 2);
   assert.deepEqual(
     sources.map((source) => source.heading),
     ["", ""],
@@ -4598,7 +4612,7 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     sources.map((source) => source.content),
     pinnedSources.map((source) => source.content),
   );
-  const sectionSource = citedGraph.items[0].inputSources[2];
+  const sectionSource = resolvedSources[2];
   assert.equal(sectionSource.heading, "Migration notes");
   const retainedSources = retainPlanningSourceMemory({
     repository: expandedState.repository,

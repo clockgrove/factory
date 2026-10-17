@@ -20,7 +20,6 @@ import type {
   PlanReviewRequest,
 } from "../contracts.js";
 import {
-  type PlanningSource,
   planningSources,
   assertObjectiveCriteria,
   objectiveCriteria,
@@ -59,7 +58,7 @@ export interface PlanCandidate {
   objective: number;
   baseSha: string;
   bodyDigest: string;
-  sources: PlanningSource[];
+  /** Pinned source identities; their bytes are re-derived from the base and the body. */
   sourceDigests: { path: string; heading?: string; digest: string }[];
   controllerCapabilities: ControllerCapabilitiesManifest;
   controllerCapabilitiesDigest: string;
@@ -150,7 +149,6 @@ export function buildPlanCandidate(
     objective,
     baseSha,
     bodyDigest: digest(body),
-    sources,
     sourceDigests: sources.map(({ path, heading, content }) => ({
       path,
       ...(heading ? { heading } : {}),
@@ -274,7 +272,6 @@ export function verifyPlanCandidate(
       JSON.stringify(expectedPacket.controllerCapabilities) ||
     candidate.controllerCapabilitiesDigest !==
       expectedPacket.controllerCapabilitiesDigest ||
-    JSON.stringify(candidate.sources) !== JSON.stringify(expectedSources) ||
     candidate.graphDigest !== digest(JSON.stringify(candidate.graph)) ||
     JSON.stringify(candidate.commands) !==
       JSON.stringify(expectedPacket.commands) ||
@@ -318,7 +315,7 @@ export function verifyPlanCandidate(
     throw new Error(
       "Plan contains a command without established host execution authority",
     );
-  assertPreIntegrationCheckSources(candidate.graph, candidate.sources);
+  assertPreIntegrationCheckSources(candidate.graph, expectedSources);
   assertKnownCheckNames(candidate.graph, workflowCheckNames(checkout, baseSha));
   // Verify already reviewed bytes, including historical aggregate acceptance.
   // New compilation and amendments enforce controller derivation before review.
@@ -330,14 +327,14 @@ export function verifyPlanCandidate(
   );
   assertCoverageSources(
     candidate.graph,
-    candidate.sources,
+    expectedSources,
     coverageObligations(body, objectiveCriteria(body)),
     candidate.finalCommands,
     commandAuthority(body),
   );
-  validateCitations(candidate.graph, candidate.sources, checkout);
-  assertWorkerInputSources(candidate.graph, candidate.sources, checkout);
-  validateCommandProvenance(candidate.graph, candidate.sources, checkout);
+  validateCitations(candidate.graph, expectedSources, checkout);
+  assertWorkerInputSources(candidate.graph, expectedSources, checkout);
+  validateCommandProvenance(candidate.graph, expectedSources, checkout);
 }
 
 /** Bind a specific human fallback to the exact reviewed plan packet. */

@@ -24,7 +24,8 @@ export interface PlanningSourceDelivery {
     encoding: "utf-8";
     bytes: number;
     digest: string;
-    lineCount: number;
+    /** Planner deliveries count lines; worker deliveries derive from references alone. */
+    lineCount?: number;
     complete: true;
   }[];
   reusedSourceIndices: number[];

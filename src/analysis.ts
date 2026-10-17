@@ -40,8 +40,6 @@ type ControllerObservation = Omit<DiagnosticEvent, "detail">;
 export interface AnalysisOptions {
   filters?: Partial<Record<AnalysisField, string>>;
   groupBy?: AnalysisField[];
-  /** Explicit private-content read for legacy native call IDs/timestamps only. */
-  includeNativeToolContent?: boolean;
 }
 
 const stages = ["provider", "parse", "protocol", "semantic"] as const;
@@ -338,7 +336,6 @@ function summarizeImageOutputs(
 
 function summarizeNative(
   records: InteractionMetadata[],
-  options: AnalysisOptions,
   parentTools: ReturnType<typeof summarizeNativeTools>,
 ) {
   const parent = records.filter((record) => !record.nativeOwnership);
@@ -412,10 +409,7 @@ function summarizeNative(
             )
             .at(-1)?.status ?? "unknown",
         tools: summarizeTools(
-          summarizeNativeTools(
-            children.get(scope.sessionId) ?? [],
-            options.includeNativeToolContent,
-          ),
+          summarizeNativeTools(children.get(scope.sessionId) ?? []),
         ),
       })),
     },
@@ -749,10 +743,7 @@ function summarizeNativeScope(records: InteractionMetadata[]) {
   };
 }
 
-function summarizeInvocation(
-  records: InteractionMetadata[],
-  options: AnalysisOptions,
-) {
+function summarizeInvocation(records: InteractionMetadata[]) {
   records.sort(order);
   const identity = Object.fromEntries(
     analysisFields.map((field) => {
@@ -796,7 +787,6 @@ function summarizeInvocation(
   const cost = usage?.cost;
   const nativeToolActivity = summarizeNativeTools(
     records.filter((record) => !record.nativeOwnership),
-    options.includeNativeToolContent,
   );
   return {
     key: invocationKey(first),
@@ -840,7 +830,7 @@ function summarizeInvocation(
           })),
       ]),
     ),
-    native: summarizeNative(records, options, nativeToolActivity),
+    native: summarizeNative(records, nativeToolActivity),
     nativeToolActivity,
     sdkOperations: summarizeSdkOperations(records),
     imageOutputs: summarizeImageOutputs(records, nativeToolActivity),
@@ -1176,11 +1166,6 @@ export function analyzeInteractions(
   controllerObservations: ControllerObservation[] = [],
   options: AnalysisOptions = {},
 ) {
-  if (
-    options.includeNativeToolContent !== undefined &&
-    typeof options.includeNativeToolContent !== "boolean"
-  )
-    throw new Error("includeNativeToolContent must be true or false");
   for (const field of [
     ...Object.keys(options.filters ?? {}),
     ...(options.groupBy ?? []),
@@ -1216,7 +1201,7 @@ export function analyzeInteractions(
         );
       }),
     )
-    .map((entries) => summarizeInvocation(entries, options))
+    .map((entries) => summarizeInvocation(entries))
     .sort((a, b) => a.key.localeCompare(b.key));
   const includedKeys = new Set(invocations.map((invocation) => invocation.key));
   const nativeGroups = new Map<string, InteractionMetadata[]>();
@@ -1344,9 +1329,6 @@ export function analyzeInteractions(
     scope: "retained-observations" as const,
     filters: options.filters ?? {},
     groupBy,
-    nativeToolContent: options.includeNativeToolContent
-      ? "explicit-private-content-read"
-      : "metadata-only",
     ...aggregate(invocations),
     nativeFamilyResponseUsage: {
       ...wholeNativeFamily,
@@ -1399,7 +1381,7 @@ export function analyzeInteractions(
       "Only the latest invocation-cumulative usage contributes to totals. Provider-call and model breakdown observations are alternate views, not additional usage.",
       "Provider cost estimates are not billed cost or subscription availability. Missing estimates are not zero; currencies remain separate.",
       "Compare scope, retries, model/reasoning, prompt/source/configuration identities and capture coverage before interpreting differences. No causal model-quality claim is made.",
-      "Capture may be disabled, redacted, truncated or incomplete. Default analysis never loads content. Explicit native-tool content analysis reads only complete authenticated tool payloads to recover legacy call IDs/timestamps; it returns no arguments, paths or error text and never reconstructs historical decisions.",
+      "Capture may be disabled, redacted, truncated or incomplete. Analysis never loads content.",
       "Native tool counts deduplicate call IDs within each invocation and exclude SDK callbacks and replacement snapshots. Output observation proves returned transport, not nested command success. Response boundaries count observed tool-call rounds, not all upstream requests. Call-to-output durations use recorded native timestamps, never capture-write time, and can overlap. Nested command/process counts and repeated reads/validation remain unavailable without explicit structured facts.",
       "Native tool counts cover correlated model-visible calls only. SDK items, nested processes, model responses, parent invocations and child scopes are not extra calls; outputs never prove command success. Child accounting remains separate because parent inclusion is unknown. Reported child status is not resource cessation or acceptance.",
       "SDK operation summaries deduplicate exposed item identities and remain separate from native wrapper calls. Image observations identify serialized image-bearing tool output, not file identity, first rendering, billed image tokens or successful inspection; absent image metadata is unavailable rather than zero.",

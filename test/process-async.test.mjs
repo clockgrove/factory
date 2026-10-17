@@ -365,11 +365,9 @@ process.stdout.write(JSON.stringify(emitted));`,
       durableCapture.content.originalDigest,
       durableCapture.content.retainedDigest,
     );
-    // A real private process capture is not a native model tool call. Even the
-    // explicit legacy-tool read must neither expose its text nor invent counts.
-    const analysis = analyzeInteractions([metadata], [], {
-      includeNativeToolContent: true,
-    });
+    // A real private process capture is not a native model tool call:
+    // analysis must neither expose its text nor invent counts.
+    const analysis = analyzeInteractions([metadata]);
     assert.equal(
       analysis.requestBytes.renderedPromptBytes.total,
       Buffer.byteLength("real child process capture π"),
@@ -437,7 +435,6 @@ process.stdout.write(JSON.stringify(emitted));`,
     );
     assert.equal(analysis.nativeFamilyResponseUsage.paidOwnedChildSessions, 0);
     assert.equal(analysis.nativeToolActivity.uniqueCalls, null);
-    assert.equal(analysis.invocations[0].nativeToolActivity.contentReads, 0);
     assert.equal(
       JSON.stringify(analysis).includes("real child process capture"),
       false,

@@ -29,22 +29,19 @@ import {
 
 /** Compact bindings into the existing snapshot, not a second copy of its evidence. */
 export interface FinalAcceptance {
-  /** Historical delivered seals predate this field; new seals always bind it. */
-  candidateBasis?: "pinned-baseline" | "current-graph-integration";
+  candidateBasis: "pinned-baseline" | "current-graph-integration";
   sealedAt: string;
   graphDigest: string;
   configDigest: string;
   commit: string;
   tree: string;
   evidenceDigest: string;
-  usage:
-    | { availability: "unavailable"; runId: string; source: "diagnostics" }
-    | {
-        availability: "observed" | "unavailable";
-        runId: string;
-        source: "durable-accounting";
-        accounting: AccountingSeal;
-      };
+  usage: {
+    availability: "observed" | "unavailable";
+    runId: string;
+    source: "durable-accounting";
+    accounting: AccountingSeal;
+  };
   resources: "owned-attempts-settled; controller-processes-stopped; evidence-retained";
 }
 
@@ -216,10 +213,7 @@ export function assertFinalAcceptance(
     !Number.isFinite(Date.parse(seal.sealedAt)) ||
     seal.graphDigest !== graphDigest(state.graph) ||
     seal.configDigest !== state.configDigest ||
-    (seal.candidateBasis !== undefined &&
-      seal.candidateBasis !== candidate.basis) ||
-    (candidate.basis === "pinned-baseline" &&
-      seal.candidateBasis !== candidate.basis) ||
+    seal.candidateBasis !== candidate.basis ||
     seal.commit !== candidate.commitSha ||
     seal.tree !== state.finalValidation?.treeSha ||
     seal.evidenceDigest !== evidenceDigest(state) ||
@@ -230,36 +224,31 @@ export function assertFinalAcceptance(
     throw new Error(
       "Final acceptance binding differs from its sealed candidate or evidence",
     );
-  if (seal.usage.source === "diagnostics") {
-    if (seal.usage.availability !== "unavailable")
-      throw new Error("Historical diagnostic accounting remains unavailable");
-  } else if (seal.usage.source === "durable-accounting") {
-    assertAccountingSealBinding(
+  if (seal.usage.source !== "durable-accounting")
+    throw new Error("Final accounting source is invalid");
+  assertAccountingSealBinding(
+    state.repository,
+    state.objective,
+    state.runId,
+    seal.usage.accounting,
+  );
+  if (
+    JSON.stringify(seal.usage.accounting.chargedWorkAttempts) !==
+    JSON.stringify(chargedWorkAttemptIds(state))
+  )
+    throw new Error("Final accounting omits retained charged attempts");
+  if (
+    seal.usage.availability !==
+    (seal.usage.accounting.records.length ? "observed" : "unavailable")
+  )
+    throw new Error("Final accounting availability differs from its originals");
+  if (options.verifyAccountingBodies !== false)
+    assertAccountingSeal(
       state.repository,
       state.objective,
       state.runId,
       seal.usage.accounting,
     );
-    if (
-      JSON.stringify(seal.usage.accounting.chargedWorkAttempts) !==
-      JSON.stringify(chargedWorkAttemptIds(state))
-    )
-      throw new Error("Final accounting omits retained charged attempts");
-    if (
-      seal.usage.availability !==
-      (seal.usage.accounting.records.length ? "observed" : "unavailable")
-    )
-      throw new Error(
-        "Final accounting availability differs from its originals",
-      );
-    if (options.verifyAccountingBodies !== false)
-      assertAccountingSeal(
-        state.repository,
-        state.objective,
-        state.runId,
-        seal.usage.accounting,
-      );
-  } else throw new Error("Final accounting source is invalid");
 }
 
 export function sealFinalAcceptance(state: FactoryState): void {

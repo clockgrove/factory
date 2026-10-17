@@ -342,10 +342,6 @@ async function compilePlanAdmitted(
     throw new PlanningNeedsDecision(
       "Planning recovery stopped; inspect the preserved exact decision",
     );
-  if ("reviewResponse" in record)
-    throw new PlanningReviewBindingError(
-      "Retained planning review lacks its original request binding; stop owned work and use supported cancellation before a corrected successor",
-    );
   const sources = planningSources(body, baseSha, checkout);
   if (record.review) {
     try {

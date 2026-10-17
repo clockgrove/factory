@@ -662,7 +662,6 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
                 sources.find((source) => source.path === "contract.md").content,
               )
               .digest("hex"),
-            text: content,
           },
         },
       ],
@@ -900,24 +899,6 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       expandedFiles.reusedSourceIndices,
       sourceFiles.reusedSourceIndices,
     );
-    // Old admitted receipts preserve their original mixed inline/reused
-    // presentation when reconstructing a response after recovery.
-    const { bodyDelivery: _presentation, ...historicalReceipt } = expandedFiles;
-    const historical = renderCompilationCall(
-      { ...request, sources: expanded },
-      historicalReceipt,
-    );
-    const historicalChoices = JSON.parse(
-      historical.call.prompt.split("Compiler choices (JSON data):\n")[1],
-    );
-    const historicalInline = historicalChoices.sources.at(-2);
-    assert.equal(historicalInline.contentFile, undefined);
-    assert.ok(
-      historical.call.prompt.includes(
-        ` source ${historicalInline.sourceIndex}>>>\n`,
-      ),
-    );
-    assert.ok(historicalChoices.sources[0].contentFile);
     const expandedCall = renderCompilationCall(
       { ...request, sources: expanded },
       expandedFiles,
@@ -959,7 +940,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     for (const delivery of [
       undefined,
       sourceFiles,
-      { ...sourceFiles, bodyDelivery: undefined, reusedSourceIndices: [] },
+      { ...sourceFiles, reusedSourceIndices: [] },
     ]) {
       const emitted = renderDiagnosisCall(diagnosisRequest, delivery);
       const graphView = JSON.parse(
@@ -993,10 +974,6 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       assert.deepEqual(
         graphView.items[0].inputSources.at(-1),
         rejectedGraph.items[0].inputSources.at(-1),
-      );
-      assert.equal(
-        graphView.requiredPreIntegrationChecks[0].source.text,
-        undefined,
       );
       assert.deepEqual(
         JSON.parse(emitted.sourcePacket).rejectedGraph,

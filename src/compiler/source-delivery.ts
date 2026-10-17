@@ -29,8 +29,8 @@ export interface PlanningSourceDelivery {
     complete: true;
   }[];
   reusedSourceIndices: number[];
-  /** Persisted presentation binding; older receipts omitted only reused bodies. */
-  bodyDelivery?: "all-files";
+  /** Persisted presentation binding: every body is a contentFile. */
+  bodyDelivery: "all-files";
 }
 
 /** Adapter-owned proof of source bytes supplied by a completed earlier turn. */
@@ -212,8 +212,7 @@ export function assertPlanningSourceDelivery(
   sources: Sources,
 ): void {
   if (
-    (delivery.bodyDelivery !== undefined &&
-      delivery.bodyDelivery !== "all-files") ||
+    delivery.bodyDelivery !== "all-files" ||
     delivery.baseSha !== baseSha ||
     delivery.sourcesDigest !== digest(JSON.stringify(sources))
   )
@@ -222,8 +221,7 @@ export function assertPlanningSourceDelivery(
     );
   const expected = materializePlanningSources(delivery.root, baseSha, sources);
   if (
-    (delivery.bodyDelivery !== undefined &&
-      delivery.bodyDelivery !== "all-files") ||
+    delivery.bodyDelivery !== "all-files" ||
     delivery.baseSha !== baseSha ||
     delivery.sourcesDigest !== expected.sourcesDigest ||
     JSON.stringify(delivery.files) !== JSON.stringify(expected.files) ||

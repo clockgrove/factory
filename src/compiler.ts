@@ -50,7 +50,6 @@ export {
   validateCommandProvenance,
   type SourceSelector,
   type PlanningSource,
-  assertObjectiveTemplate,
   finalObjectiveCommands,
   objectiveCriteria,
   assertObjectiveCriteria,

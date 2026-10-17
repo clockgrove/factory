@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { ThreadError, ThreadEvent, Usage } from "@openai/codex-sdk";
-import { codexRuntimeDirectory } from "./codex-planning-isolation.js";
+import { codexRuntime } from "./codex-planning-isolation.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
 import {
   codexStderrCapture,
@@ -353,14 +353,7 @@ class AppServerClient {
     ) => Promise<void>,
     cancel?: () => void,
   ): Promise<void> {
-    const target =
-      process.arch === "arm64"
-        ? "aarch64-unknown-linux-musl"
-        : "x86_64-unknown-linux-musl";
-    const root = join(codexRuntimeDirectory(), target);
-    const modern = existsSync(join(root, "bin", "codex"));
-    const file = join(root, modern ? "bin" : "codex", "codex");
-    const path = join(root, modern ? "codex-path" : "path");
+    const { file, path } = codexRuntime();
     const env: Record<string, string> = {
       ...this.args.env,
       CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "codex_sdk_ts",

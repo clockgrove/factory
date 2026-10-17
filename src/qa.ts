@@ -501,8 +501,6 @@ function assertSourceObligationShape(entry: {
     entry.source.path === "OBJECTIVE" ||
     typeof entry.statement !== "string" ||
     !entry.statement.trim() ||
-    (entry.source.text !== undefined &&
-      (typeof entry.source.text !== "string" || !entry.source.text.trim())) ||
     !/^[a-f0-9]{64}$/.test(entry.source.digest)
   )
     throw new Error(
@@ -551,7 +549,7 @@ export function assertCoverageSources(
   const authority =
     isCommand ?? ((command: string) => planned.has(normalizedCommand(command)));
   // A located exit item is re-sliced from its pinned source; an Objective
-  // criterion (or a retained graph's span) carries its text.
+  // criterion carries its text.
   const spanText = (source: CoverageObligation["source"]) => {
     if (!source.lines) return source.text;
     const pinned = sources.find(
@@ -598,13 +596,13 @@ export function assertCoverageSources(
   const objective = sources.find((source) => source.path === "OBJECTIVE");
   const spans: CoverageObligation["source"][] = [];
   const located = (entry: { source: CoverageObligation["source"] }) => {
-    const { path, digest, text, lines } = entry.source;
+    const { path, digest, lines } = entry.source;
     const source = sources.find(
       (source) =>
         source.path === path && sourceDigest(source.content) === digest,
     );
     const actual = lines && source && sourceLines(source.content, lines);
-    if (!lines || !actual?.trim() || (text !== undefined && actual !== text))
+    if (!lines || !actual?.trim())
       throw new Error(
         "Source obligation line range differs from its pinned source",
       );
@@ -645,11 +643,7 @@ export function assertCoverageSources(
         source.path === entry.source.path &&
         sourceDigest(source.content) === entry.source.digest,
     );
-    if (
-      !source ||
-      (entry.source.path !== "OBJECTIVE" &&
-        !source.content.includes(entry.source.text!))
-    )
+    if (!source || entry.source.path !== "OBJECTIVE")
       throw new Error("Coverage source differs from pinned content");
     if (
       entry.source.path === "OBJECTIVE" &&
@@ -790,8 +784,8 @@ export function reusableEnvironmentValidationIndices(
     const command = normalizedCommand(item.validation[index]!.command);
     return !coverage.some((entry) => {
       // State checks this without the pinned sources, so a located exit item
-      // is matched by its statement; a retained graph keeps its span text.
-      const explicitCommand = (entry.source.text ?? coverageCriterion(entry))
+      // is matched by its statement.
+      const explicitCommand = coverageCriterion(entry)
         .trim()
         .replace(/^`([^`]+)`$/, "$1");
       return (

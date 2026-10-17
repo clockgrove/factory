@@ -133,6 +133,16 @@ export function codexRuntimeDirectory(): string {
   );
 }
 
+/** The installed Codex binary and the PATH directory of its bundled helpers. */
+export function codexRuntime(): { file: string; path: string } {
+  const target =
+    process.arch === "arm64"
+      ? "aarch64-unknown-linux-musl"
+      : "x86_64-unknown-linux-musl";
+  const root = join(codexRuntimeDirectory(), target);
+  return { file: join(root, "bin", "codex"), path: join(root, "codex-path") };
+}
+
 const real = (path: string) =>
   existsSync(path) ? realpathSync(path) : resolve(path);
 const within = (path: string, directory: string) =>

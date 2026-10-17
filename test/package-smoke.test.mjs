@@ -348,17 +348,12 @@ assert.throws(() => assertPinnedNpmScripts(checkout, rawBase, rawChanged, [boots
       run(
         "diagnostics",
         "--analyze",
-        "--native-tool-content",
         "--json",
         "--objective",
         "1",
         "--config",
         config,
       ),
-    );
-    assert.equal(
-      nativeAnalysis.nativeToolContent,
-      "explicit-private-content-read",
     );
     assert.equal(nativeAnalysis.nativeToolActivity.uniqueCalls, null);
     assert.equal(nativeAnalysis.nativeToolActivity.availability, "unavailable");

@@ -429,8 +429,7 @@ export interface FactoryState {
    * card's Project Status. The issue is recorded, so a later graph revision cannot rebind it.
    */
   workItemTracking?: Record<string, WorkItemTracking>;
-  /** New-run admission only. Absence does not prove historical non-submission. */
-  publicationContract?: "exact-request-v1";
+  publicationContract: "exact-request-v1";
   /** Retained across WorkState replacement; never reconstructed from diagnostics. */
   publicationIntents?: Record<
     string,
@@ -471,7 +470,7 @@ export interface FactoryState {
   configDigest: string;
   baseSha: string;
   graph: WorkGraph;
-  objectiveCommands?: string[];
+  objectiveCommands: string[];
   issueByItemId: Record<string, number>;
   /** The login that authored Factory's issues: its GitHub identity. */
   issueAuthor?: string;
@@ -502,7 +501,7 @@ export interface FactoryState {
   finalValidation?: ValidationEvidence & { passed: boolean; detail?: string };
   finalAcceptancePending?: AcceptancePending;
   finalAcceptanceDecisions?: AcceptanceDecision[];
-  objectiveBodyDigest?: string;
+  objectiveBodyDigest: string;
   objectiveClosure?: "pending" | "complete";
   cancelRequested?: boolean;
   cancelledAt?: string;
@@ -1739,8 +1738,7 @@ export function parseFactoryState(
           )
             throw new Error("AssetSet relationships are invalid");
         }
-        if (set.capture !== undefined || set.manifestRef !== undefined)
-          assertAssetCaptureReceipt(set as unknown as CapturedAssetSet);
+        assertAssetCaptureReceipt(set as unknown as CapturedAssetSet);
       }
     }
     if (item.selectedAssetSet !== undefined) {

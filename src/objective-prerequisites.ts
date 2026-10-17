@@ -86,9 +86,7 @@ export async function planningPrerequisites(
       objective: predecessor,
       bodyDigest: previous.objectiveBodyDigest,
       acceptance: {
-        ...(previous.finalAcceptance.candidateBasis === undefined
-          ? {}
-          : { candidateBasis: previous.finalAcceptance.candidateBasis }),
+        candidateBasis: previous.finalAcceptance.candidateBasis,
         sealedAt,
         commit,
         tree,

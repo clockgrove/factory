@@ -220,7 +220,7 @@ export interface InteractionMetadata {
   };
   nativeRollout?: {
     cliVersion: string | null;
-    /** Absent in legacy captures; history completeness alone cannot establish tool coverage. */
+    /** Absent when native history is unavailable; history completeness alone cannot establish tool coverage. */
     toolMetadata?: "available" | "partial";
     modelProvider?: string;
     reportedModel?: string;

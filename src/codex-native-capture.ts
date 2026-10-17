@@ -120,7 +120,7 @@ export function ownedRolloutBoundary(
 }
 
 /** Only explicit transport fields: never inspect shell text or nested output. */
-export function nativeToolObservation(
+function nativeToolObservation(
   value: unknown,
   rowTimestamp?: unknown,
   turnId: string | null = null,

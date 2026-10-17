@@ -332,7 +332,7 @@ export function recordSavedResultRefusal(
  * findings repair needs a new judgment. Built from the retained refusal alone, so it is rebuilt
  * identically after a restart.
  */
-export function reviewFindingsCorrection(
+function reviewFindingsCorrection(
   state: FactoryState,
   id: string,
 ): RepairCorrection | undefined {

@@ -12,7 +12,7 @@ import { configurationCommand, shortPlanDigest } from "./status-summary.js";
 import { awaitsOperator } from "./step.js";
 
 /** Process exit codes for run and the background service (supervisor serve). */
-export const EXIT_COMPLETE = 0;
+const EXIT_COMPLETE = 0;
 export const EXIT_FAILED = 1;
 export const EXIT_NEEDS_DECISION = 2;
 

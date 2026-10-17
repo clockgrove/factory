@@ -61,7 +61,7 @@ import {
 } from "./work-repair.js";
 import { assertWorkspacePackageChange } from "./workspace-membership.js";
 
-export interface ValidationObservation {
+interface ValidationObservation {
   index: number;
   passed: boolean;
   exitCode: number;
@@ -69,7 +69,7 @@ export interface ValidationObservation {
   output: string;
 }
 
-export interface ValidationOutputObservation {
+interface ValidationOutputObservation {
   index: number;
   stream: "stdout" | "stderr";
   output: string;
@@ -322,7 +322,7 @@ function dependencyInputsChanged(
   );
 }
 
-export interface ValidationPreparation {
+interface ValidationPreparation {
   commands: string[];
   observe?: (entry: ValidationObservation) => void;
   observeOutput?: (entry: ValidationOutputObservation) => void;
@@ -783,7 +783,7 @@ async function unregisterStaleWorktrees(
  * Pin the selected entrypoint and execution config to the accepted base. */
 export const PINNED_PNPM_BOOTSTRAP =
   "pnpm install --frozen-lockfile --ignore-scripts";
-export const PINNED_NPM_BOOTSTRAP = "npm ci --ignore-scripts";
+const PINNED_NPM_BOOTSTRAP = "npm ci --ignore-scripts";
 
 /** Exact script-disabled root installs; this classification grants no authority. */
 export function packageBootstrap(command: string): "npm" | "pnpm" | undefined {
@@ -792,7 +792,7 @@ export function packageBootstrap(command: string): "npm" | "pnpm" | undefined {
   return undefined;
 }
 
-export interface PackageScriptAuthority {
+interface PackageScriptAuthority {
   /** Exact stable same-manager pin declared by the pinned Objective. */
   packageManagerUpdate?: string;
   /** Final acceptance must include the declared update. */
@@ -1228,14 +1228,9 @@ export async function validateWorkItem(
   return evidence;
 }
 export {
-  commandPassEvidence,
-  gitChangeEvidence,
-  gitChangeEvidenceSources,
   objectiveReviewEvidence,
   retainedReviewLiterals,
-  ReviewDeliveryObservation,
   validStoppedLeftovers,
-  workItemMaterializationEvidence,
   workItemReviewEvidence,
   workItemReviewObservations,
 } from "./result-evidence.js";
@@ -1244,8 +1239,6 @@ export {
   AcceptanceDecision,
   assertSelectedLfsValidation,
   assertValidationWorktreeObservation,
-  CriterionEvidence,
   SelectedLfsValidation,
   ValidationEvidence,
-  ValidationWorktreeObservation,
 } from "./validation-evidence.js";

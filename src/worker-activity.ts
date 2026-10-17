@@ -15,14 +15,14 @@ import { pinnedGitRawWithin } from "./process.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
 
 /** One recorded worker tool call: metadata only. */
-export interface WorkerToolEvent {
+interface WorkerToolEvent {
   at: string;
   tool: string;
   target?: string;
 }
 
 /** What a worker's progress stream shows about its activity. Telemetry only. */
-export interface WorkerActivity {
+interface WorkerActivity {
   provider?: string;
   startedAt?: string;
   lastEventAt?: string;
@@ -66,10 +66,7 @@ export interface ItemActivity {
 const ATTEMPT =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-export function workerProgressPath(
-  repository: string,
-  attempt: string,
-): string {
+function workerProgressPath(repository: string, attempt: string): string {
   if (!ATTEMPT.test(attempt)) throw new Error("Invalid worker attempt ID");
   return join(stateRoot(repository), "harness", `${attempt}.progress.ndjson`);
 }
@@ -89,7 +86,7 @@ const EDIT_TOOLS = [
 export const PROGRESS_QUIET_MS = 15 * 60_000;
 
 /** How long validation may keep failing before it is called out. */
-export const VALIDATION_FAILING_MS = 20 * 60_000;
+const VALIDATION_FAILING_MS = 20 * 60_000;
 
 const count = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
@@ -98,7 +95,7 @@ const count = (value: unknown): number =>
  * Summarize a worker's progress stream, or undefined when it has none. With
  * `owned`, only edits inside those ownership scopes count as progress.
  */
-export function readWorkerActivity(
+function readWorkerActivity(
   repository: string,
   attempt: string,
   recentLimit = 8,
@@ -218,7 +215,7 @@ export function readWorkerActivity(
  * or undefined when unknown. Takes no index lock, so a worker's own `git add` or
  * commit never collides with it, and gives up after 5 seconds.
  */
-export function worktreeChanges(worktree: string): string[] | undefined {
+function worktreeChanges(worktree: string): string[] | undefined {
   try {
     const raw = pinnedGitRawWithin(
       worktree,
@@ -404,9 +401,7 @@ export function progressQuietMs(
 }
 
 /** Recent tool calls such as `Read a.ts · Edit b.ts · Bash pnpm`. */
-export function recentLine(
-  activity: WorkerActivity | undefined,
-): string | undefined {
+function recentLine(activity: WorkerActivity | undefined): string | undefined {
   if (!activity?.recent.length) return undefined;
   return activity.recent
     .map((event) =>
@@ -415,11 +410,9 @@ export function recentLine(
     .join(" · ");
 }
 
-/** Changed paths such as `3: a.ts, b.ts, c.ts`, at most `limit` named. */
-export function changesLine(
-  changes: string[] | undefined,
-  limit = 8,
-): string | undefined {
+/** Changed paths such as `3: a.ts, b.ts, c.ts`, at most eight named. */
+export function changesLine(changes: string[] | undefined): string | undefined {
+  const limit = 8;
   if (!changes) return undefined;
   if (!changes.length) return "none yet";
   const named = changes.slice(0, limit).join(", ");
@@ -427,7 +420,7 @@ export function changesLine(
 }
 
 /** A Work Item's headline: state, step, attempt and pull request. */
-export function itemHeadline(item: ItemActivity): string {
+function itemHeadline(item: ItemActivity): string {
   return [
     `${item.id} · ${item.status}${item.step ? ` (${item.step})` : ""}`,
     ...(item.attempt

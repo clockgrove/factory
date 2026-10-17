@@ -8,7 +8,6 @@ import type {
   ContentStore,
   DeclaredWorkCondition,
   GraphExpansionEnvelope,
-  PlanningRequest,
   WorkGraph,
   WorkItem,
 } from "./contracts.js";
@@ -1007,13 +1006,6 @@ export async function readPinnedWorkflowRecipe(
   const input = { pin, contract: resolved };
   assertWorkflowRecipeInput(input);
   return input;
-}
-export function hydrateWorkflowRecipeRequest<T>(
-  request: PlanningRequest<T>,
-  input: WorkflowRecipeInput,
-): PlanningRequest<T> {
-  assertWorkflowRecipeInput(input);
-  return { ...request, workflowRecipe: structuredClone(input) };
 }
 function prerequisites(
   recipe: ResolvedWorkflowRecipe,

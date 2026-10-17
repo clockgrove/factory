@@ -49,8 +49,7 @@ export interface MemoryLearningSelection {
   access: MemoryAccess;
   memoryIds?: string[];
   scope?: MemoryLookup["scope"];
-  includeLearning?: boolean;
-  learning?: { includeUnapproved: boolean };
+  learning?: { includeUnapproved: true };
 }
 
 function refIdentity(ref: ContentRef): string {
@@ -230,10 +229,8 @@ export async function buildMemoryLearningClosure(
     [join(root, "memory", "records")],
     "memory",
   );
-  const includeLearning =
-    selection.includeLearning ?? Boolean(selection.learning);
   const learning =
-    includeLearning && selection.access.visibility.includes("private")
+    selection.learning && selection.access.visibility.includes("private")
       ? checkpointOriginalInventory(
           LEARNING_ORIGINAL_KINDS.map((kind) => join(root, "learning", kind)),
           "learning",
@@ -393,13 +390,7 @@ async function buildMemoryLearningClosureLocal(
         role: `memory:${binding.id}:tree`,
       });
   }
-  const includeLearning =
-    selection.includeLearning ?? Boolean(selection.learning);
-  if (includeLearning && selection.access.visibility.includes("private")) {
-    if (selection.learning?.includeUnapproved === false)
-      throw new Error(
-        "Exact learning recovery includes original approved and unapproved history",
-      );
+  if (selection.learning && selection.access.visibility.includes("private")) {
     if (selection.scope?.paths !== undefined)
       throw new Error(
         "Original private learning requires repository-wide authorized history scope",
@@ -474,7 +465,6 @@ export interface ExactMemoryLearningInstall {
   repository: string;
   root?: string;
   access: MemoryAccess;
-  scope?: MemoryLookup["scope"];
   files: RecoveryCheckpointFile[];
   contentRefs: ContentRef[];
   readVerifiedBlob(ref: ContentRef): Promise<Uint8Array>;
@@ -498,13 +488,6 @@ export async function installExactMemoryLearning(
   const files = input.files.filter((file) =>
     ["memory-binding", "learning-original"].includes(file.kind),
   );
-  if (
-    input.scope?.paths !== undefined &&
-    files.some((file) => file.kind === "learning-original")
-  )
-    throw new Error(
-      "Original private learning requires repository-wide authorized history scope",
-    );
   const paths = new Set<string>();
   for (const file of files) {
     if (paths.has(file.path))
@@ -559,12 +542,7 @@ export async function installExactMemoryLearning(
         record.visibility !== file.visibility
       )
         throw new Error("Portable memory manifest scope changed");
-      memory.assertExactDestination(
-        binding,
-        manifestBytes,
-        input.access,
-        input.scope,
-      );
+      memory.assertExactDestination(binding, manifestBytes, input.access);
       memories.push({ binding, bytes: manifestBytes, record });
     }
   }
@@ -584,10 +562,6 @@ export async function installExactMemoryLearning(
     for (const source of record.sources) if (source.ref) await load(source.ref);
   }
   if (originals.length) validateLearningOriginals(input.repository, originals);
-  if (originals.length && input.scope?.paths !== undefined)
-    throw new Error(
-      "Original private learning requires repository-wide authorized history scope",
-    );
   const { verifyContinuationReferenceClosure } = await import(
     "./recovery-checkpoint-closure.js"
   );
@@ -633,12 +607,7 @@ export async function installExactMemoryLearning(
   ))
     installLearningOriginal(input.repository, original, root);
   for (const original of memories)
-    memory.installExact(
-      original.binding,
-      original.bytes,
-      input.access,
-      input.scope,
-    );
+    memory.installExact(original.binding, original.bytes, input.access);
   memory.rebuild();
   return {
     memoryRecords: memories.length,

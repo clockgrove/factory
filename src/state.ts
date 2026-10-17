@@ -95,6 +95,7 @@ import {
   assertValidationExecutionControl,
 } from "./validation-evidence.js";
 import { assertRepairReadiness } from "./work-repair.js";
+import { record } from "./unknown-fields.js";
 
 export type WorkStatus =
   | "pending"
@@ -739,12 +740,6 @@ export function assertCoordinator(value: unknown): void {
       ))
   )
     throw new Error("Invalid coordinator process identities");
-}
-
-function record(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error(`${label} must be an object`);
-  return value as Record<string, unknown>;
 }
 
 function string(value: unknown, label: string): string {

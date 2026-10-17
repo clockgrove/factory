@@ -31,7 +31,7 @@ const CLAUDE_LOGIN_CREDENTIALS = [
 ];
 
 /** Whether a configured planner or local harness uses the Claude login. */
-export function usesClaudeLogin(config: FactoryConfig): boolean {
+function usesClaudeLogin(config: FactoryConfig): boolean {
   if (config.planning.kind === "claude-agent-sdk") return true;
   if (config.execution.kind !== "local") return false;
   return [

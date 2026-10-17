@@ -109,7 +109,7 @@ export interface PreState {
   wait?: Wait;
 }
 
-export function preStatePath(repository: string, objective: number): string {
+function preStatePath(repository: string, objective: number): string {
   return join(dirname(statePath(repository, objective)), "pre-state.json");
 }
 
@@ -232,23 +232,8 @@ export function saveState(
 }
 
 const currentVersion = (value: unknown): boolean => {
-  const version = (value as { schemaVersion?: unknown } | null)?.schemaVersion;
-  return (
-    version === 7 ||
-    version === 8 ||
-    version === 9 ||
-    version === 10 ||
-    version === 11 ||
-    version === 12 ||
-    version === 13 ||
-    version === 14 ||
-    version === 15 ||
-    version === 16 ||
-    version === 17 ||
-    version === 18 ||
-    version === 19 ||
-    version === 20
-  );
+  const state = value as ContinuationState | null;
+  return isPreparationState(state) || isExecutionState(state);
 };
 
 /** Every Objective (or preparation) directory whose snapshot an earlier version wrote. */
@@ -571,7 +556,7 @@ export interface ControllerLock {
   token: string;
 }
 
-export interface ControllerOwner {
+interface ControllerOwner {
   intake?: boolean;
   pid: number;
   startTime: string;

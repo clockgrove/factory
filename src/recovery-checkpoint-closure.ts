@@ -606,7 +606,7 @@ function continuationReferences(value: unknown): ContinuationReferences & {
   };
 }
 
-/** Schema-checked portable references, also used by original learning snapshots. */
+/** Schema-checked portable references of a continuation, without its roots; tests inspect them. */
 export function describeContinuationReferences(
   value: unknown,
 ): ContinuationReferences {
@@ -615,7 +615,7 @@ export function describeContinuationReferences(
 }
 
 /** A verified archive cache can supply bytes before any installation writes. */
-export interface RecoveryReferenceReader {
+interface RecoveryReferenceReader {
   readBytes(ref: ContentRef): Uint8Array | Promise<Uint8Array>;
 }
 async function readReference(

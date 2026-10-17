@@ -1,5 +1,5 @@
 /**
- * Converting a call site to `step` (recovery v2.2, #515):
+ * Rules for a `step` call site:
  * 1. Wrap one repeatable effect: `await step(state, { scope, name, paid }, async (ctx) => ..., { save, signal, clock })`
  *    with scope `{ item: id }` or `"objective"` and a kebab-case name (`publish`, `merge`, `plan`).
  * 2. The body is correct when repeated from the top: observe first, create idempotently, confirm.
@@ -16,48 +16,8 @@
  *    Otherwise branch on `faultOf(error).kind`: `cancelled` stop quietly; `work` fail the attempt, then
  *    repair or retry; `decision` / `config` leave the scope waiting (the wait is saved; `factory retry`
  *    answers it); `defect` stop and report. Transient faults never leave `step`.
- * 8. Pass the run's cancel signal as `signal` and its pause signal as `pause` on every call. The old
- *    repeat loops (repeatInterrupted, retryTransient) are gone; diagnostics spans go inside the body.
- */
-/*
- * Worked examples (sketches):
- *
- * execute: a session is attempt + seq, saved before its start. A dead session ends that seq; the next try
- * starts seq + 1 (inside the step: the attempt does not rotate). find() skips ended sessions.
- *   await step(state, { scope: { item: id }, name: "execute", paid: true }, async (ctx) => {
- *     work.session ??= { attempt: work.attempt, seq: 1 }; save();
- *     const session = (await driver.find(work.session)) ?? (await ctx.paid(() => driver.start(input, work.session)));
- *     const seen = await driver.poll(session);
- *     ctx.progress();
- *     if (seen.dead) {                                     // driver confirmed it stopped
- *       work.session = { ...work.session, seq: work.session.seq + 1 }; save();
- *       ctx.paidLost(`worker ${session.id} ended without a result`);   // counts toward the bound
- *     }
- *     if (!seen.done) ctx.pending(undefined, seen.nextPollAt);         // running: poll, no wait
- *     return ctx.paid(() => driver.collect(session));
- *   }, opts);
- *
- * merge: observe, merge, confirm; CI is pending, not a fault.
- *   await step(state, { scope: { item: id }, name: "merge" }, async (ctx) => {
- *     const pr = await github.pullRequest(n);
- *     ctx.progress();
- *     if (pr.merged) return confirm(pr);
- *     if (pr.mergeState === "DIRTY") throw new StepFault({ kind: "work", evidence: { detail: "conflict" } });
- *     if (!pr.requiredChecksPassed) ctx.pending({ kind: "ci", detail: `PR #${n} checks` });
- *     await github.merge(n, { expectedHead: pr.head });
- *     return confirm(await github.pullRequest(n));
- *   }, opts);
- *
- * project: several idempotent creates, saving each identity.
- *   await step(state, { scope: "objective", name: "project" }, async (ctx) => {
- *     const existing = await github.issuesByMarker(objective);
- *     ctx.progress();
- *     for (const item of missing(existing)) {
- *       state.issueByItemId[item.id] = await github.createIssue(item);
- *       save();
- *       ctx.progress();
- *     }
- *   }, opts);
+ * 8. Pass the run's cancel signal as `signal` and its pause signal as `pause` on every call. Diagnostics
+ *    spans go inside the body.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -85,7 +45,7 @@ export type StepState = FactoryState | PreparationState;
 export type StepScope = { item: string } | "objective";
 
 /** Observational only: never persisted or consulted by repeat/recovery. */
-export interface StepAttemptObservation {
+interface StepAttemptObservation {
   operationAttemptId: string;
   parentOperationAttemptId?: string;
   scope: string;
@@ -152,7 +112,7 @@ function observeAttempt(event: StepAttemptObservation): void {
   }
 }
 
-export interface StepSpec {
+interface StepSpec {
   scope: StepScope;
   /** Kebab-case step name, such as `publish` or `plan`. */
   name: string;
@@ -161,7 +121,7 @@ export interface StepSpec {
 }
 
 /** A "not yet" a step can report; it never counts as a fault. */
-export interface PendingWait {
+interface PendingWait {
   kind: "ci" | "capacity" | "dependency" | "prerequisite";
   detail: string;
 }
@@ -225,20 +185,20 @@ export class StepPaused extends Error {
   }
 }
 
-export const FIRST_BACKOFF_MS = 1_000;
-export const MAX_BACKOFF_MS = 5 * 60_000;
-export const PENDING_POLL_MS = 30_000;
+const FIRST_BACKOFF_MS = 1_000;
+const MAX_BACKOFF_MS = 5 * 60_000;
+const PENDING_POLL_MS = 30_000;
 /** Status reports an outage once a run of faults will have lasted this long. */
-export const OUTAGE_AFTER_MS = 60_000;
+const OUTAGE_AFTER_MS = 60_000;
 /** After this much running time a run of faults offers the operator cancel. */
-export const ESCALATE_AFTER_MS = 24 * 60 * 60_000;
+const ESCALATE_AFTER_MS = 24 * 60 * 60_000;
 /** Paid faults a paid step repeats; the next one is a decision. */
-export const PAID_FAULT_LIMIT = 3;
+const PAID_FAULT_LIMIT = 3;
 
 const systemClock: StepClock = { now: time.now, sleep: time.sleep };
 
 /** Delay before the `count`th repeat: 1 s doubling to a 5-minute cap. */
-export function backoffDelay(count: number): number {
+function backoffDelay(count: number): number {
   return Math.min(
     FIRST_BACKOFF_MS * 2 ** Math.max(0, count - 1),
     MAX_BACKOFF_MS,
@@ -318,8 +278,8 @@ const retrySleepers = new WeakMap<object, Set<AbortController>>();
 export function endProviderLimitWaits(
   state: StepState,
   scope: StepScope,
-  now = time.now(),
 ): boolean {
+  const now = time.now();
   let ended = false;
   for (const [key, record] of Object.entries(state.repeats ?? {})) {
     const last = record.faults?.last;
@@ -383,7 +343,7 @@ export function clearAllRepeats(state: StepState): void {
 }
 
 /** A step of the scope in a run of transient faults, for status. */
-export interface Outage {
+interface Outage {
   step: string;
   since: string;
   tries: number;
@@ -401,8 +361,8 @@ export interface Outage {
 export function outageOf(
   state: StepState,
   scope: StepScope,
-  now = time.now(),
 ): Outage | undefined {
+  const now = time.now();
   let found: Outage | undefined;
   for (const [key, record] of Object.entries(state.repeats ?? {})) {
     const faults = record.faults;

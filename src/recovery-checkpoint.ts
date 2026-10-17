@@ -766,6 +766,8 @@ interface QueueVerificationContext {
     material: { path: string; identity: string }[];
   };
   gitPackBytes?: number;
+  /** Set once a full publication completes; see checkpointBasis. */
+  incremental?: { since: number; publications: number };
 }
 const scopes = new AsyncLocalStorage<{
   config: FactoryConfig;
@@ -795,6 +797,8 @@ const scopes = new AsyncLocalStorage<{
     key: string;
     options: GitPersistenceConfig;
     bodies: Map<string, { ref: ContentRef; bytes?: Buffer }>;
+    /** Bodies the verified acknowledged base already holds; see checkpointBasis. */
+    covered?: ReadonlySet<string>;
     pendingReferences: Map<string, string>;
     pendingReferenceBytes: number;
     sourceOriginals: Map<string, string>;
@@ -1244,6 +1248,26 @@ function journal(
     throw new Error("Checkpoint acknowledged sequence has no verified receipt");
   return value;
 }
+/**
+ * Every save marks the journal, so each one reads and rewrites it. Keep its
+ * settled attempt history short: unsettled attempts, the acknowledged one and
+ * the most recent ATTEMPT_HISTORY remain (forwarded receipts and late landings
+ * only ever name recent ones).
+ */
+const ATTEMPT_HISTORY = 64;
+function pruneAttempts(record: CheckpointJournal): void {
+  if (record.attempts.length <= ATTEMPT_HISTORY) return;
+  const recent = record.attempts.length - ATTEMPT_HISTORY;
+  const acknowledged = record.lastAcknowledged;
+  record.attempts = record.attempts.filter(
+    (attempt, index) =>
+      index >= recent ||
+      (attempt.status !== "acknowledged" && attempt.status !== "not-landed") ||
+      (attempt.candidate === acknowledged?.commitSha &&
+        attempt.payloadDigest === acknowledged.payloadDigest &&
+        attempt.sequence === acknowledged.sequence),
+  );
+}
 function mutate(
   config: FactoryConfig,
   options: GitPersistenceConfig,
@@ -1255,6 +1279,7 @@ function mutate(
   try {
     const record = journal(config, options);
     update(record);
+    pruneAttempts(record);
     writeAtomic(p.journal, record);
     return record;
   } finally {
@@ -1588,6 +1613,13 @@ export function withQueueControlVerification<T>(
       failed = true;
       failure = error;
     }
+    // A background settled publication uses this verifier until it ends.
+    for (
+      let pending = settledPublications.get(input.config.repository);
+      pending;
+      pending = settledPublications.get(input.config.repository)
+    )
+      await pending;
     verification.closed = true;
     try {
       await verification.serial;
@@ -1695,6 +1727,7 @@ async function withFiniteCheckpointReads<T>(
   localOnly: boolean,
   scope: NonNullable<ReturnType<typeof scopes.getStore>>,
   publicationLocal = false,
+  covered?: ReadonlySet<string>,
 ): Promise<T> {
   const options = settings(config);
   if (!localOnly || !options || scope.config !== config)
@@ -1702,6 +1735,7 @@ async function withFiniteCheckpointReads<T>(
   assertProcessActive();
   const phase = {
     publicationLocal,
+    covered,
     scope: scope as object,
     config,
     verification: scope.verification,
@@ -1787,6 +1821,9 @@ async function withFiniteCheckpointReads<T>(
       const store = new LocalContentStore(phase.root);
       for (const { ref } of phase.bodies.values()) {
         assertProcessActive();
+        // The independently verified archive already holds these exact bytes;
+        // only bodies new since that base are read and pushed (and verified).
+        if (phase.covered?.has(canonical(ref))) continue;
         store.verifyPrivateBytes(ref);
       }
       assertProcessActive();
@@ -1991,6 +2028,8 @@ export function checkpointOriginalInventory(
   directories: string[],
   kind: "accounting" | "memory" | "learning",
   authenticateAddition?: (path: string) => void,
+  /** Originals this closure leaves out; their names still detect additions. */
+  excluded?: (path: string) => boolean,
 ): { path: string; fingerprint: string }[] | undefined {
   const active = activeClosureBinding();
   if (!active?.scope.verification || active.phase.closed) return undefined;
@@ -2003,7 +2042,8 @@ export function checkpointOriginalInventory(
       const names = originalNames(directory, kind);
       for (const name of names) {
         const path = join(directory, name);
-        files.push({ path, fingerprint: originalFingerprint(path) });
+        if (!excluded?.(path))
+          files.push({ path, fingerprint: originalFingerprint(path) });
       }
       if (phase.sourceOriginals.size + files.length > phase.options.maxFiles)
         return undefined;
@@ -2654,9 +2694,22 @@ export async function withCheckpointDisposals<T>(
     disposals.closed = true;
   }
 }
+/**
+ * Wait until the archive acknowledges the journal as of this call.
+ * - `before-effect` precedes an external effect and `explicit` precedes
+ *   disposing local material: both wait for their acknowledgment.
+ * - `settled` guards no effect. Inside a controller (one with a verifier) it
+ *   starts at most one background publication, once `coalesceMs` has passed,
+ *   and returns at once; the next waiting admission reports any failure, which
+ *   the journal keeps.
+ * - `final` (a controller's last admission) waits for that background work,
+ *   publishes any pending change regardless of `coalesceMs`, and rescans and
+ *   verifies the whole archive (see checkpointBasis).
+ */
 export async function awaitCheckpointAdmission(
   repository: string | undefined,
   reason: "before-effect" | "settled" | "explicit",
+  options: { final?: boolean } = {},
 ): Promise<void> {
   const scope = scopes.getStore();
   if (!scope) return;
@@ -2666,6 +2719,7 @@ export async function awaitCheckpointAdmission(
     );
   if (
     reason === "explicit" &&
+    !options.final &&
     scope.disposals?.covered &&
     !scope.disposals.closed
   )
@@ -2676,43 +2730,30 @@ export async function awaitCheckpointAdmission(
     persistence?.scope === "repository-knowledge"
   )
     return;
-  // An explicit admission precedes disposing local material, so it must
-  // acknowledge everything recorded when it began.
-  const entrySequence =
-    reason === "explicit" && persistence
-      ? journal(scope.config, persistence).sequence
-      : undefined;
-  let acknowledged: RecoveryCheckpointStatus;
-  const deadline = Date.now() + COLLECTION_WAIT_MS;
-  for (;;) {
-    try {
-      acknowledged = await synchronizeRecoveryCheckpoint(scope.config, {
-        reason,
-        buildClosure: scope.buildClosure,
-      });
-      break;
-    } catch (error) {
-      // Another Work Item's collector, in this or another controller process,
-      // is freezing its return: wait outside the publication queue instead of
-      // stopping for a decision. The closure cannot change before a pending
-      // collector finishes, so poll that cheaply and rebuild only afterwards.
-      const pending = pendingCollection(error);
-      if (
-        !pending ||
-        Date.now() >= deadline ||
-        !collecting(scope.config.repository, pending)
-      )
-        throw error;
-      do {
-        await new Promise<void>((done) => setTimeout(done, 1000));
-        assertProcessActive();
-      } while (
-        Date.now() < deadline &&
-        collecting(scope.config.repository, pending)
-      );
-    }
+  if (options.final) await settledPublications.get(scope.config.repository);
+  else if (
+    reason === "settled" &&
+    persistence &&
+    scope.verification &&
+    !scope.verification.closed
+  ) {
+    startSettledPublication(scope, persistence);
+    return;
   }
+  // One acknowledgment that covers the journal as of this call admits it, so
+  // admissions queued behind one publication can share it. An explicit one
+  // also publishes or revalidates the current closure (see publishCheckpoint).
+  const entrySequence = persistence
+    ? journal(scope.config, persistence).sequence
+    : undefined;
+  const acknowledged = await admitCheckpoint(scope, {
+    reason,
+    ...(reason !== "explicit" &&
+      entrySequence !== undefined && { coveredSequence: entrySequence }),
+    ...(options.final && { final: true }),
+  });
   if (
+    reason === "explicit" &&
     entrySequence !== undefined &&
     (acknowledged.lastAcknowledged?.sequence ?? -1) < entrySequence
   )
@@ -2741,6 +2782,97 @@ export async function awaitCheckpointAdmission(
       fingerprint,
       status: structuredClone(acknowledged),
     };
+}
+type CheckpointAdmissionInput = {
+  reason: "before-effect" | "settled" | "explicit";
+  /** Return once the acknowledged sequence reaches this one. */
+  coveredSequence?: number;
+  final?: true;
+};
+async function admitCheckpoint(
+  scope: NonNullable<ReturnType<typeof scopes.getStore>>,
+  input: CheckpointAdmissionInput,
+): Promise<RecoveryCheckpointStatus> {
+  const deadline = Date.now() + COLLECTION_WAIT_MS;
+  for (;;) {
+    try {
+      return await synchronizeRecoveryCheckpoint(scope.config, {
+        ...input,
+        buildClosure: scope.buildClosure,
+      });
+    } catch (error) {
+      // Another Work Item's collector, in this or another controller process,
+      // is freezing its return: wait outside the publication queue instead of
+      // stopping for a decision. The closure cannot change before a pending
+      // collector finishes, so poll that cheaply and rebuild only afterwards.
+      const pending = pendingCollection(error);
+      if (
+        !pending ||
+        Date.now() >= deadline ||
+        !collecting(scope.config.repository, pending)
+      )
+        throw error;
+      do {
+        await new Promise<void>((done) => setTimeout(done, 1000));
+        assertProcessActive();
+      } while (
+        Date.now() < deadline &&
+        collecting(scope.config.repository, pending)
+      );
+    }
+  }
+}
+/** At most one background `settled` publication per repository. */
+const settledPublications = new Map<string, Promise<void>>();
+function startSettledPublication(
+  scope: NonNullable<ReturnType<typeof scopes.getStore>>,
+  options: GitPersistenceConfig,
+): void {
+  const repository = scope.config.repository;
+  if (settledPublications.has(repository)) return;
+  const record = journal(scope.config, options);
+  const last = record.attempts.at(-1);
+  // An unconfirmed submission is settled by exact remote observation, which
+  // a settled admission performs even with nothing new to publish.
+  const unsettled =
+    last !== undefined &&
+    last.status !== "acknowledged" &&
+    last.status !== "not-landed";
+  if (
+    record.hold ||
+    (!unsettled &&
+      ((record.lastAcknowledged &&
+        record.sequence === record.acknowledgedSequence) ||
+        (record.dirtySince &&
+          Date.now() - Date.parse(record.dirtySince) < options.coalesceMs)))
+  )
+    return;
+  // Only the controller's verifier and closure carry over: the publication
+  // belongs to no caller's operation or disposal call.
+  const owned = {
+    config: scope.config,
+    buildClosure: scope.buildClosure,
+    verification: scope.verification,
+  };
+  // One attempt: a pending collection or any other failure stays in the
+  // journal, and the next admission tries again or reports it.
+  const publication: Promise<void> = scopes
+    .run(owned, () =>
+      synchronizeRecoveryCheckpoint(owned.config, {
+        reason: "settled",
+        coveredSequence: record.sequence,
+        buildClosure: owned.buildClosure,
+      }),
+    )
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .finally(() => {
+      if (settledPublications.get(repository) === publication)
+        settledPublications.delete(repository);
+    });
+  settledPublications.set(repository, publication);
 }
 function git(
   directory: string,
@@ -4829,6 +4961,86 @@ async function freshArchive(
 function verifierMaterialFingerprint(objects: Map<string, string>): string {
   return hash(canonical([...objects]));
 }
+/**
+ * A controller's publications are incremental: bodies its own verified
+ * acknowledged base already holds are not reread locally, and the rebuildable
+ * body, producer and remote facts it verified earlier are reused. Every
+ * FULL_CHECKPOINT_PUBLICATIONS publications or FULL_CHECKPOINT_INTERVAL_MS,
+ * whichever comes first, and at its final admission, those facts are dropped
+ * first, so the build rescans every local body and the base is fetched and
+ * verified again in full. A controller's first publication is full by
+ * construction: its verifier starts empty. An uncertain verifier drops the
+ * base identity and these facts itself, which also disables the reuse.
+ *
+ * 25 publications is about 15 minutes of a busy Objective. A full publication
+ * rehashes the closure (some 360 MB here) and the base, a few seconds, so this
+ * costs well under a second per publication while bounding how long a
+ * locally damaged body could go unnoticed. The archive is unaffected: it gets
+ * exact verified bytes either way.
+ */
+const FULL_CHECKPOINT_PUBLICATIONS = 25;
+const FULL_CHECKPOINT_INTERVAL_MS = 30 * 60_000;
+/** Whether this publication is full; drops the reusable facts when it is. */
+function checkpointBasis(
+  context: QueueVerificationContext | undefined,
+  final = false,
+): boolean {
+  if (!context) return true;
+  const basis = context.incremental;
+  if (
+    !final &&
+    basis &&
+    basis.publications < FULL_CHECKPOINT_PUBLICATIONS &&
+    Date.now() - basis.since < FULL_CHECKPOINT_INTERVAL_MS
+  )
+    return false;
+  delete context.incremental;
+  // Without a basis nothing was reused yet: the verifier's facts all come
+  // from this controller's own full verification.
+  if (basis || final) {
+    context.content.clear();
+    context.contentBytes = 0;
+    context.summaries.clear();
+    context.summaryBytes = 0;
+    delete context.publisherObjects;
+    delete context.publisherObjectBytes;
+    delete context.baseIdentity;
+    delete context.baseIdentityBytes;
+  }
+  return true;
+}
+function completeCheckpointBasis(
+  context: QueueVerificationContext | undefined,
+  full: boolean,
+): void {
+  if (!context) return;
+  if (full) context.incremental = { since: Date.now(), publications: 0 };
+  else if (context.incremental) context.incremental.publications++;
+}
+/** Exact bodies of the acknowledged base this controller verified itself. */
+function coveredBodies(
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+  context: QueueVerificationContext | undefined,
+  record: CheckpointJournal,
+): ReadonlySet<string> | undefined {
+  const identity = context?.baseIdentity;
+  const acknowledged = record.lastAcknowledged;
+  if (
+    !context ||
+    !identity ||
+    !acknowledged ||
+    context.closed ||
+    context.quarantined ||
+    identity.verificationKey !== context.key ||
+    context.key !== verificationKey(config, options) ||
+    identity.commitSha !== acknowledged.commitSha ||
+    identity.payloadDigest !== acknowledged.payloadDigest ||
+    identity.sequence !== acknowledged.sequence
+  )
+    return undefined;
+  return new Set(identity.blobEntries.map((entry) => canonical(entry.ref)));
+}
 /** Only a completed independent read plus its actual ACK supplies a reusable base. */
 function retainVerifiedBaseIdentity(
   config: FactoryConfig,
@@ -6391,8 +6603,7 @@ function markNotLanded(
 }
 export async function synchronizeRecoveryCheckpoint(
   config: FactoryConfig,
-  input: {
-    reason: "before-effect" | "settled" | "explicit";
+  input: CheckpointAdmissionInput & {
     buildClosure?: () => Promise<RecoveryCheckpointClosure>;
   },
 ): Promise<RecoveryCheckpointStatus> {
@@ -6446,8 +6657,7 @@ function coverDisposals(): void {
 }
 async function publishCheckpoint(
   config: FactoryConfig,
-  input: {
-    reason: "before-effect" | "settled" | "explicit";
+  input: CheckpointAdmissionInput & {
     buildClosure?: () => Promise<RecoveryCheckpointClosure>;
   },
 ): Promise<RecoveryCheckpointStatus> {
@@ -6553,12 +6763,15 @@ async function publishCheckpoint(
         );
       if (
         record.lastAcknowledged &&
-        record.sequence === record.acknowledgedSequence &&
-        input.reason !== "explicit"
+        input.reason !== "explicit" &&
+        (record.sequence === record.acknowledgedSequence ||
+          (input.coveredSequence !== undefined &&
+            record.acknowledgedSequence >= input.coveredSequence))
       )
         return status(record, options);
       if (
         input.reason === "settled" &&
+        !input.final &&
         record.dirtySince &&
         Date.now() - Date.parse(record.dirtySince) < options.coalesceMs
       )
@@ -6568,10 +6781,15 @@ async function publishCheckpoint(
       // The exact pre-push check below still precedes the push.
       await verifyDestination(config, options);
       let sequence = record.sequence;
+      const verification = scopes.getStore()?.verification;
+      const full = checkpointBasis(verification, input.final);
+      const covered = full
+        ? undefined
+        : coveredBodies(config, options, verification, record);
       const closureObservation = checkpointObservation(
         config,
         "recovery-checkpoint-closure",
-        () => ({ reason: input.reason }),
+        () => ({ reason: input.reason, basis: full ? "full" : "incremental" }),
       );
       closureObservation.start("build-and-verify");
       const local = await withFiniteCheckpointReads(
@@ -6611,6 +6829,7 @@ async function publishCheckpoint(
         true,
         scopes.getStore() ?? { config, buildClosure: build },
         true,
+        covered,
       ).catch((error: unknown) => {
         closureObservation.fail(error);
         throw error;
@@ -6677,6 +6896,7 @@ async function publishCheckpoint(
               })
             : journal(config, options);
           coverDisposals();
+          completeCheckpointBasis(verification, full);
           return status(current, options);
         }
         let observedSequence: number | undefined;
@@ -6968,6 +7188,7 @@ async function publishCheckpoint(
         acknowledged.lastAcknowledged,
       );
       coverDisposals();
+      completeCheckpointBasis(verification, full);
       return acknowledged;
     } catch (error) {
       if (error instanceof CheckpointRestart) throw error;

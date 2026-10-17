@@ -22,10 +22,6 @@ import {
   PROGRESS_ITEM_ID,
 } from "./github-progress-state.js";
 import {
-  awaitCheckpointAdmission,
-  isCheckpointAdmissionFailure,
-} from "./recovery-checkpoint.js";
-import {
   callLabel,
   callProgressText,
   type ModelCallRow,
@@ -269,7 +265,6 @@ export async function projectLiveStatus(
         failedEdit.delete(key(target));
         break;
       } catch (error) {
-        if (isCheckpointAdmissionFailure(error)) throw error;
         if (
           !target.active &&
           attempt < FINAL_TRIES &&
@@ -312,6 +307,8 @@ async function editLiveStatus(
     runId: retained.runId,
     body,
     ...(record && { record }),
+    // A derived view: no checkpoint precedes the create. A host restored
+    // without this record adopts the comment by its marker and author.
     beforeWrite: async (actorId) => {
       const state = live();
       if (target.read(state))
@@ -319,7 +316,6 @@ async function editLiveStatus(
       target.write(state, { actorId });
       try {
         args.save();
-        await awaitCheckpointAdmission(args.config.repository, "before-effect");
       } catch (error) {
         // The POST follows this call, so nothing was sent. A refused save
         // must not leave the record in the live state either.

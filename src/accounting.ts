@@ -905,6 +905,8 @@ export function accountingPersistenceClosure(
       });
       retainedPayload(record, store);
     },
+    // A retired Objective's originals are in its evidence commit, not here.
+    (path) => archived.has(`accounting/${basename(path)}`),
   );
   const originals = inventory
     ? inventory.map((source) => ({ source }))

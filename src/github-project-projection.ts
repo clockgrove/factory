@@ -285,21 +285,8 @@ async function projectCard(
           if (observed) current.observed = observed;
           throw error;
         }
-        try {
-          await awaitCheckpointAdmission(
-            args.config.repository,
-            "before-effect",
-          );
-        } catch (error) {
-          // The mutation follows this call, so nothing was sent: drop the
-          // intent instead of leaving it to read as an unknown update.
-          const latest = target.read(live());
-          if (latest?.requests.at(-1)?.requestId === intent.requestId) {
-            latest.requests.pop();
-            args.save();
-          }
-          throw error;
-        }
+        // A derived view: no checkpoint precedes the update. A host restored
+        // without this intent reads the card and sets the same status again.
       },
     });
     const state = live();
@@ -346,12 +333,9 @@ async function projectCard(
       };
       delete current.failure;
     }
-    // The response is saved locally. Every dependent GitHub effect, including
-    // this card's next update, publishes it within its own pre-effect
-    // checkpoint, so a separate publication here only repeats that barrier.
+    // The response is saved locally; the next checkpoint publication carries it.
     args.save();
   } catch (error) {
-    if (isCheckpointAdmissionFailure(error)) throw error;
     const state = live();
     const existed = target.read(state) !== undefined;
     const current = target.ensure(state);

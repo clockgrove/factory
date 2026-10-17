@@ -19,7 +19,6 @@ import {
 } from "./github-progress-state.js";
 import {
   awaitCheckpointAdmission,
-  isCheckpointAdmissionFailure,
   withRecoveryCheckpointScope,
 } from "./recovery-checkpoint.js";
 import { buildRecoveryCheckpointClosure } from "./recovery-checkpoint-closure.js";
@@ -497,18 +496,8 @@ async function publishProgress(
           current.requests.pop();
           throw error;
         }
-        try {
-          await awaitCheckpointAdmission(config.repository, "before-effect");
-        } catch (error) {
-          // The POST follows this call, so nothing was sent: drop the intent
-          // instead of leaving it to read as an unknown publication.
-          const latest = target.read(live());
-          if (latest?.requests.at(-1)?.snapshotId === snapshotId) {
-            latest.requests.pop();
-            save();
-          }
-          throw error;
-        }
+        // A derived view: no checkpoint precedes the POST. A host restored
+        // without this intent posts its next snapshot under a new marker.
       },
     });
     const current = target.read(live());
@@ -526,8 +515,6 @@ async function publishProgress(
       );
     intent.comment = observed;
     delete current.failure;
-    // A successor comment's own pre-effect checkpoint publishes this response
-    // with its intent, so the successor never precedes this durable receipt.
     save();
     // A reconciled older snapshot may precede the current presentation
     // (including final closure). Publish that meaningful change once next.
@@ -536,8 +523,7 @@ async function publishProgress(
         target.notify &&
         pending.presentationDigest !== target.presentationDigest,
     );
-  } catch (error) {
-    if (isCheckpointAdmissionFailure(error)) throw error;
+  } catch {
     const state = live();
     const existed = target.read(state) !== undefined;
     const current = target.ensure(state);

@@ -2840,11 +2840,16 @@ async function exportAssetSetsForReviewUnscoped(
   return sets.map((set) => set.id);
 }
 
-/** Bind direct library controllers to the same repository-specific durability boundary. */
+/**
+ * Bind direct library controllers to the same repository-specific durability
+ * boundary. An Objective controller's last admission is `final`: it publishes
+ * whatever is pending and verifies the whole archive.
+ */
 async function checkpointController<T>(
   config: FactoryConfig,
   task: () => Promise<T>,
   store?: ContentStore,
+  final = false,
 ): Promise<T> {
   return withRecoveryCheckpointScope(
     {
@@ -2866,7 +2871,9 @@ async function checkpointController<T>(
         )
           throw error;
         try {
-          await awaitCheckpointAdmission(config.repository, "settled");
+          await awaitCheckpointAdmission(config.repository, "settled", {
+            final,
+          });
         } catch (settlement) {
           // Name the stop itself: the pending checkpoint only follows it.
           throw new AggregateError(
@@ -2877,7 +2884,11 @@ async function checkpointController<T>(
         }
         throw error;
       }
-      await awaitCheckpointAdmission(config.repository, "settled");
+      await awaitCheckpointAdmission(
+        config.repository,
+        final ? "explicit" : "settled",
+        { final },
+      );
       return result;
     },
   );
@@ -2939,6 +2950,7 @@ export function runObjective(
         config,
         () => runObjectiveUnscoped(...args),
         services.contentStore,
+        true,
       ),
   );
 }

@@ -167,14 +167,16 @@ const longContextCompactWindow = 400_000;
 
 /**
  * The model string passed to the SDK. Captures and digests keep the configured
- * name. FACTORY_CLAUDE_1M=0 restores the standard window without a config
- * change, so config digests and started Objectives are unaffected.
+ * name. The 1M window is opt-in with FACTORY_CLAUDE_1M=1: measured workers
+ * used about four times the input tokens per attempt on it with no quality
+ * gain. It is not configuration, so config digests and started Objectives
+ * are unaffected.
  */
 export function claudeSdkModel(
   model: string,
   environment: NodeJS.ProcessEnv,
 ): string {
-  return environment.FACTORY_CLAUDE_1M !== "0" && longContextModels.has(model)
+  return environment.FACTORY_CLAUDE_1M === "1" && longContextModels.has(model)
     ? `${model}[1m]`
     : model;
 }

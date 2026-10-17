@@ -360,7 +360,7 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
         },
         env: {
           ...claudeWorkerEnvironment(credentialDirectory),
-          // The worker builds its SDK options; carry the 1M-window override.
+          // The worker builds its SDK options; carry the 1M-window opt-in.
           ...(process.env.FACTORY_CLAUDE_1M !== undefined && {
             FACTORY_CLAUDE_1M: process.env.FACTORY_CLAUDE_1M,
           }),

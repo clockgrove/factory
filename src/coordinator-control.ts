@@ -426,17 +426,18 @@ function sendControl(
         submitted ? "unknown" : "not-sent",
         options?.deadlineAt,
       );
+    // The deadline ends a probe the same way whether its timer or a late
+    // connection observes it first.
+    const expired = () =>
+      request.action === "readiness"
+        ? new ControllerReadinessPendingError("deadline")
+        : incomplete();
     const abort = () => finish(incomplete());
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
     if (options)
       timer = setTimeout(
-        () =>
-          finish(
-            request.action === "readiness"
-              ? new ControllerReadinessPendingError("deadline")
-              : incomplete(),
-          ),
+        () => finish(expired()),
         Math.max(0, options.deadlineAt - Date.now()),
       );
     socket.once("connect", closeDirectory);
@@ -444,12 +445,8 @@ function sendControl(
     let body = "";
     socket.setEncoding("utf8");
     socket.on("connect", () => {
-      if (
-        settled ||
-        signal?.aborted ||
-        (options && Date.now() >= options.deadlineAt)
-      )
-        return finish(incomplete());
+      if (settled || signal?.aborted) return finish(incomplete());
+      if (options && Date.now() >= options.deadlineAt) return finish(expired());
       submitted = true;
       socket.write(`${JSON.stringify({ ...request, token })}\n`);
     });

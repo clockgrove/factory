@@ -2743,7 +2743,12 @@ export class RealGitHubGateway implements GitHubGateway {
     return this.native.mergeStack(layers, baseBranch, expectedStack, {
       ...options,
       requireMergeCommits: () => this.requireMergeCommits(baseBranch),
-      failed: () => this.stackReadiness(layers),
+      // The caller clears its recorded request first, so the repeat requests
+      // the merge anew instead of resuming the failed one (#1482).
+      failed: async () => {
+        await options.failed?.();
+        await this.stackReadiness(layers);
+      },
     });
   }
 

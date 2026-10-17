@@ -52,14 +52,12 @@ import {
   claudeOwnedSpawn,
   claudePrivateWrite,
   readClaudePrivate,
-  claudeProcessDisposition,
   claudeResumeOptions,
   claudeSessionEnvironment,
   prepareClaudeSession,
   releaseClaudeStorage,
   requireClaudeSession,
   settleClaudeProcess,
-  type ClaudeNativeProcess,
   type ClaudeOwnedSession,
 } from "./execution/claude-session.js";
 import { redact } from "./execution/harness-support.js";
@@ -71,6 +69,10 @@ import {
 } from "./recovery-checkpoint.js";
 import { assertDurableValue } from "./execution/checkpoint.js";
 import { attachFault, type Fault, transient } from "./fault.js";
+import {
+  type NativeProcessOwner,
+  nativeProcessDisposition,
+} from "./process.js";
 import { serviceLoginSecrets } from "./provider-credentials.js";
 import {
   assertProviderTurnDeadline,
@@ -798,7 +800,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       return { disposition: "unknown" };
     const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
     if (runningTurns.has(session.data.root)) return { disposition: "active" };
-    const disposition = claudeProcessDisposition(session.data.process);
+    const disposition = nativeProcessDisposition(session.data.process);
     if (disposition !== "settled") return { disposition };
     // Only the controller writes `completed.json`, so a turn without its own
     // has no outcome left to recover once its process has ceased.
@@ -1025,7 +1027,7 @@ class ClaudePlanningTransport implements PlanningTransport {
     let events: AsyncIterator<SDKMessage> | undefined;
     let closeStarted = false;
     let result: SDKResultMessage | undefined;
-    let nativeProcess: ClaudeNativeProcess | undefined;
+    let nativeProcess: NativeProcessOwner | undefined;
     let nativeSpawnAttempted = false;
     let streamClosed = false;
     let checkpointRejected = false;

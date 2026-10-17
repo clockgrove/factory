@@ -29,7 +29,13 @@ import type {
   ReviewImageInput,
 } from "../contracts.js";
 import { codexCaptureEvent } from "../execution/interaction-capture.js";
-import { currentProcessSignal, UnsettledSubprocessError } from "../process.js";
+import {
+  currentProcessSignal,
+  isNativeProcessOwner,
+  type NativeProcessOwner,
+  nativeProcessDisposition,
+  UnsettledSubprocessError,
+} from "../process.js";
 import { transient } from "../fault.js";
 import {
   DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
@@ -73,6 +79,12 @@ import {
 } from "./transport.js";
 
 const LOWER_EFFORT_REVIEW_IDLE_TIMEOUT_MS = 5 * 60 * 1_000;
+
+/**
+ * Session homes whose turn this controller is still running. Its process can
+ * exit before the turn's outcome is written, so such a turn is never ceased.
+ */
+const runningTurns = new Set<string>();
 
 const codexBilling = (detail: string): CodexFailure => ({
   failureClass: "provider-billing",
@@ -394,6 +406,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     deliveredSources?: DeliveredPlanningSources;
     sourceDelivery?: PlanningSourceDelivery | null;
     sourceRequestDigest?: string;
+    process?: NativeProcessOwner;
   } {
     const data = session.data as
       | {
@@ -409,6 +422,7 @@ export class CodexPlanningTransport implements PlanningTransport {
           deliveredSources?: DeliveredPlanningSources;
           sourceDelivery?: PlanningSourceDelivery | null;
           sourceRequestDigest?: string;
+          process?: unknown;
         }
       | undefined;
     if (
@@ -428,7 +442,8 @@ export class CodexPlanningTransport implements PlanningTransport {
       (data.sourceReadProfile !== undefined &&
         (data.sourceReadProfile !== "pinned-source-read-v1" ||
           session.scope.role !== "planning" ||
-          data.transport !== "exec"))
+          data.transport !== "exec")) ||
+      (data.process !== undefined && !isNativeProcessOwner(data.process))
     )
       throw new Error(
         "Reviewer continuation differs from its private adapter binding",
@@ -448,6 +463,7 @@ export class CodexPlanningTransport implements PlanningTransport {
       deliveredSources?: DeliveredPlanningSources;
       sourceDelivery?: PlanningSourceDelivery | null;
       sourceRequestDigest?: string;
+      process?: NativeProcessOwner;
     };
   }
 
@@ -579,13 +595,40 @@ export class CodexPlanningTransport implements PlanningTransport {
       throw new Error(
         "Codex session model or tool policy changed. Reconciliation cannot rewrite the retained policy or prove an unknown turn settled. After authenticated resource settlement, use supported session disposal before a fresh review within its existing allowance.",
       );
+    // A turn a stopped controller left active settles its resources once its
+    // recorded process provably ceased. Unless the native thread still holds
+    // its outcome, it is then ceased: abandoned with its turn unknown.
+    let ceased = false;
+    if (
+      session.status === "in-flight" &&
+      session.currentTurn?.resources === "active"
+    ) {
+      if (runningTurns.has(data.sessionRoot)) return { disposition: "active" };
+      const disposition = nativeProcessDisposition(data.process);
+      if (disposition !== "settled") return { disposition };
+      ceased = true;
+    }
+    const unrecovered = (
+      disposition: "active" | "unknown",
+    ): AgentSessionReconciliation =>
+      !ceased
+        ? { disposition }
+        : session.currentTurn!.terminal === undefined
+          ? {
+              disposition: "ceased",
+              session: {
+                ...structuredClone(session),
+                currentTurn: { ...session.currentTurn!, resources: "settled" },
+              },
+            }
+          : { disposition: "unknown" };
     if (session.status === "in-flight" && data.transport === "app-server") {
       if (
         !data.threadId ||
         !data.turnId ||
-        session.currentTurn?.resources !== "settled"
+        (!ceased && session.currentTurn?.resources !== "settled")
       )
-        return { disposition: "unknown" };
+        return unrecovered("unknown");
       assertOwnedCodexHome(data.sessionRoot, this.sessionOwner(session));
       const home = createCodexHome({
         root: data.sessionRoot,
@@ -617,8 +660,8 @@ export class CodexPlanningTransport implements PlanningTransport {
             ? AbortSignal.any([guard.signal, caller])
             : guard.signal,
         });
-        if (snapshot.status === "inProgress") return { disposition: "active" };
-        if (snapshot.status === "unknown") return { disposition: "unknown" };
+        if (snapshot.status === "inProgress") return unrecovered("active");
+        if (snapshot.status === "unknown") return unrecovered("unknown");
         const recovered = structuredClone(session);
         recovered.currentTurn!.terminal = snapshot.status;
         recovered.currentTurn!.resources = "settled";
@@ -650,7 +693,7 @@ export class CodexPlanningTransport implements PlanningTransport {
       session.status === "in-flight" ||
       session.currentTurn?.resources !== "settled"
     )
-      return { disposition: "unknown" };
+      return unrecovered("unknown");
     if (
       data.response !== undefined &&
       data.responseDigest !==
@@ -725,6 +768,18 @@ export class CodexPlanningTransport implements PlanningTransport {
     signal?: AbortSignal;
     deadlineAt?: string;
   }): Promise<void> {
+    const running: string[] = [];
+    try {
+      await this.runTurn(args, running);
+    } finally {
+      for (const root of running) runningTurns.delete(root);
+    }
+  }
+
+  private async runTurn(
+    args: Parameters<CodexPlanningTransport["run"]>[0],
+    running: string[],
+  ): Promise<void> {
     const { invocation, turn: state } = args;
     const selection = this.selection(args.role);
     const selectedTransport = args.tree ? "exec" : this.transport;
@@ -812,6 +867,7 @@ export class CodexPlanningTransport implements PlanningTransport {
       delete sessionData.responseDigest;
       delete sessionData.usage;
       delete sessionData.turnId;
+      delete sessionData.process;
       if (sourceRead && args.planningSources) {
         sessionData.sourceDelivery = args.planningSources.delivery ?? null;
         sessionData.sourceRequestDigest = createHash("sha256")
@@ -996,6 +1052,10 @@ export class CodexPlanningTransport implements PlanningTransport {
       session = { ...session, data: { ...sessionData }, status };
       continuation.checkpoint(session);
     };
+    if (session && sessionData) {
+      runningTurns.add(sessionData.sessionRoot);
+      running.push(sessionData.sessionRoot);
+    }
     try {
       checkpointSession("in-flight");
       initialCheckpointed = true;
@@ -1113,6 +1173,14 @@ export class CodexPlanningTransport implements PlanningTransport {
             }
           : {}),
         env: home.env,
+        // The recorded process lets a later controller prove its cessation.
+        ...(session &&
+          sessionData && {
+            spawned: (owner: NativeProcessOwner) => {
+              sessionData!.process = owner;
+              checkpointSession("in-flight");
+            },
+          }),
         ...(invocation.observe?.nativeBoundaryTelemetry && {
           boundary: (
             boundary: import("../capture.js").ModelBoundaryObservation,

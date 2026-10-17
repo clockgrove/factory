@@ -11,6 +11,7 @@ import {
   nativeCodexServiceTier,
 } from "./codex-exec.js";
 import {
+  type NativeProcessOwner,
   subprocessAsync,
   UnsettledSubprocessError,
   type SubprocessInputChannel,
@@ -64,6 +65,8 @@ export interface CodexAppServerOptions {
   redactionValues?: string[];
   /** Optional observation; exceptions never alter protocol work. */
   progress?: (event: CodexAppServerProgress) => void;
+  /** Records the native process before any protocol input. */
+  spawned?: (owner: NativeProcessOwner) => void;
 }
 
 export interface CodexAppServerTurnOptions extends CodexAppServerOptions {
@@ -369,7 +372,7 @@ class AppServerClient {
       const result = await subprocessAsync(
         file,
         command,
-        { env, signal },
+        { env, signal, spawned: this.args.spawned },
         {
           cancellationGraceMs: 250,
           cancel: () => cancel?.(),

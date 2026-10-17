@@ -9,7 +9,11 @@ import type {
 import type { CodexServiceTier } from "./config.js";
 import { codexRuntime } from "./codex-planning-isolation.js";
 import { attachFault } from "./fault.js";
-import { subprocessAsync, UnsettledSubprocessError } from "./process.js";
+import {
+  type NativeProcessOwner,
+  subprocessAsync,
+  UnsettledSubprocessError,
+} from "./process.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
 import type { ModelBoundaryObservation } from "./capture.js";
 import {
@@ -185,6 +189,8 @@ export async function runCodexExec(args: {
   stderr?: (diagnostic: CodexStderrDiagnostic) => void | Promise<void>;
   redactionValues?: string[];
   boundary?: (observation: ModelBoundaryObservation) => void;
+  /** Records the native process before its prompt is written. */
+  spawned?: (owner: NativeProcessOwner) => void;
 }): Promise<void> {
   assertReviewImages(args.reviewImages, args.options.workingDirectory);
   const started = performance.now();
@@ -259,7 +265,7 @@ export async function runCodexExec(args: {
     const result = await subprocessAsync(
       file,
       command,
-      { env, signal },
+      { env, signal, spawned: args.spawned },
       args.prompt,
       (stream, chunk) => {
         if (stream === "stderr") {

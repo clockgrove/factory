@@ -8,7 +8,6 @@ import {
   renameSync,
   rmSync,
   writeFileSync,
-  readlinkSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -20,22 +19,14 @@ import {
   assertAgentSessionScope,
 } from "../agent-session.js";
 import {
-  linuxProcessIdentity,
-  processGroupExists,
+  type NativeProcessOwner,
+  nativeProcessDisposition,
+  nativeProcessOwner,
   UnsettledSubprocessError,
 } from "../process.js";
 import { killGroup, type WorkerHandleData } from "./worker-process.js";
 import type { ClaudeUsageBaseline } from "./claude-usage.js";
 
-export interface ClaudeNativeProcess {
-  pid: number;
-  group: number;
-  startTime: string;
-  namespace: string;
-  uid: number;
-  /** The kernel boot the process ran in; absent from earlier receipts. */
-  boot?: string;
-}
 export interface ClaudeSessionData {
   root: string;
   selectionDigest: string;
@@ -44,7 +35,7 @@ export interface ClaudeSessionData {
   baseline?: ClaudeUsageBaseline;
   nativeTerminal?: true;
   settled?: true;
-  process?: ClaudeNativeProcess;
+  process?: NativeProcessOwner;
   pendingWorkerIdentity?: string;
   worker?: WorkerHandleData;
   profileId?: string;
@@ -286,43 +277,10 @@ export function claudeResumeOptions(
       : { sessionId: session.data.nativeSessionId }),
   };
 }
-let kernelBoot: string | undefined;
-/** This kernel boot's identity; it cannot change while this process runs. */
-function currentBoot(): string {
-  kernelBoot ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-  return kernelBoot;
-}
-/**
- * Whether the recorded process may still run. `settled` is a proof that it
- * and its group ceased: a later boot ended every process of an earlier one,
- * whatever its namespace; within the recorded namespace, the leader is gone
- * or its pid now names another process, and no process remains in its group.
- * `active` is only ever the exact recorded process or its group, so a caller
- * never signals a process it cannot identify. Anything else is `unknown`.
- */
-export function claudeProcessDisposition(
-  owner: ClaudeNativeProcess | undefined,
-): "active" | "settled" | "unknown" {
-  if (!owner || owner.uid !== process.getuid?.()) return "unknown";
-  if (owner.boot !== undefined && owner.boot !== currentBoot())
-    return "settled";
-  if (owner.namespace !== readlinkSync("/proc/self/ns/pid")) return "unknown";
-  const current = linuxProcessIdentity(owner.pid);
-  if (current?.startTime === owner.startTime) {
-    // The recorded process itself still runs; outside its group it is unowned.
-    if (current.group !== owner.group) return "unknown";
-    return processGroupExists(owner.group) ? "active" : "settled";
-  }
-  // The leader is gone or its pid is reused. A reused pid's group may be
-  // another owner's, so only an empty group proves cessation.
-  if (processGroupExists(owner.group)) return current ? "unknown" : "active";
-  return "settled";
-}
 export function claudeOwnedSpawn(
-  onSpawn: (owner: ClaudeNativeProcess) => void,
+  onSpawn: (owner: NativeProcessOwner) => void,
 ): NonNullable<Options["spawnClaudeCodeProcess"]> {
   return (options) => {
-    const boot = currentBoot();
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
       env: options.env,
@@ -331,22 +289,13 @@ export function claudeOwnedSpawn(
     });
     // Ensure process errors always have a listener even if ownership/checkpointing throws.
     child.on("error", () => undefined);
-    const identity = child.pid && linuxProcessIdentity(child.pid);
-    if (!child.pid || !identity || identity.group !== child.pid) {
-      child.kill("SIGKILL");
-      throw new UnsettledSubprocessError(
-        "Claude native process ownership is unresolved",
-      );
-    }
-    const owner: ClaudeNativeProcess = {
-      pid: child.pid,
-      group: identity.group,
-      startTime: identity.startTime,
-      namespace: readlinkSync("/proc/self/ns/pid"),
-      uid: process.getuid!(),
-      boot,
-    };
+    let owner: NativeProcessOwner;
     try {
+      if (!child.pid)
+        throw new UnsettledSubprocessError(
+          "Claude native process ownership is unresolved",
+        );
+      owner = nativeProcessOwner(child.pid);
       onSpawn(owner);
     } catch (error) {
       child.kill("SIGKILL");
@@ -356,7 +305,7 @@ export function claudeOwnedSpawn(
     options.signal.addEventListener(
       "abort",
       () => {
-        if (claudeProcessDisposition(owner) === "active") child.kill("SIGTERM");
+        if (nativeProcessDisposition(owner) === "active") child.kill("SIGTERM");
       },
       { once: true },
     );
@@ -365,19 +314,19 @@ export function claudeOwnedSpawn(
   };
 }
 export async function settleClaudeProcess(
-  owner: ClaudeNativeProcess | undefined,
+  owner: NativeProcessOwner | undefined,
 ): Promise<void> {
   if (!owner)
     throw new UnsettledSubprocessError(
       "Claude native process was not authenticated",
     );
-  const disposition = claudeProcessDisposition(owner);
+  const disposition = nativeProcessDisposition(owner);
   if (disposition === "unknown")
     throw new UnsettledSubprocessError(
       "Claude native process namespace or ownership changed",
     );
   if (disposition === "active") await killGroup(owner.group, "Claude planning");
-  if (claudeProcessDisposition(owner) !== "settled")
+  if (nativeProcessDisposition(owner) !== "settled")
     throw new UnsettledSubprocessError(
       "Claude native process cessation remains unresolved",
     );

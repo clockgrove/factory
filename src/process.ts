@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -1513,6 +1514,81 @@ function processGroupMembers(group: number, limit = Infinity): number {
   return members;
 }
 
+/** A spawned process group leader's recorded identity, for later cessation proof. */
+export interface NativeProcessOwner {
+  pid: number;
+  group: number;
+  startTime: string;
+  namespace: string;
+  uid: number;
+  /** The kernel boot the process ran in; absent from earlier receipts. */
+  boot?: string;
+}
+export function isNativeProcessOwner(
+  value: unknown,
+): value is NativeProcessOwner {
+  const owner = value as Partial<NativeProcessOwner> | null;
+  return (
+    typeof owner === "object" &&
+    owner !== null &&
+    Number.isSafeInteger(owner.pid) &&
+    Number.isSafeInteger(owner.group) &&
+    Number.isSafeInteger(owner.uid) &&
+    typeof owner.startTime === "string" &&
+    typeof owner.namespace === "string" &&
+    (owner.boot === undefined || typeof owner.boot === "string")
+  );
+}
+let kernelBoot: string | undefined;
+/** This kernel boot's identity; it cannot change while this process runs. */
+function currentBoot(): string {
+  kernelBoot ??= readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  return kernelBoot;
+}
+/** The identity of `pid`, a just-spawned child that leads its own group. */
+export function nativeProcessOwner(pid: number): NativeProcessOwner {
+  const boot = currentBoot();
+  const identity = linuxProcessIdentity(pid);
+  if (!identity || identity.group !== pid)
+    throw new UnsettledSubprocessError(
+      "Native process ownership is unresolved",
+    );
+  return {
+    pid,
+    group: identity.group,
+    startTime: identity.startTime,
+    namespace: readlinkSync("/proc/self/ns/pid"),
+    uid: process.getuid!(),
+    boot,
+  };
+}
+/**
+ * Whether the recorded process may still run. `settled` is a proof that it
+ * and its group ceased: a later boot ended every process of an earlier one,
+ * whatever its namespace; within the recorded namespace, the leader is gone
+ * or its pid now names another process, and no process remains in its group.
+ * `active` is only ever the exact recorded process or its group, so a caller
+ * never signals a process it cannot identify. Anything else is `unknown`.
+ */
+export function nativeProcessDisposition(
+  owner: NativeProcessOwner | undefined,
+): "active" | "settled" | "unknown" {
+  if (!owner || owner.uid !== process.getuid?.()) return "unknown";
+  if (owner.boot !== undefined && owner.boot !== currentBoot())
+    return "settled";
+  if (owner.namespace !== readlinkSync("/proc/self/ns/pid")) return "unknown";
+  const current = linuxProcessIdentity(owner.pid);
+  if (current?.startTime === owner.startTime) {
+    // The recorded process itself still runs; outside its group it is unowned.
+    if (current.group !== owner.group) return "unknown";
+    return processGroupExists(owner.group) ? "active" : "settled";
+  }
+  // The leader is gone or its pid is reused. A reused pid's group may be
+  // another owner's, so only an empty group proves cessation.
+  if (processGroupExists(owner.group)) return current ? "unknown" : "active";
+  return "settled";
+}
+
 interface OwnedSubprocess {
   pid: number;
   startTime: string;
@@ -1601,7 +1677,10 @@ interface InteractiveSubprocessInput {
 export async function subprocessAsync(
   file: string,
   args: string[],
-  options: SpawnOptions = {},
+  options: SpawnOptions & {
+    /** Records the child's identity before any input; a throw stops it. */
+    spawned?: (owner: NativeProcessOwner) => void;
+  } = {},
   input?: string | InteractiveSubprocessInput,
   observe?: (stream: "stdout" | "stderr", chunk: Buffer) => void,
   boundary?: (
@@ -1631,7 +1710,7 @@ export async function subprocessAsync(
   const scope = processCancellation.getStore();
   let stoppedLeftovers = 0;
   // `options.signal` (such as a deadline) also stops the whole process group.
-  const { signal: extra, ...spawnOptions } = options;
+  const { signal: extra, spawned, ...spawnOptions } = options;
   const signal =
     scope?.signal && extra
       ? AbortSignal.any([scope.signal, extra])
@@ -1729,6 +1808,11 @@ export async function subprocessAsync(
         "Interactive subprocess ownership could not be established",
       );
     if (owned) scope?.observe?.(owned, false);
+    if (spawned) {
+      if (!owned)
+        throw new Error("Subprocess ownership could not be established");
+      spawned(nativeProcessOwner(owned.pid));
+    }
     if (interactive) {
       const channel: SubprocessInputChannel = {
         signal,

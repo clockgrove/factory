@@ -114,7 +114,7 @@ const ENVIRONMENT = [
 ];
 
 /** What a Codex shell may do in its working directory and on the network. */
-export interface CodexSandbox {
+interface CodexSandbox {
   /** The thread's working directory. */
   directory: string;
   workspace: "read" | "write";
@@ -359,7 +359,7 @@ enabled = ${sandbox.network}
 `;
 }
 
-export interface CodexHome {
+interface CodexHome {
   root: string;
   /** Authenticate settled native history before resuming; unavailable throws. */
   nativeCaptureBoundary(threadId: string): NativeCaptureBoundary;
@@ -646,7 +646,7 @@ function authenticateHome(root: string, owner: string) {
   return identity;
 }
 
-/** Remove only an authenticated, settled retained adapter home. */
+/** Fail unless a retained adapter home still belongs to `owner` with its recorded directory identities. */
 export function assertOwnedCodexHome(root: string, owner: string): void {
   authenticateHome(root, owner);
 }

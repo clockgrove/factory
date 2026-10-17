@@ -5,7 +5,7 @@ import {
   type CaptureExportOptions,
 } from "./capture-export.js";
 
-export function parseCaptureExportOptions(args: string[]) {
+function parseCaptureExportOptions(args: string[]) {
   const values = new Map<string, string[]>();
   let send = false;
   for (let index = 0; index < args.length; index++) {

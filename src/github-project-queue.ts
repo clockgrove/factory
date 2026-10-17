@@ -15,6 +15,7 @@ import type {
   ProjectQueuePlannedEffect,
   ProjectQueuePlannedEffectInput,
 } from "./contracts.js";
+import { canonical } from "./execution-profiles.js";
 import { GitHubProjectQueueGraphqlError } from "./github-client.js";
 import type { ProjectGraphQL } from "./github-project.js";
 import { currentProcessSignal, assertProcessActive } from "./process.js";
@@ -49,21 +50,10 @@ const positiveInteger = (value: unknown): value is number =>
   Number.isSafeInteger(value) && Number(value) > 0;
 const orderValue = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
-const same = (left: unknown, right: unknown): boolean => {
-  const stable = (value: unknown): unknown => {
-    if (Array.isArray(value)) return value.map(stable);
-    if (value !== null && typeof value === "object")
-      return Object.fromEntries(
-        Object.entries(value)
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([key, child]) => [key, stable(child)]),
-      );
-    return value;
-  };
-  return JSON.stringify(stable(left)) === JSON.stringify(stable(right));
-};
+const same = (left: unknown, right: unknown): boolean =>
+  JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 
-export function assertProjectQueueBinding(
+function assertProjectQueueBinding(
   value: unknown,
   repository?: string,
 ): asserts value is ProjectQueueBinding {
@@ -749,7 +739,7 @@ export function assertProjectQueueWriteReceipt(
 }
 
 /** Keeps an unreadable original response private for the owner's exact receipt journal. */
-export class ProjectQueueResponseError extends Error {
+class ProjectQueueResponseError extends Error {
   constructor(
     readonly intent: ProjectQueueIntent,
     readonly original: unknown,

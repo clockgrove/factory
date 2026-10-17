@@ -59,7 +59,6 @@ export function planningSessionInputDigest(inputs: {
   sourcePacketDigest?: string;
   approvedPlaybookPin?: ApprovedPlaybookPin;
   workflowRecipePin?: WorkflowRecipePin;
-  contextLookup?: PlanningContextPacket;
   planningRecovery?: { contextLookup?: { packet: PlanningContextPacket } };
 }): string {
   if (!/^[a-f0-9]{40}$/.test(inputs.baseSha))
@@ -85,8 +84,7 @@ export function planningSessionInputDigest(inputs: {
             digest: inputs.approvedPlaybookPin.digest,
           },
   ];
-  const context =
-    inputs.planningRecovery?.contextLookup?.packet ?? inputs.contextLookup;
+  const context = inputs.planningRecovery?.contextLookup?.packet;
   if (context) {
     if (context.schemaVersion !== 1 || !/^[a-f0-9]{64}$/.test(context.binding))
       throw new Error("Planner immutable context binding is invalid");

@@ -1,5 +1,5 @@
 /** The options each CLI command reads; shared by the CLI and guided setup. */
-export const installFlags = [
+const installFlags = [
   "provider",
   "repository",
   "checkout",
@@ -89,7 +89,7 @@ const commandFlags: Record<string, string[]> = {
   retry: ["objective", "item", "rereview", "review-artifacts", "fresh"],
 };
 /** Flags that take no value; everything else reads the next argument. */
-export const booleanFlags = new Set([
+const booleanFlags = new Set([
   "background",
   "config-only",
   "capture-content",

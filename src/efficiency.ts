@@ -6,7 +6,7 @@ import type { DiagnosticEvent } from "./diagnostics.js";
  * durations are never summed: state-derived events carry the whole Work Item's duration.
  */
 
-export const efficiencyStages = [
+const efficiencyStages = [
   "plan",
   "implement",
   "validate",
@@ -138,7 +138,7 @@ function humanWait(event: ControllerEvent): boolean {
 }
 
 /** Merge overlapping or touching intervals. */
-export function unionIntervals(intervals: Interval[]): Interval[] {
+function unionIntervals(intervals: Interval[]): Interval[] {
   const merged: Interval[] = [];
   for (const [start, end] of [...intervals].sort((a, b) => a[0] - b[0])) {
     const last = merged.at(-1);
@@ -381,7 +381,7 @@ export function summarizeEfficiency(
   };
 }
 
-export type EfficiencyReport = ReturnType<typeof summarizeEfficiency>;
+type EfficiencyReport = ReturnType<typeof summarizeEfficiency>;
 
 export function formatDuration(ms: number): string {
   const seconds = Math.round(ms / 1000);

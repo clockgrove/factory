@@ -25,12 +25,7 @@ import {
   readInteractionMetadata,
 } from "./capture.js";
 import { objectiveComplete } from "./completion.js";
-import {
-  type Capacity,
-  type HostFacts,
-  liveCapacity,
-  stateRoot,
-} from "./config.js";
+import { type Capacity, liveCapacity, stateRoot } from "./config.js";
 import type {
   ModelInvocationObservation,
   ModelInvocationPhase,
@@ -341,7 +336,7 @@ export function redactDiagnosticDetail(
 }
 
 /** Project private coordinator error strings without changing the snapshot. */
-export function redactCoordinatorDisposition(
+function redactCoordinatorDisposition(
   coordinator: CoordinatorDisposition | undefined,
   secrets: string[] = [],
 ): CoordinatorDisposition | undefined {
@@ -972,7 +967,7 @@ type ModelEvent = Pick<
 >;
 
 /** Derive observational totals without treating absent provider usage as zero. */
-export function summarizeModelInvocations(
+function summarizeModelInvocations(
   events: Array<ModelEvent | Record<string, unknown>>,
 ): ModelInvocationSummary {
   const invocations = new Map<
@@ -1929,8 +1924,8 @@ export function readUsageSummaryEvents(
     }),
     ...durable,
   ];
-  // Old worker summaries omitted adapter identity. Use only retained matching
-  // invocation/attempt capture metadata; never infer the provider from a model name.
+  // Worker summaries omit adapter identity without an execution binding. Use only retained
+  // matching invocation/attempt capture metadata; never infer the provider from a model name.
   const adapters = new Map<string, Set<string>>();
   for (const capture of readInteractionMetadata(repository, objective)) {
     const key = JSON.stringify([capture.invocationId, capture.providerAttempt]);
@@ -1955,8 +1950,8 @@ export function readUsageSummaryEvents(
  * The sizing scheduling uses now: the worker ceiling and the per-phase reservations, and whether
  * the host or the configuration chose each. Host-sized values follow the current host.
  */
-export function capacityView(capacity: Capacity, hostFacts?: HostFacts) {
-  const live = liveCapacity(capacity, hostFacts);
+export function capacityView(capacity: Capacity) {
+  const live = liveCapacity(capacity);
   return {
     concurrency: live.concurrency,
     concurrencySource: capacity.hostSized?.concurrency
@@ -2554,7 +2549,7 @@ function splitStatus(
 }
 
 /** Status of an Objective still planning; no executable graph exists yet. */
-export function preparationStatusDocument(
+function preparationStatusDocument(
   preparation: PreparationState,
   secrets: string[] = [],
   runActive: boolean | null = null,

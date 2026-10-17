@@ -393,7 +393,6 @@ async function projectCard(
   }
 }
 
-/** Direct callers use the same admitted repository scope as owned controllers. */
 /**
  * Whether this run projects Project status: explicitly configured, or by default from the
  * queue Project where the gateway can read and update it.
@@ -410,6 +409,7 @@ export function projectStatusOffered(
   );
 }
 
+/** Direct callers use the same admitted repository scope as owned controllers. */
 export function projectGitHubProjectStatus(args: Args): Promise<void> {
   if (!projectStatusOffered(args.config, args.github)) return Promise.resolve();
   return withRecoveryCheckpointScope(

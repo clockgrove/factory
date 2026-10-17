@@ -24,7 +24,7 @@ import type { ContentRef } from "./contracts.js";
 import { parseDiscoveryBody } from "./discovery.js";
 import { validOwnershipPath } from "./ownership.js";
 import { acceptedPlanningDecisionContext } from "./planning-decision-context.js";
-import { markCheckpointDirty } from "./recovery-checkpoint.js";
+import { canonical, markCheckpointDirty } from "./recovery-checkpoint.js";
 import {
   type ContinuationState,
   isExecutionState,
@@ -435,16 +435,6 @@ export function assertRepositoryMemoryBindings(
   }
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object")
-    return `{${Object.entries(value)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
-      .join(",")}}`;
-  return JSON.stringify(value);
-}
 function meaningfulRecord(record: RepositoryMemoryRecord): string {
   const immutableReference =
     record.kind === "reference" &&

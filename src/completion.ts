@@ -191,7 +191,7 @@ export function assertTerminalEligibility(state: FactoryState): void {
 }
 
 /** Charge identities come from the retained execution attempts, not observations. */
-export function chargedWorkAttemptIds(state: FactoryState): string[] {
+function chargedWorkAttemptIds(state: FactoryState): string[] {
   return [
     ...new Set(
       Object.values(state.work).flatMap((work) =>
@@ -209,7 +209,7 @@ export function assertFinalAcceptance(
   options: { verifyAccountingBodies?: boolean } = {},
 ): void {
   const seal = state.finalAcceptance;
-  if (!seal) return; // Historical snapshots remain readable without invented evidence.
+  if (!seal) return; // Not sealed yet: there is no final acceptance to verify.
   assertTerminalEligibility(state);
   const candidate = objectiveCandidate(state)!;
   if (

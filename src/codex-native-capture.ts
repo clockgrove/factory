@@ -195,7 +195,7 @@ export interface OwnedRolloutBudget {
 }
 
 /** Only explicit image blocks in tool output; text, shell arguments and URLs are never exported. */
-export function nativeImageOutputObservation(
+function nativeImageOutputObservation(
   payload: Record<string, unknown>,
   rowTimestamp?: unknown,
 ): CaptureEvent["nativeImageOutput"] {

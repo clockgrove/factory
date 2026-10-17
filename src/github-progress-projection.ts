@@ -246,7 +246,6 @@ async function projectGitHubProgressUnscoped(args: Args): Promise<void> {
         ...details,
         snapshotId,
         observedAt,
-        preparedAt: observedAt,
       }),
   });
   // Keep a fresh snapshot read outside the persistence catch: a corrupt or
@@ -556,7 +555,6 @@ async function publishProgress(
   }
 }
 
-/** Direct callers use the same admitted repository scope as owned controllers. */
 /**
  * Whether this run projects progress: explicitly configured, or on by default where the
  * gateway can post comments.
@@ -569,6 +567,7 @@ export function progressOffered(
   return !!settings && (settings.explicit || !!github.progressComment);
 }
 
+/** Direct callers use the same admitted repository scope as owned controllers. */
 export function projectGitHubProgress(args: Args): Promise<void> {
   if (!progressOffered(args.config, args.github)) return Promise.resolve();
   return withRecoveryCheckpointScope(

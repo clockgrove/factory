@@ -39,7 +39,6 @@ export interface GitHubProgressInput
   snapshotId: string;
   /** The observation time belongs to the persisted snapshot, not this render. */
   observedAt: string;
-  preparedAt: string;
 }
 
 const markdown = (text: string): string =>
@@ -99,7 +98,7 @@ export function objectiveStatusLines(
   const work = "work" in input.view ? input.view.work : [];
   const done = work.filter((item) => item.status === "done");
   const active = work.filter((item) =>
-    ["running", "published", "merging", "waiting"].includes(item.status),
+    ["running", "published", "waiting"].includes(item.status),
   );
   const children =
     input.view.state === "preparing" ? (input.view.split?.children ?? []) : [];
@@ -215,10 +214,7 @@ export function renderObjectiveNotification(
 ): string {
   if (
     !/^[a-f0-9-]{36}$/.test(input.snapshotId) ||
-    [input.observedAt, input.preparedAt].some((at) =>
-      Number.isNaN(Date.parse(at)),
-    ) ||
-    Date.parse(input.observedAt) > Date.parse(input.preparedAt)
+    Number.isNaN(Date.parse(input.observedAt))
   )
     throw new Error(
       "GitHub progress requires verified identity and observation times",

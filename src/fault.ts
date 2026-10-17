@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import * as time from "./clock.js";
 
 /** What a failed result showed, for repair and the operator. */
-export interface FailureEvidence {
+interface FailureEvidence {
   detail: string;
   /** A discovery the worker staged with its wrong result; reviewed as an amendment. */
   discovery?: import("./contracts.js").WorkDiscovery;
@@ -151,7 +151,7 @@ const text = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
 
 /** Exact shape check, used for attached faults and persisted state. */
-export function isFault(value: unknown): value is Fault {
+function isFault(value: unknown): value is Fault {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const fault = value as Record<string, unknown>;
   const keys = Object.keys(fault).sort().join(",");
@@ -193,10 +193,7 @@ export function isFault(value: unknown): value is Fault {
   }
 }
 
-export type FaultClassifier = (
-  error: unknown,
-  method: string,
-) => Fault | undefined;
+type FaultClassifier = (error: unknown, method: string) => Fault | undefined;
 
 /**
  * Method decorator for an adapter boundary: errors leaving the method keep
@@ -308,15 +305,12 @@ function header(headers: HeaderSource, name: string): string | undefined {
 }
 
 /** When a rate-limited request may be sent again, from standard headers. */
-export function retryAfter(
-  headers: HeaderSource,
-  now = time.now(),
-): string | undefined {
+function retryAfter(headers: HeaderSource): string | undefined {
   const retry = header(headers, "retry-after");
   if (retry !== undefined) {
     const seconds = Number(retry);
     const until = Number.isFinite(seconds)
-      ? now + seconds * 1000
+      ? time.now() + seconds * 1000
       : Date.parse(retry);
     if (Number.isFinite(until)) return new Date(until).toISOString();
   }
@@ -330,7 +324,7 @@ export function retryAfter(
  */
 export function requestFault(
   error: unknown,
-  options: { outcomeUnknown: boolean; fix: string; now?: number },
+  options: { outcomeUnknown: boolean; fix: string },
 ): Fault | undefined {
   if (!(error instanceof Error)) return undefined;
   const { status, statusCode, headers } = error as {
@@ -344,7 +338,7 @@ export function requestFault(
     if (http === 401 || http === 403)
       return { kind: "config", detail, fix: options.fix };
     if (http === 429) {
-      const retryAt = retryAfter(headers, options.now);
+      const retryAt = retryAfter(headers);
       return {
         kind: "transient",
         detail,
@@ -428,7 +422,7 @@ export const decision = (question: string, ...evidence: string[]): Fault => ({
 });
 
 /** A run of transient faults with no progress between them. */
-export interface FaultRun {
+interface FaultRun {
   /** When the run began (wall clock, for the operator). */
   since: string;
   count: number;

@@ -8,8 +8,8 @@ import { createHash } from "node:crypto";
 import { assertAgentSessionRef } from "./agent-session.js";
 import { isDeepStrictEqual } from "node:util";
 import type {
-  AccountInfo,
   Options,
+  Query,
   SDKAssistantMessageError,
   SDKMessage,
   SDKRateLimitInfo,
@@ -81,8 +81,8 @@ import {
   requireCompletedProviderTurn,
 } from "./provider-turn.js";
 
-export const CLAUDE_PLANNING_PROVIDER = "anthropic-claude-agent-sdk";
-export const CLAUDE_PLANNING_ADAPTER = CLAUDE_AGENT_SDK_ADAPTER_IDENTITY;
+const CLAUDE_PLANNING_PROVIDER = "anthropic-claude-agent-sdk";
+const CLAUDE_PLANNING_ADAPTER = CLAUDE_AGENT_SDK_ADAPTER_IDENTITY;
 
 /** The Agent SDK's internal tool that carries `outputFormat` results. */
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
@@ -94,14 +94,14 @@ const CLAUDE_TREE_REVIEW_MAX_TURNS = 40;
 const TREE_REVIEW_TOOLS = ["Read", "Grep", "Glob"];
 
 /** Stable system context shared by every Claude planning call. */
-export const CLAUDE_PLANNING_SYSTEM_PROMPT = [
+const CLAUDE_PLANNING_SYSTEM_PROMPT = [
   "You are the planning and review model for Clockgrove Factory.",
   "The user message is the complete request; you have no tools, files or network.",
   "Return exactly the requested result through the structured output.",
 ].join(" ");
 
 /** The system prompt when the session may read an exact tree. */
-export const CLAUDE_TREE_REVIEW_SYSTEM_PROMPT = [
+const CLAUDE_TREE_REVIEW_SYSTEM_PROMPT = [
   "You are the planning and review model for Clockgrove Factory.",
   "The user message is the complete request; you have no network.",
   "Your working directory holds the exact files the request names, and your tools can only read them.",
@@ -113,18 +113,9 @@ export type ClaudePlanningConfig = Extract<
   { kind: "claude-agent-sdk" }
 >;
 
-/** The narrow Agent SDK call surface the transport uses. */
-export type ClaudePlanningQuery = (params: {
-  prompt: string;
-  options: Options;
-}) => AsyncIterable<SDKMessage>;
-
 export interface ClaudePlanningModelOptions extends PlanningModelOptions {
   /** Installation-owned private conversation storage; absent means fresh calls. */
   sessionRoot?: string;
-  /** Defaults to the pinned Agent SDK `query`. */
-  query?: ClaudePlanningQuery;
-  providerTurnIdleTimeoutMs?: number;
   /** Capture redaction only; never sent to the provider. */
   redactionValues?: string[];
 }
@@ -172,7 +163,7 @@ const indexKeys = (length: number) =>
  * becomes an object with one required key per index; claudeOutputValue
  * turns it back into the canonical array before any Factory decoder sees it.
  */
-export function claudeOutputSchema(schema: unknown): unknown {
+function claudeOutputSchema(schema: unknown): unknown {
   const indexed: Record<string, unknown> = {};
   const result = claudeSchemaNode(schema, indexed);
   if (isRecord(result) && Object.keys(indexed).length)
@@ -265,7 +256,7 @@ function admits(schema: unknown, value: Record<string, unknown>): boolean {
  * Only an object with exactly the encoded keys becomes an array; anything
  * else stays as returned, so the canonical decoder still rejects it.
  */
-export function claudeOutputValue(schema: unknown, value: unknown): unknown {
+function claudeOutputValue(schema: unknown, value: unknown): unknown {
   if (!isRecord(schema) || !hasExactLength(schema)) return value;
   const length = exactLength(schema);
   if (length !== undefined) {
@@ -309,7 +300,7 @@ export function claudeOutputValue(schema: unknown, value: unknown): unknown {
  * Authentication is whatever the SDK resolves from the operator's Claude
  * login, CLAUDE_CODE_OAUTH_TOKEN or an optional ANTHROPIC_API_KEY.
  */
-export function claudePlanningOptions(input: {
+function claudePlanningOptions(input: {
   config: ClaudePlanningConfig;
   selection: ClaudeModelSelection;
   schema: unknown;
@@ -367,7 +358,9 @@ export function claudePlanningOptions(input: {
   };
 }
 
-async function loadClaudeQuery(): Promise<ClaudePlanningQuery> {
+async function loadClaudeQuery(): Promise<
+  typeof import("@anthropic-ai/claude-agent-sdk").query
+> {
   try {
     return (await import("@anthropic-ai/claude-agent-sdk")).query;
   } catch (error) {
@@ -376,12 +369,6 @@ async function loadClaudeQuery(): Promise<ClaudePlanningQuery> {
     );
   }
 }
-
-/** The Agent SDK control surface the model-free login probe uses. */
-export type ClaudeLoginQuery = (params: {
-  prompt: AsyncIterable<never>;
-  options: Options;
-}) => { accountInfo(): Promise<AccountInfo>; close(): void };
 
 export interface ClaudeLoginReadiness {
   status: "present" | "missing";
@@ -399,19 +386,16 @@ const LOGIN_PROBE_TIMEOUT_MS = 30_000;
  */
 export async function probeClaudeLogin(
   environment: Record<string, string> = {},
-  query?: ClaudeLoginQuery,
 ): Promise<ClaudeLoginReadiness> {
   const root = mkdtempSync(join(tmpdir(), "factory-claude-login-"));
   const guard = new ProviderTurnGuard(LOGIN_PROBE_TIMEOUT_MS);
-  let session: ReturnType<ClaudeLoginQuery> | undefined;
+  let session: Query | undefined;
   let release: () => void = () => undefined;
   const idle = new Promise<void>((resolve) => (release = resolve));
   try {
     const credentialDirectory = join(root, "empty-gh-config");
     mkdirSync(credentialDirectory, { mode: 0o700 });
-    const start =
-      query ??
-      ((await guard.race(loadClaudeQuery())) as unknown as ClaudeLoginQuery);
+    const start = await guard.race(loadClaudeQuery());
     session = start({
       // Streaming input keeps the session open for control requests and
       // ends, without a message, when the probe finishes.
@@ -696,8 +680,6 @@ class ClaudePlanningTransport implements PlanningTransport {
 
   constructor(
     private config: ClaudePlanningConfig,
-    private query: ClaudePlanningQuery | undefined,
-    private providerTurnIdleTimeoutMs: number | undefined,
     redactionValues: string[],
     private sessionRoot?: string,
   ) {
@@ -765,12 +747,11 @@ class ClaudePlanningTransport implements PlanningTransport {
     let compacted = false;
     if (continuation) {
       if (
-        this.query ||
-        (args.role === "planner"
+        args.role === "planner"
           ? continuation.scope.role !== "planning"
           : !["result-review", "objective-review"].includes(
               continuation.scope.role,
-            ))
+            )
       )
         throw new Error(
           "Claude continuation has a different native transport or role",
@@ -816,8 +797,8 @@ class ClaudePlanningTransport implements PlanningTransport {
       claudePrivateWrite(join(owned.data.root, "pending.json"), owned.ref);
     }
     const guard = new ProviderTurnGuard(
-      this.providerTurnIdleTimeoutMs ?? modelResponseTimeoutMs(reasoningEffort),
-      this.providerTurnIdleTimeoutMs ?? DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
+      modelResponseTimeoutMs(reasoningEffort),
+      DEFAULT_PROVIDER_TURN_IDLE_TIMEOUT_MS,
       args.deadlineAt,
     );
     const abortController = new AbortController();
@@ -851,7 +832,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       assertProviderTurnDeadline(args.deadlineAt);
       abortController.signal.throwIfAborted();
       root = mkdtempSync(join(tmpdir(), "factory-claude-planning-"));
-      const query = this.query ?? (await guard.race(loadClaudeQuery()));
+      const query = await guard.race(loadClaudeQuery());
       // A tree review reads the exact tree; any other session gets an empty
       // private directory, with nothing to read or load.
       const cwd = args.tree ?? join(root, "cwd");
@@ -867,30 +848,25 @@ class ClaudePlanningTransport implements PlanningTransport {
         abortController,
         tree: Boolean(args.tree),
       });
-      if (!this.query) {
-        const spawnNative = claudeOwnedSpawn((owner) => {
-          nativeProcess = owner;
-          if (owned) {
-            owned.data.process = owner;
-            owned.ref.currentTurn = {
-              ...owned.ref.currentTurn!,
-              dispatch: "submitted",
-              resources: "active",
-            };
-            checkpoint("in-flight");
-            claudePrivateWrite(
-              join(owned.data.root, "pending.json"),
-              owned.ref,
-            );
-          }
-        });
-        options.spawnClaudeCodeProcess = (options) => {
-          assertProviderTurnDeadline(args.deadlineAt);
-          abortController.signal.throwIfAborted();
-          nativeSpawnAttempted = true;
-          return spawnNative(options);
-        };
-      }
+      const spawnNative = claudeOwnedSpawn((owner) => {
+        nativeProcess = owner;
+        if (owned) {
+          owned.data.process = owner;
+          owned.ref.currentTurn = {
+            ...owned.ref.currentTurn!,
+            dispatch: "submitted",
+            resources: "active",
+          };
+          checkpoint("in-flight");
+          claudePrivateWrite(join(owned.data.root, "pending.json"), owned.ref);
+        }
+      });
+      options.spawnClaudeCodeProcess = (options) => {
+        assertProviderTurnDeadline(args.deadlineAt);
+        abortController.signal.throwIfAborted();
+        nativeSpawnAttempted = true;
+        return spawnNative(options);
+      };
       if (owned) {
         Object.assign(options, claudeResumeOptions(owned));
         options.env = claudeSessionEnvironment(owned, options.env ?? {});
@@ -1122,7 +1098,7 @@ class ClaudePlanningTransport implements PlanningTransport {
       if (nativeProcess) {
         await settleClaudeProcess(nativeProcess);
         state.stopped = true;
-      } else if (!nativeSpawnAttempted && !this.query) {
+      } else if (!nativeSpawnAttempted) {
         // Validation/import failed before the pinned SDK's sole process launch surface.
         state.stopped = true;
       }
@@ -1302,8 +1278,6 @@ export class ClaudePlanningModel extends StructuredPlanningModel {
     super(
       new ClaudePlanningTransport(
         config,
-        options.query,
-        options.providerTurnIdleTimeoutMs,
         options.redactionValues ?? [],
         options.sessionRoot,
       ),

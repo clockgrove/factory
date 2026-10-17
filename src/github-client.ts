@@ -206,7 +206,7 @@ function transportFailure(
  * for a merge's 405 (which has no code) the repository and pull request facts
  * read back after it. The server's prose is never read or retained.
  */
-export type GitHubRefusal =
+type GitHubRefusal =
   | "merge-method-not-allowed"
   | "base-modified"
   | "already-exists";
@@ -345,7 +345,6 @@ const FEATURE_ROUTE = /^(stacks\b|issues\/\d+\/(dependencies|sub_issues)\b)/;
 export function gitHubFault(
   error: unknown,
   call: GitHubCall,
-  now = time.now(),
 ): Fault | undefined {
   if (!(error instanceof GitHubRequestError)) return undefined;
   const path = call.path.split("?")[0]!;
@@ -375,7 +374,10 @@ export function gitHubFault(
         };
       // An object Factory created moments ago may not be visible yet,
       // even through its dependency or sub-issue routes.
-      if (call.createdAt !== undefined && now - call.createdAt < GITHUB_LAG_MS)
+      if (
+        call.createdAt !== undefined &&
+        time.now() - call.createdAt < GITHUB_LAG_MS
+      )
         return transient(`GitHub does not show ${what} yet`, false);
       if (FEATURE_ROUTE.test(path))
         return {
@@ -532,12 +534,9 @@ export class GitHubClient {
   private queue: Promise<void> = Promise.resolve();
   private notBefore = 0;
 
-  constructor(private readonly supplied?: Octokit) {}
-
   private octokit(): Promise<Octokit> {
     if (!this.client) {
       this.client = (async () => {
-        if (this.supplied) return this.supplied;
         let token: string;
         try {
           // A credential helper is not owned work: it keeps the caller's

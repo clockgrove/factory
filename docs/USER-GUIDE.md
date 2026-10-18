@@ -45,14 +45,14 @@ It does not see your home directory, logins (`~/.claude`, `~/.codex`, `~/.ssh`, 
 
 The optional top-level `sandbox` object relaxes this. It is a host setting and does not change the configuration digest:
 
-| Field           | Default | Effect                                                                                                                                                                                                                    |
-| --------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `required`      | `true`  | `false` runs commands unsandboxed when bubblewrap is unavailable. Status and setup show it.                                                                                                                               |
-| `network`       | `"off"` | `"package-install"` gives network only to `pnpm install --frozen-lockfile --ignore-scripts` and `npm ci --ignore-scripts`, so they can fetch what the store lacks. Every other command stays offline.                     |
-| `packageStore`  | none    | An absolute directory of its own for the pnpm store and cache and the npm cache, shared writable by sandboxed commands. With a warm store an install runs offline. pnpm 11 or later reads it; its store must be writable. |
-| `readOnlyPaths` | `[]`    | Further absolute host directories commands may read, such as a toolchain outside the `PATH`.                                                                                                                              |
+| Field           | Default | Effect                                                                                                                                                                                                                                                                          |
+| --------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `required`      | `true`  | `false` runs commands unsandboxed when bubblewrap is not installed. An installed bubblewrap that fails is always a fault. Status and setup show the mode.                                                                                                                       |
+| `network`       | `"off"` | `"package-install"` gives network only to the dependency install (`pnpm install --frozen-lockfile --ignore-scripts` or `npm ci --ignore-scripts`) when it runs first in its sequence and its package inputs passed Factory's package checks. Every other command stays offline. |
+| `packageStore`  | none    | An absolute directory of its own for the pnpm store and cache and the npm cache. That same verified install writes it, with an empty HOME and package-manager hooks off; every other command reads it. With a warm store the install runs offline. pnpm 11 or later reads it.   |
+| `readOnlyPaths` | `[]`    | Further absolute host directories commands may read, such as a toolchain outside the `PATH`. Runtime-socket directories (`/run`, `XDG_RUNTIME_DIR`) and `/tmp` itself are refused.                                                                                              |
 
-A pnpm or npm target needs `"network": "package-install"`, or a `packageStore` warmed beforehand. Without a store, each validation starts with an empty one. Use a dedicated directory, not your personal store: sandboxed commands can write it. `factory status` and setup report the sandbox (`commandSandbox`); with bubblewrap missing and `required` true, setup stops and names the fix.
+A pnpm or npm target needs `"network": "package-install"`, or a `packageStore` warmed beforehand. Without a store, each validation starts with an empty one. Use a dedicated directory, not your personal store. `factory status` and setup report the sandbox (`commandSandbox`); when it cannot run and `required` is true, setup stops and names the fix.
 
 ### Providers
 

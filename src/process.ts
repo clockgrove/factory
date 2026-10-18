@@ -838,6 +838,9 @@ const GIT_CONFIG: [string, string][] = [
   ["gc.auto", "0"],
   ["core.hooksPath", "/dev/null"],
   ["core.fsmonitor", "false"],
+  // Never descend into a submodule: its configuration is not Factory's.
+  ["diff.ignoreSubmodules", "all"],
+  ["submodule.recurse", "false"],
   ["core.alternateRefsCommand", ""],
   ["commit.gpgSign", "false"],
   ["tag.gpgSign", "false"],
@@ -2195,4 +2198,16 @@ export function pinnedGitMagicAsync(
   ...args: string[]
 ): Promise<string> {
   return gitProcess(checkout, args, true, { GIT_LITERAL_PATHSPECS: "0" });
+}
+
+/** pinnedGitMagicAsync on a separate index file, never the checkout's own. */
+export function pinnedGitIndexAsync(
+  checkout: string,
+  index: string,
+  ...args: string[]
+): Promise<string> {
+  return gitProcess(checkout, args, true, {
+    GIT_LITERAL_PATHSPECS: "0",
+    GIT_INDEX_FILE: index,
+  });
 }

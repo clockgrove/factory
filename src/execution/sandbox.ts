@@ -692,6 +692,8 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
     env.npm_config_ignore_scripts = "true";
     env.pnpm_config_ignore_scripts = "true";
     env.pnpm_config_ignore_pnpmfile = "true";
+    // Nor does it fetch and run another pnpm version.
+    env.pnpm_config_manage_package_manager_versions = "false";
   }
   const system = SYSTEM_DIRECTORIES.filter((path) => existsSync(path)).map(
     (path) => real(path),

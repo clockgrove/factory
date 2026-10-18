@@ -503,7 +503,7 @@ test("a verified install reaches only its configured registry, and commands are 
   // Real dependency tarballs served on host loopback, standing in for the
   // configured registry: only an install in the host's network reaches it.
   const tarballs = {};
-  for (const name of ["dep", "added", "foreign"]) {
+  for (const name of ["dep", "added", "foreign", "merged"]) {
     const pack = join(root, "pack", name);
     mkdirSync(join(pack, "package"), { recursive: true });
     writeFileSync(
@@ -580,7 +580,11 @@ test("a verified install reaches only its configured registry, and commands are 
       return { commit: read("HEAD"), tree: read("HEAD^{tree}") };
     };
     // The base configures the registry; its lockfile resolves there.
-    writeFileSync(join(worktree, ".npmrc"), `registry=${registry}\n`);
+    // No fetch retries, so an offline install fails at once.
+    writeFileSync(
+      join(worktree, ".npmrc"),
+      `registry=${registry}\nfetch-retries=0\n`,
+    );
     writeFileSync(join(worktree, ".gitignore"), "node_modules/\n");
     write(worktree, { dep: `${registry}dep/-/dep-1.0.0.tgz` });
     const base = commit("base");
@@ -642,6 +646,30 @@ test("a verified install reaches only its configured registry, and commands are 
     const before = requests.length;
     await assert.rejects(
       validate(commit("add a foreign tarball"), 3),
+      /ECONNREFUSED/,
+    );
+    assert.equal(requests.length, before);
+    // A pnpm lockfile hiding a foreign tarball behind a YAML merge key (which
+    // pnpm's reader applies and YAML 1.2 does not) keeps the install offline,
+    // although the npm lockfile alone would be allowed.
+    write(worktree, {
+      dep: `${registry}dep/-/dep-1.0.0.tgz`,
+      merged: `${registry}merged/-/merged-1.0.0.tgz`,
+    });
+    writeFileSync(
+      join(worktree, "pnpm-lock.yaml"),
+      [
+        "lockfileVersion: '9.0'",
+        "packages:",
+        "  merged@1.0.0:",
+        "    resolution:",
+        `      integrity: ${integrity(tarballs.merged)}`,
+        `      <<: {tarball: 'http://localhost:${server.address().port}/merged/x.tgz'}`,
+        "",
+      ].join("\n"),
+    );
+    await assert.rejects(
+      validate(commit("hide a tarball behind a merge key"), 4),
       /ECONNREFUSED/,
     );
     assert.equal(requests.length, before);

@@ -1,4 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { McpServerStatus } from "@anthropic-ai/claude-agent-sdk";
@@ -8,7 +10,7 @@ import {
   hasUnresolvedSubprocesses,
   pinnedGit,
   pinnedGitAsync,
-  pinnedGitMagicAsync,
+  pinnedGitIndexAsync,
 } from "../process.js";
 import { workHandoffSchema } from "../objective-knowledge.js";
 import {
@@ -159,24 +161,37 @@ function bounded(text: string): string {
 export async function workerFilesTree(worktree: string): Promise<string> {
   // Host-side Git must not enter a repository the worker wrote.
   assertNoNestedGit(worktree);
-  await pinnedGitMagicAsync(
-    worktree,
-    "add",
-    "-A",
-    "--",
-    ".",
-    ...privateStagingExclusions(worktree),
-  );
+  // A separate index from HEAD: the worker's own index never holds what this
+  // stages, so a nested repository made meanwhile never becomes a gitlink
+  // there for another Git call to enter.
+  const scratch = mkdtempSync(join(tmpdir(), "factory-snapshot-"));
+  const index = join(scratch, "index");
   try {
+    await pinnedGitIndexAsync(worktree, index, "read-tree", "HEAD");
+    await pinnedGitIndexAsync(
+      worktree,
+      index,
+      "add",
+      "-A",
+      "--",
+      ".",
+      ...privateStagingExclusions(worktree),
+    );
+    const staged = await pinnedGitIndexAsync(
+      worktree,
+      index,
+      "ls-files",
+      "--stage",
+      "-z",
+    );
     // No snapshot with a gitlink is committed, let alone validated.
-    if (indexHasGitlinks(worktree))
+    if (staged.split("\0").some((entry) => entry.startsWith("160000 ")))
       throw new Error(
         "Your files include a submodule gitlink; Factory refuses nested repositories and submodules",
       );
-    return pinnedGit(worktree, "write-tree");
+    return (await pinnedGitIndexAsync(worktree, index, "write-tree")).trim();
   } finally {
-    // Leave the worker's index as it was; collection stages its own result.
-    await pinnedGitAsync(worktree, "reset", "--quiet");
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 

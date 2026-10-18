@@ -9,7 +9,8 @@
  * reach the registry in its lookups: that channel remains.
  */
 import { posix } from "node:path";
-import { parse } from "yaml";
+import { isDeepStrictEqual } from "node:util";
+import { isScalar, parse, parseDocument, visit } from "yaml";
 import { pinnedGitRaw } from "../process.js";
 
 /** Files that choose where an install fetches from and what it runs. */
@@ -148,12 +149,43 @@ function importerEntryAllowed(importer: string, value: unknown): boolean {
   return colon < 0 || (colon > value.indexOf("(") && value.indexOf("(") >= 0);
 }
 
+/**
+ * The YAML as plain data, or undefined when Factory and a package manager
+ * could read it differently: pnpm's YAML reader applies `<<` merge keys,
+ * which YAML 1.2 does not, so a lockfile with merge keys, anchors, aliases,
+ * explicit tags or duplicate keys is never read as data here.
+ */
+function plainYaml(text: string): unknown {
+  const document = parseDocument(text, { uniqueKeys: true, merge: false });
+  if (document.errors.length) return undefined;
+  let plain = true;
+  visit(document, {
+    Alias: () => {
+      plain = false;
+      return visit.BREAK;
+    },
+    Node: (_key, node) => {
+      if (node.anchor || node.tag) {
+        plain = false;
+        return visit.BREAK;
+      }
+    },
+    Pair: (_key, pair) => {
+      if (isScalar(pair.key) && pair.key.value === "<<") {
+        plain = false;
+        return visit.BREAK;
+      }
+    },
+  });
+  return plain ? document.toJS() : undefined;
+}
+
 /** pnpm-lock.yaml: every package resolves by integrity from a registry origin. */
 function pnpmLockfileFromRegistries(
   text: string,
   registries: Set<string>,
 ): boolean {
-  const lock = parse(text) as Record<string, unknown> | null;
+  const lock = plainYaml(text) as Record<string, unknown> | null;
   if (!lock || typeof lock !== "object") return false;
   const importers = lock.importers;
   if (importers !== undefined) {
@@ -190,8 +222,14 @@ function pnpmLockfileFromRegistries(
     const resolution = (entry as Record<string, unknown>).resolution;
     if (!resolution || typeof resolution !== "object") return false;
     const fields = resolution as Record<string, unknown>;
-    // Git, directory and other typed resolutions are not registry packages.
-    if (fields.type !== undefined || typeof fields.integrity !== "string")
+    // Only a registry resolution: its integrity and, at most, its tarball.
+    // Git, directory and other typed resolutions carry other keys.
+    if (
+      Object.keys(fields).some(
+        (key) => key !== "integrity" && key !== "tarball",
+      ) ||
+      typeof fields.integrity !== "string"
+    )
       return false;
     // pnpm omits the tarball for the default registry's own URL.
     if (fields.tarball !== undefined) {
@@ -269,6 +307,18 @@ export function installMayUseNetwork(
     )
       return true;
     if (changed(worktree, base, commit, CONFIGURATION)) return false;
+    // package.json may change here, but not the package manager it pins:
+    // pnpm would download and run that version.
+    const manager = (revision: string) => {
+      const text = file(worktree, revision, "package.json");
+      if (text === undefined) return {};
+      const manifest = JSON.parse(text) as Record<string, unknown>;
+      return {
+        packageManager: manifest.packageManager,
+        devEngines: manifest.devEngines,
+      };
+    };
+    if (!isDeepStrictEqual(manager(base), manager(commit))) return false;
     const registries = configuredRegistries(worktree, base);
     if (!registries) return false;
     if (file(worktree, commit, "npm-shrinkwrap.json") !== undefined)

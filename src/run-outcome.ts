@@ -4,10 +4,12 @@ import {
   isPreparationState,
   openAmendmentQuestion,
   openPlanningQuestion,
+  planningRevisionGrantable,
 } from "./state.js";
 import { objectiveComplete } from "./completion.js";
 import type { IntakeAuthorization } from "./intake.js";
 import { objectiveCandidate } from "./qa.js";
+import { PLANNING_REVISION_GRANT } from "./repair-policy.js";
 import type { ContinuationState } from "./state.js";
 import { configurationCommand, shortPlanDigest } from "./status-summary.js";
 import { awaitsOperator } from "./step.js";
@@ -126,7 +128,9 @@ export function runOutcome(
           : `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nDecide with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept|refuse --answer "…" --reason "…"`, configuration)}\`, then rerun \`${rerun}\``
         : openPlanningQuestion(state)
           ? `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nAnswer with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…" --reason "…"`, configuration)}\`, then \`${rerun}\` revises the draft plan with your answer; or discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
-          : `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nResolve it in the Objective, or on the default branch when it is a repository change that is yours to make; discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, then rerun \`${rerun}\``,
+          : planningRevisionGrantable(state)
+            ? `Objective #${objective}: ${state.coordinator.waitReason ?? "planning used up its revisions with review fix findings left"}\nGrant ${PLANNING_REVISION_GRANT} more revisions with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --reason "…"`, configuration)}\`, then \`${rerun}\` revises the retained draft for the last review's findings; or discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
+            : `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nResolve it in the Objective, or on the default branch when it is a repository change that is yours to make; discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, then rerun \`${rerun}\``,
     };
   if (objectiveComplete(state))
     return {

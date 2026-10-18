@@ -1076,6 +1076,36 @@ async function controllerKilledInReview(scenario) {
 }
 
 /**
+ * Run an Objective to its end. When the plan review needs more revisions
+ * than the default planning allowance, planning stops with a grantable stop
+ * (`planningRevisionGrant` in status). Plan-review strictness is not what the
+ * scenario tests, so grant the revisions through the supported decision and
+ * run again, at most twice.
+ */
+async function runGrantingRevisions(scenario, objective, label) {
+  let done = await startRun(objective, label).exit;
+  for (let grants = 1; done.code === 2 && grants <= 2; grants++) {
+    const granted = status(objective)?.planningRevisionGrant;
+    if (!granted) break;
+    const decided = factory([
+      "decide",
+      "--objective",
+      String(objective),
+      "--outcome",
+      "accept",
+      "--reason",
+      "recovery-e2e: plan review strictness is outside this scenario",
+    ]);
+    scenario.note(
+      `#${objective} used up its planning revisions; granting ${granted} more exited ${decided.code}`,
+    );
+    if (decided.code !== 0) break;
+    done = await startRun(objective, `${label}-granted-${grants}`).exit;
+  }
+  return done;
+}
+
+/**
  * S7: cancel a queued Objective while its worker runs; its claim settles and
  * the next queued Objective is dispatched and completes. Foreground runs stand
  * in for the service: its `supervisor serve` entry point needs the systemd
@@ -1138,8 +1168,7 @@ async function cancelMidExecution(scenario) {
     workers.every((pid) => !alive(pid)),
     workers.filter(alive),
   );
-  const second = startRun(b, "s7-next");
-  const next = await second.exit;
+  const next = await runGrantingRevisions(scenario, b, "s7-next");
   scenario.check(
     `queue continues: #${b} is dispatched and completes (exit 0)`,
     next.code === 0,

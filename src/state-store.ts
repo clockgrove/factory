@@ -632,21 +632,29 @@ export function readControllerOwner(path: string): ControllerOwner | undefined {
     Number(owner.pid) <= 0 ||
     typeof owner.startTime !== "string" ||
     !Number.isSafeInteger(owner.objective) ||
-    typeof owner.token !== "string" ||
-    (owner.queue !== undefined &&
-      (!owner.queue ||
-        typeof owner.queue !== "object" ||
-        Object.keys(owner.queue).sort().join() !==
-          "authorityDigest,configDigest" ||
-        Object.values(owner.queue).some(
-          (digest) =>
-            typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest),
-        )))
+    typeof owner.token !== "string"
   )
     throw new Error(
       "Controller lock identity is invalid; operator direction required",
     );
-  return owner as unknown as ControllerOwner;
+  // A queue binding of another shape (another release's) reads as none: the
+  // owner then receives no forwarded queue command, and a receiver
+  // authenticates every command again anyway.
+  const { queue, ...identity } = owner;
+  return (queueBindingShape(queue)
+    ? { ...identity, queue }
+    : identity) as unknown as ControllerOwner;
+}
+function queueBindingShape(value: unknown): value is QueueControlBinding {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).sort().join() === "authorityDigest,configDigest" &&
+    Object.values(value).every(
+      (digest) => typeof digest === "string" && /^[a-f0-9]{64}$/.test(digest),
+    )
+  );
 }
 
 /** The installation's owner: the background service, or a queue command for a moment. */

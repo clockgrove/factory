@@ -20,9 +20,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   type FactoryConfig,
-  factoryConfigDigest,
   factoryAuthorityDigest,
   maxActiveObjectives,
+  queueConfigDigest,
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
@@ -2596,7 +2596,7 @@ export function createQueueCommand(
   const recipe: QueueCommandRecipe = {
     schemaVersion: 1,
     id: input.operations[0]!.id,
-    configDigest: factoryConfigDigest(config),
+    configDigest: queueConfigDigest(config),
     deadlineAt: input.deadlineAt,
     operations: input.operations.map((operation) =>
       structuredClone(commandHeader(operation)),
@@ -2624,7 +2624,7 @@ function ownQueueCommand(config: FactoryConfig, command: QueueCommand) {
     !owner ||
     owner.stopped ||
     owner.recipe !== JSON.stringify(command.recipe) ||
-    command.recipe.configDigest !== factoryConfigDigest(config) ||
+    command.recipe.configDigest !== queueConfigDigest(config) ||
     command.recipe.deadlineAt !== (currentProcessDeadlineAt() ?? null)
   )
     throw new Error(

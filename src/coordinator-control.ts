@@ -360,10 +360,27 @@ export async function requestForegroundQueueControl(
         entry.queue?.authorityDigest === options.binding.authorityDigest &&
         entry.queue.configDigest === options.binding.configDigest,
     );
-    if (!owner)
+    if (!owner) {
+      const named = (entries: typeof owners) =>
+        entries.map((entry) => `Objective #${entry.objective}`).join(", ");
+      const unbound = owners.filter((entry) => !entry.queue);
+      const other = owners.filter((entry) => entry.queue);
       throw new Error(
-        `Foreground runs of ${owners.map((entry) => `Objective #${entry.objective}`).join(", ")} run with other shared settings than this command (such as the Project, autonomy or queue settings), so none can execute it; nothing was sent. Run it once one of them ends`,
+        [
+          ...(other.length
+            ? [
+                `${named(other)} run${other.length === 1 ? "s" : ""} with other shared settings than this command (such as the Project, autonomy or queue settings); run this once one of them ends`,
+              ]
+            : []),
+          ...(unbound.length
+            ? [
+                `${named(unbound)} ${unbound.length === 1 ? "does" : "do"} not execute queue commands (started by an older release or not a foreground run); restart it or wait for it to end`,
+              ]
+            : []),
+        ].join("; ") +
+          ". No foreground run can execute this queue command; nothing was sent",
       );
+    }
     currentProcessSignal()?.throwIfAborted();
     const reply = await sendControl(
       objectiveRoot(repository, owner.objective),

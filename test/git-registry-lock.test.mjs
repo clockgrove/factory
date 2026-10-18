@@ -1396,7 +1396,7 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       const before = writes;
       await assert.rejects(
         intakeControl(config, "pause", undefined, github),
-        /Objective #1 run with other shared settings .*nothing was sent/,
+        /Objective #1 runs with other shared settings .*nothing was sent/,
       );
       // Sent anyway, the stale owner refuses it before any effect.
       await assert.rejects(

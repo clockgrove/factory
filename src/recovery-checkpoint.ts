@@ -767,6 +767,9 @@ interface QueueVerificationContext {
     material: { path: string; identity: string }[];
   };
   gitPackBytes?: number;
+  /** Retired Objective snapshots by path; see retainRetiredCheckpointSnapshot. */
+  retiredSnapshots?: Map<string, RetiredCheckpointSnapshot>;
+  retiredSnapshotBytes?: number;
   /** Set once a full publication completes; see checkpointBasis. */
   incremental?: { since: number; publications: number };
 }
@@ -787,7 +790,7 @@ const scopes = new AsyncLocalStorage<{
   };
   verification?: QueueVerificationContext;
   /** See withCheckpointDisposals. */
-  disposals?: { covered: boolean; closed: boolean };
+  disposals?: { covered: boolean; closed: boolean; frozenAt?: number };
   closureReads?: {
     publicationLocal: boolean;
     scope: object;
@@ -2132,7 +2135,8 @@ function verificationMetadataBytes(context: QueueVerificationContext): number {
     negotiationTipCharge(context.negotiationTip) +
     (context.baseIdentityBytes ?? 0) +
     (context.publisherObjectBytes ?? 0) +
-    (context.gitPackBytes ?? 0)
+    (context.gitPackBytes ?? 0) +
+    (context.retiredSnapshotBytes ?? 0)
   );
 }
 
@@ -2193,6 +2197,8 @@ function clearRebuildableVerificationMetadata(
   delete context.publisherObjectBytes;
   delete context.gitPack;
   delete context.gitPackBytes;
+  delete context.retiredSnapshots;
+  delete context.retiredSnapshotBytes;
 }
 
 function retainContentVerification(
@@ -2351,6 +2357,73 @@ export function retainRecoveryCheckpointGitPack(
   }
   context.gitPack = structuredClone(packet);
   context.gitPackBytes = charge;
+}
+/**
+ * A retired Objective snapshot this controller read, hashed and retained in
+ * an earlier closure: its exact private-file fingerprint, `stateDigest` and
+ * content address. It was terminal and not a restored record.
+ */
+export interface RetiredCheckpointSnapshot {
+  fingerprint: string;
+  digest: string;
+  ref: ContentRef;
+}
+function retiredSnapshotContext() {
+  const scope = scopes.getStore();
+  const context = scope?.verification;
+  const options = scope && settings(scope.config);
+  if (!context || !scope || !options) return undefined;
+  if (
+    context.closed ||
+    context.quarantined ||
+    context.key !== verificationKey(scope.config, options)
+  )
+    throw new Error(
+      "Checkpoint snapshot cache has a different admitted binding",
+    );
+  return { context, options };
+}
+/** The retained facts of a retired snapshot, only at its exact fingerprint. */
+export function cachedRetiredCheckpointSnapshot(
+  path: string,
+  fingerprint: string,
+): RetiredCheckpointSnapshot | undefined {
+  const cached = retiredSnapshotContext()?.context.retiredSnapshots?.get(path);
+  return cached?.fingerprint === fingerprint
+    ? structuredClone(cached)
+    : undefined;
+}
+/**
+ * Remember a retired snapshot for this controller's later closures. Rebuildable:
+ * the next full publication drops it (see checkpointBasis), and a miss reads,
+ * hashes and checks the file in full.
+ */
+export function retainRetiredCheckpointSnapshot(
+  path: string,
+  snapshot: RetiredCheckpointSnapshot,
+): void {
+  assertRef(snapshot.ref);
+  if (!/^[a-f0-9]{64}$/.test(snapshot.digest))
+    throw new Error("Invalid retired checkpoint snapshot identity");
+  const active = retiredSnapshotContext();
+  if (!active) return;
+  const { context, options } = active;
+  const charge =
+    Buffer.byteLength(path) + Buffer.byteLength(canonical(snapshot));
+  const previous = context.retiredSnapshots?.get(path);
+  const priorCharge = previous
+    ? Buffer.byteLength(path) + Buffer.byteLength(canonical(previous))
+    : 0;
+  if (!reserveVerificationMetadata(context, options, charge, priorCharge))
+    return;
+  context.retiredSnapshots ??= new Map();
+  const prior = context.retiredSnapshots.get(path);
+  if (prior)
+    context.retiredSnapshotBytes =
+      (context.retiredSnapshotBytes ?? 0) -
+      (Buffer.byteLength(path) + Buffer.byteLength(canonical(prior)));
+  context.retiredSnapshots.set(path, structuredClone(snapshot));
+  context.retiredSnapshotBytes = (context.retiredSnapshotBytes ?? 0) + charge;
 }
 /** A producer completes durability before returning; an explicit forwarding caller may reuse it. */
 export function withRecoveryCheckpointOperation<T>(
@@ -2681,14 +2754,25 @@ export function acceptForwardedCheckpointCompletion(
  * return at once. Their local records are published by the next ordinary
  * admission; until then a lost host restores the archived material, whose
  * disposal is safe to repeat.
+ *
+ * `frozenAt` names the journal sequence (see checkpointJournalSequence) at
+ * which that material was frozen. When an independently verified
+ * acknowledgment at or above it already exists, that closure holds the
+ * material too, and `explicit` admissions inside the call return at once.
+ * Archive history is never force pushed, so the closure stays in the archive.
  */
 export async function withCheckpointDisposals<T>(
   task: () => Promise<T>,
+  options: { frozenAt?: number } = {},
 ): Promise<T> {
   const scope = scopes.getStore();
   if (!scope) return task();
   // Work that outlives the call keeps this context but not its coverage.
-  const disposals = { covered: false, closed: false };
+  const disposals = {
+    covered: false,
+    closed: false,
+    ...(options.frozenAt !== undefined && { frozenAt: options.frozenAt }),
+  };
   try {
     return await scopes.run({ ...scope, disposals }, task);
   } finally {
@@ -2718,14 +2802,21 @@ export async function awaitCheckpointAdmission(
     throw new CheckpointAdmissionFailure(
       "Checkpoint scope differs from external-effect repository",
     );
+  const persistence = settings(scope.config);
   if (
     reason === "explicit" &&
     !options.final &&
-    scope.disposals?.covered &&
-    !scope.disposals.closed
+    scope.disposals &&
+    !scope.disposals.closed &&
+    (scope.disposals.covered ||
+      (scope.disposals.frozenAt !== undefined &&
+        persistence?.scope === "private-history" &&
+        acknowledgedThrough(
+          journal(scope.config, persistence),
+          scope.disposals.frozenAt,
+        )))
   )
     return;
-  const persistence = settings(scope.config);
   if (
     reason === "before-effect" &&
     persistence?.scope === "repository-knowledge"
@@ -2783,6 +2874,30 @@ export async function awaitCheckpointAdmission(
       fingerprint,
       status: structuredClone(acknowledged),
     };
+}
+/** An independently verified acknowledgment holds the journal at `sequence`. */
+function acknowledgedThrough(
+  record: CheckpointJournal,
+  sequence: number,
+): boolean {
+  return (
+    !record.hold &&
+    record.lastAcknowledged !== undefined &&
+    record.acknowledgedSequence >= sequence
+  );
+}
+/**
+ * The current journal sequence of this controller's private-history archive:
+ * every local save made so far is at or below it. Undefined without one.
+ */
+export function checkpointJournalSequence(
+  repository: string,
+): number | undefined {
+  const scope = scopes.getStore();
+  if (!scope || scope.config.repository !== repository) return undefined;
+  const persistence = settings(scope.config);
+  if (persistence?.scope !== "private-history") return undefined;
+  return journal(scope.config, persistence).sequence;
 }
 type CheckpointAdmissionInput = {
   reason: "before-effect" | "settled" | "explicit";
@@ -5012,6 +5127,8 @@ function checkpointBasis(
     delete context.publisherObjectBytes;
     delete context.baseIdentity;
     delete context.baseIdentityBytes;
+    delete context.retiredSnapshots;
+    delete context.retiredSnapshotBytes;
   }
   return true;
 }

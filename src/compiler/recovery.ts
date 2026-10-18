@@ -241,8 +241,11 @@ export async function retainPlanningNativeReturn(
   owner.nativeReturns ??= [];
   owner.nativeReturns.push(ref);
   args.save();
-  // Retained locally; the next pre-effect checkpoint carries it.
-  await awaitCheckpointAdmission(args.repository, "settled");
+  // Retained locally. A return guards no effect, and the planning call that
+  // follows (graph review, revision) admits it in its own pre-effect
+  // checkpoint; a stop admits it at the controller's last admission. A
+  // background publication started here would only serialize ahead of that
+  // pre-effect barrier and delay the next paid call.
   return "admission-complete";
 }
 

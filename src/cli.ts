@@ -141,8 +141,8 @@ function help(): void {
       "      Control the background service (stop drains and keeps state; --disable also stops it starting at login)",
       "  status [--objective N | --issue N|URL] [--json]",
       "      With --objective: the phase and the exact next command. --issue finds the Objective, or Work Item, an issue names in local state. Without: the service and the queue",
-      "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT] --reason TEXT",
-      "      Decide a plan or a pending amendment's question (--answer is required to accept either) or a result criterion (--item names the Work Item; without it, the final acceptance)",
+      "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT [--question DIGEST]] --reason TEXT",
+      "      Decide a plan or a pending amendment's question (--answer is required to accept either; --question names the question status shows, and decide refuses another) or a result criterion (--item names the Work Item; without it, the final acceptance)",
       "  retry --objective N [--item ITEM [--fresh]] [--rereview] [--review-artifacts FILE]",
       "      Answer a step's decision or configuration fix, end a provider usage-limit wait, start a failed Work Item's new attempt (continuing from its refused result; --fresh starts from the base), or (--item --rereview) validate and review the same pending or settled command-failure result within resultRereviews limits",
       "  repair --objective N --proposal FILE",
@@ -446,6 +446,7 @@ async function decideCommand(
     actor: operatorName(),
     outcome,
     answer: option(args, "answer"),
+    question: option(args, "question"),
     reason,
   });
   // A live service recorded the decision itself; queue resume continues it.

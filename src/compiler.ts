@@ -65,8 +65,10 @@ export {
 } from "./compiler/candidate.js";
 
 export {
+  assertAnsweredQuestion,
   planReviewPacket,
   planningReviewEvidence,
+  questionDigest,
 } from "./compiler/packets.js";
 
 export {

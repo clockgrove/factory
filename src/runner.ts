@@ -225,6 +225,8 @@ export interface DecisionInput {
   outcome: "accept" | "refuse";
   /** The answer to a plan's question; required to accept a plan. */
   answer?: string;
+  /** The digest status shows for the question --answer answers; decide refuses any other open question. */
+  question?: string;
   reason: string;
 }
 
@@ -246,10 +248,12 @@ export function parseDecisionInput(value: unknown): DecisionInput {
   const item = optional("item");
   const criterion = optional("criterion");
   const answer = optional("answer");
+  const question = optional("question");
   return {
     ...(item !== undefined && { item }),
     ...(criterion !== undefined && { criterion }),
     ...(answer !== undefined && { answer }),
+    ...(question !== undefined && { question }),
     actor: input.actor,
     outcome: input.outcome,
     reason: input.reason,
@@ -284,6 +288,8 @@ async function decideObjectiveUnscoped(
       `Objective #${objective} has no Factory state; run \`factory run --objective ${objective}\` first`,
     );
   assertRestoredContinuationReady(state, config);
+  if (input.question !== undefined && !input.answer)
+    throw new Error("--question names the question an --answer answers");
   if (isPreparationState(state)) {
     if (input.item || input.criterion)
       throw new Error(
@@ -320,6 +326,7 @@ async function decideObjectiveUnscoped(
       actor: input.actor,
       outcome: input.outcome,
       answer: input.answer ?? "",
+      ...(input.question !== undefined && { question: input.question }),
       reason: input.reason,
     });
     return input.outcome === "refuse"
@@ -1015,6 +1022,7 @@ async function runObjectiveOwned(
               actor: decision.actor,
               answer: decision.answer,
               reason: decision.reason,
+              question: decision.question,
             });
             resumePlanning(current);
             persist();
@@ -1047,6 +1055,7 @@ async function runObjectiveOwned(
                 actor: decision.actor,
                 answer: decision.answer,
                 reason: decision.reason,
+                question: decision.question,
               },
               {
                 objective,
@@ -1074,6 +1083,7 @@ async function runObjectiveOwned(
               outcome: "accept",
               answer: decision.answer,
               reason: decision.reason,
+              question: decision.question,
             },
             current.restoration
               ? current.configDigest

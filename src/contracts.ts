@@ -587,16 +587,19 @@ export interface PlanCommandAuthorization {
  * to a plan review's operator-decision questions,
  * bound to the retained draft (compiler answer) it was asked about. It is
  * authority for that one choice within the Objective, never new command,
- * ownership or source authority.
+ * ownership or source authority. An answer to a pending amendment's question
+ * reaches the amendment's next compilation instead of a retained draft, and
+ * records neither a time nor a draft.
  */
 export interface OperatorPlanningDecision {
   question: string;
   answer: string;
   actor: string;
   reason: string;
-  at: string;
-  /** SHA-256 of the exact retained draft the answer revises. */
-  draftDigest: string;
+  /** Absent on an amendment's answer. */
+  at?: string;
+  /** SHA-256 of the exact retained draft the answer revises; absent on an amendment's answer. */
+  draftDigest?: string;
 }
 
 export interface PlanReviewRequest {

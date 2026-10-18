@@ -43,11 +43,13 @@ import {
   withPlannerAdmission,
 } from "./compiler/planning.js";
 import {
+  assertAnsweredQuestion,
   commandAuthority,
   compileObjective,
   finalObjectiveCommands,
   hydrateWorkerInputSources,
   objectiveCriteria,
+  operatorPlanningDecisions,
   paidModel,
   planningReviewEvidence,
   planningSources,
@@ -925,6 +927,7 @@ export function decideAmendment(
     actor: string;
     outcome: "accept" | "refuse";
     answer?: string;
+    question?: string;
     reason: string;
   },
 ): void {
@@ -937,6 +940,7 @@ export function decideAmendment(
   if (input.outcome === "accept") {
     if (!input.answer?.trim())
       throw new Error("Accepting an amendment decision requires --answer");
+    assertAnsweredQuestion(open.question, input.question);
     open.answer = {
       actor: input.actor,
       answer: input.answer,
@@ -1443,6 +1447,15 @@ async function advanceAmendment(args: {
     if (pending.phase === "compiled") {
       stage = "review";
       await verifyPrerequisites();
+      // The operator's answers this Objective's planning and this amendment
+      // recorded are reviewed with it, as in plan review, so they are not
+      // asked again.
+      const operatorDecisions = [
+        ...(operatorPlanningDecisions(state.planningRecovery) ?? []),
+        ...(pending.decisions ?? []).flatMap((entry) =>
+          entry.answer ? [{ question: entry.question, ...entry.answer }] : [],
+        ),
+      ];
       const packet = planReviewPacket(
         args.body,
         state.baseSha,
@@ -1456,6 +1469,7 @@ async function advanceAmendment(args: {
         state.approvedPlaybookPin,
         state.planningRecovery?.contextLookup?.packet,
         args.workflowRecipe,
+        operatorDecisions,
       );
       packet.amendment = {
         currentImplementationEvidence: amendmentImplementationEvidence({

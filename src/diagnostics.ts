@@ -18,6 +18,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { readAccountingRecords, retainModelAccounting } from "./accounting.js";
 import { replacementRefusal } from "./amendment-admission.js";
+import { questionDigest } from "./compiler/packets.js";
 import { PLANNING_REVISION_GRANT } from "./compiler/recovery.js";
 import {
   type CapturePolicy,
@@ -2376,6 +2377,10 @@ export function statusDocument(
             const open = openAmendmentQuestion(state);
             return open ? redactDiagnosticDetail(open.question, secrets) : null;
           })(),
+          questionDigest: (() => {
+            const open = openAmendmentQuestion(state);
+            return open ? questionDigest(open.question) : null;
+          })(),
           // Why `factory propose-amendment` would refuse a replacement of a
           // rejected amendment (the checks submitAmendment applies); null when
           // it fits. Status names it only then; otherwise `factory cancel`.
@@ -2651,6 +2656,17 @@ function preparationStatusDocument(
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
     planningQuestion: Boolean(openPlanningQuestion(preparation)),
     planReviewQuestions: reviewDecisionAnswerable(preparation)?.count ?? 0,
+    // The exact question an accepted --answer is recorded against, as decide
+    // selects it; `factory decide --question` names its digest.
+    questionDigest: (() => {
+      const open =
+        openPlanningQuestion(preparation)?.question ??
+        openReviewDecision(preparation)?.question ??
+        (review?.status === "needs-human" && review.acceptable !== false
+          ? question
+          : undefined);
+      return open === undefined ? null : questionDigest(open);
+    })(),
     // An older plan without its retained draft: an answer cannot revise it.
     ...(openReviewDecision(preparation) &&
     !reviewDecisionAnswerable(preparation)

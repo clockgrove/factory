@@ -53,7 +53,15 @@ const commandFlags: Record<string, string[]> = {
   collect: ["objective", "item", "run", "attempt"],
   queue: [],
   supervisor: ["cli", "disable", "service-credential"],
-  decide: ["objective", "item", "criterion", "outcome", "answer", "reason"],
+  decide: [
+    "objective",
+    "item",
+    "criterion",
+    "outcome",
+    "answer",
+    "question",
+    "reason",
+  ],
   status: ["objective", "issue", "json"],
   watch: ["objective", "json", "follow", "interval", "stale-minutes"],
   diagnostics: [

@@ -146,6 +146,8 @@ interface PreparingStatusView extends WaitView {
   planningQuestion?: boolean;
   /** The plan review's operator questions one answer settles; the answer revises the plan, which is reviewed again. */
   planReviewQuestions?: number;
+  /** The digest of the open question an accepted --answer answers, which `factory decide --question` names; null when none is open. */
+  questionDigest?: string | null;
   /** The review asked the operator, but the plan's draft is not retained: only a refusal applies. */
   planReviewDraftMissing?: true;
   /** It stopped at its revision allowance with only fix findings left: accepting grants this many more revisions. */
@@ -360,6 +362,8 @@ interface ExecutionStatusView extends WaitView {
     error: string | null;
     /** The planner's unanswered question about the amendment, if any. */
     question?: string | null;
+    /** That question's digest, which `factory decide --question` names. */
+    questionDigest?: string | null;
     /** The Work Item whose discovery this amendment proposes, if a worker proposed it. */
     worker?: string | null;
     /** Why `factory propose-amendment` would refuse a replacement of a rejected amendment; null when it fits. */
@@ -406,6 +410,11 @@ export function shortPlanDigest(plan: { reviewDigest: string }): string {
 
 const REASON = '"WHY"';
 const ANSWER = '"ANSWER"';
+
+/** Binds a printed --answer to the open question it answers. */
+function namedQuestion(digest: string | null | undefined): string {
+  return digest ? ` --question ${digest}` : "";
+}
 
 /** A criterion as one shell word, so the printed command runs as shown. */
 export function shellWord(text: string): string {
@@ -739,7 +748,7 @@ function decisionNeeded(view: ExecutionStatusView): StatusSummary | undefined {
       phase: "needs-decision",
       summary: "the pending amendment needs an answer",
       nextAction: {
-        command: `factory decide --objective ${objective} --outcome accept|refuse --answer "…" --reason "…"`,
+        command: `factory decide --objective ${objective} --outcome accept|refuse --answer "…"${namedQuestion(view.pendingAmendment?.questionDigest)} --reason "…"`,
         reason: `${asked} Accept records the answer and ${run(objective)} compiles the amendment with it; refuse rejects the amendment and gives back its planning revision.`,
       },
     };
@@ -1266,11 +1275,11 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
           }
         : view.planReviewQuestions
           ? {
-              command: `factory decide --objective ${objective} --outcome accept --answer ${ANSWER} --reason ${REASON}`,
+              command: `factory decide --objective ${objective} --outcome accept --answer ${ANSWER}${namedQuestion(view.questionDigest)} --reason ${REASON}`,
               reason: `${view.planReviewQuestions > 1 ? "Answer every question below in one --answer" : "Answer the plan review's question below"}; then ${run(objective)} revises the plan with your answer and reviews it again (refuse discards the plan instead)`,
             }
           : {
-              command: `factory decide --objective ${objective} --outcome accept|refuse --answer ${ANSWER} --reason ${REASON}`,
+              command: `factory decide --objective ${objective} --outcome accept|refuse --answer ${ANSWER}${namedQuestion(view.questionDigest)} --reason ${REASON}`,
               reason: `Answer the question below; then ${run(objective)}`,
             },
     };
@@ -1293,7 +1302,7 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         : "planning stopped for a decision",
       nextAction: view.planningQuestion
         ? {
-            command: `factory decide --objective ${objective} --outcome accept --answer ${ANSWER} --reason ${REASON}`,
+            command: `factory decide --objective ${objective} --outcome accept --answer ${ANSWER}${namedQuestion(view.questionDigest)} --reason ${REASON}`,
             reason: `Answer the planner's question; then ${run(objective)} revises the draft plan with it (refuse discards the planning instead)`,
           }
         : {

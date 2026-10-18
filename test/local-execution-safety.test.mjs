@@ -2402,10 +2402,39 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     assert.equal(consumption(asking).planningRevisions, revisionsBefore);
     assert.equal(existsSync(join(root, "legacy-planner-homes")), false);
     const refusing = structuredClone(asking);
+    // Status names the open question by digest, and its command passes it:
+    // an answer that names another question is refused and records nothing.
+    const askingStatus = continuationStatusDocument(
+      asking,
+      legacy.repository,
+      legacy.objective,
+      "regular",
+    );
+    const openDigest = createHash("sha256")
+      .update("May the catalog membership assertion grow?")
+      .digest("hex");
+    assert.equal(askingStatus.pendingAmendment.questionDigest, openDigest);
+    assert.match(askingStatus.nextAction.command, /--question [0-9a-f]{64} /);
+    assert.ok(askingStatus.nextAction.command.includes(openDigest));
+    assert.throws(
+      () =>
+        decideAmendment(asking, {
+          actor: "operator",
+          outcome: "accept",
+          answer: "Yes",
+          question: createHash("sha256")
+            .update("An older question")
+            .digest("hex"),
+          reason: "A stale command",
+        }),
+      /--question names a question that is not the open one/,
+    );
+    assert.equal(asking.pendingAmendment.decisions[0].answer, undefined);
     decideAmendment(asking, {
       actor: "operator",
       outcome: "accept",
       answer: "Yes, only for the added components",
+      question: openDigest,
       reason: "The Objective requires them",
     });
     saveState(legacyPath, asking);

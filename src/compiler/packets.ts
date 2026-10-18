@@ -36,6 +36,22 @@ export function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+/** An open question's identity: the SHA-256 of its exact text, which status shows and `factory decide --question` names. */
+export function questionDigest(question: string): string {
+  return digest(question);
+}
+
+/** Refuse an answer whose `--question` names another question than the open one. */
+export function assertAnsweredQuestion(
+  open: string,
+  named: string | undefined,
+): void {
+  if (named !== undefined && named !== questionDigest(open))
+    throw new Error(
+      "--question names a question that is not the open one; inspect status and answer the open question",
+    );
+}
+
 export function planReviewPacket(
   objective: string,
   baseSha: string,

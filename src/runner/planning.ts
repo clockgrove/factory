@@ -474,6 +474,8 @@ export async function decidePlan(
     outcome: "accept" | "refuse";
     answer: string;
     reason: string;
+    /** The digest of the question the answer means; see `questionDigest`. */
+    question?: string;
   },
 ): Promise<PreparationState> {
   validateTarget(config.repository, config.checkout);

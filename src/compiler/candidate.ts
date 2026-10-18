@@ -36,6 +36,7 @@ import {
 import type { ResolvedGraphFinding } from "../review-evidence.js";
 import type { checkedPlanReview } from "./planning.js";
 import {
+  assertAnsweredQuestion,
   planReviewDigest,
   digest,
   reviewResultDigest,
@@ -388,6 +389,7 @@ export async function resolvePlan(
     outcome: "accept" | "refuse";
     answer: string;
     reason: string;
+    question?: string;
   },
   configDigest: string,
 ): Promise<PlanCandidate> {
@@ -413,10 +415,12 @@ export async function resolvePlan(
     throw new Error(
       "A human decision needs actor, reason, and a specific answer when accepted",
     );
+  const question =
+    candidate.review.failure?.question ??
+    candidate.review.findings[0]!.question;
+  assertAnsweredQuestion(question, input.question);
   const decision = {
-    question:
-      candidate.review.failure?.question ??
-      candidate.review.findings[0]!.question,
+    question,
     answer: input.answer,
     actor: input.actor,
     at: new Date().toISOString(),

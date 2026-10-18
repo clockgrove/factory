@@ -1744,7 +1744,7 @@ export function compilerWire(
         .map((position) => coverageCriterion(obligations[position]!));
       if (!outcomes.length)
         throw new PlannerChoiceError(
-          `Child ${child.key} owns no Objective Acceptance outcome, and every child owns at least one (rule 12). Remove child ${child.key}: move ${child.itemIds.length ? `its Work Items (${child.itemIds.join(", ")})` : "its work"} into the ready child that needs it, or leave it to the stub that depends on it, which plans it later`,
+          `Child ${child.key} owns no Objective Acceptance outcome, and every child owns at least one (the Child Objectives rule). Remove child ${child.key}: move ${child.itemIds.length ? `its Work Items (${child.itemIds.join(", ")})` : "its work"} into the ready child that needs it, or leave it to the stub that depends on it, which plans it later`,
           child.itemIds,
         );
       const { itemIds, ...spec } = child;

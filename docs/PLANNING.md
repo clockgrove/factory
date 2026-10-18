@@ -1,0 +1,74 @@
+# Plan standard
+
+A plan says **what** must be true when the work is done, and **what other items rely on**. The worker decides **how** from the real code, and result review checks the how against that code.
+
+Why: a planner writes every detail from a partial read of the repository. Each mechanism, line number or edit list it adds can contradict the real code, and then becomes a review finding or blocks the worker on wording. Precise plans with 40 or more acceptance entries per item needed far more revision rounds than outcome-level plans.
+
+The rules live in `src/compiler/work-item-rubric.ts`. The planner and the graph reviewer read the same Work Item standard and the same checklist.
+
+## A Work Item
+
+| Field       | Rule                                                                                                                                |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Goal        | One sentence: the outcome.                                                                                                          |
+| Contract    | Only what other items or users rely on (names, semantics, formats), stated once in the brief and repeated in each consumer's brief. |
+| Acceptance  | Observable behaviour, invariants and refusal classes at the contract level. Each entry is checkable from outside the code.          |
+| Evidence    | The repository tests or commands that prove the acceptance.                                                                         |
+| Constraints | What must not change or must not be used, as non-goals.                                                                             |
+| Docs        | What a reader needs documented, where the target's AGENTS.md doc map puts it.                                                       |
+
+**Never:** internal mechanisms, line numbers or ranges, file-by-file edit lists, reading lists, one entry per malformed field or error path, "existing tests unchanged" prose, or restated source text.
+
+**Keep:** invariants across inputs or steps (step-size independence, determinism), the real upstream producer named by its type, and existing helpers and conventions named by name. These raise result quality.
+
+**Size:** one outcome per item. About 15 acceptance entries is a signal, not a target: above it, split the item or say in its brief why it is one outcome.
+
+**Briefs** carry settled decisions and cross-item contracts the worker cannot get from the repository. Workers read the code themselves.
+
+**Existing tests are protected by default.** An item changes an existing assertion, golden or baseline only when its acceptance states that behaviour change and why.
+
+## How the planner works
+
+1. **Research.** Explore wide, then narrow. Collect facts tied to files: conventions, real producers and types, existing behaviour, constraints. These facts stay in the planning session; Factory never stores them.
+2. **Write** the plan from the Objective and those facts only.
+3. **Check** the plan against the graph reviewer's checklist before submitting.
+
+All three happen in the planner's one session. Self-checking is a filter; the independent graph review stays the gate.
+
+## How review holds the standard
+
+- **Graph review:** an acceptance entry that prescribes a mechanism, a line or a file edit instead of behaviour is a fix finding. Review never asks for more detail than the standard requires.
+- **Result review** judges behaviour. It does not refuse a criterion because the code reaches the stated behaviour another way than a plan happened to describe. It refuses an unannounced change to an existing test.
+
+## Example
+
+An Objective asks for a retention limit on a job queue.
+
+**Before (excerpts from a 23-entry item):**
+
+- `JobStore.prune()` in `store.ts` deletes expired rows in one statement and returns a frozen array of removed ids. ← mechanism
+- Refuses `retention: null` at `config.queue.retention` with `ConfigError`. Refuses a non-number. Refuses a negative number. ← one entry per field path
+- The comment on `store.ts` line 88 names the new limit. ← line number
+- Existing tests and golden files are unchanged. ← test prose
+- Brief: "Start by reading `store.ts` (around lines 40–210) and `config.ts` (around line 130)." ← reading list
+
+**After (6 entries):**
+
+Goal: finished jobs older than the configured retention are removed from the queue.
+
+Contract: the queue configuration accepts an optional `retention` (a duration). Without it, behaviour and the stored format are exactly as today.
+
+Acceptance:
+
+1. A finished job older than the retention is no longer listed or returned after the next prune.
+2. A finished job inside the retention, and every unfinished job, is kept.
+3. A malformed retention (null, not a duration, negative) is refused through the existing configuration validation.
+4. Invariant: the same jobs remain whether pruning runs once or in several smaller steps.
+5. Without `retention`, the queue lists and stores exactly what it does today.
+6. The configuration reference documents `retention` and its default.
+
+Evidence: new tests in the repository suite prove 1–5; the full existing suite passes.
+Constraints: no new storage dependency.
+Docs: the configuration reference, where the doc map puts it.
+
+The worker reads the code and decides which function prunes, how removal is batched and which error path reports a bad value.

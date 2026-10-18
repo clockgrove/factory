@@ -95,7 +95,7 @@ export function validateSplitGraph(args: {
     if (!prepared.some(({ sources }) => cites(sources, required.source)))
       throw new PlanValidationError(
         new PlannerChoiceError(
-          `No child Objective cites ${required.source.path}, the source of ${what}, so the split would drop it (rule 12): add ${required.source.path} to the sources of the child whose work it governs`,
+          `No child Objective cites ${required.source.path}, the source of ${what}, so the split would drop it (the Child Objectives rule): add ${required.source.path} to the sources of the child whose work it governs`,
         ),
       );
   const parentLines = body.split("\n");
@@ -174,7 +174,7 @@ export function validateSplitGraph(args: {
             throw refused(
               child.key,
               new Error(
-                `the exclusion "${bounded(exclusion.statement)}" of ${exclusion.source.path} cites Objective line index ${line} ("${bounded(parentLines[line] ?? "")}"${section === null ? ", before the first section" : ` in ${section}`}), which this child does not carry${owner ? `: it is child ${owner}'s Acceptance outcome` : ""}. An exclusion holds in every child that cites its source (rule 12): cite only lines each of them carries (its own outcomes or a carried section such as Constraints), remove ${exclusion.source.path} from the sources of ${child.key}${owner ? ` and keep it with ${owner}` : ""}, or cover the exit item instead`,
+                `the exclusion "${bounded(exclusion.statement)}" of ${exclusion.source.path} cites Objective line index ${line} ("${bounded(parentLines[line] ?? "")}"${section === null ? ", before the first section" : ` in ${section}`}), which this child does not carry${owner ? `: it is child ${owner}'s Acceptance outcome` : ""}. An exclusion holds in every child that cites its source (the Child Objectives rule): cite only lines each of them carries (its own outcomes or a carried section such as Constraints), remove ${exclusion.source.path} from the sources of ${child.key}${owner ? ` and keep it with ${owner}` : ""}, or cover the exit item instead`,
               ),
             );
           }

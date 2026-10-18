@@ -338,7 +338,6 @@ export async function createFactoryValidationMcp(
     excluded: new Set(
       (input.lfs?.members ?? []).map((member) => member.destination),
     ),
-    delivered: new Map(),
   };
   const passedTrees = new Set<string>();
   let queue: Promise<unknown> = Promise.resolve();

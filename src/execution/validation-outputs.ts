@@ -1,5 +1,3 @@
-import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -13,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { ownsPath } from "../ownership.js";
-import { pinnedGitEnvironment, pinnedGitRaw } from "../process.js";
+import { GitFailure, pinnedGitRawWith } from "../process.js";
 import { privateStagingPath } from "./local.js";
 
 /**
@@ -24,18 +22,15 @@ export const maxReturnedOutputFiles = 64;
 export const maxReturnedOutputBytes = 8 * 1024 * 1024;
 /** Report lines per category; the rest are counted. */
 const maxListedPaths = 16;
+/** Each local Git listing is bounded; a stalled one is reported, not awaited. */
+const gitTimeoutMs = 60_000;
 
-/** One worker session's copy-back state across its Validate runs. */
+/** Which produced files may come back from a worker's Validate runs. */
 export interface ValidationOutputs {
   ownedPaths: readonly string[];
   /** Selected LFS destinations: hydrated by Factory, never produced. */
   excluded: ReadonlySet<string>;
-  /** Path to the SHA-256 of the bytes Factory last wrote there. */
-  delivered: Map<string, string>;
 }
-
-const sha256 = (bytes: Buffer) =>
-  createHash("sha256").update(bytes).digest("hex");
 
 function inside(root: string, path: string): boolean {
   const rel = relative(root, path);
@@ -59,19 +54,26 @@ function ignoredInWorktree(
   paths: readonly string[],
 ): Set<string> {
   if (!paths.length) return new Set();
-  const env = pinnedGitEnvironment();
-  // check-ignore accepts literal filenames, not pathspecs; that switch is unsupported.
-  delete env.GIT_LITERAL_PATHSPECS;
-  const result = spawnSync(
-    "git",
-    ["-C", worktree, "check-ignore", "-z", "--stdin"],
-    { env, input: `${paths.join("\0")}\0`, maxBuffer: 64 * 1024 * 1024 },
-  );
-  if (result.error) throw result.error;
-  if (result.status === 1) return new Set();
-  if (result.status !== 0)
-    throw new Error("Cannot verify which produced files the checkout ignores");
-  return new Set(result.stdout.toString("utf8").split("\0").filter(Boolean));
+  let output: Buffer;
+  try {
+    output = pinnedGitRawWith(
+      worktree,
+      {
+        timeoutMs: gitTimeoutMs,
+        input: `${paths.join("\0")}\0`,
+        // check-ignore takes literal filenames and refuses the literal-pathspec switch.
+        env: { GIT_LITERAL_PATHSPECS: "0" },
+      },
+      "check-ignore",
+      "-z",
+      "--stdin",
+    );
+  } catch (error) {
+    // Exit 1: none of the paths is ignored.
+    if (error instanceof GitFailure && error.status === 1) return new Set();
+    throw error;
+  }
+  return new Set(output.toString("utf8").split("\0").filter(Boolean));
 }
 
 /** Create missing parents as plain directories; refuse links and files on the way. */
@@ -96,9 +98,14 @@ function readProduced(
   root: string,
   path: string,
   budget: number,
-): Buffer | "not a regular file" | number {
+): Buffer | string | number {
   const source = join(root, path);
-  if (!inside(root, realpathSync(dirname(source)))) return "not a regular file";
+  try {
+    if (!inside(root, realpathSync(dirname(source))))
+      return "its directory leaves the validation copy";
+  } catch (error) {
+    return `unreadable in the validation copy (${(error as NodeJS.ErrnoException).code ?? "error"})`;
+  }
   let fd: number;
   try {
     fd = openSync(source, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -128,11 +135,12 @@ function listed(lines: string[]): string[] {
  * After a Validate run settles, return the files its commands produced under
  * the Work Item's owned paths from the validation copy to the worker's
  * checkout, which the worker otherwise cannot read. Only regular files that
- * the worker's checkout ignores are copied, so a copy never enters the
- * result tree; a file there is created, or refreshed only while it still
- * holds bytes Factory wrote, so the worker's own edits are never
- * overwritten. Tracked or unignored changes are reported, not copied. The
- * validation copy is only read. Returns the report for the tool result, or
+ * the worker's checkout ignores at copy time are copied, so `git add -A`
+ * leaves them out of the result unless the ignore rules change. A file this
+ * run produced replaces the worker's copy at that path: the worker never
+ * authors ignored files, and a continuation or repair starts with the last
+ * run's stale ones. Tracked or unignored changes are reported, not copied.
+ * The validation copy is only read. Returns the report for the tool result, or
  * "" when the commands produced nothing under owned paths. Never throws: a
  * failure is reported and leaves the validation result unchanged.
  */
@@ -157,8 +165,9 @@ function copyProduced(
   if (!scopes.length) return "";
   // Pinned Git pathspecs are literal. `matching` lists an ignored directory
   // (a dependency tree or build cache) as one entry, never its contents.
-  const fields = pinnedGitRaw(
+  const fields = pinnedGitRawWith(
     validationCopy,
+    { timeoutMs: gitTimeoutMs },
     "status",
     "--porcelain=v1",
     "-z",
@@ -194,10 +203,8 @@ function copyProduced(
   const returned: string[] = [];
   const skipped: string[] = [];
   const omitted: string[] = [];
-  const produced = new Set<string>();
   let bytes = 0;
   for (const path of candidates) {
-    produced.add(path);
     if (!ignored.has(path)) {
       changed.push(path);
       continue;
@@ -215,76 +222,57 @@ function copyProduced(
       omitted.push(`- ${path} (${content} bytes)`);
       continue;
     }
-    const digest = sha256(content);
     const destination = join(worktree, path);
     if (!plainParent(worktree, path)) {
       skipped.push(`- ${path}: a parent in your checkout is not a directory`);
       continue;
     }
-    let current: ReturnType<typeof lstatSync> | undefined;
+    let existed = false;
     try {
-      current = lstatSync(destination);
+      const current = lstatSync(destination);
+      if (!current.isFile()) {
+        skipped.push(`- ${path}: not a regular file in your checkout`);
+        continue;
+      }
+      existed = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    if (!current) {
-      // Exclusive create: a file the worker wrote meanwhile is never replaced.
-      try {
-        writeFileSync(destination, content, { flag: "wx" });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        skipped.push(`- ${path}: your checkout has this file; kept yours`);
-        continue;
-      }
-    } else if (
-      current.isFile() &&
-      !current.isSymbolicLink() &&
-      outputs.delivered.has(path) &&
-      sha256(readFileSync(destination)) === outputs.delivered.get(path)
-    ) {
-      // Still exactly what an earlier run returned: refresh it.
-      const fd = openSync(
+    let fd: number;
+    try {
+      // Never through a link; never blocks on a special file.
+      fd = openSync(
         destination,
-        constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_TRUNC |
+          constants.O_NOFOLLOW |
+          constants.O_NONBLOCK,
       );
-      try {
-        writeFileSync(fd, content);
-      } finally {
-        closeSync(fd);
-      }
-    } else {
-      skipped.push(
-        `- ${path}: your checkout has a different version of this file; kept yours`,
-      );
+    } catch {
+      skipped.push(`- ${path}: not a regular file in your checkout`);
       continue;
     }
-    outputs.delivered.set(path, digest);
-    bytes += content.length;
-    returned.push(`- ${path} (${content.length} bytes)`);
-  }
-  // An earlier copy this run did not produce stays until the worker changes it.
-  const stale = [...outputs.delivered].flatMap(([path, digest]) => {
-    if (produced.has(path)) return [];
     try {
-      const entry = lstatSync(join(worktree, path));
-      if (
-        entry.isFile() &&
-        !entry.isSymbolicLink() &&
-        sha256(readFileSync(join(worktree, path))) === digest
-      )
-        return [`- ${path}`];
-    } catch {
-      // Gone: nothing stale remains.
+      if (!fstatSync(fd).isFile()) {
+        skipped.push(`- ${path}: not a regular file in your checkout`);
+        continue;
+      }
+      writeFileSync(fd, content);
+    } finally {
+      closeSync(fd);
     }
-    outputs.delivered.delete(path);
-    return [];
-  });
-  const sections = [returned, skipped, omitted, changed, directories, stale];
+    bytes += content.length;
+    returned.push(
+      `- ${path} (${content.length} bytes${existed ? ", replaced the earlier copy" : ""})`,
+    );
+  }
+  const sections = [returned, skipped, omitted, changed, directories];
   if (sections.every((section) => !section.length)) return "";
   const parts = ["Files the commands produced under your owned paths:"];
   if (returned.length)
     parts.push(
-      `Returned to your checkout at the same paths (ignored by Git, so never part of your result):\n${listed(returned).join("\n")}`,
+      `Returned to your checkout at the same paths (Git ignores them, so they stay out of your result unless the ignore rules change):\n${listed(returned).join("\n")}`,
     );
   if (skipped.length)
     parts.push(`Not returned:\n${listed(skipped).join("\n")}`);
@@ -299,10 +287,6 @@ function copyProduced(
   if (directories.length)
     parts.push(
       `Ignored directories, contents not returned:\n${listed(directories.map((path) => `- ${path}`)).join("\n")}`,
-    );
-  if (stale.length)
-    parts.push(
-      `Returned by an earlier run and not produced by this one, so possibly stale:\n${listed(stale).join("\n")}`,
     );
   return parts.join("\n");
 }

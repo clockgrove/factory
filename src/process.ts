@@ -1506,6 +1506,25 @@ export function pinnedGitRawWithin(
   return syncGit(checkout, args, true, timeoutMs);
 }
 
+/**
+ * `pinnedGitRaw` with a deadline, optional standard input and environment
+ * overrides, such as `check-ignore --stdin`, which refuses literal pathspecs.
+ */
+export function pinnedGitRawWith(
+  checkout: string,
+  options: { timeoutMs: number; input?: string; env?: NodeJS.ProcessEnv },
+  ...args: string[]
+): Buffer {
+  return syncGit(
+    checkout,
+    args,
+    true,
+    options.timeoutMs,
+    options.input,
+    options.env,
+  );
+}
+
 /** `pinnedGitRaw` with standard input, such as a `cat-file --batch` request. */
 export function pinnedGitRawInput(
   checkout: string,
@@ -1521,10 +1540,11 @@ function syncGit(
   pinned: boolean,
   timeoutMs: number | undefined,
   input?: string,
+  overrides?: NodeJS.ProcessEnv,
 ): Buffer {
   assertUnlocked(args);
   return classifiedGit(args, () => {
-    const factory = factoryGit(checkout, args, pinned);
+    const factory = factoryGit(checkout, args, pinned, overrides);
     const traces = GitTraces.open(args);
     try {
       const result = spawnSync("git", factory.args, {

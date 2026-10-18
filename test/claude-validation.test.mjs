@@ -161,7 +161,6 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   const outputs = {
     ownedPaths: ["own/", "a.txt"],
     excluded: new Set(),
-    delivered: new Map(),
   };
   const tracked = status(worktree);
   const first = await runDeclaredValidation(
@@ -189,8 +188,9 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   assert.equal(existsSync(join(worktree, "other")), false);
   assert.equal(readFileSync(join(worktree, "a.txt"), "utf8"), "changed\n");
   assert.equal(status(worktree), tracked);
-  // A later run refreshes its own unchanged copy, never a worker's edit.
-  await runDeclaredValidation(
+  // Each run replaces the copy it produced, including a continuation's stale one.
+  writeFileSync(join(worktree, "own/x.actual.json"), "stale");
+  const replaced = await runDeclaredValidation(
     worktree,
     [produce("two")],
     6,
@@ -201,17 +201,9 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
     readFileSync(join(worktree, "own/x.actual.json"), "utf8"),
     "two",
   );
-  writeFileSync(join(worktree, "own/x.actual.json"), "mine");
-  const kept = await runDeclaredValidation(
-    worktree,
-    [produce("three")],
-    7,
-    undefined,
-    outputs,
+  assert.match(
+    replaced.text,
+    /\n- own\/x\.actual\.json \(3 bytes, replaced the earlier copy\)\n/,
   );
-  assert.equal(
-    readFileSync(join(worktree, "own/x.actual.json"), "utf8"),
-    "mine",
-  );
-  assert.match(kept.text, /- own\/x\.actual\.json: [^\n]*kept yours/);
+  assert.equal(status(worktree), tracked);
 });

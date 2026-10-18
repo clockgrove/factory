@@ -1,8 +1,10 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
+  Options,
   SDKAssistantMessageError,
   SDKMessage,
   SDKResultMessage,
@@ -210,6 +212,57 @@ const credentialContinuation =
   "Your session stopped on a transient provider authentication error before you finished. Continue the same task from where you stopped; your changes so far are in the working tree. Then review your own diff and give your final report.";
 const credentialRestart =
   "\n\nAn earlier session of this attempt stopped on a transient provider authentication error. Its uncommitted changes are already in your working tree: continue from them rather than starting over.";
+
+/**
+ * Spawn the Claude CLI as the SDK's own local spawn does, in the worker's
+ * process group, but keep the child: `Query.return()` waits at most about
+ * 2 s for it, so a credential retry waits for its exit itself. Stderr is
+ * drained; the SDK does not read it from a custom spawn.
+ */
+function trackedCliSpawn(
+  onSpawn: (child: ChildProcess) => void,
+): NonNullable<Options["spawnClaudeCodeProcess"]> {
+  return ({ command, args, cwd, env, signal }) => {
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      signal,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.stderr.resume();
+    onSpawn(child);
+    return child as ChildProcess &
+      ReturnType<NonNullable<Options["spawnClaudeCodeProcess"]>>;
+  };
+}
+
+const CLI_EXIT_WAIT_MS = 5_000;
+
+/**
+ * Wait until an ended query's CLI child exited, killing it after a bounded
+ * wait, so a retry's CLI never writes the same transcript alongside it.
+ */
+async function cliExited(child: ChildProcess | undefined): Promise<void> {
+  if (!child || child.pid === undefined) return;
+  const exited = () => child.exitCode !== null || child.signalCode !== null;
+  const wait = (ms: number) =>
+    new Promise<boolean>((done) => {
+      if (exited()) return done(true);
+      const onExit = () => {
+        clearTimeout(timer);
+        done(true);
+      };
+      const timer = setTimeout(() => {
+        child.off("exit", onExit);
+        done(exited());
+      }, ms);
+      child.once("exit", onExit);
+    });
+  if (await wait(CLI_EXIT_WAIT_MS)) return;
+  child.kill("SIGKILL");
+  if (await wait(CLI_EXIT_WAIT_MS)) return;
+  throw new Error("Claude CLI did not exit before its credential retry");
+}
 
 /**
  * The user turns of one streaming query. Streaming input keeps the native
@@ -457,15 +510,22 @@ async function main(): Promise<void> {
       input.request.worktree,
     );
     const prompt = rendered.prompt;
-    let options = claudeQueryOptions(
-      input,
-      process.env,
-      controller,
-      prepared,
-      validation,
-      files,
-      shell,
-    );
+    let cli: ChildProcess | undefined;
+    const spawnCli = trackedCliSpawn((child) => {
+      cli = child;
+    });
+    let options: Options = {
+      ...claudeQueryOptions(
+        input,
+        process.env,
+        controller,
+        prepared,
+        validation,
+        files,
+        shell,
+      ),
+      spawnClaudeCodeProcess: spawnCli,
+    };
     capture.request(
       prompt,
       {
@@ -602,9 +662,11 @@ async function main(): Promise<void> {
         // usage; nothing new is charged or recorded by the controller.
         const retryDelayMs = CREDENTIAL_RETRY_DELAYS_MS[credentialRetries++]!;
         turns.end();
-        // Ends the CLI child and closes the MCP transports, so the next query
-        // can connect the same servers.
+        // Closes the MCP transports, so the next query can connect the same
+        // servers, and ends the CLI child; its exit is awaited before the
+        // next CLI may write the same conversation.
         await turn.race(stream.return(undefined));
+        await turn.race(cliExited(cli));
         if (!progressLost)
           try {
             privateProgress(progressPath, {
@@ -629,17 +691,20 @@ async function main(): Promise<void> {
         // worker keeps its context; otherwise the run restarts the prompt.
         const resumes =
           !!input.session && existsSync(claudeTranscriptPath(input.session));
-        options = claudeQueryOptions(
-          resumes
-            ? { ...input, session: { ...input.session!, resume: true } }
-            : input,
-          process.env,
-          controller,
-          prepared,
-          validation,
-          files,
-          shell,
-        );
+        options = {
+          ...claudeQueryOptions(
+            resumes
+              ? { ...input, session: { ...input.session!, resume: true } }
+              : input,
+            process.env,
+            controller,
+            prepared,
+            validation,
+            files,
+            shell,
+          ),
+          spawnClaudeCodeProcess: spawnCli,
+        };
         usage.restart(resumes);
         const retryPrompt = resumes
           ? credentialContinuation

@@ -86,6 +86,7 @@ import {
 import {
   assertAnsweredQuestion,
   digest,
+  type PlanningReviewRequest,
   planningReviewEvidence,
   planReviewPacket,
 } from "./packets.js";
@@ -987,7 +988,7 @@ async function compilePlanAdmitted(
   };
   while (true) {
     let graph: WorkGraph | undefined;
-    let packet: PlanReviewRequest | undefined;
+    let packet: PlanningReviewRequest | undefined;
     let review: Awaited<ReturnType<typeof checkedPlanReview>> | undefined;
     let reviewing = false;
     let failure: string;

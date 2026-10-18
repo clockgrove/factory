@@ -587,24 +587,30 @@ export interface PlanCommandAuthorization {
  * to a plan review's operator-decision questions,
  * bound to the retained draft (compiler answer) it was asked about. It is
  * authority for that one choice within the Objective, never new command,
- * ownership or source authority. An answer to a pending amendment's question
- * reaches the amendment's next compilation instead of a retained draft, and
- * records neither a time nor a draft.
+ * ownership or source authority.
  */
 export interface OperatorPlanningDecision {
   question: string;
   answer: string;
   actor: string;
   reason: string;
-  /** Absent on an amendment's answer. */
-  at?: string;
-  /** SHA-256 of the exact retained draft the answer revises; absent on an amendment's answer. */
-  draftDigest?: string;
+  at: string;
+  /** SHA-256 of the exact retained draft the answer revises. */
+  draftDigest: string;
 }
 
+/**
+ * An operator answer a review checks the graph follows. An answer to a
+ * pending amendment's question reaches the amendment's next compilation, not
+ * a retained draft, and records neither a time nor a draft.
+ */
+export type ReviewedOperatorDecision =
+  | OperatorPlanningDecision
+  | Omit<OperatorPlanningDecision, "at" | "draftDigest">;
+
 export interface PlanReviewRequest {
-  /** Operator answers to the planner's and plan reviews' questions, in the order asked. */
-  operatorDecisions?: OperatorPlanningDecision[];
+  /** Operator answers to the planner's, plan reviews' and an amendment's questions, in the order asked. */
+  operatorDecisions?: ReviewedOperatorDecision[];
   /** Exact pinned structural recipe independently reviewed with this graph. */
   workflowRecipe?: import("./workflow-recipes.js").WorkflowRecipeInput;
   /** Authenticated role input; preserves source, command and effect authority. */

@@ -1,5 +1,6 @@
 import { splitSettled } from "./objective-split.js";
 import {
+  answeredQuestionDigest,
   isExecutionState,
   isPreparationState,
   openAmendmentQuestion,
@@ -13,7 +14,11 @@ import type { IntakeAuthorization } from "./intake.js";
 import { objectiveCandidate } from "./qa.js";
 import { PLANNING_REVISION_GRANT } from "./repair-policy.js";
 import type { ContinuationState } from "./state.js";
-import { configurationCommand, shortPlanDigest } from "./status-summary.js";
+import {
+  configurationCommand,
+  namedQuestion,
+  shortPlanDigest,
+} from "./status-summary.js";
 import { awaitsOperator } from "./step.js";
 
 /** Process exit codes for run and the background service (supervisor serve). */
@@ -83,6 +88,8 @@ export function runOutcome(
     `factory run --objective ${objective}`,
     configuration,
   );
+  // Binds a printed --answer to the open question decide checks.
+  const named = namedQuestion(answeredQuestionDigest(state));
   // A step's decision stands until the operator's retry clears it.
   const retry = configurationCommand(
     `factory retry --objective ${objective}`,
@@ -103,7 +110,7 @@ export function runOutcome(
   if (amendmentAsked)
     return {
       code: EXIT_NEEDS_DECISION,
-      message: `Objective #${objective} amendment needs a decision: ${amendmentAsked.question}\nAnswer with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…" --reason "…"`, configuration)}\` and \`${rerun}\`, or refuse the amendment with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``,
+      message: `Objective #${objective} amendment needs a decision: ${amendmentAsked.question}\nAnswer with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…"${named} --reason "…"`, configuration)}\` and \`${rerun}\`, or refuse the amendment with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``,
     };
   if (
     wait?.kind === "decision" &&
@@ -128,12 +135,12 @@ export function runOutcome(
         ? state.plan.review.acceptable === false
           ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} cannot be accepted: ${state.coordinator.waitReason ?? "inspect status"}\nRefuse it with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, then rerun \`${rerun}\``
           : reviewDecisionAnswerable(state)
-            ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\n${reviewDecisionAnswerable(state)!.count > 1 ? "Answer every question in one --answer" : "Answer"} with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…" --reason "…"`, configuration)}\`, then \`${rerun}\` revises the plan with your answer and reviews it again; or discard the plan with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
+            ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\n${reviewDecisionAnswerable(state)!.count > 1 ? "Answer every question in one --answer" : "Answer"} with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…"${named} --reason "…"`, configuration)}\`, then \`${rerun}\` revises the plan with your answer and reviews it again; or discard the plan with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
             : openReviewDecision(state)
               ? `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nThis plan's draft is not retained, so an answer cannot revise it: refuse it with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, state the decision in the Objective, then rerun \`${rerun}\``
-              : `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nDecide with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept|refuse --answer "…" --reason "…"`, configuration)}\`, then rerun \`${rerun}\``
+              : `Objective #${objective} plan ${shortPlanDigest(state.plan)} needs a decision: ${state.coordinator.waitReason ?? "inspect the plan review"}\nDecide with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept|refuse --answer "…"${named} --reason "…"`, configuration)}\`, then rerun \`${rerun}\``
         : openPlanningQuestion(state)
-          ? `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nAnswer with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…" --reason "…"`, configuration)}\`, then \`${rerun}\` revises the draft plan with your answer; or discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
+          ? `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nAnswer with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --answer "…"${named} --reason "…"`, configuration)}\`, then \`${rerun}\` revises the draft plan with your answer; or discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
           : planningRevisionGrantable(state)
             ? `Objective #${objective}: ${state.coordinator.waitReason ?? "planning used up its revisions with review fix findings left"}\nGrant ${PLANNING_REVISION_GRANT} more revisions with \`${configurationCommand(`factory decide --objective ${objective} --outcome accept --reason "…"`, configuration)}\`, then \`${rerun}\` revises the retained draft for the last review's findings; or discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\``
             : `Objective #${objective}: ${state.coordinator.waitReason ?? "planning stopped for a decision; inspect status"}\nResolve it in the Objective, or on the default branch when it is a repository change that is yours to make; discard the stopped planning with \`${configurationCommand(`factory decide --objective ${objective} --outcome refuse --reason "…"`, configuration)}\`, then rerun \`${rerun}\``,

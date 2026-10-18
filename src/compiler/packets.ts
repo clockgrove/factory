@@ -22,6 +22,7 @@ import {
   type ApprovedPlaybookPin,
   type OperatorPlanningDecision,
   type PlanReviewRequest,
+  type ReviewedOperatorDecision,
   assertPlanningExecutionBounds,
   assertApprovedPlaybookPin,
 } from "../contracts.js";
@@ -52,7 +53,14 @@ export function assertAnsweredQuestion(
     );
 }
 
-export function planReviewPacket(
+/** A plan review packet whose operator answers are all bound to retained drafts. */
+export type PlanningReviewRequest = PlanReviewRequest & {
+  operatorDecisions?: OperatorPlanningDecision[];
+};
+
+export function planReviewPacket<
+  D extends ReviewedOperatorDecision = OperatorPlanningDecision,
+>(
   objective: string,
   baseSha: string,
   sources: PlanningSource[],
@@ -65,8 +73,8 @@ export function planReviewPacket(
   approvedPlaybookPin?: ApprovedPlaybookPin,
   contextLookup?: PlanningContextPacket,
   workflowRecipe?: WorkflowRecipeInput,
-  operatorDecisions?: OperatorPlanningDecision[],
-): PlanReviewRequest {
+  operatorDecisions?: D[],
+): PlanReviewRequest & { operatorDecisions?: D[] } {
   if (workflowRecipe) assertWorkflowRecipeInput(workflowRecipe);
   if (executionBounds) assertPlanningExecutionBounds(executionBounds);
   if (approvedPlaybookPin !== undefined)

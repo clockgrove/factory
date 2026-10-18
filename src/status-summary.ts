@@ -412,7 +412,7 @@ const REASON = '"WHY"';
 const ANSWER = '"ANSWER"';
 
 /** Binds a printed --answer to the open question it answers. */
-function namedQuestion(digest: string | null | undefined): string {
+export function namedQuestion(digest: string | null | undefined): string {
   return digest ? ` --question ${digest}` : "";
 }
 

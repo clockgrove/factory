@@ -18,7 +18,6 @@ import type {
   OperatorPlanningDecision,
   WorkGraph,
   PlanCommandAuthorization,
-  PlanReviewRequest,
 } from "../contracts.js";
 import {
   planningSources,
@@ -37,6 +36,7 @@ import type { ResolvedGraphFinding } from "../review-evidence.js";
 import type { checkedPlanReview } from "./planning.js";
 import {
   assertAnsweredQuestion,
+  type PlanningReviewRequest,
   planReviewDigest,
   digest,
   reviewResultDigest,
@@ -116,7 +116,7 @@ export function buildPlanCandidate(
   executionProfiles: ExecutionProfileChoices | undefined,
   sources: ReturnType<typeof planningSources>,
   graph: WorkGraph,
-  packet: PlanReviewRequest,
+  packet: PlanningReviewRequest,
   review: Awaited<ReturnType<typeof checkedPlanReview>>,
   revisions: number,
 ): PlanCandidate {

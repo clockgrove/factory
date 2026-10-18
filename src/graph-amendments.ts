@@ -54,6 +54,7 @@ import {
   planningReviewEvidence,
   planningSources,
   planReviewPacket,
+  questionDigest,
   validateCommandProvenance,
   validateGraph,
   validateGraphSources,
@@ -912,7 +913,7 @@ function amendmentDecisionReturns(original: object): ContentRef[] {
 
 /** The operator's question about the pending amendment and how to answer it. */
 function amendmentQuestion(state: FactoryState, question: string): string {
-  return `${question} Answer with factory decide --objective ${state.objective} --outcome accept --answer "..." --reason "...", or refuse the amendment with --outcome refuse --reason "...".`;
+  return `${question} Answer with factory decide --objective ${state.objective} --outcome accept --answer "..." --question ${questionDigest(question)} --reason "...", or refuse the amendment with --outcome refuse --reason "...".`;
 }
 
 /**

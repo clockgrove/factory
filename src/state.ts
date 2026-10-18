@@ -7,6 +7,7 @@ import {
 import { assertWorkItemScheduling } from "./scheduler.js";
 import { assertAdaptiveContextPacket } from "./adaptive-context.js";
 import { assertPlanningLookupRecord } from "./compiler/context.js";
+import { questionDigest } from "./compiler/packets.js";
 import {
   assertDiscoveryOutputManifest,
   assertDiscoverySpecification,
@@ -420,6 +421,33 @@ export function reviewDecisionAnswerable(
     state.planningRecovery.answer
     ? asked
     : undefined;
+}
+
+/**
+ * The exact open question an accepted `factory decide --answer` is recorded
+ * against, as decide selects it; `--question` names its digest.
+ */
+export function openAnsweredQuestion(
+  state: ContinuationState,
+): string | undefined {
+  if (isExecutionState(state)) return openAmendmentQuestion(state)?.question;
+  if (!isPreparationState(state)) return undefined;
+  const review = state.plan?.review;
+  return (
+    openPlanningQuestion(state)?.question ??
+    openReviewDecision(state)?.question ??
+    (review?.status === "needs-human" && review.acceptable !== false
+      ? (review.failure?.question ?? review.findings[0]?.question)
+      : undefined)
+  );
+}
+
+/** That question's digest, which status and printed commands show; null when none is open. */
+export function answeredQuestionDigest(
+  state: ContinuationState,
+): string | null {
+  const open = openAnsweredQuestion(state);
+  return open === undefined ? null : questionDigest(open);
 }
 
 /** Planning stopped at its revision allowance with only fix findings left: accepting grants more revisions. */

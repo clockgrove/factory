@@ -68,6 +68,7 @@ import {
   observedStackNumber,
   openAmendmentQuestion,
   openPlanningQuestion,
+  openReviewDecision,
   planningRevisionGrantable,
   projectionStarted,
 } from "./state.js";
@@ -2648,6 +2649,7 @@ function preparationStatusDocument(
     planningStopped:
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
     planningQuestion: Boolean(openPlanningQuestion(preparation)),
+    planReviewQuestion: Boolean(openReviewDecision(preparation)),
     planningRevisionGrant: planningRevisionGrantable(preparation)
       ? PLANNING_REVISION_GRANT
       : null,

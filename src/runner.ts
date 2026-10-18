@@ -13,6 +13,7 @@ import {
 } from "./agent-session.js";
 import {
   answerPlanningDecision,
+  answerReviewDecision,
   bindPlanningPlaybook,
   grantPlanningRevisions,
   resolvePlan,
@@ -142,6 +143,7 @@ import {
   isPreparationState,
   openAmendmentQuestion,
   openPlanningQuestion,
+  openReviewDecision,
   pendingQuestions,
   planningRevisionGrantable,
   rejectionHoldsPause,
@@ -1026,6 +1028,41 @@ async function runObjectiveOwned(
               "Factory cannot accept this plan; hand off the owner and refuse it to plan again",
             );
           const issue = await services.github.objective(objective);
+          // The review asked the operator: the answer revises the plan,
+          // which is reviewed again; this plan is never accepted with it.
+          const asked = openReviewDecision(current);
+          if (asked) {
+            if (
+              owner.snapshot !== current ||
+              owner.handoff ||
+              owner.abort.signal.aborted
+            )
+              throw new Error(
+                "The owner's plan changed while deciding; inspect status and decide again",
+              );
+            answerReviewDecision(
+              current,
+              asked.question,
+              {
+                actor: decision.actor,
+                answer: decision.answer,
+                reason: decision.reason,
+              },
+              {
+                objective,
+                body: issue.body,
+                baseSha: current.baseSha,
+                checkout: config.checkout,
+                configDigest: current.restoration
+                  ? current.configDigest
+                  : factoryConfigDigest(config),
+              },
+            );
+            resumePlanning(current);
+            persist();
+            wake();
+            return "plan-answered";
+          }
           const accepted = await resolvePlan(
             current.plan,
             objective,

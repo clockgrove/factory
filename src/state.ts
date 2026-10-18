@@ -379,6 +379,30 @@ export function openPlanningQuestion(
   return record?.phase === "stopped" && open && !open.answer ? open : undefined;
 }
 
+/**
+ * The questions of a plan whose independent review asked the operator
+ * (operator-decision findings). An answer revises the plan's retained draft
+ * and the revised plan is reviewed again; it never accepts this plan.
+ */
+export function openReviewDecision(
+  state: ContinuationState,
+): { question: string } | undefined {
+  if (!isPreparationState(state) || !state.plan) return undefined;
+  const review = state.plan.review;
+  if (review.status !== "needs-human" || review.acceptable === false)
+    return undefined;
+  const questions = [
+    ...new Set(
+      review.findings.flatMap((finding) =>
+        "kind" in finding && finding.kind === "operator-decision"
+          ? [finding.question]
+          : [],
+      ),
+    ),
+  ];
+  return questions.length ? { question: questions.join("\n") } : undefined;
+}
+
 /** Planning stopped at its revision allowance with only fix findings left: accepting grants more revisions. */
 export function planningRevisionGrantable(state: ContinuationState): boolean {
   return (

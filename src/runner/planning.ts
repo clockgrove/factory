@@ -17,6 +17,7 @@ import {
 import { adaptiveWorkflowEnabled } from "../adaptive-workflow.js";
 import {
   answerPlanningDecision,
+  answerReviewDecision,
   bindPlanningPlaybook,
   compilePlan,
   grantPlanningRevisions,
@@ -52,6 +53,7 @@ import type { PreparationState } from "../state.js";
 import {
   isPreparationState,
   openPlanningQuestion,
+  openReviewDecision,
   planningRevisionGrantable,
   projectionStarted,
 } from "../state.js";
@@ -456,10 +458,11 @@ async function planObjectiveObserved(
 
 /**
  * Decide the plan a run persisted in state. Accepting binds the answer to that exact reviewed
- * plan, or, when planning stopped at the planner's own question, to the draft it asked about,
- * which the next run revises; when planning stopped at its revision allowance with only fix
- * findings left, accepting grants more revisions of the retained draft. Refusing discards the
- * unprojected preparation so the next run plans again.
+ * plan; when the planner itself asked, or the plan's review asked the operator
+ * (operator-decision findings), it binds the answer to the retained draft instead, which the
+ * next run revises with it and reviews again. When planning stopped at its revision allowance
+ * with only fix findings left, accepting grants more revisions of the retained draft. Refusing
+ * discards the unprojected preparation so the next run plans again.
  */
 export async function decidePlan(
   config: FactoryConfig,
@@ -573,19 +576,35 @@ export async function decidePlan(
           `Factory cannot accept plan ${shortPlanDigest(preparation.plan)}; refuse it to plan again`,
         );
       const issue = await services.github.objective(objective);
-      preparation.plan = await resolvePlan(
-        preparation.plan,
-        objective,
-        issue.body,
-        preparation.baseSha,
-        config.checkout,
-        input,
-        preparation.restoration
-          ? preparation.configDigest
-          : factoryConfigDigest(config),
-      );
-      delete preparation.coordinator.waitReason;
-      saveState(path, preparation);
+      const configDigest = preparation.restoration
+        ? preparation.configDigest
+        : factoryConfigDigest(config);
+      // The review asked the operator: the answer revises the plan, which
+      // is reviewed again; this plan is never accepted with it.
+      const asked = openReviewDecision(preparation);
+      if (asked) {
+        answerReviewDecision(preparation, asked.question, input, {
+          objective,
+          body: issue.body,
+          baseSha: preparation.baseSha,
+          checkout: config.checkout,
+          configDigest,
+        });
+        resumePlanning(preparation);
+        saveState(path, preparation);
+      } else {
+        preparation.plan = await resolvePlan(
+          preparation.plan,
+          objective,
+          issue.body,
+          preparation.baseSha,
+          config.checkout,
+          input,
+          configDigest,
+        );
+        delete preparation.coordinator.waitReason;
+        saveState(path, preparation);
+      }
     }
     diagnostics.emit({
       operation: "planning-decision",
@@ -616,7 +635,7 @@ export async function decidePlan(
     releaseMutationLock(config, objective, lock);
   }
 }
-/** An answered planner question returns the stopped preparation to planning. */
+/** An answered planning question or a revision grant returns the stopped preparation to planning. */
 export function resumePlanning(preparation: PreparationState): void {
   preparation.coordinator.phase = "planning";
   preparation.coordinator.phaseStartedAt = new Date().toISOString();

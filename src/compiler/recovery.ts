@@ -115,15 +115,16 @@ interface PlanningInvocationReceipt {
 }
 
 /**
- * A question the planner asked while compiling, with the draft it was asked
- * about. The operator's answer revises that exact draft in a fresh session;
- * the revised graph still gets its independent review.
+ * A question the planner asked while compiling, or the operator-decision
+ * questions of a plan review, with the draft it was asked about. The
+ * operator's answer revises that exact draft in a fresh session; the revised
+ * graph still gets its independent review.
  */
 export interface PlanningDecisionRecord {
   question: string;
   /** Accepted corrections before the question; older ones are in the draft. */
   round: number;
-  /** The asking compilation's complete answer: the draft an answer revises. */
+  /** The asking (or reviewed) compilation's complete answer: the draft an answer revises. */
   draft: ContentRef;
   /** The asking round's receipts. */
   invocations: PlanningInvocationReceipt[];
@@ -172,7 +173,7 @@ export interface PlanningRecoveryRecord {
   revision?: ContentRef;
   diagnosisResponse?: { kind: string; diagnosis: string; correction: string };
   review?: PlanningReviewRecord;
-  /** The planner's questions, oldest first; the last, while unanswered, holds planning. */
+  /** The planner's and plan reviews' questions, oldest first; the last, while unanswered, holds planning. */
   decisions?: PlanningDecisionRecord[];
   /**
    * Planning stopped because the revision allowance ran out while the last
@@ -238,6 +239,75 @@ export function answerPlanningDecision(
   };
   record.revision = open.draft;
   record.phase = "ready";
+}
+
+/**
+ * `factory decide --outcome accept` for a plan whose independent review asked
+ * the operator (operator-decision findings): never accept that plan. The
+ * answer becomes an operator decision on the reviewed graph's retained draft,
+ * exactly like an answer to the planner's own question, so the next run
+ * revises the draft with it as an authoritative operator correction and
+ * reviews the result again. An answer that confirms the plan's choice costs a
+ * change list without changes; no code judges the answer's text. The plan
+ * must still be the current one (as for accepting it). The caller holds the
+ * mutation lock and saves.
+ */
+export function answerReviewDecision(
+  state: { plan?: PlanCandidate; planningRecovery?: PlanningRecoveryRecord },
+  questions: string,
+  input: { actor: string; answer: string; reason: string },
+  current: {
+    objective: number;
+    body: string;
+    baseSha: string;
+    checkout: string;
+    configDigest: string;
+  },
+): void {
+  const record = state.planningRecovery;
+  const plan = state.plan;
+  if (!plan || plan.review.status !== "needs-human")
+    throw new Error("This plan has no open review question");
+  if (!input.actor.trim() || !input.answer.trim() || !input.reason.trim())
+    throw new Error("Answering the plan review needs actor, answer and reason");
+  verifyPlanCandidate(
+    plan,
+    current.objective,
+    current.body,
+    current.baseSha,
+    current.checkout,
+    current.configDigest,
+    true,
+  );
+  if (record?.phase !== "stopped" || !record.answer)
+    throw new Error(
+      "This plan's draft is not retained, so an answer cannot revise it; refuse the plan and state the decision in the Objective to plan again",
+    );
+  record.decisions = [
+    ...(record.decisions ?? []),
+    {
+      question: questions,
+      round: record.history.length,
+      draft: record.answer,
+      // The reviewed round's receipts; the revision plans in a fresh session.
+      invocations: structuredClone(record.invocations ?? []),
+      answer: {
+        actor: input.actor,
+        answer: input.answer,
+        reason: input.reason,
+        at: new Date().toISOString(),
+      },
+    },
+  ];
+  record.invocations = [];
+  record.revision = record.answer;
+  delete record.answer;
+  delete record.response;
+  delete record.responseFailure;
+  delete record.review;
+  delete record.diagnosisResponse;
+  record.phase = "ready";
+  delete state.plan;
 }
 
 /**

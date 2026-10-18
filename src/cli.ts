@@ -457,7 +457,7 @@ async function decideCommand(
     decided === "plan-accepted"
       ? `Accepted the plan for Objective #${objective}; run ${run} to continue`
       : decided === "plan-answered"
-        ? `Answered the planner's question for Objective #${objective}; ${run} revises the draft plan with your answer and reviews it`
+        ? `Recorded your answer for Objective #${objective}; ${run} revises the plan with your answer and reviews it again`
         : decided === "plan-revisions-granted"
           ? `Granted ${PLANNING_REVISION_GRANT} more plan revisions for Objective #${objective}; ${run} revises the retained draft for the last review's findings`
           : decided === "plan-refused"

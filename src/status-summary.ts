@@ -144,6 +144,8 @@ interface PreparingStatusView extends WaitView {
   planningStopped: boolean;
   /** It stopped at the planner's own question: an answer revises its draft. */
   planningQuestion?: boolean;
+  /** The plan's review asked the operator: an answer revises the plan, which is reviewed again. */
+  planReviewQuestion?: boolean;
   /** It stopped at its revision allowance with only fix findings left: accepting grants this many more revisions. */
   planningRevisionGrant?: number | null;
   /** The planner call now or last made, and projection's issue count. */
@@ -1255,10 +1257,15 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
     return {
       phase: "needs-plan-decision",
       summary: "plan review needs a human decision",
-      nextAction: {
-        command: `factory decide --objective ${objective} --outcome accept|refuse --answer ${ANSWER} --reason ${REASON}`,
-        reason: `Answer the question below; then ${run(objective)}`,
-      },
+      nextAction: view.planReviewQuestion
+        ? {
+            command: `factory decide --objective ${objective} --outcome accept --answer ${ANSWER} --reason ${REASON}`,
+            reason: `Answer the plan review's question below; then ${run(objective)} revises the plan with your answer and reviews it again (refuse discards the plan instead)`,
+          }
+        : {
+            command: `factory decide --objective ${objective} --outcome accept|refuse --answer ${ANSWER} --reason ${REASON}`,
+            reason: `Answer the question below; then ${run(objective)}`,
+          },
     };
   if (view.planningStopped && view.planningRevisionGrant) {
     const rounds = planningRoundsText(view.planningStep?.rounds);

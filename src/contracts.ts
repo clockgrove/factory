@@ -583,7 +583,8 @@ export interface PlanCommandAuthorization {
 }
 
 /**
- * The operator's answer to a question the planner asked while compiling,
+ * The operator's answer to a question the planner asked while compiling, or
+ * to a plan review's operator-decision questions,
  * bound to the retained draft (compiler answer) it was asked about. It is
  * authority for that one choice within the Objective, never new command,
  * ownership or source authority.
@@ -599,7 +600,7 @@ export interface OperatorPlanningDecision {
 }
 
 export interface PlanReviewRequest {
-  /** Operator answers to the planner's questions, in the order asked. */
+  /** Operator answers to the planner's and plan reviews' questions, in the order asked. */
   operatorDecisions?: OperatorPlanningDecision[];
   /** Exact pinned structural recipe independently reviewed with this graph. */
   workflowRecipe?: import("./workflow-recipes.js").WorkflowRecipeInput;

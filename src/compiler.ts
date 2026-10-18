@@ -75,6 +75,7 @@ export {
   type PlanningRecoveryContext,
   type PlanningDecisionRecord,
   answerPlanningDecision,
+  answerReviewDecision,
   compilePlan,
   grantPlanningRevisions,
   operatorPlanningDecisions,

@@ -79,7 +79,7 @@ export interface PlanCandidate {
   reviewDigest: string;
   /** Factory installation configuration bound at preview time. */
   configDigest: string;
-  /** Operator answers to the planner's questions this graph was revised for; reviewed with it. */
+  /** Operator answers to the planner's and plan reviews' questions this graph was revised for; reviewed with it. */
   operatorDecisions?: OperatorPlanningDecision[];
   humanDecision?: {
     question: string;

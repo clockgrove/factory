@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentSessionRef, AgentSessionRequest } from "../contracts.js";
@@ -245,6 +245,12 @@ export function claudeSessionEnvironment(
     environment.CLAUDE_SECURESTORAGE_CONFIG_DIR ??
     environment.CLAUDE_CONFIG_DIR ??
     "";
+  // The CLI resolves a relative directory against its own working
+  // directory, which for a worker is the checkout it may write.
+  if (login && !isAbsolute(login))
+    throw new Error(
+      "CLAUDE_CONFIG_DIR and CLAUDE_SECURESTORAGE_CONFIG_DIR must be absolute paths",
+    );
   const credentials = join(
     login || join(homedir(), ".claude"),
     ".credentials.json",
@@ -257,8 +263,15 @@ export function claudeSessionEnvironment(
     throw new Error(
       "Claude login credential source is not an owned regular file",
     );
-  // A copy left by an earlier version must not be read or kept.
+  // A copy or staging file left by an earlier version must not be kept.
   rmSync(join(config, ".credentials.json"), { force: true });
+  for (const name of readdirSync(config)) {
+    if (!/^\.credentials\..*\.tmp$/.test(name)) continue;
+    const staging = join(config, name);
+    const entry = lstatSync(staging);
+    if (entry.isFile() && entry.uid === process.getuid?.())
+      rmSync(staging, { force: true });
+  }
   return {
     ...environment,
     CLAUDE_CONFIG_DIR: config,

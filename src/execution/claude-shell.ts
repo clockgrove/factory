@@ -173,6 +173,7 @@ export async function runSandboxedCommand(input: {
       TEMP: temporary,
     },
     network: false,
+    packageInstall: false,
     // The shell never runs unsandboxed, whatever `required` allows.
     policy: { ...input.policy, required: true },
   });

@@ -134,6 +134,7 @@ function assertInitialization(
   message: SDKSystemMessage,
   input: ClaudeWorkerInput,
   sdkModel: string,
+  shellTool: boolean,
 ): void {
   const { config, request } = input;
   if (resolve(message.cwd) !== resolve(request.worktree))
@@ -158,7 +159,6 @@ function assertInitialization(
   const fileTools = factoryFilesAuthorized(input);
   if (fileTools)
     for (const tool of factoryFilesToolNames) configuredTools.add(tool);
-  const shellTool = factoryShellAuthorized(input);
   if (shellTool) configuredTools.add(factoryShellToolName);
   const unexpectedTool = message.tools.find(
     (tool) => !configuredTools.has(tool),
@@ -521,7 +521,7 @@ async function main(): Promise<void> {
           );
         }
       if (message.type === "system" && message.subtype === "init") {
-        assertInitialization(message, input, options.model!);
+        assertInitialization(message, input, options.model!, !!shell);
         if (prepared || validation || files || shell) {
           const statuses = await turn.race(stream.mcpServerStatus());
           prepared?.markReady(

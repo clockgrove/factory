@@ -24,6 +24,13 @@ const MAX_FILE_BYTES = 1_048_576;
 const MAX_TREE_BYTES = 67_108_864;
 /** Rendered map bound; the remainder is counted, not listed. */
 const MAX_MAP_BYTES = 49_152;
+/** Exported Markdown files above this size get a heading outline in the map. */
+const OUTLINE_MIN_FILE_BYTES = 32_768;
+/**
+ * Total outline bound. Deeper heading levels are dropped first (3, then 2);
+ * level-1 headings past the bound are counted, not listed.
+ */
+const MAX_OUTLINE_BYTES = 8192;
 
 export interface TreeEntry {
   path: string;
@@ -91,7 +98,64 @@ export function repositoryMap(checkout: string, baseSha: string): string {
     lines.push(line);
   }
   const omitted = entries.length - lines.length;
-  return `${header}${lines.join("")}${omitted ? `... ${omitted} more paths are not listed (map bound ${MAX_MAP_BYTES} bytes); find them with your read tools.\n` : ""}`;
+  return `${header}${lines.join("")}${omitted ? `... ${omitted} more paths are not listed (map bound ${MAX_MAP_BYTES} bytes); find them with your read tools.\n` : ""}${markdownOutline(checkout, exported)}`;
+}
+
+/**
+ * Heading outlines of large exported Markdown files, so a reader opens the
+ * section it needs instead of searching the file for headings. Bounded by
+ * MAX_OUTLINE_BYTES; fenced code is not scanned for headings.
+ */
+function markdownOutline(checkout: string, exported: TreeEntry[]): string {
+  const large = exported.filter(
+    (entry) => entry.size > OUTLINE_MIN_FILE_BYTES && /\.md$/i.test(entry.path),
+  );
+  if (!large.length) return "";
+  const files = readBlobs(checkout, large).map((body, at) => {
+    const headings: { level: number; line: string }[] = [];
+    let fence = "";
+    for (const [index, text] of body
+      .toString("utf8")
+      .split(/\r?\n/)
+      .entries()) {
+      const marker = text.match(/^ {0,3}(`{3,}|~{3,})/)?.[1];
+      if (marker && (!fence || marker.startsWith(fence))) {
+        fence = fence ? "" : marker;
+        continue;
+      }
+      const heading = !fence && text.match(/^(#{1,6})[ \t]+(.+?)[ \t#]*$/);
+      if (heading)
+        headings.push({
+          level: heading[1]!.length,
+          line: `${index + 1}\t${heading[1]} ${heading[2]!.slice(0, 160)}\n`,
+        });
+    }
+    return { path: large[at]!.path, headings };
+  });
+  const header = (level: number) =>
+    `Heading outlines of exported Markdown files over ${OUTLINE_MIN_FILE_BYTES} bytes, levels 1-${level}: the path, then one line per heading: 1-based line number, tab, heading.\n`;
+  for (let level = 3; level >= 1; level--) {
+    const parts = [header(level)];
+    let bytes = Buffer.byteLength(parts[0]!) + 128;
+    let omitted = 0;
+    for (const file of files) {
+      const selected = file.headings.filter((entry) => entry.level <= level);
+      if (!selected.length) continue;
+      for (const [at, line] of [`${file.path}\n`, ...selected].entries()) {
+        const text = typeof line === "string" ? line : line.line;
+        if (omitted || bytes + Buffer.byteLength(text) > MAX_OUTLINE_BYTES) {
+          omitted += selected.length - Math.max(0, at - 1);
+          break;
+        }
+        bytes += Buffer.byteLength(text);
+        parts.push(text);
+      }
+    }
+    if (!omitted) return parts.join("");
+    if (level === 1)
+      return `${parts.join("")}... ${omitted} more headings are not listed (outline bound ${MAX_OUTLINE_BYTES} bytes).\n`;
+  }
+  return "";
 }
 
 /**

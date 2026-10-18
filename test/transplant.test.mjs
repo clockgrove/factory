@@ -1579,6 +1579,13 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
   writeFileSync(join(checkout, "secret.txt"), "outside admitted selector\n");
   const tabPath = "api/tab\tcontract.txt";
   writeFileSync(join(checkout, tabPath), "literal tab filename body\n");
+  // A large Markdown file gets a heading outline in the map; fenced lines
+  // are not headings.
+  mkdirSync(join(checkout, "docs"));
+  writeFileSync(
+    join(checkout, "docs", "guide.md"),
+    `# Guide\n${"body text\n".repeat(2000)}## Setup\n\`\`\`sh\n# not a heading\n\`\`\`\n${"more text\n".repeat(2000)}### Details\n`,
+  );
   mkdirSync(join(checkout, "unrelated"));
   for (let index = 0; index < 500; index++)
     writeFileSync(
@@ -2559,6 +2566,11 @@ test("compiler retrieves scoped immutable bodies and retains exact bounded conte
   assert.equal(map, repositoryMap(checkout, baseSha));
   assert.match(map, new RegExp(`Repository map at base ${baseSha}`));
   assert.match(map, /^api\/contract\.txt\t36$/m);
-  assert.ok(Buffer.byteLength(map) <= 49_152);
+  assert.ok(Buffer.byteLength(map) <= 49_152 + 8192);
   assert.match(map, /more paths are not listed/);
+  assert.match(
+    map,
+    /^docs\/guide\.md\n1\t# Guide\n2002\t## Setup\n4006\t### Details\n/m,
+  );
+  assert.doesNotMatch(map, /not a heading/);
 });

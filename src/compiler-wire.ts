@@ -98,6 +98,15 @@ const strict = (properties: Record<string, Schema>): Schema => ({
 });
 const text: Schema = { type: "string" };
 
+/** The environment a null planner choice stands for: no setup, no probe. */
+const DEFAULT_ENVIRONMENT = {
+  kind: "local",
+  readiness: "available",
+  probeValidationIndex: null,
+  prerequisiteValidationIndices: [],
+  preparedBy: "",
+};
+
 /** Shared compilation/diagnosis meaning; no probe result or extra authority. */
 export const COMPILER_READINESS_GUIDANCE =
   "Same-owner source-authorized setup followed by the unchanged real readiness probe uses available with empty preparedBy and ordered prerequisiteValidationIndices before probeValidationIndex. available describes that sequence for checking in the actual fresh checkout before implementation; it never claims the probe already passed or grants authority. prepare is exclusively preparation supplied by an actual declared dependency named in preparedBy, not a synonym for the owner's setup commands. Unknown runtime readiness alone does not require an operator decision when this authorized sequence can establish it. Correct a generated mismatch as planning-output only within permitted repair classes and recorded attempt limits; do not invent a dependency, waive the probe or claim readiness. Ask the operator for an actual missing source fact, permission, capability or human-owned choice through decisionRequired.";
@@ -324,38 +333,50 @@ export function compilerWire(
     });
     itemSchema.required!.push("executionProfile");
   }
+  // null selects the default environment (see DEFAULT_ENVIRONMENT), so the
+  // common case costs the planner no output.
   const environment = {
-    anyOf: ["local", "real"].flatMap((kind) =>
-      ["available", "prepare", "missing"].map((readiness) =>
-        strict({
-          kind: { type: "string", enum: [kind] },
-          readiness: {
-            type: "string",
-            enum: [readiness],
-            description:
-              readiness === "available"
-                ? "The owner can run its authorized prerequisites followed by its probe before implementation; this choice does not claim readiness passed."
-                : readiness === "prepare"
-                  ? "An actual declared dependency supplies preparation; same-owner prerequisite commands do not use prepare."
-                  : "A source-required external environment prerequisite is missing: name its authorized probe or prerequisite commands. It asks the operator to establish it. Use decisionRequired, not missing, when the Objective as written does not allow covering the criterion.",
-          },
-          probeValidationIndex:
-            kind === "real"
-              ? integer()
-              : { type: ["integer", "null"], minimum: 0 },
-          prerequisiteValidationIndices: { type: "array", items: integer() },
-          preparedBy:
-            readiness === "prepare"
-              ? {
-                  ...text,
-                  minLength: 1,
-                  description:
-                    "ID of an actual preparation item in this owner's dependencies.",
-                }
-              : { type: "string", enum: [""] },
-        }),
-      ),
-    ),
+    description:
+      "null for the default: local, available, null probe, no prerequisites or preparedBy.",
+    anyOf: [
+      { type: "null" },
+      {
+        anyOf: ["local", "real"].flatMap((kind) =>
+          ["available", "prepare", "missing"].map((readiness) =>
+            strict({
+              kind: { type: "string", enum: [kind] },
+              readiness: {
+                type: "string",
+                enum: [readiness],
+                description:
+                  readiness === "available"
+                    ? "The owner can run its authorized prerequisites followed by its probe before implementation; this choice does not claim readiness passed."
+                    : readiness === "prepare"
+                      ? "An actual declared dependency supplies preparation; same-owner prerequisite commands do not use prepare."
+                      : "A source-required external environment prerequisite is missing: name its authorized probe or prerequisite commands. It asks the operator to establish it. Use decisionRequired, not missing, when the Objective as written does not allow covering the criterion.",
+              },
+              probeValidationIndex:
+                kind === "real"
+                  ? integer()
+                  : { type: ["integer", "null"], minimum: 0 },
+              prerequisiteValidationIndices: {
+                type: "array",
+                items: integer(),
+              },
+              preparedBy:
+                readiness === "prepare"
+                  ? {
+                      ...text,
+                      minLength: 1,
+                      description:
+                        "ID of an actual preparation item in this owner's dependencies.",
+                    }
+                  : { type: "string", enum: [""] },
+            }),
+          ),
+        ),
+      },
+    ],
   };
   // CI checks are chosen from the names the base and Objective define, so an
   // invented name cannot be expressed.
@@ -447,7 +468,11 @@ export function compilerWire(
       sourceIndex: integer(request.sources.length),
       firstLineIndex: integer(),
       lastLineIndex: integer(),
-      statement: { ...text, minLength: 1 },
+      statement: {
+        description:
+          "null when the cited lines state the exit item on their own; Factory then uses those exact lines.",
+        anyOf: [{ type: "null" }, { ...text, minLength: 1 }],
+      },
       disposition: {
         anyOf: [
           strict({
@@ -1329,7 +1354,12 @@ export function compilerWire(
           default:
             throw new Error("Planner proof form is invalid");
         }
-        const env = object(entry.environment, "environment");
+        const env = object(
+          entry.environment === null
+            ? structuredClone(DEFAULT_ENVIRONMENT)
+            : entry.environment,
+          "environment",
+        );
         keys(
           env,
           [
@@ -1471,7 +1501,9 @@ export function compilerWire(
           throw new PlannerChoiceError(
             `Planner source obligation ${position} must select an existing nonblank line range of a cited source, not the Objective`,
           );
-        if (typeof entry.statement !== "string" || !entry.statement.trim())
+        // A null statement is the exact cited lines, already checked nonblank.
+        const statement = entry.statement === null ? spanText : entry.statement;
+        if (typeof statement !== "string" || !statement.trim())
           throw new Error("Planner source obligation must state its exit item");
         const source = {
           path: pinned.path,
@@ -1494,7 +1526,7 @@ export function compilerWire(
           graph.coverage!.push({
             criterionId: sourceObligationId(source),
             source,
-            statement: entry.statement,
+            statement,
             ...proved(disposition, `source obligation ${position}`),
           });
           continue;
@@ -1516,7 +1548,7 @@ export function compilerWire(
           );
         exclusions.push({
           source,
-          statement: entry.statement,
+          statement,
           reason: disposition.reason,
           objectiveLines: disposition.objectiveLineIndices.map((line) =>
             index(line, objectiveLines, "objectiveLineIndices"),

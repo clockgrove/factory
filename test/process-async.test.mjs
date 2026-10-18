@@ -3989,6 +3989,35 @@ test("source readiness prepares each real fresh checkout before its phase checks
       () => wire.decode(duplicated),
       /one coverage entry per obligation/,
     );
+    // A null environment is the default, and a null source-obligation
+    // statement is the exact cited lines; both decode to the full form.
+    const exitLine = source.lines.find((line) => line.text.trim());
+    const lean = structuredClone(generated);
+    lean.coverage[0].environment = null;
+    lean.sourceObligations = [
+      {
+        sourceIndex: source.sourceIndex,
+        firstLineIndex: exitLine.lineIndex,
+        lastLineIndex: exitLine.lineIndex,
+        statement: null,
+        disposition: {
+          kind: "covered",
+          itemId: item.id,
+          proof: { kind: "final-review" },
+          environment: null,
+        },
+      },
+    ];
+    const leanGraph = wire.decode(lean);
+    const defaultEnvironment = {
+      kind: "local",
+      readiness: "available",
+      preparedBy: "",
+      probe: "",
+    };
+    assert.deepEqual(leanGraph.coverage[0].environment, defaultEnvironment);
+    assert.equal(leanGraph.coverage.at(-1).statement, exitLine.text);
+    assert.deepEqual(leanGraph.coverage.at(-1).environment, defaultEnvironment);
     const graph = validateCompiledGraph({
       graph: wire.decode(generated),
       request,

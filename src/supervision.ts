@@ -76,6 +76,7 @@ const serviceEnvironment = [
   "GH_CONFIG_DIR",
   // Claude login location and the network settings needed to reach providers.
   "CLAUDE_CONFIG_DIR",
+  "CLAUDE_SECURESTORAGE_CONFIG_DIR",
   "HTTPS_PROXY",
   "HTTP_PROXY",
   "NO_PROXY",

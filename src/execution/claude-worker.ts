@@ -203,8 +203,8 @@ const MAX_TURN_LIMIT_CONTINUATIONS = 2;
 /**
  * Backoff before each fresh query after the API rejected the worker's login
  * (status 401), as planning retries it (#1528). Clients sharing one login
- * rotate its OAuth token; a fresh query copies the login again. A login that
- * stays rejected after these stops the attempt for the operator.
+ * rotate its OAuth token; a fresh query re-reads the shared login. A login
+ * that stays rejected after these stops the attempt for the operator.
  */
 const CREDENTIAL_RETRY_DELAYS_MS = [3_000, 6_000] as const;
 

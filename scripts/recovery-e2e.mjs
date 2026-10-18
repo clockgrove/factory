@@ -791,17 +791,13 @@ async function controllerKilledInPlanning(scenario) {
   );
   cancelAfterFailure(scenario, n, done);
   await assertSettled(scenario, n, "complete");
-  const runs = factory([
-    "diagnostics",
-    "--objective",
-    String(n),
-    "--summary",
-    "--json",
-  ]).json?.bindings?.observedRunIds;
+  // The recovery resumes the stopped run's continuation (same run id) under
+  // its own Project owner claim, after handing off the killed run's claim.
+  const claims = ownerClaims(n).length;
   scenario.check(
-    "recovery ran as a new controller run",
-    (runs?.length ?? 0) >= 2,
-    runs?.length,
+    "recovery ran as a new controller run with its own owner claim",
+    claims >= 2,
+    claims,
   );
 }
 

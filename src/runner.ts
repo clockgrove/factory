@@ -292,6 +292,10 @@ async function decideObjectiveUnscoped(
       input.outcome === "accept" && planningRevisionGrantable(state);
     if (input.outcome === "accept" && !input.answer && !granting)
       throw new Error("Accepting a plan requires --answer to its question");
+    if (granting && input.answer?.trim())
+      throw new Error(
+        "Granting planning revisions answers no question; omit --answer",
+      );
     // A live service owns the installation: it applies the decision (#1290).
     if (forward) {
       const reply = await requestControl(config.repository, {

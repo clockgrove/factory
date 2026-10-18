@@ -638,7 +638,7 @@ export interface PlanRevisionScope {
   changedItemIds: string[];
   addedItemIds: string[];
   removedItemIds: string[];
-  /** Plan-level graph fields (such as coverage or sourceObligations) the revision changed. */
+  /** Plan-level graph fields (such as coverage or sourceObligations) the revision changed; operatorDecisions when the operator answered since. */
   changedFields: string[];
 }
 

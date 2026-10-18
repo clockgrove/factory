@@ -45,6 +45,7 @@ import {
   failureDigest,
   objectiveEvent,
   PAID_ATTEMPTS,
+  PLANNING_REVISION_GRANT,
   type RepairClass,
   type RepairLedger,
 } from "../repair-policy.js";
@@ -143,8 +144,7 @@ export interface PlanningRevisionGrant {
   round: number;
 }
 
-/** Revisions one `factory decide --outcome accept` grants after the allowance ran out. */
-export const PLANNING_REVISION_GRANT = 2;
+export { PLANNING_REVISION_GRANT };
 
 /** A reviewed graph's per-item and plan-level digests: what the next review compares. */
 interface ReviewedGraphDigests {
@@ -249,7 +249,7 @@ export function answerPlanningDecision(
  */
 export function grantPlanningRevisions(
   state: { plan?: PlanCandidate; planningRecovery?: PlanningRecoveryRecord },
-  input: { actor: string; reason: string },
+  input: { actor: string; reason: string; answer?: string },
 ): void {
   const record = state.planningRecovery;
   if (
@@ -258,6 +258,10 @@ export function grantPlanningRevisions(
     record.stoppedFor !== "revision-allowance"
   )
     throw new Error("Planning did not stop at its revision allowance");
+  if (input.answer?.trim())
+    throw new Error(
+      "Granting planning revisions answers no question; omit --answer",
+    );
   if (!input.actor.trim() || !input.reason.trim())
     throw new Error("Granting planning revisions needs actor and reason");
   record.grants = [
@@ -274,8 +278,17 @@ export function grantPlanningRevisions(
   record.phase = "ready";
 }
 
-function reviewedGraphDigests(graph: WorkGraph): ReviewedGraphDigests {
-  const { items: _items, ...fields } = graph;
+function reviewedGraphDigests(
+  graph: WorkGraph,
+  record: PlanningRecoveryRecord,
+): ReviewedGraphDigests {
+  const { items: _items, ...graphFields } = graph;
+  // The operator's answers are reviewed with the graph, so a new answer
+  // counts as a change the next review checks.
+  const fields = {
+    ...graphFields,
+    operatorDecisions: operatorPlanningDecisions(record) ?? [],
+  };
   return {
     items: Object.fromEntries(
       graphItems(graph).map((item) => [item.id, digest(JSON.stringify(item))]),
@@ -301,7 +314,7 @@ function revisionScope(
   const last = reviewed.at(-1);
   const before = last?.reviewedGraph;
   if (!last || !before) return undefined;
-  const now = reviewedGraphDigests(graph);
+  const now = reviewedGraphDigests(graph, record);
   const findings = (last.review?.response as { findings?: unknown } | undefined)
     ?.findings;
   const keys = new Set([
@@ -1257,7 +1270,7 @@ async function compilePlanAdmitted(
         corrections: structuredClone(stating),
         ...(record.review ? { review: reviewByReference(record.review) } : {}),
         ...(record.review && graph
-          ? { reviewedGraph: reviewedGraphDigests(graph) }
+          ? { reviewedGraph: reviewedGraphDigests(graph, record) }
           : {}),
       });
       record.invocations = [];
@@ -1351,7 +1364,7 @@ async function compilePlanAdmitted(
       correction: diagnosis.correction,
       ...(record.review ? { review: reviewByReference(record.review) } : {}),
       ...(record.review && graph
-        ? { reviewedGraph: reviewedGraphDigests(graph) }
+        ? { reviewedGraph: reviewedGraphDigests(graph, record) }
         : {}),
     });
     record.invocations = [];

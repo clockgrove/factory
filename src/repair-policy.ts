@@ -147,8 +147,16 @@ export interface RepairLedger {
    */
   charges?: Record<string, Charge>;
   /** Operator grants of more planning revisions (see grantPlanningRevisions). */
-  planningRecovery?: { grants?: readonly { rounds: number }[] };
+  planningRecovery?: {
+    grants?: readonly { rounds: number }[];
+    history?: { readonly length: number };
+  };
+  /** Set on a preparation: planning is still revising while it has no plan. */
+  kind?: string;
+  plan?: unknown;
 }
+/** Revisions one operator grant adds after planning used up its allowance. */
+export const PLANNING_REVISION_GRANT = 2;
 /** Paid calls (planning diagnoses) asked per failure event before the operator decides. */
 export const PAID_ATTEMPTS = 3;
 /**
@@ -292,14 +300,21 @@ export function consumption(
 }
 /** The Objective's limit for `key`: its snapshot plus the operator's planning revision grants. */
 export function allowanceLimit(state: RepairLedger, key: Allowance): number {
-  const granted =
-    key === "planningRevisions"
-      ? (state.planningRecovery?.grants ?? []).reduce(
-          (total, grant) => total + grant.rounds,
-          0,
-        )
-      : 0;
-  return state.autonomy.allowances[key] + granted;
+  const base = state.autonomy.allowances[key];
+  if (key !== "planningRevisions") return base;
+  const granted = (state.planningRecovery?.grants ?? []).reduce(
+    (total, grant) => total + grant.rounds,
+    0,
+  );
+  // A grant is for initial planning: once a plan exists, only the granted
+  // rounds planning used still count, so none becomes amendment budget.
+  if (state.kind === "preparing" && state.plan === undefined)
+    return base + granted;
+  const used = Math.max(
+    0,
+    (state.planningRecovery?.history?.length ?? 0) - base,
+  );
+  return base + Math.min(granted, used);
 }
 /** Per-path limits cap Work Item scopes; planning is one Objective-wide scope under its allowance. */
 function scopeLimit(
@@ -668,23 +683,32 @@ export function validateCorrection(
 }
 
 /** Each grant is a recorded operator decision: who, why, when, how many and at which round. */
-function assertPlanningGrants(recovery: unknown): void {
+function assertPlanningGrants(state: RepairLedger): void {
+  const recovery: unknown = state.planningRecovery;
   if (recovery === undefined) return;
   const value = recovery as {
     grants?: unknown;
     history?: unknown[];
+    phase?: unknown;
     stoppedFor?: unknown;
   };
   if (
     value?.stoppedFor !== undefined &&
-    value.stoppedFor !== "revision-allowance"
+    (value.stoppedFor !== "revision-allowance" ||
+      value.phase !== "stopped" ||
+      state.plan !== undefined)
   )
     throw new Error("Invalid planning stop reason");
   if (value?.grants === undefined) return;
+  // Each grant follows the allowance it extends: it is given exactly when
+  // planning has used the snapshot plus every earlier grant.
+  let expectedRound = state.autonomy.allowances.planningRevisions;
   if (
     !Array.isArray(value.grants) ||
     value.grants.some((grant) => {
       const entry = grant as Record<string, unknown>;
+      const round = expectedRound;
+      expectedRound += PLANNING_REVISION_GRANT;
       return (
         !entry ||
         typeof entry !== "object" ||
@@ -693,12 +717,9 @@ function assertPlanningGrants(recovery: unknown): void {
           (text) => typeof text === "string" && text.trim(),
         ) ||
         !Number.isFinite(Date.parse(entry.at as string)) ||
-        !Number.isSafeInteger(entry.rounds) ||
-        (entry.rounds as number) < 1 ||
-        (entry.rounds as number) > 16 ||
-        !Number.isSafeInteger(entry.round) ||
-        (entry.round as number) < 0 ||
-        (entry.round as number) > (value.history?.length ?? 0)
+        entry.rounds !== PLANNING_REVISION_GRANT ||
+        entry.round !== round ||
+        round > (value.history?.length ?? 0)
       );
     })
   )
@@ -712,7 +733,7 @@ export function assertRepairLedger(
   },
 ): void {
   validateAutonomy(state.autonomy);
-  assertPlanningGrants(state.planningRecovery);
+  assertPlanningGrants(state);
   // Charges replaced these counters; refuse rather than silently reset them.
   for (const counter of ["allowanceConsumption", "repairConsumption"])
     if (Object.hasOwn(state, counter))

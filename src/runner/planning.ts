@@ -489,6 +489,9 @@ export async function decidePlan(
         "Objective has no persisted plan awaiting a decision; run it first",
       );
     assertRestoredContinuationReady(preparation, config);
+    // A cancelled run has nothing left to decide; nothing is written.
+    if (preparation.cancelRequested || preparation.cancelledAt)
+      throw new Error("Objective is cancelled");
     if (input.outcome === "refuse") {
       if (!input.actor.trim() || !input.reason.trim())
         throw new Error("A plan refusal needs actor and reason");

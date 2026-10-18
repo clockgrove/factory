@@ -25,6 +25,7 @@ import { assertApprovedPlaybookPin } from "./contracts.js";
 import { assertDurableValue } from "./execution/checkpoint.js";
 import { graphDigest } from "./graph-amendments.js";
 import { withCheckpointDisposals } from "./recovery-checkpoint.js";
+import { settleInterruptedPaidCall } from "./step.js";
 import type { ContinuationState } from "./state.js";
 
 function object(value: unknown): Record<string, unknown> {
@@ -653,8 +654,18 @@ export async function settleAbandonedReviewTurns(
       continue;
     // A turn whose reconciliation fails stays held; the others still settle.
     const receipt = await stoppedTurnReceipt(ref, model).catch(() => undefined);
-    if (receipt)
+    if (!receipt) continue;
+    // A result review's paid-call marker settles in the same save.
+    const undo =
+      role === "result-review" && itemId !== undefined
+        ? settleInterruptedPaidCall(state, { item: itemId }, "review")
+        : undefined;
+    try {
       agentSessionContinuation(state, role, itemId, save).checkpoint(receipt);
+    } catch (error) {
+      undo?.();
+      throw error;
+    }
   }
 }
 
@@ -669,8 +680,9 @@ export async function settleAbandonedReviewTurns(
  * - a turn that ended with an authenticated failure, or whose session is
  *   unavailable or released so no outcome can be recovered from it: the turn
  *   already holds no resource and stays as it is.
- * The receipt is kept, marked abandoned. During execution the owner is a Work
- * Item diagnosis. A live or recoverable turn stays held for its owner.
+ * The receipt is kept, marked abandoned, and its step's paid-call marker
+ * settles in the same save. During execution the owner is a Work Item
+ * diagnosis. A live or recoverable turn stays held for its owner.
  */
 export async function settleAbandonedPlanningTurn(
   state: ContinuationState,
@@ -707,7 +719,9 @@ export async function settleAbandonedPlanningTurn(
     );
     if (receipt?.resultDigest) return;
     invocationId = invocation.id;
+    let undoMarker: (() => void) | undefined;
     abandon = () => {
+      undoMarker = settleInterruptedPaidCall(state, "objective", "plan");
       // A submitted invocation an earlier build left without its receipt.
       if (receipt) receipt.abandoned = true;
       else {
@@ -722,6 +736,7 @@ export async function settleAbandonedPlanningTurn(
       planning.phase = "ready";
     };
     restore = () => {
+      undoMarker?.();
       if (receipt) delete receipt.abandoned;
       else planning.invocations!.pop();
       planning.invocation = invocation;
@@ -729,10 +744,12 @@ export async function settleAbandonedPlanningTurn(
     };
   } else {
     if (state.finalAcceptance || state.objectiveClosure === "complete") return;
-    const recovery = Object.values(state.work).find((work) => {
-      const id = work.recovery?.diagnosisInvocation?.id;
-      return id !== undefined && owner(id) !== undefined;
-    })?.recovery;
+    const [itemId, diagnosed] =
+      Object.entries(state.work).find(([, work]) => {
+        const id = work.recovery?.diagnosisInvocation?.id;
+        return id !== undefined && owner(id) !== undefined;
+      }) ?? [];
+    const recovery = diagnosed?.recovery;
     const invocation = recovery?.diagnosisInvocation;
     if (
       !recovery ||
@@ -742,7 +759,13 @@ export async function settleAbandonedPlanningTurn(
     )
       return;
     invocationId = invocation.id;
+    let undoMarker: (() => void) | undefined;
     abandon = () => {
+      undoMarker = settleInterruptedPaidCall(
+        state,
+        { item: itemId! },
+        "diagnose",
+      );
       recovery.diagnosisInvocation = {
         id: randomUUID(),
         submitted: false,
@@ -753,6 +776,7 @@ export async function settleAbandonedPlanningTurn(
       };
     };
     restore = () => {
+      undoMarker?.();
       recovery.diagnosisInvocation = invocation;
     };
   }

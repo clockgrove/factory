@@ -404,6 +404,29 @@ class StepPending extends Error {
 const running = new WeakMap<object, Set<string>>();
 
 /**
+ * A paid call a stopped controller left in flight, whose turn has since been
+ * settled as abandoned: count it now as the one paid fault the step's next
+ * entry would count, so its marker no longer holds a handoff (#1511). A step
+ * running in this process keeps its marker. The caller saves this with the
+ * settled turn; the returned function, if any, undoes it if that save fails.
+ */
+export function settleInterruptedPaidCall(
+  state: StepState,
+  scope: StepScope,
+  name: string,
+): (() => void) | undefined {
+  const key = repeatKey(scope, name);
+  const entry = state.repeats?.[key];
+  if (!entry?.inFlight || running.get(state)?.has(key)) return undefined;
+  const settled: RepeatRecord = { ...entry, paid: (entry.paid ?? 0) + 1 };
+  delete settled.inFlight;
+  state.repeats![key] = settled;
+  return () => {
+    state.repeats![key] = entry;
+  };
+}
+
+/**
  * Run one repeatable effect. Transient faults repeat with a persisted
  * backoff; a restart resumes from the saved record. See the top of this file.
  */

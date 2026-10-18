@@ -615,6 +615,8 @@ export async function runObjectivePass(
     if (concurrentObjectives(config))
       await objectiveStep(state, "execution-admission", async (context) => {
         const conflict = admitExecution(config, state);
+        // A service run hands its slot back and returns to the queue.
+        if (conflict) owner.executionHeld?.(conflict);
         if (conflict)
           context.pending(
             { kind: "dependency", detail: executionConflictDetail(conflict) },

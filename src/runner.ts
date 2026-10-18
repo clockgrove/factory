@@ -20,7 +20,11 @@ import {
 } from "./compiler.js";
 import { objectiveComplete } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
-import { factoryConfigDigest, stateRoot } from "./config.js";
+import {
+  factoryConfigDigest,
+  maxActiveObjectives,
+  stateRoot,
+} from "./config.js";
 import type {
   ContentStore,
   ExecutionDriver,
@@ -588,6 +592,14 @@ async function runObjectiveUnscoped(
     ) => void | Promise<void>;
     admitChildObjectives?: AdmitChildObjectives;
     /**
+     * The service: this run waits behind an overlapping Objective. Returns
+     * true when the run should hand off and return to the queue.
+     */
+    onExecutionHeld?: (conflict: {
+      objective: number;
+      paths: string[];
+    }) => boolean;
+    /**
      * Executes a Project queue command this foreground owner receives for
      * the installation (see requestForegroundQueueControl).
      */
@@ -799,6 +811,12 @@ async function runObjectiveOwned(
         owner.workPause.abort(new Error("Coordinator handoff requested"));
       }
     } else owner.initialMode = "draining";
+  };
+  owner.executionHeld = (conflict) => {
+    if (owner.handoff) return true;
+    if (!options.onExecutionHeld?.(conflict)) return false;
+    releaseOwnership();
+    return true;
   };
   const wait = async (observationDelay?: number) => {
     if (
@@ -1226,7 +1244,11 @@ async function runObjectiveOwned(
     wake();
   };
   process.on("SIGTERM", handoff);
-  process.on("SIGUSR1", cancel);
+  // With several service runs in one process, a signal would cancel them
+  // all; they take cancellation through the service's control only.
+  const cancelSignal =
+    !options.observeControl || maxActiveObjectives(config) === 1;
+  if (cancelSignal) process.on("SIGUSR1", cancel);
   let progressTask: Promise<void> | undefined;
   // Presentation never decides the controller's fate (#1276). When one of its
   // checkpoint admissions fails for a reason that is not waited out, it holds,
@@ -1500,7 +1522,7 @@ async function runObjectiveOwned(
   } finally {
     if (progressTimer) clearInterval(progressTimer);
     if (deadlineTimer) clearTimeout(deadlineTimer);
-    process.off("SIGUSR1", cancel);
+    if (cancelSignal) process.off("SIGUSR1", cancel);
     process.off("SIGTERM", handoff);
     let controlReleased = false;
     try {
@@ -1665,15 +1687,25 @@ async function cancelObjectiveOwned(
   const installation = liveControllerOwner(
     installationLockPath(config.repository),
   );
-  // The service answers for every Objective through its endpoint; a signal
-  // would reach every Objective it runs.
-  if (installation?.intake)
+  const objectiveOwner = liveControllerOwner(
+    objectiveLockPath(config.repository, objective),
+  );
+  if (installation?.intake) {
+    // The service runs this Objective under its own lock in its own process.
+    // With one slot it runs nothing else, so the signal reaches only this
+    // run; with several, a signal would cancel every run.
+    if (
+      maxActiveObjectives(config) === 1 &&
+      objectiveOwner?.pid === installation.pid
+    ) {
+      process.kill(installation.pid, "SIGUSR1");
+      return "requested";
+    }
     throw new Error(
       `The service owns Objective #${objective} but its control endpoint is unavailable; run this again in a moment`,
     );
-  const owner =
-    installation ??
-    liveControllerOwner(objectiveLockPath(config.repository, objective));
+  }
+  const owner = installation ?? objectiveOwner;
   if (owner) {
     if (owner.objective !== objective)
       throw new ForegroundControllerError(owner.objective);

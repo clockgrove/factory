@@ -1972,6 +1972,9 @@ async function runIntakeOwned(
     // Runs asked to hand off because they wait behind an overlap while the
     // service stops; their handoff is not the service's.
     const yielded = new Set<number>();
+    // Objectives this service handed back to the queue: their handoff left
+    // them draining, so their next run here resumes them.
+    const requeued = new Set<number>();
     const idle = () =>
       pauseObservation(
         queuePollSeconds(config) * 1000,
@@ -2006,8 +2009,28 @@ async function runIntakeOwned(
                 enqueueIntake(config, services.github, objectives, {
                   expectedBodyDigests,
                 }).then(() => undefined),
+              // Held behind an overlapping Objective after planning: the run
+              // hands its slot back and selection passes over it until the
+              // overlap clears.
+              onExecutionHeld: () => {
+                if (slots <= 1 || handingOff || localMode) return false;
+                yielded.add(selected);
+                requeued.add(selected);
+                return true;
+              },
               observeControl: async (handler) => {
                 entry.control = handler;
+                if (
+                  handler &&
+                  requeued.delete(selected) &&
+                  !handingOff &&
+                  !localMode
+                )
+                  // A refused resume leaves it draining; status names resume.
+                  await handler({
+                    objective: selected,
+                    action: "resume",
+                  }).catch(() => undefined);
                 if (handler && (handingOff || localMode))
                   await handler({
                     objective: selected,
@@ -2102,6 +2125,7 @@ async function runIntakeOwned(
               }
               if (!held) continue;
               yielded.add(objective);
+              requeued.add(objective);
               void control({ objective, action: "handoff" }).catch(
                 () => undefined,
               );

@@ -93,6 +93,12 @@ interface ExecutionLease {
   runId: string;
   admittedAt: string;
   ownedPaths: string[];
+  /**
+   * The Objective this admitted one waits for, because an amendment added
+   * paths that Objective owns. A waiting later Objective never holds an
+   * earlier one's added paths, so two amendments cannot wait on each other.
+   */
+  waitingFor?: number;
 }
 
 const leasePath = (repository: string, objective: number) =>
@@ -112,7 +118,8 @@ function readLease(
     typeof value.runId !== "string" ||
     !Number.isFinite(Date.parse(value.admittedAt)) ||
     !Array.isArray(value.ownedPaths) ||
-    value.ownedPaths.some((path) => typeof path !== "string")
+    value.ownedPaths.some((path) => typeof path !== "string") ||
+    (value.waitingFor !== undefined && !Number.isSafeInteger(value.waitingFor))
   )
     return undefined;
   return value;
@@ -210,12 +217,19 @@ function conflictFor(
   runs = unfinishedRuns(repository, objective),
 ): ExecutionConflict | undefined {
   // Paths an amendment added since admission yield to every active lease,
-  // later ones included; admitted paths yield only to earlier leases.
+  // later ones included, unless that later Objective itself waits (for its
+  // own amendment): the earlier one then wins. Admitted paths yield only to
+  // earlier leases.
   const added = own
     ? paths.filter((path) => !own.ownedPaths.includes(path))
     : paths;
   for (const lease of activeLeases(repository, objective, runs)) {
-    const checked = !own || earlier(lease, own) ? paths : added;
+    const checked =
+      !own || earlier(lease, own)
+        ? paths
+        : lease.waitingFor === undefined
+          ? added
+          : [];
     const shared = overlap(checked, lease.ownedPaths);
     if (shared.length) return { objective: lease.objective, paths: shared };
   }
@@ -243,11 +257,20 @@ export function admitExecution(
     const own = previous?.runId === state.runId ? previous : undefined;
     const paths = footprint(state);
     const conflict = conflictFor(repository, objective, paths, own, runs);
-    if (conflict) return conflict;
+    if (conflict) {
+      // An admitted Objective records whom it waits for; its admitted paths
+      // stay held meanwhile.
+      if (own && own.waitingFor !== conflict.objective)
+        writeAtomic(leasePath(repository, objective), {
+          ...own,
+          waitingFor: conflict.objective,
+        } satisfies ExecutionLease);
+      return conflict;
+    }
     if (
       !own ||
       JSON.stringify(own.ownedPaths) !== JSON.stringify(paths) ||
-      own.objective !== objective
+      own.waitingFor !== undefined
     )
       writeAtomic(leasePath(repository, objective), {
         schemaVersion: 1,
@@ -284,6 +307,8 @@ interface CapacityLedger {
   objective: number;
   ownerTokenDigest: string;
   phases: ResourcePhase[];
+  /** Phases this controller waits to reserve, with when each was asked. */
+  pending?: { phase: ResourcePhase; requestedAt: number }[];
 }
 
 const PHASES: readonly ResourcePhase[] = [
@@ -296,14 +321,33 @@ const PHASES: readonly ResourcePhase[] = [
 const ledgerPath = (repository: string, objective: number) =>
   join(objectiveRoot(repository, objective), "capacity.json");
 
+/** A phase request waiting for a slot; the oldest across controllers goes first. */
+export interface PendingPhase {
+  phase: ResourcePhase;
+  requestedAt: number;
+  objective: number;
+}
+
+/** Whether `left` was asked before `right`; the order is total. */
+export function askedFirst(left: PendingPhase, right: PendingPhase): boolean {
+  return (
+    left.requestedAt < right.requestedAt ||
+    (left.requestedAt === right.requestedAt && left.objective < right.objective)
+  );
+}
+
 /** One Objective controller's view of the installation's shared capacity. */
 export interface SharedCapacity {
-  /** Phases the other live Objective controllers reserve now. */
-  others(): ResourcePhase[];
+  readonly objective: number;
+  /** What the other live Objective controllers reserve and wait for now. */
+  others(): { reserved: ResourcePhase[]; pending: PendingPhase[] };
   /** Check and reserve atomically with every other controller. */
   exclusive<T>(task: () => T): T;
-  /** Publish this controller's current reservations. */
-  publish(phases: ResourcePhase[]): void;
+  /** Publish this controller's current reservations and waiting requests. */
+  publish(
+    phases: ResourcePhase[],
+    pending: { phase: ResourcePhase; requestedAt: number }[],
+  ): void;
 }
 
 /**
@@ -320,43 +364,54 @@ export function sharedCapacity(
   const { repository } = config;
   const ownerTokenDigest = sha256(ownerToken);
   return {
+    objective,
     others() {
-      return objectiveIds(repository).flatMap((id) => {
-        if (id === objective) return [];
+      const reserved: ResourcePhase[] = [];
+      const pending: PendingPhase[] = [];
+      for (const id of objectiveIds(repository)) {
+        if (id === objective) continue;
         let ledger: CapacityLedger | undefined;
+        let owner: ReturnType<typeof liveControllerOwner>;
         try {
           ledger = readJson(ledgerPath(repository, id)) as
             | CapacityLedger
             | undefined;
+          owner = liveControllerOwner(objectiveLockPath(repository, id));
         } catch {
-          return [];
+          continue;
         }
         if (
           ledger?.schemaVersion !== 1 ||
           ledger.objective !== id ||
-          !Array.isArray(ledger.phases)
+          !Array.isArray(ledger.phases) ||
+          !owner ||
+          sha256(owner.token) !== ledger.ownerTokenDigest
         )
-          return [];
-        let owner: ReturnType<typeof liveControllerOwner>;
-        try {
-          owner = liveControllerOwner(objectiveLockPath(repository, id));
-        } catch {
-          return [];
-        }
-        if (!owner || sha256(owner.token) !== ledger.ownerTokenDigest)
-          return [];
-        return ledger.phases.filter((phase) => PHASES.includes(phase));
-      });
+          continue;
+        reserved.push(
+          ...ledger.phases.filter((phase) => PHASES.includes(phase)),
+        );
+        for (const request of Array.isArray(ledger.pending)
+          ? ledger.pending
+          : [])
+          if (
+            PHASES.includes(request?.phase) &&
+            Number.isFinite(request.requestedAt)
+          )
+            pending.push({ ...request, objective: id });
+      }
+      return { reserved, pending };
     },
     exclusive(task) {
       return withHostGuard(repository, "capacity", task);
     },
-    publish(phases) {
+    publish(phases, pending) {
       writeAtomic(ledgerPath(repository, objective), {
         schemaVersion: 1,
         objective,
         ownerTokenDigest,
         phases,
+        pending,
       } satisfies CapacityLedger);
     },
   };

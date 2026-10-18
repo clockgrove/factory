@@ -1464,13 +1464,27 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       objective: 4,
       paths: ["docs/guide.md"],
     });
+    // Two amendments onto each other's paths: the later one, now waiting
+    // itself, no longer holds the earlier one, which goes first.
+    const crossed = structuredClone(disjoint);
+    crossed.graph.items[0].ownedPaths = ["docs/", "src/x.ts"];
+    assert.deepEqual(admitExecution(sharedConfig, crossed), {
+      objective: 2,
+      paths: ["src/x.ts"],
+    });
+    assert.equal(admitExecution(sharedConfig, amended), undefined);
+    assert.deepEqual(admitExecution(sharedConfig, crossed)?.objective, 2);
     // Host capacity: another live controller's reservation fills the ceiling.
     const firstLock = acquireObjectiveLock(shared, 2),
       secondLock = acquireObjectiveLock(shared, 4);
     try {
-      sharedCapacity(sharedConfig, 2, firstLock.token).publish(["validation"]);
+      const firstCapacity = sharedCapacity(sharedConfig, 2, firstLock.token);
+      firstCapacity.publish(["validation"], []);
       const capacity = sharedCapacity(sharedConfig, 4, secondLock.token);
-      assert.deepEqual(capacity.others(), ["validation"]);
+      assert.deepEqual(capacity.others(), {
+        reserved: ["validation"],
+        pending: [],
+      });
       const phases = phaseAdmission(
         disjoint,
         () => undefined,
@@ -1479,8 +1493,15 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       );
       assert.equal(phases.blocker("code", "validation")?.kind, "concurrency");
       assert.equal(phases.blocker("code", "coding"), undefined);
+      // An older request of the other controller goes first.
+      firstCapacity.publish(
+        [],
+        [{ phase: "validation", requestedAt: Date.now() - 1000 }],
+      );
+      assert.equal(phases.blocker("code", "validation")?.kind, "concurrency");
+      assert.equal(phases.blocker("code", "review"), undefined);
       releaseControllerLock(objectiveLockPath(shared, 2), firstLock);
-      assert.deepEqual(capacity.others(), []);
+      assert.deepEqual(capacity.others(), { reserved: [], pending: [] });
       assert.equal(phases.blocker("code", "validation"), undefined);
     } finally {
       releaseControllerLock(objectiveLockPath(shared, 4), secondLock);

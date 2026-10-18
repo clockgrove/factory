@@ -1,4 +1,4 @@
-import type { SharedCapacity } from "./concurrent-objectives.js";
+import { askedFirst, type SharedCapacity } from "./concurrent-objectives.js";
 import { liveCapacity, type ResourcePhase } from "./config.js";
 import { cancelledFault, StepFault } from "./fault.js";
 import type { FactoryState } from "./state.js";
@@ -56,12 +56,43 @@ export function phaseAdmission(
       const phase = effectivePhase(work);
       return phase ? [phase] : [];
     });
-  const publish = () => shared?.publish(owned());
+  // When each waiting request was asked: across controllers the oldest
+  // request for a phase goes first, so one Objective's backlog, woken at once
+  // by its own releases, cannot starve another's.
+  const requestedAt = new Map<string, number>();
+  const publish = () =>
+    shared?.publish(
+      owned(),
+      Object.entries(state.work).flatMap(([id, work]) =>
+        work.requestedPhase && requestedAt.has(id)
+          ? [{ phase: work.requestedPhase, requestedAt: requestedAt.get(id)! }]
+          : [],
+      ),
+    );
+  /** Other controllers' reservations, and their older requests for `phase`. */
+  const othersHolding = (id: string, phase?: ResourcePhase) => {
+    if (!shared) return [];
+    const { reserved, pending } = shared.others();
+    const mine = {
+      phase: phase ?? "coding",
+      requestedAt: requestedAt.get(id) ?? Date.now(),
+      objective: shared.objective,
+    };
+    return [
+      ...reserved,
+      ...pending
+        .filter(
+          (other) => other.phase === mine.phase && askedFirst(other, mine),
+        )
+        .map((other) => other.phase),
+    ];
+  };
   const codingCount = () =>
     Object.values(state.work).filter(
       (work) => effectivePhase(work) === "coding",
     ).length +
-    (shared?.others().filter((phase) => phase === "coding").length ?? 0);
+    (shared?.others().reserved.filter((phase) => phase === "coding").length ??
+      0);
   const availableSlots = (reported: number | "unknown") => {
     if (
       reported !== "unknown" &&
@@ -109,7 +140,7 @@ export function phaseAdmission(
         )
         .filter(([other, work]) => other !== id && work.phaseReservation),
       // Other Objectives' controllers on this installation.
-      ...(shared?.others() ?? []).map(
+      ...othersHolding(id, phase).map(
         (reserved) => ["", { phaseReservation: reserved }] as const,
       ),
     ];
@@ -185,9 +216,26 @@ export function phaseAdmission(
     // Callers transfer only after the previous effect has settled. No coding slot is held while awaiting review.
     delete work.phaseReservation;
     work.requestedPhase = phase;
+    requestedAt.set(id, Date.now());
     publish();
     save();
     notify();
+    try {
+      await admitted(id, phase);
+    } catch (error) {
+      // A request that ends unadmitted no longer goes ahead of others.
+      requestedAt.delete(id);
+      publish();
+      throw error;
+    }
+    delete work.requestedPhase;
+    clearWait(state, { item: id });
+    work.phaseReservation = phase;
+    save();
+    notify();
+  };
+  const admitted = async (id: string, phase: ResourcePhase) => {
+    const work = state.work[id]!;
     while (true) {
       if (cancelled()) throw cancelledFault();
       // The runner cancels the Objective when its deadline passes.
@@ -205,6 +253,8 @@ export function phaseAdmission(
             const found = blocker(id, phase);
             if (!found) {
               work.phaseReservation = phase;
+              delete work.requestedPhase;
+              requestedAt.delete(id);
               publish();
             }
             return found;
@@ -227,11 +277,6 @@ export function phaseAdmission(
         save();
       await changed(true);
     }
-    delete work.requestedPhase;
-    clearWait(state, { item: id });
-    work.phaseReservation = phase;
-    save();
-    notify();
   };
   // Reservations a resumed controller retains count for the others at once.
   publish();

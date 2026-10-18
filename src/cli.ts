@@ -1002,7 +1002,8 @@ function statusDocument(
           : `Admits the Objective to the queue; then \`factory run --objective ${objective}\` starts it`,
       };
     else if (service) {
-      document.summary = "queued; the running service starts it in queue order";
+      document.summary =
+        "queued; the running service starts it in queue order while the queue runs (`factory status` shows the queue and what holds it)";
       document.nextAction = null;
     } else {
       // Every dispatch slot is held by another run's unsettled claim.

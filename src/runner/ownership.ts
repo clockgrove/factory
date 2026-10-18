@@ -172,6 +172,11 @@ export interface LocalOwner {
   activeItems?: ReadonlyMap<string, unknown>;
   snapshot?: ContinuationState;
   lock: ControllerLock;
+  /**
+   * A service-hosted run held behind an overlapping Objective: true when the
+   * controller hands off so the service can dispatch another Objective.
+   */
+  executionHeld?: (conflict: { objective: number; paths: string[] }) => boolean;
   abort: AbortController;
   changed: boolean;
   deadlineAt?: string;

@@ -94,10 +94,65 @@ type Pull = {
   base: { ref: string; sha: string; repo?: { full_name?: string } | null };
 };
 
+const issueList = (entries: readonly string[]): string =>
+  entries.map((entry) => `- ${entry}`).join("\n");
+
+/**
+ * The Work Item issue body: what a reader needs first (goal, the settled
+ * contract and decisions in the brief, acceptance), then Factory's execution
+ * mechanics collapsed. The marker stays first and is the only part read back.
+ */
 function projectedIssueBody(item: WorkItem, objective: number): string {
   const marker = `<!-- factory:objective=${objective};item=${item.id} -->`;
-  return `${marker}\n\n## Goal\n${item.goal}\n\n## Acceptance\n${item.acceptance.map((a) => `- ${a}`).join("\n")}\n\n## Non-goals\n${item.nonGoals.map((a) => `- ${a}`).join("\n")}\n\n## Dependencies\n${item.dependencies.length ? item.dependencies.map((id) => `- ${id}`).join("\n") : "- None"}\n\n## Sources\n${item.citations.map((c) => `- ${c.path}${c.heading ? ` — ${c.heading}` : ""}`).join("\n")}\n\n## Owned paths\n${item.ownedPaths.map((p) => `- ${p}`).join("\n")}\n\n## Validation\n${item.validation.map((check) => `- \`${check.command}\` (${check.provenance}${check.source ? `: ${check.source}` : ""})`).join("\n")}\n\n## Brief\n${item.brief}${item.executionBinding ? `\n\n## Assigned execution profile\n${JSON.stringify(item.executionProfile)}\n\nResolved binding: ${JSON.stringify(item.executionBinding)}` : ""}`;
+  const parts = issueParts(item);
+  return `${marker}\n\n## Goal\n${item.goal}\n\n## Contract and decisions\n${item.brief}\n\n## Acceptance\n${parts.acceptance}\n\n## Non-goals\n${parts.nonGoals}\n\n## Dependencies\n${parts.dependencies}\n\n<details><summary>Execution details</summary>\n\n### Sources\n${parts.sources}\n\n### Owned paths\n${parts.ownedPaths}\n\n### Validation\n${parts.validation}${parts.profile ? `\n\n### Assigned execution profile\n${parts.profile}` : ""}\n\n</details>`;
 }
+
+function issueParts(item: WorkItem) {
+  return {
+    acceptance: issueList(item.acceptance),
+    nonGoals: issueList(item.nonGoals),
+    dependencies: item.dependencies.length
+      ? issueList(item.dependencies)
+      : "- None",
+    sources: issueList(
+      item.citations.map(
+        (c) => `${c.path}${c.heading ? ` — ${c.heading}` : ""}`,
+      ),
+    ),
+    ownedPaths: issueList(item.ownedPaths),
+    validation: issueList(
+      item.validation.map(
+        (check) =>
+          `\`${check.command}\` (${check.provenance}${check.source ? `: ${check.source}` : ""})`,
+      ),
+    ),
+    profile: item.executionBinding
+      ? `${JSON.stringify(item.executionProfile)}\n\nResolved binding: ${JSON.stringify(item.executionBinding)}`
+      : undefined,
+  };
+}
+
+/**
+ * The layout before Execution details. Issues projected in it stay as is: an
+ * exact copy still counts as Factory's own unedited projection, and an
+ * amendment rewrites it once in the current layout. Remove once no open
+ * Work Item issue uses it.
+ */
+function legacyIssueBody(item: WorkItem, objective: number): string {
+  const marker = `<!-- factory:objective=${objective};item=${item.id} -->`;
+  const parts = issueParts(item);
+  return `${marker}\n\n## Goal\n${item.goal}\n\n## Acceptance\n${parts.acceptance}\n\n## Non-goals\n${parts.nonGoals}\n\n## Dependencies\n${parts.dependencies}\n\n## Sources\n${parts.sources}\n\n## Owned paths\n${parts.ownedPaths}\n\n## Validation\n${parts.validation}\n\n## Brief\n${item.brief}${parts.profile ? `\n\n## Assigned execution profile\n${parts.profile}` : ""}`;
+}
+
+/** Whether a body is an exact projection of the version, in either layout. */
+const projects = (
+  body: string | null,
+  item: WorkItem,
+  objective: number,
+): boolean =>
+  body === projectedIssueBody(item, objective) ||
+  body === legacyIssueBody(item, objective);
 
 /**
  * GitHub no longer matches what Factory recorded. Ownership is not checked
@@ -1320,7 +1375,7 @@ export class RealGitHubGateway implements GitHubGateway {
         [item, ...(old ? [old] : [])].some(
           (version) =>
             issue.title === version.title &&
-            issue.body === projectedIssueBody(version, request.objectiveIssue),
+            projects(issue.body, version, request.objectiveIssue),
         ) &&
         (issue.labels ?? []).some(
           (label) =>
@@ -1381,10 +1436,13 @@ export class RealGitHubGateway implements GitHubGateway {
             (previous) => previous.id === item.id,
           );
           const expectedBody = projectedIssueBody(item, request.objectiveIssue);
-          if (found.body !== expectedBody || found.title !== item.title) {
+          if (
+            !projects(found.body, item, request.objectiveIssue) ||
+            found.title !== item.title
+          ) {
             if (
               !old ||
-              found.body !== projectedIssueBody(old, request.objectiveIssue) ||
+              !projects(found.body, old, request.objectiveIssue) ||
               found.title !== old.title ||
               found.state !== "open"
             )
@@ -1421,7 +1479,7 @@ export class RealGitHubGateway implements GitHubGateway {
         }
         if (
           !request.previousGraph &&
-          (found.body !== projectedIssueBody(item, request.objectiveIssue) ||
+          (!projects(found.body, item, request.objectiveIssue) ||
             found.title !== item.title ||
             found.state !== "open")
         )

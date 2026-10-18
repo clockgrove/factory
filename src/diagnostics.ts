@@ -37,6 +37,7 @@ import { faultDetail, faultOf, type Wait } from "./fault.js";
 import type { GitHubTransportObservation } from "./github-client.js";
 import type { GitHubProgressProjection } from "./github-progress-state.js";
 import { graphDigest } from "./graph-amendments.js";
+import { workerIdentity } from "./item-steps.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
 import {
   derivePrerequisiteGuidance,
@@ -1652,7 +1653,7 @@ export function readAgentTimeline(
         if (state?.runId) runByAttempt.set(work.attempt, state.runId);
       }
     for (const name of readdirSync(root).filter((name) =>
-      /^[0-9a-f-]{36}\.progress\.ndjson$/.test(name),
+      /^[0-9a-f-]{36}(?:-[1-9]\d*)?\.progress\.ndjson$/.test(name),
     )) {
       const path = join(root, name);
       const attemptId = name.slice(0, 36);
@@ -1906,7 +1907,7 @@ export function readUsageSummaryEvents(
   const root = join(stateRoot(repository), "harness");
   if (existsSync(root))
     for (const name of readdirSync(root).filter((name) =>
-      /^[0-9a-f-]{36}\.progress\.ndjson$/.test(name),
+      /^[0-9a-f-]{36}(?:-[1-9]\d*)?\.progress\.ndjson$/.test(name),
     )) {
       const attemptId = name.slice(0, 36);
       if (!itemByAttempt.has(attemptId)) continue;
@@ -2288,7 +2289,7 @@ export function statusDocument(
           join(
             stateRoot(repository),
             "harness",
-            `${current.attempt}.progress.ndjson`,
+            `${workerIdentity(current)}.progress.ndjson`,
           ),
         )
           ? "streamed"

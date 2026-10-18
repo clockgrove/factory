@@ -1,4 +1,6 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { stateRoot } from "./config.js";
 import type { ModelInvocationUsage } from "./contracts.js";
 import { diagnosticPath, privateRecords } from "./diagnostics.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
@@ -80,8 +82,9 @@ interface WorkerStream {
 }
 
 const TERMINAL = ["completed", "failed", "response-invalid"];
-const ATTEMPT =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A worker's stream identity: its attempt, or `<attempt>-<n>` for a replacement. */
+const WORKER =
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:-[1-9]\d*)?$/;
 const text = (value: unknown): string | undefined =>
   typeof value === "string" && value ? value : undefined;
 const count = (value: unknown): number | undefined =>
@@ -157,16 +160,16 @@ const workerStreams = new Map<
   { size: number; mtimeMs: number; stream: WorkerStream }
 >();
 
-/** A worker attempt's usage observations, harness identity and reported turns. */
-function workerStream(repository: string, attemptId: string): WorkerStream {
+/** A worker's usage observations, harness identity and reported turns. */
+function workerStream(repository: string, identity: string): WorkerStream {
   // Only a local worker attempt has a progress stream.
   const empty = (): WorkerStream => ({
     usage: [],
     adapters: new Map(),
     live: {},
   });
-  if (!ATTEMPT.test(attemptId)) return empty();
-  const path = workerProgressPath(repository, attemptId);
+  if (!WORKER.test(identity)) return empty();
+  const path = workerProgressPath(repository, identity);
   if (!existsSync(path)) return empty();
   const { size, mtimeMs } = statSync(path);
   const cached = workerStreams.get(path);
@@ -323,10 +326,24 @@ export function readRunTelemetry(
   if (isExecutionState(state))
     for (const [itemId, work] of Object.entries(state.work))
       if (work.attempt) noteAttempt(work.attempt, itemId, work.startedAt ?? "");
+  // An attempt's replacement workers stream under `<attempt>-<n>`, which is
+  // also their invocation ID.
+  const harness = join(stateRoot(repository), "harness");
+  const identities = existsSync(harness)
+    ? readdirSync(harness).flatMap((name) => {
+        const identity = name.endsWith(".progress.ndjson")
+          ? name.slice(0, -".progress.ndjson".length)
+          : "";
+        const attemptId = WORKER.exec(identity)?.[1];
+        return attemptId && attempts.has(attemptId)
+          ? [{ identity, attemptId }]
+          : [];
+      })
+    : [];
   const streams = new Map<string, WorkerStream>();
-  for (const attemptId of attempts.keys()) {
-    const stream = workerStream(repository, attemptId);
-    streams.set(attemptId, stream);
+  for (const { identity, attemptId } of identities) {
+    const stream = workerStream(repository, identity);
+    streams.set(identity, stream);
     for (const { at, value } of stream.usage)
       workerUsage(calls, attemptId, at, value);
     for (const [invocation, adapter] of stream.adapters)
@@ -358,7 +375,7 @@ export function readRunTelemetry(
       const itemId = call.itemId ?? attempt?.itemId;
       const stream =
         call.phase === "implementation" && call.attemptId
-          ? streams.get(call.attemptId)
+          ? (streams.get(call.invocationId) ?? streams.get(call.attemptId))
           : undefined;
       if (stream) {
         call.turns = stream.turns;

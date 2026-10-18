@@ -513,6 +513,8 @@ export function renderWorkerProgress(
       );
     else if (event.operation === "rate_limit_event")
       lines.push(`${at} rate limit notice`);
+    else if (event.operation === "credential-retry")
+      lines.push(`${at} login rejected; continuing in a fresh session`);
     else if (event.operation === "validation") {
       const run = event.validation as Record<string, unknown> | undefined;
       if (typeof run?.passed === "boolean")

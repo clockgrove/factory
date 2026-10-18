@@ -124,11 +124,27 @@ function claudeUsageDelta(
   return { models, ...(costUsd === undefined ? {} : { costUsd }) };
 }
 
+/** Counters both parts reported; a counter either lacks stays unknown. */
+function addUsage(
+  a: ModelInvocationUsage,
+  b: ModelInvocationUsage,
+): ModelInvocationUsage {
+  const sum: ModelInvocationUsage = {};
+  for (const key of Object.keys(a) as (keyof ModelInvocationUsage)[]) {
+    const left = a[key];
+    const right = b[key];
+    if (left !== undefined && right !== undefined) sum[key] = left + right;
+  }
+  return sum;
+}
+
 export class ClaudeUsage {
   private seen = new Set<string>();
   private usage: ModelInvocationUsage = {};
   private snapshot: ClaudeUsageBaseline | undefined;
   private newCost: number | undefined;
+  /** Earlier queries of this worker run, before a credential retry. */
+  private carried: { usage: ModelInvocationUsage; cost?: number } | undefined;
   constructor(
     private secrets: string[],
     private baseline?: ClaudeUsageBaseline,
@@ -170,12 +186,36 @@ export class ClaudeUsage {
     };
   }
 
+  /**
+   * Count a new query of the same worker run. What earlier queries used stays
+   * counted. A resumed native conversation reports totals that include its
+   * earlier queries, so their last snapshot becomes its baseline; a new
+   * conversation counts from zero.
+   */
+  restart(resumed: boolean): void {
+    const cost = this.cost();
+    this.carried = {
+      usage: this.totals(),
+      ...(cost === undefined ? {} : { cost }),
+    };
+    this.baseline = resumed ? this.snapshot : undefined;
+    this.resumed = resumed;
+    this.usage = {};
+    this.snapshot = undefined;
+    this.newCost = undefined;
+  }
+
   totals(): ModelInvocationUsage {
-    return { ...this.usage };
+    return this.carried
+      ? addUsage(this.carried.usage, this.usage)
+      : { ...this.usage };
   }
 
   cost(): number | undefined {
-    return this.newCost;
+    if (!this.carried) return this.newCost;
+    return this.carried.cost !== undefined && this.newCost !== undefined
+      ? this.carried.cost + this.newCost
+      : undefined;
   }
 
   boundary(): ClaudeUsageBaseline | undefined {

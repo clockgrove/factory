@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import type { AgentSessionRef, AgentSessionRequest } from "../contracts.js";
@@ -115,14 +115,19 @@ export function requireClaudeSession(
     throw new Error("Claude conversation owner changed");
   return { ref, data, owner, resume: ref.turn > 1 };
 }
-export function claudeHistoryDigest(session: ClaudeOwnedSession): string {
-  const root = join(
+/** The native transcript of an owned conversation, once the CLI wrote it. */
+export function claudeTranscriptPath(session: ClaudeOwnedSession): string {
+  return join(
     session.data.root,
     "config",
     "projects",
     session.ref.identity,
+    `${session.data.nativeSessionId}.jsonl`,
   );
-  const transcript = join(root, `${session.data.nativeSessionId}.jsonl`);
+}
+export function claudeHistoryDigest(session: ClaudeOwnedSession): string {
+  const transcript = claudeTranscriptPath(session);
+  const root = dirname(transcript);
   // A reported session identifier is insufficient without its actual retained transcript.
   regularBytes(transcript, false);
   const entries: [string, string][] = [];

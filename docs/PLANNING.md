@@ -44,6 +44,14 @@ All three happen in the planner's one session. Self-checking is a filter; the in
 - **Lint before review.** Before any paid review, Factory refuses an item with more than 15 acceptance entries and no `oneOutcomeReason`, and an acceptance entry that cites a line number next to a source file name. The planner gets both as one correction. Amendments skip this lint; graph review judges them.
 - **Obligations are proved at owner level.** A covered Objective criterion or source exit item names its owner and proof kind. For item or QA review, the owner's review judges the obligation itself, with the owner's acceptance as a whole as its proof. No proof points at a single acceptance entry. Code still checks that each obligation has exactly one owner, the owner exists and the proof kind fits the owner. In an amendment, an already-reviewed item keeps only the semantic proofs it had; a newly assigned obligation needs final review or new work.
 
+## Engineering standard
+
+Workers and Work Item result review share one short code-quality bar, `ENGINEERING_STANDARD` in the same file: precise types without escaping casts, reuse instead of copies, decisions on error codes rather than message text, no swallowed errors, exact-value test assertions, docs that match the code, no leftovers, validation once at the boundary, and narrowly scoped configuration changes.
+
+Why: these are the failures a senior reviewer flags first, and acceptance criteria rarely name them, so a result could pass every criterion and still need cleanup.
+
+The worker gets the standard before its self-review. Result review refuses a violation in code the result adds or changes, filed under the criterion whose code contains it, even when every criterion passes. Unchanged existing code is not a finding. Where the target's AGENTS.md or documented conventions differ, the target wins. Final Objective review does not re-apply it.
+
 ## Example
 
 An Objective asks for a retention limit on a job queue.

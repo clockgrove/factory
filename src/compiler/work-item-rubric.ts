@@ -172,3 +172,20 @@ export const GRAPH_REVIEW_FIRST_ROUND =
 /** A revision round: verify the last findings, review the change, and keep unchanged parts stable. */
 export const GRAPH_REVIEW_REVISION_ROUND =
   "This is a revision round: the planner revised the plan for the previous review's findings below, and Factory's deterministic checks passed on the whole revised plan. (a) Report each previous finding again, with its kind, unless the revision resolved it. (b) Review the changed and added items, and whatever a change affects (dependencies, dependents, coverage, ownership, shared files), against every check. (c) On unchanged parts, report a new finding only if it would let a worker deliver a wrong result or make the Objective fail, or needs an operator decision under check 10; wording, style and \"could be more precise\" are not findings there.";
+
+/**
+ * The code-quality bar every worker gets up front and every Work Item result
+ * review enforces on changed code. Generic for any repository; the target's
+ * own conventions win where they differ.
+ */
+export const ENGINEERING_STANDARD = `Engineering standard. Each rule names a defect a senior reviewer flags:
+- Precise types: no casts that escape the type system (\`as unknown as\`, \`as any\`, a non-null assertion that silences an error); model data with the repository's types, not untyped records.
+- Reuse: search for an existing helper before writing one. Never copy a function or test setup: import it, or move it to a shared module in your owned paths.
+- Structure, not prose: decide on error types, codes or fields, never on message text.
+- Handle or propagate every error; never swallow one (no empty catch).
+- Tests assert exact values that fail if the behaviour changes: no presence or type checks, tautologies or a value compared with itself.
+- Docs, comments and READMEs state only what the code does.
+- No dead code, debug leftovers, placeholder assertions or unrelated changes.
+- Validate input once at the boundary, with the repository's parsers and validators; do not re-check what a callee validates or hand-roll a parser.
+- Scope configuration changes (timeouts, lint rules) to what needs them, never globally for one case.
+Where the repository's AGENTS.md or documented conventions differ, the repository wins.`;

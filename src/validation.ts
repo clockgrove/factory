@@ -489,6 +489,7 @@ export async function validateCheckout(
   // there (caches, downloaded browsers) reaches the commands after it.
   let temporaryRoot: string;
   let homeRoot: string;
+  const installHomes: string[] = [];
   try {
     temporaryRoot = mkdtempSync(join(tmpdir(), "factory-validation-"));
   } catch (error) {
@@ -566,22 +567,33 @@ export async function validateCheckout(
         stdout: new StringDecoder("utf8"),
         stderr: new StringDecoder("utf8"),
       };
-      // Only Factory's exact script-disabled installs may reach the network,
-      // and only when the operator allowed it.
+      // Only Factory's exact script-disabled install, run first (before any
+      // command could change the checkout) after its package inputs were
+      // verified, writes the shared store; and only it, when the operator
+      // allowed it, reaches the network. It gets an empty HOME of its own,
+      // so nothing an earlier command left there configures it.
+      const install =
+        sequenceIndex === 0 &&
+        sandbox.packageInputsVerified === true &&
+        packageBootstrap(check) !== undefined;
+      let home = homeRoot;
+      if (install) {
+        home = mkdtempSync(join(tmpdir(), "factory-install-home-"));
+        installHomes.push(home);
+      }
       const launch = sandboxedCommand({
         command: check,
         checkout: worktree,
         temporary: temporaryRoot,
-        home: homeRoot,
+        home,
         env: {
           ...localValidationEnvironment(emptyCredentials),
           TMPDIR: temporaryRoot,
           TMP: temporaryRoot,
           TEMP: temporaryRoot,
         },
-        network:
-          sandbox.network === "package-install" &&
-          packageBootstrap(check) !== undefined,
+        network: install && sandbox.network === "package-install",
+        packageInstall: install,
         policy: sandbox,
       });
       const result = await subprocessAsync(
@@ -734,10 +746,9 @@ export async function validateCheckout(
     };
     return evidence;
   } finally {
-    if (!hasUnresolvedSubprocesses()) {
-      rmSync(temporaryRoot, { recursive: true, force: true });
-      rmSync(homeRoot, { recursive: true, force: true });
-    }
+    if (!hasUnresolvedSubprocesses())
+      for (const path of [temporaryRoot, homeRoot, ...installHomes])
+        rmSync(path, { recursive: true, force: true });
   }
 }
 
@@ -833,7 +844,7 @@ export function packageBootstrap(command: string): "npm" | "pnpm" | undefined {
   return undefined;
 }
 
-interface PackageScriptAuthority {
+export interface PackageScriptAuthority {
   /** Exact stable same-manager pin declared by the pinned Objective. */
   packageManagerUpdate?: string;
   /** Final acceptance must include the declared update. */
@@ -1261,7 +1272,8 @@ export async function validateWorkItem(
     { commands: [] },
     selectedArtifacts,
     undefined,
-    sandbox,
+    // The package inputs were just checked for exactly these commands.
+    { ...sandbox, packageInputsVerified: true },
   );
   // Keep the installation selector identity when only this item's producers
   // were selected. QA and final validation still use the complete selection.

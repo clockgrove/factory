@@ -2145,7 +2145,8 @@ export class LocalExecutionDriver implements ExecutionDriver {
           false,
           undefined,
           undefined,
-          this.commandSandbox,
+          // assertPinnedNpmScripts checked these commands' inputs above.
+          { ...this.commandSandbox, packageInputsVerified: true },
         );
         if (context?.cancelled())
           throw cancelledFault(

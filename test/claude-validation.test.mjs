@@ -6,6 +6,7 @@ import {
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -275,7 +276,26 @@ test("declared commands run in an OS sandbox that hides the host and keeps loopb
   const worktree = join(root, "worktree");
   execFileSync("git", ["init", "-q", worktree]);
   writeFileSync(join(worktree, "a.txt"), "base\n");
-  execFileSync("git", ["-C", worktree, "add", "a.txt"]);
+  // A dependency-free npm project, so the exact install runs offline.
+  const manifest = { name: "sandboxed", version: "1.0.0" };
+  writeFileSync(join(worktree, "package.json"), JSON.stringify(manifest));
+  writeFileSync(
+    join(worktree, "package-lock.json"),
+    JSON.stringify({
+      ...manifest,
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": manifest },
+    }),
+  );
+  execFileSync("git", [
+    "-C",
+    worktree,
+    "add",
+    "a.txt",
+    "package.json",
+    "package-lock.json",
+  ]);
   execFileSync("git", [
     "-C",
     worktree,
@@ -313,6 +333,8 @@ test("declared commands run in an OS sandbox that hides the host and keeps loopb
   const result = await runDeclaredValidation(
     worktree,
     [
+      // The verified install, run first, may write the shared store.
+      "npm ci --ignore-scripts",
       // Each escape must fail inside the sandbox, so each command passes.
       ...secrets.map((path) => `! cat ${quote(path)}`),
       `! ls ${quote(home)}`,
@@ -325,9 +347,10 @@ test("declared commands run in an OS sandbox that hides the host and keeps loopb
       // Only loopback: no route off the host, even for a command the
       // package-install policy does not name.
       `test "$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ')" = lo`,
-      // A private, writable HOME and the configured shared package store.
+      // A private, writable HOME; the shared package store is read-only to
+      // every command but the install.
       `test "$HOME" != ${quote(home)} && touch "$HOME/ok"`,
-      'mkdir -p "$npm_config_cache" && touch "$npm_config_cache/marker"',
+      'test -d "$npm_config_cache" && ! touch "$npm_config_cache/marker"',
       // Normal work: read the checkout, write ignored files, serve loopback.
       "grep -qx base a.txt && git status --porcelain >/dev/null",
       `node -e 'const s=require("net").createServer(c=>c.end("ok")).listen(0,"127.0.0.1",()=>require("net").connect(s.address().port,"127.0.0.1").on("data",d=>{s.close();process.exit(String(d)==="ok"?0:1)}))'`,
@@ -336,10 +359,27 @@ test("declared commands run in an OS sandbox that hides the host and keeps loopb
     undefined,
     undefined,
     policy,
+    { sourceDeclared: ["npm ci --ignore-scripts"] },
   );
   assert.equal(result.passed, true, result.text);
   assert.equal(existsSync(join(outside, "escape")), false);
-  assert.equal(existsSync(join(store, "npm", "marker")), true);
+  assert.equal(existsSync(join(store, "npm", "marker")), false);
+  const logs = () => readdirSync(join(store, "npm", "_logs")).length;
+  const written = logs();
+  assert.ok(written > 0);
+  // A candidate that changes package-manager configuration loses that: its
+  // install neither writes the store nor reaches the network.
+  writeFileSync(join(worktree, ".npmrc"), "registry=http://127.0.0.1:9/\n");
+  await runDeclaredValidation(
+    worktree,
+    ["npm ci --ignore-scripts"],
+    3,
+    undefined,
+    undefined,
+    policy,
+    { sourceDeclared: ["npm ci --ignore-scripts"] },
+  );
+  assert.equal(logs(), written);
   for (const path of secrets)
     assert.equal(readFileSync(path, "utf8"), "secret\n");
   // A command that does reach a host secret fails the run.

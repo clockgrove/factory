@@ -11,7 +11,11 @@ import {
   pinnedGitMagicAsync,
 } from "../process.js";
 import { workHandoffSchema } from "../objective-knowledge.js";
-import { validateTree } from "../validation.js";
+import {
+  assertPinnedNpmScripts,
+  type PackageScriptAuthority,
+  validateTree,
+} from "../validation.js";
 import { CandidateValidationFailure } from "../work-repair.js";
 import type { HarnessRequest, WorkHandoffNote } from "../contracts.js";
 import { readWorkHandoff } from "./harness-support.js";
@@ -47,6 +51,8 @@ interface ValidationEnvironmentInput {
   lfs?: HarnessRequest["validationLfs"];
   /** The controller's OS sandbox policy; absent is strict. */
   sandbox?: CommandSandboxPolicy;
+  /** The controller's package authority for these commands (source-declared ones, a pinned update). */
+  packageAuthority?: PackageScriptAuthority;
   /** Each completed run's structured facts, for the worker's progress stream. */
   onRun?: (facts: ValidationRunFacts) => void;
 }
@@ -179,6 +185,7 @@ export async function runDeclaredValidation(
   lfs?: HarnessRequest["validationLfs"],
   outputs?: ValidationOutputs,
   sandbox: CommandSandboxPolicy = STRICT_COMMAND_SANDBOX,
+  packageAuthority: PackageScriptAuthority = {},
 ): Promise<{
   passed: boolean;
   text: string;
@@ -204,6 +211,23 @@ export async function runDeclaredValidation(
       "Factory worker validation snapshot",
     )
   ).trim();
+  // The controller's package-input check, against the attempt's base: only
+  // when it passes may an install write the shared store or use the network
+  // the operator allowed. Otherwise the run continues without either.
+  let packageInputsVerified = false;
+  try {
+    assertPinnedNpmScripts(
+      worktree,
+      pinnedGit(worktree, "rev-parse", "HEAD"),
+      commit,
+      [...commands],
+      packageAuthority,
+    );
+    packageInputsVerified = true;
+  } catch {
+    // Unverified package inputs: the install gets neither.
+  }
+  const { packageInputsVerified: _claimed, ...policy } = sandbox;
   const root = join(workerValidationRoot(worktree), `${run}`);
   let produced = "";
   const inspectSettled =
@@ -232,7 +256,9 @@ export async function runDeclaredValidation(
       undefined,
       undefined,
       inspectSettled,
-      sandbox,
+      packageInputsVerified
+        ? { ...policy, packageInputsVerified: true }
+        : policy,
     );
     return {
       passed: true,
@@ -369,6 +395,7 @@ export async function createFactoryValidationMcp(
               input.lfs,
               outputs,
               input.sandbox,
+              input.packageAuthority,
             );
             return { declared, handoff };
           });

@@ -311,7 +311,8 @@ export async function finalizeObjective(args: {
           },
           config.reviewArtifacts,
           undefined,
-          commandSandboxPolicy(config),
+          // assertPinnedNpmScripts checked these commands' inputs above.
+          { ...commandSandboxPolicy(config), packageInputsVerified: true },
         );
         // This ordering is controller-observed, not inferred from cleanliness
         // or an identical tree. Baseline/read-only QA makes no integration claim.

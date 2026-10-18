@@ -1,7 +1,7 @@
 /**
  * The operating-system sandbox for every command a worker can cause to run
  * on the controller's host: declared validation commands, setup and
- * prerequisite commands, readiness probes and a worker's shell. Each command
+ * prerequisite commands and readiness probes. Each command
  * runs under bubblewrap in new user, PID, IPC, UTS, cgroup and network
  * namespaces. It sees the system read-only, the PATH's toolchains read-only,
  * its checkout (writable, its `.git` entry read-only) and the checkout's git
@@ -22,7 +22,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   delimiter,
@@ -79,6 +79,19 @@ function linkedGit(
 export function gitMetadata(workspace: string): string[] {
   const git = linkedGit(workspace);
   if (!git || git.common === git.administrative) return [];
+  // Only a real linked worktree's metadata: `<common>/worktrees/<name>`,
+  // whose `gitdir` names this checkout's `.git`.
+  try {
+    if (
+      real(dirname(git.administrative)) !==
+        real(join(git.common, "worktrees")) ||
+      real(readFileSync(join(git.administrative, "gitdir"), "utf8").trim()) !==
+        real(join(workspace, ".git"))
+    )
+      return [];
+  } catch {
+    return [];
+  }
   return [
     git.administrative,
     ...[
@@ -119,6 +132,7 @@ const windowsProfile = (directory: string) =>
 function privatePaths(
   source: NodeJS.ProcessEnv,
   workspace: string,
+  sealCommonGit = true,
 ): { home: string; exposes: (directory: string) => boolean } {
   const home = real(source.HOME || homedir());
   const config = source.XDG_CONFIG_HOME || join(home, ".config");
@@ -141,7 +155,7 @@ function privatePaths(
     join(data, "clockgrove-factory"),
     join(data, "factory-copilot-auth"),
     join(state, "clockgrove-factory"),
-    ...(linked ? [linked.common] : []),
+    ...(linked && sealCommonGit ? [linked.common] : []),
   ].map(real);
   return {
     home,
@@ -265,6 +279,12 @@ export interface CommandSandboxPolicy {
   network: "off" | "package-install";
   packageStore?: string;
   readOnlyPaths: string[];
+  /**
+   * Set only by a caller that checked these commands' package inputs
+   * (assertPinnedNpmScripts) on this exact tree; without it no install gets
+   * network or a writable store.
+   */
+  packageInputsVerified?: true;
 }
 
 export const STRICT_COMMAND_SANDBOX: CommandSandboxPolicy = {
@@ -367,23 +387,31 @@ function bubblewrapExecutable(): string | undefined {
 
 export type CommandSandboxAvailability =
   | { available: true; executable: string; version: string }
-  | { available: false; detail: string };
+  | { available: false; installed: boolean; detail: string };
 
 let availability: CommandSandboxAvailability | undefined;
 
 /**
- * Whether bubblewrap starts a sandbox on this host, probed once per process
- * with the same namespaces and system mounts every command gets.
+ * Whether bubblewrap starts a sandbox on this host, probed with the same
+ * namespaces and system mounts every command gets. Success is kept for the
+ * process; a failure is probed again next time, so a transient one never
+ * turns the sandbox off.
  */
 export function commandSandboxAvailability(): CommandSandboxAvailability {
-  availability ??= probeCommandSandbox();
-  return availability;
+  if (availability) return availability;
+  const probed = probeCommandSandbox();
+  if (probed.available) availability = probed;
+  return probed;
 }
 
 function probeCommandSandbox(): CommandSandboxAvailability {
   const executable = bubblewrapExecutable();
   if (!executable)
-    return { available: false, detail: "bubblewrap (bwrap) is not installed" };
+    return {
+      available: false,
+      installed: false,
+      detail: "bubblewrap (bwrap) is not installed",
+    };
   const version = spawnSync(executable, ["--version"], {
     encoding: "utf8",
     timeout: 10_000,
@@ -414,6 +442,7 @@ function probeCommandSandbox(): CommandSandboxAvailability {
     };
   return {
     available: false,
+    installed: true,
     detail: `bubblewrap could not start a sandbox (${probe.error?.message ?? `exit ${probe.status ?? probe.signal}`}): ${(probe.stderr ?? "").trim().slice(0, 500)}`,
   };
 }
@@ -440,7 +469,7 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
       ...shared,
       detail: `${found.version} at ${found.executable}; network ${policy.network === "off" ? "off for every command" : "only for script-disabled package installs"}`,
     };
-  if (!policy.required)
+  if (!policy.required && !found.installed)
     return {
       mode: "unsandboxed",
       ...shared,
@@ -450,7 +479,9 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
     mode: "unavailable",
     ...shared,
     detail: `${found.detail}; Factory refuses to run worker-caused commands`,
-    fix: UNAVAILABLE_FIX,
+    fix: found.installed
+      ? "Make bubblewrap able to start a sandbox on this host (unprivileged user namespaces); sandbox.required false applies only where bubblewrap is not installed."
+      : UNAVAILABLE_FIX,
   };
 }
 
@@ -470,6 +501,11 @@ export interface SandboxedCommandInput {
   env: Record<string, string>;
   /** This command may reach the network (the policy decides which may). */
   network: boolean;
+  /**
+   * A verified dependency install: the package store is writable and
+   * package-manager hooks are forced off. Every other command reads it only.
+   */
+  packageInstall: boolean;
   policy: CommandSandboxPolicy;
 }
 
@@ -488,10 +524,12 @@ const HOST_DIRECTORY_VARIABLES = [
 /**
  * The process to spawn for `command`: `sh -c` inside bubblewrap, or plain
  * `sh -c` only when the operator set `sandbox.required` false and bubblewrap
- * is unavailable. Spawn it detached (as subprocessAsync does): that makes
- * bubblewrap a session leader without a controlling terminal, and every
- * sandboxed process stays in its process group, which the caller stops and
- * proves gone. Throws a configuration fault when the sandbox cannot run.
+ * is not installed. Spawn it detached (as subprocessAsync does): that makes
+ * bubblewrap a session leader without a controlling terminal, inside the
+ * caller's process group, which the caller stops and proves gone. A process
+ * that leaves the group inside the sandbox still ends with it: when the
+ * command exits, the PID namespace's init exits and the kernel kills the
+ * rest first. Throws a configuration fault when the sandbox cannot run.
  */
 export function sandboxedCommand(input: SandboxedCommandInput): {
   file: string;
@@ -501,7 +539,9 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
 } {
   const found = commandSandboxAvailability();
   if (!found.available) {
-    if (input.policy.required)
+    // Unsandboxed only by explicit choice and only without bubblewrap: an
+    // installed one that fails is a fault, never a reason to run bare.
+    if (input.policy.required || found.installed)
       throw configFault(
         `The command sandbox is unavailable: ${found.detail}. Factory refuses to run worker-caused commands without it.`,
         UNAVAILABLE_FIX,
@@ -518,10 +558,25 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   const home = realpathSync(input.home);
   // Exposure is judged against the operator's real HOME and Factory's paths.
   const { exposes } = privatePaths(process.env, checkout);
+  // Runtime directories hold sockets, which a read-only mount still lets a
+  // process connect to (a user bus, a container daemon, a terminal).
+  const runtime = [
+    "/run",
+    "/var/run",
+    "/proc",
+    "/sys",
+    "/dev",
+    ...(process.env.XDG_RUNTIME_DIR ? [process.env.XDG_RUNTIME_DIR] : []),
+  ].map(real);
+  const temporaryRoots = ["/tmp", tmpdir()].map(real);
   const unsafe = (path: string, field: string) => {
-    if (exposes(path))
+    if (
+      exposes(path) ||
+      runtime.some((root) => within(path, root) || within(root, path)) ||
+      temporaryRoots.some((root) => within(root, path))
+    )
       throw configFault(
-        `${field} ${path} would show sandboxed commands your HOME, a login or Factory's own files`,
+        `${field} ${path} would show sandboxed commands your HOME, a login, Factory's own files, runtime sockets or the shared temporary directory`,
         `Point ${field} at a directory of its own`,
       );
   };
@@ -555,26 +610,54 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   env.HOME = home;
   if (path !== undefined) env.PATH = path;
   const writable = [checkout, temporary, home];
+  let readOnlyStore: string | undefined;
   if (input.policy.packageStore) {
     mkdirSync(input.policy.packageStore, { recursive: true, mode: 0o700 });
     const store = realpathSync(input.policy.packageStore);
     unsafe(store, "sandbox.packageStore");
-    if (within(store, checkout) || within(checkout, store))
+    if (
+      [checkout, temporary, home].some(
+        (path) => within(store, path) || within(path, store),
+      ) ||
+      existsSync(join(store, ".git"))
+    )
       throw configFault(
-        `sandbox.packageStore ${store} overlaps the command's checkout`,
-        "Point sandbox.packageStore at a directory outside every checkout",
+        `sandbox.packageStore ${store} overlaps a checkout or the command's private directories`,
+        "Point sandbox.packageStore at a directory of its own, outside every checkout",
       );
-    writable.push(store);
-    // pnpm 11+ reads pnpm_config_*; its SQLite store index needs writes.
+    // pnpm 11+ reads pnpm_config_*; its SQLite store index needs writes, so
+    // only a verified install writes it and every other command reads it.
+    if (input.packageInstall) writable.push(store);
+    else readOnlyStore = store;
     env.pnpm_config_store_dir = join(store, "pnpm-store");
     env.pnpm_config_cache_dir = join(store, "pnpm-cache");
     env.npm_config_cache = join(store, "npm");
+  }
+  if (input.packageInstall) {
+    // An install runs no package-manager hooks, whatever the checkout says.
+    env.npm_config_ignore_scripts = "true";
+    env.pnpm_config_ignore_scripts = "true";
+    env.pnpm_config_ignore_pnpmfile = "true";
   }
   const system = SYSTEM_DIRECTORIES.filter((path) => existsSync(path)).map(
     (path) => real(path),
   );
   const mounts = new Map<string, "ro" | "rw">();
-  for (const path of [...toolchains, ...readOnly, ...gitMetadata(checkout)])
+  // Git metadata is the checkout's own, never a login or Factory's files.
+  const { exposes: exposesBesidesGit } = privatePaths(
+    process.env,
+    checkout,
+    false,
+  );
+  const metadata = gitMetadata(checkout).filter(
+    (path) => !exposesBesidesGit(path),
+  );
+  for (const path of [
+    ...toolchains,
+    ...readOnly,
+    ...metadata,
+    ...(readOnlyStore ? [readOnlyStore] : []),
+  ])
     if (!system.some((root) => within(path, root))) mounts.set(path, "ro");
   for (const path of writable) mounts.set(path, "rw");
   // The checkout's `.git` stays read-only, so no command repoints it.

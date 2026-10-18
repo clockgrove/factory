@@ -36,10 +36,19 @@ const returnedHeadChars = 2_000;
 const returnedTailChars = 14_000;
 
 interface ShellInput {
-  config: { tools: readonly string[]; allowedTools: readonly string[] };
+  config: {
+    tools: readonly string[];
+    allowedTools: readonly string[];
+    settingSources?: readonly string[];
+  };
 }
 
-/** Write and Validate together authorize the shell, on a host with the sandbox. */
+/**
+ * Write and Validate together authorize the shell, on a host with the
+ * sandbox. Not when project or local Claude settings load: the shell could
+ * write their hooks into the worktree, and the Claude CLI runs those
+ * outside the sandbox.
+ */
 export function factoryShellAuthorized(input: ShellInput): boolean {
   const granted = (tool: string) =>
     input.config.tools.includes(tool) &&
@@ -47,6 +56,9 @@ export function factoryShellAuthorized(input: ShellInput): boolean {
   return (
     granted("Write") &&
     granted(validateToolConfigName) &&
+    !input.config.settingSources?.some(
+      (source) => source === "project" || source === "local",
+    ) &&
     commandSandboxAvailability().available
   );
 }
@@ -151,6 +163,8 @@ export async function runSandboxedCommand(input: {
   command: string;
   timeoutMs: number;
   policy: CommandSandboxPolicy;
+  /** Stops the command early, as the deadline does (the worker is closing). */
+  signal?: AbortSignal;
 }): Promise<{
   exitCode: number | null;
   timedOut: boolean;
@@ -186,7 +200,13 @@ export async function runSandboxedCommand(input: {
     const result = await subprocessAsync(
       launch.file,
       launch.args,
-      { cwd: input.worktree, env: launch.env, signal: deadline },
+      {
+        cwd: input.worktree,
+        env: launch.env,
+        signal: input.signal
+          ? AbortSignal.any([deadline, input.signal])
+          : deadline,
+      },
       undefined,
       (_stream, chunk) => output.add(chunk),
       undefined,
@@ -201,6 +221,8 @@ export async function runSandboxedCommand(input: {
   } catch (error) {
     // Cancellation stops the whole process group and proves it gone first;
     // an unproved stop stays an error.
+    if (input.signal?.aborted && !(error instanceof UnsettledSubprocessError))
+      throw new Error("the Factory shell closed while the command ran");
     if (!deadline.aborted || error instanceof UnsettledSubprocessError)
       throw error;
     return {
@@ -233,6 +255,7 @@ export async function createFactoryShellMcp(input: {
   let ready = false;
   // An unproved stop leaves the outcome unknown: no further commands.
   let unsettled = false;
+  const closed = new AbortController();
   let queue: Promise<unknown> = Promise.resolve();
   const server = createSdkMcpServer({
     name: factoryShellServerName,
@@ -264,6 +287,7 @@ export async function createFactoryShellMcp(input: {
               command,
               timeoutMs: timeoutMs ?? defaultCommandTimeoutMs,
               policy,
+              signal: closed.signal,
             });
           });
           queue = result.catch(() => undefined);
@@ -310,6 +334,8 @@ export async function createFactoryShellMcp(input: {
     server,
     close: async () => {
       ready = false;
+      // A running command stops with the worker, proved gone like a timeout.
+      closed.abort();
       closing ??= server.instance.close();
       await closing;
       await queue;

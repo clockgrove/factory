@@ -73,6 +73,7 @@ import {
   writeHarnessResult,
 } from "./harness-support.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
+import { indexHasGitlinks } from "./staged-candidate.js";
 import { workerShellRoot } from "./local.js";
 import { toolActivity } from "./tool-activity.js";
 
@@ -412,7 +413,12 @@ async function main(): Promise<void> {
         }),
       );
     }
-    if (factoryShellAuthorized(input)) {
+    // Not in a checkout with submodule gitlinks: host-side Git would enter a
+    // repository the shell could write behind one.
+    if (
+      factoryShellAuthorized(input) &&
+      !indexHasGitlinks(input.request.worktree)
+    ) {
       shell = await turn.race(
         createFactoryShellMcp({
           worktree: input.request.worktree,

@@ -718,10 +718,38 @@ export async function asInstallationOwner<T>(
   }
 }
 
+/** Installation leases whose own process runs Objectives under their own locks, with their run counts. */
+const delegatingInstallations = new Map<string, number>();
+
+/**
+ * Let the live installation owner (the service) own Objectives itself while
+ * `task` runs: each Objective it dispatches takes its own Objective lock, so
+ * several run side by side and each owner claim, settlement and status names
+ * exactly one Objective. Other processes stay excluded by the installation
+ * lease.
+ */
+export async function withObjectiveDelegation<T>(
+  lock: ControllerLock,
+  task: () => Promise<T>,
+): Promise<T> {
+  delegatingInstallations.set(
+    lock.token,
+    (delegatingInstallations.get(lock.token) ?? 0) + 1,
+  );
+  try {
+    return await task();
+  } finally {
+    const remaining = (delegatingInstallations.get(lock.token) ?? 1) - 1;
+    if (remaining) delegatingInstallations.set(lock.token, remaining);
+    else delegatingInstallations.delete(lock.token);
+  }
+}
+
 /**
  * Own one Objective: refused while the installation has a live owner (the
  * service answers for every Objective), except that owner itself deciding
- * a stopped Objective. Owners of different Objectives run side by side.
+ * a stopped Objective or running Objectives it dispatched. Owners of
+ * different Objectives run side by side.
  */
 export function acquireObjectiveLock(
   repository: string,
@@ -742,7 +770,8 @@ export function acquireObjectiveLock(
         const owner = liveControllerOwner(installation);
         const self =
           owner?.pid === process.pid &&
-          owner.token === installationMutation?.token;
+          (owner.token === installationMutation?.token ||
+            delegatingInstallations.has(owner.token));
         return owner && !self ? "this installation" : undefined;
       },
     },

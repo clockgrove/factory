@@ -27,6 +27,7 @@ import {
 import { runWorker, stopWorker as stopSharedWorker } from "../item-worker.js";
 import { materializeAssetSet, validationLfsMembersForItem } from "../media.js";
 import { packageManagerUpdate } from "../package-manager-update.js";
+import type { SharedCapacity } from "../concurrent-objectives.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { currentProcessSignal } from "../process.js";
 import { resultReviewCriteria } from "../qa.js";
@@ -89,6 +90,8 @@ export async function runRegularGraph(args: {
   save: () => void;
   active: Map<string, Promise<void>>;
   cancelled: () => boolean;
+  /** Other concurrent Objectives' reservations on this installation. */
+  sharedCapacity?: SharedCapacity;
   paused?: () => boolean;
   amendmentPending?: () => boolean;
   /** Authenticated settlements for this immutable graph pass. */
@@ -114,7 +117,12 @@ export async function runRegularGraph(args: {
     save,
     active,
   } = args;
-  const phases = phaseAdmission(state, save, args.cancelled);
+  const phases = phaseAdmission(
+    state,
+    save,
+    args.cancelled,
+    args.sharedCapacity,
+  );
   const graph = state.graph;
   const baseSha = state.baseSha;
   let failure: unknown;

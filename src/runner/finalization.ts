@@ -14,7 +14,7 @@ import {
 import { join } from "node:path";
 import { objectiveCriteria, planningSources } from "../compiler.js";
 import { closeObjectiveIssue, sealFinalAcceptance } from "../completion.js";
-import type { FactoryConfig } from "../config.js";
+import { type FactoryConfig, maxActiveObjectives } from "../config.js";
 import type {
   ContentStore,
   GitHubGateway,
@@ -50,7 +50,11 @@ import {
   objectiveDiscoveryInputs,
 } from "./discovery.js";
 
-/** Heads others push during final validation that Factory follows before asking. */
+/**
+ * Heads others push during final validation that Factory follows before
+ * asking, per Objective that may run at once: concurrent Objectives merge
+ * onto the same default branch while each validates its final head.
+ */
 const FOLLOWED_HEAD_LIMIT = 3;
 /** Execution initializes the coordinator before entering final validation. */
 export async function finalizeObjective(args: {
@@ -159,7 +163,8 @@ export async function finalizeObjective(args: {
         // A pending question is answered once the step runs again.
         if (
           !followed?.asked &&
-          (followed?.heads.length ?? 0) >= FOLLOWED_HEAD_LIMIT
+          (followed?.heads.length ?? 0) >=
+            FOLLOWED_HEAD_LIMIT * maxActiveObjectives(config)
         ) {
           state.finalHead = { ...followed!, asked: head };
           save(state);

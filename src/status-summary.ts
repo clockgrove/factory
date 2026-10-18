@@ -1792,6 +1792,8 @@ function renderPrerequisiteGuidance(
 
 /** What `factory status` without `--objective` reports: the background service and its queue. */
 interface ServiceStatusDocument {
+  /** Every Objective a live controller runs, with its phase. */
+  activeObjectives?: { objective: number; phase: string; summary: string }[];
   currentObjective?: StatusView & StatusSummary;
   currentObjectiveError?: string;
   service: {
@@ -1813,6 +1815,8 @@ interface ServiceStatusDocument {
     activeObjective?: number | null;
     /** Every Objective a live controller runs; foreground runs side by side. */
     activeObjectives?: number[];
+    /** Upgrade drain: no new dispatch while the active runs finish. */
+    finishing?: boolean;
     observation?: { error?: string; needsDecision?: number };
     remoteObservation?: { availability: "last-observed" | "unavailable" };
   };
@@ -1896,8 +1900,21 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
     if (!queued.length)
       lines.push("  `factory queue add N` queues an Objective");
   }
+  if (queue.finishing)
+    lines.push(
+      running
+        ? `  Draining for upgrade: no new dispatch while ${running} finish; run \`factory supervisor upgrade\` again once none is running`
+        : "  Drained for upgrade: nothing is running; run `factory supervisor upgrade` again",
+    );
   if (queue.observation?.error)
     lines.push(`  Last error: ${short(queue.observation.error, 160)}`);
+  if ((document.activeObjectives?.length ?? 0) > 1) {
+    lines.push("Active Objectives:");
+    for (const entry of document.activeObjectives!)
+      lines.push(
+        `  #${entry.objective}: ${entry.phase} — ${short(entry.summary, 120)}`,
+      );
+  }
   if (document.currentObjective)
     lines.push("", ...renderStatusText(document.currentObjective));
   if (document.currentObjectiveError)

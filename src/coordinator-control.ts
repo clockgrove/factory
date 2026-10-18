@@ -37,7 +37,9 @@ export interface ControlRequest {
     | "dequeue"
     | "enqueue"
     | "watch"
-    | "project-queue";
+    | "project-queue"
+    /** Upgrade drain: the service dispatches nothing new; active runs finish. */
+    | "finish";
   input?: Record<string, unknown>;
   /** One finite caller operation; loss of its reply never authorizes replay. */
   command?: { id: string; deadlineAt: number };

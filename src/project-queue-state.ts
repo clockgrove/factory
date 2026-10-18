@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { splitSettled } from "./objective-split.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -21,6 +22,7 @@ import {
   type FactoryConfig,
   factoryConfigDigest,
   factoryAuthorityDigest,
+  maxActiveObjectives,
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
@@ -57,6 +59,7 @@ import {
 } from "./recovery-checkpoint.js";
 import type { ContinuationState } from "./state.js";
 import {
+  acquireControllerLock,
   assertRestoredContinuationReady,
   cancelledContinuationResourceHold,
   continuationConfigurationMatches,
@@ -66,6 +69,7 @@ import {
   objectiveLockPath,
   installationLockPath,
   statePath,
+  releaseControllerLock,
   restoredContinuationOwnershipHold,
   type ControllerLock,
 } from "./state-store.js";
@@ -2941,6 +2945,48 @@ async function performQueueEffect(
     throw error;
   }
 }
+/** The longest a queue mutation waits for another without its own deadline. */
+const QUEUE_MUTATION_WAIT_MS = 180_000;
+const queueMutations = new AsyncLocalStorage<string>();
+/**
+ * Project queue mutations and dispatch claims take turns across every process
+ * of this installation: several controllers (the service and foreground runs,
+ * or foreground runs side by side) each allocate queue order from the same
+ * retained history and read it settled. The lock names its holder process, so
+ * a crashed holder's lock is reclaimed. Waiting is bounded by the caller's
+ * command deadline.
+ */
+export async function withQueueMutationLock<T>(
+  repository: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  if (queueMutations.getStore() === repository) return task();
+  mkdirSync(stateRoot(repository), { recursive: true, mode: 0o700 });
+  const path = join(stateRoot(repository), "queue-mutation.lock");
+  const deadline = currentProcessDeadlineAt();
+  const waitUntil = deadline
+    ? Date.parse(deadline)
+    : Date.now() + QUEUE_MUTATION_WAIT_MS;
+  let lock: ReturnType<typeof acquireControllerLock> | undefined;
+  for (;;) {
+    assertProcessActive();
+    try {
+      lock = acquireControllerLock(path, 0, {
+        owned: "a Project queue mutation",
+      });
+      break;
+    } catch (error) {
+      if (Date.now() >= waitUntil) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  try {
+    return await queueMutations.run(repository, task);
+  } finally {
+    releaseControllerLock(path, lock);
+  }
+}
+
 export async function claimProjectQueueRun(
   config: FactoryConfig,
   github: GitHubGateway,
@@ -2950,6 +2996,27 @@ export async function claimProjectQueueRun(
   recoveryLock?: ControllerLock,
 ): Promise<QueueOwnerClaim | undefined> {
   if (!config.queue?.project) return;
+  // Claims take turns with each other and with queue mutations: each reads
+  // the settled history and counts the dispatch slots other runs hold.
+  return withQueueMutationLock(config.repository, () =>
+    claimProjectQueueRunOwned(
+      config,
+      github,
+      objective,
+      ownerToken,
+      snapshot,
+      recoveryLock,
+    ),
+  );
+}
+async function claimProjectQueueRunOwned(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  objective: number,
+  ownerToken: string,
+  snapshot?: ContinuationState,
+  recoveryLock?: ControllerLock,
+): Promise<QueueOwnerClaim> {
   assertProcessActive();
   const enteredAt = Date.now();
   requireProjectQueueEffects(config);
@@ -2986,13 +3053,14 @@ export async function claimProjectQueueRun(
     return entry;
   };
   let entry = approvedEntry(observed);
-  if (
-    snapshot &&
-    recoveryLock &&
-    observed.history.some(
-      (record) => record.kind === "project-queue-owner" && !record.settled,
-    )
-  ) {
+  const unsettledOf = (history: QueueRecord[], own: boolean) =>
+    history.filter(
+      (record): record is QueueOwnerClaim =>
+        record.kind === "project-queue-owner" &&
+        !record.settled &&
+        (record.objective === objective) === own,
+    );
+  if (snapshot && recoveryLock && unsettledOf(observed.history, true).length) {
     if (recoveryLock.token !== ownerToken)
       throw new Error(
         "Recovery owner differs from the current controller lock",
@@ -3010,14 +3078,25 @@ export async function claimProjectQueueRun(
       record.objective === objective &&
       !record.settled?.refusal,
   );
-  if (
-    observed.history.some(
-      (record) => record.kind === "project-queue-owner" && !record.settled,
-    )
-  )
+  if (unsettledOf(observed.history, true).length)
     throw new Error(
       "This Project admission has an unfinished or foreign owner; supported resource reconciliation is required before dispatch",
     );
+  // Every other unsettled claim holds one dispatch slot until its run
+  // settles, a stopped or foreign run's included.
+  const slots = maxActiveObjectives(config);
+  const assertSlot = (history: QueueRecord[]) => {
+    const active = [
+      ...new Set(unsettledOf(history, false).map((claim) => claim.objective)),
+    ];
+    if (active.length < slots) return;
+    throw new Error(
+      slots === 1
+        ? "This Project admission has an unfinished or foreign owner; supported resource reconciliation is required before dispatch"
+        : `queue.maxActiveObjectives (${slots}) Objectives are already active (${active.map((id) => `#${id}`).join(", ")}); this one starts when one of them settles`,
+    );
+  };
+  assertSlot(observed.history);
   const started = prior.filter((claim) => !claim.settled?.reservationFailure);
   if (
     started.length &&
@@ -3072,6 +3151,9 @@ export async function claimProjectQueueRun(
     ...(snapshot ? { priorRunId: snapshot.runId } : {}),
   };
   assertProcessActive();
+  // Claims written by this installation's other processes but not yet
+  // published count too; the queue mutation lock the caller holds orders them.
+  assertSlot(localQueueHistory(config));
   save(claim);
   try {
     await awaitCheckpointAdmission(config.repository, "before-effect");
@@ -3180,13 +3262,19 @@ export async function settleFailedProjectQueueReservation(
   await awaitCheckpointAdmission(config.repository, "explicit");
 }
 
-/** A fresh read can hold an actual owner; it never grants or releases ownership. */
+/**
+ * A fresh read can hold an actual owner; it never grants or releases
+ * ownership. It reads settled history, so it takes its turn with queue
+ * mutations other controllers may be making.
+ */
 export async function assertProjectQueueRunLive(
   config: FactoryConfig,
   github: GitHubGateway,
   claim: QueueOwnerClaim,
 ): Promise<void> {
-  const observed = await observeProjectQueue(config, github);
+  const observed = await withQueueMutationLock(config.repository, () =>
+    observeProjectQueue(config, github),
+  );
   const entry = observed.entries.find(
     (candidate) =>
       candidate.admissionId === claim.admissionId &&
@@ -3379,12 +3467,15 @@ export async function settleStoppedProjectQueueRun(
     throw new Error(
       "Stopped Project handoff cannot settle an unfinished queue mutation",
     );
+  // Other Objectives' runs may hold their own claims concurrently.
   const pending = history.filter(
     (record): record is QueueOwnerClaim =>
-      record.kind === "project-queue-owner" && !record.settled,
+      record.kind === "project-queue-owner" &&
+      !record.settled &&
+      record.objective === state.objective,
   );
   if (!pending.length) return;
-  if (pending.length !== 1 || pending[0]!.objective !== state.objective)
+  if (pending.length !== 1)
     throw new Error("Stopped Project handoff has competing unfinished claims");
   const claim = pending[0]!;
   // Execution and planning hand off under the same rule: the original

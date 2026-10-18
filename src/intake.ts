@@ -8,6 +8,7 @@ import {
   type FactoryConfig,
   factoryAuthorityDigest,
   factoryConfigDigest,
+  maxActiveObjectives,
   stateRoot,
 } from "./config.js";
 import type {
@@ -28,6 +29,10 @@ import {
   requestForegroundQueueControl,
   serveControl,
 } from "./coordinator-control.js";
+import {
+  executionConflictDetail,
+  plannedExecutionConflict,
+} from "./concurrent-objectives.js";
 import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { attachedFault } from "./fault.js";
 import { RealGitHubGateway } from "./github.js";
@@ -71,6 +76,7 @@ import {
   retainedQueueCommandOutcome,
   verifyQueueObservation,
   type VerifiedQueueObservation,
+  withQueueMutationLock,
 } from "./project-queue-state.js";
 import {
   onlyCheckpointBoundsExceeded,
@@ -104,7 +110,6 @@ import {
   queuedObjectiveConfig,
 } from "./supervision.js";
 import {
-  acquireControllerLock,
   acquireInstallationLock,
   asInstallationOwner,
   assertRestoredInstallationDispatchReady,
@@ -114,6 +119,7 @@ import {
   releaseControllerLock,
   readScannedContinuation,
   retargetControllerLock,
+  withObjectiveDelegation,
 } from "./state-store.js";
 
 /** A fresh in-memory Project view; never persisted or restored as a queue. */
@@ -272,45 +278,6 @@ function projectMutation<T>(
         )
       : task(),
   );
-}
-const queueMutations = new AsyncLocalStorage<string>();
-/**
- * Project queue mutations and dispatch claims take turns across every process
- * of this installation: several controllers (the service and foreground runs,
- * or foreground runs side by side) each allocate queue order from the same
- * retained history and read it settled. The lock names its holder process, so
- * a crashed holder's lock is reclaimed. Waiting is bounded by the caller's
- * command deadline.
- */
-export async function withQueueMutationLock<T>(
-  repository: string,
-  task: () => Promise<T>,
-): Promise<T> {
-  if (queueMutations.getStore() === repository) return task();
-  mkdirSync(stateRoot(repository), { recursive: true, mode: 0o700 });
-  const path = join(stateRoot(repository), "queue-mutation.lock");
-  const deadline = currentProcessDeadlineAt();
-  const waitUntil = deadline
-    ? Date.parse(deadline)
-    : Date.now() + QUEUE_COMMAND_TIMEOUT_MS;
-  let lock: ReturnType<typeof acquireControllerLock> | undefined;
-  for (;;) {
-    assertProcessActive();
-    try {
-      lock = acquireControllerLock(path, 0, {
-        owned: "a Project queue mutation",
-      });
-      break;
-    } catch (error) {
-      if (Date.now() >= waitUntil) throw error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  try {
-    return await queueMutations.run(repository, task);
-  } finally {
-    releaseControllerLock(path, lock);
-  }
 }
 export const queuePollSeconds = (config: FactoryConfig): number =>
   config.queue?.pollSeconds ?? DEFAULT_QUEUE_POLL_SECONDS;
@@ -1578,10 +1545,23 @@ async function runIntakeOwned(
   const lockPath = join(stateRoot(config.repository), "controller.lock"),
     lock = acquireInstallationLock(config.repository);
   let server: Awaited<ReturnType<typeof serveControl>> | undefined;
-  let activeObjective: number | undefined;
-  let objectiveControl:
-    | ((request: ControlRequest) => Promise<unknown>)
-    | undefined;
+  // The Objectives this service runs at once, each with the control its run
+  // registers; at most queue.maxActiveObjectives (default 1).
+  const active = new Map<
+    number,
+    { control?: (request: ControlRequest) => Promise<unknown> }
+  >();
+  const slots = maxActiveObjectives(config);
+  const activeControls = () =>
+    [...active].flatMap(([objective, entry]) =>
+      entry.control ? [[objective, entry.control] as const] : [],
+    );
+  // A run that needs a person or failed holds new dispatch; the service then
+  // ends with this record once its other active runs settle.
+  let stopping: IntakeAuthorization["observation"];
+  // Upgrade drain (`factory supervisor upgrade` with several Objectives): no
+  // new dispatch while the active runs finish; `queue resume` lifts it.
+  let finishing = false;
   let handingOff = false;
   let localMode: QueueMode | undefined;
   let completedCheckpointFailure: IntakeAuthorization["observation"];
@@ -1691,11 +1671,8 @@ async function runIntakeOwned(
   const onHandoff = () => {
     handingOff = true;
     localMode = "draining";
-    if (activeObjective && objectiveControl)
-      void objectiveControl({
-        objective: activeObjective,
-        action: "handoff",
-      }).catch(() => undefined);
+    for (const [objective, control] of activeControls())
+      void control({ objective, action: "handoff" }).catch(() => undefined);
     signalWake();
   };
   const authenticateQueueRequest = (
@@ -1716,19 +1693,27 @@ async function runIntakeOwned(
     ...record,
     ...(completedCheckpointFailure
       ? { observation: completedCheckpointFailure }
+      : stopping
+        ? { observation: stopping }
+        : {}),
+    activeObjective: [...active.keys()][0] ?? null,
+    activeObjectives: [...active.keys()],
+    maxActiveObjectives: slots,
+    ...(finishing ? { finishing: true } : {}),
+    // A run's stop holds new dispatch locally without pausing the other runs.
+    ...(localMode || stopping || completedCheckpointFailure
+      ? { localMode: localMode ?? "paused" }
       : {}),
-    activeObjective: activeObjective ?? null,
-    ...(localMode ? { localMode } : {}),
     pendingMutations,
   });
   const handleOwned = async (request: ControlRequest): Promise<unknown> => {
     if (request.objective !== 0) {
-      if (request.objective === activeObjective && objectiveControl)
-        return objectiveControl(request);
+      const control = active.get(request.objective)?.control;
+      if (control) return control(request);
       if (request.action === "decide") {
         // The Objective's run registers its control late and clears it early;
         // in those windows it may be writing state it has not saved yet.
-        if (request.objective === activeObjective)
+        if (active.has(request.objective))
           throw new Error(
             `Objective #${request.objective} is starting or settling under the service; retry the decision`,
           );
@@ -1801,11 +1786,9 @@ async function runIntakeOwned(
           };
         throw error;
       }
-      if (request.action === "resume" && activeObjective && objectiveControl)
-        await objectiveControl({
-          objective: activeObjective,
-          action: "resume",
-        });
+      if (request.action === "resume")
+        for (const [objective, control] of activeControls())
+          await control({ objective, action: "resume" });
     }
     signalWake();
     return acknowledgment;
@@ -1820,6 +1803,11 @@ async function runIntakeOwned(
     // Token/live-owner authentication happens in serveControl; semantic authority
     // is checked above before any local dispatch state changes.
     if (request.action === "status") return handleOwned(request);
+    if (request.objective === 0 && request.action === "finish") {
+      finishing = true;
+      signalWake();
+      return Promise.resolve(localStatus());
+    }
     if (request.objective === 0)
       backgroundObservation?.abort(observationPreempted);
     if (
@@ -1831,11 +1819,13 @@ async function runIntakeOwned(
       // The existing Objective handler sets its dispatch stop synchronously
       // before its returned promise. Retain already admitted work, and await
       // the same requested transition as part of this bounded command.
-      if (activeObjective && objectiveControl)
-        localCessation = objectiveControl({
-          objective: activeObjective,
-          action: request.action,
-        }).then(
+      const controls = activeControls();
+      if (controls.length)
+        localCessation = Promise.all(
+          controls.map(([objective, control]) =>
+            control({ objective, action: request.action }),
+          ),
+        ).then(
           () => ({}),
           (error) => ({ error }),
         );
@@ -1880,6 +1870,8 @@ async function runIntakeOwned(
         if (request.objective === 0 && request.action === "resume") {
           localMode = undefined;
           completedCheckpointFailure = undefined;
+          stopping = undefined;
+          finishing = false;
         }
         signalWake();
         return completed;
@@ -1975,264 +1967,298 @@ async function runIntakeOwned(
       lock,
       bindRecoveryCheckpointControllerScope(handle),
     );
-    for (;;) {
-      if (handingOff || localMode === "draining")
-        return { ...record, mode: "draining" };
-      if (pendingMutations) {
-        await controlTail;
-        continue;
-      }
-      if (completedCheckpointFailure) {
-        // A held owner serves authenticated control only. Background polling
-        // must not repeat the failed publication or create dispatch authority.
-        await pauseObservation(
-          queuePollSeconds(config) * 1000,
-          heldUntil,
-          registerWake,
-        );
-        continue;
-      }
-      let observed: VerifiedQueueObservation | undefined;
-      try {
-        observed = await observeBackground();
-        record = view(config, observed);
-      } catch (error) {
-        currentProcessSignal()?.throwIfAborted();
-        assertProcessActive();
-        if (error === observationPreempted) {
-          // Keep the prior timestamp and contents for local status. A cancelled
-          // observation grants no dispatch authority; the next poll is fresh.
-          continue;
-        }
-        holdFor(error);
-        record = view(config, undefined, error);
-      }
-      // A verified background owner remains available for explicit queue
-      // control after restart; the actual draining mode never admits dispatch.
-      // Local drain/handoff still ceases it through the branch above.
-      if (
-        record.complete &&
-        record.mode === "draining" &&
-        !options.backgroundConfigurationPath
-      )
-        return record;
-      if (
-        observed &&
-        record.mode === "running" &&
-        localMode !== "paused" &&
-        pendingMutations === 0
-      ) {
-        const reasons: Record<string, string> = {};
-        let selected: number | undefined;
-        for (const entry of observed.entries.filter(
-          (entry) => entry.state === "queued",
-        )) {
-          // Retired terminal history needs nothing and is never acted on (#1457).
-          const read = readScannedContinuation(
-            config.repository,
-            entry.objective,
-          );
-          if (read === "history") continue;
-          const state = read;
-          if (terminal(state)) {
-            // A split parent whose last child settle failed closes here; it
-            // needs only local state and the parent's own provider.
-            if (splitReadyToClose(config.repository, state))
-              try {
-                const runtime = objectiveRuntime(entry.objective);
-                await settleSplitParent({
-                  config: runtime.config,
-                  github: runtime.services.github,
-                  parent: entry.objective,
-                  lockParent: false,
-                });
-              } catch (error) {
-                reasons[entry.objective] =
-                  `Closing the split Objective failed: ${error instanceof Error ? error.message : String(error)}`;
-              }
-            continue;
-          }
-          const card = observed.snapshot.cards.find(
-            (candidate) => candidate.objective === entry.objective,
-          )!;
-          if (
-            card.state !== "open" ||
-            queueDigest(card.body) !== entry.bodyDigest
-          ) {
-            reasons[entry.objective] =
-              "Issue is closed or its approved contents changed";
-            continue;
-          }
-          if (state?.error || state?.cancelRequested) {
-            reasons[entry.objective] =
-              "Retained failure/cancellation requires supported recovery";
-            break;
-          }
-          try {
-            if (!state) {
-              if (!services.github.objectiveDependencies)
-                throw new Error("Native dependency observation unavailable");
-              const predecessors = expandSplitPredecessors(
-                config.repository,
-                await services.github.objectiveDependencies(entry.objective),
-              );
-              const missing = predecessors.find((id) => {
-                const before = readContinuation(config.repository, id);
-                return (
-                  !isExecutionState(before) ||
-                  !objectiveComplete(before) ||
-                  !before.finalAcceptance
-                );
-              });
-              if (missing) {
-                reasons[entry.objective] =
-                  `Predecessor #${missing} has no accepted evidence`;
-                continue;
-              }
-              await resolveIntakeBase(
-                config,
-                services.github,
-                predecessors,
-                entry.objective,
-              );
-            }
-            selected = entry.objective;
-            break;
-          } catch (error) {
-            holdFor(error);
-            reasons[entry.objective] = String(error);
-          }
-        }
-        record.observation = {
-          at: new Date().toISOString(),
-          reasons,
-          ...(!selected
-            ? {
-                idleReason: record.objectives.length
-                  ? "waiting-for-eligible-work"
-                  : "awaiting-approved-work",
-              }
-            : {}),
-        };
-        if (selected) {
-          activeObjective = selected;
-          retargetControllerLock(lockPath, lock, selected);
-          try {
-            if (handingOff || localMode || pendingMutations) continue;
-            const { config: objectiveConfig, services: objectiveServices } =
-              objectiveRuntime(selected);
-            const result = await runObjective(
-              objectiveConfig,
-              selected,
-              objectiveServices,
-              {
-                // Children of a split are admitted through this controller's
-                // own authenticated queue command path.
-                admitChildObjectives: (objectives, expectedBodyDigests) =>
-                  enqueueIntake(config, services.github, objectives, {
-                    expectedBodyDigests,
-                  }).then(() => undefined),
-                ownerLock: lock,
-                observeControl: async (handler) => {
-                  objectiveControl = handler;
-                  if (handler && (handingOff || localMode))
-                    await handler({
-                      objective: selected,
-                      action: handingOff
-                        ? "handoff"
-                        : localMode === "paused"
-                          ? "pause"
-                          : "drain",
-                    });
-                },
-              },
-            );
-            if (!terminal(result)) {
-              localMode = "paused";
-              record.observation = {
-                at: new Date().toISOString(),
-                reasons,
-                needsDecision: selected,
-                error:
-                  result.coordinator?.waitReason ??
-                  "Inspect retained Objective status",
-              };
-              try {
-                await applyControl(config, services.github, "pause");
-              } catch {
-                /* Local stop retains remote uncertainty. */
-              }
-              return { ...record, mode: "paused" };
-            }
-          } catch (error) {
-            if (error instanceof CoordinatorHandoff) {
-              handingOff = true;
-              return { ...record, mode: "draining" };
-            }
-            localMode = "paused";
-            record.observation = {
-              at: new Date().toISOString(),
-              reasons,
-              error: String(error),
-            };
-            // A configured archive limit stops for the operator, who raises it
-            // and continues (#1306): it needs a person, not a failure.
-            const bounds = onlyCheckpointBoundsExceeded(error);
-            if (bounds) {
-              record.observation = {
-                ...record.observation,
-                needsDecision: selected,
-                error: `${bounds.fault.detail}. ${bounds.fault.fix}`,
-              };
-              try {
-                await applyControl(config, services.github, "pause");
-              } catch {
-                /* Local stop retains remote uncertainty. */
-              }
-              return { ...record, mode: "paused" };
-            }
-            if (
-              options.backgroundConfigurationPath &&
-              terminal(readContinuation(config.repository, selected)) &&
-              (error instanceof CheckpointProducerInventoryChanged ||
-                isCheckpointAdmissionFailure(error))
-            ) {
-              // Retain the actual failure and local dispatch stop while status
-              // and explicit recovery use the ordinary checkpoint barriers.
-              // Historical acceptance and archive uncertainty stay unchanged.
-              completedCheckpointFailure = record.observation;
-              continue;
-            }
-            try {
-              await applyControl(config, services.github, "pause");
-            } catch {
-              /* No replay or fallback authority. */
-            }
-            return { ...record, mode: "paused" };
-          } finally {
-            objectiveControl = undefined;
-            activeObjective = undefined;
-            retargetControllerLock(lockPath, lock, 0);
-          }
-          continue;
-        }
-        if (
-          !record.watch &&
-          observed.entries.every(
-            (entry) =>
-              entry.state === "withdrawn" ||
-              ((read) => read === "history" || terminal(read))(
-                readScannedContinuation(config.repository, entry.objective),
-              ),
-          )
-        )
-          return record;
-      }
-      await pauseObservation(
+    const runs = new Set<Promise<void>>();
+    const idle = () =>
+      pauseObservation(
         queuePollSeconds(config) * 1000,
         heldUntil,
         registerWake,
       );
+    /**
+     * Hold new dispatch; the service stops once its other runs settle. Those
+     * runs continue: this is not an operator pause.
+     */
+    const stop = (
+      observation: NonNullable<IntakeAuthorization["observation"]>,
+    ) => {
+      stopping ??= observation;
+      signalWake();
+    };
+    const launch = (selected: number, reasons: Record<string, string>) => {
+      const entry: { control?: (request: ControlRequest) => Promise<unknown> } =
+        {};
+      active.set(selected, entry);
+      const run = (async () => {
+        try {
+          const { config: objectiveConfig, services: objectiveServices } =
+            objectiveRuntime(selected);
+          // The service owns each Objective it runs with that Objective's own
+          // lock, so several run side by side and each claim names one.
+          const result = await withObjectiveDelegation(lock, () =>
+            runObjective(objectiveConfig, selected, objectiveServices, {
+              // Children of a split are admitted through this controller's
+              // own authenticated queue command path.
+              admitChildObjectives: (objectives, expectedBodyDigests) =>
+                enqueueIntake(config, services.github, objectives, {
+                  expectedBodyDigests,
+                }).then(() => undefined),
+              observeControl: async (handler) => {
+                entry.control = handler;
+                if (handler && (handingOff || localMode))
+                  await handler({
+                    objective: selected,
+                    action: handingOff
+                      ? "handoff"
+                      : localMode === "paused"
+                        ? "pause"
+                        : "drain",
+                  });
+              },
+            }),
+          );
+          if (!terminal(result))
+            stop({
+              at: new Date().toISOString(),
+              reasons,
+              needsDecision: selected,
+              error:
+                result.coordinator?.waitReason ??
+                "Inspect retained Objective status",
+            });
+        } catch (error) {
+          if (error instanceof CoordinatorHandoff) {
+            handingOff = true;
+            return;
+          }
+          const observation = {
+            at: new Date().toISOString(),
+            reasons,
+            error: String(error),
+          };
+          // A configured archive limit stops for the operator, who raises it
+          // and continues (#1306): it needs a person, not a failure.
+          const bounds = onlyCheckpointBoundsExceeded(error);
+          if (bounds) {
+            stop({
+              ...observation,
+              needsDecision: selected,
+              error: `${bounds.fault.detail}. ${bounds.fault.fix}`,
+            });
+            return;
+          }
+          if (
+            options.backgroundConfigurationPath &&
+            terminal(readContinuation(config.repository, selected)) &&
+            (error instanceof CheckpointProducerInventoryChanged ||
+              isCheckpointAdmissionFailure(error))
+          ) {
+            // Retain the actual failure and local dispatch stop while status
+            // and explicit recovery use the ordinary checkpoint barriers.
+            // Historical acceptance and archive uncertainty stay unchanged.
+            completedCheckpointFailure = observation;
+            return;
+          }
+          stop(observation);
+        } finally {
+          active.delete(selected);
+          signalWake();
+        }
+      })();
+      runs.add(run);
+      void run.finally(() => runs.delete(run));
+    };
+    try {
+      for (;;) {
+        // Local drain or handoff: active runs stop at their safe points.
+        if (handingOff || localMode === "draining") {
+          if (active.size) {
+            await idle();
+            continue;
+          }
+          return { ...record, mode: "draining" };
+        }
+        if (pendingMutations) {
+          await controlTail;
+          continue;
+        }
+        if (stopping) {
+          if (active.size) {
+            await idle();
+            continue;
+          }
+          try {
+            await applyControl(config, services.github, "pause");
+          } catch {
+            /* Local stop retains remote uncertainty. */
+          }
+          return { ...record, observation: stopping, mode: "paused" };
+        }
+        if (completedCheckpointFailure || finishing || active.size >= slots) {
+          // A held owner serves authenticated control only: background polling
+          // must not repeat the failed publication or create dispatch
+          // authority. Full slots need no Project observation either.
+          await idle();
+          continue;
+        }
+        let observed: VerifiedQueueObservation | undefined;
+        try {
+          observed = await observeBackground();
+          record = view(config, observed);
+        } catch (error) {
+          currentProcessSignal()?.throwIfAborted();
+          assertProcessActive();
+          if (error === observationPreempted) {
+            // Keep the prior timestamp and contents for local status. A cancelled
+            // observation grants no dispatch authority; the next poll is fresh.
+            continue;
+          }
+          holdFor(error);
+          record = view(config, undefined, error);
+        }
+        // A verified background owner remains available for explicit queue
+        // control after restart; the actual draining mode never admits dispatch.
+        // Local drain/handoff still ceases it through the branch above.
+        if (
+          record.complete &&
+          record.mode === "draining" &&
+          !options.backgroundConfigurationPath
+        ) {
+          if (active.size) {
+            await idle();
+            continue;
+          }
+          return record;
+        }
+        if (
+          observed &&
+          record.mode === "running" &&
+          localMode !== "paused" &&
+          pendingMutations === 0
+        ) {
+          const reasons: Record<string, string> = {};
+          const selected: number[] = [];
+          for (const entry of observed.entries.filter(
+            (entry) => entry.state === "queued",
+          )) {
+            if (active.size + selected.length >= slots) break;
+            if (active.has(entry.objective)) continue;
+            // Retired terminal history needs nothing and is never acted on (#1457).
+            const read = readScannedContinuation(
+              config.repository,
+              entry.objective,
+            );
+            if (read === "history") continue;
+            const state = read;
+            if (terminal(state)) {
+              // A split parent whose last child settle failed closes here; it
+              // needs only local state and the parent's own provider.
+              if (splitReadyToClose(config.repository, state))
+                try {
+                  const runtime = objectiveRuntime(entry.objective);
+                  await settleSplitParent({
+                    config: runtime.config,
+                    github: runtime.services.github,
+                    parent: entry.objective,
+                    lockParent: false,
+                  });
+                } catch (error) {
+                  reasons[entry.objective] =
+                    `Closing the split Objective failed: ${error instanceof Error ? error.message : String(error)}`;
+                }
+              continue;
+            }
+            const card = observed.snapshot.cards.find(
+              (candidate) => candidate.objective === entry.objective,
+            )!;
+            if (
+              card.state !== "open" ||
+              queueDigest(card.body) !== entry.bodyDigest
+            ) {
+              reasons[entry.objective] =
+                "Issue is closed or its approved contents changed";
+              continue;
+            }
+            if (state?.error || state?.cancelRequested) {
+              reasons[entry.objective] =
+                "Retained failure/cancellation requires supported recovery";
+              break;
+            }
+            // A planned Objective whose owned paths overlap an earlier active
+            // one would only wait: the next queued Objective runs instead.
+            const conflict =
+              slots > 1 ? plannedExecutionConflict(config, state) : undefined;
+            if (conflict) {
+              reasons[entry.objective] = executionConflictDetail(conflict);
+              continue;
+            }
+            try {
+              if (!state) {
+                if (!services.github.objectiveDependencies)
+                  throw new Error("Native dependency observation unavailable");
+                const predecessors = expandSplitPredecessors(
+                  config.repository,
+                  await services.github.objectiveDependencies(entry.objective),
+                );
+                const missing = predecessors.find((id) => {
+                  const before = readContinuation(config.repository, id);
+                  return (
+                    !isExecutionState(before) ||
+                    !objectiveComplete(before) ||
+                    !before.finalAcceptance
+                  );
+                });
+                if (missing) {
+                  reasons[entry.objective] =
+                    `Predecessor #${missing} has no accepted evidence`;
+                  continue;
+                }
+                await resolveIntakeBase(
+                  config,
+                  services.github,
+                  predecessors,
+                  entry.objective,
+                );
+              }
+              selected.push(entry.objective);
+            } catch (error) {
+              holdFor(error);
+              reasons[entry.objective] = String(error);
+            }
+          }
+          record.observation = {
+            at: new Date().toISOString(),
+            reasons,
+            ...(!selected.length && !active.size
+              ? {
+                  idleReason: record.objectives.length
+                    ? "waiting-for-eligible-work"
+                    : "awaiting-approved-work",
+                }
+              : {}),
+          };
+          for (const objective of selected) {
+            if (handingOff || localMode || pendingMutations) break;
+            launch(objective, reasons);
+          }
+          if (selected.length) continue;
+          if (
+            !record.watch &&
+            !active.size &&
+            observed.entries.every(
+              (entry) =>
+                entry.state === "withdrawn" ||
+                ((read) => read === "history" || terminal(read))(
+                  readScannedContinuation(config.repository, entry.objective),
+                ),
+            )
+          )
+            return record;
+        }
+        await idle();
+      }
+    } finally {
+      // The installation lease outlives every run it lent ownership to.
+      while (runs.size) await Promise.allSettled([...runs]);
     }
   } finally {
     process.off("SIGTERM", onHandoff);

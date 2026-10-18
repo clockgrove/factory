@@ -19,6 +19,7 @@ import {
   configPath,
   type FactoryConfig,
   factoryConfigDigest,
+  maxActiveObjectives,
   readConfig,
   readConfigFile,
   stateRoot,
@@ -83,6 +84,7 @@ import {
   continuationConfigurationMatches,
   installationLockPath,
   liveControllerOwner,
+  liveObjectiveOwners,
   objectiveLockPath,
   readContinuation,
   readPreState,
@@ -161,8 +163,8 @@ function help(): void {
       "      Freeze an existing completed local return; ordinary validation and review remain required",
       "  propose-amendment --objective N --proposal FILE",
       "      Submit a graph amendment (or a replacement for a rejected one)",
-      "  watch --objective N [--json] [--follow [--interval SECONDS]] [--stale-minutes N]",
-      "      One screen: each Work Item's step, worker liveness and effort, files changed so far and recent tool calls",
+      "  watch [--objective N] [--json] [--follow [--interval SECONDS]] [--stale-minutes N]",
+      "      One screen: each Work Item's step, worker liveness and effort, files changed so far and recent tool calls; without --objective, every running Objective",
       "  diagnostics --objective N [--follow | --summary | --analyze | --logs ITEM [--follow] | --captures [--content RECORD_ID]]",
       "  diagnostics --scorecard FILE [--json] [--output ABSOLUTE_NEW_FILE]",
       "      The one observation command: agent timeline by default. --summary prints the efficiency report (time per stage, operator waits, attempts, tokens per role; --json for tools). --analyze takes [--group-by FIELD ...] [--filter FIELD=VALUE ...] [--json|--gantt] [--output ABSOLUTE_NEW_FILE]",
@@ -368,6 +370,24 @@ async function supervisorCommand(args: string[], path: string): Promise<void> {
   console.log(
     typeof result === "string" ? result : JSON.stringify(result, null, 2),
   );
+  // An upgrade that waits for running Objectives to finish needs a rerun.
+  if (result && typeof result === "object" && "draining" in result)
+    process.exitCode = EXIT_NEEDS_DECISION;
+}
+
+/** Every Objective a live controller runs: the service's, else foreground runs. */
+async function runningObjectives(config: FactoryConfig): Promise<number[]> {
+  if (liveControllerOwner(installationLockPath(config.repository))?.intake) {
+    const queue = (await composeIntake(config).intakeControl("status")) as {
+      activeObjectives?: number[];
+      activeObjective?: number | null;
+    };
+    return (
+      queue.activeObjectives ??
+      (queue.activeObjective ? [queue.activeObjective] : [])
+    );
+  }
+  return liveObjectiveOwners(config.repository).map((owner) => owner.objective);
 }
 
 /** `factory status` without an Objective: the service and the queue. */
@@ -380,7 +400,38 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
     Pick<IntakeAuthorization, "remoteObservation"> & {
       localMode?: string;
     };
-  const objective = queue.activeObjective ?? queue.observation?.needsDecision;
+  // Every Objective a live controller runs: the service's, else the
+  // foreground runs side by side.
+  const running =
+    queue.activeObjectives ??
+    (queue.activeObjective ? [queue.activeObjective] : []);
+  const objective = running[0] ?? queue.observation?.needsDecision;
+  const activeObjectives = running.map((id) => {
+    try {
+      const { document } = statusDocument(
+        config,
+        id,
+        { serviceRegistered: service.registered === true },
+        path,
+      );
+      return {
+        objective: id,
+        phase: document.phase,
+        summary: document.summary,
+      };
+    } catch (error) {
+      return {
+        objective: id,
+        phase: "unknown",
+        summary: redactDiagnosticDetail(
+          error instanceof Error ? error.message : String(error),
+          config.policy.allowedSecretNames
+            .map((name) => process.env[name])
+            .filter((value): value is string => Boolean(value)),
+        ),
+      };
+    }
+  });
   let current: Pick<
     ServiceStatus,
     "currentObjective" | "currentObjectiveError"
@@ -409,6 +460,7 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
   const document = {
     service,
     queue,
+    activeObjectives,
     ...current,
     durability: gitPersistenceStatus(config),
     commandSandbox: commandSandboxStatus(commandSandboxPolicy(config)),
@@ -631,6 +683,8 @@ async function dispatchMain(
   const { config } = selected;
   if (command === "diagnostics" && option(args, "scorecard") !== undefined)
     return runDiagnosticsScorecardCommand(config, args);
+  if (command === "watch" && option(args, "objective") === undefined)
+    return watchObjective(config, () => runningObjectives(config), args);
   const objective = Number(option(args, "objective"));
   if (!Number.isSafeInteger(objective) || objective <= 0)
     throw new Error(`${command} requires --objective N`);
@@ -953,7 +1007,7 @@ function statusDocument(
     } else {
       // Every dispatch slot is held by another run's unsettled claim.
       const claimed = locallyClaimedObjectives(config, objective);
-      if (claimed?.length) {
+      if (claimed && claimed.length >= maxActiveObjectives(config)) {
         document.summary = `queued; waits for ${claimed.map((id) => `Objective #${id}`).join(", ")} to finish`;
         document.nextAction = null;
       }
@@ -974,10 +1028,14 @@ function statusDocument(
   };
 }
 
-/** `factory watch`: one screen of each Work Item's live state; `--follow` reprints it. */
+/**
+ * `factory watch`: one screen of each Work Item's live state; `--follow`
+ * reprints it. Without `--objective`, every Objective a live controller runs,
+ * one after another, re-resolved at each reprint.
+ */
 async function watchObjective(
   config: FactoryConfig,
-  objective: number,
+  target: number | (() => Promise<number[]>),
   args: string[],
 ): Promise<void> {
   const number = (name: string, fallback: number): number => {
@@ -990,7 +1048,16 @@ async function watchObjective(
   };
   const staleMs = number("stale-minutes", 5) * 60_000;
   const intervalMs = number("interval", 30) * 1000;
-  const print = () => {
+  const printAll = async () => {
+    const objectives = typeof target === "number" ? [target] : await target();
+    if (!objectives.length && !args.includes("--json"))
+      console.log("No Objective is running");
+    for (const [index, objective] of objectives.entries()) {
+      if (index && !args.includes("--json")) console.log("");
+      print(objective);
+    }
+  };
+  const print = (objective: number) => {
     const { document, secrets } = statusDocument(config, objective);
     const continuation = readContinuation(config.repository, objective);
     const items = continuation
@@ -1038,19 +1105,17 @@ async function watchObjective(
     for (const line of renderWatch(headline, items, now, staleMs))
       console.log(redactDiagnosticDetail(line, secrets));
   };
-  print();
+  await printAll();
   if (!args.includes("--follow")) return;
   await new Promise<void>((resolve) => {
     const timer = setInterval(() => {
-      try {
-        // JSON output stays one object per line.
-        if (!args.includes("--json")) console.log("");
-        print();
-      } catch (error) {
+      // JSON output stays one object per line.
+      if (!args.includes("--json")) console.log("");
+      printAll().catch((error: unknown) => {
         process.stderr.write(
           `factory watch: ${error instanceof Error ? error.message : String(error)}\n`,
         );
-      }
+      });
     }, intervalMs);
     const stop = () => {
       clearInterval(timer);

@@ -643,7 +643,9 @@ async function runObjectiveOwned(
   services: ApplicationServices,
   options: NonNullable<Parameters<typeof runObjective>[3]>,
 ): Promise<ContinuationState> {
-  if (!!options.ownerLock !== !!options.observeControl)
+  // The service routes control through its own endpoint (observeControl);
+  // it owns each Objective it runs with that Objective's own lock.
+  if (options.ownerLock && !options.observeControl)
     throw new Error(
       "Borrowed Objective ownership requires its intake control handler",
     );
@@ -1597,7 +1599,7 @@ async function runObjectiveOwned(
     );
   if (isExecutionState(runResult!) && objectiveComplete(runResult!))
     await settleParentOfChild(config, services.github, objective, {
-      lockParent: !options.ownerLock,
+      lockParent: !options.observeControl,
     });
   return runResult!;
 }
@@ -1659,8 +1661,17 @@ async function cancelObjectiveOwned(
     action: "cancel",
   });
   if (control.handled) return "requested";
+  const installation = liveControllerOwner(
+    installationLockPath(config.repository),
+  );
+  // The service answers for every Objective through its endpoint; a signal
+  // would reach every Objective it runs.
+  if (installation?.intake)
+    throw new Error(
+      `The service owns Objective #${objective} but its control endpoint is unavailable; run this again in a moment`,
+    );
   const owner =
-    liveControllerOwner(installationLockPath(config.repository)) ??
+    installation ??
     liveControllerOwner(objectiveLockPath(config.repository, objective));
   if (owner) {
     if (owner.objective !== objective)

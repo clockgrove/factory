@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import {
   type FactoryConfig,
   factoryConfigDigest,
+  maxActiveObjectives,
   readConfig,
   readConfigFile,
   stateRoot,
@@ -53,6 +54,7 @@ import {
   readContinuation,
   readControllerOwner,
   liveControllerOwner,
+  liveObjectiveOwners,
   installationLockPath,
 } from "./state-store.js";
 
@@ -578,6 +580,35 @@ async function handoffService(config: FactoryConfig): Promise<void> {
     await pause(100);
   }
 }
+/**
+ * Upgrade drain with several Objectives (queue.maxActiveObjectives above 1):
+ * digests and prompts change with a release, so Objectives finish on the
+ * release that started them. The service stops dispatching new work and its
+ * active runs finish; foreground runs finish on their own. Returns every
+ * Objective still running; the upgrade proceeds once none remains.
+ */
+async function drainForUpgrade(config: FactoryConfig): Promise<number[]> {
+  if (maxActiveObjectives(config) <= 1) return [];
+  const service = liveControllerOwner(installationLockPath(config.repository));
+  let running: number[] = [];
+  if (service?.intake) {
+    const reply = await requestControl(config.repository, {
+      objective: 0,
+      action: "finish",
+    });
+    running = reply.handled
+      ? ((reply.result as { activeObjectives?: number[] }).activeObjectives ??
+        [])
+      : [];
+  }
+  // Objective locks the service holds are its own runs, counted above.
+  const foreground = liveObjectiveOwners(config.repository)
+    .filter((owner) => owner.pid !== service?.pid)
+    .map((owner) => owner.objective);
+  return [...new Set([...running, ...foreground])].sort(
+    (left, right) => left - right,
+  );
+}
 /** A stopped service whose run exited 2 is waiting for a human decision, not failed. */
 function awaitsDecision(name: string): boolean {
   return (
@@ -828,6 +859,16 @@ export async function supervise(
     // A failed unit is one that should be running: upgrading it, as when returning from a
     // package that refused the retained state, starts it again.
     const wasActive = ["active", "failed"].includes(inspect("is-active", name));
+    if (candidate) {
+      const running = await drainForUpgrade(config);
+      if (running.length)
+        return {
+          artifact: candidate.cli,
+          upgraded: false,
+          draining: running,
+          next: `New dispatch is held while ${running.map((id) => `Objective #${id}`).join(", ")} finish${running.length === 1 ? "es" : ""}; \`factory status\` shows them. Run this upgrade again once none is running; \`factory queue resume\` cancels the drain`,
+        };
+    }
     const beforeIntake =
       candidate && wasActive ? await readIntake(config) : undefined;
     const resumeIdleWatcher =

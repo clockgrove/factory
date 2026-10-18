@@ -312,6 +312,12 @@ export interface FactoryConfig {
   queue?: {
     pollSeconds: number;
     objectiveDeadlineSeconds?: number;
+    /**
+     * How many queued Objectives may run at once (default 1). Operational:
+     * outside both digests, so changing it strands no started Objective or
+     * queue receipt.
+     */
+    maxActiveObjectives?: number;
     project?: ProjectQueueBinding;
   };
   schemaVersion: 1;
@@ -1007,9 +1013,23 @@ export function validateConfig(value: unknown): FactoryConfig {
     assertObject(value.queue, "queue");
     assertOnlyKeys(
       value.queue,
-      ["pollSeconds", "objectiveDeadlineSeconds", "project"],
+      [
+        "pollSeconds",
+        "objectiveDeadlineSeconds",
+        "maxActiveObjectives",
+        "project",
+      ],
       "queue",
     );
+    if (
+      value.queue.maxActiveObjectives !== undefined &&
+      (!Number.isSafeInteger(value.queue.maxActiveObjectives) ||
+        (value.queue.maxActiveObjectives as number) < 1 ||
+        (value.queue.maxActiveObjectives as number) > MAX_ACTIVE_OBJECTIVES)
+    )
+      throw new Error(
+        `queue.maxActiveObjectives must be an integer from 1 to ${MAX_ACTIVE_OBJECTIVES}`,
+      );
     if (
       typeof value.queue.pollSeconds !== "number" ||
       !Number.isFinite(value.queue.pollSeconds) ||
@@ -1369,7 +1389,11 @@ export function factoryAuthorityDigest(config: FactoryConfig): string {
     queueProvider,
     ...declared
   } = withoutOperationalSettings(config);
-  const { pollSeconds: _pollSeconds, ...queueAuthority } = queue ?? {};
+  const {
+    pollSeconds: _pollSeconds,
+    maxActiveObjectives: _maxActiveObjectives,
+    ...queueAuthority
+  } = queue ?? {};
   const bound = {
     ...declared,
     ...queueProvider,
@@ -1387,6 +1411,17 @@ export function factoryAuthorityDigest(config: FactoryConfig): string {
     return JSON.stringify(value);
   };
   return createHash("sha256").update(canonical(bound)).digest("hex");
+}
+
+/**
+ * The most queued Objectives one installation runs at once. Each run in the
+ * service process listens for its own SIGTERM handoff, and Node warns above
+ * ten listeners per signal.
+ */
+const MAX_ACTIVE_OBJECTIVES = 8;
+/** How many queued Objectives may run at once; 1 unless the operator opts in. */
+export function maxActiveObjectives(config: FactoryConfig): number {
+  return config.queue?.maxActiveObjectives ?? 1;
 }
 
 export function configPath(): string {

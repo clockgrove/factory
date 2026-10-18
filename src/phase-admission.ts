@@ -1,3 +1,4 @@
+import type { SharedCapacity } from "./concurrent-objectives.js";
 import { liveCapacity, type ResourcePhase } from "./config.js";
 import { cancelledFault, StepFault } from "./fault.js";
 import type { FactoryState } from "./state.js";
@@ -13,11 +14,17 @@ interface Blocked {
   fix?: string;
 }
 
-/** Shared by both concrete runners. The snapshot owns reservations; waiters only wake it. */
+/**
+ * Shared by both concrete runners. The snapshot owns reservations; waiters only
+ * wake it. With `shared`, the other Objectives' live reservations count against
+ * the same ceilings, and each reservation is checked and published atomically
+ * with theirs.
+ */
 export function phaseAdmission(
   state: FactoryState,
   save: () => void,
   cancelled: () => boolean,
+  shared?: SharedCapacity,
 ) {
   // Stored capacity binds the plan; scheduling never exceeds what this host offers now.
   const capacity = liveCapacity(state.capacity);
@@ -44,10 +51,17 @@ export function phaseAdmission(
       const timer = checkCancellation ? setTimeout(wake, 250) : undefined;
       waiters.add(wake);
     });
+  const owned = (): ResourcePhase[] =>
+    Object.values(state.work).flatMap((work) => {
+      const phase = effectivePhase(work);
+      return phase ? [phase] : [];
+    });
+  const publish = () => shared?.publish(owned());
   const codingCount = () =>
     Object.values(state.work).filter(
       (work) => effectivePhase(work) === "coding",
-    ).length;
+    ).length +
+    (shared?.others().filter((phase) => phase === "coding").length ?? 0);
   const availableSlots = (reported: number | "unknown") => {
     if (
       reported !== "unknown" &&
@@ -87,12 +101,18 @@ export function phaseAdmission(
     return undefined;
   };
   const blocker = (id: string, phase: ResourcePhase): Blocked | undefined => {
-    const reservations = Object.entries(state.work)
-      .map(
-        ([other, work]) =>
-          [other, { ...work, phaseReservation: effectivePhase(work) }] as const,
-      )
-      .filter(([other, work]) => other !== id && work.phaseReservation);
+    const reservations = [
+      ...Object.entries(state.work)
+        .map(
+          ([other, work]) =>
+            [other, { phaseReservation: effectivePhase(work) }] as const,
+        )
+        .filter(([other, work]) => other !== id && work.phaseReservation),
+      // Other Objectives' controllers on this installation.
+      ...(shared?.others() ?? []).map(
+        (reserved) => ["", { phaseReservation: reserved }] as const,
+      ),
+    ];
     const ceiling =
       phase === "coding"
         ? capacity.concurrency
@@ -156,6 +176,7 @@ export function phaseAdmission(
   const release = (id: string) => {
     delete state.work[id]!.phaseReservation;
     delete state.work[id]!.requestedPhase;
+    publish();
     save();
     notify();
   };
@@ -164,6 +185,7 @@ export function phaseAdmission(
     // Callers transfer only after the previous effect has settled. No coding slot is held while awaiting review.
     delete work.phaseReservation;
     work.requestedPhase = phase;
+    publish();
     save();
     notify();
     while (true) {
@@ -176,7 +198,18 @@ export function phaseAdmission(
         throw cancelledFault(
           "Objective deadline reached before phase admission",
         );
-      const blocked = blocker(id, phase);
+      // With other Objectives, the check and the published reservation are
+      // one step, so two controllers never take the same last slot.
+      const blocked = shared
+        ? shared.exclusive(() => {
+            const found = blocker(id, phase);
+            if (!found) {
+              work.phaseReservation = phase;
+              publish();
+            }
+            return found;
+          })
+        : blocker(id, phase);
       if (!blocked) break;
       if (blocked.fix)
         throw new StepFault({
@@ -200,6 +233,8 @@ export function phaseAdmission(
     save();
     notify();
   };
+  // Reservations a resumed controller retains count for the others at once.
+  publish();
   return {
     blocker,
     slotBlocker,

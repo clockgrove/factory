@@ -32,6 +32,7 @@ import {
 } from "../item-worker.js";
 import { materializeAssetSet, validationLfsMembersForItem } from "../media.js";
 import { packageManagerUpdate } from "../package-manager-update.js";
+import type { SharedCapacity } from "../concurrent-objectives.js";
 import { phaseAdmission } from "../phase-admission.js";
 import { currentProcessSignal } from "../process.js";
 import { resultReviewCriteria } from "../qa.js";
@@ -90,6 +91,8 @@ export async function runNativeGraph(args: {
   save: () => void;
   active: Map<string, Promise<void>>;
   cancelled: () => boolean;
+  /** Other concurrent Objectives' reservations on this installation. */
+  sharedCapacity?: SharedCapacity;
   paused?: () => boolean;
   amendmentPending?: () => boolean;
   /** Authenticated settlements for this immutable graph pass. */
@@ -113,7 +116,12 @@ export async function runNativeGraph(args: {
     save,
     active,
   } = args;
-  const phases = phaseAdmission(state, save, args.cancelled);
+  const phases = phaseAdmission(
+    state,
+    save,
+    args.cancelled,
+    args.sharedCapacity,
+  );
   const branchFor = (id: string) => `factory/objective-${objective}/${id}`;
   const signal = args.signal ?? currentProcessSignal();
   /** The operator cancelled the Objective. */

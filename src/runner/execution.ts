@@ -1,5 +1,11 @@
 import { readPinnedWorkflowRecipe } from "../workflow-recipes.js";
 import {
+  admitExecution,
+  concurrentObjectives,
+  executionConflictDetail,
+  sharedCapacity as createSharedCapacity,
+} from "../concurrent-objectives.js";
+import {
   applyPendingGraphExpansion,
   authenticateExpansionInputs,
   authenticateObjectiveInputs,
@@ -147,6 +153,9 @@ export function objectiveStepPause(
     return undefined;
   return canHandoff(snapshot) ? owner.pause.signal : undefined;
 }
+
+/** How often an Objective held behind an overlapping one checks again. */
+const EXECUTION_ADMISSION_POLL_MS = 15_000;
 
 export async function runObjectivePass(
   config: FactoryConfig,
@@ -600,6 +609,22 @@ export async function runObjectivePass(
     );
     stateForSignal = state;
     save(state);
+    // Objectives running at once (queue.maxActiveObjectives above 1): this one
+    // executes only while no earlier-admitted unfinished Objective owns an
+    // overlapping path, and its phases share the host's capacity with theirs.
+    if (concurrentObjectives(config))
+      await objectiveStep(state, "execution-admission", async (context) => {
+        const conflict = admitExecution(config, state);
+        if (conflict)
+          context.pending(
+            { kind: "dependency", detail: executionConflictDetail(conflict) },
+            new Date(Date.now() + EXECUTION_ADMISSION_POLL_MS).toISOString(),
+          );
+        context.progress();
+      });
+    const sharedCapacity = owner.lock
+      ? createSharedCapacity(config, objective, owner.lock.token)
+      : undefined;
     /** Delivery re-observes the Objective: a foreign edit or closure is a decision. */
     // Items deliver concurrently; they share one observation in flight.
     let observing: Promise<void> | undefined;
@@ -643,6 +668,7 @@ export async function runObjectivePass(
         active,
         reconcile,
         cancelled: cancellationRequested,
+        sharedCapacity,
         signal: owner.abort.signal,
         // Read at each step: resume replaces the controller.
         get pause() {
@@ -672,6 +698,7 @@ export async function runObjectivePass(
         active,
         reconcile,
         cancelled: cancellationRequested,
+        sharedCapacity,
         signal: owner.abort.signal,
         // Read at each step: resume replaces the controller.
         get pause() {

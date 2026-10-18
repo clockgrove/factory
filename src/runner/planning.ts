@@ -19,6 +19,7 @@ import {
   answerPlanningDecision,
   bindPlanningPlaybook,
   compilePlan,
+  grantPlanningRevisions,
   type PlanCandidate,
   paidPlanningModel,
   planningSources,
@@ -51,6 +52,7 @@ import type { PreparationState } from "../state.js";
 import {
   isPreparationState,
   openPlanningQuestion,
+  planningRevisionGrantable,
   projectionStarted,
 } from "../state.js";
 import {
@@ -455,8 +457,9 @@ async function planObjectiveObserved(
 /**
  * Decide the plan a run persisted in state. Accepting binds the answer to that exact reviewed
  * plan, or, when planning stopped at the planner's own question, to the draft it asked about,
- * which the next run revises; refusing discards the unprojected preparation so the next run
- * plans again.
+ * which the next run revises; when planning stopped at its revision allowance with only fix
+ * findings left, accepting grants more revisions of the retained draft. Refusing discards the
+ * unprojected preparation so the next run plans again.
  */
 export async function decidePlan(
   config: FactoryConfig,
@@ -481,6 +484,7 @@ export async function decidePlan(
   const started = Date.now();
   diagnostics.emit({ operation: "planning-decision", outcome: "started" });
   const lock = mutationLock(config, objective);
+  let granted = false;
   try {
     const path = statePath(config.repository, objective);
     const preparation = readContinuation(config.repository, objective);
@@ -556,6 +560,11 @@ export async function decidePlan(
       answerPlanningDecision(preparation, input);
       resumePlanning(preparation);
       saveState(path, preparation);
+    } else if (planningRevisionGrantable(preparation)) {
+      grantPlanningRevisions(preparation, input);
+      granted = true;
+      resumePlanning(preparation);
+      saveState(path, preparation);
     } else {
       if (!preparation.plan)
         throw new Error("Objective planning has not produced a plan yet");
@@ -588,7 +597,9 @@ export async function decidePlan(
             ? "refused"
             : preparation.plan
               ? "human-accepted"
-              : "answered",
+              : granted
+                ? "revisions-granted"
+                : "answered",
       },
       detail: input.reason,
     });

@@ -18,6 +18,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { readAccountingRecords, retainModelAccounting } from "./accounting.js";
 import { replacementRefusal } from "./amendment-admission.js";
+import { PLANNING_REVISION_GRANT } from "./compiler/recovery.js";
 import {
   type CapturePolicy,
   CaptureWriter,
@@ -67,6 +68,7 @@ import {
   observedStackNumber,
   openAmendmentQuestion,
   openPlanningQuestion,
+  planningRevisionGrantable,
   projectionStarted,
 } from "./state.js";
 import type { PreState } from "./state-store.js";
@@ -74,6 +76,7 @@ import {
   type PendingDecisionView,
   type PlanningStepView,
   planningRefusal,
+  planningRounds,
   type StatusView,
   shortPlanDigest,
   summarizeStatus,
@@ -2543,6 +2546,7 @@ function planningStepView(
         recovery?.invocations?.at(-1)?.phase ??
         null),
     revision: recovery?.history.length ?? 0,
+    rounds: plan ? [] : planningRounds(recovery),
     refused: refused && {
       ...refused,
       detail: redact(refused.detail ?? undefined),
@@ -2644,6 +2648,9 @@ function preparationStatusDocument(
     planningStopped:
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
     planningQuestion: Boolean(openPlanningQuestion(preparation)),
+    planningRevisionGrant: planningRevisionGrantable(preparation)
+      ? PLANNING_REVISION_GRANT
+      : null,
     planningStep: planningStepView(preparation, redact),
     issueByItemId: preparation.issueByItemId,
     projectionStarted: projectionStarted(preparation),

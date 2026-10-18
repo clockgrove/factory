@@ -140,6 +140,7 @@ export interface FactoryApplication {
   ): Promise<
     | "plan-accepted"
     | "plan-answered"
+    | "plan-revisions-granted"
     | "plan-refused"
     | "amendment-accepted"
     | "amendment-refused"

@@ -621,7 +621,25 @@ export interface PlanReviewRequest {
   finalCommands: string[];
   /** Check names from the base's workflows. */
   checkNames?: string[];
+  /**
+   * A planning revision round's review scope. Set only on the request to the
+   * reviewer, never in the packet or its digest; absent on a first review.
+   */
+  revisionScope?: PlanRevisionScope;
   invocation?: ModelInvocationContext;
+}
+
+/** What a revision round's review checks first: the last review's findings and the revision's changes. */
+export interface PlanRevisionScope {
+  /** This review's number among the plan's reviews, from 1. */
+  round: number;
+  previousFindings: { kind: string; itemIds: string[]; detail: string }[];
+  /** Work Items present in both graphs whose definition changed. */
+  changedItemIds: string[];
+  addedItemIds: string[];
+  removedItemIds: string[];
+  /** Plan-level graph fields (such as coverage or sourceObligations) the revision changed. */
+  changedFields: string[];
 }
 
 export interface ValidationCommandReceipt {

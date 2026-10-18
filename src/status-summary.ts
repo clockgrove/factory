@@ -144,6 +144,8 @@ interface PreparingStatusView extends WaitView {
   planningStopped: boolean;
   /** It stopped at the planner's own question: an answer revises its draft. */
   planningQuestion?: boolean;
+  /** It stopped at its revision allowance with only fix findings left: accepting grants this many more revisions. */
+  planningRevisionGrant?: number | null;
   /** The planner call now or last made, and projection's issue count. */
   planningStep?: PlanningStepView | null;
   /** Projection has started (an issue exists or the phase was entered): a plan can no longer be refused. */
@@ -177,6 +179,8 @@ export interface PlanningStepView {
   revision: number;
   /** Why the previous plan was refused; null before any refusal. */
   refused: PlanningRefusalView | null;
+  /** Each finished plan check or review so far, oldest first; empty before any. */
+  rounds?: PlanningRoundView[];
   /** Work Item issues recorded of the plan's items, while projection runs. */
   issues: { created: number; total: number } | null;
 }
@@ -191,8 +195,44 @@ export interface PlanningRefusalView {
   detail: string | null;
 }
 
+/** One planning round's outcome: a Factory check refusal, or a review with its fix findings. */
+export interface PlanningRoundView {
+  source: "check" | "review";
+  fixes: number;
+}
+
 type PlanningHistoryEntry =
   import("./compiler.js").PlanningRecoveryRecord["history"][number];
+
+/**
+ * Every finished round: each refused plan in history, then the current
+ * round's review once it answered without being revised yet (a stop).
+ */
+export function planningRounds(
+  record: import("./compiler.js").PlanningRecoveryRecord | undefined,
+): PlanningRoundView[] {
+  const rounds = (record?.history ?? []).map((entry) => {
+    const refused = planningRefusal(entry)!;
+    return { source: refused.source, fixes: refused.fixes };
+  });
+  const current = record?.review?.response?.findings;
+  if (current)
+    rounds.push({
+      source: "review",
+      fixes: current.filter((finding) => finding.kind === "fix").length,
+    });
+  return rounds;
+}
+
+/** `review findings per round: 1, 2, check, 3`, or "" before two rounds. */
+export function planningRoundsText(
+  rounds: PlanningRoundView[] | undefined,
+): string {
+  if (!rounds || rounds.length < 2) return "";
+  return `fix findings per round: ${rounds
+    .map((round) => (round.source === "check" ? "check" : String(round.fixes)))
+    .join(", ")}`;
+}
 
 /** Why a planning round's plan was refused: its recorded corrections, or its retained review. */
 export function planningRefusal(
@@ -254,7 +294,10 @@ export function planningActivity(
   const doing =
     (step?.call && PLANNER_CALLS[step.call]) ??
     "compiling and reviewing the plan";
-  return step?.revision ? `${doing} (revision ${step.revision})` : doing;
+  const rounds = planningRoundsText(step?.rounds);
+  return step?.revision
+    ? `${doing} (revision ${step.revision}${rounds ? `; ${rounds}` : ""})`
+    : doing;
 }
 
 interface CapacityView {
@@ -1217,6 +1260,17 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
         reason: `Answer the question below; then ${run(objective)}`,
       },
     };
+  if (view.planningStopped && view.planningRevisionGrant) {
+    const rounds = planningRoundsText(view.planningStep?.rounds);
+    return {
+      phase: "needs-plan-decision",
+      summary: `plan revisions used up with review fix findings left${rounds ? `; ${rounds}` : ""}`,
+      nextAction: {
+        command: `factory decide --objective ${objective} --outcome accept --reason ${REASON}`,
+        reason: `Grants ${view.planningRevisionGrant} more plan revisions; then ${run(objective)} revises the retained draft for the last review's findings (refuse discards the planning instead)`,
+      },
+    };
+  }
   if (view.planningStopped)
     return {
       phase: "needs-plan-decision",

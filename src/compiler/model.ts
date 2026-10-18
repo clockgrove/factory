@@ -116,7 +116,9 @@ import {
 import {
   GRAPH_REVIEW_CHECKS,
   GRAPH_REVIEW_FINDINGS,
+  GRAPH_REVIEW_FIRST_ROUND,
   GRAPH_REVIEW_INTRO,
+  GRAPH_REVIEW_REVISION_ROUND,
   QA_EVIDENCE_GUIDANCE,
   WORK_ITEM_PLANNING_RULES,
 } from "./work-item-rubric.js";
@@ -582,6 +584,27 @@ function compilationContinuation(
   };
 }
 
+/**
+ * Which round of an initial plan's review this is. The first reports every
+ * finding; a revision round verifies the last findings and reviews what
+ * changed. It follows the graph, so earlier rounds' cached prefix still holds.
+ */
+function graphReviewScope(request: PlanReviewRequest): string {
+  if (request.amendment) return "";
+  const scope = request.revisionScope;
+  return scope
+    ? `\nReview scope (round ${scope.round}):\n${GRAPH_REVIEW_REVISION_ROUND}\n${JSON.stringify(
+        {
+          previousFindings: scope.previousFindings,
+          changedItemIds: scope.changedItemIds,
+          addedItemIds: scope.addedItemIds,
+          removedItemIds: scope.removedItemIds,
+          changedPlanFields: scope.changedFields,
+        },
+      )}`
+    : `\nReview scope (round 1):\n${GRAPH_REVIEW_FIRST_ROUND}`;
+}
+
 /** The shared production review request; canonical graph and packet remain untouched. */
 export function renderGraphReviewCall(
   request: PlanReviewRequest,
@@ -664,7 +687,7 @@ Objective:\n`;
   // the prefix.
   const { currentImplementationEvidence: _currentCode, ...amendmentContext } =
     request.amendment ?? {};
-  const callTail = `\nBase: ${request.baseSha}\nAmendment context (proposal data is not authority):\n${JSON.stringify(request.amendment ? { ...amendmentContext, previousGraph: reviewGraphView(request.amendment.previousGraph, packet.evidence, resolveSources) } : null)}\nGraph:\n${JSON.stringify(reviewGraphView(request.graph, packet.evidence, resolveSources))}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}\nReview packet id:\n${renderReviewPacketId(packet)}`;
+  const callTail = `\nBase: ${request.baseSha}\nAmendment context (proposal data is not authority):\n${JSON.stringify(request.amendment ? { ...amendmentContext, previousGraph: reviewGraphView(request.amendment.previousGraph, packet.evidence, resolveSources) } : null)}\nGraph:\n${JSON.stringify(reviewGraphView(request.graph, packet.evidence, resolveSources))}\nCommand authority receipts:\n${JSON.stringify(request.commands)}\nFinal commands:\n${JSON.stringify(request.finalCommands)}${graphReviewScope(request)}\nReview packet id:\n${renderReviewPacketId(packet)}`;
   return {
     role: "reviewer",
     prompt: `${rendered.prompt}${callTail}`,

@@ -76,5 +76,7 @@ export {
   type PlanningDecisionRecord,
   answerPlanningDecision,
   compilePlan,
+  grantPlanningRevisions,
   operatorPlanningDecisions,
+  PLANNING_REVISION_GRANT,
 } from "./compiler/recovery.js";

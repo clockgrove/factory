@@ -379,6 +379,16 @@ export function openPlanningQuestion(
   return record?.phase === "stopped" && open && !open.answer ? open : undefined;
 }
 
+/** Planning stopped at its revision allowance with only fix findings left: accepting grants more revisions. */
+export function planningRevisionGrantable(state: ContinuationState): boolean {
+  return (
+    isPreparationState(state) &&
+    !state.plan &&
+    state.planningRecovery?.phase === "stopped" &&
+    state.planningRecovery.stoppedFor === "revision-allowance"
+  );
+}
+
 /** Set the coordinator's mode, unless a rejected amendment holds it paused. */
 export function setCoordinatorMode(
   state: ContinuationState,

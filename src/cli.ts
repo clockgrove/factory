@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { PLANNING_REVISION_GRANT } from "./compiler.js";
 import { runCaptureExportCommand } from "./capture-export-cli.js";
 import { assertKnownFlags, option } from "./cli-flags.js";
 import { itemActivities, renderWatch } from "./worker-activity.js";
@@ -457,17 +458,19 @@ async function decideCommand(
       ? `Accepted the plan for Objective #${objective}; run ${run} to continue`
       : decided === "plan-answered"
         ? `Answered the planner's question for Objective #${objective}; ${run} revises the draft plan with your answer and reviews it`
-        : decided === "plan-refused"
-          ? `Refused and discarded the plan for Objective #${objective}; the next run plans again`
-          : decided === "amendment-accepted"
-            ? `Answered the amendment's question for Objective #${objective}; ${run} compiles it with your answer`
-            : decided === "amendment-refused"
-              ? `Refused the amendment for Objective #${objective} and gave back its planning revision; submit a corrected one with \`factory propose-amendment --objective ${objective} --proposal FILE\``
-              : `Recorded ${outcome} for the ${item ? `pending criterion of Work Item ${item}` : "pending final acceptance"}; ${
-                  decided === "result-open"
-                    ? `other criteria still wait: \`factory status --objective ${objective}\` lists each decision, then ${run} continues`
-                    : `${run} continues it`
-                }`,
+        : decided === "plan-revisions-granted"
+          ? `Granted ${PLANNING_REVISION_GRANT} more plan revisions for Objective #${objective}; ${run} revises the retained draft for the last review's findings`
+          : decided === "plan-refused"
+            ? `Refused and discarded the plan for Objective #${objective}; the next run plans again`
+            : decided === "amendment-accepted"
+              ? `Answered the amendment's question for Objective #${objective}; ${run} compiles it with your answer`
+              : decided === "amendment-refused"
+                ? `Refused the amendment for Objective #${objective} and gave back its planning revision; submit a corrected one with \`factory propose-amendment --objective ${objective} --proposal FILE\``
+                : `Recorded ${outcome} for the ${item ? `pending criterion of Work Item ${item}` : "pending final acceptance"}; ${
+                    decided === "result-open"
+                      ? `other criteria still wait: \`factory status --objective ${objective}\` lists each decision, then ${run} continues`
+                      : `${run} continues it`
+                  }`,
   );
 }
 

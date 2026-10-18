@@ -54,3 +54,11 @@ Examples: do not flag a brief for omitting an API that its complete inputSources
 /** How findings are shaped; the caller appends the human-prerequisite guidance. */
 export const GRAPH_REVIEW_FINDINGS =
   "If there is no material defect, return the exact packetId with an empty findings array. Otherwise return the packetId and one finding per defect, each naming the graph item ids it concerns (empty only for a defect in the plan as a whole), citing evidence indices from the review packet and stating what must change. Set each finding's kind: fix when the planner can correct the plan within the Objective and supplied sources (checks 1-9 and 11; it then receives the finding as a correction); operator-decision when the correction needs a product, scope or authority decision the Objective leaves to the operator (check 10, an open scope question about a source exit item under check 1, or an unresolved source decision), stated as a specific operator question (the operator is asked once the plan has no fix finding left; a review with both sends only its fixes to the planner, and the revised plan is reviewed again). Do not report observations, confirmations or speculative questions.";
+
+/** A plan's first review: later rounds only verify its findings and the revision's changes. */
+export const GRAPH_REVIEW_FIRST_ROUND =
+  "This is the one full review of this plan: report every finding you can establish in this pass, grouped by item, because later rounds only verify these findings and review what each revision changes.";
+
+/** A revision round: verify the last findings, review the change, and keep unchanged parts stable. */
+export const GRAPH_REVIEW_REVISION_ROUND =
+  "This is a revision round: the planner revised the plan for the previous review's findings below, and Factory's deterministic checks passed on the whole revised plan. (a) Report each previous finding again, with its kind, unless the revision resolved it. (b) Review the changed and added items, and whatever a change affects (dependencies, dependents, coverage, ownership, shared files), against every check. (c) On unchanged parts, report a new finding only if it would let a worker deliver a wrong result or make the Objective fail; wording, style and \"could be more precise\" are not findings there.";

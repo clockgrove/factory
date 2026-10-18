@@ -24,6 +24,7 @@ import { pinnedGit, pinnedGitEnvironment, pinnedGitRaw } from "./process.js";
 import { objectiveCandidate } from "./qa.js";
 import {
   allowanceKey,
+  allowanceLimit,
   assertRepairLedger,
   consumption,
   failureDigest,
@@ -2334,7 +2335,7 @@ function retainedRepairProof(
         allowance: key,
         objective: {
           consumed: consumption(state)[key],
-          limit: state.autonomy.allowances[key],
+          limit: allowanceLimit(state, key),
         },
         paths: scopes.map((scope) => ({
           scope,

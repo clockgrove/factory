@@ -808,6 +808,8 @@ const scopes = new AsyncLocalStorage<{
     /** Bodies the verified acknowledged base already holds; see checkpointBasis. */
     covered?: ReadonlySet<string>;
     pendingReferences: Map<string, string>;
+    /** Producer slots this build staged; committed after its final boundary. */
+    slots: Map<string, string>;
     pendingReferenceBytes: number;
     sourceOriginals: Map<string, string>;
     sourceInventories: Map<
@@ -1641,6 +1643,7 @@ export function withQueueControlVerification<T>(
     } finally {
       verification.summaries.clear();
       verification.content.clear();
+      delete verification.referenceSlots;
       verification.lineages.clear();
       delete verification.queueValidation;
       delete verification.queueValidationBytes;
@@ -1754,6 +1757,7 @@ async function withFiniteCheckpointReads<T>(
     bodies: new Map<string, { ref: ContentRef; bytes?: Buffer }>(),
     recorders: [] as Map<string, ContentRef>[],
     pendingReferences: new Map<string, string>(),
+    slots: new Map<string, string>(),
     pendingReferenceBytes: 0,
     sourceOriginals: new Map<string, string>(),
     sourceInventories: new Map<
@@ -1842,7 +1846,7 @@ async function withFiniteCheckpointReads<T>(
         throw new Error(
           "Checkpoint closure configuration changed during verification",
         );
-      if (phase.verification)
+      if (phase.verification) {
         for (const [key, value] of [...phase.pendingReferences]) {
           if (!phase.pendingReferences.has(key)) continue;
           phase.pendingReferences.delete(key);
@@ -1856,6 +1860,24 @@ async function withFiniteCheckpointReads<T>(
             value,
           );
         }
+        // Only a build that passed its final boundary supersedes a slot's
+        // previous summary; a failed build keeps it.
+        const context = phase.verification;
+        for (const [named, key] of phase.slots) {
+          const previous = context.referenceSlots?.get(named);
+          const retained =
+            previous === undefined || previous === key
+              ? undefined
+              : context.content.get(previous);
+          if (retained !== undefined) {
+            context.content.delete(previous!);
+            context.contentBytes -=
+              Buffer.byteLength(previous!) + Buffer.byteLength(retained);
+          }
+          context.referenceSlots ??= new Map();
+          context.referenceSlots.set(named, key);
+        }
+      }
       return closure;
     } finally {
       phase.closed = true;
@@ -1865,6 +1887,7 @@ async function withFiniteCheckpointReads<T>(
         phase.verification.pendingReferenceBytes -= phase.pendingReferenceBytes;
       }
       phase.pendingReferences.clear();
+      phase.slots.clear();
       phase.sourceOriginals.clear();
       phase.sourceInventories.clear();
       phase.pendingReferenceBytes = 0;
@@ -1951,19 +1974,24 @@ export function deferCheckpointClosureVerification(
 }
 
 /**
- * Only the concrete store calls this, with bytes its opened file has just
- * proved exact (hashed, or an earlier hash of that exact file identity), so
- * hashing them a second time adds no fact.
+ * The concrete store passes the identity of the file it just read: when this
+ * controller holds a hash of that exact identity, the bytes are not hashed a
+ * second time. Any other bytes are hashed before they are shared.
  */
 export function retainCheckpointClosureBytes(
   root: string,
   ref: ContentRef,
   bytes: Buffer,
+  identity: string,
 ): void {
   const phase = closureReadPhase(root);
   if (!phase) return;
   assertRef(ref);
-  if (bytes.length !== ref.bytes)
+  if (
+    bytes.length !== ref.bytes ||
+    (!checkpointContentVerified(root, ref, identity) &&
+      hash(bytes) !== ref.digest)
+  )
     throw new Error("Checkpoint closure body failed exact digest verification");
   const key = canonical([resolve(root), ref]);
   recordClosureOriginal(phase, key, ref);
@@ -2170,29 +2198,9 @@ export function retainRecoveryCheckpointReferences(
   ]);
   const value = JSON.stringify(summary);
   const charge = Buffer.byteLength(key) + Buffer.byteLength(value);
+  if (slot !== undefined)
+    phase.slots.set(canonical(["reference-slot", resolve(root), slot]), key);
   if (phase.pendingReferences.has(key) || context.content.has(key)) return;
-  if (slot !== undefined) {
-    const named = canonical(["reference-slot", resolve(root), slot]);
-    const previous = context.referenceSlots?.get(named);
-    if (previous !== undefined) {
-      const pending = phase.pendingReferences.get(previous);
-      if (pending !== undefined) {
-        const released =
-          Buffer.byteLength(previous) + Buffer.byteLength(pending);
-        phase.pendingReferences.delete(previous);
-        phase.pendingReferenceBytes -= released;
-        context.pendingReferenceBytes -= released;
-      }
-      const retained = context.content.get(previous);
-      if (retained !== undefined) {
-        context.content.delete(previous);
-        context.contentBytes -=
-          Buffer.byteLength(previous) + Buffer.byteLength(retained);
-      }
-    }
-    context.referenceSlots ??= new Map();
-    context.referenceSlots.set(named, key);
-  }
   if (!reserveVerificationMetadata(context, phase.options, charge)) return;
   phase.pendingReferences.set(key, value);
   phase.pendingReferenceBytes += charge;
@@ -2267,6 +2275,7 @@ function clearRebuildableVerificationMetadata(
   context.summaries.clear();
   context.summaryBytes = 0;
   context.content.clear();
+  delete context.referenceSlots;
   context.contentBytes = 0;
   delete context.publisherObjects;
   delete context.publisherObjectBytes;
@@ -5195,6 +5204,7 @@ function checkpointBasis(
   // verifier already established (for example at controller startup).
   if (basis || final) {
     context.content.clear();
+    delete context.referenceSlots;
     context.contentBytes = 0;
     context.summaries.clear();
     context.summaryBytes = 0;
@@ -6101,6 +6111,7 @@ async function freshArchiveOwnedStrict(
       context.summaries.clear();
       context.summaryBytes = 0;
       context.content.clear();
+      delete context.referenceSlots;
       context.contentBytes = 0;
       rmSync(directory, { recursive: true, force: true });
       delete context.directory;
@@ -6120,6 +6131,7 @@ async function freshArchiveOwnedStrict(
         context.lineageBytes = 0;
         context.summaryBytes = 0;
         context.content.clear();
+        delete context.referenceSlots;
         context.contentBytes = 0;
         delete context.objects;
         delete context.negotiationTip;
@@ -6131,6 +6143,7 @@ async function freshArchiveOwnedStrict(
       context.summaries.clear();
       context.summaryBytes = 0;
       context.content.clear();
+      delete context.referenceSlots;
       context.contentBytes = 0;
       context.lineages.clear();
       context.lineageBytes = 0;

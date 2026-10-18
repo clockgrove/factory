@@ -157,7 +157,10 @@ export class LocalContentStore implements ContentStore {
     );
   }
 
-  private readDescriptor(fd: number, ref: ContentRef): Buffer {
+  private readDescriptor(
+    fd: number,
+    ref: ContentRef,
+  ): { bytes: Buffer; identity: string } {
     const identity = this.descriptorIdentity(fd, ref);
     const verified = checkpointContentVerified(this.root, ref, identity);
     const bytes = readFileSync(fd);
@@ -173,7 +176,7 @@ export class LocalContentStore implements ContentStore {
       throw new Error("Content object changed during exact byte verification");
     if (!verified)
       retainCheckpointContentVerification(this.root, ref, identity);
-    return bytes;
+    return { bytes, identity };
   }
 
   private retainExisting(ref: ContentRef): boolean {
@@ -252,8 +255,9 @@ export class LocalContentStore implements ContentStore {
     if (cached) return cached;
     const fd = this.openObject(ref);
     try {
-      const bytes = this.readDescriptor(fd, ref);
-      if (concrete) retainCheckpointClosureBytes(this.root, ref, bytes);
+      const { bytes, identity } = this.readDescriptor(fd, ref);
+      if (concrete)
+        retainCheckpointClosureBytes(this.root, ref, bytes, identity);
       return bytes;
     } finally {
       closeSync(fd);

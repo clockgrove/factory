@@ -5,6 +5,7 @@ import { privateRecords } from "./diagnostics.js";
 import { displayClock } from "./display-time.js";
 import { factoryFilesToolNames } from "./execution/claude-files.js";
 import { factoryValidationToolName } from "./execution/claude-validation.js";
+import { workerIdentity } from "./item-steps.js";
 import { ownsPath } from "./ownership.js";
 import {
   type AttemptKind,
@@ -66,11 +67,15 @@ export interface ItemActivity {
 const ATTEMPT =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** An attempt ID, or a replacement worker's `<attempt>-<ordinal>` identity. */
+const WORKER =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-[1-9]\d*)?$/;
+
 export function workerProgressPath(
   repository: string,
   attempt: string,
 ): string {
-  if (!ATTEMPT.test(attempt)) throw new Error("Invalid worker attempt ID");
+  if (!WORKER.test(attempt)) throw new Error("Invalid worker attempt ID");
   return join(stateRoot(repository), "harness", `${attempt}.progress.ndjson`);
 }
 
@@ -296,7 +301,13 @@ export function itemActivities(
       (entry) => entry.id === id,
     )?.ownedPaths;
     try {
-      const activity = readWorkerActivity(repository, work.attempt, 8, owned);
+      // A replacement worker streams under its own identity, not the attempt's.
+      const activity = readWorkerActivity(
+        repository,
+        workerIdentity(work),
+        8,
+        owned,
+      );
       if (activity) item.activity = activity;
     } catch {
       // Telemetry only: an unreadable stream leaves activity unknown.

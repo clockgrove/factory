@@ -48,7 +48,7 @@ export interface GitHubProgressInput
 
 const markdown = (text: string): string =>
   text.replace(/[\\`*_{}[\]()<>#!|]/g, "\\$&").replace(/@/g, "@\u200b");
-const compact = (text: string): string =>
+export const compact = (text: string): string =>
   markdown(text.replace(/\s+/g, " ").trim());
 /** A command as inline code; status commands carry no backtick or newline. */
 const code = (text: string): string => {
@@ -247,11 +247,13 @@ function callLine(call: ModelCallRow): string {
       call.usage.cachedInputTokens,
       call.usage.outputTokens,
     ),
-    call.outcome === "running"
-      ? `running ${time}`
-      : call.outcome === "failed"
-        ? `${time} failed`
-        : time,
+    call.refused
+      ? `${time} · refused: ${call.refused}`
+      : call.outcome === "running"
+        ? `running ${time}`
+        : call.outcome === "failed"
+          ? `${time} failed${call.failureClass ? ` (${identity(call.failureClass)})` : ""}`
+          : time,
   ].join(" · ");
 }
 

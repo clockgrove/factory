@@ -2,6 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import type { ModelInvocationUsage } from "./contracts.js";
 import { diagnosticPath, privateRecords } from "./diagnostics.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
+import { type PlanningRefusalView, planningRefusal } from "./status-summary.js";
 import {
   isCodexUsageIdentity,
   normalizeCodexTokenUsage,
@@ -39,6 +40,10 @@ export interface ModelCallRow {
   startedAt: string;
   durationMs?: number;
   outcome: "completed" | "failed" | "running";
+  /** The provider failure's recorded class, for a failed call. */
+  failureClass?: string;
+  /** A compile whose plan Factory refused, by what refused it (planning history). */
+  refused?: PlanningRefusalView["source"];
 }
 
 interface Call {
@@ -60,6 +65,7 @@ interface Call {
   endedAt?: string;
   durationMs?: number;
   failed?: boolean;
+  failureClass?: string;
 }
 
 /** What a worker attempt's progress stream recorded about its model use. */
@@ -104,6 +110,7 @@ function observe(
     "adapter",
     "model",
     "effort",
+    "failureClass",
   ] as const)
     if (fields[name] !== undefined && call[name] === undefined)
       (call as unknown as Record<string, unknown>)[name] = fields[name];
@@ -308,6 +315,7 @@ export function readRunTelemetry(
           toolCalls: count(metadata.toolCalls),
           usage: metadata.usageAvailable === true ? metadata : undefined,
           live: liveUsage(metadata),
+          failureClass: text(metadata.failureClass),
           durationMs: count(event.durationMs),
         },
       );
@@ -323,6 +331,14 @@ export function readRunTelemetry(
       workerUsage(calls, attemptId, at, value);
     for (const [invocation, adapter] of stream.adapters)
       if (!adapters.has(invocation)) adapters.set(invocation, adapter);
+  }
+  // Each refused plan's compile calls, by what refused it.
+  const refusals = new Map<string, PlanningRefusalView["source"]>();
+  for (const entry of state.planningRecovery?.history ?? []) {
+    const source = planningRefusal(entry)?.source;
+    for (const invocation of entry.invocations)
+      if (source && invocation.phase === "compile")
+        refusals.set(invocation.id, source);
   }
   // Each item's attempts are numbered in the order they started.
   const ordinals = new Map<string, number>();
@@ -382,6 +398,13 @@ export function readRunTelemetry(
             ? "failed"
             : "completed"
           : "running",
+        ...(call.failed &&
+          call.failureClass && { failureClass: call.failureClass }),
+        // A provider retry that failed for its own reason was not the refused plan.
+        ...(refusals.has(call.invocationId) &&
+          (!call.failed || call.failureClass === "semantic-validation") && {
+            refused: refusals.get(call.invocationId),
+          }),
       };
     })
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));

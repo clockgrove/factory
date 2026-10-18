@@ -72,6 +72,7 @@ import type { PreState } from "./state-store.js";
 import {
   type PendingDecisionView,
   type PlanningStepView,
+  planningRefusal,
   type StatusView,
   shortPlanDigest,
   summarizeStatus,
@@ -2461,6 +2462,8 @@ export interface ModelActivity {
   /** Set when the call returned or failed; a provider retry clears it. */
   endedAt?: number;
   outcome?: "returned" | "failed";
+  /** The failed call's recorded class, such as a provider capacity failure. */
+  failureClass?: string;
   inputTokens?: number;
   outputTokens?: number;
 }
@@ -2500,9 +2503,13 @@ function noteModelActivity(
   if (["completed", "failed", "response-invalid"].includes(observation.type)) {
     current.endedAt = now;
     current.outcome = observation.type === "completed" ? "returned" : "failed";
+    if (current.outcome === "failed" && observation.failureClass)
+      current.failureClass = observation.failureClass;
+    else delete current.failureClass;
   } else {
     delete current.endedAt;
     delete current.outcome;
+    delete current.failureClass;
   }
   if (observation.usage?.inputTokens !== undefined)
     current.inputTokens = observation.usage.inputTokens;
@@ -2521,9 +2528,13 @@ export function objectiveModelActivity(
 }
 
 /** The planner call now or last made, and projection's issue count: structured facts only. */
-function planningStepView(preparation: PreparationState): PlanningStepView {
+function planningStepView(
+  preparation: PreparationState,
+  redact: (value: string | undefined) => string | null,
+): PlanningStepView {
   const recovery = preparation.planningRecovery;
   const plan = preparation.plan;
+  const refused = plan ? null : planningRefusal(recovery?.history.at(-1));
   return {
     call: plan
       ? null
@@ -2531,6 +2542,10 @@ function planningStepView(preparation: PreparationState): PlanningStepView {
         recovery?.invocations?.at(-1)?.phase ??
         null),
     revision: recovery?.history.length ?? 0,
+    refused: refused && {
+      ...refused,
+      detail: redact(refused.detail ?? undefined),
+    },
     issues:
       plan && preparation.coordinator.phase === "projection"
         ? {
@@ -2627,7 +2642,7 @@ function preparationStatusDocument(
       : null,
     planningStopped:
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
-    planningStep: planningStepView(preparation),
+    planningStep: planningStepView(preparation, redact),
     issueByItemId: preparation.issueByItemId,
     projectionStarted: projectionStarted(preparation),
     split: splitStatus(preparation, redact),

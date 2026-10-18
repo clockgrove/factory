@@ -50,6 +50,7 @@ import {
   packageManagerUpdate,
 } from "../package-manager-update.js";
 import { UnsettledSubprocessError } from "../process.js";
+import { childIdentity } from "../objective-split.js";
 import { qualityCheckpointInstructions } from "../quality-checkpoint.js";
 import {
   assertAggregateAcceptance,
@@ -606,6 +607,7 @@ export function prepareCompilationRequest(args: {
     compileContext: {
       objectiveNumber: objective,
       instructions,
+      ...(childIdentity(body) && { splitChild: true }),
       ...(amendment && {
         previousGraph: amendment.currentGraph,
         immutableItemIds: amendment.immutableItemIds,

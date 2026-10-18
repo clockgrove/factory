@@ -3,7 +3,10 @@ import { settleAbandonedPlanningTurn } from "../agent-session.js";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { COMPILER_READINESS_GUIDANCE } from "../compiler-wire.js";
+import {
+  COMPILER_READINESS_GUIDANCE,
+  PlannerChoiceError,
+} from "../compiler-wire.js";
 import { stateRoot } from "../config.js";
 import { LocalContentStore } from "../content/local.js";
 import type {
@@ -693,6 +696,8 @@ async function compilePlanAdmitted(
     let failure: string;
     // Where the failure came from when it already states what to fix.
     let stated: "check" | "review" | undefined;
+    // The graph items a check refusal names, so the revision cites them.
+    let refusedItems: string[] = [];
     try {
       const revised =
         corrections.length && record.revision && contentStore
@@ -878,6 +883,11 @@ async function compilePlanAdmitted(
         );
       failure = error instanceof Error ? error.message : String(error);
       if (answered) stated = "check";
+      if (
+        error instanceof PlanValidationError &&
+        error.cause instanceof PlannerChoiceError
+      )
+        refusedItems = error.cause.itemIds;
     }
     const identity = failureDigest(failure);
     const unchanged = record.history.some(
@@ -982,7 +992,13 @@ async function compilePlanAdmitted(
     if (direct) {
       const stating: PlanCorrection[] =
         stated === "check"
-          ? [{ source: "check", detail: failure }]
+          ? [
+              {
+                source: "check",
+                ...(refusedItems.length > 0 && { itemIds: refusedItems }),
+                detail: failure,
+              },
+            ]
           : fixes.map((finding) => ({
               source: "review" as const,
               itemIds: finding.itemIds,

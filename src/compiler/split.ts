@@ -4,6 +4,8 @@ import { assertPreIntegrationCheckSources } from "../delivery/readiness.js";
 import { assertChildObjectives, childIssueBody } from "../objective-split.js";
 import { sourceDigest } from "../qa.js";
 import { verifyReviewedGraph } from "./candidate.js";
+import { PlannerChoiceError } from "../compiler-wire.js";
+import { markdownLines } from "../markdown.js";
 import { PlanValidationError } from "./faults.js";
 import {
   prepareCompilationRequest,
@@ -14,6 +16,12 @@ import {
   objectiveCriteria,
   planningSources,
 } from "./sources.js";
+
+/** Model-authored text quoted in a refusal: one line, bounded. */
+const bounded = (text: string): string => {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > 120 ? `${line.slice(0, 119)}…` : line;
+};
 
 /** Every Work Item of a graph, including each ready child's in a split. */
 export function graphItems(graph: WorkGraph): WorkGraph["items"] {
@@ -40,10 +48,15 @@ export function validateSplitGraph(args: {
   const { graph, request, body, checkout } = args;
   const objective = request.compileContext!.objectiveNumber;
   const children = graph.split!.children;
+  // A refusal names the child and carries its Work Items, so the revision
+  // gets their cited sections.
   const refused = (key: string, error: unknown) =>
     new PlanValidationError(
-      new Error(
+      new PlannerChoiceError(
         `Child Objective ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        children
+          .find((child) => child.key === key)
+          ?.graph?.items.map((item) => item.id) ?? [],
       ),
     );
   const prepared = children.map((child) => {
@@ -70,17 +83,42 @@ export function validateSplitGraph(args: {
     );
   // The decoder gave every ready child the whole plan's checks and exclusions.
   const ready = children.find((child) => child.graph)!.graph!;
-  for (const required of [
-    ...(ready.requiredPreIntegrationChecks ?? []),
-    ...(ready.sourceExclusions ?? []),
+  for (const [what, required] of [
+    ...(ready.requiredPreIntegrationChecks ?? []).map(
+      (check) => [`required check ${check.checkName}`, check] as const,
+    ),
+    ...(ready.sourceExclusions ?? []).map(
+      (exclusion) =>
+        [`the exclusion "${bounded(exclusion.statement)}"`, exclusion] as const,
+    ),
   ])
     if (!prepared.some(({ sources }) => cites(sources, required.source)))
       throw new PlanValidationError(
-        new Error(
-          `No child Objective cites ${required.source.path}, so the split would drop what it requires`,
+        new PlannerChoiceError(
+          `No child Objective cites ${required.source.path}, the source of ${what}, so the split would drop it (rule 12): add ${required.source.path} to the sources of the child whose work it governs`,
         ),
       );
   const parentLines = body.split("\n");
+  const parentMarks = markdownLines(body);
+  /** The level 2 or 3 section an Objective line is in, or null before the first. */
+  const sectionOf = (line: number): string | null => {
+    for (let at = line; at >= 0; at--) {
+      const heading = parentMarks[at]?.heading;
+      if (heading && [2, 3].includes(heading.level)) return heading.text;
+    }
+    return null;
+  };
+  /** The other child whose Acceptance outcome is this Objective line, if any. */
+  const outcomeOwner = (key: string, line: number) => {
+    const text = (parentLines[line] ?? "")
+      .trim()
+      .replace(/^(?:[-*]|\d+[.)])\s+/, "");
+    return children.find(
+      (child) =>
+        child.key !== key &&
+        child.outcomes.some((outcome) => outcome.trim() === text),
+    )?.key;
+  };
   for (const { child, childBody, sources } of prepared) {
     if (!child.graph) continue;
     let childRequest: PlanningRequest<WorkGraph>;
@@ -130,13 +168,16 @@ export function validateSplitGraph(args: {
         ...exclusion,
         objectiveLines: exclusion.objectiveLines.map((line) => {
           const moved = childLines.indexOf(parentLines[line] ?? "\0");
-          if (moved < 0)
+          if (moved < 0) {
+            const section = sectionOf(line);
+            const owner = outcomeOwner(child.key, line);
             throw refused(
               child.key,
               new Error(
-                `excludes ${exclusion.source.path} for Objective text it does not carry`,
+                `the exclusion "${bounded(exclusion.statement)}" of ${exclusion.source.path} cites Objective line index ${line} ("${bounded(parentLines[line] ?? "")}"${section === null ? ", before the first section" : ` in ${section}`}), which this child does not carry${owner ? `: it is child ${owner}'s Acceptance outcome` : ""}. An exclusion holds in every child that cites its source (rule 12): cite only lines each of them carries (its own outcomes or a carried section such as Constraints), remove ${exclusion.source.path} from the sources of ${child.key}${owner ? ` and keep it with ${owner}` : ""}, or cover the exit item instead`,
               ),
             );
+          }
           return moved;
         }),
       }));

@@ -53,6 +53,13 @@ interface CompilerCitationChoice {
  */
 export class PlannerChoiceError extends Error {
   override readonly name = "PlannerChoiceError";
+  /** The graph items the refusal concerns, so a revision gets their cited sections. */
+  constructor(
+    message: string,
+    readonly itemIds: string[] = [],
+  ) {
+    super(message);
+  }
 }
 
 function object(value: unknown, label: string): ObjectValue {
@@ -388,9 +395,11 @@ export function compilerWire(
       "final-controller",
     ],
   };
-  // A new plan may split the Objective into child Objectives. An obligation
-  // a stub child carries names that child's key as its itemId.
-  const splittable = !context.previousGraph && !request.contextLookup;
+  // A new plan may split the Objective into child Objectives, unless it is
+  // itself a child: children never split again. An obligation a stub child
+  // carries names that child's key as its itemId.
+  const splittable =
+    !context.previousGraph && !request.contextLookup && !context.splitChild;
   const proofFields: Record<string, Schema> = {
     itemId: { ...text, minLength: 1 },
     proof: {
@@ -572,7 +581,7 @@ export function compilerWire(
       ? {
           split: {
             description:
-              "null for one Work Item graph. Otherwise the child Objectives that replace it: every Work Item belongs to one ready child through itemIds, and every Objective obligation goes to one child.",
+              "null for one Work Item graph. Otherwise the child Objectives that replace it: every Work Item belongs to one ready child through itemIds, every Objective obligation goes to one child, and every child owns at least one.",
             anyOf: [
               { type: "null" },
               strict({
@@ -1703,7 +1712,8 @@ export function compilerWire(
         .map((position) => coverageCriterion(obligations[position]!));
       if (!outcomes.length)
         throw new PlannerChoiceError(
-          `Child ${child.key} carries no Objective obligation; every child delivers at least one Acceptance outcome`,
+          `Child ${child.key} owns no Objective Acceptance outcome, and every child owns at least one (rule 12). Remove child ${child.key}: move ${child.itemIds.length ? `its Work Items (${child.itemIds.join(", ")})` : "its work"} into the ready child that needs it, or leave it to the stub that depends on it, which plans it later`,
+          child.itemIds,
         );
       const { itemIds, ...spec } = child;
       return {

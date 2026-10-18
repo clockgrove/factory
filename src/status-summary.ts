@@ -173,8 +173,66 @@ export interface PlanningStepView {
   call: string | null;
   /** Corrected compiles so far; 0 while the first draft is made. */
   revision: number;
+  /** Why the previous plan was refused; null before any refusal. */
+  refused: PlanningRefusalView | null;
   /** Work Item issues recorded of the plan's items, while projection runs. */
   issues: { created: number; total: number } | null;
+}
+
+/** A refused plan, from the planning history's structured fields. */
+export interface PlanningRefusalView {
+  /** check: a deterministic Factory check; review: the plan review's fix findings. */
+  source: "check" | "review";
+  /** The review's fix findings; 0 for a check. */
+  fixes: number;
+  /** The check's or first fix finding's recorded detail: its first sentence, bounded. */
+  detail: string | null;
+}
+
+type PlanningHistoryEntry =
+  import("./compiler.js").PlanningRecoveryRecord["history"][number];
+
+/** Why a planning round's plan was refused: its recorded corrections, or its retained review. */
+export function planningRefusal(
+  entry: PlanningHistoryEntry | undefined,
+): PlanningRefusalView | null {
+  if (!entry) return null;
+  const fixes = entry.corrections
+    ? entry.corrections.filter((correction) => correction.source === "review")
+    : (entry.review?.response?.findings ?? []).filter(
+        (finding) => finding.kind === "fix",
+      );
+  if (fixes.length || entry.review)
+    return {
+      source: "review",
+      fixes: fixes.length,
+      detail: fixes[0] ? firstSentence(fixes[0].detail) : null,
+    };
+  const check = entry.corrections?.find(
+    (correction) => correction.source === "check",
+  );
+  return {
+    source: "check",
+    fixes: 0,
+    detail: firstSentence(check?.detail ?? entry.detail),
+  };
+}
+
+/** A recorded detail's first sentence on one line, at most 200 characters. */
+function firstSentence(text: string): string | null {
+  const line = text.replace(/\s+/g, " ").trim();
+  const end = line.search(/[.!?](?:\s|$)/);
+  const sentence = end < 0 ? line : line.slice(0, end + 1);
+  if (!sentence) return null;
+  return sentence.length > 200 ? `${sentence.slice(0, 199)}…` : sentence;
+}
+
+/** `previous plan refused by a Factory check: …` or `… by the plan review: 2 fix findings; first: …`. */
+export function planningRefusalText(refused: PlanningRefusalView): string {
+  if (refused.source === "check")
+    return `previous plan refused by a Factory check${refused.detail ? `: ${refused.detail}` : ""}`;
+  const count = `${refused.fixes} fix finding${refused.fixes === 1 ? "" : "s"}`;
+  return `previous plan refused by the plan review: ${count}${refused.detail ? `; first: ${refused.detail}` : ""}`;
 }
 
 const PLANNER_CALLS: Record<string, string> = {
@@ -1170,10 +1228,15 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
     };
   const waiting = objectiveWait(view);
   if (waiting) return waiting;
-  const doing = planningActivity(
+  const activity = planningActivity(
     view.coordinator?.phase ?? "planning",
     view.planningStep,
   );
+  const refused = view.planningStep?.refused;
+  const doing =
+    refused && view.coordinator?.phase !== "projection"
+      ? `${activity}; ${short(planningRefusalText(refused), 160)}`
+      : activity;
   return {
     phase: "planning",
     summary: view.coordinator?.waitReason

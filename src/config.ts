@@ -1280,16 +1280,18 @@ function executionWithoutWorkerLimits(
 }
 
 /**
- * Settings that only present or operate the run are left out of both digests, so changing
- * them never strands a started Objective or a queue receipt: GitHub progress and Project
- * status, the archive's operational limits (`gitPersistence` maxBytes, maxFiles,
- * timeoutMs and coalesceMs) and worker run limits (`withoutWorkerLimits`). The archive's
+ * Settings that only present, observe or operate the run are left out of both digests, so
+ * changing them never strands a started Objective or a queue receipt: GitHub progress and
+ * Project status, diagnostic `capture`, the archive's operational limits (`gitPersistence`
+ * maxBytes, maxFiles, timeoutMs and coalesceMs) and worker run limits
+ * (`withoutWorkerLimits`). The archive's
  * identity (remote, ref, visibility, scope) stays bound. Key order is kept, so a
  * configuration without them digests exactly as before.
  */
 function withoutOperationalSettings(config: FactoryConfig): FactoryConfig {
   return Object.fromEntries(
     Object.entries(config).flatMap(([key, value]) => {
+      if (key === "capture") return [];
       if (key === "execution")
         return [[key, executionWithoutWorkerLimits(value as ExecutionConfig)]];
       if (key === "queueProvider") {

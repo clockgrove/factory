@@ -8,6 +8,7 @@ import {
 import { displayDateTime } from "./display-time.js";
 import { attachedFault } from "./fault.js";
 import {
+  compact,
   type GitHubProgressDecision,
   type ObjectiveStatusInput,
   objectiveStatusLines,
@@ -29,7 +30,12 @@ import {
   runningCallText,
 } from "./run-telemetry.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
-import { type PlanningStepView, planningActivity } from "./status-summary.js";
+import {
+  type PlanningRefusalView,
+  type PlanningStepView,
+  planningActivity,
+  planningRefusalText,
+} from "./status-summary.js";
 import {
   activityLine,
   changesLine,
@@ -135,6 +141,11 @@ export async function projectLiveStatus(
     isExecutionState(retained) || retained.split?.enqueuedAt
       ? undefined
       : planningActivity(retained.coordinator.phase, step);
+  // Why the previous plan was refused, while planning revises it.
+  const refused =
+    planning !== undefined && retained.coordinator?.phase === "planning"
+      ? (step?.refused ?? null)
+      : null;
   if (isExecutionState(retained))
     for (const [id, issue] of Object.entries(retained.issueByItemId)) {
       const facts = presentation.items[id];
@@ -195,6 +206,7 @@ export async function projectLiveStatus(
       digest: JSON.stringify([
         phase,
         planning,
+        refused,
         presentation.digest,
         ...itemDigests,
       ]),
@@ -213,6 +225,7 @@ export async function projectLiveStatus(
             ? runningCallLines(calls(at), at)
             : planningLines(
                 planning,
+                refused,
                 retained.coordinator?.phaseStartedAt,
                 objectiveModelActivity(args.config.repository, args.objective),
                 at,
@@ -410,6 +423,7 @@ function workerAge(items: ItemActivity[], id: string, now: number): string {
 /** Planning's step, how long its phase has run and the planner's activity: structured facts only. */
 function planningLines(
   activity: string,
+  refused: PlanningRefusalView | null,
   phaseStartedAt: string | undefined,
   model: ModelActivity | undefined,
   now: number,
@@ -421,6 +435,10 @@ function planningLines(
   const since = phaseStartedAt ? Date.parse(phaseStartedAt) : Number.NaN;
   if (Number.isFinite(since))
     lines.push(`- In this phase ${shortAge(now - since)}`);
+  if (refused) {
+    const text = planningRefusalText(refused);
+    lines.push(`- ${compact(text.charAt(0).toUpperCase() + text.slice(1))}`);
+  }
   if (model) {
     const call = `${callLabel(model.phase, model.ordinal) ?? model.phase} call`;
     const usage = [
@@ -440,7 +458,7 @@ function planningLines(
     });
     if (model.endedAt !== undefined)
       lines.push(
-        `- Model: last ${call} ${model.outcome} after ${shortAge(model.endedAt - model.startedAt)}${[
+        `- Model: last ${call} ${model.outcome}${model.failureClass ? ` (${code(model.failureClass)})` : ""} after ${shortAge(model.endedAt - model.startedAt)}${[
           counts,
           ...usage,
         ]

@@ -4,7 +4,7 @@ A plan says **what** must be true when the work is done, and **what other items 
 
 Why: a planner writes every detail from a partial read of the repository. Each mechanism, line number or edit list it adds can contradict the real code, and then becomes a review finding or blocks the worker on wording. Precise plans with 40 or more acceptance entries per item needed far more revision rounds than outcome-level plans.
 
-The rules live in `src/compiler/work-item-rubric.ts`. The planner and the graph reviewer read the same Work Item standard and the same checklist.
+The rules live in `src/compiler/work-item-rubric.ts`. The planner and the graph reviewer read the same Work Item standard. The reviewer applies the full checklist; the planner gets a short checklist of its plan-shaping judgments, quoted from the same text, without the review-packet mechanics.
 
 ## A Work Item
 
@@ -31,7 +31,7 @@ The rules live in `src/compiler/work-item-rubric.ts`. The planner and the graph 
 
 1. **Research.** Explore wide, then narrow. Collect facts tied to files: conventions, real producers and types, existing behaviour, constraints. These facts stay in the planning session; Factory never stores them.
 2. **Write** the plan from the Objective and those facts only.
-3. **Check** the plan against the graph reviewer's checklist before submitting.
+3. **Check** the plan against the short checklist of the reviewer's plan-shaping judgments before submitting.
 
 All three happen in the planner's one session. Self-checking is a filter; the independent graph review stays the gate.
 

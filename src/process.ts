@@ -1006,13 +1006,6 @@ function repositoryConfigFiles(
       ? resolve(gitdir, readFileSync(commondir, "utf8").trim())
       : gitdir;
     const config = join(common, "config");
-    // A symlinked HEAD's target is not covered by its own stat identity.
-    if (
-      lstatSync(join(gitdir, "HEAD"), {
-        throwIfNoEntry: false,
-      })?.isSymbolicLink()
-    )
-      return undefined;
     return {
       gitdir,
       common,
@@ -1038,7 +1031,10 @@ function repositoryConfigFiles(
 /**
  * Exact stat identities: inode and timestamps for files, inode alone for
  * directories (whose timestamps change with every index or ref write), and
- * absence. Undefined when a file changed within RACY_CONFIG_MS.
+ * absence. Undefined when a file changed within RACY_CONFIG_MS, or when any
+ * path is a symlink: lstat identifies the link, not its target, so a later
+ * change to the target (a config, commondir or HEAD it points at) would stay
+ * invisible.
  */
 function statIdentity(paths: string[], racy: boolean): string | undefined {
   const now = BigInt(Date.now()) * 1_000_000n;
@@ -1046,6 +1042,7 @@ function statIdentity(paths: string[], racy: boolean): string | undefined {
   const identities: string[] = [];
   for (const path of paths) {
     const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+    if (stat?.isSymbolicLink()) return undefined;
     if (!stat) identities.push("absent");
     else if (stat.isDirectory())
       identities.push(`d:${stat.dev}:${stat.ino}:${stat.mode}`);

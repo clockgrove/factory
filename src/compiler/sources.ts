@@ -965,6 +965,7 @@ function validSourcePath(path: string): boolean {
     !path ||
     path.startsWith("/") ||
     path.includes("\\") ||
+    path.includes("\0") ||
     path.split("/").some((part) => !part || part === "." || part === "..")
   );
 }
@@ -1013,19 +1014,27 @@ class BaseTree {
         bytes += Buffer.byteLength(path) + 1;
       }
       for (const path of chunk) this.entries.set(path, null);
-      let output: string;
-      try {
-        output = pinnedGitRaw(
-          this.checkout,
-          "ls-tree",
-          "-lz",
-          this.baseSha,
-          "--",
-          ...chunk,
-        ).toString("utf8");
-      } catch {
-        continue;
-      }
+      const list = (paths: string[]): string | undefined => {
+        try {
+          return pinnedGitRaw(
+            this.checkout,
+            "ls-tree",
+            "-lz",
+            this.baseSha,
+            "--",
+            ...paths,
+          ).toString("utf8");
+        } catch {
+          return undefined;
+        }
+      };
+      // A failed batch must not refuse its other paths: list them one by one,
+      // so each failure stays with its own citation.
+      const output =
+        list(chunk) ??
+        (chunk.length > 1
+          ? chunk.map((path) => list([path]) ?? "").join("\0")
+          : "");
       const requested = new Set(chunk);
       for (const record of output.split("\0")) {
         const entry = /^(\d{6}) (\w+) ([a-f0-9]{40,64}) +(\d+|-)\t(.*)$/s.exec(

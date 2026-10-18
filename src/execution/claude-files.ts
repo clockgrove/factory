@@ -5,16 +5,16 @@ import {
   fstatSync,
   ftruncateSync,
   lstatSync,
-  mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   realpathSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import type { McpServerStatus } from "@anthropic-ai/claude-agent-sdk";
 import { ownsPath } from "../ownership.js";
+import { openParent } from "./directory-walk.js";
 import { privateStagingPath } from "./local.js";
 
 export const factoryFilesServerName = "factory-files";
@@ -128,54 +128,81 @@ function ownedRelative(
 }
 
 /**
- * The Git-relative path of an owned file the worker may delete. Every parent
- * must be a real directory under the worktree, so no symlink redirects the
- * unlink; the final entry is a file or a link, and unlink never follows it.
+ * Delete one owned file. Every parent is walked by held descriptor and must be
+ * a real directory under the worktree, so no symlink, even one swapped in
+ * mid-walk, redirects the unlink; the final entry is a file or a link, and
+ * unlink never follows it. Returns its Git-relative path.
  */
-function ownedDeletionTarget(
+function deleteOwnedFile(
   worktree: string,
   ownedPaths: readonly string[],
   path: string,
-): { root: string; relative: string } {
+): string {
   const root = realpathSync(worktree);
   const relative = ownedRelative(worktree, root, ownedPaths, path);
-  const parts = relative.split("/");
-  let current = root;
-  for (const [index, part] of parts.entries()) {
-    current = join(current, part);
-    const entry = lstatSync(current, { throwIfNoEntry: false });
+  const parent = openParent(root, relative, false);
+  try {
+    const target = `${parent.anchor}/${parent.name}`;
+    const entry = lstatSync(target, { throwIfNoEntry: false });
     if (!entry) throw new Error(`${relative} does not exist`);
-    if (index < parts.length - 1 ? !entry.isDirectory() : entry.isDirectory())
+    if (entry.isDirectory())
       throw new Error(
         `${relative} is not a file reached through real directories`,
       );
+    unlinkSync(target);
+  } finally {
+    closeSync(parent.fd);
   }
-  return { root, relative };
+  return relative;
 }
 
-function inside(root: string, path: string): boolean {
-  const rel = relative(root, path);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
+const copyBound = `${maxCopiedFileBytes / (1024 * 1024)} MiB copy bound`;
 
 /**
- * Walk a path's parents from the worktree root: each must be a real
- * directory, never a link. With `create`, missing parents become plain
- * directories. The resolved parent must stay inside the worktree.
+ * The bytes of one regular file under the worktree, at most the copy bound:
+ * parents are walked by held descriptor, the file is never followed through a
+ * link, and the read stops one byte past the bound even if the file grows.
  */
-function realParents(root: string, relative: string, create: boolean): void {
-  let current = root;
-  for (const part of relative.split("/").slice(0, -1)) {
-    current = join(current, part);
-    const entry = lstatSync(current, { throwIfNoEntry: false });
-    if (!entry) {
-      if (!create) throw new Error(`${relative} does not exist`);
-      mkdirSync(current);
-    } else if (!entry.isDirectory())
-      throw new Error(`${relative} is not reached through real directories`);
+function readOwnedFile(root: string, relative: string): Buffer {
+  const parent = openParent(root, relative, false);
+  let fd: number;
+  try {
+    // Never through a link; never blocks on a special file.
+    fd = openSync(
+      `${parent.anchor}/${parent.name}`,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (error) {
+    throw new Error(
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? `${relative} does not exist`
+        : `${relative} is not a regular file`,
+    );
+  } finally {
+    closeSync(parent.fd);
   }
-  if (!inside(root, realpathSync(dirname(join(root, relative)))))
-    throw new Error(`${relative} leaves the worktree`);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error(`${relative} is not a regular file`);
+    if (stat.size > maxCopiedFileBytes)
+      throw new Error(
+        `${relative} has ${stat.size} bytes, over the ${copyBound}`,
+      );
+    const buffer = Buffer.alloc(maxCopiedFileBytes + 1);
+    let length = 0;
+    for (;;) {
+      const read = readSync(fd, buffer, length, buffer.length - length, null);
+      if (!read) break;
+      length += read;
+      if (length > maxCopiedFileBytes)
+        throw new Error(
+          `${relative} grew past the ${copyBound} while it was read`,
+        );
+    }
+    return buffer.subarray(0, length);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
@@ -196,64 +223,37 @@ export function copyOwnedFile(
   const source = ownedRelative(worktree, root, ownedPaths, from);
   const destination = ownedRelative(worktree, root, ownedPaths, to);
   if (source === destination) throw new Error("from and to name the same file");
-  realParents(root, source, false);
-  let content: Buffer;
-  let fd: number;
+  const content = readOwnedFile(root, source);
+  const parent = openParent(root, destination, true);
   try {
-    // Never through a link; never blocks on a special file.
-    fd = openSync(
-      join(root, source),
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-    );
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    throw new Error(
-      code === "ENOENT"
-        ? `${source} does not exist`
-        : `${source} is not a regular file`,
-    );
-  }
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) throw new Error(`${source} is not a regular file`);
-    if (stat.size > maxCopiedFileBytes)
-      throw new Error(
-        `${source} has ${stat.size} bytes, over the ${maxCopiedFileBytes / (1024 * 1024)} MiB copy bound`,
+    let fd: number;
+    try {
+      // Never through a link; never blocks on a special file. Truncate only
+      // after the open entry proves to be a regular file with no other name,
+      // so the write cannot reach a file outside the worktree.
+      fd = openSync(
+        `${parent.anchor}/${parent.name}`,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_NOFOLLOW |
+          constants.O_NONBLOCK,
       );
-    content = readFileSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  if (content.length > maxCopiedFileBytes)
-    throw new Error(
-      `${source} grew past the ${maxCopiedFileBytes / (1024 * 1024)} MiB copy bound while it was read`,
-    );
-  realParents(root, destination, true);
-  const target = join(root, destination);
-  try {
-    // Never through a link; never blocks on a special file. Truncate only
-    // after the open entry proves to be a regular file with no other name,
-    // so the write cannot reach a file outside the worktree.
-    fd = openSync(
-      target,
-      constants.O_WRONLY |
-        constants.O_CREAT |
-        constants.O_NOFOLLOW |
-        constants.O_NONBLOCK,
-    );
-  } catch {
-    throw new Error(`${destination} exists and is not a regular file`);
-  }
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile())
+    } catch {
       throw new Error(`${destination} exists and is not a regular file`);
-    if (stat.nlink !== 1)
-      throw new Error(`${destination} is a hard link to another file`);
-    ftruncateSync(fd, 0);
-    writeFileSync(fd, content);
+    }
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile())
+        throw new Error(`${destination} exists and is not a regular file`);
+      if (stat.nlink !== 1)
+        throw new Error(`${destination} is a hard link to another file`);
+      ftruncateSync(fd, 0);
+      writeFileSync(fd, content);
+    } finally {
+      closeSync(fd);
+    }
   } finally {
-    closeSync(fd);
+    closeSync(parent.fd);
   }
   return {
     from: source,
@@ -288,16 +288,13 @@ export async function createFactoryFilesMcp(input: FilesEnvironmentInput) {
           try {
             if (!ready || realpathSync(input.worktree) !== root)
               throw new Error("Factory file deletion is not ready");
-            const target = ownedDeletionTarget(
+            const deleted = deleteOwnedFile(
               input.worktree,
               input.ownedPaths,
               path,
             );
-            unlinkSync(join(target.root, target.relative));
             return {
-              content: [
-                { type: "text" as const, text: `Deleted ${target.relative}` },
-              ],
+              content: [{ type: "text" as const, text: `Deleted ${deleted}` }],
             };
           } catch (error) {
             return {

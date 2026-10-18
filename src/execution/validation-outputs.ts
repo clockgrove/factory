@@ -3,7 +3,6 @@ import {
   constants,
   fstatSync,
   lstatSync,
-  mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
@@ -12,6 +11,7 @@ import {
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { ownsPath } from "../ownership.js";
 import { GitFailure, pinnedGitRawWith } from "../process.js";
+import { type OpenParent, openParent } from "./directory-walk.js";
 import { privateStagingPath } from "./local.js";
 
 /**
@@ -76,21 +76,57 @@ function ignoredInWorktree(
   return new Set(output.toString("utf8").split("\0").filter(Boolean));
 }
 
-/** Create missing parents as plain directories; refuse links and files on the way. */
-function plainParent(worktree: string, path: string): boolean {
-  let current = worktree;
-  for (const part of dirname(path).split("/")) {
-    if (part === ".") break;
-    current = join(current, part);
-    try {
-      const entry = lstatSync(current);
-      if (!entry.isDirectory() || entry.isSymbolicLink()) return false;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
-      mkdirSync(current);
-    }
+/**
+ * Write one returned file in the worker's checkout: parents are walked by held
+ * descriptor and created as plain directories, never through a link, and the
+ * file itself is never a link or special file. Returns whether it replaced an
+ * earlier copy, or why it was not written.
+ */
+function writeReturned(
+  worktree: string,
+  path: string,
+  content: Buffer,
+): { existed: boolean } | string {
+  let parent: OpenParent;
+  try {
+    parent = openParent(worktree, path, true);
+  } catch {
+    return "a parent in your checkout is not a directory";
   }
-  return true;
+  try {
+    const destination = `${parent.anchor}/${parent.name}`;
+    let existed = false;
+    try {
+      if (!lstatSync(destination).isFile())
+        return "not a regular file in your checkout";
+      existed = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    let fd: number;
+    try {
+      // Never through a link; never blocks on a special file.
+      fd = openSync(
+        destination,
+        constants.O_WRONLY |
+          constants.O_CREAT |
+          constants.O_TRUNC |
+          constants.O_NOFOLLOW |
+          constants.O_NONBLOCK,
+      );
+    } catch {
+      return "not a regular file in your checkout";
+    }
+    try {
+      if (!fstatSync(fd).isFile()) return "not a regular file in your checkout";
+      writeFileSync(fd, content);
+    } finally {
+      closeSync(fd);
+    }
+    return { existed };
+  } finally {
+    closeSync(parent.fd);
+  }
 }
 
 /** A regular file's bytes, never through a link, within the remaining budget. */
@@ -222,49 +258,14 @@ function copyProduced(
       omitted.push(`- ${path} (${content} bytes)`);
       continue;
     }
-    const destination = join(worktree, path);
-    if (!plainParent(worktree, path)) {
-      skipped.push(`- ${path}: a parent in your checkout is not a directory`);
+    const written = writeReturned(worktree, path, content);
+    if (typeof written === "string") {
+      skipped.push(`- ${path}: ${written}`);
       continue;
-    }
-    let existed = false;
-    try {
-      const current = lstatSync(destination);
-      if (!current.isFile()) {
-        skipped.push(`- ${path}: not a regular file in your checkout`);
-        continue;
-      }
-      existed = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    let fd: number;
-    try {
-      // Never through a link; never blocks on a special file.
-      fd = openSync(
-        destination,
-        constants.O_WRONLY |
-          constants.O_CREAT |
-          constants.O_TRUNC |
-          constants.O_NOFOLLOW |
-          constants.O_NONBLOCK,
-      );
-    } catch {
-      skipped.push(`- ${path}: not a regular file in your checkout`);
-      continue;
-    }
-    try {
-      if (!fstatSync(fd).isFile()) {
-        skipped.push(`- ${path}: not a regular file in your checkout`);
-        continue;
-      }
-      writeFileSync(fd, content);
-    } finally {
-      closeSync(fd);
     }
     bytes += content.length;
     returned.push(
-      `- ${path} (${content.length} bytes${existed ? ", replaced the earlier copy" : ""})`,
+      `- ${path} (${content.length} bytes${written.existed ? ", replaced the earlier copy" : ""})`,
     );
   }
   const sections = [returned, skipped, omitted, changed, directories];

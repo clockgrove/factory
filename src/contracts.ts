@@ -147,7 +147,15 @@ export interface SourceExclusion {
 
 export type CoverageProof =
   | { kind: "result-command" | "integrated-command"; validationIndex: number }
-  | { kind: "result-semantic" | "integrated-semantic"; acceptanceIndex: number }
+  | {
+      kind: "result-semantic" | "integrated-semantic";
+      /**
+       * Absent in new plans: the owner's review judges the obligation itself,
+       * with the owner's acceptance as a whole as its proof. Plans retained
+       * from earlier releases point at one owner acceptance entry instead.
+       */
+      acceptanceIndex?: number;
+    }
   | { kind: "final-review" }
   | { kind: "final-controller"; guaranteeId: string }
   | { kind: "integrated-ci"; checkName: string }

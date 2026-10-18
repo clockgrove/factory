@@ -280,6 +280,23 @@ export function hydrateCoverageSources(
   }
 }
 
+/**
+ * The criterion text an item or QA review judges for a semantic proof: the
+ * obligation itself (resultReviewCriteria adds it to the owner's review), or
+ * the one acceptance entry a plan retained from an earlier release names.
+ */
+export function semanticProofCriterion(
+  entry: AcceptanceCoverage,
+  item: WorkItem,
+): string | undefined {
+  const proof = entry.proof;
+  if (proof.kind !== "result-semantic" && proof.kind !== "integrated-semantic")
+    return undefined;
+  return proof.acceptanceIndex === undefined
+    ? coverageCriterion(entry)
+    : item.acceptance[proof.acceptanceIndex];
+}
+
 function indexReference(index: number, length: number): boolean {
   return Number.isSafeInteger(index) && index >= 0 && index < length;
 }
@@ -293,19 +310,26 @@ function assertProofShape(entry: AcceptanceCoverage): void {
   const fields: Record<string, string[]> = {
     "result-command": ["kind", "validationIndex"],
     "integrated-command": ["kind", "validationIndex"],
-    "result-semantic": ["kind", "acceptanceIndex"],
-    "integrated-semantic": ["kind", "acceptanceIndex"],
+    "result-semantic": ["kind"],
+    "integrated-semantic": ["kind"],
     "final-review": ["kind"],
     "final-controller": ["kind", "guaranteeId"],
     "integrated-ci": ["kind", "checkName"],
     "published-ci": ["kind", "checkName", "targetItem"],
   };
+  // A semantic proof retained from an earlier release names one entry.
+  const legacy =
+    proof?.kind?.endsWith("-semantic") &&
+    Object.hasOwn(proof, "acceptanceIndex")
+      ? ["acceptanceIndex"]
+      : [];
   if (
     !proof ||
     typeof proof !== "object" ||
     Array.isArray(proof) ||
     !Object.hasOwn(fields, proof.kind) ||
-    Object.keys(proof).sort().join() !== [...fields[proof.kind]!].sort().join()
+    Object.keys(proof).sort().join() !==
+      [...fields[proof.kind]!, ...legacy].sort().join()
   )
     throw new Error(
       "Coverage requires a supported typed proof; published ordinary proof is unsupported",
@@ -375,6 +399,7 @@ export function assertCoverageShape(graph: WorkGraph): void {
       );
     if (
       "acceptanceIndex" in proof &&
+      proof.acceptanceIndex !== undefined &&
       !indexReference(proof.acceptanceIndex, item.acceptance.length)
     )
       throw new Error(
@@ -765,11 +790,12 @@ export function assertCompletedCoverage(state: FactoryState): void {
       )
     )
       throw new Error("Required coverage command proof is missing");
+    const semantic = semanticProofCriterion(entry, item);
     if (
-      "acceptanceIndex" in proof &&
+      semantic !== undefined &&
       !work.validation.criteria?.some(
         (criterion) =>
-          criterion.criterion === item.acceptance[proof.acceptanceIndex] &&
+          criterion.criterion === semantic &&
           ["pass", "human-accept"].includes(criterion.verdict),
       )
     )

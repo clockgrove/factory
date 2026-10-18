@@ -1077,7 +1077,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       coverage: [
         {
           itemId: currentGraph.items[0].id,
-          proof: { kind: "result-semantic", acceptanceIndex: 0 },
+          proof: { kind: "result-semantic" },
           environment: {
             kind: "local",
             readiness: "available",

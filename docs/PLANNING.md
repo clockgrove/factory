@@ -39,6 +39,8 @@ All three happen in the planner's one session. Self-checking is a filter; the in
 
 - **Graph review:** an acceptance entry that prescribes a mechanism, a line or a file edit instead of behaviour is a fix finding. Review never asks for more detail than the standard requires.
 - **Result review** judges behaviour. It does not refuse a criterion because the code reaches the stated behaviour another way than a plan happened to describe. It refuses an unannounced change to an existing test.
+- **Lint before review.** Before any paid review, Factory refuses an item with more than 15 acceptance entries and no `oneOutcomeReason`, and an acceptance entry that cites a line number next to a file name. The planner gets both as one correction.
+- **Obligations are proved at owner level.** A covered Objective criterion or source exit item names its owner and proof kind. For item or QA review, the owner's review judges the obligation itself, with the owner's acceptance as a whole as its proof. No proof points at a single acceptance entry. Code still checks that each obligation has exactly one owner, the owner exists and the proof kind fits the owner.
 
 ## Example
 

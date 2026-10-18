@@ -3942,6 +3942,7 @@ test("source readiness prepares each real fresh checkout before its phase checks
           children: [],
           newPackages: [],
           priority: 0,
+          oneOutcomeReason: null,
           citations: [{ path: citation.path, heading: citation.heading }],
           validation: [setup, probe, acceptance].map((command) => ({
             kind: "source-line",

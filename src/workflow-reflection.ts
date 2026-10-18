@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { readAdaptiveContextBytes } from "./adaptive-context.js";
 import type { ContentRef, ContentStore } from "./contracts.js";
 import { graphDigest } from "./graph-amendments.js";
-import { coverageCriterion, objectiveCandidate } from "./qa.js";
+import {
+  coverageCriterion,
+  objectiveCandidate,
+  semanticProofCriterion,
+} from "./qa.js";
 import {
   PAID_ATTEMPTS,
   amendmentAllowed,
@@ -139,9 +143,7 @@ export function workflowStageObligations(state: FactoryState) {
     const tree = final ? state.finalValidation?.treeSha : work?.treeSha;
     const criterion = final
       ? coverageCriterion(entry)
-      : "acceptanceIndex" in proof
-        ? item.acceptance[proof.acceptanceIndex]
-        : undefined;
+      : semanticProofCriterion(entry, item);
     const semantic =
       criterion === undefined ||
       Boolean(

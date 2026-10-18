@@ -1120,8 +1120,10 @@ function assertPrivateFile(stat: BigIntStats): void {
 function privateOriginal(
   path: string,
   root: string,
-): { bytes: Buffer; fingerprint: string; ctimeNs: bigint } {
+): { bytes: Buffer; fingerprint: string; ctimeNs: bigint; readAtNs: bigint } {
   assertPrivatePath(path, root);
+  // Before the read: the racy window is measured from here, not from use.
+  const readAtNs = BigInt(Date.now()) * 1_000_000n;
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd, { bigint: true });
@@ -1138,7 +1140,7 @@ function privateOriginal(
       realpathSync(path) !== resolve(path)
     )
       throw new Error("Recovery checkpoint original changed during its read");
-    return { bytes, fingerprint, ctimeNs: stat.ctimeNs };
+    return { bytes, fingerprint, ctimeNs: stat.ctimeNs, readAtNs };
   } finally {
     closeSync(fd);
   }
@@ -1437,6 +1439,7 @@ async function buildRecoveryCheckpointClosureLocal(input: {
           digest: string;
           fingerprint: string;
           ctimeNs: bigint;
+          readAtNs: bigint;
           value: () => unknown;
         }
     >();
@@ -1571,8 +1574,7 @@ async function buildRecoveryCheckpointClosureLocal(input: {
             if (
               !state &&
               snapshot &&
-              BigInt(Date.now()) * 1_000_000n - snapshot.ctimeNs >
-                RACY_SNAPSHOT_NS
+              snapshot.readAtNs - snapshot.ctimeNs > RACY_SNAPSHOT_NS
             )
               retainRetiredCheckpointSnapshot(path, {
                 fingerprint: snapshot.fingerprint,

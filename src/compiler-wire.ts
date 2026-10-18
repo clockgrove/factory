@@ -103,15 +103,18 @@ const text: Schema = { type: "string" };
  * A line-number reference next to a file name in an acceptance entry
  * (`store.ts:88`, `store.ts#L88`, `store.ts line 88`, `store.ts (lines
  * 40-210)`). Structural only: a file name with an extension directly followed
- * by a line marker; URLs and bare "line 1" of some output do not match.
+ * by a line marker. Only source-file extensions count, so host:port and data
+ * files ("data.csv line 1") do not match, nor do URLs or "line 1" of output.
  */
 const LINE_REFERENCE =
-  /(?<![:/\w.-])[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{0,7}`?(?::\d+\b|#L\d+\b|\s*,?\s*\(?\s*(?:around\s+|near\s+|at\s+)?lines?\s+\d+)/i;
+  /(?<![:/\w.-])[\w.-]+(?:\/[\w.-]+)*\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|rb|php|cs|c|cc|cpp|h|hpp|swift|sh|sql|css|scss|vue|svelte|md|ya?ml|toml|json|html)`?(?::\d+\b|#L\d+\b|\s*,?\s*\(?\s*(?:around\s+|near\s+|at\s+)?lines?\s+\d+)/i;
 
 /**
  * The plan standard's deterministic lint, run before paid review on the
  * items the planner defined in this answer: an item above the entry signal
- * states why it is one outcome, and no acceptance entry cites a line.
+ * states why it is one outcome, and no acceptance entry cites a line. An
+ * amendment carries pending items over and has no correction channel for
+ * these, so it is not linted; graph review checks 3 and 8 judge it there.
  */
 function planStandardLint(item: ObjectValue, reason: string | null): string[] {
   if (!Array.isArray(item.acceptance)) return [];
@@ -1181,7 +1184,9 @@ export function compilerWire(
           delete item.oneOutcomeReason;
           if (reason !== null && (typeof reason !== "string" || !reason.trim()))
             throw new Error("Planner oneOutcomeReason must be null or text");
-          const findings = planStandardLint(item, reason);
+          const findings = context.previousGraph
+            ? []
+            : planStandardLint(item, reason);
           if (findings.length) linted.add(String(item.id));
           lint.push(...findings);
           if (reason !== null && typeof item.brief === "string")
@@ -1350,6 +1355,7 @@ export function compilerWire(
       const proved = (
         entry: ObjectValue,
         label: string,
+        criterionId: string,
       ): Omit<
         NonNullable<WorkGraph["coverage"]>[number],
         keyof CoverageObligation
@@ -1387,9 +1393,28 @@ export function compilerWire(
           // The owner's review judges the obligation itself; its acceptance
           // as a whole is the proof, so no entry is named.
           case "result-semantic":
-          case "integrated-semantic":
+          case "integrated-semantic": {
             canonicalProof = { kind: proof.kind };
+            // A started item's review is settled: it judged only the
+            // obligations it owned then. It keeps proving those, with the
+            // exact earlier proof; it cannot judge a newly assigned one.
+            if (retainedItems.has(owner.id) && owner.id !== reattempt) {
+              const previous = context.previousGraph?.coverage?.find(
+                (old) =>
+                  old.criterionId === criterionId &&
+                  old.itemId === owner.id &&
+                  (old.proof.kind === "result-semantic" ||
+                    old.proof.kind === "integrated-semantic"),
+              );
+              if (!previous)
+                throw new PlannerChoiceError(
+                  `Work Item ${owner.id} is already reviewed and cannot judge a newly assigned obligation; use final-review or new work`,
+                  [owner.id],
+                );
+              canonicalProof = structuredClone(previous.proof);
+            }
             break;
+          }
           case "final-review":
             canonicalProof = { kind: "final-review" };
             break;
@@ -1545,7 +1570,11 @@ export function compilerWire(
         }
         graph.coverage!.push({
           ...structuredClone(obligations[obligationIndex]!),
-          ...proved(entry, `coverage ${obligationIndex}`),
+          ...proved(
+            entry,
+            `coverage ${obligationIndex}`,
+            obligations[obligationIndex]!.criterionId,
+          ),
         });
       }
       const objectiveSource = request.sources.find(
@@ -1601,11 +1630,16 @@ export function compilerWire(
             stubSourceKeys.push({ key: stub, path: source.path });
             continue;
           }
+          const criterionId = sourceObligationId(source);
           graph.coverage!.push({
-            criterionId: sourceObligationId(source),
+            criterionId,
             source,
             statement,
-            ...proved(disposition, `source obligation ${position}`),
+            ...proved(
+              disposition,
+              `source obligation ${position}`,
+              criterionId,
+            ),
           });
           continue;
         }

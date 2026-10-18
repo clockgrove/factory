@@ -729,7 +729,9 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
   for (const escape of [
     `! cat '${secret}'`,
     "! sh -c 'echo gitdir: /tmp >> .git'",
-    `! touch '${join(repository, "escape")}'`,
+    // Under /tmp this lands in the sandbox's private /tmp; elsewhere it is
+    // refused. Either way the host file never appears (checked below).
+    `touch '${join(repository, "escape")}' 2>/dev/null || true`,
     `! kill -0 ${process.pid}`,
     `i="$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ')"; echo "$i"; test "$i" = lo`,
   ]) {

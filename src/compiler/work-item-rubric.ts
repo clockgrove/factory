@@ -61,7 +61,7 @@ Keep these, because they raise result quality:
 - reusing the repository's existing helpers, types and conventions, named by name;
 - for a total or never-throws contract, malformed input kept apart from internal defects: a catch-all that reports every error as invalid input does not meet it.
 Existing tests are protected by default: an item changes an existing assertion, golden or baseline only when its acceptance states that behaviour change and why, and an exact-membership list grows by exactly the item's additions.
-Generated values: a worker that cannot run arbitrary commands learns only from its validation output and the checkout. Where an item must commit values only running code produces (hashes, snapshots, goldens, generated files), one of its authorized commands produces them, or reports the actual values in its output or inside the checkout; otherwise the worker cannot learn what to commit. If no command does, plan that capability in the item that owns the harness or tool (for example, the check reports the actual value on mismatch, or a generator writes the file), and have dependent items consume it.
+Generated values: a worker that cannot run arbitrary commands learns only from its validation output and the checkout. Where an item must commit values only running code produces (hashes, snapshots, goldens, generated files), one of its authorized commands produces them, or reports the actual values in its output or in a Git-ignored file under the item's owned paths, which comes back to the checkout; otherwise the worker cannot learn what to commit. If no command does, plan that capability in the item that owns the harness or tool (for example, the check reports the actual value on mismatch, or a generator writes the file), and have dependent items consume it.
 Size: one outcome per item. Split by independently verifiable capability, never by layer; each item includes its own tests and docs. About ${WORK_ITEM_ENTRY_SIGNAL} acceptance entries is a signal, not a target: above it, split the item or state why it is one outcome (Factory adds the reason to the brief).`;
 
 /** The planner's job, how it works, and the rules for its output fields. */
@@ -127,7 +127,7 @@ const CODE_CLAIMS =
 
 /** Check 8: a shell-less worker can learn generated values only from its commands. */
 const GENERATED_VALUES =
-  "Flag an item whose worker cannot run arbitrary commands but must commit values only running code produces (hashes, snapshots, goldens, generated files), when none of its authorized commands produces them or reports the actual values in its output or inside the checkout and no item it depends on delivers that capability: its worker cannot learn what to commit.";
+  "Flag an item whose worker cannot run arbitrary commands but must commit values only running code produces (hashes, snapshots, goldens, generated files), when none of its authorized commands produces them or reports the actual values in its output or in a Git-ignored file under the item's owned paths and no item it depends on delivers that capability: its worker cannot learn what to commit.";
 
 /** The numbered rubric; checks 1-9 and 11 are fix findings (except an open source scope question in check 1), check 10 is an operator decision. */
 export const GRAPH_REVIEW_CHECKS = `Check:

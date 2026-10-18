@@ -153,4 +153,65 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
     decoded.criteria,
     /\n\[0\] a\.txt holds the change\nnote \[0\]: changed: a\.txt:1$/,
   );
+  // Ignored files a run produces under owned paths come back to the checkout;
+  // tracked changes, ignored directories and unowned files do not.
+  writeFileSync(join(worktree, ".gitignore"), "*.actual.json\ncache/\n");
+  const produce = (value) =>
+    `mkdir -p own/cache other && printf ${value} > own/x.actual.json && printf c > own/cache/c.json && printf o > other/o.actual.json && printf t > a.txt && exit 1`;
+  const outputs = {
+    ownedPaths: ["own/", "a.txt"],
+    excluded: new Set(),
+    delivered: new Map(),
+  };
+  const tracked = status(worktree);
+  const first = await runDeclaredValidation(
+    worktree,
+    [produce("one")],
+    5,
+    undefined,
+    outputs,
+  );
+  assert.equal(first.passed, false);
+  assert.equal(
+    readFileSync(join(worktree, "own/x.actual.json"), "utf8"),
+    "one",
+  );
+  assert.match(first.text, /\n- own\/x\.actual\.json \(3 bytes\)\n/);
+  assert.match(
+    first.text,
+    /not returned because Git tracks them[^\n]*\n- a\.txt\n/,
+  );
+  assert.match(
+    first.text,
+    /Ignored directories, contents not returned:\n- own\/cache\/$/m,
+  );
+  assert.equal(existsSync(join(worktree, "own/cache")), false);
+  assert.equal(existsSync(join(worktree, "other")), false);
+  assert.equal(readFileSync(join(worktree, "a.txt"), "utf8"), "changed\n");
+  assert.equal(status(worktree), tracked);
+  // A later run refreshes its own unchanged copy, never a worker's edit.
+  await runDeclaredValidation(
+    worktree,
+    [produce("two")],
+    6,
+    undefined,
+    outputs,
+  );
+  assert.equal(
+    readFileSync(join(worktree, "own/x.actual.json"), "utf8"),
+    "two",
+  );
+  writeFileSync(join(worktree, "own/x.actual.json"), "mine");
+  const kept = await runDeclaredValidation(
+    worktree,
+    [produce("three")],
+    7,
+    undefined,
+    outputs,
+  );
+  assert.equal(
+    readFileSync(join(worktree, "own/x.actual.json"), "utf8"),
+    "mine",
+  );
+  assert.match(kept.text, /- own\/x\.actual\.json: [^\n]*kept yours/);
 });

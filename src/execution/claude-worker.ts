@@ -338,6 +338,7 @@ async function main(): Promise<void> {
         createFactoryValidationMcp({
           worktree: input.request.worktree,
           commands: validationCommands,
+          ownedPaths: input.request.item.ownedPaths,
           config: input.config,
           ...(input.request.validationLfs && {
             lfs: input.request.validationLfs,

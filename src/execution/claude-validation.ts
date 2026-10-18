@@ -20,6 +20,10 @@ import {
   privateStagingExclusions,
   workerValidationRoot,
 } from "./local.js";
+import {
+  returnProducedFiles,
+  type ValidationOutputs,
+} from "./validation-outputs.js";
 
 export const factoryValidationServerName = "factory-validation";
 const factoryValidationServerVersion = "1.0.0";
@@ -32,6 +36,8 @@ const maxOutputChars = 8_000;
 interface ValidationEnvironmentInput {
   worktree: string;
   commands: readonly string[];
+  /** The Work Item's owned paths: produced files under them come back. */
+  ownedPaths: readonly string[];
   config: { tools: readonly string[]; allowedTools: readonly string[] };
   handoff: HandoffContext;
   lfs?: HarnessRequest["validationLfs"];
@@ -157,12 +163,15 @@ export async function workerFilesTree(worktree: string): Promise<string> {
  * run's temporary files reach the commands. It restores the selected LFS
  * bytes controller validation restores, by digest from the controller's
  * staged copy. The worker names no command: only the declared ones run.
+ * With `outputs`, files the commands produced under owned paths come back to
+ * the worktree after the run settles (see returnProducedFiles).
  */
 export async function runDeclaredValidation(
   worktree: string,
   commands: readonly string[],
   run: number,
   lfs?: HarnessRequest["validationLfs"],
+  outputs?: ValidationOutputs,
 ): Promise<{
   passed: boolean;
   text: string;
@@ -189,6 +198,14 @@ export async function runDeclaredValidation(
     )
   ).trim();
   const root = join(workerValidationRoot(worktree), `${run}`);
+  let produced = "";
+  const inspectSettled =
+    outputs &&
+    ((copy: string) => {
+      produced = returnProducedFiles(copy, worktree, outputs);
+    });
+  const withProduced = (text: string) =>
+    produced ? `${text}\n\n${produced}` : text;
   try {
     const evidence = await validateTree(
       worktree,
@@ -205,13 +222,18 @@ export async function runDeclaredValidation(
       lfs && new LocalContentStore(lfs.store),
       undefined,
       false,
+      undefined,
+      undefined,
+      inspectSettled,
     );
     return {
       passed: true,
       tree,
       ran,
       failed,
-      text: `All ${evidence.commands.length} declared validation commands passed:\n${commands.map((command) => `- ${command}`).join("\n")}`,
+      text: withProduced(
+        `All ${evidence.commands.length} declared validation commands passed:\n${commands.map((command) => `- ${command}`).join("\n")}`,
+      ),
     };
   } catch (error) {
     if (error instanceof CandidateValidationFailure)
@@ -220,7 +242,9 @@ export async function runDeclaredValidation(
         tree,
         ran,
         failed,
-        text: `Validation failed. Fix this before you finish.\n${bounded(error.message)}`,
+        text: withProduced(
+          `Validation failed. Fix this before you finish.\n${bounded(error.message)}`,
+        ),
       };
     throw error;
   } finally {
@@ -309,6 +333,13 @@ export async function createFactoryValidationMcp(
   let ready = false;
   let runs = 0;
   let passed = 0;
+  const outputs: ValidationOutputs = {
+    ownedPaths: input.ownedPaths,
+    excluded: new Set(
+      (input.lfs?.members ?? []).map((member) => member.destination),
+    ),
+    delivered: new Map(),
+  };
   const passedTrees = new Set<string>();
   let queue: Promise<unknown> = Promise.resolve();
   const server = createSdkMcpServer({
@@ -317,7 +348,7 @@ export async function createFactoryValidationMcp(
     tools: [
       tool(
         "run_validation",
-        "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.",
+        "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.",
         {},
         async () => {
           const run = ++runs;
@@ -329,6 +360,7 @@ export async function createFactoryValidationMcp(
               input.commands,
               run,
               input.lfs,
+              outputs,
             );
             return { declared, handoff };
           });
@@ -380,7 +412,8 @@ export async function createFactoryValidationMcp(
         {
           alwaysLoad: true,
           annotations: {
-            readOnlyHint: true,
+            // It writes only ignored produced files, never the result tree.
+            readOnlyHint: false,
             destructiveHint: false,
             openWorldHint: false,
           },

@@ -343,6 +343,8 @@ export async function validateTree(
   retainFailedValidation = true,
   preparation: ValidationPreparation = { commands: [] },
   reviewArtifacts: readonly ReviewArtifactSelector[] = [],
+  /** Reads the settled checkout, passed or failed, before it is removed; must not throw. */
+  inspectSettled?: (worktree: string) => void,
 ): Promise<ValidationEvidence> {
   const worktree = join(root, "worktree");
   try {
@@ -377,7 +379,10 @@ export async function validateTree(
     };
     return evidence;
   } finally {
-    if (!hasUnresolvedSubprocesses()) await removeWorktree(checkout, worktree);
+    if (!hasUnresolvedSubprocesses()) {
+      inspectSettled?.(worktree);
+      await removeWorktree(checkout, worktree);
+    }
   }
 }
 

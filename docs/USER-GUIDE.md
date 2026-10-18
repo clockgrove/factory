@@ -9,7 +9,7 @@ Agents operate Factory through the `setup` and `director` skills, and the skills
 - Linux x64 (WSL2 works), Node.js 22 or later, Git 2.31 or later, an authenticated `gh`, and logins for the selected planning, review and worker providers. Defaults require a Codex login; Claude choices and other providers are in [local providers](#local-providers).
 - A trusted checkout whose `origin` fetch and push URLs resolve to the same GitHub `OWNER/REPO`. Factory refuses local-path origins, mismatched push URLs and its own source repositories.
 - The target's toolchain on the validation `PATH`. Factory installs no package manager or build tool. Validation runs commands with non-login `sh -c`, so shell profiles do not provision it.
-- bubblewrap (`bwrap`) with unprivileged user namespaces. Worker-caused commands run in its [command sandbox](#command-sandbox); without it Factory refuses to run them.
+- bubblewrap (`bwrap`) with unprivileged user namespaces. Worker-caused commands run in its [command sandbox](#command-sandbox); without it Factory refuses to run them. Ubuntu 23.10 and later can restrict user namespaces with AppArmor: give `bwrap` a profile that allows them, or set `kernel.apparmor_restrict_unprivileged_userns=0`.
 - Requirements and validation instructions committed. Planning reads the pinned Git base, not uncommitted or unpushed edits. The base is the head of the default branch on `origin`, fetched when the run first plans; the Objective keeps that base on every later run.
 - A controller started from an ordinary host terminal. A controller inside an agent command sandbox passes that sandbox to its workers.
 

@@ -28,6 +28,7 @@ import type {
   PlanningModel,
 } from "./contracts.js";
 import {
+  type ControlContext,
   type ControlRequest,
   ForegroundControllerError,
   requestControl,
@@ -93,6 +94,7 @@ import {
 import { objectiveCandidate } from "./qa.js";
 import {
   awaitCheckpointAdmission,
+  bindRecoveryCheckpointControllerScope,
   CheckpointProducerInventoryChanged,
   gitPersistenceStatus,
   isCheckpointAdmissionFailure,
@@ -585,6 +587,14 @@ async function runObjectiveUnscoped(
       handler: ((request: ControlRequest) => Promise<unknown>) | undefined,
     ) => void | Promise<void>;
     admitChildObjectives?: AdmitChildObjectives;
+    /**
+     * Executes a Project queue command this foreground owner receives for
+     * the installation (see requestForegroundQueueControl).
+     */
+    queueControl?: (
+      request: ControlRequest,
+      context: ControlContext,
+    ) => Promise<unknown>;
   } = {},
 ): Promise<ContinuationState> {
   if (
@@ -912,9 +922,32 @@ async function runObjectiveOwned(
   };
   armDeadline();
   let controlTail: Promise<unknown> = Promise.resolve();
+  // Queue commands run one at a time beside this Objective's own control.
+  let queueTail: Promise<unknown> = Promise.resolve();
   let server;
   try {
-    const handle = async (request: ControlRequest) => {
+    // Bound inside the controller's checkpoint scope: a command reuses this
+    // owner's verifier and owns its own operation and acknowledgment.
+    const queueControl =
+      options.queueControl &&
+      !options.observeControl &&
+      config.queue?.project &&
+      config.gitPersistence?.scope === "private-history"
+        ? bindRecoveryCheckpointControllerScope(options.queueControl)
+        : undefined;
+    const handle = async (
+      request: ControlRequest,
+      context?: ControlContext,
+    ) => {
+      if (request.objective === 0 && request.action === "project-queue") {
+        if (!queueControl || !context)
+          throw new Error(
+            "This controller does not own Project queue commands",
+          );
+        const result = queueTail.then(() => queueControl(request, context));
+        queueTail = result.catch(() => undefined);
+        return result;
+      }
       if (request.objective !== objective)
         throw new Error("Objective identity differs from owner");
       const state = owner.snapshot;
@@ -1478,7 +1511,7 @@ async function runObjectiveOwned(
         finalizationErrors.push(error);
       }
       // Await original work even after one promise fails; never replay a failed projection.
-      for (const task of [controlTail, progressTask]) {
+      for (const task of [controlTail, queueTail, progressTask]) {
         try {
           await task;
         } catch (error) {

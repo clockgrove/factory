@@ -602,7 +602,7 @@ export interface ControllerLock {
   token: string;
 }
 
-interface ControllerOwner {
+export interface ControllerOwner {
   intake?: boolean;
   pid: number;
   startTime: string;
@@ -660,16 +660,23 @@ export function liveControllerOwner(path: string): ControllerOwner | undefined {
 export function liveObjectiveOwner(
   repository: string,
 ): ControllerOwner | undefined {
+  return liveObjectiveOwners(repository)[0];
+}
+
+/** Every live Objective owner, in Objective order. */
+export function liveObjectiveOwners(repository: string): ControllerOwner[] {
   const root = join(stateRoot(repository), "objectives");
-  if (!existsSync(root)) return undefined;
-  for (const name of readdirSync(root)) {
-    if (!/^\d+$/.test(name)) continue;
-    const owner = liveControllerOwner(
-      objectiveLockPath(repository, Number(name)),
-    );
-    if (owner) return owner;
-  }
-  return undefined;
+  if (!existsSync(root)) return [];
+  return readdirSync(root)
+    .filter((name) => /^\d+$/.test(name))
+    .map(Number)
+    .sort((left, right) => left - right)
+    .flatMap((objective) => {
+      const owner = liveControllerOwner(
+        objectiveLockPath(repository, objective),
+      );
+      return owner ? [owner] : [];
+    });
 }
 
 /**

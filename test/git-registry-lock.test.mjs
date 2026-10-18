@@ -32,6 +32,7 @@ import { LocalExecutionDriver, CodexHarness } from "../dist/execution/local.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import {
   enqueueIntake,
+  foregroundQueueControl,
   intakeControl,
   runIntake,
   resolveIntakeBase,
@@ -43,6 +44,7 @@ import { resolveAutonomy } from "../dist/repair-policy.js";
 import {
   ControllerCommandIncompleteError,
   requestControl,
+  serveControl,
 } from "../dist/coordinator-control.js";
 import { validateWorkItem } from "../dist/validation.js";
 import {
@@ -82,6 +84,7 @@ import {
 } from "../dist/project-queue-state.js";
 import {
   awaitCheckpointAdmission,
+  bindRecoveryCheckpointControllerScope,
   gitPersistenceStatus,
   isCheckpointCollectionPending,
   markCheckpointDirty,
@@ -1304,6 +1307,74 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
   // receipts; this is no model response or claim of provider qualification.
   sealFinalAcceptance(state);
   saveState(statePath(repository, 1), state);
+  if (!collectedExecution) {
+    // With no service, a live foreground owner executes the installation's
+    // queue commands and returns their completion after the terminal archive
+    // acknowledgment; the forwarding command publishes nothing itself.
+    const foregroundLock = acquireObjectiveLock(repository, 1);
+    let stop;
+    const stopped = new Promise((resolve) => {
+      stop = resolve;
+    });
+    let serving;
+    const listening = new Promise((resolve) => {
+      serving = resolve;
+    });
+    const owner = withRecoveryCheckpointControllerVerification(
+      {
+        config,
+        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+      },
+      async () => {
+        const queue = bindRecoveryCheckpointControllerScope(
+          foregroundQueueControl(config, github),
+        );
+        const server = await serveControl(
+          repository,
+          foregroundLock,
+          (request) => queue(request),
+          1,
+        );
+        serving();
+        await stopped;
+        await new Promise((resolve) => server.close(resolve));
+      },
+    );
+    try {
+      await listening;
+      const status = await intakeControl(config, "status", undefined, github);
+      assert.deepEqual(status.activeObjectives, [1]);
+      const before = writes;
+      const paused = await intakeControl(config, "pause", undefined, github);
+      assert.equal(paused.mode, "paused");
+      assert.equal(JSON.parse(controlMetadata).mode, "paused");
+      assert.equal(writes, before + 1);
+      assert.equal(gitPersistenceStatus(config).pendingChanges, false);
+      const resumed = await intakeControl(config, "resume", undefined, github);
+      assert.equal(resumed.mode, "running");
+      // An unchanged admission keeps its place: no Project write.
+      const kept = await enqueueIntake(config, github, [1]);
+      assert.deepEqual(
+        kept.targets.map((target) => [target.objective, target.state]),
+        [[1, "queued"]],
+      );
+      assert.equal(writes, before + 2);
+      const history = await readQueueHistory(config);
+      assert(
+        history.some(
+          (record) =>
+            record.kind === "project-queue-operation" &&
+            record.action === "control" &&
+            record.completed &&
+            JSON.parse(record.metadata).mode === "paused",
+        ),
+      );
+    } finally {
+      stop();
+      await owner;
+      releaseControllerLock(objectiveLockPath(repository, 1), foregroundLock);
+    }
+  }
   // Exercise the actual intake eligibility seam against real Git. An empty
   // native dependency set has no base-dependent eligibility, while the
   // predecessor path still fetches and proves accepted ancestry before alignment.

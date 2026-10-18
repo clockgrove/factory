@@ -1811,6 +1811,8 @@ interface ServiceStatusDocument {
     watch?: true;
     mode?: string;
     activeObjective?: number | null;
+    /** Every Objective a live controller runs; foreground runs side by side. */
+    activeObjectives?: number[];
     observation?: { error?: string; needsDecision?: number };
     remoteObservation?: { availability: "last-observed" | "unavailable" };
   };
@@ -1864,11 +1866,17 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
   const queued = (queue.objectives ?? []).filter(
     (id) => !(queue.dequeued ?? []).includes(id),
   );
+  const running = (
+    queue.activeObjectives ??
+    (queue.activeObjective ? [queue.activeObjective] : [])
+  )
+    .map((id) => `#${id}`)
+    .join(", ");
   // Without a Project observation the queue's mode and entries are unknown,
   // not paused or empty, so no queue command is named from them (#1297).
   if (queue.remoteObservation?.availability === "unavailable")
     lines.push(
-      `Queue: unknown; the Project observation is unavailable${queue.activeObjective ? `; #${queue.activeObjective} running` : ""}`,
+      `Queue: unknown; the Project observation is unavailable${running ? `; ${running} running` : ""}`,
     );
   else {
     const parts = [
@@ -1876,7 +1884,7 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
       queued.length
         ? `queued ${queued.map((id) => `#${id}`).join(", ")}`
         : "empty",
-      ...(queue.activeObjective ? [`#${queue.activeObjective} running`] : []),
+      ...(running ? [`${running} running`] : []),
     ];
     lines.push(`Queue: ${parts.join("; ")}`);
     if (queue.mode === "paused")

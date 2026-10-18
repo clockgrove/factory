@@ -12,6 +12,7 @@ import {
   installationLockPath,
   liveControllerOwner,
   liveObjectiveOwner,
+  liveObjectiveOwners,
   objectiveLockPath,
   objectiveRoot,
 } from "./state-store.js";
@@ -150,7 +151,9 @@ export async function serveControl(
             !owner ||
             owner.token !== lock.token ||
             owner.pid !== process.pid ||
-            (!owner.intake && request.objective !== owner.objective)
+            (!owner.intake &&
+              request.objective !== owner.objective &&
+              !forwardedQueueCommand(request))
           )
             throw new Error("Controller command owner changed");
           if (
@@ -293,8 +296,8 @@ export async function serveControl(
 }
 
 /**
- * A foreground `factory run` owns only its Objective, and the queue waits for it. The message
- * names the command that does work meanwhile.
+ * A foreground `factory run` owns only its Objective. Queue commands reach it
+ * (see requestForegroundQueueControl); other installation commands wait for it.
  */
 export class ForegroundControllerError extends Error {
   constructor(readonly objective: number) {
@@ -302,8 +305,76 @@ export class ForegroundControllerError extends Error {
       // Objective 0 is a queue command holding the installation for a moment.
       objective === 0
         ? "A factory queue command is running; run this again in a moment"
-        : `Controller is running Objective #${objective} in the foreground; \`factory status --objective ${objective}\` shows it, and queue commands work once it ends`,
+        : `Controller is running Objective #${objective} in the foreground; \`factory status --objective ${objective}\` shows it, and this command works once it ends`,
     );
+  }
+}
+
+/**
+ * A Project queue command a foreground Objective owner executes for the
+ * installation: with no service, the live foreground owners are the
+ * installation's controllers, so one of them owns the change and its durable
+ * acknowledgment, as the service would.
+ */
+function forwardedQueueCommand(request: ControlRequest): boolean {
+  return request.objective === 0 && request.action === "project-queue";
+}
+
+/**
+ * Send a Project queue command to the lowest-numbered live foreground owner
+ * that `eligible` admits (one running the command's own configuration).
+ * `handled: false` means nothing was sent: no foreground owner remains, or the
+ * service now owns the installation, so the caller resolves its owner again.
+ */
+export async function requestForegroundQueueControl(
+  repository: string,
+  request: ControlRequest,
+  options: {
+    deadlineAt: number;
+    onAcknowledgment?: (value: unknown) => void;
+    eligible: (owner: { objective: number }) => boolean;
+  },
+): Promise<{ handled: boolean; result?: unknown }> {
+  if (!forwardedQueueCommand(request) || !request.command)
+    throw new Error("Only a bounded Project queue command reaches a run");
+  const waitUntil = Date.now() + ENDPOINT_WAIT_MS;
+  for (;;) {
+    if (
+      !Number.isFinite(options.deadlineAt) ||
+      options.deadlineAt <= Date.now()
+    )
+      throw new ControllerCommandIncompleteError(
+        request.command.id,
+        "not-sent",
+        options.deadlineAt,
+      );
+    if (liveControllerOwner(installationLockPath(repository)))
+      return { handled: false };
+    const owners = liveObjectiveOwners(repository);
+    if (!owners.length) return { handled: false };
+    const owner = owners.find(options.eligible);
+    if (!owner)
+      throw new Error(
+        `Foreground runs of ${owners.map((entry) => `Objective #${entry.objective}`).join(", ")} use another configuration, so none can execute this queue command; nothing was sent. Run it once one of them ends, or with the provider they run`,
+      );
+    currentProcessSignal()?.throwIfAborted();
+    const reply = await sendControl(
+      objectiveRoot(repository, owner.objective),
+      owner,
+      request,
+      options,
+    );
+    if (reply) return reply;
+    if (Date.now() >= waitUntil)
+      throw new ControllerCommandIncompleteError(
+        request.command.id,
+        "not-sent",
+        options.deadlineAt,
+        new Error(
+          `Controller pid ${owner.pid} still owns Objective #${owner.objective} without a control endpoint; run this again once it serves control or exits`,
+        ),
+      );
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 

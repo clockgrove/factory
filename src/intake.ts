@@ -25,6 +25,7 @@ import {
   ForegroundControllerError,
   type ReturnedQueueCommand,
   requestControl,
+  requestForegroundQueueControl,
   serveControl,
 } from "./coordinator-control.js";
 import { NativeStackDelivery } from "./delivery/native-stack.js";
@@ -108,6 +109,7 @@ import {
   asInstallationOwner,
   assertRestoredInstallationDispatchReady,
   installationContinuations,
+  liveObjectiveOwners,
   readContinuation,
   releaseControllerLock,
   readScannedContinuation,
@@ -262,12 +264,53 @@ function projectMutation<T>(
   task: () => Promise<T>,
 ): Promise<T> {
   assertProcessActive();
-  return github.withProjectQueueObservation
-    ? github.withProjectQueueObservation(
-        requireProjectQueueEffects(config),
-        task,
-      )
-    : task();
+  return withQueueMutationLock(config.repository, () =>
+    github.withProjectQueueObservation
+      ? github.withProjectQueueObservation(
+          requireProjectQueueEffects(config),
+          task,
+        )
+      : task(),
+  );
+}
+const queueMutations = new AsyncLocalStorage<string>();
+/**
+ * Project queue mutations and dispatch claims take turns across every process
+ * of this installation: several controllers (the service and foreground runs,
+ * or foreground runs side by side) each allocate queue order from the same
+ * retained history and read it settled. The lock names its holder process, so
+ * a crashed holder's lock is reclaimed. Waiting is bounded by the caller's
+ * command deadline.
+ */
+export async function withQueueMutationLock<T>(
+  repository: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  if (queueMutations.getStore() === repository) return task();
+  mkdirSync(stateRoot(repository), { recursive: true, mode: 0o700 });
+  const path = join(stateRoot(repository), "queue-mutation.lock");
+  const deadline = currentProcessDeadlineAt();
+  const waitUntil = deadline
+    ? Date.parse(deadline)
+    : Date.now() + QUEUE_COMMAND_TIMEOUT_MS;
+  let lock: ReturnType<typeof acquireControllerLock> | undefined;
+  for (;;) {
+    assertProcessActive();
+    try {
+      lock = acquireControllerLock(path, 0, {
+        owned: "a Project queue mutation",
+      });
+      break;
+    } catch (error) {
+      if (Date.now() >= waitUntil) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  try {
+    return await queueMutations.run(repository, task);
+  } finally {
+    releaseControllerLock(path, lock);
+  }
 }
 export const queuePollSeconds = (config: FactoryConfig): number =>
   config.queue?.pollSeconds ?? DEFAULT_QUEUE_POLL_SECONDS;
@@ -456,15 +499,24 @@ async function projectControlRequest(
 ) {
   const scope = commandScopes.getStore();
   const deadlineAt = scope?.deadlineAt ?? Date.now() + QUEUE_COMMAND_TIMEOUT_MS;
-  const observed = await requestControl(
-    config.repository,
-    {
-      objective: 0,
-      action: "status",
-    },
-    { deadlineAt },
-  );
-  if (!observed.handled) return observed;
+  // The service owns the installation's queue. Without it, a live foreground
+  // Objective owner executes the command (requestForegroundQueueControl).
+  let foreground = false;
+  try {
+    const observed = await requestControl(
+      config.repository,
+      {
+        objective: 0,
+        action: "status",
+      },
+      { deadlineAt },
+    );
+    if (!observed.handled) return observed;
+  } catch (error) {
+    if (!(error instanceof ForegroundControllerError) || !error.objective)
+      throw error;
+    foreground = true;
+  }
   const request: ControlRequest = {
     objective: 0,
     action: "project-queue",
@@ -477,10 +529,29 @@ async function projectControlRequest(
     },
     command: { id: randomUUID(), deadlineAt },
   };
-  const reply = await requestControl(config.repository, request, {
-    deadlineAt,
-    onAcknowledgment: scope?.onAcknowledgment,
-  });
+  const reply = foreground
+    ? await requestForegroundQueueControl(config.repository, request, {
+        deadlineAt,
+        onAcknowledgment: scope?.onAcknowledgment,
+        // The owner executes it under its own configuration, which must be
+        // the command's: its frozen continuation names it.
+        eligible: (owner) => {
+          try {
+            return (
+              readContinuation(config.repository, owner.objective)
+                ?.configDigest === factoryConfigDigest(config)
+            );
+          } catch {
+            return false;
+          }
+        },
+      })
+    : await requestControl(config.repository, request, {
+        deadlineAt,
+        onAcknowledgment: scope?.onAcknowledgment,
+      });
+  // Nothing reached a foreground owner: none remains, or the service started.
+  if (foreground && !reply.handled) return reply;
   if (!reply.handled)
     throw new ControllerCommandIncompleteError(
       request.command!.id,
@@ -963,29 +1034,13 @@ export async function admitChildObjectives(
   objectives: number[],
   expectedBodyDigests: Record<string, string>,
 ): Promise<void> {
-  // Foreground owners of different Objectives can run side by side, so their
-  // admissions take turns: each allocates queue order from the same history.
-  const path = join(stateRoot(config.repository), "child-admission.lock");
-  let lock: ReturnType<typeof acquireControllerLock> | undefined;
-  for (let waited = 0; !lock; waited += 1) {
-    try {
-      lock = acquireControllerLock(path, objectives[0]!, {
-        owned: "a child Objective admission",
-      });
-    } catch (error) {
-      if (waited >= 120) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-  try {
-    await queueOperation(config, () =>
-      scoped(config, () =>
-        enqueueOwned(config, github, objectives, { expectedBodyDigests }),
-      ),
-    );
-  } finally {
-    releaseControllerLock(path, lock);
-  }
+  // Foreground owners of different Objectives can run side by side; their
+  // admissions take turns under the queue mutation lock (projectMutation).
+  await queueOperation(config, () =>
+    scoped(config, () =>
+      enqueueOwned(config, github, objectives, { expectedBodyDigests }),
+    ),
+  );
 }
 export async function ensureProjectObjective(
   config: FactoryConfig,
@@ -1329,14 +1384,119 @@ async function intakeControlCommand(
   } catch (error) {
     if (action !== "status" || !(error instanceof ForegroundControllerError))
       throw error;
+    const foreground = liveObjectiveOwners(config.repository).map(
+      (owner) => owner.objective,
+    );
     return {
       ...(await readIntake(config, { github })),
       activeObjective: error.objective,
+      activeObjectives: foreground.length ? foreground : [error.objective],
     };
   }
   if (reply.handled) return reply.result;
   if (action === "status") return readIntake(config, { github });
   return locked(config, () => applyControl(config, github, action, objective));
+}
+/**
+ * A forwarded Project queue command, authenticated against this owner's queue
+ * authority and its original bounded deadline. Returns it with its operation as
+ * the action.
+ */
+function authenticatedQueueCommand(
+  config: FactoryConfig,
+  request: ControlRequest,
+): ControlRequest {
+  const operation = request.input?.operation;
+  if (
+    request.objective !== 0 ||
+    request.input?.protocol !== "project-queue-v1" ||
+    request.input?.authorityDigest !== factoryAuthorityDigest(config) ||
+    request.input?.configDigest !== factoryConfigDigest(config) ||
+    typeof operation !== "string" ||
+    !["enqueue", "watch", "pause", "resume", "drain", "dequeue"].includes(
+      operation,
+    )
+  )
+    throw new Error(
+      "Project queue control protocol or authority binding differs",
+    );
+  if (
+    !request.command ||
+    request.command.deadlineAt > Date.now() + QUEUE_COMMAND_TIMEOUT_MS
+  )
+    throw new Error(
+      "Project queue command requires its original bounded request deadline",
+    );
+  return { ...request, action: operation as ControlRequest["action"] };
+}
+/** The Project effect of one authenticated queue command, by its live owner. */
+function ownedQueueCommand(
+  config: FactoryConfig,
+  github: GitHubGateway,
+  request: ControlRequest,
+  cached?: IntakeAuthorization,
+): Promise<QueueCommandAcknowledgment> {
+  if (request.action === "enqueue") {
+    const ids = request.input?.objectives as number[];
+    return request.input?.roadmapOnly
+      ? ensureProjectObjectivesOwned(
+          config,
+          github,
+          ids,
+          request.input?.provenance as ProjectPublicationProvenance | undefined,
+          cached,
+        )
+      : enqueueOwned(
+          config,
+          github,
+          ids,
+          {
+            expectedBodyDigests: request.input?.expectedBodyDigests as
+              | Record<string, string>
+              | undefined,
+          },
+          cached,
+        );
+  }
+  if (request.action === "watch") return writeWatch(config, github, cached);
+  return applyControl(
+    config,
+    github,
+    request.action,
+    request.action === "dequeue"
+      ? (request.input?.objectives as number[])
+      : undefined,
+    cached,
+  );
+}
+/**
+ * The queue command handler of a foreground `factory run`: with no service, a
+ * live foreground owner executes the installation's queue commands, as the
+ * service would, and returns the command's exact completion receipt after its
+ * terminal archive acknowledgment. Its pause, resume and drain change the
+ * Project control only: they hold or allow new dispatch, and the running
+ * Objectives keep their own `factory pause|drain|resume --objective N`.
+ */
+export function foregroundQueueControl(
+  config: FactoryConfig,
+  github: GitHubGateway,
+): (request: ControlRequest) => Promise<unknown> {
+  return async (original) => {
+    const request = authenticatedQueueCommand(config, original);
+    assertProcessActive();
+    return withRecoveryCheckpointCommandOperation(
+      {
+        config,
+        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+      },
+      {
+        requestId: original.command!.id,
+        action: `project-queue:${request.action}`,
+        inputDigest: queueDigest(JSON.stringify(original.input)),
+      },
+      () => ownedQueueCommand(config, github, request),
+    );
+  };
 }
 export async function resumeWatcherAfterUpgrade(
   config: FactoryConfig,
@@ -1542,28 +1702,7 @@ async function runIntakeOwned(
     request: ControlRequest,
   ): ControlRequest => {
     if (request.action === "project-queue") {
-      const operation = request.input?.operation;
-      if (
-        request.objective !== 0 ||
-        request.input?.protocol !== "project-queue-v1" ||
-        request.input?.authorityDigest !== factoryAuthorityDigest(config) ||
-        request.input?.configDigest !== factoryConfigDigest(config) ||
-        typeof operation !== "string" ||
-        !["enqueue", "watch", "pause", "resume", "drain", "dequeue"].includes(
-          operation,
-        )
-      )
-        throw new Error(
-          "Project queue control protocol or authority binding differs",
-        );
-      if (
-        !request.command ||
-        request.command.deadlineAt > Date.now() + QUEUE_COMMAND_TIMEOUT_MS
-      )
-        throw new Error(
-          "Project queue command requires its original bounded request deadline",
-        );
-      request = { ...request, action: operation as ControlRequest["action"] };
+      request = authenticatedQueueCommand(config, request);
     } else if (
       request.objective === 0 &&
       ["enqueue", "watch", "resume", "dequeue"].includes(request.action)
@@ -1629,42 +1768,24 @@ async function runIntakeOwned(
       signalWake();
     }
     let acknowledgment: QueueCommandAcknowledgment;
-    if (request.action === "enqueue") {
-      if (handingOff || localMode === "draining")
+    if (request.action === "enqueue" || request.action === "watch") {
+      if (
+        request.action === "enqueue" &&
+        (handingOff || localMode === "draining")
+      )
         throw new Error("The local service is draining");
-      const ids = request.input?.objectives as number[];
-      if (request.input?.roadmapOnly) {
-        acknowledgment = await ensureProjectObjectivesOwned(
-          config,
-          services.github,
-          ids,
-          request.input?.provenance as ProjectPublicationProvenance | undefined,
-          record,
-        );
-      } else {
-        acknowledgment = await enqueueOwned(
-          config,
-          services.github,
-          ids,
-          {
-            expectedBodyDigests: request.input?.expectedBodyDigests as
-              | Record<string, string>
-              | undefined,
-          },
-          record,
-        );
-      }
-    } else if (request.action === "watch") {
-      acknowledgment = await writeWatch(config, services.github, record);
+      acknowledgment = await ownedQueueCommand(
+        config,
+        services.github,
+        request,
+        record,
+      );
     } else {
       try {
-        acknowledgment = await applyControl(
+        acknowledgment = await ownedQueueCommand(
           config,
           services.github,
-          request.action,
-          request.action === "dequeue"
-            ? (request.input?.objectives as number[])
-            : undefined,
+          request,
           record,
         );
       } catch (error) {

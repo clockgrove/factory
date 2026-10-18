@@ -45,7 +45,11 @@ import {
 } from "./intake.js";
 import { runDreamCommand } from "./learning.js";
 import { operatorName } from "./operator.js";
-import { QueueAuthorityChanged } from "./project-queue-state.js";
+import {
+  locallyAdmitted,
+  locallyClaimedObjectives,
+  QueueAuthorityChanged,
+} from "./project-queue-state.js";
 import { runProposeCommand } from "./proposals.js";
 import {
   loadServiceLoginCredentials,
@@ -918,6 +922,42 @@ function statusDocument(
           command: `factory persistence reconcile --objective ${objective}`,
           reason: continuation.restoration.reason,
         };
+  }
+  // With a Project queue, `run` needs an admission (#1577): an Objective the
+  // local receipts do not show admitted is added first, and a running service
+  // starts an admitted one itself.
+  if (
+    !continuation &&
+    config.queue?.project &&
+    document.state === "not-started" &&
+    document.nextAction?.command === `factory run --objective ${objective}`
+  ) {
+    let service = false;
+    try {
+      service =
+        liveControllerOwner(installationLockPath(config.repository))?.intake ===
+        true;
+    } catch {
+      // An unreadable lock leaves the service unknown; `run` then says why.
+    }
+    if (!locallyAdmitted(config, objective))
+      document.nextAction = {
+        command: `factory queue add ${objective}`,
+        reason: service
+          ? "Admits the Objective to the queue; the running service then starts it in queue order"
+          : `Admits the Objective to the queue; then \`factory run --objective ${objective}\` starts it`,
+      };
+    else if (service) {
+      document.summary = "queued; the running service starts it in queue order";
+      document.nextAction = null;
+    } else {
+      // Every dispatch slot is held by another run's unsettled claim.
+      const claimed = locallyClaimedObjectives(config, objective);
+      if (claimed?.length) {
+        document.summary = `queued; waits for ${claimed.map((id) => `Objective #${id}`).join(", ")} to finish`;
+        document.nextAction = null;
+      }
+    }
   }
   if (document.nextAction)
     document.nextAction.command = configurationCommand(

@@ -46,6 +46,7 @@ import { profileBinding, workerCommandAccess } from "./execution-profiles.js";
 import { RealGitHubGateway } from "./github.js";
 import {
   admitChildObjectives,
+  foregroundQueueControl,
   enqueueIntake,
   ensureProjectObjective,
   type IntakeAuthorization,
@@ -326,6 +327,7 @@ export function createApplication(
               objectives,
               bodyDigests,
             ),
+          queueControl: foregroundQueueControl(config, services.github),
         }),
       ),
     cancelObjective: (objective) =>

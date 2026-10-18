@@ -1973,6 +1973,72 @@ export function retainedQueueEntry(
     true,
   );
 }
+/**
+ * This installation's own retained receipts, read locally without the archive
+ * or the Project. An observation for status only; it grants nothing.
+ */
+export function localQueueHistory(config: FactoryConfig): QueueRecord[] {
+  const directory = join(stateRoot(config.repository), "project-queue-history");
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory)
+    .filter((name) => /^[a-f0-9-]{36}\.json$/.test(name))
+    .sort()
+    .map((name) =>
+      parseQueueRecord(
+        privateBytes(join(directory, name)),
+        config.repository,
+        name.slice(0, -".json".length),
+      ),
+    );
+}
+/**
+ * Whether the local receipts show `objective` admitted to the queue under the
+ * current queue authority. Unreadable or partial history answers false: status
+ * then names `factory queue add`, which keeps an unchanged admission's place.
+ */
+export function locallyAdmitted(
+  config: FactoryConfig,
+  objective: number,
+): boolean {
+  try {
+    const entry = retainedQueueEntry(
+      config,
+      localQueueHistory(config),
+      objective,
+    );
+    return (
+      entry?.state === "queued" &&
+      entry.authorityDigest === factoryAuthorityDigest(config)
+    );
+  } catch {
+    return false;
+  }
+}
+/**
+ * Objectives other than `except` whose local owner claims are unsettled: each
+ * holds a dispatch slot until its run settles. Unreadable history answers
+ * undefined (unknown).
+ */
+export function locallyClaimedObjectives(
+  config: FactoryConfig,
+  except?: number,
+): number[] | undefined {
+  try {
+    return [
+      ...new Set(
+        localQueueHistory(config).flatMap((record) =>
+          record.kind === "project-queue-owner" &&
+          !record.settled &&
+          record.objective !== except
+            ? [record.objective]
+            : [],
+        ),
+      ),
+    ].sort((left, right) => left - right);
+  } catch {
+    return undefined;
+  }
+}
 /** Authenticated successful and uncertain allocations are never recycled. */
 export function nextProjectQueueOrder(history: QueueRecord[]): number {
   const allocated = history.flatMap((record) =>

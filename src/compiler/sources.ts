@@ -26,7 +26,7 @@ import {
   assertPinnedNpmScripts,
   fixedPackageScripts,
 } from "../validation.js";
-import { pinnedGit, pinnedGitRaw } from "../process.js";
+import { pinnedGit, pinnedGitRaw, pinnedGitRawInput } from "../process.js";
 import { assertPreIntegrationCheckSources } from "../delivery/readiness.js";
 import { assertKnownCheckNames, workflowCheckNames } from "../check-names.js";
 import { isAbsolute } from "node:path";
@@ -124,6 +124,20 @@ export function resolveWorkItemSources(
       return [];
     }
   };
+  // Every repository path's entry, then every blob, in one batch each.
+  const tree = new BaseTree(args.checkout, args.baseSha);
+  const paths = refs.flatMap((ref) =>
+    ref && typeof ref.path === "string" && ref.path !== "OBJECTIVE"
+      ? [ref.path]
+      : [],
+  );
+  tree.load(paths);
+  tree.read(
+    paths.flatMap((path) => {
+      const entry = tree.entry(path);
+      return entry?.type === "blob" ? [entry.oid] : [];
+    }),
+  );
   return refs.map((ref) => {
     const label = `${ref.path}${ref.heading ? `#${ref.heading}` : ""}`;
     const defect = (reason: string): never => {
@@ -147,7 +161,7 @@ export function resolveWorkItemSources(
     } else {
       let text = "";
       try {
-        text = pinnedText(args.checkout, args.baseSha, ref.path);
+        text = pinnedText(args.checkout, args.baseSha, ref.path, tree);
       } catch (error) {
         defect(error instanceof Error ? error.message : String(error));
       }
@@ -196,8 +210,23 @@ function workerInputSources(
   graph: WorkGraph,
   sources: PlanningSource[],
   checkout: string,
+  tree = new BaseTree(checkout, graph.baseSha),
 ) {
   const choices = compilerCitationChoices(sources);
+  prefetchCitations(
+    tree,
+    workShapes(graph).flatMap((item) =>
+      item.citations.flatMap((citation) => {
+        const heading = citation.heading ?? "";
+        return choices.some(
+          (choice) =>
+            choice.path === citation.path && choice.heading === heading,
+        )
+          ? []
+          : [{ path: citation.path, heading }];
+      }),
+    ),
+  );
   return workShapes(graph).map((item) =>
     item.citations.map((citation) => {
       const heading = citation.heading ?? "";
@@ -206,13 +235,7 @@ function workerInputSources(
       );
       return source
         ? structuredClone(source)
-        : repositoryCitation(
-            checkout,
-            graph.baseSha,
-            item.id,
-            citation.path,
-            heading,
-          );
+        : repositoryCitation(tree, item.id, citation.path, heading);
     }),
   );
 }
@@ -233,12 +256,12 @@ const MAX_REPOSITORY_CITED_BYTES = 524_288;
  * Repository citations carry no command authority.
  */
 function repositoryCitation(
-  checkout: string,
-  baseSha: string,
+  tree: BaseTree,
   itemId: string,
   path: string,
   heading: string,
 ): { path: string; heading: string; content: string } {
+  const baseSha = tree.baseSha;
   const refuse = (reason: string): never => {
     throw new GraphValidationError(
       itemId,
@@ -246,17 +269,8 @@ function repositoryCitation(
     );
   };
   // Regular blob identity and size come from the tree before any body read.
-  let size: number | undefined;
-  try {
-    const entry = /^(?:100644|100755) blob [a-f0-9]{40,64} +(\d+)\t/.exec(
-      pinnedGitRaw(checkout, "ls-tree", "-lz", baseSha, "--", path).toString(
-        "utf8",
-      ),
-    );
-    size = entry ? Number(entry[1]) : undefined;
-  } catch {
-    size = undefined;
-  }
+  const entry = repositoryEntry(tree, path);
+  const size = entry?.size;
   if (size === undefined) return refuse("it is not a regular tracked file");
   // A heading selects a section of a file up to the read tree's 1 MiB export bound.
   const readBound = heading
@@ -268,7 +282,7 @@ function repositoryCitation(
     );
   let content: string;
   try {
-    const text = pinnedText(checkout, baseSha, path);
+    const text = pinnedText(tree.checkout, baseSha, path, tree);
     content = heading ? sectionText(path, text, heading) : text;
   } catch (error) {
     return refuse(error instanceof Error ? error.message : String(error));
@@ -278,6 +292,73 @@ function repositoryCitation(
       `the cited content exceeds ${MAX_REPOSITORY_CITATION_BYTES} bytes; cite one exact heading or a smaller file`,
     );
   return { path, heading, content };
+}
+
+/**
+ * The regular blob a repository citation may name, from the tree entry
+ * listing (as `ls-tree -l` reports it) before any body read.
+ */
+function repositoryEntry(
+  tree: BaseTree,
+  path: string,
+): BaseTreeEntry | undefined {
+  if (!validSourcePath(path)) {
+    // Not a batchable literal path: list it alone, as one citation always
+    // was, so pinnedText reports its actual refusal.
+    try {
+      const entry = /^(100644|100755) blob ([a-f0-9]{40,64}) +(\d+)\t/.exec(
+        pinnedGitRaw(
+          tree.checkout,
+          "ls-tree",
+          "-lz",
+          tree.baseSha,
+          "--",
+          path,
+        ).toString("utf8"),
+      );
+      return entry
+        ? {
+            mode: entry[1]!,
+            type: "blob",
+            oid: entry[2]!,
+            size: Number(entry[3]),
+          }
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const entry = tree.entry(path);
+  return entry &&
+    (entry.mode === "100644" || entry.mode === "100755") &&
+    entry.type === "blob" &&
+    entry.size !== undefined
+    ? entry
+    : undefined;
+}
+
+/**
+ * Read every repository citation's tree entry, then every in-bound body, in
+ * one batch each; repositoryCitation then refuses or resolves each one from
+ * memory exactly as it would alone.
+ */
+function prefetchCitations(
+  tree: BaseTree,
+  citations: { path: string; heading: string }[],
+): void {
+  tree.load(citations.map((citation) => citation.path));
+  tree.read(
+    citations.flatMap(({ path, heading }) => {
+      const entry = repositoryEntry(tree, path);
+      return entry &&
+        entry.size! <=
+          (heading
+            ? MAX_REPOSITORY_SECTION_FILE_BYTES
+            : MAX_REPOSITORY_CITATION_BYTES)
+        ? [entry.oid]
+        : [];
+    }),
+  );
 }
 
 /** Bound of the cited repository bytes one plan revision carries inline. */
@@ -297,19 +378,15 @@ export function revisionCitedSections(
   const sections: { path: string; heading: string; content: string }[] = [];
   const seen = new Set<string>();
   let bytes = 0;
+  const tree = new BaseTree(checkout, baseSha);
+  prefetchCitations(tree, citations);
   for (const { path, heading } of citations) {
     const key = JSON.stringify([path, heading]);
     if (seen.has(key)) continue;
     seen.add(key);
     let content: string;
     try {
-      content = repositoryCitation(
-        checkout,
-        baseSha,
-        "revision",
-        path,
-        heading,
-      ).content;
+      content = repositoryCitation(tree, "revision", path, heading).content;
     } catch {
       continue;
     }
@@ -522,8 +599,9 @@ export function assertWorkerInputSources(
   graph: WorkGraph,
   sources: PlanningSource[],
   checkout: string,
+  tree = new BaseTree(checkout, graph.baseSha),
 ): void {
-  const inputs = workerInputSources(graph, sources, checkout);
+  const inputs = workerInputSources(graph, sources, checkout, tree);
   for (const [index, item] of workShapes(graph).entries()) {
     if (
       JSON.stringify(item.inputSources) !==
@@ -882,25 +960,154 @@ function selectedHeadings(body: string): SourceSelector[] {
     });
 }
 
-function pinnedText(checkout: string, baseSha: string, path: string): string {
-  if (
+function validSourcePath(path: string): boolean {
+  return !(
     !path ||
     path.startsWith("/") ||
     path.includes("\\") ||
+    path.includes("\0") ||
     path.split("/").some((part) => !part || part === "." || part === "..")
-  )
-    throw new Error(`Invalid planning source path: ${path}`);
-  let bytes: Buffer;
-  try {
-    if (
-      pinnedGit(checkout, "cat-file", "-t", `${baseSha}:${path}`).trim() !==
-      "blob"
-    )
-      throw new Error("Planning source must be a file");
-    bytes = pinnedGitRaw(checkout, "show", `${baseSha}:${path}`);
-  } catch {
-    throw new Error(`Planning source ${path} is missing at base ${baseSha}`);
+  );
+}
+
+/** One tree entry at a base commit, as `ls-tree -l` reports it. */
+interface BaseTreeEntry {
+  mode: string;
+  type: string;
+  oid: string;
+  /** Blob size; undefined for a tree or submodule entry. */
+  size?: number;
+}
+
+/** Literal path operands per `ls-tree` call, well under any argument limit. */
+const LS_TREE_PATH_BYTES = 65_536;
+
+/**
+ * Exact entries and blob bytes of one base commit, read in batches: one
+ * `ls-tree -lz` for many paths and one `cat-file --batch` for many blobs,
+ * instead of several pinned git processes per path. A commit's tree and a
+ * blob's bytes are immutable, so a reader memoizes what it read for its
+ * lifetime (one validation or resolution).
+ */
+class BaseTree {
+  private readonly entries = new Map<string, BaseTreeEntry | null>();
+  private readonly blobs = new Map<string, Buffer>();
+  constructor(
+    readonly checkout: string,
+    readonly baseSha: string,
+  ) {}
+
+  /** Resolve these paths' entries; a path that is absent resolves to null. */
+  load(paths: Iterable<string>): void {
+    const pending = [...new Set(paths)].filter(
+      (path) => validSourcePath(path) && !this.entries.has(path),
+    );
+    while (pending.length) {
+      const chunk: string[] = [];
+      let bytes = 0;
+      while (
+        pending.length &&
+        (chunk.length === 0 || bytes < LS_TREE_PATH_BYTES)
+      ) {
+        const path = pending.shift()!;
+        chunk.push(path);
+        bytes += Buffer.byteLength(path) + 1;
+      }
+      for (const path of chunk) this.entries.set(path, null);
+      const list = (paths: string[]): string | undefined => {
+        try {
+          return pinnedGitRaw(
+            this.checkout,
+            "ls-tree",
+            "-lz",
+            this.baseSha,
+            "--",
+            ...paths,
+          ).toString("utf8");
+        } catch {
+          return undefined;
+        }
+      };
+      // A failed batch must not refuse its other paths: list them one by one,
+      // so each failure stays with its own citation.
+      const output =
+        list(chunk) ??
+        (chunk.length > 1
+          ? chunk.map((path) => list([path]) ?? "").join("\0")
+          : "");
+      const requested = new Set(chunk);
+      for (const record of output.split("\0")) {
+        const entry = /^(\d{6}) (\w+) ([a-f0-9]{40,64}) +(\d+|-)\t(.*)$/s.exec(
+          record,
+        );
+        if (!entry || !requested.has(entry[5]!)) continue;
+        this.entries.set(entry[5]!, {
+          mode: entry[1]!,
+          type: entry[2]!,
+          oid: entry[3]!,
+          ...(entry[4] === "-" ? {} : { size: Number(entry[4]) }),
+        });
+      }
+    }
   }
+
+  entry(path: string): BaseTreeEntry | undefined {
+    if (!validSourcePath(path)) return undefined;
+    this.load([path]);
+    return this.entries.get(path) ?? undefined;
+  }
+
+  /** Read these blobs' bytes with one `cat-file --batch`. */
+  read(oids: Iterable<string>): void {
+    const pending = [...new Set(oids)].filter((oid) => !this.blobs.has(oid));
+    if (!pending.length) return;
+    let output: Buffer;
+    try {
+      output = pinnedGitRawInput(
+        this.checkout,
+        `${pending.join("\n")}\n`,
+        "cat-file",
+        "--batch",
+      );
+    } catch {
+      return;
+    }
+    // Each object is "<oid> <type> <size>\n", its bytes, then "\n".
+    let cursor = 0;
+    for (const oid of pending) {
+      const end = output.indexOf(10, cursor);
+      if (end < 0) return;
+      const header = /^([a-f0-9]{40,64}) blob (\d+)$/.exec(
+        output.subarray(cursor, end).toString("utf8"),
+      );
+      if (!header || header[1] !== oid) return;
+      const size = Number(header[2]);
+      const bytes = output.subarray(end + 1, end + 1 + size);
+      if (bytes.length !== size || output[end + 1 + size] !== 10) return;
+      this.blobs.set(oid, Buffer.from(bytes));
+      cursor = end + 1 + size + 1;
+    }
+  }
+
+  /** The exact bytes of a blob entry, or undefined when they cannot be read. */
+  bytes(entry: BaseTreeEntry): Buffer | undefined {
+    this.read([entry.oid]);
+    return this.blobs.get(entry.oid);
+  }
+}
+
+function pinnedText(
+  checkout: string,
+  baseSha: string,
+  path: string,
+  tree = new BaseTree(checkout, baseSha),
+): string {
+  if (!validSourcePath(path))
+    throw new Error(`Invalid planning source path: ${path}`);
+  const entry = tree.entry(path);
+  const bytes = entry?.type === "blob" ? tree.bytes(entry) : undefined;
+  if (!bytes)
+    throw new Error(`Planning source ${path} is missing at base ${baseSha}`);
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
@@ -1028,8 +1235,22 @@ export function validateCitations(
   graph: WorkGraph,
   sources: PlanningSource[],
   checkout: string,
+  tree = new BaseTree(checkout, graph.baseSha),
 ): void {
   const repositoryBytes = new Map<string, number>();
+  prefetchCitations(
+    tree,
+    workShapes(graph).flatMap((item) =>
+      item.citations.flatMap((citation) => {
+        const heading = citation.heading ?? "";
+        return citationChoices(
+          sources.filter((source) => source.path === citation.path),
+        ).some((choice) => choice.heading === heading)
+          ? []
+          : [{ path: citation.path, heading }];
+      }),
+    ),
+  );
   for (const item of workShapes(graph)) {
     for (const citation of item.citations) {
       const matching = sources.filter(
@@ -1042,13 +1263,7 @@ export function validateCitations(
         continue;
       let cited: ReturnType<typeof repositoryCitation>;
       try {
-        cited = repositoryCitation(
-          checkout,
-          graph.baseSha,
-          item.id,
-          citation.path,
-          heading,
-        );
+        cited = repositoryCitation(tree, item.id, citation.path, heading);
       } catch (error) {
         if (!matching.length || !heading) throw error;
         throw new GraphValidationError(
@@ -1107,8 +1322,10 @@ export function validateGraphSources(
 ): void {
   assertPreIntegrationCheckSources(graph, sources);
   assertKnownCheckNames(graph, workflowCheckNames(checkout, baseSha));
-  validateCitations(graph, sources, checkout);
-  assertWorkerInputSources(graph, sources, checkout);
+  // Both checks read the same citations at the graph base: once, in batches.
+  const tree = new BaseTree(checkout, graph.baseSha);
+  validateCitations(graph, sources, checkout, tree);
+  assertWorkerInputSources(graph, sources, checkout, tree);
   validateCommandProvenance(graph, sources, checkout);
   for (const item of workShapes(graph)) {
     if (

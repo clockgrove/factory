@@ -4337,7 +4337,8 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         },
       );
       assert.equal(timeoutInvocation.providerAttempt, 1);
-      assert.equal(timeoutInvocation.providerMaxAttempts, 1);
+      // Only a login rejected before any model turn may use the other two.
+      assert.equal(timeoutInvocation.providerMaxAttempts, 3);
       assert.equal(
         timeoutEvents.filter((event) => event.type === "started").length,
         1,

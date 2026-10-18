@@ -895,8 +895,9 @@ class RepositoryProgramConfigured extends Error {
 }
 
 /**
- * One `git config --show-scope --get-regexp` read as [scope, key, value].
- * NUL-terminated records ("scope\0key\nvalue\0"), so a value containing a
+ * One `git config --show-scope --get-regexp` read as [scope, key, value,
+ * origin]. NUL-terminated records ("scope\0key\nvalue\0", with
+ * "origin\0" after the scope when requested), so a value containing a
  * newline or tab stays inside its own entry. A key without a value (an
  * implicit boolean true) has value undefined.
  */
@@ -904,7 +905,8 @@ function configEntries(
   directory: string,
   env: NodeJS.ProcessEnv,
   pattern: string,
-): [string, string, string | undefined][] {
+  origins = false,
+): [string, string, string | undefined, string | undefined][] {
   // Without the directory there is no repository configuration to read;
   // the command itself reports the missing directory.
   if (!existsSync(directory)) return [];
@@ -915,6 +917,7 @@ function configEntries(
       directory,
       "config",
       "--null",
+      ...(origins ? ["--show-origin"] : []),
       "--show-scope",
       "--includes",
       "--get-regexp",
@@ -929,16 +932,24 @@ function configEntries(
       `git config --get-regexp failed (${result.status}): ${result.stderr}`,
     );
   const fields = result.stdout.split("\0");
-  if (fields.pop() !== "" || fields.length % 2)
+  const width = origins ? 3 : 2;
+  if (fields.pop() !== "" || fields.length % width)
     throw new Error("git config returned malformed entries");
-  const entries: [string, string, string | undefined][] = [];
-  for (let index = 0; index < fields.length; index += 2) {
-    const entry = fields[index + 1]!;
+  const entries: [string, string, string | undefined, string | undefined][] =
+    [];
+  for (let index = 0; index < fields.length; index += width) {
+    const entry = fields[index + width - 1]!;
+    const origin = origins ? fields[index + 1] : undefined;
     const newline = entry.indexOf("\n");
     entries.push(
       newline < 0
-        ? [fields[index]!, entry, undefined]
-        : [fields[index]!, entry.slice(0, newline), entry.slice(newline + 1)],
+        ? [fields[index]!, entry, undefined, origin]
+        : [
+            fields[index]!,
+            entry.slice(0, newline),
+            entry.slice(newline + 1),
+            origin,
+          ],
     );
   }
   return entries;
@@ -947,21 +958,207 @@ function configEntries(
 const repositoryScope = (scope: string) =>
   scope === "local" || scope === "worktree";
 
+/**
+ * Passed repository-program checks, so a later Factory git command in the
+ * same repository does not spawn a second `git config` process. Spawning
+ * from a large controller costs tens of milliseconds each. An entry holds
+ * only a pass, keyed by directory, pattern and the exact environment, and is
+ * valid while every file that decides which repository configuration git
+ * reads keeps its exact stat identity (see repositoryConfigFiles). Any
+ * change, including a same-size rewrite or a replaced `.git`, runs the full
+ * check again.
+ */
+const programChecks = new Map<string, { paths: string[]; identity: string }>();
+const PROGRAM_CHECKS = 256;
+/** A file modified this recently may change again within its timestamp tick. */
+const RACY_CONFIG_MS = 2_000;
+/** Configuration whose presence makes a pass uncacheable, or locates the file. */
+const CACHE_PROBE =
+  "core\\.repositoryformatversion|extensions\\.worktreeconfig|include\\..+|includeif\\..+";
+const CACHE_BLOCKERS =
+  /^(extensions\.worktreeconfig|include\..+|includeif\..+)$/;
+
+/**
+ * The files deciding which repository configuration git reads in a
+ * directory that is itself a repository root: a main worktree (`.git`
+ * directory), a linked worktree (`.git` file naming its gitdir and
+ * commondir) or a bare repository. Anything else (a subdirectory, a symlinked
+ * `.git`, an environment-selected gitdir) is not cached.
+ */
+function repositoryConfigFiles(
+  directory: string,
+):
+  | { gitdir: string; common: string; config: string; paths: string[] }
+  | undefined {
+  try {
+    const dot = join(directory, ".git");
+    const stat = lstatSync(dot, { throwIfNoEntry: false });
+    let gitdir: string;
+    if (stat?.isDirectory()) gitdir = dot;
+    else if (stat?.isFile()) {
+      const named = /^gitdir: (.+)\n?$/.exec(readFileSync(dot, "utf8"));
+      if (!named) return undefined;
+      gitdir = resolve(directory, named[1]!);
+    } else if (!stat) gitdir = directory;
+    else return undefined;
+    const commondir = join(gitdir, "commondir");
+    const common = existsSync(commondir)
+      ? resolve(gitdir, readFileSync(commondir, "utf8").trim())
+      : gitdir;
+    const config = join(common, "config");
+    return {
+      gitdir,
+      common,
+      config,
+      // Gitdir validity (HEAD, objects, refs) decides whether discovery stops
+      // here; the `.git` entry and commondir decide where it points.
+      paths: [
+        dot,
+        gitdir,
+        join(gitdir, "HEAD"),
+        commondir,
+        common,
+        join(common, "objects"),
+        join(common, "refs"),
+        config,
+      ],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Exact stat identities: inode and timestamps for files, inode alone for
+ * directories (whose timestamps change with every index or ref write), and
+ * absence. Undefined when a file changed within RACY_CONFIG_MS, or when any
+ * path is a symlink: lstat identifies the link, not its target, so a later
+ * change to the target (a config, commondir or HEAD it points at) would stay
+ * invisible.
+ */
+function statIdentity(paths: string[], racy: boolean): string | undefined {
+  const now = BigInt(Date.now()) * 1_000_000n;
+  const window = BigInt(RACY_CONFIG_MS) * 1_000_000n;
+  const identities: string[] = [];
+  for (const path of paths) {
+    const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+    if (stat?.isSymbolicLink()) return undefined;
+    if (!stat) identities.push("absent");
+    else if (stat.isDirectory())
+      identities.push(`d:${stat.dev}:${stat.ino}:${stat.mode}`);
+    else {
+      if (racy && (now - stat.mtimeNs < window || now - stat.ctimeNs < window))
+        return undefined;
+      identities.push(
+        `f:${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`,
+      );
+    }
+  }
+  return identities.join("\0");
+}
+
+function sameFile(left: string, right: string): boolean {
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
 /** Refuse repository-scope programs, and for a remote command its transport. */
 function assertNoRepositoryPrograms(
   directory: string,
   env: NodeJS.ProcessEnv,
   remote: boolean,
 ): void {
-  const pattern = `^(${REPOSITORY_PROGRAMS}${remote ? `|${REPOSITORY_TRANSPORT}` : ""})$`;
-  for (const [scope, key, value] of configEntries(directory, env, pattern)) {
-    if (!repositoryScope(scope)) continue;
-    // Git LFS's own filter: the whole value must be one git-lfs writes.
-    if (value !== undefined && LFS_FILTER_COMMANDS[key]?.includes(value))
-      continue;
-    if (HARMLESS_TRANSPORT.test(key)) continue;
-    throw new RepositoryProgramConfigured(directory, key);
+  const programs = `${REPOSITORY_PROGRAMS}${remote ? `|${REPOSITORY_TRANSPORT}` : ""}`;
+  // An environment-selected repository is not located by directory alone.
+  const key =
+    env.GIT_DIR === undefined && env.GIT_COMMON_DIR === undefined
+      ? createHash("sha256")
+          .update(
+            JSON.stringify([
+              resolve(directory),
+              programs,
+              Object.entries(env).sort(([a], [b]) => (a < b ? -1 : 1)),
+            ]),
+          )
+          .digest("hex")
+      : undefined;
+  const cached = key ? programChecks.get(key) : undefined;
+  if (cached && statIdentity(cached.paths, false) === cached.identity) {
+    programChecks.delete(key!);
+    programChecks.set(key!, cached);
+    return;
   }
+  if (key) programChecks.delete(key);
+  // Identities are taken before git reads the configuration, so a change
+  // after this point always differs from the cached identity.
+  const files = key ? repositoryConfigFiles(directory) : undefined;
+  const identity = files && statIdentity(files.paths, true);
+  let located = false;
+  let cacheable = identity !== undefined;
+  for (const [scope, name, value, origin] of configEntries(
+    directory,
+    env,
+    `^(${programs}${cacheable ? `|${CACHE_PROBE}` : ""})$`,
+    cacheable,
+  )) {
+    if (!repositoryScope(scope)) continue;
+    // Every repository-scope entry must come from the one predicted file.
+    if (
+      cacheable &&
+      !(
+        origin?.startsWith("file:") &&
+        sameFile(resolve(directory, origin.slice(5)), files!.config)
+      )
+    )
+      cacheable = false;
+    if (CACHE_BLOCKERS.test(name)) {
+      cacheable = false;
+      continue;
+    }
+    if (name === "core.repositoryformatversion") {
+      located = true;
+      continue;
+    }
+    // Git LFS's own filter: the whole value must be one git-lfs writes.
+    if (value !== undefined && LFS_FILTER_COMMANDS[name]?.includes(value))
+      continue;
+    if (HARMLESS_TRANSPORT.test(name)) continue;
+    throw new RepositoryProgramConfigured(directory, name);
+  }
+  if (!cacheable || !located) return;
+  // Confirm git itself located the predicted repository (relative origins
+  // name files from its root), and that nothing changed meanwhile.
+  const discovered = spawnSync(
+    "git",
+    [
+      "-C",
+      directory,
+      "rev-parse",
+      "--path-format=absolute",
+      "--absolute-git-dir",
+      "--git-common-dir",
+    ],
+    { env, encoding: "utf8" },
+  );
+  const [gitdir, common, extra] =
+    discovered.status === 0 && !discovered.error
+      ? discovered.stdout.split("\n")
+      : [];
+  if (
+    !gitdir ||
+    !common ||
+    extra !== "" ||
+    !sameFile(gitdir, files!.gitdir) ||
+    !sameFile(common, files!.common) ||
+    statIdentity(files!.paths, true) !== identity
+  )
+    return;
+  programChecks.set(key!, { paths: files!.paths, identity: identity! });
+  if (programChecks.size > PROGRAM_CHECKS)
+    programChecks.delete(programChecks.keys().next().value!);
 }
 
 /** Tests serve origin from local bare repositories; nothing else sets this. */
@@ -1309,11 +1506,21 @@ export function pinnedGitRawWithin(
   return syncGit(checkout, args, true, timeoutMs);
 }
 
+/** `pinnedGitRaw` with standard input, such as a `cat-file --batch` request. */
+export function pinnedGitRawInput(
+  checkout: string,
+  input: string,
+  ...args: string[]
+): Buffer {
+  return syncGit(checkout, args, true, undefined, input);
+}
+
 function syncGit(
   checkout: string,
   args: string[],
   pinned: boolean,
   timeoutMs: number | undefined,
+  input?: string,
 ): Buffer {
   assertUnlocked(args);
   return classifiedGit(args, () => {
@@ -1323,6 +1530,7 @@ function syncGit(
       const result = spawnSync("git", factory.args, {
         env: traces ? traces.env(factory.env) : factory.env,
         maxBuffer: Number.MAX_SAFE_INTEGER,
+        ...(input !== undefined && { input }),
         ...(timeoutMs !== undefined && {
           timeout: timeoutMs,
           killSignal: "SIGKILL" as const,

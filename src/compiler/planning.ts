@@ -1,5 +1,8 @@
 import { admitNativeReturn } from "./native-return.js";
-import { hasPrivateCheckpointScope } from "../recovery-checkpoint.js";
+import {
+  hasPrivateCheckpointScope,
+  withCheckpointDisposals,
+} from "../recovery-checkpoint.js";
 import { assertDeclaredConditions } from "../adaptive-routing.js";
 import {
   assertWorkflowRecipeGraph,
@@ -20,6 +23,7 @@ import {
 import {
   agentSessionContinuation,
   planningSessionInputDigest,
+  settledSessionSequence,
 } from "../agent-session.js";
 import { workflowCheckNames } from "../check-names.js";
 import {
@@ -179,7 +183,15 @@ export async function freshPlannerSession(
     currentRound(retained.currentTurn!.invocationId)
   )
     return;
-  await model.releaseSession(structuredClone(retained));
+  // The pre-effect checkpoint of the call after this session's last turn
+  // (normally the graph review) already holds its frozen state, so its
+  // disposal needs no publication of its own; the release is admitted with
+  // the revision's own pre-effect checkpoint.
+  const frozenAt = settledSessionSequence(state, retained);
+  await withCheckpointDisposals(
+    () => model.releaseSession!(structuredClone(retained)),
+    frozenAt === undefined ? {} : { frozenAt },
+  );
   session.checkpoint({ ...structuredClone(retained), status: "released" });
 }
 

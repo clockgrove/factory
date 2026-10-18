@@ -110,6 +110,26 @@ export function claudeAuthenticationFailure(
   );
 }
 
+/**
+ * Whether an authentication failure is the API rejecting the credentials it
+ * was sent (status 401) before any model response. Clients sharing one login
+ * rotate its OAuth token, so a session that read it just before a rotation
+ * gets this; a fresh session reads the new token. Claude Agent SDK 0.3.281
+ * reports no structured cause (revoked, expired, invalid), only the status,
+ * so every such 401 qualifies; a login that stays rejected still stops.
+ */
+export function claudeCredentialRejected(
+  result: SDKResultMessage,
+  modelResponded: boolean,
+): boolean {
+  return (
+    !modelResponded &&
+    result.subtype === "success" &&
+    result.is_error &&
+    result.api_error_status === 401
+  );
+}
+
 /** Network settings a host may need to reach the Claude API. */
 const claudeNetworkEnvironment = [
   "HTTPS_PROXY",

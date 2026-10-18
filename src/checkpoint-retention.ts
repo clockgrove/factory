@@ -135,18 +135,36 @@ export function retiredHistory(
 export function retiredEvidence(
   repository: string,
   objective: number,
-  bytes: Uint8Array,
-  state: unknown,
+  digest: string,
+  /** The parsed snapshot; read only when a retirement names its digest. */
+  snapshot: () => unknown,
   acknowledged: (commit: string) => boolean,
 ): RetirementRecord | undefined {
-  if (!terminalContinuation(state)) return undefined;
   const record = readRetirement(repository, objective);
-  if (!record || record.stateDigest !== stateDigest(bytes)) return undefined;
+  if (!record || record.stateDigest !== digest) return undefined;
+  const state = snapshot();
+  if (!terminalContinuation(state)) return undefined;
   const restored =
     !!state &&
     typeof state === "object" &&
     (state as { restoration?: unknown }).restoration !== undefined;
   return restored || acknowledged(record.evidenceCommit) ? record : undefined;
+}
+
+/**
+ * retiredEvidence for a snapshot already known to be terminal history (not a
+ * restored record) at exactly this digest.
+ */
+export function retiredHistoryEvidence(
+  repository: string,
+  objective: number,
+  digest: string,
+  acknowledged: (commit: string) => boolean,
+): RetirementRecord | undefined {
+  const record = readRetirement(repository, objective);
+  return record?.stateDigest === digest && acknowledged(record.evidenceCommit)
+    ? record
+    : undefined;
 }
 
 /**

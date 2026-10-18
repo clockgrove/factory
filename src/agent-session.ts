@@ -24,7 +24,10 @@ import type {
 import { assertApprovedPlaybookPin } from "./contracts.js";
 import { assertDurableValue } from "./execution/checkpoint.js";
 import { graphDigest } from "./graph-amendments.js";
-import { withCheckpointDisposals } from "./recovery-checkpoint.js";
+import {
+  checkpointJournalSequence,
+  withCheckpointDisposals,
+} from "./recovery-checkpoint.js";
 import { settleInterruptedPaidCall } from "./step.js";
 import type { ContinuationState } from "./state.js";
 
@@ -355,6 +358,48 @@ export function assertAgentSessions(state: ContinuationState): void {
   }
 }
 
+/**
+ * The journal sequence at which this controller saved each settled `ready`
+ * session in its current form (process memory only; a restart forgets it).
+ */
+const settledSessions = new Map<
+  string,
+  { ref: AgentSessionRef; sequence: number }
+>();
+const SETTLED_SESSION_LIMIT = 256;
+function settledSessionKey(repository: string, ref: AgentSessionRef): string {
+  return JSON.stringify([repository, ref.adapter, ref.identity]);
+}
+function recordSettledSession(repository: string, ref: AgentSessionRef): void {
+  const key = settledSessionKey(repository, ref);
+  settledSessions.delete(key);
+  if (
+    ref.status !== "ready" ||
+    (ref.currentTurn && ref.currentTurn.resources !== "settled")
+  )
+    return;
+  const sequence = checkpointJournalSequence(repository);
+  if (sequence === undefined) return;
+  settledSessions.set(key, { ref: structuredClone(ref), sequence });
+  if (settledSessions.size > SETTLED_SESSION_LIMIT)
+    settledSessions.delete(settledSessions.keys().next().value!);
+}
+
+/**
+ * The journal sequence as of which `ref`, exactly as retained, was saved
+ * settled and `ready`: any acknowledgment at or above it holds the session's
+ * frozen state. Undefined when this controller did not see that save.
+ */
+export function settledSessionSequence(
+  state: ContinuationState,
+  ref: AgentSessionRef,
+): number | undefined {
+  const saved = settledSessions.get(settledSessionKey(state.repository, ref));
+  return saved && isDeepStrictEqual(saved.ref, ref)
+    ? saved.sequence
+    : undefined;
+}
+
 /** The caller already owns the lifecycle mutation lock and paid-step admission. */
 export function agentSessionContinuation(
   state: ContinuationState,
@@ -559,6 +604,7 @@ export function agentSessionContinuation(
       state.agentSessions ??= {};
       state.agentSessions[entryKey] = structuredClone(ref);
       save();
+      recordSettledSession(state.repository, ref);
       previous = JSON.stringify(ref);
       if (["unavailable", "released"].includes(ref.status)) {
         delete continuation.retained;

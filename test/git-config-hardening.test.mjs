@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import childProcess, { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   lstatSync,
@@ -9,6 +10,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -1070,4 +1072,133 @@ test("controller Git ignores executable configuration shared by a worker worktre
     manyPacket.observations.some((row) => row[1] === false && row[2] === "t"),
   );
   assert.equal(existsSync(marker), false);
+});
+
+test("a cached repository-program pass still refuses every later configuration change", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-git-program-cache-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Count real git processes through a PATH shim (pinned Git keeps PATH).
+  const shim = join(root, "bin");
+  const log = join(root, "spawns.log");
+  mkdirSync(shim);
+  writeFileSync(
+    join(shim, "git"),
+    `#!/bin/sh\necho "$1 $2 $3" >>'${log}'\nexec '${execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim()}' "$@"\n`,
+    { mode: 0o755 },
+  );
+  const spawns = () =>
+    existsSync(log) ? readFileSync(log, "utf8").split("\n").length - 1 : 0;
+  const checkout = join(root, "checkout");
+  mkdirSync(checkout);
+  git(checkout, "init", "-q", "-b", "main");
+  writeFileSync(join(checkout, "a.txt"), "a\n");
+  git(checkout, "add", ".");
+  git(
+    checkout,
+    "-c",
+    "user.name=Factory",
+    "-c",
+    "user.email=factory@example.invalid",
+    "commit",
+    "-qm",
+    "base",
+  );
+  const worker = join(root, "worker");
+  git(checkout, "worktree", "add", "-q", "--detach", worker, "HEAD");
+  const bare = join(root, "bare.git");
+  execFileSync("git", ["clone", "-q", "--bare", checkout, bare]);
+  const other = join(root, "other");
+  execFileSync("git", ["clone", "-q", checkout, other]);
+  const included = join(root, "included.gitconfig");
+  writeFileSync(included, "");
+  const including = join(root, "including");
+  execFileSync("git", ["clone", "-q", checkout, including]);
+  git(including, "config", "include.path", included);
+  // A worker can replace the shared config, or a linked worktree's commondir,
+  // with a symlink to a file it owns. lstat identifies only the link, so a
+  // pass through any symlink is never cached.
+  const symlinkedConfig = join(root, "symlinked-config");
+  execFileSync("git", ["clone", "-q", checkout, symlinkedConfig]);
+  const ownedConfig = join(root, "owned.gitconfig");
+  renameSync(join(symlinkedConfig, ".git", "config"), ownedConfig);
+  symlinkSync(ownedConfig, join(symlinkedConfig, ".git", "config"));
+  const symlinkedCommon = join(root, "symlinked-common");
+  git(checkout, "worktree", "add", "-q", "--detach", symlinkedCommon, "HEAD");
+  const commondir = join(
+    git(symlinkedCommon, "rev-parse", "--absolute-git-dir"),
+    "commondir",
+  );
+  const ownedCommondir = join(root, "owned-commondir");
+  writeFileSync(ownedCommondir, `${join(checkout, ".git")}\n`);
+  rmSync(commondir);
+  symlinkSync(ownedCommondir, commondir);
+  // A pass is cached only once its files are past the racy timestamp window.
+  await new Promise((done) => setTimeout(done, 2_100));
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${shim}:${originalPath}`;
+  t.after(() => {
+    process.env.PATH = originalPath;
+  });
+  const head = git(checkout, "rev-parse", "HEAD");
+  const uncached = [including, symlinkedConfig, symlinkedCommon];
+  for (const directory of [checkout, worker, bare, ...uncached]) {
+    assert.equal(pinnedGit(directory, "rev-parse", "HEAD"), head);
+    const before = spawns();
+    assert.equal(pinnedGit(directory, "rev-parse", "HEAD"), head);
+    // A cached pass spawns only the command; an include or symlink never is.
+    assert.equal(spawns() - before, uncached.includes(directory) ? 2 : 1);
+  }
+  process.env.PATH = originalPath;
+  // Repository-scope programs added after a cached pass still refuse.
+  git(checkout, "config", "filter.x.smudge", "x");
+  assert.throws(
+    () => pinnedGit(checkout, "rev-parse", "HEAD"),
+    /defines filter\.x\.smudge/,
+  );
+  // The linked worktree shares that common configuration.
+  assert.throws(
+    () => pinnedGit(worker, "rev-parse", "HEAD"),
+    /defines filter\.x\.smudge/,
+  );
+  git(bare, "config", "merge.x.driver", "x");
+  assert.throws(
+    () => pinnedGit(bare, "rev-parse", "HEAD"),
+    /defines merge\.x\.driver/,
+  );
+  // An included file is not fingerprinted, so a pass through it is not cached.
+  writeFileSync(included, '[filter "y"]\n\tclean = y\n');
+  assert.throws(
+    () => pinnedGit(including, "rev-parse", "HEAD"),
+    /defines filter\.y\.clean/,
+  );
+  // A worker that repoints its `.git` at another repository is checked there.
+  git(checkout, "config", "--unset", "filter.x.smudge");
+  assert.equal(pinnedGit(worker, "rev-parse", "HEAD"), head);
+  git(other, "config", "filter.z.process", "z");
+  writeFileSync(join(worker, ".git"), `gitdir: ${join(other, ".git")}\n`);
+  assert.throws(
+    () => pinnedGit(worker, "rev-parse", "HEAD"),
+    /defines filter\.z\.process/,
+  );
+  // The symlink targets gain programs after the passes above: both refuse.
+  appendFileSync(ownedConfig, '[filter "s"]\n\tprocess = s\n');
+  assert.throws(
+    () => pinnedGit(symlinkedConfig, "rev-parse", "HEAD"),
+    /defines filter\.s\.process/,
+  );
+  writeFileSync(ownedCommondir, `${join(other, ".git")}\n`);
+  assert.throws(
+    () => pinnedGit(symlinkedCommon, "rev-parse", "HEAD"),
+    /defines filter\.z\.process/,
+  );
+  // A batched citation lookup refuses only its own invalid path (a NUL can
+  // never reach git), never the valid citations beside it.
+  const { revisionCitedSections } = await import("../dist/compiler/sources.js");
+  assert.deepEqual(
+    revisionCitedSections(checkout, head, [
+      { path: "a\0.txt", heading: "" },
+      { path: "a.txt", heading: "" },
+    ]),
+    [{ path: "a.txt", heading: "", content: "a\n" }],
+  );
 });

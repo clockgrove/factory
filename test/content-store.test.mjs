@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import {
+import fs, {
   chmodSync,
   createReadStream,
   existsSync,
@@ -107,12 +107,14 @@ import {
   assertRecoveryCheckpointManifest,
   awaitCheckpointAdmission,
   checkpointClosureOriginals,
+  checkpointJournalSequence,
   gitPersistenceStatus,
   inspectRecoveryCheckpoint,
   readRecoveryCheckpointBodies,
   readVerifiedRecoveryCheckpoint,
   synchronizeRecoveryCheckpoint,
   withRecoveryCheckpointClosureReads,
+  withCheckpointDisposals,
   withRecoveryCheckpointCommandOperation,
   withRecoveryCheckpointControllerVerification,
   withRecoveryCheckpointOperation,
@@ -1254,6 +1256,43 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     retiredClosure.contentRefs.length < closure.contentRefs.length,
     true,
   );
+  // A controller reads, hashes and parses a retired snapshot once: its later
+  // closures reuse it at the exact private-file fingerprint, and any rewrite
+  // reads it again. A change within the racy window is never reused.
+  const retiredPath = statePath(repository, 1);
+  const settledFor = 2100 - (Date.now() - statSync(retiredPath).ctimeMs);
+  if (settledFor > 0)
+    await new Promise((resolve) => setTimeout(resolve, settledFor));
+  const retiredOpens = { count: 0 };
+  const originalOpen = fs.openSync;
+  fs.openSync = function (path, ...rest) {
+    if (path === retiredPath) retiredOpens.count++;
+    return Reflect.apply(originalOpen, this, [path, ...rest]);
+  };
+  syncBuiltinESMExports();
+  try {
+    await withRecoveryCheckpointControllerVerification(
+      { config, buildClosure },
+      async () => {
+        const first = await buildClosure();
+        assert.equal(retiredOpens.count, 1);
+        const reused = await buildClosure();
+        assert.equal(retiredOpens.count, 1);
+        assert.deepEqual(reused, first);
+        assert.deepEqual(first, retiredClosure);
+        writeFileSync(retiredPath, readFileSync(retiredPath));
+        retiredOpens.count = 0;
+        const reread = await buildClosure();
+        assert.equal(retiredOpens.count, 1);
+        assert.deepEqual(reread, first);
+        await buildClosure();
+        assert.equal(retiredOpens.count, 2, "a racy change is read again");
+      },
+    );
+  } finally {
+    fs.openSync = originalOpen;
+    syncBuiltinESMExports();
+  }
   // Only the exact accounting originals the evidence commit holds leave: a
   // record written for the retired Objective afterwards stays live.
   retainWorkerAccounting(
@@ -1533,6 +1572,14 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
         repository,
       ),
   );
+  // A planning return guards no effect: it publishes nothing itself, and the
+  // next pre-effect admission (the following planning call's) carries it.
+  assert.equal(returnClosureBuilds, 0);
+  assert.equal(publicationCount(), beforeReturnPublications);
+  await withRecoveryCheckpointScope(
+    { config, buildClosure: buildReturnClosure },
+    () => awaitCheckpointAdmission(repository, "before-effect"),
+  );
   assert.equal(returnClosureBuilds, 1);
   assert.equal(publicationCount(), beforeReturnPublications + 1);
   const returnedArchive = await readVerifiedRecoveryCheckpoint(config);
@@ -1557,6 +1604,31 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(
     gitPersistenceStatus(config).lastAcknowledged.sequence,
     returnedArchive.manifest.sequence,
+  );
+  // Disposing material frozen at or below an acknowledged sequence needs no
+  // publication of its own; material frozen after it still does.
+  await withRecoveryCheckpointScope(
+    { config, buildClosure: buildReturnClosure },
+    async () => {
+      const frozenAt = checkpointJournalSequence(repository);
+      assert.equal(
+        frozenAt,
+        gitPersistenceStatus(config).lastAcknowledged.sequence,
+      );
+      saveState(statePath(repository, 1), cancelled);
+      await withCheckpointDisposals(
+        () => awaitCheckpointAdmission(repository, "explicit"),
+        { frozenAt },
+      );
+      assert.equal(returnClosureBuilds, 1);
+      assert.equal(publicationCount(), beforeReturnPublications + 1);
+      await withCheckpointDisposals(
+        () => awaitCheckpointAdmission(repository, "explicit"),
+        { frozenAt: checkpointJournalSequence(repository) },
+      );
+      assert.equal(returnClosureBuilds, 2);
+      assert.equal(publicationCount(), beforeReturnPublications + 2);
+    },
   );
   // Keep this storage-only fixture terminal before the later cancellation
   // lineage workflow; its pending retention owner supplies no dispatched work.

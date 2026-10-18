@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  type BigIntStats,
   closeSync,
   constants,
   existsSync,
@@ -29,6 +30,7 @@ import {
   ARCHIVED_EVIDENCE,
   type RetirementRecord,
   retiredEvidence,
+  retiredHistoryEvidence,
   stateDigest,
   terminalHistory,
 } from "./checkpoint-retention.js";
@@ -67,8 +69,11 @@ import {
   acknowledgedArchiveCommit,
   assertRecoveryCheckpointManifest,
   cachedRecoveryCheckpointGitPack,
+  cachedRetiredCheckpointSnapshot,
+  type RetiredCheckpointSnapshot,
   recoveryCheckpointGitPackObservation,
   retainRecoveryCheckpointGitPack,
+  retainRetiredCheckpointSnapshot,
   withRecoveryCheckpointClosureReads,
 } from "./recovery-checkpoint.js";
 import type { RepositoryMemoryBinding } from "./repository-memory.js";
@@ -1076,6 +1081,21 @@ export async function verifyLocalMemoryBodyReferenceClosure(
 }
 
 function privateBytes(path: string, root: string): Buffer {
+  return privateOriginal(path, root).bytes;
+}
+
+function privateFingerprint(value: BigIntStats): string {
+  return [
+    value.dev,
+    value.ino,
+    value.mode,
+    value.uid,
+    value.size,
+    value.mtimeNs,
+    value.ctimeNs,
+  ].join(":");
+}
+function assertPrivatePath(path: string, root: string): void {
   const bound = relative(resolve(root), resolve(path));
   if (
     !bound ||
@@ -1084,40 +1104,65 @@ function privateBytes(path: string, root: string): Buffer {
     realpathSync(path) !== resolve(path)
   )
     throw new Error("Recovery checkpoint original is outside its private root");
+}
+function assertPrivateFile(stat: BigIntStats): void {
+  if (
+    !stat.isFile() ||
+    stat.uid !== BigInt(process.getuid!()) ||
+    stat.mode & 0o077n
+  )
+    throw new Error(
+      "Recovery checkpoint original must be an owned private regular file",
+    );
+}
+
+/** The exact bytes of an owned private original and the fingerprint they were read at. */
+function privateOriginal(
+  path: string,
+  root: string,
+): { bytes: Buffer; fingerprint: string; ctimeNs: bigint; readAtNs: bigint } {
+  assertPrivatePath(path, root);
+  // Before the read: the racy window is measured from here, not from use.
+  const readAtNs = BigInt(Date.now()) * 1_000_000n;
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd, { bigint: true });
-    const fingerprint = (value: typeof stat) =>
-      [
-        value.dev,
-        value.ino,
-        value.mode,
-        value.uid,
-        value.size,
-        value.mtimeNs,
-        value.ctimeNs,
-      ].join(":");
-    if (
-      !stat.isFile() ||
-      stat.uid !== BigInt(process.getuid!()) ||
-      stat.mode & 0o077n ||
-      fingerprint(stat) !== fingerprint(lstatSync(path, { bigint: true }))
-    )
+    assertPrivateFile(stat);
+    const fingerprint = privateFingerprint(stat);
+    if (fingerprint !== privateFingerprint(lstatSync(path, { bigint: true })))
       throw new Error(
         "Recovery checkpoint original must be an owned private regular file",
       );
     const bytes = readFileSync(fd);
     if (
-      fingerprint(stat) !== fingerprint(fstatSync(fd, { bigint: true })) ||
-      fingerprint(stat) !== fingerprint(lstatSync(path, { bigint: true })) ||
+      fingerprint !== privateFingerprint(fstatSync(fd, { bigint: true })) ||
+      fingerprint !== privateFingerprint(lstatSync(path, { bigint: true })) ||
       realpathSync(path) !== resolve(path)
     )
       throw new Error("Recovery checkpoint original changed during its read");
-    return bytes;
+    return { bytes, fingerprint, ctimeNs: stat.ctimeNs, readAtNs };
   } finally {
     closeSync(fd);
   }
 }
+
+/**
+ * The current fingerprint of an owned private original, with the same
+ * containment and ownership checks as privateOriginal, without reading it.
+ */
+function privateOriginalFingerprint(path: string, root: string): string {
+  assertPrivatePath(path, root);
+  const stat = lstatSync(path, { bigint: true });
+  assertPrivateFile(stat);
+  return privateFingerprint(stat);
+}
+
+/**
+ * A file changed within this window of its read could be rewritten again in
+ * the same filesystem timestamp tick with the same size, invisibly to its
+ * fingerprint, so its facts are not reused (as Git treats "racy" index entries).
+ */
+const RACY_SNAPSHOT_NS = 2_000_000_000n;
 
 /** Authenticate one recorded worker return, never enumerate its native storage. */
 export function localWorkerReturn(
@@ -1383,18 +1428,59 @@ async function buildRecoveryCheckpointClosureLocal(input: {
           .sort()
       : [];
     const retired = new Map<number, RetirementRecord>();
+    // Each snapshot is read, hashed and parsed at most once per closure, and
+    // the retirement and the closure use exactly those bytes. A retired one
+    // this controller already retained is reused at its exact fingerprint.
+    const snapshots = new Map<
+      number,
+      | { retained: RetiredCheckpointSnapshot }
+      | {
+          bytes: Buffer;
+          digest: string;
+          fingerprint: string;
+          ctimeNs: bigint;
+          readAtNs: bigint;
+          value: () => unknown;
+        }
+    >();
+    const acknowledged = (commit: string) =>
+      acknowledgedArchiveCommit(config, commit);
     for (const id of objectiveIds) {
       const path = join(objectiveDirectory, id, "state.json");
       if (!existsSync(path)) continue;
-      const bytes = privateBytes(path, root);
+      const retained = cachedRetiredCheckpointSnapshot(
+        path,
+        privateOriginalFingerprint(path, root),
+      );
+      if (retained) {
+        const record = retiredHistoryEvidence(
+          config.repository,
+          Number(id),
+          retained.digest,
+          acknowledged,
+        );
+        if (record) {
+          retired.set(Number(id), record);
+          snapshots.set(Number(id), { retained });
+          continue;
+        }
+      }
+      const original = privateOriginal(path, root);
+      let parsed: { value: unknown } | undefined;
+      const value = () => {
+        parsed ??= { value: JSON.parse(original.bytes.toString("utf8")) };
+        return parsed.value;
+      };
+      const digest = stateDigest(original.bytes);
       const record = retiredEvidence(
         config.repository,
         Number(id),
-        bytes,
-        JSON.parse(bytes.toString("utf8")),
-        (commit) => acknowledgedArchiveCommit(config, commit),
+        digest,
+        value,
+        acknowledged,
       );
       if (record) retired.set(Number(id), record);
+      snapshots.set(Number(id), { ...original, digest, value });
     }
     for (const entry of memory.typedGitObjects ?? [])
       objects.set(`${entry.kind}:${entry.sha}`, entry);
@@ -1425,15 +1511,36 @@ async function buildRecoveryCheckpointClosureLocal(input: {
     for (const id of objectiveIds) {
       for (const name of ["state.json", "pre-state.json"] as const) {
         const path = join(objectiveDirectory, id, name);
-        if (!existsSync(path)) continue;
-        const bytes = privateBytes(path, root);
+        const snapshot =
+          name === "state.json" ? snapshots.get(Number(id)) : undefined;
+        if (snapshot && "retained" in snapshot) {
+          const { ref } = snapshot.retained;
+          gaps.push({
+            path: `objectives/${id}/state.json`,
+            availability: ARCHIVED_EVIDENCE,
+            required: false,
+            reason:
+              "Retired terminal Objective: its complete evidence is in the archive history",
+            evidenceCommit: retired.get(Number(id))!.evidenceCommit,
+          });
+          files.push({
+            kind: "continuation",
+            path: `objectives/${id}/state.json`,
+            ref,
+            visibility: "private",
+          });
+          refs.set(refKey(ref), ref);
+          continue;
+        }
+        if (!snapshot && !existsSync(path)) continue;
+        const bytes = snapshot ? snapshot.bytes : privateBytes(path, root);
         if (name === "state.json") {
-          const value = JSON.parse(bytes.toString("utf8"));
+          const value = snapshot
+            ? snapshot.value()
+            : JSON.parse(bytes.toString("utf8"));
           // Retire only the exact bytes the retirement check read; a snapshot
-          // that changed since (for example, a retry) takes the full path.
-          const retirement = retired.get(Number(id));
-          if (retirement && stateDigest(bytes) !== retirement.stateDigest)
-            retired.delete(Number(id));
+          // that appeared since takes the full path.
+          if (!snapshot) retired.delete(Number(id));
           if (retired.has(Number(id))) {
             // A retired snapshot is history and is not parsed: a shape this
             // version no longer reads stays opaque (#1457). A restored record
@@ -1461,9 +1568,19 @@ async function buildRecoveryCheckpointClosureLocal(input: {
               required: false,
               reason:
                 "Retired terminal Objective: its complete evidence is in the archive history",
-              evidenceCommit: retirement!.evidenceCommit,
+              evidenceCommit: retired.get(Number(id))!.evidenceCommit,
             });
             await include(`objectives/${id}/${name}`, "continuation", bytes);
+            if (
+              !state &&
+              snapshot &&
+              snapshot.readAtNs - snapshot.ctimeNs > RACY_SNAPSHOT_NS
+            )
+              retainRetiredCheckpointSnapshot(path, {
+                fingerprint: snapshot.fingerprint,
+                digest: snapshot.digest,
+                ref: files.at(-1)!.ref,
+              });
             continue;
           }
           const state = parsePortableContinuation(

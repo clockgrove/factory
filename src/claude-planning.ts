@@ -41,6 +41,7 @@ import {
 import {
   claudeAuthenticationFailure,
   claudeAuthenticationValues,
+  claudeCredentialRejected,
   claudeWorkerEnvironment,
 } from "./execution/claude.js";
 import {
@@ -715,6 +716,11 @@ function structuredFault(
 type RequestBaseData = ClaudeOwnedSession["data"] & {
   requestBase?: string;
   diagnosis?: true;
+  /**
+   * The provider rejected the login before the last request reached a model.
+   * A retry starts afresh rather than resending that request on top of it.
+   */
+  credentialRejected?: true;
 };
 
 /** One Claude planning turn's request. */
@@ -952,9 +958,10 @@ class ClaudePlanningTransport implements PlanningTransport {
     // session, and no later turn continues it. The settled conversation it
     // replaces is released; a revision after a diagnosis plans afresh anyway.
     const retained = continuation?.retained;
+    const retainedData = retained?.data as RequestBaseData | undefined;
     if (
       retained &&
-      (diagnosis || (retained.data as RequestBaseData | undefined)?.diagnosis)
+      (diagnosis || retainedData?.diagnosis || retainedData?.credentialRejected)
     ) {
       await this.releaseSession(structuredClone(retained));
       continuation!.checkpoint({
@@ -1251,6 +1258,12 @@ class ClaudePlanningTransport implements PlanningTransport {
         schema: args.schema,
       });
     } catch (error) {
+      if (
+        owned &&
+        error instanceof AuthenticationRequiredError &&
+        error.credentialRejected
+      )
+        (owned.data as RequestBaseData).credentialRejected = true;
       checkpointRejected = isCheckpointAdmissionFailure(error);
       if (isCheckpointAdmissionFailure(error) && nativeSpawnAttempted)
         markCheckpointEffectDispatched(error);
@@ -1507,10 +1520,14 @@ class ClaudePlanningTransport implements PlanningTransport {
     if (failure !== undefined)
       state.fault ??= structuredFault(failure, status, facts);
     if (authentication)
-      throw new AuthenticationRequiredError(failure!, {
-        provider: "claude",
-        command: "claude auth login",
-      });
+      throw new AuthenticationRequiredError(
+        failure!,
+        { provider: "claude", command: "claude auth login" },
+        // An initialized session settles its failed turn, so a retry can
+        // release it and start afresh.
+        facts.initialized &&
+          claudeCredentialRejected(result, facts.modelResponded),
+      );
     if (failure !== undefined) throw new Error(failure);
     if (result.subtype === "success")
       state.response = JSON.stringify(

@@ -932,6 +932,12 @@ export class AuthenticationRequiredError extends Error {
   constructor(
     message: string,
     readonly authentication: AuthenticationRequest,
+    /**
+     * The provider rejected the credentials it was sent (HTTP 401) before any
+     * model turn. Another client on the host may have just rotated a shared
+     * login, so a fresh session that reads it again can succeed.
+     */
+    readonly credentialRejected = false,
   ) {
     super(message);
   }

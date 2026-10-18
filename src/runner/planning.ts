@@ -974,11 +974,15 @@ export async function prepareObjective(args: {
     }
     if (unacceptable) plan.review.acceptable = false;
     else delete plan.review.acceptable;
+    // One answer settles every operator question the review asked.
+    const asked = openReviewDecision(preparation);
     preparation.coordinator.phase = "waiting";
     preparation.coordinator.phaseStartedAt = new Date().toISOString();
     preparation.coordinator.waitReason = unacceptable
       ? `Plan needs a decision: it cannot be accepted (${unacceptable}); refuse it to plan again`
-      : `Plan needs a decision: ${plan.review.failure?.question ?? plan.review.findings[0]?.question ?? "inspect the plan review"}`;
+      : asked && asked.count > 1
+        ? `Plan needs a decision on ${asked.count} review questions:\n${asked.question}`
+        : `Plan needs a decision: ${plan.review.failure?.question ?? plan.review.findings[0]?.question ?? "inspect the plan review"}`;
     saveState(path, preparation);
     return preparation;
   }

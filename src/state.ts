@@ -386,7 +386,7 @@ export function openPlanningQuestion(
  */
 export function openReviewDecision(
   state: ContinuationState,
-): { question: string } | undefined {
+): { question: string; count: number } | undefined {
   if (!isPreparationState(state) || !state.plan) return undefined;
   const review = state.plan.review;
   if (review.status !== "needs-human" || review.acceptable === false)
@@ -400,7 +400,26 @@ export function openReviewDecision(
       ),
     ),
   ];
-  return questions.length ? { question: questions.join("\n") } : undefined;
+  return questions.length
+    ? { question: questions.join("\n"), count: questions.length }
+    : undefined;
+}
+
+/**
+ * The review's questions when an answer can revise the plan: its draft is
+ * retained. Without one (older state) decide refuses the answer, so guidance
+ * offers only a refusal.
+ */
+export function reviewDecisionAnswerable(
+  state: ContinuationState,
+): { question: string; count: number } | undefined {
+  const asked = openReviewDecision(state);
+  return asked &&
+    isPreparationState(state) &&
+    state.planningRecovery?.phase === "stopped" &&
+    state.planningRecovery.answer
+    ? asked
+    : undefined;
 }
 
 /** Planning stopped at its revision allowance with only fix findings left: accepting grants more revisions. */

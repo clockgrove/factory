@@ -69,6 +69,7 @@ import {
   openAmendmentQuestion,
   openPlanningQuestion,
   openReviewDecision,
+  reviewDecisionAnswerable,
   planningRevisionGrantable,
   projectionStarted,
 } from "./state.js";
@@ -2649,7 +2650,12 @@ function preparationStatusDocument(
     planningStopped:
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
     planningQuestion: Boolean(openPlanningQuestion(preparation)),
-    planReviewQuestion: Boolean(openReviewDecision(preparation)),
+    planReviewQuestions: reviewDecisionAnswerable(preparation)?.count ?? 0,
+    // An older plan without its retained draft: an answer cannot revise it.
+    ...(openReviewDecision(preparation) &&
+    !reviewDecisionAnswerable(preparation)
+      ? { planReviewDraftMissing: true as const }
+      : {}),
     planningRevisionGrant: planningRevisionGrantable(preparation)
       ? PLANNING_REVISION_GRANT
       : null,

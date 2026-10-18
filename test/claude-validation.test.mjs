@@ -3,15 +3,20 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
+  symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { LocalContentStore } from "../dist/content/local.js";
+import { copyOwnedFile } from "../dist/execution/claude-files.js";
 import {
   checkWorkHandoff,
   runDeclaredValidation,
@@ -206,4 +211,61 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
     /\n- own\/x\.actual\.json \(3 bytes, replaced the earlier copy\)\n/,
   );
   assert.equal(status(worktree), tracked);
+  // Without a shell, the worker commits a returned file with copy_file: the
+  // exact bytes of a long single line, never passed through the model.
+  const golden = Buffer.from(`{"v":"${"x".repeat(1_500_000)}"}`);
+  writeFileSync(join(worktree, "own/big.actual.json"), golden);
+  const sha256 = createHash("sha256").update(golden).digest("hex");
+  assert.deepEqual(
+    copyOwnedFile(
+      worktree,
+      outputs.ownedPaths,
+      "own/big.actual.json",
+      "own/goldens/big.json",
+    ),
+    {
+      from: "own/big.actual.json",
+      to: "own/goldens/big.json",
+      bytes: golden.length,
+      sha256,
+    },
+  );
+  assert.deepEqual(
+    readFileSync(join(worktree, "own/goldens/big.json")),
+    golden,
+  );
+  assert.match(status(worktree), /^\?\? own\/$/m);
+  // A copy replaces an owned file in place and reaches tracked sources too.
+  copyOwnedFile(worktree, outputs.ownedPaths, "own/x.actual.json", "a.txt");
+  assert.equal(readFileSync(join(worktree, "a.txt"), "utf8"), "two");
+  writeFileSync(join(worktree, "a.txt"), "changed\n");
+  // Unowned or escaping destinations, Git metadata, links on either side
+  // and oversized sources are refused, and nothing is written.
+  const refused = (from, to, message) =>
+    assert.throws(
+      () => copyOwnedFile(worktree, outputs.ownedPaths, from, to),
+      message,
+    );
+  refused("own/x.actual.json", "new.txt", /new\.txt is not owned/);
+  refused("own/x.actual.json", "own/../new.txt", /normalized path/);
+  refused("own/x.actual.json", `${dirname(worktree)}/out`, /outside/);
+  refused("own/x.actual.json", "own/.git/config", /Git metadata/);
+  symlinkSync("../new.txt", join(worktree, "own/link.json"));
+  refused(
+    "own/link.json",
+    "own/y.json",
+    /own\/link\.json is not a regular file/,
+  );
+  refused("own/x.actual.json", "own/link.json", /own\/link\.json exists/);
+  linkSync(join(worktree, "new.txt"), join(worktree, "own/hard.json"));
+  refused("own/x.actual.json", "own/hard.json", /hard link/);
+  symlinkSync("..", join(worktree, "own/up"));
+  refused("own/up/new.txt", "own/y.json", /real directories/);
+  refused("own/x.actual.json", "own/up/a.txt", /real directories/);
+  truncateSync(join(worktree, "own/big.actual.json"), 16 * 1024 * 1024 + 1);
+  refused("own/big.actual.json", "own/y.json", /over the 16 MiB copy bound/);
+  assert.equal(existsSync(join(worktree, "own/y.json")), false);
+  assert.equal(readFileSync(join(worktree, "new.txt"), "utf8"), "edited\n");
+  assert.equal(readFileSync(join(worktree, "a.txt"), "utf8"), "changed\n");
+  rmSync(dirname(worktree), { recursive: true, force: true });
 });

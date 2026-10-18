@@ -51,9 +51,9 @@ import {
 } from "./claude-validation.js";
 import {
   createFactoryFilesMcp,
-  deletionAuthorized,
+  factoryFilesAuthorized,
   factoryFilesServerName,
-  factoryFilesToolName,
+  factoryFilesToolNames,
   type PreparedClaudeFiles,
 } from "./claude-files.js";
 import {
@@ -147,8 +147,9 @@ function assertInitialization(
   const configuredTools = new Set(config.tools);
   if (request.environment?.mcp) configuredTools.add(factoryMcpToolName);
   if (validating) configuredTools.add(factoryValidationToolName);
-  const deleting = deletionAuthorized(input);
-  if (deleting) configuredTools.add(factoryFilesToolName);
+  const fileTools = factoryFilesAuthorized(input);
+  if (fileTools)
+    for (const tool of factoryFilesToolNames) configuredTools.add(tool);
   const unexpectedTool = message.tools.find(
     (tool) => !configuredTools.has(tool),
   );
@@ -157,7 +158,7 @@ function assertInitialization(
   const expectedServers = [
     ...(request.environment?.mcp ? [factoryMcpServerName] : []),
     ...(validating ? [factoryValidationServerName] : []),
-    ...(deleting ? [factoryFilesServerName] : []),
+    ...(fileTools ? [factoryFilesServerName] : []),
   ];
   if (
     message.mcp_servers.length !== expectedServers.length ||
@@ -373,7 +374,7 @@ async function main(): Promise<void> {
         }),
       );
     }
-    if (deletionAuthorized(input)) {
+    if (factoryFilesAuthorized(input)) {
       files = await turn.race(
         createFactoryFilesMcp({
           worktree: input.request.worktree,

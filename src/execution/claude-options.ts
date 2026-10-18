@@ -10,7 +10,7 @@ import {
 import {
   factoryFilesServerName,
   factoryFilesToolAllowed,
-  factoryFilesToolName,
+  factoryFilesToolNames,
   type PreparedClaudeFiles,
 } from "./claude-files.js";
 import {
@@ -85,7 +85,7 @@ function claudeToolAllowed(
     );
   // Readiness is an attempt-wide gate, including native reads and writes.
   if (input.request.environment?.mcp && !prepared?.isReady()) return false;
-  if (toolName === factoryFilesToolName)
+  if (factoryFilesToolNames.includes(toolName))
     return (
       !!files?.isReady() &&
       factoryFilesToolAllowed(input, toolName, toolInput, mcpServer)

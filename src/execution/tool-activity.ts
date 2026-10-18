@@ -12,7 +12,8 @@ interface ToolActivity {
 
 const TOOL_NAME = /^[A-Za-z0-9_.:/-]{1,128}$/;
 const PROGRAM = /^[A-Za-z0-9._+-]{1,64}$/;
-const FILE_FIELDS = ["file_path", "notebook_path", "path"] as const;
+/** `to` is Factory copy_file's destination, the file it changes. */
+const FILE_FIELDS = ["file_path", "notebook_path", "path", "to"] as const;
 
 const SHELL_WRAPPER = /^\s*(?:\S*\/)?(?:ba|z)?sh\s+-l?c\s+['"]?/;
 

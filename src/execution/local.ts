@@ -113,6 +113,7 @@ import {
   workerSourceDelivery,
 } from "./harness-support.js";
 import {
+  assertNoNestedGit,
   checkStagedCandidate,
   scanCollectionObservation,
   scanPrivateStaging,
@@ -1172,6 +1173,8 @@ export async function freezeRejectedCollection(args: {
     reason: "collector-safety-rejected",
   };
   try {
+    // Before host-side Git reads anything: no nested repository it would enter.
+    assertNoNestedGit(args.worktree);
     if (pinnedGit(args.worktree, "rev-parse", "HEAD") !== args.request.baseSha)
       throw workFault("Rejected worker changed its admitted HEAD");
     const prospective = [
@@ -1424,6 +1427,8 @@ export async function collectWorktreeResult(
   // database. Bound inputs and the manifest stay on disk until the commit
   // lands: a transient fault before then repeats collection from the top and
   // verifies the same bytes again.
+  // Before host-side Git stages anything: no nested repository it would enter.
+  assertNoNestedGit(worktree);
   try {
     await pinnedGitMagicAsync(
       worktree,
@@ -2146,7 +2151,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
           undefined,
           undefined,
           // assertPinnedNpmScripts checked these commands' inputs above.
-          { ...this.commandSandbox, packageInputsVerified: true },
+          {
+            ...this.commandSandbox,
+            packageInputsVerified: true,
+            packageInputsBase: request.baseSha,
+          },
         );
         if (context?.cancelled())
           throw cancelledFault(

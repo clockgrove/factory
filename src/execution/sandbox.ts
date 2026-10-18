@@ -271,7 +271,16 @@ export interface CommandSandboxConfig {
   packageStore?: string;
   /** Further host directories commands may read, such as a toolchain outside the PATH. */
   readOnlyPaths?: string[];
+  /** Resource limits for each command; omitted fields use the defaults. */
+  limits?: {
+    /** Size of the private /tmp and /dev/shm, each, in MiB (default 1024). */
+    tmpMiB?: number;
+    /** RLIMIT_NPROC: processes the operator's account may have while it runs (default 4096). */
+    processes?: number;
+  };
 }
+
+export const DEFAULT_SANDBOX_LIMITS = { tmpMiB: 1024, processes: 4096 };
 
 /** The effective policy; strict unless the operator's configuration relaxes it. */
 export interface CommandSandboxPolicy {
@@ -279,27 +288,51 @@ export interface CommandSandboxPolicy {
   network: "off" | "package-install";
   packageStore?: string;
   readOnlyPaths: string[];
+  limits: { tmpMiB: number; processes: number };
   /**
    * Set only by a caller that checked these commands' package inputs
    * (assertPinnedNpmScripts) on this exact tree; without it no install gets
    * network or a writable store.
    */
   packageInputsVerified?: true;
+  /**
+   * The attempt's base commit. A verified install reaches the network only
+   * when its lockfiles and package-manager configuration are byte-identical
+   * to this commit's: a candidate's lockfile could otherwise name tarball
+   * URLs that carry the repository's contents anywhere.
+   */
+  packageInputsBase?: string;
 }
 
 export const STRICT_COMMAND_SANDBOX: CommandSandboxPolicy = {
   required: true,
   network: "off",
   readOnlyPaths: [],
+  limits: DEFAULT_SANDBOX_LIMITS,
 };
 
 export function assertCommandSandboxConfig(value: unknown): void {
   const sandbox = record(value, "sandbox");
   refuseUnknownFields(
     sandbox,
-    ["required", "network", "packageStore", "readOnlyPaths"],
+    ["required", "network", "packageStore", "readOnlyPaths", "limits"],
     "sandbox",
   );
+  if (sandbox.limits !== undefined) {
+    const limits = record(sandbox.limits, "sandbox.limits");
+    refuseUnknownFields(limits, ["tmpMiB", "processes"], "sandbox.limits");
+    const integer = (value: unknown, minimum: number) =>
+      value === undefined ||
+      (Number.isSafeInteger(value) && (value as number) >= minimum);
+    if (!integer(limits.tmpMiB, 16))
+      throw new Error(
+        "sandbox.limits.tmpMiB must be an integer of at least 16",
+      );
+    if (!integer(limits.processes, 64))
+      throw new Error(
+        "sandbox.limits.processes must be an integer of at least 64",
+      );
+  }
   if (sandbox.required !== undefined && typeof sandbox.required !== "boolean")
     throw new Error("sandbox.required must be a boolean");
   if (
@@ -336,6 +369,7 @@ export function commandSandboxPolicy(config?: {
     network: sandbox.network ?? "off",
     ...(sandbox.packageStore && { packageStore: sandbox.packageStore }),
     readOnlyPaths: [...(sandbox.readOnlyPaths ?? [])],
+    limits: { ...DEFAULT_SANDBOX_LIMITS, ...sandbox.limits },
   };
 }
 
@@ -386,7 +420,13 @@ function bubblewrapExecutable(): string | undefined {
 }
 
 export type CommandSandboxAvailability =
-  | { available: true; executable: string; version: string }
+  | {
+      available: true;
+      executable: string;
+      version: string;
+      /** This bubblewrap can size a tmpfs (`--size`, 0.10 and later). */
+      tmpfsSize: boolean;
+    }
   | { available: false; installed: boolean; detail: string };
 
 let availability: CommandSandboxAvailability | undefined;
@@ -442,12 +482,18 @@ function probeCommandSandbox(): CommandSandboxAvailability {
     ],
     { encoding: "utf8", timeout: 10_000, env: {} },
   );
-  if (probe.status === 0)
+  if (probe.status === 0) {
+    const help = spawnSync(executable, ["--help"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
     return {
       available: true,
       executable,
       version: version.stdout.trim() || "unknown",
+      tmpfsSize: /^\s*--size\b/m.test(`${help.stdout}${help.stderr}`),
     };
+  }
   return {
     available: false,
     installed: true,
@@ -475,7 +521,7 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
     return {
       mode: "bubblewrap",
       ...shared,
-      detail: `${found.version} at ${found.executable}; network ${policy.network === "off" ? "off for every command" : "only for script-disabled package installs"}`,
+      detail: `${found.version} at ${found.executable}; network ${policy.network === "off" ? "off for every command" : "only for verified package installs"}; at most ${policy.limits?.processes ?? DEFAULT_SANDBOX_LIMITS.processes} processes; private /tmp ${found.tmpfsSize ? `${policy.limits?.tmpMiB ?? DEFAULT_SANDBOX_LIMITS.tmpMiB} MiB` : "unsized (this bubblewrap has no --size)"}`,
     };
   if (!policy.required && !found.installed)
     return {
@@ -681,6 +727,23 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
         mounts.set(resolver, "ro");
     }
   }
+  // Process limit: RLIMIT_NPROC, set by util-linux prlimit inside the sandbox.
+  const prlimit = ["/usr/bin/prlimit", "/bin/prlimit"].find((path) =>
+    existsSync(path),
+  );
+  if (!prlimit)
+    throw configFault(
+      "prlimit (util-linux) is not installed; the command sandbox cannot limit processes",
+      "Install util-linux's prlimit on this host",
+    );
+  // A policy recorded before limits existed gets the defaults.
+  const limits = { ...DEFAULT_SANDBOX_LIMITS, ...input.policy.limits };
+  const tmpBytes = String(limits.tmpMiB * 1024 * 1024);
+  const sized = (path: string) => [
+    ...(found.tmpfsSize ? ["--size", tmpBytes] : []),
+    "--tmpfs",
+    path,
+  ];
   // Parents before children, so a nested mount lands inside its parent.
   const ordered = [...mounts.entries()].sort(
     ([a], [b]) =>
@@ -696,8 +759,8 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
       "/proc",
       "--dev",
       "/dev",
-      "--tmpfs",
-      "/tmp",
+      ...sized("/dev/shm"),
+      ...sized("/tmp"),
       ...ordered.flatMap(([path, access]) => [
         access === "rw" ? "--bind" : "--ro-bind",
         path,
@@ -709,6 +772,9 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
       "/",
       "--chdir",
       checkout,
+      "--",
+      prlimit,
+      `--nproc=${limits.processes}`,
       "--",
       "/bin/sh",
       "-c",

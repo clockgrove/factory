@@ -13,6 +13,7 @@ import {
   truncateSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -22,7 +23,10 @@ import {
   checkWorkHandoff,
   runDeclaredValidation,
   workerFilesTree,
+  workerValidationCommands,
 } from "../dist/execution/claude-validation.js";
+import { commandSandboxAvailability } from "../dist/execution/sandbox.js";
+import { validateTree } from "../dist/validation.js";
 
 const status = (worktree) =>
   execFileSync("git", ["-C", worktree, "status", "--porcelain"], {
@@ -390,4 +394,207 @@ test("declared commands run in an OS sandbox that hides the host and keeps loopb
   );
   assert.equal(leaked.passed, false);
   assert.doesNotMatch(leaked.text, /secret/);
+});
+
+test("host-side Git never enters a nested repository sandboxed code could write", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-nested-git-"));
+  const marker = join(root, "ran-outside-the-sandbox");
+  const git = (cwd, ...args) =>
+    execFileSync(
+      "git",
+      [
+        "-C",
+        cwd,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        ...args,
+      ],
+      { encoding: "utf8" },
+    );
+  // A nested repository whose clean filter runs a program: host-side Git
+  // runs it once a gitlink in the index makes it recurse.
+  const plant = (directory) =>
+    [
+      `mkdir -p '${directory}'`,
+      `cd '${directory}'`,
+      "git init -q",
+      "echo '* filter=evil' > .gitattributes && echo data > f",
+      "git add . && git -c user.name=t -c user.email=t@e commit -qm n",
+      `git config filter.evil.clean "sh -c 'touch ${marker}; cat'"`,
+      "touch -d '2000-01-01' f",
+    ].join(" && ");
+  const repository = (name) => {
+    const path = join(root, name);
+    execFileSync("git", ["init", "-q", path]);
+    writeFileSync(join(path, "a.txt"), "base\n");
+    git(path, "add", "a.txt");
+    git(path, "commit", "-qm", "base");
+    return path;
+  };
+  // Route 1: a worker's embedded repository would become a gitlink in the
+  // Validate snapshot; the snapshot is refused before Git stages it.
+  const first = repository("embedded");
+  execFileSync("sh", ["-c", plant(join(first, "x"))]);
+  const embedded = await runDeclaredValidation(first, ["true"], 1).catch(
+    (error) => error,
+  );
+  assert.match(String(embedded.message ?? embedded.text), /nested Git entry/);
+  assert.equal(existsSync(marker), false);
+  rmSync(join(first, "x"), { recursive: true, force: true });
+  // A validation command that plants one in its checkout leaves no gitlink:
+  // host-side status after it never enters the repository.
+  const planted = await runDeclaredValidation(
+    first,
+    [plant("y"), "git status --porcelain >/dev/null"],
+    2,
+  );
+  assert.equal(planted.passed, false);
+  assert.match(planted.text, /modified the result tree/);
+  assert.equal(existsSync(marker), false);
+  // Route 2: a base with a submodule gitlink gets no Validate, a worker's
+  // repository behind it is refused before Git stages, and no tree with a
+  // gitlink is validated.
+  const second = repository("submodule");
+  git(
+    second,
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `160000,${git(second, "rev-parse", "HEAD").trim()},sub`,
+  );
+  git(second, "commit", "-qm", "submodule");
+  assert.deepEqual(
+    workerValidationCommands({
+      config: { tools: ["Validate"], allowedTools: ["Validate"] },
+      request: {
+        worktree: second,
+        item: { validation: [{ command: "true" }] },
+      },
+    }),
+    [],
+  );
+  execFileSync("sh", ["-c", plant(join(second, "sub"))]);
+  const behindGitlink = await runDeclaredValidation(second, ["true"], 3).catch(
+    (error) => error,
+  );
+  assert.match(
+    String(behindGitlink.message ?? behindGitlink.text),
+    /nested Git entry/,
+  );
+  assert.equal(existsSync(marker), false);
+  rmSync(join(second, "sub"), { recursive: true, force: true });
+  await assert.rejects(
+    validateTree(
+      second,
+      join(root, "validation"),
+      git(second, "rev-parse", "HEAD").trim(),
+      git(second, "rev-parse", "HEAD^{tree}").trim(),
+      ["true"],
+    ),
+    /submodule gitlinks/,
+  );
+  assert.equal(existsSync(marker), false);
+});
+
+test("a verified install reaches the network only with its base lockfile, and commands are resource-limited", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-install-network-"));
+  // A real dependency tarball served on host loopback: only an install in the
+  // host's network can fetch it.
+  const pack = join(root, "pack");
+  mkdirSync(join(pack, "package"), { recursive: true });
+  writeFileSync(
+    join(pack, "package", "package.json"),
+    JSON.stringify({ name: "dep", version: "1.0.0" }),
+  );
+  execFileSync("tar", ["-czf", join(pack, "dep.tgz"), "-C", pack, "package"]);
+  const tarball = readFileSync(join(pack, "dep.tgz"));
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url);
+    response.end(tarball);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const url = (query) =>
+      `http://127.0.0.1:${server.address().port}/dep.tgz${query}`;
+    const manifest = {
+      name: "installing",
+      version: "1.0.0",
+      dependencies: { dep: "1.0.0" },
+    };
+    const lock = (resolved, bytes = tarball) =>
+      JSON.stringify({
+        name: "installing",
+        version: "1.0.0",
+        lockfileVersion: 3,
+        requires: true,
+        packages: {
+          "": manifest,
+          "node_modules/dep": {
+            version: "1.0.0",
+            resolved,
+            integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
+          },
+        },
+      });
+    const worktree = join(root, "worktree");
+    execFileSync("git", ["init", "-q", worktree]);
+    writeFileSync(join(worktree, "package.json"), JSON.stringify(manifest));
+    writeFileSync(join(worktree, "package-lock.json"), lock(url("")));
+    writeFileSync(join(worktree, ".gitignore"), "node_modules/\n");
+    execFileSync("git", ["-C", worktree, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      worktree,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "-qm",
+      "base",
+    ]);
+    const store = join(root, "store");
+    const policy = {
+      required: true,
+      network: "package-install",
+      packageStore: store,
+      readOnlyPaths: [],
+      limits: { tmpMiB: 64, processes: 512 },
+    };
+    const install = "npm ci --ignore-scripts";
+    const run = (commands, number) =>
+      runDeclaredValidation(
+        worktree,
+        commands,
+        number,
+        undefined,
+        undefined,
+        policy,
+        { sourceDeclared: [install] },
+      );
+    const limited = [
+      `test "$(awk '/Max processes/{print $3}' /proc/self/limits)" = 512`,
+      ...(commandSandboxAvailability().tmpfsSize
+        ? [`test "$(df -k /tmp | awk 'NR==2{print $2}')" = 65536`]
+        : []),
+    ];
+    // The base lockfile: the verified install fetches from the network.
+    const online = await run([install, ...limited], 1);
+    assert.equal(online.passed, true, online.text);
+    assert.deepEqual(requests, ["/dep.tgz"]);
+    // A candidate's lockfile naming another URL (and bytes the store lacks)
+    // installs offline: no request leaves the sandbox.
+    writeFileSync(
+      join(worktree, "package-lock.json"),
+      lock(url("?repository-contents"), Buffer.from("other bytes")),
+    );
+    // The install fails where it connects (its own loopback); npm retries.
+    await assert.rejects(run([install], 2), /ECONNREFUSED/);
+    assert.deepEqual(requests, ["/dep.tgz"]);
+  } finally {
+    server.close();
+  }
 });

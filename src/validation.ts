@@ -29,6 +29,7 @@ import {
   sandboxedCommand,
 } from "./execution/sandbox.js";
 import { StepFault, transient } from "./fault.js";
+import { indexHasGitlinks } from "./execution/staged-candidate.js";
 import { lfsFiltered } from "./media.js";
 import { ownsPath } from "./ownership.js";
 import {
@@ -327,6 +328,59 @@ function dependencyInputsChanged(
   );
 }
 
+/** Files that choose where an install fetches from and what it fetches. */
+const PACKAGE_NETWORK_INPUTS = [
+  "package.json",
+  "pnpm-lock.yaml",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  ".npmrc",
+  "pnpm-workspace.yaml",
+  ".pnpmfile.cjs",
+  ".pnpmfile.mjs",
+  ".pnpmfile.js",
+];
+
+function packageNetworkInputsUnchanged(
+  worktree: string,
+  base: string,
+  commit: string,
+): boolean {
+  try {
+    return (
+      pinnedGitRaw(
+        worktree,
+        "diff-tree",
+        "-r",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        base,
+        commit,
+        "--",
+        ...PACKAGE_NETWORK_INPUTS,
+      ).length === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+function treeHasGitlinks(checkout: string, commit: string): boolean {
+  return pinnedGitRaw(checkout, "ls-tree", "-r", "-z", "--full-tree", commit)
+    .toString("utf8")
+    .split("\0")
+    .some((entry) => entry.startsWith("160000 "));
+}
+
+const gitlinkRefusal = () =>
+  new StepFault({
+    kind: "config",
+    detail:
+      "Factory does not validate trees that contain submodule gitlinks: host-side Git would enter repositories sandboxed commands can write",
+    fix: "Use Factory on a repository without submodules",
+  });
+
 interface ValidationPreparation {
   commands: string[];
   observe?: (entry: ValidationObservation) => void;
@@ -359,6 +413,7 @@ export async function validateTree(
       `Validation environment unavailable: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  if (treeHasGitlinks(checkout, commit)) throw gitlinkRefusal();
   await removeValidationWorktree(checkout, worktree);
   await addWorktree(checkout, worktree, commit);
   try {
@@ -436,6 +491,10 @@ export async function validateCheckout(
     );
   if (pinnedGitRaw(worktree, "status", "--porcelain").length)
     throw new Error("Validation worktree is not initially clean");
+  // Sandboxed commands can write any directory of the checkout. Behind a
+  // gitlink, host-side Git would enter a repository they wrote, with its
+  // configuration; so no checkout with one is validated.
+  if (indexHasGitlinks(worktree)) throw gitlinkRefusal();
   const selectedLfs = await hydrateSelectedLfsBytes(
     worktree,
     lfsMembers,
@@ -576,6 +635,17 @@ export async function validateCheckout(
         sequenceIndex === 0 &&
         sandbox.packageInputsVerified === true &&
         packageBootstrap(check) !== undefined;
+      // Network only for an unchanged lockfile and configuration; a changed
+      // one installs offline from the store.
+      const online =
+        install &&
+        sandbox.network === "package-install" &&
+        sandbox.packageInputsBase !== undefined &&
+        packageNetworkInputsUnchanged(
+          worktree,
+          sandbox.packageInputsBase,
+          commit,
+        );
       let home = homeRoot;
       if (install) {
         home = mkdtempSync(join(tmpdir(), "factory-install-home-"));
@@ -592,7 +662,7 @@ export async function validateCheckout(
           TMP: temporaryRoot,
           TEMP: temporaryRoot,
         },
-        network: install && sandbox.network === "package-install",
+        network: online,
         packageInstall: install,
         policy: sandbox,
       });
@@ -1273,7 +1343,11 @@ export async function validateWorkItem(
     selectedArtifacts,
     undefined,
     // The package inputs were just checked for exactly these commands.
-    { ...sandbox, packageInputsVerified: true },
+    {
+      ...sandbox,
+      packageInputsVerified: true,
+      packageInputsBase: predecessorSha ?? acceptedBaseSha,
+    },
   );
   // Keep the installation selector identity when only this item's producers
   // were selected. QA and final validation still use the complete selection.

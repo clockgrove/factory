@@ -1,3 +1,4 @@
+import { indexHasGitlinks } from "./execution/staged-candidate.js";
 import { existsSync, lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { stateRoot } from "./config.js";
@@ -220,6 +221,8 @@ function readWorkerActivity(
  */
 function worktreeChanges(worktree: string): string[] | undefined {
   try {
+    // Behind a gitlink, status would enter a repository the worker can write.
+    if (indexHasGitlinks(worktree)) return undefined;
     const raw = pinnedGitRawWithin(
       worktree,
       5000,

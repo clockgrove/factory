@@ -19,6 +19,7 @@ import {
 import { CandidateValidationFailure } from "../work-repair.js";
 import type { HarnessRequest, WorkHandoffNote } from "../contracts.js";
 import { readWorkHandoff } from "./harness-support.js";
+import { assertNoNestedGit, indexHasGitlinks } from "./staged-candidate.js";
 import {
   type CommandSandboxPolicy,
   STRICT_COMMAND_SANDBOX,
@@ -88,12 +89,17 @@ function validationAuthorized(input: {
   );
 }
 
-/** The declared commands a configured worker may run, or none. */
+/**
+ * The declared commands a configured worker may run, or none. None in a
+ * checkout with submodule gitlinks: Factory validates no such tree, and
+ * host-side Git would enter repositories the commands could write.
+ */
 export function workerValidationCommands(input: {
   config: { tools: readonly string[]; allowedTools: readonly string[] };
-  request: { item: { validation: { command: string }[] } };
+  request: { worktree: string; item: { validation: { command: string }[] } };
 }): string[] {
-  return validationAuthorized(input)
+  return validationAuthorized(input) &&
+    !indexHasGitlinks(input.request.worktree)
     ? input.request.item.validation.map((entry) => entry.command)
     : [];
 }
@@ -151,6 +157,8 @@ function bounded(text: string): string {
 
 /** The tree of the worker's current files without private staging, as collection stages them. */
 export async function workerFilesTree(worktree: string): Promise<string> {
+  // Host-side Git must not enter a repository the worker wrote.
+  assertNoNestedGit(worktree);
   await pinnedGitMagicAsync(
     worktree,
     "add",
@@ -160,6 +168,11 @@ export async function workerFilesTree(worktree: string): Promise<string> {
     ...privateStagingExclusions(worktree),
   );
   try {
+    // No snapshot with a gitlink is committed, let alone validated.
+    if (indexHasGitlinks(worktree))
+      throw new Error(
+        "Your files include a submodule gitlink; Factory refuses nested repositories and submodules",
+      );
     return pinnedGit(worktree, "write-tree");
   } finally {
     // Leave the worker's index as it was; collection stages its own result.
@@ -227,7 +240,12 @@ export async function runDeclaredValidation(
   } catch {
     // Unverified package inputs: the install gets neither.
   }
-  const { packageInputsVerified: _claimed, ...policy } = sandbox;
+  const {
+    packageInputsVerified: _claimed,
+    packageInputsBase: _base,
+    ...policy
+  } = sandbox;
+  const base = pinnedGit(worktree, "rev-parse", "HEAD");
   const root = join(workerValidationRoot(worktree), `${run}`);
   let produced = "";
   const inspectSettled =
@@ -257,7 +275,7 @@ export async function runDeclaredValidation(
       undefined,
       inspectSettled,
       packageInputsVerified
-        ? { ...policy, packageInputsVerified: true }
+        ? { ...policy, packageInputsVerified: true, packageInputsBase: base }
         : policy,
     );
     return {

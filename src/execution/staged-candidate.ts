@@ -135,6 +135,36 @@ function safeIgnoredLink(worktree: string, path: string): boolean {
   }
 }
 
+/**
+ * Refuse any `.git` below the checkout's own. Host-side Git (status, diff,
+ * add) recurses into a nested repository behind a gitlink and honours that
+ * repository's own configuration, which sandboxed code can write: a filter or
+ * other program there would run outside the sandbox. Checked before any
+ * host-side Git reads a worker's checkout. Links are not followed.
+ */
+export function assertNoNestedGit(root: string): void {
+  const inspect = (directory: string, relative: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!relative && entry.name === ".git") continue;
+      const path = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.name === ".git")
+        throw workFault(
+          `Worker created a nested Git entry at ${JSON.stringify(path)}; Factory refuses nested repositories and submodules`,
+        );
+      if (entry.isDirectory()) inspect(join(directory, entry.name), path);
+    }
+  };
+  inspect(root, "");
+}
+
+/** Whether the checkout's index holds a submodule gitlink (mode 160000). */
+export function indexHasGitlinks(worktree: string): boolean {
+  return pinnedGitRaw(worktree, "ls-files", "--stage", "-z")
+    .toString("utf8")
+    .split("\0")
+    .some((entry) => entry.startsWith("160000 "));
+}
+
 /** Recurse even through ignored directories: special files and unsafe links still fail. */
 function checkWorktreeEntries(
   worktree: string,
@@ -144,6 +174,10 @@ function checkWorktreeEntries(
     for (const name of readdirSync(directory)) {
       if (!relative && name === ".git") continue;
       const path = relative ? `${relative}/${name}` : name;
+      if (name === ".git")
+        throw workFault(
+          `Worker created a nested Git entry at ${JSON.stringify(path)}; Factory refuses nested repositories and submodules`,
+        );
       const absolute = join(directory, name);
       const type = lstatSync(absolute);
       if (type.isDirectory()) {

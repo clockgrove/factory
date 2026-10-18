@@ -53,6 +53,10 @@ import {
 } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
 import {
+  commandSandboxPolicy,
+  commandSandboxStatus,
+} from "./execution/sandbox.js";
+import {
   onlyCheckpointBoundsExceeded,
   gitPersistenceStatus,
   inspectRecoveryCheckpoint,
@@ -403,6 +407,7 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
     queue,
     ...current,
     durability: gitPersistenceStatus(config),
+    commandSandbox: commandSandboxStatus(commandSandboxPolicy(config)),
     provider: {
       name: readConfigFile(path).defaultProvider,
       selectedBy: "default",
@@ -422,6 +427,9 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
           : "Project observation: unavailable; status grants no new admission.",
       );
     console.log(`Durability: ${JSON.stringify(document.durability)}`);
+    console.log(
+      `Command sandbox: ${document.commandSandbox.mode}; ${document.commandSandbox.detail}`,
+    );
     console.log(
       `Provider for new queued work: ${document.provider.name} (${providerSummary(config)})`,
     );

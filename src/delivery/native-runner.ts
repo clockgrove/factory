@@ -1,3 +1,4 @@
+import { commandSandboxPolicy } from "../execution/sandbox.js";
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "../compiler.js";
@@ -973,6 +974,7 @@ export async function runNativeGraph(args: {
                 packageManagerUpdate(args.objectiveBody),
                 true,
                 config.reviewArtifacts,
+                commandSandboxPolicy(config),
               ),
           });
           await phases.reserve(item.id, "review");

@@ -11,6 +11,10 @@ import type { ProjectQueueBinding } from "./contracts.js";
 import { validateClaudeManagedConfig } from "./execution/claude-managed.js";
 import { validateOpenAIManagedConfig } from "./execution/openai-managed.js";
 import {
+  assertCommandSandboxConfig,
+  type CommandSandboxConfig,
+} from "./execution/sandbox.js";
+import {
   assertGitHubProjectStatusConfig,
   type GitHubProjectStatusConfig,
 } from "./github-project-state.js";
@@ -320,6 +324,11 @@ export interface FactoryConfig {
     network: "host" | "off";
     allowedSecretNames: string[];
   };
+  /**
+   * The OS sandbox worker-caused commands run in (validation, setup, probes,
+   * a worker's shell). Omitted: required, network off, no shared store.
+   */
+  sandbox?: CommandSandboxConfig;
 }
 
 const codexReasoningEfforts = new Set<CodexReasoningEffort>([
@@ -700,9 +709,11 @@ export function validateConfig(value: unknown): FactoryConfig {
       "planningContext",
       "gitPersistence",
       "queueProvider",
+      "sandbox",
     ],
     "configuration",
   );
+  if (value.sandbox !== undefined) assertCommandSandboxConfig(value.sandbox);
   if (value.queueProvider !== undefined) {
     assertObject(value.queueProvider, "queueProvider");
     assertOnlyKeys(
@@ -1282,7 +1293,7 @@ function executionWithoutWorkerLimits(
 /**
  * Settings that only present, observe or operate the run are left out of both digests, so
  * changing them never strands a started Objective or a queue receipt: GitHub progress and
- * Project status, diagnostic `capture`, the archive's operational limits (`gitPersistence`
+ * Project status, diagnostic `capture`, the command `sandbox` host settings, the archive's operational limits (`gitPersistence`
  * maxBytes, maxFiles, timeoutMs and coalesceMs) and worker run limits
  * (`withoutWorkerLimits`). The archive's
  * identity (remote, ref, visibility, scope) stays bound. Key order is kept, so a
@@ -1291,7 +1302,7 @@ function executionWithoutWorkerLimits(
 function withoutOperationalSettings(config: FactoryConfig): FactoryConfig {
   return Object.fromEntries(
     Object.entries(config).flatMap(([key, value]) => {
-      if (key === "capture") return [];
+      if (key === "capture" || key === "sandbox") return [];
       if (key === "execution")
         return [[key, executionWithoutWorkerLimits(value as ExecutionConfig)]];
       if (key === "queueProvider") {

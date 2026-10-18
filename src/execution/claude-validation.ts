@@ -16,6 +16,10 @@ import { CandidateValidationFailure } from "../work-repair.js";
 import type { HarnessRequest, WorkHandoffNote } from "../contracts.js";
 import { readWorkHandoff } from "./harness-support.js";
 import {
+  type CommandSandboxPolicy,
+  STRICT_COMMAND_SANDBOX,
+} from "./sandbox.js";
+import {
   FACTORY_EMAIL,
   privateStagingExclusions,
   workerValidationRoot,
@@ -41,6 +45,8 @@ interface ValidationEnvironmentInput {
   config: { tools: readonly string[]; allowedTools: readonly string[] };
   handoff: HandoffContext;
   lfs?: HarnessRequest["validationLfs"];
+  /** The controller's OS sandbox policy; absent is strict. */
+  sandbox?: CommandSandboxPolicy;
   /** Each completed run's structured facts, for the worker's progress stream. */
   onRun?: (facts: ValidationRunFacts) => void;
 }
@@ -172,6 +178,7 @@ export async function runDeclaredValidation(
   run: number,
   lfs?: HarnessRequest["validationLfs"],
   outputs?: ValidationOutputs,
+  sandbox: CommandSandboxPolicy = STRICT_COMMAND_SANDBOX,
 ): Promise<{
   passed: boolean;
   text: string;
@@ -225,6 +232,7 @@ export async function runDeclaredValidation(
       undefined,
       undefined,
       inspectSettled,
+      sandbox,
     );
     return {
       passed: true,
@@ -360,6 +368,7 @@ export async function createFactoryValidationMcp(
               run,
               input.lfs,
               outputs,
+              input.sandbox,
             );
             return { declared, handoff };
           });

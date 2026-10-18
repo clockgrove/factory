@@ -1,3 +1,4 @@
+import { commandSandboxPolicy } from "./execution/sandbox.js";
 import { authenticateWorkRouting } from "./runner/routing.js";
 import { randomUUID } from "node:crypto";
 import { authenticateDiscoveryOutput } from "./discovery.js";
@@ -135,6 +136,8 @@ async function preflightItemEnvironmentObserved(
     // validation command map. Retain their original failure without
     // claiming failed-result receipts for a different phase.
     false,
+    [],
+    commandSandboxPolicy(args.config),
   );
 }
 
@@ -372,6 +375,7 @@ export async function runQaItem(args: {
             ...(args.config.reviewArtifacts ?? []),
             ...(work.reviewArtifactSelection ?? []),
           ],
+          commandSandboxPolicy(args.config),
         );
       },
       {

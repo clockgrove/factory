@@ -1118,6 +1118,8 @@ export interface HarnessRequest {
   selectedAssets?: (SelectedAssetInput & { path: string })[];
   /** The controller's private store of exactly these members' verified bytes, outside the worktree. */
   validationLfs?: { members: ValidationLfsMember[]; store: string };
+  /** The operator's OS sandbox policy for commands the worker causes; absent is strict. */
+  commandSandbox?: import("./execution/sandbox.js").CommandSandboxPolicy;
 }
 export interface HarnessHandle {
   /** Provider attempt identity, stable across controller restarts. */

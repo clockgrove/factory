@@ -344,6 +344,9 @@ async function main(): Promise<void> {
           ...(input.request.validationLfs && {
             lfs: input.request.validationLfs,
           }),
+          ...(input.request.commandSandbox && {
+            sandbox: input.request.commandSandbox,
+          }),
           handoff: {
             peers: input.request.handoffPeers ?? [],
             acceptance: input.request.item.acceptance,

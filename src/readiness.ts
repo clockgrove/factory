@@ -2,6 +2,10 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { probeClaudeLogin } from "./claude-planning.js";
 import { type FactoryConfig, stateRoot } from "./config.js";
+import {
+  commandSandboxPolicy,
+  commandSandboxStatus,
+} from "./execution/sandbox.js";
 import { probeCodexReadiness } from "./harness-readiness.js";
 import {
   credentialFileBindings,
@@ -37,6 +41,26 @@ const fail = (
 export async function checkReadiness(
   config: FactoryConfig,
   input: { credentialFiles?: string[]; outsideDirectory?: string } = {},
+): Promise<Readiness> {
+  // Validation, setup and probes run on this host for every harness, local or
+  // managed, so the command sandbox is checked first and for all of them.
+  const commandSandbox = commandSandboxStatus(commandSandboxPolicy(config));
+  if (commandSandbox.mode === "unavailable")
+    return fail(
+      { status: "missing", commandSandbox },
+      commandSandbox.detail,
+      commandSandbox.fix!,
+    );
+  const readiness = await harnessReadiness(config, input);
+  return {
+    ...readiness,
+    document: { ...readiness.document, commandSandbox },
+  };
+}
+
+async function harnessReadiness(
+  config: FactoryConfig,
+  input: { credentialFiles?: string[]; outsideDirectory?: string },
 ): Promise<Readiness> {
   const credentialFiles = input.credentialFiles ?? [];
   const required = requiredProviderCredentials(config);

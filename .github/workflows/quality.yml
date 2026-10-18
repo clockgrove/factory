@@ -30,6 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
+      - uses: ./.github/actions/bubblewrap
       - run: git lfs version
       - run: npm test
 

@@ -1,3 +1,4 @@
+import { commandSandboxPolicy } from "../execution/sandbox.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "../compiler.js";
@@ -639,6 +640,7 @@ export async function runRegularGraph(args: {
           packageManagerUpdate(args.objectiveBody),
           true,
           config.reviewArtifacts,
+          commandSandboxPolicy(config),
         ),
     });
     await phases.reserve(item.id, "review");

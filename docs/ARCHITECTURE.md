@@ -46,7 +46,7 @@ The target owns requirements, validation commands, permissions, protection rules
 | Controller ownership and execution          | `src/runner.ts`, `src/runner/ownership.ts`, `src/runner/execution.ts`                                                   |
 | Scheduling and phase capacity               | `src/scheduler.ts`, `src/phase-admission.ts`                                                                            |
 | Worker adapters and attempt collection      | `src/execution/`                                                                                                        |
-| Command execution and receipt checks        | `src/validation.ts`, `src/validation-evidence.ts`                                                                       |
+| Command execution and receipt checks        | `src/validation.ts`, `src/validation-evidence.ts`, `src/execution/sandbox.ts`                                           |
 | Result evidence and acceptance review       | `src/result-evidence.ts`, `src/result-review.ts`, `src/review-evidence.ts`                                              |
 | GitHub delivery and integration             | `src/delivery/`                                                                                                         |
 | Final validation, sealing and closure       | `src/runner/finalization.ts`, `src/completion.ts`, `src/qa.ts`                                                          |

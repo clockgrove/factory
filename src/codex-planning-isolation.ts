@@ -1,10 +1,8 @@
 import {
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
-  statSync,
   lstatSync,
   unlinkSync,
   symlinkSync,
@@ -21,13 +19,19 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   captureOwnedRollout,
   type NativeCaptureObserver,
   type NativeCaptureBoundary,
   ownedRolloutBoundary,
 } from "./codex-native-capture.js";
+import {
+  gitMetadata,
+  real,
+  toolchainDirectories,
+  within,
+} from "./execution/sandbox.js";
 import { workerToolchainPath } from "./process.js";
 
 /** Replaces native coding-agent boilerplate only for isolated read-only roles. */
@@ -143,186 +147,6 @@ export function codexRuntime(): { file: string; path: string } {
   return { file: join(root, "bin", "codex"), path: join(root, "codex-path") };
 }
 
-const real = (path: string) =>
-  existsSync(path) ? realpathSync(path) : resolve(path);
-const within = (path: string, directory: string) =>
-  path === directory ||
-  path.startsWith(directory.endsWith(sep) ? directory : directory + sep);
-
-/**
- * A linked worktree's git directories: its own administrative directory
- * (`<common>/worktrees/<name>`) and the checkout's common git directory.
- */
-function linkedGit(
-  workspace: string,
-): { administrative: string; common: string } | undefined {
-  try {
-    const link = /^gitdir: (.+)$/m.exec(
-      readFileSync(join(workspace, ".git"), "utf8"),
-    );
-    if (!link) return undefined;
-    const administrative = resolve(workspace, link[1]!);
-    const common = join(administrative, "commondir");
-    return {
-      administrative,
-      common: existsSync(common)
-        ? resolve(administrative, readFileSync(common, "utf8").trim())
-        : administrative,
-    };
-  } catch {
-    // No `.git`, or a checkout whose `.git` directory the profile keeps read-only.
-    return undefined;
-  }
-}
-
-/**
- * What git reads in a linked worktree, mounted read-only at their real paths
- * so read-only commands (`ls-files`, `status`, `diff`, `log`) work: the
- * worktree's administrative directory (HEAD, index) and, from the common
- * directory, the objects, refs and settings. Not the common directory as a
- * whole: that would show other worktrees' metadata, hooks and reflogs.
- * A `.git` that is not a linked worktree's gets nothing.
- */
-function gitMetadata(workspace: string): string[] {
-  const git = linkedGit(workspace);
-  if (!git || git.common === git.administrative) return [];
-  return [
-    git.administrative,
-    ...[
-      "objects",
-      "refs",
-      "packed-refs",
-      "HEAD",
-      "config",
-      "info",
-      "shallow",
-      "reftable",
-    ].map((name) => join(git.common, name)),
-  ]
-    .filter((path) => existsSync(path))
-    .map((path) => realpathSync(path));
-}
-
-/**
- * The directories a worker's shell reads, never writes, so the tools on its
- * PATH run: every PATH directory, and the directory of the real file behind
- * each link in one. A directory named `bin` or `sbin` stands for its install
- * prefix, where a tool keeps its libraries, unless the prefix is hidden,
- * the HOME or Windows profile itself, or a direct child of either. Those
- * directories can contain unrelated private files; mount only bin there.
- *
- * Nothing here may show the operator's HOME as a whole, a login (SSH, gh,
- * Codex, Claude, Copilot), Factory's config or state, or the checkout's git
- * directory. A PATH directory that would is a configuration error; a link
- * that leads into one is left unmounted, so that tool does not run.
- */
-function toolchainDirectories(
-  source: NodeJS.ProcessEnv,
-  workspace: string,
-): string[] {
-  const home = real(source.HOME || homedir());
-  const config = source.XDG_CONFIG_HOME || join(home, ".config");
-  const state = source.XDG_STATE_HOME || join(home, ".local", "state");
-  const data = source.XDG_DATA_HOME || join(home, ".local", "share");
-  const credentialDirectories = [
-    "ssh",
-    "aws",
-    "docker",
-    "kube",
-    "gnupg",
-    "gh",
-    "codex",
-    "claude",
-    "copilot",
-  ];
-  const windowsProfile = (directory: string) =>
-    /^\/mnt\/[a-z]\/Users\/[^/]+(?=\/|$)/i.exec(directory)?.[0];
-  const linked = linkedGit(workspace);
-  const sealed = [
-    join(home, ".ssh"),
-    join(home, ".claude"),
-    join(home, ".copilot"),
-    join(home, ".aws"),
-    join(home, ".docker"),
-    join(home, ".kube"),
-    join(home, ".gnupg"),
-    ...[config, data].flatMap((root) =>
-      credentialDirectories.map((name) => join(root, name)),
-    ),
-    source.CODEX_HOME || join(home, ".codex"),
-    join(config, "clockgrove-factory"),
-    join(data, "clockgrove-factory"),
-    join(data, "factory-copilot-auth"),
-    join(state, "clockgrove-factory"),
-    ...(linked ? [linked.common] : []),
-  ].map(real);
-  const exposes = (directory: string) => {
-    const profile = windowsProfile(directory);
-    const protectedPaths = profile
-      ? credentialDirectories.map((name) => real(join(profile, `.${name}`)))
-      : [];
-    return (
-      within(home, directory) ||
-      /^\/mnt(?:\/[a-z](?:\/Users)?)?\/?$/i.test(directory) ||
-      (profile !== undefined && within(profile, directory)) ||
-      [...sealed, ...protectedPaths].some(
-        (path) => within(path, directory) || within(directory, path),
-      )
-    );
-  };
-  const root = (directory: string) => {
-    const prefix = dirname(directory);
-    if (
-      ["bin", "sbin"].includes(basename(directory)) &&
-      !basename(prefix).startsWith(".") &&
-      dirname(prefix) !== home &&
-      dirname(prefix) !== windowsProfile(prefix) &&
-      !exposes(prefix)
-    )
-      return prefix;
-    return exposes(directory) ? undefined : directory;
-  };
-  const roots = new Set<string>();
-  for (const entry of (source.PATH ?? "").split(":")) {
-    // A relative entry resolves inside the worktree, which is mounted.
-    if (!isAbsolute(entry) || !existsSync(entry)) continue;
-    const directory = realpathSync(entry);
-    if (!statSync(directory).isDirectory() || within(directory, workspace))
-      continue;
-    const mount = root(directory);
-    if (!mount)
-      throw new Error(
-        `PATH entry ${entry} would show Codex workers your HOME, a login or Factory's own files. Remove it from the PATH Factory runs with, or move its tools to a directory of their own.`,
-      );
-    // A linked PATH directory is mounted under the name the PATH uses too.
-    roots.add(mount).add(resolve(entry));
-    for (const item of readdirSync(directory, { withFileTypes: true })) {
-      if (!item.isSymbolicLink()) continue;
-      const target = real(join(directory, item.name));
-      if (!statSync(target, { throwIfNoEntry: false })?.isFile()) continue;
-      // A link into a login directory stays unmounted: that tool does not run.
-      const linked = root(dirname(target));
-      if (linked) roots.add(linked);
-    }
-  }
-  // Factory runs its own Node in the sandbox (the readiness probe and local
-  // worker helpers), so mount it like a PATH directory even when the PATH
-  // Factory was started with omits it, as an installed launcher does (#1269).
-  const runtime = real(dirname(process.execPath));
-  if (!within(runtime, workspace)) {
-    const mount = root(runtime);
-    if (!mount)
-      throw new Error(
-        `Factory's Node runtime at ${runtime} would show Codex workers your HOME, a login or Factory's own files. Install Node in a directory of its own.`,
-      );
-    roots.add(mount);
-  }
-  return [...roots].filter(
-    (mount) =>
-      ![...roots].some((other) => other !== mount && within(mount, other)),
-  );
-}
-
 /**
  * A Codex permission profile: shell commands see only the platform paths
  * Codex calls `:minimal`, the Codex runtime, the working directory (its
@@ -345,7 +169,11 @@ function permissionProfile(
     ...(sandbox.workspace === "write"
       ? [
           ...[
-            ...toolchainDirectories(source, real(sandbox.directory)),
+            ...toolchainDirectories(
+              source,
+              real(sandbox.directory),
+              "Codex workers",
+            ),
             ...gitMetadata(real(sandbox.directory)),
           ].map((directory) => `${path(directory)} = "read"`),
           `${path(home)} = "write"`,

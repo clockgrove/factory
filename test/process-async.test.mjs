@@ -2250,8 +2250,17 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       commit,
       checkout,
     );
-    const ready = join(root, "ready");
+    // External host readiness the command can see only through the
+    // operator's read-only sandbox allowance.
+    const external = join(root, "external");
+    mkdirSync(external);
+    const ready = join(external, "ready");
     const command = `${process.execPath} -e 'process.exit(require("node:fs").existsSync(${JSON.stringify(ready)}) ? 0 : 1)'`;
+    const sandbox = {
+      required: true,
+      network: "off",
+      readOnlyPaths: [external],
+    };
     const config = { repository: "integration/validation-rereview", checkout };
     const graph = {
       objective: 1,
@@ -2360,6 +2369,11 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
         [],
         undefined,
         commit,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sandbox,
       );
     const validationStep = () =>
       validateItem({
@@ -2530,6 +2544,11 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
           [],
           undefined,
           commit,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          sandbox,
         ),
       (error) => {
         work.status = "failed";
@@ -2554,6 +2573,11 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       [],
       undefined,
       commit,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sandbox,
     );
     assert.equal(evidence.treeSha, treeSha);
     assert.equal(evidence.commands[0].exitCode, 0);

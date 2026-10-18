@@ -1,3 +1,4 @@
+import { commandSandboxPolicy } from "./execution/sandbox.js";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -584,6 +585,7 @@ function localServices(
       policy: config.capture,
       configDigest: factoryConfigDigest(config),
     },
+    commandSandboxPolicy(config),
   );
   return {
     planningModel: options.planningModel ?? composePlanningModel(config),

@@ -1,3 +1,7 @@
+import {
+  type CommandSandboxPolicy,
+  STRICT_COMMAND_SANDBOX,
+} from "./sandbox.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -1807,6 +1811,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       policy?: import("../capture.js").CapturePolicy;
       configDigest: string;
     },
+    private commandSandbox: CommandSandboxPolicy = STRICT_COMMAND_SANDBOX,
   ) {
     if (profiles)
       this.profiles = new Map(
@@ -2138,6 +2143,9 @@ export class LocalExecutionDriver implements ExecutionDriver {
           this.contentStore,
           readiness.acceptedBaseSha,
           false,
+          undefined,
+          undefined,
+          this.commandSandbox,
         );
         if (context?.cancelled())
           throw cancelledFault(
@@ -2333,6 +2341,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
             store: lfsStore,
           },
         }),
+        commandSandbox: structuredClone(this.commandSandbox),
       };
       const preparedHandle: ExecutionHandle = {
         provider: "local",

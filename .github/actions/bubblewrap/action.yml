@@ -1,0 +1,16 @@
+name: Install bubblewrap
+description: The OS sandbox Factory runs worker-caused commands in, which the integration suite exercises.
+runs:
+  using: composite
+  steps:
+    - run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q bubblewrap
+        # Ubuntu 24.04 can restrict unprivileged user namespaces to programs
+        # with an AppArmor profile; allow them when bubblewrap cannot start.
+        if ! bwrap --unshare-all --die-with-parent --ro-bind / / true; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-all --die-with-parent --ro-bind / / true
+        fi
+        bwrap --version
+      shell: bash

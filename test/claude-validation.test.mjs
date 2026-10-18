@@ -269,3 +269,85 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   assert.equal(readFileSync(join(worktree, "a.txt"), "utf8"), "changed\n");
   rmSync(dirname(worktree), { recursive: true, force: true });
 });
+
+test("declared commands run in an OS sandbox that hides the host and keeps loopback", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-command-sandbox-"));
+  const worktree = join(root, "worktree");
+  execFileSync("git", ["init", "-q", worktree]);
+  writeFileSync(join(worktree, "a.txt"), "base\n");
+  execFileSync("git", ["-C", worktree, "add", "a.txt"]);
+  execFileSync("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-qm",
+    "base",
+  ]);
+  // Host secrets a hostile test script would look for, and a host directory
+  // outside the checkout it would try to write.
+  const home = process.env.HOME;
+  const secrets = [
+    join(home, ".claude", ".credentials.json"),
+    join(home, ".ssh", "id_ed25519"),
+    join(home, ".config", "gh", "hosts.yml"),
+    join(process.env.XDG_STATE_HOME, "clockgrove-factory", "state.json"),
+  ];
+  for (const path of secrets) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "secret\n");
+  }
+  const outside = join(root, "outside");
+  mkdirSync(outside);
+  const store = join(root, "package-store");
+  const quote = (path) => `'${path}'`;
+  const policy = {
+    required: true,
+    network: "package-install",
+    packageStore: store,
+    readOnlyPaths: [],
+  };
+  const result = await runDeclaredValidation(
+    worktree,
+    [
+      // Each escape must fail inside the sandbox, so each command passes.
+      ...secrets.map((path) => `! cat ${quote(path)}`),
+      `! ls ${quote(home)}`,
+      `! ls ${quote(join(process.env.XDG_STATE_HOME, "clockgrove-factory"))}`,
+      `! touch ${quote(join(outside, "escape"))}`,
+      // The checkout's .git cannot be repointed.
+      "! sh -c 'echo gitdir: /tmp >> .git'",
+      // No host process is visible or signalable.
+      `! kill -0 ${process.pid}`,
+      // Only loopback: no route off the host, even for a command the
+      // package-install policy does not name.
+      `test "$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ')" = lo`,
+      // A private, writable HOME and the configured shared package store.
+      `test "$HOME" != ${quote(home)} && touch "$HOME/ok"`,
+      'mkdir -p "$npm_config_cache" && touch "$npm_config_cache/marker"',
+      // Normal work: read the checkout, write ignored files, serve loopback.
+      "grep -qx base a.txt && git status --porcelain >/dev/null",
+      `node -e 'const s=require("net").createServer(c=>c.end("ok")).listen(0,"127.0.0.1",()=>require("net").connect(s.address().port,"127.0.0.1").on("data",d=>{s.close();process.exit(String(d)==="ok"?0:1)}))'`,
+    ],
+    1,
+    undefined,
+    undefined,
+    policy,
+  );
+  assert.equal(result.passed, true, result.text);
+  assert.equal(existsSync(join(outside, "escape")), false);
+  assert.equal(existsSync(join(store, "npm", "marker")), true);
+  for (const path of secrets)
+    assert.equal(readFileSync(path, "utf8"), "secret\n");
+  // A command that does reach a host secret fails the run.
+  const leaked = await runDeclaredValidation(
+    worktree,
+    [`cat ${quote(secrets[0])}`],
+    2,
+  );
+  assert.equal(leaked.passed, false);
+  assert.doesNotMatch(leaked.text, /secret/);
+});

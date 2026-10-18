@@ -61,6 +61,7 @@ const claudeLocalAuthenticationEnvironment = [
   "ANTHROPIC_CONFIG_DIR",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "CLAUDE_CONFIG_DIR",
+  "CLAUDE_SECURESTORAGE_CONFIG_DIR",
 ];
 
 function claudeWorkerInput(

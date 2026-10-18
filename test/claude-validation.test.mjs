@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { LocalContentStore } from "../dist/content/local.js";
+import { runSandboxedCommand } from "../dist/execution/claude-shell.js";
 import { copyOwnedFile } from "../dist/execution/claude-files.js";
 import {
   checkWorkHandoff,
@@ -25,7 +26,10 @@ import {
   workerFilesTree,
   workerValidationCommands,
 } from "../dist/execution/claude-validation.js";
-import { commandSandboxAvailability } from "../dist/execution/sandbox.js";
+import {
+  commandSandboxAvailability,
+  STRICT_COMMAND_SANDBOX,
+} from "../dist/execution/sandbox.js";
 import { validateTree } from "../dist/validation.js";
 
 const status = (worktree) =>
@@ -676,4 +680,80 @@ test("a verified install reaches only its configured registry, and commands are 
   } finally {
     server.close();
   }
+});
+
+test("a worker's shell runs in its checkout inside the same sandbox, bounded", async () => {
+  const root = mkdtempSync(join(tmpdir(), "factory-worker-shell-"));
+  const repository = join(root, "repository");
+  execFileSync("git", ["init", "-q", repository]);
+  writeFileSync(join(repository, "a.txt"), "base\n");
+  execFileSync("git", ["-C", repository, "add", "a.txt"]);
+  execFileSync("git", [
+    "-C",
+    repository,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-qm",
+    "base",
+  ]);
+  // A worker's checkout is a linked worktree, as Factory creates it.
+  const worktree = join(root, "worktree");
+  execFileSync("git", ["-C", repository, "worktree", "add", "-q", worktree]);
+  const secret = join(process.env.HOME, ".claude", ".credentials.json");
+  mkdirSync(dirname(secret), { recursive: true });
+  writeFileSync(secret, "secret\n");
+  const run = (command, timeoutMs = 60_000) =>
+    runSandboxedCommand({
+      worktree,
+      root: `${worktree}.shell`,
+      command,
+      timeoutMs,
+      policy: STRICT_COMMAND_SANDBOX,
+    });
+  // Normal work: compute, write the checkout, read Git, keep HOME between calls.
+  const hashed = await run(
+    'sha256sum a.txt > a.sha && cat a.sha && git status --porcelain && echo kept > "$HOME/note"',
+  );
+  assert.equal(hashed.exitCode, 0, hashed.output);
+  const digest = createHash("sha256").update("base\n").digest("hex");
+  assert.match(hashed.output, new RegExp(`${digest}  a.txt\n\\?\\? a.sha\n`));
+  assert.equal(
+    readFileSync(join(worktree, "a.sha"), "utf8"),
+    `${digest}  a.txt\n`,
+  );
+  assert.equal((await run('cat "$HOME/note"')).output, "kept\n");
+  // Escapes fail: host secrets, .git, the network, the controller.
+  const escapes = await run(
+    [
+      `! cat '${secret}'`,
+      "! sh -c 'echo gitdir: /tmp >> .git'",
+      `! touch '${join(repository, "escape")}'`,
+      `! kill -0 ${process.pid}`,
+      `test "$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ')" = lo`,
+    ].join(" && "),
+  );
+  assert.equal(escapes.exitCode, 0, escapes.output);
+  assert.equal(existsSync(join(repository, "escape")), false);
+  // A nonzero exit is reported, not thrown.
+  assert.equal((await run("exit 7")).exitCode, 7);
+  // Wall time is bounded: everything the command started is stopped.
+  const stopped = await run("sleep 31.25 & sleep 31.25", 1_000);
+  assert.equal(stopped.timedOut, true);
+  assert.equal(
+    execFileSync("ps", ["-eo", "args"], { encoding: "utf8" })
+      .split("\n")
+      .some((line) => line.trim() === "sleep 31.25"),
+    false,
+  );
+  // Output is bounded to its start and end.
+  const long = await run(
+    "head -c 2000000 /dev/zero | tr '\\0' x; echo; echo last",
+  );
+  assert.equal(long.exitCode, 0);
+  assert.ok(long.output.length < 300_000);
+  assert.match(long.output, /bytes of output omitted/);
+  assert.match(long.output, /last\n$/);
 });

@@ -1,3 +1,4 @@
+import { factoryShellAuthorized } from "./execution/claude-shell.js";
 import { createHash } from "node:crypto";
 import {
   harnessAdapterIdentity,
@@ -108,9 +109,11 @@ export function executionProfileChoices(
 
 /**
  * What a worker can execute, decided by its harness kind. Codex workers have
- * a sandboxed shell. Claude and Copilot workers have no shell: only checkout
- * file tools and the item's authorized validation. Registered and managed
- * adapters declare neither, so planning treats them as shell-less.
+ * a sandboxed shell. Claude workers have one (run_command) when Write and
+ * Validate are granted and the command sandbox runs on this host; otherwise,
+ * like Copilot workers, only checkout file tools and the item's authorized
+ * validation. Registered and managed adapters declare neither, so planning
+ * treats them as shell-less.
  */
 export type WorkerCommandAccess = "shell" | "validation-only" | "undeclared";
 
@@ -121,6 +124,9 @@ function harnessCommandAccess(
     case "codex-sdk":
       return "shell";
     case "claude-agent-sdk":
+      return factoryShellAuthorized({ config: harness })
+        ? "shell"
+        : "validation-only";
     case "github-copilot-sdk":
       return "validation-only";
     case "registered":

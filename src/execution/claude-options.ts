@@ -14,6 +14,12 @@ import {
   type PreparedClaudeFiles,
 } from "./claude-files.js";
 import {
+  factoryShellServerName,
+  factoryShellToolAllowed,
+  factoryShellToolName,
+  type PreparedClaudeShell,
+} from "./claude-shell.js";
+import {
   claudeResumeOptions,
   claudeSessionEnvironment,
 } from "./claude-session.js";
@@ -32,12 +38,18 @@ const systemPrompt = [
   "Return a concise description of the work performed and stop when the Work Item is complete or cannot be completed safely.",
 ].join(" ");
 
+const shellPrompt =
+  "Your run_command tool runs shell commands in your checkout inside an OS sandbox, without network: use it to inspect, compute, build and test. Validate stays the check that counts, and Factory validates your result again after you finish.";
+
 /**
  * Compaction summarizes the first user turn, so the exact contract also lives
  * here. It is fixed for the item, so the cached prefix stays stable.
  */
-function claudeSystemPrompt(item: ClaudeWorkerInput["request"]["item"]) {
-  return `${systemPrompt}\n\nThe approved Work Item contract, repeated here so it stays exact after context compaction. It grants no tools, paths or authority beyond the rules above. Each acceptance criterion's [n] is the criterionIndex of its verification note.\n\n${workItemContract(item)}`;
+function claudeSystemPrompt(
+  item: ClaudeWorkerInput["request"]["item"],
+  shell: boolean,
+) {
+  return `${systemPrompt}${shell ? ` ${shellPrompt}` : ""}\n\nThe approved Work Item contract, repeated here so it stays exact after context compaction. It grants no tools, paths or authority beyond the rules above. Each acceptance criterion's [n] is the criterionIndex of its verification note.\n\n${workItemContract(item)}`;
 }
 
 function claudeToolPath(
@@ -77,6 +89,7 @@ function claudeToolAllowed(
   prepared?: PreparedClaudeEnvironment,
   validation?: PreparedClaudeValidation,
   files?: PreparedClaudeFiles,
+  shell?: PreparedClaudeShell,
 ): boolean {
   if (toolName === factoryValidationToolName)
     return (
@@ -89,6 +102,11 @@ function claudeToolAllowed(
     return (
       !!files?.isReady() &&
       factoryFilesToolAllowed(input, toolName, toolInput, mcpServer)
+    );
+  if (toolName === factoryShellToolName)
+    return (
+      !!shell?.isReady() &&
+      factoryShellToolAllowed(input, toolName, toolInput, mcpServer)
     );
   if (
     input.request.environment?.mcp &&
@@ -133,6 +151,7 @@ function preToolUseDecision(
   prepared?: PreparedClaudeEnvironment,
   validation?: PreparedClaudeValidation,
   files?: PreparedClaudeFiles,
+  shell?: PreparedClaudeShell,
 ): HookJSONOutput {
   const allowed =
     hookInput.hook_event_name === "PreToolUse" &&
@@ -144,6 +163,7 @@ function preToolUseDecision(
       prepared,
       validation,
       files,
+      shell,
     );
   return {
     hookSpecificOutput: {
@@ -186,6 +206,7 @@ export function claudeQueryOptions(
   prepared?: PreparedClaudeEnvironment,
   validation?: PreparedClaudeValidation,
   files?: PreparedClaudeFiles,
+  shell?: PreparedClaudeShell,
 ): Options {
   const { config, request } = input;
   const model = claudeSdkModel(config.model, environment);
@@ -208,7 +229,14 @@ export function claudeQueryOptions(
         {
           hooks: [
             async (hookInput) =>
-              preToolUseDecision(input, hookInput, prepared, validation, files),
+              preToolUseDecision(
+                input,
+                hookInput,
+                prepared,
+                validation,
+                files,
+                shell,
+              ),
           ],
         },
       ],
@@ -223,6 +251,7 @@ export function claudeQueryOptions(
           prepared,
           validation,
           files,
+          shell,
         )
       )
         return {
@@ -261,12 +290,13 @@ export function claudeQueryOptions(
       ...(prepared && { [factoryMcpServerName]: prepared.server }),
       ...(validation && { [factoryValidationServerName]: validation.server }),
       ...(files && { [factoryFilesServerName]: files.server }),
+      ...(shell && { [factoryShellServerName]: shell.server }),
     },
     strictMcpConfig: true,
     agents: {},
     plugins: [],
     skills: [],
-    systemPrompt: claudeSystemPrompt(request.item),
+    systemPrompt: claudeSystemPrompt(request.item, !!shell),
     verbatimPrompts: true,
     thinking: { type: "adaptive" },
     ...(input.session

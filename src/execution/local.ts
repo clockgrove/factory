@@ -670,6 +670,11 @@ export function workerValidationRoot(worktree: string): string {
   return `${worktree}.validation`;
 }
 
+/** The worker shell's sandbox HOME and TMPDIR, beside the worktree. */
+export function workerShellRoot(worktree: string): string {
+  return `${worktree}.shell`;
+}
+
 /** The worktree or its staged validation bytes remain to be removed. */
 function executionDirectoryRemains(worktree: string): boolean {
   return existsSync(worktree) || existsSync(validationLfsStore(worktree));
@@ -1906,6 +1911,7 @@ export class LocalExecutionDriver implements ExecutionDriver {
       await removeWorktree(this.checkout, path);
     else rmSync(path, { recursive: true, force: true });
     rmSync(validationLfsStore(path), { recursive: true, force: true });
+    rmSync(workerShellRoot(path), { recursive: true, force: true });
     // Each run removes its own checkout; one it retained keeps the parent.
     try {
       rmdirSync(workerValidationRoot(path));

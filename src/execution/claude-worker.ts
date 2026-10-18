@@ -57,6 +57,13 @@ import {
   type PreparedClaudeFiles,
 } from "./claude-files.js";
 import {
+  createFactoryShellMcp,
+  factoryShellAuthorized,
+  factoryShellServerName,
+  factoryShellToolName,
+  type PreparedClaudeShell,
+} from "./claude-shell.js";
+import {
   harnessFailure,
   ProviderLimitError,
   privateProgress,
@@ -66,6 +73,7 @@ import {
   writeHarnessResult,
 } from "./harness-support.js";
 import { WorkerInteractionCapture } from "./interaction-capture.js";
+import { workerShellRoot } from "./local.js";
 import { toolActivity } from "./tool-activity.js";
 
 function progressEvent(
@@ -150,6 +158,8 @@ function assertInitialization(
   const fileTools = factoryFilesAuthorized(input);
   if (fileTools)
     for (const tool of factoryFilesToolNames) configuredTools.add(tool);
+  const shellTool = factoryShellAuthorized(input);
+  if (shellTool) configuredTools.add(factoryShellToolName);
   const unexpectedTool = message.tools.find(
     (tool) => !configuredTools.has(tool),
   );
@@ -159,6 +169,7 @@ function assertInitialization(
     ...(request.environment?.mcp ? [factoryMcpServerName] : []),
     ...(validating ? [factoryValidationServerName] : []),
     ...(fileTools ? [factoryFilesServerName] : []),
+    ...(shellTool ? [factoryShellServerName] : []),
   ];
   if (
     message.mcp_servers.length !== expectedServers.length ||
@@ -273,6 +284,7 @@ async function main(): Promise<void> {
   let prepared: PreparedClaudeEnvironment | undefined;
   let validation: PreparedClaudeValidation | undefined;
   let files: PreparedClaudeFiles | undefined;
+  let shell: PreparedClaudeShell | undefined;
   let events: AsyncIterator<SDKMessage> | undefined;
   let closeStarted = false;
   let progressLost = false;
@@ -400,6 +412,24 @@ async function main(): Promise<void> {
         }),
       );
     }
+    if (factoryShellAuthorized(input)) {
+      shell = await turn.race(
+        createFactoryShellMcp({
+          worktree: input.request.worktree,
+          root: workerShellRoot(input.request.worktree),
+          config: input.config,
+          ...(input.request.commandSandbox && {
+            sandbox: input.request.commandSandbox,
+          }),
+        }).then(async (environment) => {
+          if (controller.signal.aborted) {
+            await environment.close();
+            throw new Error("Claude environment preparation interrupted");
+          }
+          return environment;
+        }),
+      );
+    }
     const rendered = renderWorkItemPrompt(
       input.request,
       input.request.worktree,
@@ -412,6 +442,7 @@ async function main(): Promise<void> {
       prepared,
       validation,
       files,
+      shell,
     );
     capture.request(
       prompt,
@@ -491,7 +522,7 @@ async function main(): Promise<void> {
         }
       if (message.type === "system" && message.subtype === "init") {
         assertInitialization(message, input, options.model!);
-        if (prepared || validation || files) {
+        if (prepared || validation || files || shell) {
           const statuses = await turn.race(stream.mcpServerStatus());
           prepared?.markReady(
             statuses.filter((status) => status.name === factoryMcpServerName),
@@ -515,6 +546,16 @@ async function main(): Promise<void> {
                 "Factory files MCP readiness verification failed",
               );
             files.markReady(owned[0]!);
+          }
+          if (shell) {
+            const owned = statuses.filter(
+              (status) => status.name === factoryShellServerName,
+            );
+            if (owned.length !== 1)
+              throw new Error(
+                "Factory shell MCP readiness verification failed",
+              );
+            shell.markReady(owned[0]!);
           }
         }
         if (
@@ -575,6 +616,7 @@ async function main(): Promise<void> {
     if (prepared) await turn.race(prepared.close());
     if (validation) await turn.race(validation.close());
     if (files) await turn.race(files.close());
+    if (shell) await turn.race(shell.close());
     turn.finish();
     providerCompleted = true;
     capture.providerCompleted();
@@ -659,7 +701,7 @@ async function main(): Promise<void> {
     turns.end();
     if (events && !closeStarted)
       void closeProviderEventStream(events, turn, false);
-    for (const owned of [prepared, validation, files]) {
+    for (const owned of [prepared, validation, files, shell]) {
       if (!owned) continue;
       const closing = owned.close();
       if (!turn.signal.aborted) {

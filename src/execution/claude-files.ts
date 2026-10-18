@@ -282,7 +282,7 @@ export async function createFactoryFilesMcp(input: FilesEnvironmentInput) {
     tools: [
       tool(
         "delete_file",
-        "Delete one file this Work Item owns, by its path in the worktree. Use it when the work removes a file; there is no shell. Factory collects the deletion with your other changes. Directories, unowned paths, Git metadata and Factory staging files are refused.",
+        "Delete one file this Work Item owns, by its path in the worktree. Use it when the work removes a file. Factory collects the deletion with your other changes. Directories, unowned paths, Git metadata and Factory staging files are refused.",
         { path: z.string().min(1) },
         async ({ path }) => {
           try {
@@ -320,7 +320,7 @@ export async function createFactoryFilesMcp(input: FilesEnvironmentInput) {
       ),
       tool(
         "copy_file",
-        `Copy the exact bytes of one file to another path, both in the worktree and owned by this Work Item. Use it to commit a file a check produced, such as an actual golden that Validate returned, instead of retyping it; there is no shell. The destination is created or replaced. Returns the bytes copied and the copy's SHA-256. Links, non-regular files, unowned paths, Git metadata, Factory staging files and files over ${maxCopiedFileBytes / (1024 * 1024)} MiB are refused.`,
+        `Copy the exact bytes of one file to another path, both in the worktree and owned by this Work Item. Use it to commit a file a check produced, such as an actual golden that Validate returned, instead of retyping it. The destination is created or replaced. Returns the bytes copied and the copy's SHA-256. Links, non-regular files, unowned paths, Git metadata, Factory staging files and files over ${maxCopiedFileBytes / (1024 * 1024)} MiB are refused.`,
         { from: z.string().min(1), to: z.string().min(1) },
         async ({ from, to }) => {
           try {

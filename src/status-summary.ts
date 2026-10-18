@@ -142,6 +142,8 @@ interface PreparingStatusView extends WaitView {
   } | null;
   /** Planning stopped for a decision before producing a reviewable plan. */
   planningStopped: boolean;
+  /** It stopped at the planner's own question: an answer revises its draft. */
+  planningQuestion?: boolean;
   /** The planner call now or last made, and projection's issue count. */
   planningStep?: PlanningStepView | null;
   /** Projection has started (an issue exists or the phase was entered): a plan can no longer be refused. */
@@ -1221,10 +1223,15 @@ function summarizePreparation(view: PreparingStatusView): StatusSummary {
       summary: view.coordinator?.waitReason
         ? short(view.coordinator.waitReason, 80)
         : "planning stopped for a decision",
-      nextAction: {
-        command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
-        reason: `Discards the stopped planning; resolve the decision in the Objective or on the default branch, then ${run(objective)} plans again`,
-      },
+      nextAction: view.planningQuestion
+        ? {
+            command: `factory decide --objective ${objective} --outcome accept --answer ${ANSWER} --reason ${REASON}`,
+            reason: `Answer the planner's question; then ${run(objective)} revises the draft plan with it (refuse discards the planning instead)`,
+          }
+        : {
+            command: `factory decide --objective ${objective} --outcome refuse --reason ${REASON}`,
+            reason: `Discards the stopped planning; resolve the decision in the Objective or on the default branch, then ${run(objective)} plans again`,
+          },
     };
   const waiting = objectiveWait(view);
   if (waiting) return waiting;

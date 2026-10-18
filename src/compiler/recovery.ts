@@ -17,6 +17,7 @@ import type {
   ModelInvocationContext,
   ModelInvocationObservation,
   ModelInvocationPhase,
+  OperatorPlanningDecision,
   PlanningExecutionBounds,
   PlanningLocalExecutables,
   PlanningModel,
@@ -111,6 +112,22 @@ interface PlanningInvocationReceipt {
   nativeReturns?: ContentRef[];
 }
 
+/**
+ * A question the planner asked while compiling, with the draft it was asked
+ * about. The operator's answer revises that exact draft in a fresh session;
+ * the revised graph still gets its independent review.
+ */
+export interface PlanningDecisionRecord {
+  question: string;
+  /** Accepted corrections before the question; older ones are in the draft. */
+  round: number;
+  /** The asking compilation's complete answer: the draft an answer revises. */
+  draft: ContentRef;
+  /** The asking round's receipts. */
+  invocations: PlanningInvocationReceipt[];
+  answer?: { actor: string; answer: string; reason: string; at: string };
+}
+
 export interface PlanningRecoveryRecord {
   /** Resource coverage only; never a native response or non-submission verdict. */
   cancelledResources?: {
@@ -131,6 +148,8 @@ export interface PlanningRecoveryRecord {
   revision?: ContentRef;
   diagnosisResponse?: { kind: string; diagnosis: string; correction: string };
   review?: PlanningReviewRecord;
+  /** The planner's questions, oldest first; the last, while unanswered, holds planning. */
+  decisions?: PlanningDecisionRecord[];
   history: {
     failure: string;
     detail: string;
@@ -142,6 +161,50 @@ export interface PlanningRecoveryRecord {
     corrections?: PlanCorrection[];
     review?: PlanningReviewRecord;
   }[];
+}
+
+/** The operator's answers, bound to the drafts they revise, in the order asked. */
+export function operatorPlanningDecisions(
+  record: PlanningRecoveryRecord | undefined,
+): OperatorPlanningDecision[] | undefined {
+  const answered = (record?.decisions ?? []).flatMap((entry) =>
+    entry.answer
+      ? [
+          {
+            question: entry.question,
+            ...entry.answer,
+            draftDigest: entry.draft.digest,
+          },
+        ]
+      : [],
+  );
+  return answered.length ? answered : undefined;
+}
+
+/**
+ * `factory decide --outcome accept` for the planner's open question: record
+ * the answer against its exact draft. The next run revises that draft with
+ * the answer as an operator correction, then validates and independently
+ * reviews the result. The caller holds the mutation lock and saves.
+ */
+export function answerPlanningDecision(
+  state: { plan?: PlanCandidate; planningRecovery?: PlanningRecoveryRecord },
+  input: { actor: string; answer: string; reason: string },
+): void {
+  const record = state.planningRecovery;
+  const open = record?.decisions?.at(-1);
+  if (state.plan || record?.phase !== "stopped" || !open || open.answer)
+    throw new Error("Planning has no open planner question");
+  if (!input.actor.trim() || !input.answer.trim() || !input.reason.trim())
+    throw new Error("Answering the planner needs actor, answer and reason");
+  open.answer = {
+    actor: input.actor,
+    answer: input.answer,
+    reason: input.reason,
+    at: new Date().toISOString(),
+  };
+  record.revision = open.draft;
+  record.phase = "ready";
 }
 
 /** Retain the current owned native original and complete its existing admission. */
@@ -408,6 +471,7 @@ async function compilePlanAdmitted(
           executionBounds,
           contextLookup: record.contextLookup?.packet,
           workflowRecipe,
+          operatorDecisions: operatorPlanningDecisions(record),
         }),
       );
     } catch {
@@ -434,6 +498,7 @@ async function compilePlanAdmitted(
       state.approvedPlaybookPin,
       record.contextLookup?.packet,
       workflowRecipe,
+      operatorPlanningDecisions(record),
     );
     const retained = retainedPlanningReview(record, packet, configDigest);
     if (
@@ -466,10 +531,22 @@ async function compilePlanAdmitted(
       : undefined);
   // This round's complete compiler answer, until it is retained by reference.
   let answered: unknown;
+  // Every round after an answer revises with it; a round's own corrections
+  // follow. Corrections from before the question are already in its draft.
+  const withAnswers = (round: PlanCorrection[]): PlanCorrection[] => [
+    ...(operatorPlanningDecisions(record) ?? []).map((entry) => ({
+      source: "operator" as const,
+      question: entry.question,
+      detail: `${entry.answer} (${entry.reason})`,
+    })),
+    ...round,
+  ];
   const last = record.history.at(-1);
-  let corrections: PlanCorrection[] = last
-    ? (last.corrections ?? [{ source: "diagnosis", detail: last.correction }])
-    : [];
+  let corrections: PlanCorrection[] = withAnswers(
+    last && record.decisions?.at(-1)?.round !== record.history.length
+      ? (last.corrections ?? [{ source: "diagnosis", detail: last.correction }])
+      : [],
+  );
   const invocationHooks = (
     id: string,
     phase: ModelInvocationPhase,
@@ -652,13 +729,15 @@ async function compilePlanAdmitted(
             )
           : await model.generateStructured(request);
       } catch (error) {
+        const asked = Boolean(plannerDecisionOf(error));
         if (
+          asked ||
           error instanceof MalformedPlannerOutput ||
           error instanceof PlanValidationError
         ) {
           await retainAnswer();
-          retainResult(error.message);
-          record.responseFailure = error.message;
+          retainResult((error as Error).message);
+          if (!asked) record.responseFailure = (error as Error).message;
           record.phase = "ready";
           save();
         }
@@ -743,6 +822,7 @@ async function compilePlanAdmitted(
         state.approvedPlaybookPin,
         record.contextLookup?.packet,
         workflowRecipe,
+        operatorPlanningDecisions(record),
       );
       const retained = retainedPlanningReview(record, packet, configDigest);
       record.review = retained.review;
@@ -795,8 +875,22 @@ async function compilePlanAdmitted(
       }
       // The planner asked a question the operator answers (#1296): planning
       // stops for that decision instead of revising against the allowance.
+      // Its draft is kept, so an answer revises it instead of planning again.
       const asked = plannerDecisionOf(error);
       if (asked) {
+        if (record.answer) {
+          record.decisions = [
+            ...(record.decisions ?? []),
+            {
+              question: asked.question,
+              round: record.history.length,
+              draft: record.answer,
+              invocations: structuredClone(record.invocations ?? []),
+            },
+          ];
+          record.invocations = [];
+          delete record.answer;
+        }
         record.phase = "stopped";
         save();
         throw new PlanningNeedsDecision(asked.question);
@@ -1021,7 +1115,7 @@ async function compilePlanAdmitted(
         ...(record.review ? { review: reviewByReference(record.review) } : {}),
       });
       record.invocations = [];
-      corrections = stating;
+      corrections = withAnswers(stating);
       nextRevision();
       delete record.response;
       delete record.responseFailure;
@@ -1112,7 +1206,9 @@ async function compilePlanAdmitted(
       ...(record.review ? { review: reviewByReference(record.review) } : {}),
     });
     record.invocations = [];
-    corrections = [{ source: "diagnosis", detail: diagnosis.correction }];
+    corrections = withAnswers([
+      { source: "diagnosis", detail: diagnosis.correction },
+    ]);
     nextRevision();
     delete record.response;
     delete record.responseFailure;

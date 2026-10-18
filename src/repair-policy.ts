@@ -909,9 +909,37 @@ export function assertRepairLedger(
       )
     )
       throw new Error("Invalid planning recovery disposition");
+    if (
+      value.decisions !== undefined &&
+      (!Array.isArray(value.decisions) ||
+        value.decisions.some(
+          (entry) =>
+            !entry ||
+            typeof entry.question !== "string" ||
+            !entry.question.trim() ||
+            !Number.isSafeInteger(entry.round) ||
+            entry.round < 0 ||
+            entry.round > value.history.length ||
+            !entry.draft ||
+            !Array.isArray(entry.invocations) ||
+            (entry.answer !== undefined &&
+              (!entry.answer ||
+                Object.keys(entry.answer).sort().join() !==
+                  "actor,answer,at,reason" ||
+                ![
+                  entry.answer.actor,
+                  entry.answer.answer,
+                  entry.answer.reason,
+                  entry.answer.at,
+                ].every((text) => typeof text === "string" && text.trim()))),
+        ) ||
+        value.decisions.slice(0, -1).some((entry) => !entry.answer))
+    )
+      throw new Error("Invalid planner decision record");
     for (const receipt of [
       ...(value.invocations ?? []),
       ...value.history.flatMap((entry) => entry.invocations),
+      ...(value.decisions ?? []).flatMap((entry) => entry.invocations),
     ]) {
       if (
         !receipt ||
@@ -936,7 +964,11 @@ export function assertRepairLedger(
         throw new Error("Invalid original planning invocation receipt");
     }
     // Retained compiler answers persist only as content-store references.
-    for (const ref of [value.answer, value.revision])
+    for (const ref of [
+      value.answer,
+      value.revision,
+      ...(value.decisions ?? []).map((entry) => entry.draft),
+    ])
       if (
         ref !== undefined &&
         (!ref ||

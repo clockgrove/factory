@@ -66,6 +66,7 @@ import {
   isPreparationState,
   observedStackNumber,
   openAmendmentQuestion,
+  openPlanningQuestion,
   projectionStarted,
 } from "./state.js";
 import type { PreState } from "./state-store.js";
@@ -2642,6 +2643,7 @@ function preparationStatusDocument(
       : null,
     planningStopped:
       !preparation.plan && preparation.planningRecovery?.phase === "stopped",
+    planningQuestion: Boolean(openPlanningQuestion(preparation)),
     planningStep: planningStepView(preparation, redact),
     issueByItemId: preparation.issueByItemId,
     projectionStarted: projectionStarted(preparation),

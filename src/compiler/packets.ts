@@ -20,6 +20,7 @@ import {
   type PlanningLocalExecutables,
   type PlanningExecutionBounds,
   type ApprovedPlaybookPin,
+  type OperatorPlanningDecision,
   type PlanReviewRequest,
   assertPlanningExecutionBounds,
   assertApprovedPlaybookPin,
@@ -48,6 +49,7 @@ export function planReviewPacket(
   approvedPlaybookPin?: ApprovedPlaybookPin,
   contextLookup?: PlanningContextPacket,
   workflowRecipe?: WorkflowRecipeInput,
+  operatorDecisions?: OperatorPlanningDecision[],
 ): PlanReviewRequest {
   if (workflowRecipe) assertWorkflowRecipeInput(workflowRecipe);
   if (executionBounds) assertPlanningExecutionBounds(executionBounds);
@@ -55,6 +57,7 @@ export function planReviewPacket(
     assertApprovedPlaybookPin(approvedPlaybookPin);
   if (contextLookup) assertPlanningContextPacket(contextLookup, sources);
   return {
+    ...(operatorDecisions?.length ? { operatorDecisions } : {}),
     ...(workflowRecipe ? { workflowRecipe } : {}),
     ...(contextLookup ? { contextLookup } : {}),
     ...(approvedPlaybookPin !== undefined ? { approvedPlaybookPin } : {}),
@@ -100,6 +103,7 @@ export function reviewResultDigest(
 export function planningReviewEvidence(
   packet: Pick<
     PlanReviewRequest,
+    | "operatorDecisions"
     | "workflowRecipe"
     | "contextLookup"
     | "sources"
@@ -110,6 +114,15 @@ export function planningReviewEvidence(
   >,
 ) {
   return [
+    ...(packet.operatorDecisions?.length
+      ? [
+          {
+            origin: "controller" as const,
+            path: "FACTORY_OPERATOR_PLANNING_DECISIONS",
+            content: JSON.stringify(packet.operatorDecisions),
+          },
+        ]
+      : []),
     ...(packet.workflowRecipe
       ? [
           {

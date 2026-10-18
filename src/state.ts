@@ -369,6 +369,16 @@ export function openAmendmentQuestion(
     : undefined;
 }
 
+/** The planner's unanswered question that stopped planning with a retained draft. */
+export function openPlanningQuestion(
+  state: ContinuationState,
+): { question: string } | undefined {
+  if (!isPreparationState(state) || state.plan) return undefined;
+  const record = state.planningRecovery;
+  const open = record?.decisions?.at(-1);
+  return record?.phase === "stopped" && open && !open.answer ? open : undefined;
+}
+
 /** Set the coordinator's mode, unless a rejected amendment holds it paused. */
 export function setCoordinatorMode(
   state: ContinuationState,

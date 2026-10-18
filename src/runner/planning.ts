@@ -16,6 +16,7 @@ import {
 } from "../agent-session.js";
 import { adaptiveWorkflowEnabled } from "../adaptive-workflow.js";
 import {
+  answerPlanningDecision,
   bindPlanningPlaybook,
   compilePlan,
   type PlanCandidate,
@@ -47,7 +48,11 @@ import { planningPrerequisites } from "../objective-prerequisites.js";
 import { fetchHead, git, gitAsync } from "../process.js";
 import { checkRequiredEnvironment, resolveAutonomy } from "../repair-policy.js";
 import type { PreparationState } from "../state.js";
-import { isPreparationState, projectionStarted } from "../state.js";
+import {
+  isPreparationState,
+  openPlanningQuestion,
+  projectionStarted,
+} from "../state.js";
 import {
   assertNoEarlierVersion,
   readContinuation,
@@ -449,7 +454,9 @@ async function planObjectiveObserved(
 
 /**
  * Decide the plan a run persisted in state. Accepting binds the answer to that exact reviewed
- * plan; refusing discards the unprojected preparation so the next run plans again.
+ * plan, or, when planning stopped at the planner's own question, to the draft it asked about,
+ * which the next run revises; refusing discards the unprojected preparation so the next run
+ * plans again.
  */
 export async function decidePlan(
   config: FactoryConfig,
@@ -542,6 +549,10 @@ export async function decidePlan(
       );
       rmSync(path);
       markCheckpointDirty(config.repository, { path, kind: "continuation" });
+    } else if (openPlanningQuestion(preparation)) {
+      answerPlanningDecision(preparation, input);
+      resumePlanning(preparation);
+      saveState(path, preparation);
     } else {
       if (!preparation.plan)
         throw new Error("Objective planning has not produced a plan yet");
@@ -569,7 +580,12 @@ export async function decidePlan(
       outcome: "completed",
       durationMs: Date.now() - started,
       metadata: {
-        review: input.outcome === "refuse" ? "refused" : "human-accepted",
+        review:
+          input.outcome === "refuse"
+            ? "refused"
+            : preparation.plan
+              ? "human-accepted"
+              : "answered",
       },
       detail: input.reason,
     });
@@ -586,6 +602,13 @@ export async function decidePlan(
     releaseMutationLock(config, objective, lock);
   }
 }
+/** An answered planner question returns the stopped preparation to planning. */
+export function resumePlanning(preparation: PreparationState): void {
+  preparation.coordinator.phase = "planning";
+  preparation.coordinator.phaseStartedAt = new Date().toISOString();
+  delete preparation.coordinator.waitReason;
+}
+
 export async function prepareObjective(args: {
   config: FactoryConfig;
   objective: number;

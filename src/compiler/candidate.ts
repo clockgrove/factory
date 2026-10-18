@@ -15,6 +15,7 @@ import type {
   PlanningLocalExecutables,
   PlanningExecutionBounds,
   ExecutionProfileChoices,
+  OperatorPlanningDecision,
   WorkGraph,
   PlanCommandAuthorization,
   PlanReviewRequest,
@@ -78,6 +79,8 @@ export interface PlanCandidate {
   reviewDigest: string;
   /** Factory installation configuration bound at preview time. */
   configDigest: string;
+  /** Operator answers to the planner's questions this graph was revised for; reviewed with it. */
+  operatorDecisions?: OperatorPlanningDecision[];
   humanDecision?: {
     question: string;
     answer: string;
@@ -125,6 +128,9 @@ export function buildPlanCandidate(
     ...(review.failure ? { failure: review.failure } : {}),
   };
   return {
+    ...(packet.operatorDecisions
+      ? { operatorDecisions: structuredClone(packet.operatorDecisions) }
+      : {}),
     ...(packet.workflowRecipe
       ? { workflowRecipe: structuredClone(packet.workflowRecipe) }
       : {}),
@@ -248,6 +254,7 @@ export function verifyPlanCandidate(
     candidate.approvedPlaybookPin,
     candidate.contextLookup,
     candidate.workflowRecipe,
+    candidate.operatorDecisions,
   );
   if (
     (candidate.prerequisites &&

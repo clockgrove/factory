@@ -513,9 +513,14 @@ function continuationReferences(value: unknown): ContinuationReferences & {
   add(state.planningRecovery?.contextLookup?.packetRef);
   add(state.planningRecovery?.answer);
   add(state.planningRecovery?.revision);
+  for (const decision of state.planningRecovery?.decisions ?? [])
+    add(decision.draft);
   for (const receipt of [
     ...(state.planningRecovery?.invocations ?? []),
     ...(state.planningRecovery?.history ?? []).flatMap(
+      (entry) => entry.invocations,
+    ),
+    ...(state.planningRecovery?.decisions ?? []).flatMap(
       (entry) => entry.invocations,
     ),
   ])
@@ -729,6 +734,14 @@ function memoryReferences(
         add(object(recovery.contextLookup).packetRef as ContentRef);
       for (const key of ["answer", "revision"])
         if (recovery[key] !== undefined) add(recovery[key] as ContentRef);
+      const decisions =
+        (recovery.decisions as
+          | {
+              draft: ContentRef;
+              invocations: { nativeReturns?: ContentRef[] }[];
+            }[]
+          | undefined) ?? [];
+      for (const decision of decisions) add(decision.draft);
       for (const receipt of [
         ...((recovery.invocations as
           | { nativeReturns?: ContentRef[] }[]
@@ -738,6 +751,7 @@ function memoryReferences(
             | { invocations: { nativeReturns?: ContentRef[] }[] }[]
             | undefined) ?? []
         ).flatMap((entry) => entry.invocations),
+        ...decisions.flatMap((entry) => entry.invocations),
       ])
         for (const ref of receipt.nativeReturns ?? []) add(ref);
     }

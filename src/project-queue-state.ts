@@ -345,6 +345,7 @@ function assertStoppedClaimState(state: ContinuationState): void {
   const receipts = [
     ...(recovery.invocations ?? []),
     ...recovery.history.flatMap((entry) => entry.invocations),
+    ...(recovery.decisions ?? []).flatMap((entry) => entry.invocations),
   ];
   if (
     receipts.some((receipt) => !receipt.resultDigest && !receipt.abandoned) ||

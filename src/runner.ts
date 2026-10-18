@@ -11,7 +11,11 @@ import {
   settleAbandonedPlanningTurn,
   settleAbandonedReviewTurns,
 } from "./agent-session.js";
-import { bindPlanningPlaybook, resolvePlan } from "./compiler.js";
+import {
+  answerPlanningDecision,
+  bindPlanningPlaybook,
+  resolvePlan,
+} from "./compiler.js";
 import { objectiveComplete } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
 import { factoryConfigDigest, stateRoot } from "./config.js";
@@ -129,13 +133,14 @@ import {
   releaseCancelledSessions,
   synchronizeWorkItemPause,
 } from "./runner/ownership.js";
-import { decidePlan } from "./runner/planning.js";
+import { decidePlan, resumePlanning } from "./runner/planning.js";
 import { SemanticAcceptanceFailure } from "./semantic-refusal.js";
 import type { ContinuationState, FactoryState, WorkState } from "./state.js";
 import {
   isExecutionState,
   isPreparationState,
   openAmendmentQuestion,
+  openPlanningQuestion,
   pendingQuestions,
   rejectionHoldsPause,
   setCoordinatorMode,
@@ -261,6 +266,7 @@ async function decideObjectiveUnscoped(
   forward = true,
 ): Promise<
   | "plan-accepted"
+  | "plan-answered"
   | "plan-refused"
   | "amendment-accepted"
   | "amendment-refused"
@@ -288,18 +294,26 @@ async function decideObjectiveUnscoped(
         input: { ...input },
       });
       if (reply.handled) {
-        if (reply.result !== "plan-accepted" && reply.result !== "plan-refused")
+        if (
+          reply.result !== "plan-accepted" &&
+          reply.result !== "plan-answered" &&
+          reply.result !== "plan-refused"
+        )
           throw new Error("The live owner returned no plan decision");
         return reply.result;
       }
     }
-    await decidePlan(config, objective, services, {
+    const decided = await decidePlan(config, objective, services, {
       actor: input.actor,
       outcome: input.outcome,
       answer: input.answer ?? "",
       reason: input.reason,
     });
-    return input.outcome === "accept" ? "plan-accepted" : "plan-refused";
+    return input.outcome === "refuse"
+      ? "plan-refused"
+      : decided.plan
+        ? "plan-accepted"
+        : "plan-answered";
   }
   // The planner's open question about the pending amendment (#1296).
   const asked = openAmendmentQuestion(state);
@@ -972,6 +986,18 @@ async function runObjectiveOwned(
             throw new Error(
               "Accepting a plan requires --answer to its question",
             );
+          // The planner's own question: the answer revises its draft.
+          if (openPlanningQuestion(current)) {
+            answerPlanningDecision(current, {
+              actor: decision.actor,
+              answer: decision.answer,
+              reason: decision.reason,
+            });
+            resumePlanning(current);
+            persist();
+            wake();
+            return "plan-answered";
+          }
           if (!current.plan)
             throw new Error("Objective planning has not produced a plan yet");
           if (current.plan.review.acceptable === false)

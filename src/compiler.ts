@@ -73,5 +73,8 @@ export {
   type PlanningReviewRecord,
   type PlanningRecoveryRecord,
   type PlanningRecoveryContext,
+  type PlanningDecisionRecord,
+  answerPlanningDecision,
   compilePlan,
+  operatorPlanningDecisions,
 } from "./compiler/recovery.js";

@@ -139,6 +139,7 @@ export interface FactoryApplication {
     input: import("./runner.js").DecisionInput,
   ): Promise<
     | "plan-accepted"
+    | "plan-answered"
     | "plan-refused"
     | "amendment-accepted"
     | "amendment-refused"

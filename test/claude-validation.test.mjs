@@ -726,16 +726,16 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
   );
   assert.equal((await run('cat "$HOME/note"')).output, "kept\n");
   // Escapes fail: host secrets, .git, the network, the controller.
-  const escapes = await run(
-    [
-      `! cat '${secret}'`,
-      "! sh -c 'echo gitdir: /tmp >> .git'",
-      `! touch '${join(repository, "escape")}'`,
-      `! kill -0 ${process.pid}`,
-      `test "$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ')" = lo`,
-    ].join(" && "),
-  );
-  assert.equal(escapes.exitCode, 0, escapes.output);
+  for (const escape of [
+    `! cat '${secret}'`,
+    "! sh -c 'echo gitdir: /tmp >> .git'",
+    `! touch '${join(repository, "escape")}'`,
+    `! kill -0 ${process.pid}`,
+    `i="$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ')"; echo "$i"; test "$i" = lo`,
+  ]) {
+    const attempt = await run(escape);
+    assert.equal(attempt.exitCode, 0, `${escape}\n${attempt.output}`);
+  }
   assert.equal(existsSync(join(repository, "escape")), false);
   // A nonzero exit is reported, not thrown.
   assert.equal((await run("exit 7")).exitCode, 7);

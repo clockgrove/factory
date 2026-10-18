@@ -498,82 +498,120 @@ test("host-side Git never enters a nested repository sandboxed code could write"
   assert.equal(existsSync(marker), false);
 });
 
-test("a verified install reaches the network only with its base lockfile, and commands are resource-limited", async () => {
+test("a verified install reaches only its configured registry, and commands are resource-limited", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-install-network-"));
-  // A real dependency tarball served on host loopback: only an install in the
-  // host's network can fetch it.
-  const pack = join(root, "pack");
-  mkdirSync(join(pack, "package"), { recursive: true });
-  writeFileSync(
-    join(pack, "package", "package.json"),
-    JSON.stringify({ name: "dep", version: "1.0.0" }),
-  );
-  execFileSync("tar", ["-czf", join(pack, "dep.tgz"), "-C", pack, "package"]);
-  const tarball = readFileSync(join(pack, "dep.tgz"));
+  // Real dependency tarballs served on host loopback, standing in for the
+  // configured registry: only an install in the host's network reaches it.
+  const tarballs = {};
+  for (const name of ["dep", "added", "foreign"]) {
+    const pack = join(root, "pack", name);
+    mkdirSync(join(pack, "package"), { recursive: true });
+    writeFileSync(
+      join(pack, "package", "package.json"),
+      JSON.stringify({ name, version: "1.0.0" }),
+    );
+    execFileSync("tar", ["-czf", join(pack, "p.tgz"), "-C", pack, "package"]);
+    tarballs[name] = readFileSync(join(pack, "p.tgz"));
+  }
   const requests = [];
+  // npm also asks the registry for audits and its own version.
+  const fetched = () => requests.filter((url) => url.includes(".tgz"));
   const server = createServer((request, response) => {
     requests.push(request.url);
-    response.end(tarball);
+    const name = request.url.split("/")[1];
+    response.end(tarballs[name] ?? "");
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
-    const url = (query) =>
-      `http://127.0.0.1:${server.address().port}/dep.tgz${query}`;
-    const manifest = {
-      name: "installing",
-      version: "1.0.0",
-      dependencies: { dep: "1.0.0" },
-    };
-    const lock = (resolved, bytes = tarball) =>
-      JSON.stringify({
+    const registry = `http://127.0.0.1:${server.address().port}/`;
+    const integrity = (bytes) =>
+      `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+    const write = (worktree, dependencies) => {
+      const manifest = {
         name: "installing",
         version: "1.0.0",
-        lockfileVersion: 3,
-        requires: true,
-        packages: {
-          "": manifest,
-          "node_modules/dep": {
-            version: "1.0.0",
-            resolved,
-            integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
+        dependencies: Object.fromEntries(
+          Object.keys(dependencies).map((name) => [name, "1.0.0"]),
+        ),
+      };
+      writeFileSync(join(worktree, "package.json"), JSON.stringify(manifest));
+      writeFileSync(
+        join(worktree, "package-lock.json"),
+        JSON.stringify({
+          name: "installing",
+          version: "1.0.0",
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            "": manifest,
+            ...Object.fromEntries(
+              Object.entries(dependencies).map(([name, resolved]) => [
+                `node_modules/${name}`,
+                {
+                  version: "1.0.0",
+                  resolved,
+                  integrity: integrity(tarballs[name]),
+                },
+              ]),
+            ),
           },
-        },
-      });
+        }),
+      );
+    };
     const worktree = join(root, "worktree");
     execFileSync("git", ["init", "-q", worktree]);
-    writeFileSync(join(worktree, "package.json"), JSON.stringify(manifest));
-    writeFileSync(join(worktree, "package-lock.json"), lock(url("")));
-    writeFileSync(join(worktree, ".gitignore"), "node_modules/\n");
-    execFileSync("git", ["-C", worktree, "add", "."]);
-    execFileSync("git", [
-      "-C",
-      worktree,
-      "-c",
-      "user.name=Test",
-      "-c",
-      "user.email=test@example.com",
-      "commit",
-      "-qm",
-      "base",
-    ]);
-    const store = join(root, "store");
-    const policy = {
-      required: true,
-      network: "package-install",
-      packageStore: store,
-      readOnlyPaths: [],
-      limits: { tmpMiB: 64, processes: 512 },
-    };
-    const install = "npm ci --ignore-scripts";
-    const run = (commands, number) =>
-      runDeclaredValidation(
+    const commit = (message) => {
+      execFileSync("git", ["-C", worktree, "add", "."]);
+      execFileSync("git", [
+        "-C",
         worktree,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-qm",
+        message,
+      ]);
+      const read = (revision) =>
+        execFileSync("git", ["-C", worktree, "rev-parse", revision], {
+          encoding: "utf8",
+        }).trim();
+      return { commit: read("HEAD"), tree: read("HEAD^{tree}") };
+    };
+    // The base configures the registry; its lockfile resolves there.
+    writeFileSync(join(worktree, ".npmrc"), `registry=${registry}\n`);
+    writeFileSync(join(worktree, ".gitignore"), "node_modules/\n");
+    write(worktree, { dep: `${registry}dep/-/dep-1.0.0.tgz` });
+    const base = commit("base");
+    const install = "npm ci --ignore-scripts";
+    // The caller that verified these package inputs passes the base, as
+    // validateWorkItem, final validation and readiness do.
+    const validate = (target, number, commands = [install]) =>
+      validateTree(
+        worktree,
+        join(root, `validation-${number}`),
+        target.commit,
+        target.tree,
         commands,
-        number,
         undefined,
         undefined,
-        policy,
-        { sourceDeclared: [install] },
+        [],
+        undefined,
+        base.commit,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        {
+          required: true,
+          network: "package-install",
+          packageStore: join(root, "store"),
+          readOnlyPaths: [],
+          limits: { tmpMiB: 64, processes: 512 },
+          packageInputsVerified: true,
+          packageInputsBase: base.commit,
+        },
       );
     const limited = [
       `test "$(awk '/Max processes/{print $3}' /proc/self/limits)" = 512`,
@@ -581,19 +619,32 @@ test("a verified install reaches the network only with its base lockfile, and co
         ? [`test "$(df -k /tmp | awk 'NR==2{print $2}')" = 65536`]
         : []),
     ];
-    // The base lockfile: the verified install fetches from the network.
-    const online = await run([install, ...limited], 1);
-    assert.equal(online.passed, true, online.text);
-    assert.deepEqual(requests, ["/dep.tgz"]);
-    // A candidate's lockfile naming another URL (and bytes the store lacks)
-    // installs offline: no request leaves the sandbox.
-    writeFileSync(
-      join(worktree, "package-lock.json"),
-      lock(url("?repository-contents"), Buffer.from("other bytes")),
+    // The base lockfile: the install fetches from the registry.
+    await validate(base, 1, [install, ...limited]);
+    assert.deepEqual(fetched(), ["/dep/-/dep-1.0.0.tgz"]);
+    // A candidate adding a dependency from the configured registry still
+    // reaches it.
+    write(worktree, {
+      dep: `${registry}dep/-/dep-1.0.0.tgz`,
+      added: `${registry}added/-/added-1.0.0.tgz`,
+    });
+    await validate(commit("add a registry dependency"), 2);
+    assert.deepEqual(fetched(), [
+      "/dep/-/dep-1.0.0.tgz",
+      "/added/-/added-1.0.0.tgz",
+    ]);
+    // One naming a tarball on another host installs offline: no request
+    // leaves, and the install fails where it connects (npm retries).
+    write(worktree, {
+      dep: `${registry}dep/-/dep-1.0.0.tgz`,
+      foreign: `http://localhost:${server.address().port}/foreign/x.tgz?repository-contents`,
+    });
+    const before = requests.length;
+    await assert.rejects(
+      validate(commit("add a foreign tarball"), 3),
+      /ECONNREFUSED/,
     );
-    // The install fails where it connects (its own loopback); npm retries.
-    await assert.rejects(run([install], 2), /ECONNREFUSED/);
-    assert.deepEqual(requests, ["/dep.tgz"]);
+    assert.equal(requests.length, before);
   } finally {
     server.close();
   }

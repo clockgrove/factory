@@ -29,6 +29,7 @@ import {
   sandboxedCommand,
 } from "./execution/sandbox.js";
 import { StepFault, transient } from "./fault.js";
+import { installMayUseNetwork } from "./execution/package-network.js";
 import { indexHasGitlinks } from "./execution/staged-candidate.js";
 import { lfsFiltered } from "./media.js";
 import { ownsPath } from "./ownership.js";
@@ -328,44 +329,6 @@ function dependencyInputsChanged(
   );
 }
 
-/** Files that choose where an install fetches from and what it fetches. */
-const PACKAGE_NETWORK_INPUTS = [
-  "package.json",
-  "pnpm-lock.yaml",
-  "package-lock.json",
-  "npm-shrinkwrap.json",
-  ".npmrc",
-  "pnpm-workspace.yaml",
-  ".pnpmfile.cjs",
-  ".pnpmfile.mjs",
-  ".pnpmfile.js",
-];
-
-function packageNetworkInputsUnchanged(
-  worktree: string,
-  base: string,
-  commit: string,
-): boolean {
-  try {
-    return (
-      pinnedGitRaw(
-        worktree,
-        "diff-tree",
-        "-r",
-        "--name-only",
-        "-z",
-        "--no-renames",
-        base,
-        commit,
-        "--",
-        ...PACKAGE_NETWORK_INPUTS,
-      ).length === 0
-    );
-  } catch {
-    return false;
-  }
-}
-
 function treeHasGitlinks(checkout: string, commit: string): boolean {
   return pinnedGitRaw(checkout, "ls-tree", "-r", "-z", "--full-tree", commit)
     .toString("utf8")
@@ -635,17 +598,13 @@ export async function validateCheckout(
         sequenceIndex === 0 &&
         sandbox.packageInputsVerified === true &&
         packageBootstrap(check) !== undefined;
-      // Network only for an unchanged lockfile and configuration; a changed
-      // one installs offline from the store.
+      // Network only from the configured registries: unchanged package
+      // configuration and a lockfile that resolves only there.
       const online =
         install &&
         sandbox.network === "package-install" &&
         sandbox.packageInputsBase !== undefined &&
-        packageNetworkInputsUnchanged(
-          worktree,
-          sandbox.packageInputsBase,
-          commit,
-        );
+        installMayUseNetwork(worktree, sandbox.packageInputsBase, commit);
       let home = homeRoot;
       if (install) {
         home = mkdtempSync(join(tmpdir(), "factory-install-home-"));

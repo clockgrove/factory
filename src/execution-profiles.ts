@@ -3,6 +3,7 @@ import {
   harnessAdapterIdentity,
   type ExecutionProfile,
   type FactoryConfig,
+  type LocalHarnessConfig,
   withoutWorkerLimits,
 } from "./config.js";
 import type {
@@ -103,6 +104,44 @@ export function executionProfileChoices(
       }),
     ),
   };
+}
+
+/**
+ * What a worker can execute, decided by its harness kind. Codex workers have
+ * a sandboxed shell. Claude and Copilot workers have no shell: only checkout
+ * file tools and the item's authorized validation. Registered and managed
+ * adapters declare neither, so planning treats them as shell-less.
+ */
+export type WorkerCommandAccess = "shell" | "validation-only" | "undeclared";
+
+function harnessCommandAccess(
+  harness: LocalHarnessConfig,
+): WorkerCommandAccess {
+  switch (harness.kind) {
+    case "codex-sdk":
+      return "shell";
+    case "claude-agent-sdk":
+    case "github-copilot-sdk":
+      return "validation-only";
+    case "registered":
+      return "undeclared";
+  }
+}
+
+/** Worker command access by execution profile id; "" names the single worker without profiles. */
+export function workerCommandAccess(
+  config: FactoryConfig,
+): Record<string, WorkerCommandAccess> {
+  const execution = config.execution;
+  if (execution.kind !== "local") return { "": "undeclared" };
+  if (execution.profiles)
+    return Object.fromEntries(
+      Object.entries(execution.profiles).map(([id, profile]) => [
+        id,
+        harnessCommandAccess(profile.harness),
+      ]),
+    );
+  return { "": harnessCommandAccess(execution.harness!) };
 }
 
 export function normalizeExecutionProfiles(

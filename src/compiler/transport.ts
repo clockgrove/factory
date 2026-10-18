@@ -41,6 +41,10 @@ export interface PlanningModelOptions {
   checkout?: string;
   /** The installation's configured selectors, shown to compile and graph review. */
   reviewArtifacts?: readonly ReviewArtifactSelector[];
+  /** What the configured workers can execute, shown to compile and graph review. */
+  workerCommandAccess?: Readonly<
+    Record<string, import("../execution-profiles.js").WorkerCommandAccess>
+  >;
   reviewCapacityRetryDelaysMs?: readonly number[];
   /** Backoff before each fresh session after the provider rejected a login it was sent. */
   credentialRetryDelaysMs?: readonly number[];

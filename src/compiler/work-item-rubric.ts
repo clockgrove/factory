@@ -4,6 +4,8 @@
  * guidance only: code checks the plan's structure, never this prose.
  */
 
+import type { WorkerCommandAccess } from "../execution-profiles.js";
+
 /**
  * Acceptance entries above which an item states why it is one outcome. A
  * signal, not a target: precise plans with 40-64 entries per item drew most
@@ -15,6 +17,33 @@ export const WORK_ITEM_ENTRY_SIGNAL = 15;
 /** Shared by the planner and the graph reviewer. */
 export const QA_EVIDENCE_GUIDANCE =
   "Read-only QA has no implementation turn or interpreter for brief prose: it executes only declared validation commands and named CI checks. Required dependency inspection and runtime artifacts need complete supplied source or an explicitly selected validation-evidence mechanism. A brief promising inspection or retention does not execute it. A passing cacheable command does not by itself establish fresh execution or missing runtime facts; absent proof remains unavailable.";
+
+/** One phrase per worker command access; the shell-less phrase is what the planner must plan around. */
+const COMMAND_ACCESS: Record<WorkerCommandAccess, string> = {
+  shell:
+    "have a sandboxed shell: besides the item's authorized validation commands, they can run commands in the checkout.",
+  "validation-only":
+    "cannot run arbitrary commands: they run only the item's authorized validation commands and read and write files in the checkout.",
+  undeclared:
+    "use an adapter that declares no shell, so plan as if they cannot run arbitrary commands: they run only the item's authorized validation commands and read and write files in the checkout.",
+};
+
+/** What the configured workers can execute, shown to the planner and the graph reviewer. */
+export function workerCapability(
+  access: Readonly<Record<string, WorkerCommandAccess>>,
+): string {
+  const groups = new Map<WorkerCommandAccess, string[]>();
+  for (const [profile, kind] of Object.entries(access))
+    groups.set(kind, [...(groups.get(kind) ?? []), profile]);
+  if (groups.size === 1)
+    return `Worker capability. Workers ${COMMAND_ACCESS[[...groups.keys()][0]!]}`;
+  return `Worker capability, by execution profile. ${[...groups]
+    .map(
+      ([kind, profiles]) =>
+        `Workers on profile${profiles.length > 1 ? "s" : ""} ${profiles.join(", ")} ${COMMAND_ACCESS[kind]}`,
+    )
+    .join(" ")}`;
+}
 
 /** What every Work Item contains and leaves out; shared by the planner and the graph reviewer. */
 export const WORK_ITEM_STANDARD = `Work Item standard. A plan says what must be true when the work is done and what other items rely on. The worker decides how from the real code, and its result reviewer checks the result against that code. A result is reviewed only against its own item's fields, so each item is complete and checkable on its own.
@@ -32,6 +61,7 @@ Keep these, because they raise result quality:
 - reusing the repository's existing helpers, types and conventions, named by name;
 - for a total or never-throws contract, malformed input kept apart from internal defects: a catch-all that reports every error as invalid input does not meet it.
 Existing tests are protected by default: an item changes an existing assertion, golden or baseline only when its acceptance states that behaviour change and why, and an exact-membership list grows by exactly the item's additions.
+Generated values: a worker that cannot run arbitrary commands learns only from its validation output and the checkout. Where an item must commit values only running code produces (hashes, snapshots, goldens, generated files), one of its authorized commands produces them, or reports the actual values in its output or inside the checkout; otherwise the worker cannot learn what to commit. If no command does, plan that capability in the item that owns the harness or tool (for example, the check reports the actual value on mismatch, or a generator writes the file), and have dependent items consume it.
 Size: one outcome per item. Split by independently verifiable capability, never by layer; each item includes its own tests and docs. About ${WORK_ITEM_ENTRY_SIGNAL} acceptance entries is a signal, not a target: above it, split the item or state why it is one outcome (Factory adds the reason to the brief).`;
 
 /** The planner's job, how it works, and the rules for its output fields. */
@@ -95,6 +125,10 @@ const CROSS_ITEM =
 const CODE_CLAIMS =
   "Claims about existing code (names, types, behaviour, conventions) rest on what was read: flag one the repository contradicts; where the code was not read, the item states the outcome and leaves the how to the worker.";
 
+/** Check 8: a shell-less worker can learn generated values only from its commands. */
+const GENERATED_VALUES =
+  "Flag an item whose worker cannot run arbitrary commands but must commit values only running code produces (hashes, snapshots, goldens, generated files), when none of its authorized commands produces them or reports the actual values in its output or inside the checkout and no item it depends on delivers that capability: its worker cannot learn what to commit.";
+
 /** The numbered rubric; checks 1-9 and 11 are fix findings (except an open source scope question in check 1), check 10 is an operator decision. */
 export const GRAPH_REVIEW_CHECKS = `Check:
 1. Acceptance coverage. ${COVERAGE} Item or QA review judges the obligation itself on the owner's result, so check that the owner's acceptance as a whole delivers it; it names no acceptance entry. Check that each proof kind fits its criterion's wording: a criterion that is exactly one backticked command is run by Factory on the integrated result, so any proof covers it; a criterion that requires another command to pass is proved by that exact command. ${SOURCE_OBLIGATIONS} Factory has checked only their structure (line ranges exist in the pinned sources and do not overlap; owners and commands exist; cited Objective lines exist). Judge fidelity: flag an exit item a cited section states that neither an entry nor an Objective criterion captures, a statement that drops or weakens a clause of its lines, a proof that cannot show it, or an exclusion whose reason does not follow from the Objective text it cites. Descriptive, background and how-to text in a cited section is context for building the work, not an exit item, so do not demand that the plan restate every clause of a document. Whether an exit item is in scope, when the Objective leaves that open, is an operator decision.
@@ -104,7 +138,7 @@ export const GRAPH_REVIEW_CHECKS = `Check:
 5. Commands. Validation commands appear in the command authority receipts (observed in the repository or declared in a pinned source). They must terminate deterministically with exit zero on success and cleanup of owned resources. Flag a bare persistent service launch used as validation even when its brief promises managed startup/shutdown; executable lifecycle proof needs a finite authorized harness. Judge semantics, not command names. Preserve source-required launch documentation and actual startup/request/shutdown proof; missing finite-check authority or a required nonterminating acceptance command needs a source decision, not an invented command or dropped requirement. Environment prerequisites select only exact authorized preimplementation setup explicitly needed by the readiness probe, before that probe in the owner's validation order; a null probe has no selected setup. Check the selected setup/probe sequence can run in preflight and the actual worker checkout before provider dispatch, preserving prerequisite dependencies and authority; each fresh result/final validation checkout needs authorized setup before its own phase checks. Ignored installations or historical receipts do not prove fresh readiness. Commands needing the new implementation belong to semantic acceptance, and setup receipts cannot replace it. Missing or unsupported setup remains an unresolved source decision. Required CI checks that must pass before merging are listed as pre-integration checks. A source-required check missing from the known CI check names is an unresolved source decision: ask the operator. ${QA_EVIDENCE_GUIDANCE}
 6. Briefs. Graph evidenceSpan references select complete worker inputs from this review packet by evidenceIndex and evidenceId, with the resolved path and JavaScript string start/length. The controller has authenticated that exact evidence row, full sourceDigest and selected contentDigest. Judge whether the selected source content supplies the necessary information; these packet-local references are not compiler pinned-source catalog indices and require no rebasing. A worker receives its item fields and pinned inputSources, and works in a full checkout of the repository, so it can read AGENTS.md, documentation and code itself. A brief carries settled decisions and cross-item contracts the worker cannot get from the repository. Flag a brief only when it depends on information that exists solely in this packet (for example an exact interface given only in the Objective) and is not in its fields or inputSources; never ask for reading lists, file lists or implementation steps.
 7. Proof modes. ${PROOF_MODES} Check architecture-derived proof responsibilities against the stated flows; for selection-dependent asynchronous work, a proposed happy-path check alone does not address material stale-completion risks. Keep verification within the Objective's and pinned sources' required scope and proof modes; flag unrequested stronger obligations, including mandatory browser causal interleavings where meaningful real journeys with production component/source proof are permitted. Preserve explicitly required execution layers, orderings and negative controls. Do not require a particular API/framework, extra Work Item or checklist. Component-authored combined tests may execute only after integration, provided their full required runtime evidence is supplied to final review and the component's own acceptance makes no premature passing claim.
-8. Work Item contracts. Each item meets the Work Item standard above. Fix findings: ${BEHAVIOUR_FINDINGS}; acceptance that only enumerates cases where the sources or conventions imply invariants, real-producer input or shared helpers to reuse; semantics that contradict a stated invariant or the real producer's actual type (a budget or state rule that breaks when inputs or steps are split, a restated input schema, a total criterion a catch-all would meet); an existing assertion, golden or baseline changed without stating the behaviour change and why. ${CONTRACT_ONCE} ${CROSS_ITEM} ${CODE_CLAIMS} The plan stays within the repository's documented budgets and conventions in the packet (size bounds, layout rules), planning the structural change where an addition could exceed one. Flag a contract only where the gap would let a worker deliver the wrong result or leave the result reviewer unable to check it, and state the exact entries to change. Never ask for more detail than the standard requires: no entry per field or error path, no prose that existing tests stay unchanged.
+8. Work Item contracts. Each item meets the Work Item standard above. Fix findings: ${BEHAVIOUR_FINDINGS}; acceptance that only enumerates cases where the sources or conventions imply invariants, real-producer input or shared helpers to reuse; semantics that contradict a stated invariant or the real producer's actual type (a budget or state rule that breaks when inputs or steps are split, a restated input schema, a total criterion a catch-all would meet); an existing assertion, golden or baseline changed without stating the behaviour change and why. ${CONTRACT_ONCE} ${CROSS_ITEM} ${CODE_CLAIMS} ${GENERATED_VALUES} The plan stays within the repository's documented budgets and conventions in the packet (size bounds, layout rules), planning the structural change where an addition could exceed one. Flag a contract only where the gap would let a worker deliver the wrong result or leave the result reviewer unable to check it, and state the exact entries to change. Never ask for more detail than the standard requires: no entry per field or error path, no prose that existing tests stay unchanged.
 9. Repository-checkable criteria. Item criteria state facts checkable in the target repository's result. Flag a criterion that restates a Factory controller guarantee (review, publication, integration, LFS upload, hydration), because the result reviewer cannot check it there, and a plan that grants deployment, service or retry authority or weakens the Objective's acceptance.
 10. Open product decisions. When the plan silently decides ${OPEN_CHOICE}, report it as an operator-decision finding whose question states the specific choice, recommends the plan's choice when it is sound and gives the consequences of each option. Fixture or test values the sources call policy, internal names and file layout are the planner's choice: never an operator question.
 11. Child Objectives. When the plan has a split, flag it unless the children are distinct capabilities worth accepting and merging separately or later children need earlier children's code to be planned well; otherwise one graph is better. Each child depends on exactly the siblings whose code it needs, owns at least one Objective outcome (enabling work without one belongs in a child that needs it), the children together deliver the whole Objective, and each stub's goal and sources are enough to plan it later. Review each ready child's graph with checks 1-9 as its own plan against its own outcomes. Factory has checked the structure: every Objective criterion goes to one child, every item to one ready child, and dependencies point to earlier children.
@@ -122,6 +156,7 @@ export const PLANNER_CHECKLIST = `Checklist: the graph reviewer applies these ju
 - Acceptance is behaviour. Fix findings: ${BEHAVIOUR_FINDINGS}.
 - Consistency. ${CROSS_ITEM}
 - Existing code. ${CODE_CLAIMS}
+- Generated values. ${GENERATED_VALUES}
 - Decisions. Never silently decide ${OPEN_CHOICE}: raise it as decisionRequired (rule 2).
 - Phases. ${PHASES}
 - Proof modes. ${PROOF_MODES}`;

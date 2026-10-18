@@ -9,6 +9,7 @@ import {
   PlannerChoiceError,
 } from "../compiler-wire.js";
 import type { CodexModelSelection } from "../config.js";
+import type { WorkerCommandAccess } from "../execution-profiles.js";
 import {
   type AgentSessionContinuation,
   type AgentSessionReconciliation,
@@ -125,6 +126,7 @@ import {
   WORK_ITEM_ENTRY_SIGNAL,
   WORK_ITEM_PLANNING_RULES,
   WORK_ITEM_STANDARD,
+  workerCapability,
 } from "./work-item-rubric.js";
 
 /** Load only the Objective's retained selection. */
@@ -447,6 +449,7 @@ export function renderCompilationCall(
   sourceDelivery?: PlanningSourceDelivery,
   reviewArtifacts?: readonly ReviewArtifactSelector[],
   repository?: RepositoryView,
+  workers?: Readonly<Record<string, WorkerCommandAccess>>,
 ): {
   wire: ReturnType<typeof compilerWire>;
   call: StructuredCall;
@@ -485,7 +488,7 @@ export function renderCompilationCall(
     ),
   );
   const instructions = `${WORK_ITEM_PLANNING_RULES}
-
+${workers ? `${workerCapability(workers)}\n` : ""}
 ${PLANNER_CHECKLIST}
 
 How to answer:
@@ -635,6 +638,7 @@ export function renderGraphReviewCall(
   reviewArtifacts?: readonly ReviewArtifactSelector[],
   repository?: RepositoryView,
   resolveSources?: (refs: readonly WorkItemSourceRef[]) => WorkItemSource[],
+  workers?: Readonly<Record<string, WorkerCommandAccess>>,
 ): StructuredCall {
   if (
     reviewFiles &&
@@ -675,7 +679,7 @@ export function renderGraphReviewCall(
   });
   const instructions = `${request.contextLookup ? "Memory bodies in factory.memory-projection/v1 may refer to an earlier match identity and body role in that same context result, or kind supplied-source selecting the exact complete source evidence via the explicit pinned-source mapping below (pinnedSourceIndex is not a graph evidenceSpan reference). The referenced literal body is authenticated by the same digest; original manifests, freshness and gaps remain independent, and no unseen or newer version follows.\n" : ""}${GRAPH_REVIEW_INTRO}
 ${WORK_ITEM_STANDARD}
-${request.workflowRecipe ? "The separately supplied pinned workflow recipe is structural planning input, never normative Sources, current acceptance proof, command or resource authority. Check that the instantiated stages fit the Objective and current evidence, retain original acceptance, and do not turn historical recipe experience or advice into a passing result. Initial compilation preserves its exact declared stage/output/condition/expansion contracts; reviewed amendments preserve its original pin while reconciling current work under the ordinary source envelope.\n" : ""}
+${workers ? `${workerCapability(workers)}\n` : ""}${request.workflowRecipe ? "The separately supplied pinned workflow recipe is structural planning input, never normative Sources, current acceptance proof, command or resource authority. Check that the instantiated stages fit the Objective and current evidence, retain original acceptance, and do not turn historical recipe experience or advice into a passing result. Initial compilation preserves its exact declared stage/output/condition/expansion contracts; reviewed amendments preserve its original pin while reconciling current work under the ordinary source envelope.\n" : ""}
 ${GRAPH_REVIEW_CHECKS}
 ${request.operatorDecisions?.length ? "\nOperator planning decisions: the controller evidence FACTORY_OPERATOR_PLANNING_DECISIONS holds the operator's recorded answers to questions the planner asked. Each answer settles that choice within the Objective: check that the graph follows it, and do not ask it again as an operator decision. An answer grants no command, ownership, source or capability authority beyond the Objective.\n" : ""}
 Amendment reconciliation: discovery is evidence from its recorded worker/base, not a current fact or added authority. Judge proposed additions against existing planned ownership and complete separately marked current implementation evidence in the review packet. Do not infer a gap merely because a parallel execution base lacks a planned sibling output. Observed current code may establish whether a proposed gap remains; it never replaces the original Objective/pinned sources, supplies command/citation authority or proves missing runtime acceptance. Unknown or incomplete current bodies remain unknown; actual defects in completed work can still require a successor. Controller validation passes list commands Factory's own validation observed passing on exact trees. When a discovery rests on a premise that a command cannot pass or that the environment lacks a tool, dependency, service or capability a command needs, and a pass shows that same command succeeding in Factory's validation, the premise is contradicted: widened ownership or new work justified only by it is a defect to report. A pass proves nothing about changes absent from its tree.
@@ -767,6 +771,7 @@ export class StructuredPlanningModel implements PlanningModel {
   private readonly wait: (milliseconds: number) => Promise<void>;
   private readonly providerTurnElapsedTimeoutMs: number;
   private readonly reviewArtifacts?: readonly ReviewArtifactSelector[];
+  private readonly workers?: Readonly<Record<string, WorkerCommandAccess>>;
   private readonly checkout?: string;
 
   get retainedPlannerCheckpointCoverage() {
@@ -840,6 +845,8 @@ export class StructuredPlanningModel implements PlanningModel {
     this.wait = options.wait ?? ((milliseconds) => time.sleep(milliseconds));
     if (options.reviewArtifacts?.length)
       this.reviewArtifacts = structuredClone([...options.reviewArtifacts]);
+    if (options.workerCommandAccess)
+      this.workers = { ...options.workerCommandAccess };
     this.checkout = options.checkout;
   }
 
@@ -1341,6 +1348,7 @@ export class StructuredPlanningModel implements PlanningModel {
       wait: this.wait,
       providerTurnElapsedTimeoutMs: this.providerTurnElapsedTimeoutMs,
       reviewArtifacts: this.reviewArtifacts,
+      ...(this.workers && { workerCommandAccess: this.workers }),
       ...(this.checkout && { checkout: this.checkout }),
     });
     scoped.approvedPlaybook = playbook;
@@ -1387,6 +1395,7 @@ export class StructuredPlanningModel implements PlanningModel {
         delivery,
         this.reviewArtifacts,
         repository,
+        this.workers,
       );
       const result = await this.withRepositoryReads(
         request.baseSha,
@@ -1472,6 +1481,7 @@ export class StructuredPlanningModel implements PlanningModel {
               delivery,
               this.reviewArtifacts,
               this.repositoryView(request.baseSha, delivery?.root),
+              this.workers,
             );
           })();
     const call = this.authoritativeCall(rendered.call);
@@ -1526,6 +1536,7 @@ export class StructuredPlanningModel implements PlanningModel {
         this.reviewArtifacts,
         repository,
         this.reviewSourceResolver(request),
+        this.workers,
       );
       return this.withRepositoryReads(
         request.baseSha,
@@ -1554,6 +1565,7 @@ export class StructuredPlanningModel implements PlanningModel {
               this.reviewArtifacts,
               repository,
               this.reviewSourceResolver(request),
+              this.workers,
             ),
           ),
       );

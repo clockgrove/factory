@@ -41,7 +41,7 @@ import {
   OpenAIManagedExecutionDriver,
   validateOpenAIManagedConfig,
 } from "./execution/openai-managed.js";
-import { profileBinding } from "./execution-profiles.js";
+import { profileBinding, workerCommandAccess } from "./execution-profiles.js";
 import { RealGitHubGateway } from "./github.js";
 import {
   admitChildObjectives,
@@ -414,6 +414,7 @@ export function composePlanningModel(
         checkout: config.checkout,
         redactionValues,
         reviewArtifacts: config.reviewArtifacts,
+        workerCommandAccess: workerCommandAccess(config),
         ...(retainedSessions
           ? {
               sessionRoot: join(
@@ -433,6 +434,7 @@ export function composePlanningModel(
       {
         redactionValues,
         reviewArtifacts: config.reviewArtifacts,
+        workerCommandAccess: workerCommandAccess(config),
         transport: config.planning.codex?.transport ?? "exec",
         sourceArtifacts: config.planning.codex?.sourceArtifacts,
         reviewEffort: config.planning.reviewEffort,

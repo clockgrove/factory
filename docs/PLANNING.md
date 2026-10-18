@@ -27,6 +27,8 @@ The rules live in `src/compiler/work-item-rubric.ts`. The planner and the graph 
 
 **Existing tests are protected by default.** An item changes an existing assertion, golden or baseline only when its acceptance states that behaviour change and why.
 
+**Generated values need a producing command.** The planner and graph reviewer are told what the configured workers can execute, from the worker harness kind: Codex workers have a sandboxed shell; Claude and Copilot workers run only the item's authorized validation commands and checkout file tools. Where a shell-less worker must commit values only running code produces (hashes, snapshots, goldens, generated files), an authorized command produces them or reports the actual values, or an item it depends on delivers that capability; otherwise review flags the item.
+
 ## How the planner works
 
 1. **Research.** Explore wide, then narrow. Collect facts tied to files: conventions, real producers and types, existing behaviour, constraints. These facts stay in the planning session; Factory never stores them.

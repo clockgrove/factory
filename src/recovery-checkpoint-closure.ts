@@ -25,7 +25,7 @@ import {
   assertAgentSessionRef,
   assertAgentSessionScope,
 } from "./agent-session.js";
-import type { FactoryConfig } from "./config.js";
+import { canonical } from "./canonical-json.js";
 import {
   ARCHIVED_EVIDENCE,
   type RetirementRecord,
@@ -34,6 +34,7 @@ import {
   stateDigest,
   terminalHistory,
 } from "./checkpoint-retention.js";
+import type { FactoryConfig } from "./config.js";
 import { stateRoot } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
 import type {
@@ -971,6 +972,21 @@ async function verifyRoots(
       gaps.push(...(value.gaps as RecoveryClosureGap[]));
     } else if (root.kind === "accounting") {
       const seal = root.accounting!;
+      // A seal names its exact records by content address, and memory
+      // observations and learning snapshots cite the same one, in their own
+      // key order: reuse its validated payload references by its canonical
+      // value and verify every record again.
+      const sealSignature = concrete && canonical(["accounting-seal", seal]);
+      const sealed =
+        sealSignature && knownStore!.checkpointReferences(sealSignature);
+      if (sealed) {
+        for (const ref of sealed.originals) {
+          originals.set(refKey(ref), { ...ref });
+          knownStore!.verifyPrivateBytes(ref);
+        }
+        for (const ref of sealed.contentRefs) add(ref);
+        continue;
+      }
       const records = await assertAccountingSealContent(
         seal.repository,
         seal.objective,
@@ -978,12 +994,23 @@ async function verifyRoots(
         seal,
         read,
       );
+      const payloads: ContentRef[] = [];
       for (const record of records) {
         if (record.kind === "interaction") {
           const payload = record.capture.content.reference?.payload;
-          if (payload) add(payload);
+          if (payload) {
+            add(payload);
+            payloads.push(payload);
+          }
         }
       }
+      if (sealSignature)
+        knownStore!.retainCheckpointReferences(sealSignature, {
+          contentRefs: payloads,
+          gitObjects: [],
+          gaps: [],
+          originals: seal.records.map((ref) => ({ ...ref })),
+        });
     } else if (root.kind === "discovery")
       for (const entry of parseDiscoveryBody(bytes).entries) add(entry.content);
     else if (root.kind === "memory") {
@@ -1066,6 +1093,19 @@ export async function verifyMemoryBodyReferenceClosure(
   return verifyDescription(memoryReferences(role, bytes), source);
 }
 
+/** The local learning producer owns this concrete store, as memory does. */
+export async function verifyLocalContinuationReferenceClosure(
+  value: unknown,
+  store: LocalContentStore,
+): Promise<ContinuationReferences> {
+  return verifyDescription(
+    continuationReferences(value),
+    store,
+    undefined,
+    store,
+  );
+}
+
 /** The normal local memory producer owns this concrete store; imports stay strict. */
 export async function verifyLocalMemoryBodyReferenceClosure(
   role: string,
@@ -1101,7 +1141,7 @@ function assertPrivatePath(path: string, root: string): void {
     !bound ||
     bound.startsWith(`..${sep}`) ||
     bound === ".." ||
-    realpathSync(path) !== resolve(path)
+    realpathSync.native(path) !== resolve(path)
   )
     throw new Error("Recovery checkpoint original is outside its private root");
 }
@@ -1137,7 +1177,7 @@ function privateOriginal(
     if (
       fingerprint !== privateFingerprint(fstatSync(fd, { bigint: true })) ||
       fingerprint !== privateFingerprint(lstatSync(path, { bigint: true })) ||
-      realpathSync(path) !== resolve(path)
+      realpathSync.native(path) !== resolve(path)
     )
       throw new Error("Recovery checkpoint original changed during its read");
     return { bytes, fingerprint, ctimeNs: stat.ctimeNs, readAtNs };

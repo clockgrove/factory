@@ -25,8 +25,9 @@ import type {
   RecoveryCheckpointGap,
 } from "./recovery-checkpoint.js";
 import {
-  checkpointOriginalInventory,
   checkpointClosureOriginals,
+  checkpointClosureOriginalsDuring,
+  checkpointOriginalInventory,
 } from "./recovery-checkpoint.js";
 import type { RecoveryGitObject } from "./recovery-checkpoint-closure.js";
 import {
@@ -257,7 +258,10 @@ export async function buildMemoryLearningClosure(
       gaps: cached.gaps,
     };
   }
-  const result = await buildMemoryLearningClosureLocal(selection);
+  const result = await buildMemoryLearningClosureLocal(
+    selection,
+    !selection.scope && bindings && learning ? { learning } : undefined,
+  );
   if (
     signature &&
     result.gaps.length === 0 &&
@@ -270,26 +274,97 @@ export async function buildMemoryLearningClosure(
       ])
   ) {
     const retained = new Set(result.contentRefs.map(refIdentity));
-    store.retainCheckpointReferences(signature, {
-      files: result.files,
-      contentRefs: result.contentRefs,
-      gitObjects: (result.gitObjects ?? []).map((object) => ({
-        sha: object.commitSha,
-        kind: "commit",
-        role: object.role,
-      })),
-      typedGitObjects: result.typedGitObjects,
-      gaps: result.gaps as import("./recovery-checkpoint-closure.js").RecoveryClosureGap[],
-      originals: (checkpointClosureOriginals() ?? []).filter(
-        (ref) => !retained.has(refIdentity(ref)),
-      ),
-    });
+    store.retainCheckpointReferences(
+      signature,
+      {
+        files: result.files,
+        contentRefs: result.contentRefs,
+        gitObjects: (result.gitObjects ?? []).map((object) => ({
+          sha: object.commitSha,
+          kind: "commit",
+          role: object.role,
+        })),
+        typedGitObjects: result.typedGitObjects,
+        gaps: result.gaps as import("./recovery-checkpoint-closure.js").RecoveryClosureGap[],
+        originals: (checkpointClosureOriginals() ?? []).filter(
+          (ref) => !retained.has(refIdentity(ref)),
+        ),
+      },
+      // Any new record or learning original supersedes this summary.
+      JSON.stringify(["memory-learning-producer", selection]),
+    );
   }
   return result;
 }
 
+/** One producer step's contribution, in its original order. */
+interface ClosurePart {
+  files: RecoveryCheckpointFile[];
+  contentRefs: ContentRef[];
+  gitObjects: NonNullable<RecoveryCheckpointClosure["gitObjects"]>;
+  typedGitObjects: RecoveryGitObject[];
+  gaps: (RecoveryCheckpointGap & { required?: boolean })[];
+}
+
+/**
+ * Reuse one step's summary in an owned closure build: its exact signature
+ * names immutable inputs, and every reference and original the step touched
+ * is verified again. A step with a gap is rebuilt every time.
+ */
+async function reusableClosurePart(
+  store: LocalContentStore,
+  signature: string | undefined,
+  build: () => Promise<ClosurePart>,
+  slot?: string,
+): Promise<ClosurePart> {
+  if (!signature) return build();
+  const cached = store.checkpointReferences(signature);
+  if (cached?.files && cached.typedGitObjects) {
+    for (const ref of [...cached.contentRefs, ...cached.originals])
+      store.verifyPrivateBytes(ref);
+    return {
+      files: cached.files,
+      contentRefs: cached.contentRefs,
+      gitObjects: cached.gitObjects.map((object) => ({
+        commitSha: object.sha,
+        role: object.role,
+      })),
+      typedGitObjects: cached.typedGitObjects,
+      gaps: cached.gaps,
+    };
+  }
+  const { value: part, originals } =
+    await checkpointClosureOriginalsDuring(build);
+  if (originals && part.gaps.length === 0) {
+    const retained = new Set(part.contentRefs.map(refIdentity));
+    store.retainCheckpointReferences(
+      signature,
+      {
+        files: part.files,
+        contentRefs: part.contentRefs,
+        gitObjects: part.gitObjects.map((object) => ({
+          sha: object.commitSha,
+          kind: "commit",
+          role: object.role,
+        })),
+        typedGitObjects: part.typedGitObjects,
+        gaps: [],
+        originals: originals.filter((ref) => !retained.has(refIdentity(ref))),
+      },
+      slot,
+    );
+  }
+  return part;
+}
+
 async function buildMemoryLearningClosureLocal(
   selection: MemoryLearningSelection,
+  /**
+   * Set only in an owned closure build of the whole history: each memory
+   * record and the learning originals then keep their own summaries, so one
+   * new record does not re-derive every other one (#1549).
+   */
+  reuse?: { learning: { path: string; fingerprint: string }[] },
 ): Promise<MemoryLearningClosure> {
   assertAccess(selection.repository, selection.access);
   const root = selection.root ?? stateRoot(selection.repository);
@@ -298,7 +373,9 @@ async function buildMemoryLearningClosureLocal(
   const verified = new Map<string, Buffer>();
   const readBytes = (ref: ContentRef) => {
     const previous = verified.get(ref.digest);
-    if (previous) return verifyBytes(ref, previous);
+    // An owned build reads through its store, which shares verified bytes and
+    // records every original each reusable step touches.
+    if (previous && !reuse) return verifyBytes(ref, previous);
     const bytes = store.readBytes(ref);
     verified.set(ref.digest, bytes);
     return bytes;
@@ -312,15 +389,39 @@ async function buildMemoryLearningClosureLocal(
     assertRef(ref);
     refs.set(refIdentity(ref), ref);
   };
+  const merge = (part: ClosurePart) => {
+    files.push(...part.files);
+    for (const ref of part.contentRefs) add(ref);
+    gitObjects.push(...part.gitObjects);
+    typedGitObjects.push(...part.typedGitObjects);
+    gaps.push(...part.gaps);
+  };
+  const emptyPart = (): ClosurePart & { refs: Map<string, ContentRef> } => ({
+    files: [],
+    contentRefs: [],
+    gitObjects: [],
+    typedGitObjects: [],
+    gaps: [],
+    refs: new Map(),
+  });
+  const complete = (part: ReturnType<typeof emptyPart>): ClosurePart => ({
+    files: part.files,
+    contentRefs: [...part.refs.values()],
+    gitObjects: part.gitObjects,
+    typedGitObjects: part.typedGitObjects,
+    gaps: part.gaps,
+  });
   const retainFile = (
+    part: ReturnType<typeof emptyPart>,
     kind: "memory-binding" | "learning-original",
     path: string,
     bytes: Uint8Array,
     visibility: "private" | "repository",
   ) => {
     const ref = store.putBytes(bytes, { mediaType: "application/json" });
-    files.push({ kind, path, ref, visibility });
-    add(ref);
+    part.files.push({ kind, path, ref, visibility });
+    assertRef(ref);
+    part.refs.set(refIdentity(ref), ref);
   };
   const retained = memory.recordsForTransfer({
     access: selection.access,
@@ -334,112 +435,167 @@ async function buildMemoryLearningClosureLocal(
       reason: unavailable,
     });
   for (const { binding, record, bindingBytes } of retained.entries) {
-    retainFile(
-      "memory-binding",
-      `memory/records/${binding.id}.json`,
-      bindingBytes,
-      record.visibility,
+    // The binding names its content-addressed manifest, which names every
+    // body and source: its exact bytes determine this record's contribution.
+    const signature =
+      reuse &&
+      JSON.stringify([
+        "memory-record",
+        selection.repository,
+        createHash("sha256").update(bindingBytes).digest("hex"),
+        bindingBytes.length,
+      ]);
+    merge(
+      await reusableClosurePart(store, signature, async () => {
+        const part = emptyPart();
+        const add = (ref: ContentRef) => {
+          assertRef(ref);
+          part.refs.set(refIdentity(ref), ref);
+        };
+        retainFile(
+          part,
+          "memory-binding",
+          `memory/records/${binding.id}.json`,
+          bindingBytes,
+          record.visibility,
+        );
+        add(binding.manifestRef);
+        for (const body of record.bodies) {
+          if (!body.ref) {
+            part.gaps.push({
+              path: `memory/records/${binding.id}.json:${body.role}`,
+              availability: body.availability,
+              reason: "Original producer retained no body",
+              required: false,
+            });
+            continue;
+          }
+          add(body.ref);
+          // A claimed immutable reference remains required even when historically unavailable.
+          const bytes = readBytes(body.ref);
+          for (const ref of await memoryBodyReferences(
+            record,
+            body.role,
+            bytes,
+            readBytes,
+            part.typedGitObjects,
+            store,
+          ))
+            add(ref);
+        }
+        for (const source of record.sources) {
+          if (source.ref) add(source.ref);
+          if (source.commitSha)
+            part.gitObjects.push({
+              commitSha: source.commitSha,
+              role: `memory:${binding.id}:${source.identity}`,
+            });
+          if (source.treeSha)
+            part.typedGitObjects.push({
+              sha: source.treeSha,
+              kind: "tree",
+              role: `memory:${binding.id}:${source.identity}`,
+            });
+        }
+        if (record.bindings.commitSha)
+          part.gitObjects.push({
+            commitSha: record.bindings.commitSha,
+            role: `memory:${binding.id}:original`,
+          });
+        if (record.bindings.treeSha)
+          part.typedGitObjects.push({
+            sha: record.bindings.treeSha,
+            kind: "tree",
+            role: `memory:${binding.id}:tree`,
+          });
+        return complete(part);
+      }),
     );
-    add(binding.manifestRef);
-    for (const body of record.bodies) {
-      if (!body.ref) {
-        gaps.push({
-          path: `memory/records/${binding.id}.json:${body.role}`,
-          availability: body.availability,
-          reason: "Original producer retained no body",
-          required: false,
-        });
-        continue;
-      }
-      add(body.ref);
-      // A claimed immutable reference remains required even when historically unavailable.
-      const bytes = readBytes(body.ref);
-      for (const ref of await memoryBodyReferences(
-        record,
-        body.role,
-        bytes,
-        readBytes,
-        typedGitObjects,
-        store,
-      ))
-        add(ref);
-    }
-    for (const source of record.sources) {
-      if (source.ref) add(source.ref);
-      if (source.commitSha)
-        gitObjects.push({
-          commitSha: source.commitSha,
-          role: `memory:${binding.id}:${source.identity}`,
-        });
-      if (source.treeSha)
-        typedGitObjects.push({
-          sha: source.treeSha,
-          kind: "tree",
-          role: `memory:${binding.id}:${source.identity}`,
-        });
-    }
-    if (record.bindings.commitSha)
-      gitObjects.push({
-        commitSha: record.bindings.commitSha,
-        role: `memory:${binding.id}:original`,
-      });
-    if (record.bindings.treeSha)
-      typedGitObjects.push({
-        sha: record.bindings.treeSha,
-        kind: "tree",
-        role: `memory:${binding.id}:tree`,
-      });
   }
   if (selection.learning && selection.access.visibility.includes("private")) {
     if (selection.scope?.paths !== undefined)
       throw new Error(
         "Original private learning requires repository-wide authorized history scope",
       );
-    const originals = learningOriginals(selection.repository, root);
-    validateLearningOriginals(selection.repository, originals);
-    const { verifyContinuationReferenceClosure } = await import(
-      "./recovery-checkpoint-closure.js"
-    );
-    for (const original of originals) {
-      retainFile("learning-original", original.path, original.bytes, "private");
-      const { kind, value, history } = decodeLearningOriginal(
+    // Learning originals are validated as one set, so they share one summary
+    // keyed by every original's exact fingerprint.
+    const signature =
+      reuse &&
+      JSON.stringify([
+        "learning-producer",
         selection.repository,
-        original.path,
-        original.bytes,
-      );
-      if (kind === "snapshots" && !history) {
-        const stateRef = snapshotStateRef(value);
-        add(stateRef);
-        const described = await verifyContinuationReferenceClosure(
-          JSON.parse(Buffer.from(readBytes(stateRef)).toString("utf8")),
-          { readBytes },
-        );
-        for (const ref of described.contentRefs) add(ref);
-        gaps.push(...described.gaps);
-        typedGitObjects.push(...described.gitObjects);
-        for (const object of described.gitObjects)
-          if (object.kind === "commit")
-            gitObjects.push({ commitSha: object.sha, role: object.role });
-      } else if (kind === "returns") {
-        add(value.responseRef as ContentRef);
-      } else if (kind === "checkpoints") {
-        const checkpoint = value as unknown as DreamInputCheckpoint;
-        validateDreamInputOriginal(
-          selection.repository,
-          checkpoint,
-          readBytes(checkpoint.inputPacketRef),
-          originals,
-        );
-        add(checkpoint.inputPacketRef);
-        for (const included of checkpoint.included) {
-          add(included.episodeRef);
-          for (const ref of included.supporting) add(ref);
-        }
-      }
-    }
+        reuse.learning,
+      ]);
+    merge(
+      await reusableClosurePart(
+        store,
+        signature,
+        async () => {
+          const part = emptyPart();
+          const add = (ref: ContentRef) => {
+            assertRef(ref);
+            part.refs.set(refIdentity(ref), ref);
+          };
+          const originals = learningOriginals(selection.repository, root);
+          validateLearningOriginals(selection.repository, originals);
+          const { verifyLocalContinuationReferenceClosure } = await import(
+            "./recovery-checkpoint-closure.js"
+          );
+          for (const original of originals) {
+            retainFile(
+              part,
+              "learning-original",
+              original.path,
+              original.bytes,
+              "private",
+            );
+            const { kind, value, history } = decodeLearningOriginal(
+              selection.repository,
+              original.path,
+              original.bytes,
+            );
+            if (kind === "snapshots" && !history) {
+              const stateRef = snapshotStateRef(value);
+              add(stateRef);
+              const described = await verifyLocalContinuationReferenceClosure(
+                JSON.parse(Buffer.from(readBytes(stateRef)).toString("utf8")),
+                store,
+              );
+              for (const ref of described.contentRefs) add(ref);
+              part.gaps.push(...described.gaps);
+              part.typedGitObjects.push(...described.gitObjects);
+              for (const object of described.gitObjects)
+                if (object.kind === "commit")
+                  part.gitObjects.push({
+                    commitSha: object.sha,
+                    role: object.role,
+                  });
+            } else if (kind === "returns") {
+              add(value.responseRef as ContentRef);
+            } else if (kind === "checkpoints") {
+              const checkpoint = value as unknown as DreamInputCheckpoint;
+              validateDreamInputOriginal(
+                selection.repository,
+                checkpoint,
+                readBytes(checkpoint.inputPacketRef),
+                originals,
+              );
+              add(checkpoint.inputPacketRef);
+              for (const included of checkpoint.included) {
+                add(included.episodeRef);
+                for (const ref of included.supporting) add(ref);
+              }
+            }
+          }
+          return complete(part);
+        },
+        JSON.stringify(["learning-producer", selection.repository]),
+      ),
+    );
   }
-  // Verify every selected body, including binary originals, without text conversion.
-  for (const ref of refs.values()) readBytes(ref);
+  // Verify every selected body, including binary originals, without text
+  // conversion or allocating bytes an earlier hash of the same file covers.
+  for (const ref of refs.values()) store.verifyPrivateBytes(ref);
   return {
     files,
     contentRefs: [...refs.values()],

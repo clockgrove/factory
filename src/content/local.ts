@@ -106,7 +106,9 @@ export class LocalContentStore implements ContentStore {
 
   private openObject(ref: ContentRef): number {
     const path = this.path(ref);
-    if (realpathSync(dirname(path)) !== resolve(dirname(path)))
+    // One native resolution, not a JavaScript walk with an lstat per path
+    // component: this runs for every original of every closure.
+    if (realpathSync.native(dirname(path)) !== resolve(dirname(path)))
       throw new Error("Content object parent resolves through a symlink");
     if (!lstatSync(path).isFile())
       throw new Error("Content object must be a regular file");
@@ -270,12 +272,13 @@ export class LocalContentStore implements ContentStore {
   retainCheckpointReferences(
     description: string,
     summary: RecoveryCheckpointReferenceSummary,
+    slot?: string,
   ): void {
     if (
       Object.getPrototypeOf(this) === LocalContentStore.prototype &&
       this.readBytes === LocalContentStore.prototype.readBytes
     )
-      retainRecoveryCheckpointReferences(this.root, description, summary);
+      retainRecoveryCheckpointReferences(this.root, description, summary, slot);
   }
 
   async put(

@@ -605,7 +605,7 @@ function privateDirectory(repository: string): string {
   return directory;
 }
 function privateBytes(path: string): Buffer {
-  if (realpathSync(dirname(path)) !== resolve(dirname(path)))
+  if (realpathSync.native(dirname(path)) !== resolve(dirname(path)))
     throw new Error("Accounting original parent resolves through a link");
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {

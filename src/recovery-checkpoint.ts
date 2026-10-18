@@ -772,6 +772,8 @@ interface QueueVerificationContext {
   retiredSnapshotBytes?: number;
   /** Set once a full publication completes; see checkpointBasis. */
   incremental?: { since: number; publications: number };
+  /** The current reference summary key of each producer slot. */
+  referenceSlots?: Map<string, string>;
 }
 const scopes = new AsyncLocalStorage<{
   config: FactoryConfig;
@@ -801,6 +803,8 @@ const scopes = new AsyncLocalStorage<{
     key: string;
     options: GitPersistenceConfig;
     bodies: Map<string, { ref: ContentRef; bytes?: Buffer }>;
+    /** Sequential producer steps recording every original they touch. */
+    recorders: Map<string, ContentRef>[];
     /** Bodies the verified acknowledged base already holds; see checkpointBasis. */
     covered?: ReadonlySet<string>;
     pendingReferences: Map<string, string>;
@@ -1748,6 +1752,7 @@ async function withFiniteCheckpointReads<T>(
     key: verificationKey(config, options),
     options: { ...options },
     bodies: new Map<string, { ref: ContentRef; bytes?: Buffer }>(),
+    recorders: [] as Map<string, ContentRef>[],
     pendingReferences: new Map<string, string>(),
     pendingReferenceBytes: 0,
     sourceOriginals: new Map<string, string>(),
@@ -1901,6 +1906,16 @@ function closureReadPhase(root: string) {
     : undefined;
 }
 
+/** Every active recorder sees each original this build touches. */
+function recordClosureOriginal(
+  phase: NonNullable<ReturnType<typeof closureReadPhase>>,
+  key: string,
+  ref: ContentRef,
+): void {
+  for (const recorder of phase.recorders)
+    if (!recorder.has(key)) recorder.set(key, { ...ref });
+}
+
 export function checkpointClosureBytes(
   root: string,
   ref: ContentRef,
@@ -1908,7 +1923,9 @@ export function checkpointClosureBytes(
   const phase = closureReadPhase(root);
   if (!phase) return undefined;
   assertRef(ref);
-  const body = phase.bodies.get(canonical([resolve(root), ref]));
+  const key = canonical([resolve(root), ref]);
+  const body = phase.bodies.get(key);
+  if (body?.bytes) recordClosureOriginal(phase, key, ref);
   return body?.bytes && Buffer.from(body.bytes);
 }
 
@@ -1921,6 +1938,7 @@ export function deferCheckpointClosureVerification(
   if (!phase) return false;
   assertRef(ref);
   const key = canonical([resolve(root), ref]);
+  recordClosureOriginal(phase, key, ref);
   if (phase.bodies.has(key)) return true;
   if (
     phase.bodies.size >= phase.options.maxFiles ||
@@ -1932,6 +1950,11 @@ export function deferCheckpointClosureVerification(
   return true;
 }
 
+/**
+ * Only the concrete store calls this, with bytes its opened file has just
+ * proved exact (hashed, or an earlier hash of that exact file identity), so
+ * hashing them a second time adds no fact.
+ */
 export function retainCheckpointClosureBytes(
   root: string,
   ref: ContentRef,
@@ -1940,9 +1963,10 @@ export function retainCheckpointClosureBytes(
   const phase = closureReadPhase(root);
   if (!phase) return;
   assertRef(ref);
-  if (bytes.length !== ref.bytes || hash(bytes) !== ref.digest)
+  if (bytes.length !== ref.bytes)
     throw new Error("Checkpoint closure body failed exact digest verification");
   const key = canonical([resolve(root), ref]);
+  recordClosureOriginal(phase, key, ref);
   const prior = phase.bodies.get(key);
   if (prior) {
     prior.bytes ??= Buffer.from(bytes);
@@ -1990,7 +2014,7 @@ function originalNames(
 }
 
 function originalFingerprint(path: string): string {
-  if (realpathSync(dirname(path)) !== resolve(dirname(path)))
+  if (realpathSync.native(dirname(path)) !== resolve(dirname(path)))
     throw new Error(
       "Checkpoint producer original parent resolves through a link",
     );
@@ -2073,6 +2097,29 @@ export function checkpointClosureOriginals(): ContentRef[] | undefined {
   return [...active.phase.bodies.values()].map(({ ref }) => ({ ...ref }));
 }
 
+/**
+ * Every original this build touches while one sequential producer step runs,
+ * including those an earlier step already touched, so the step's own summary
+ * can verify all of them again when it is reused. Undefined outside an owned
+ * closure build.
+ */
+export async function checkpointClosureOriginalsDuring<T>(
+  task: () => Promise<T>,
+): Promise<{ value: T; originals?: ContentRef[] }> {
+  const active = activeClosureBinding();
+  if (!active?.scope.verification || active.phase.closed)
+    return { value: await task() };
+  const { phase } = active;
+  const touched = new Map<string, ContentRef>();
+  phase.recorders.push(touched);
+  try {
+    const value = await task();
+    return { value, originals: [...touched.values()] };
+  } finally {
+    phase.recorders.splice(phase.recorders.indexOf(touched), 1);
+  }
+}
+
 export function cachedRecoveryCheckpointReferences(
   root: string,
   description: string,
@@ -2099,6 +2146,12 @@ export function retainRecoveryCheckpointReferences(
   root: string,
   description: string,
   summary: RecoveryCheckpointReferenceSummary,
+  /**
+   * A producer whose summary covers a growing set names one slot: its new
+   * summary replaces the previous one, which no later build can match, instead
+   * of stale summaries filling the pool until every fact is evicted.
+   */
+  slot?: string,
 ): void {
   const active = activeClosureBinding();
   const context = active?.scope.verification;
@@ -2118,6 +2171,28 @@ export function retainRecoveryCheckpointReferences(
   const value = JSON.stringify(summary);
   const charge = Buffer.byteLength(key) + Buffer.byteLength(value);
   if (phase.pendingReferences.has(key) || context.content.has(key)) return;
+  if (slot !== undefined) {
+    const named = canonical(["reference-slot", resolve(root), slot]);
+    const previous = context.referenceSlots?.get(named);
+    if (previous !== undefined) {
+      const pending = phase.pendingReferences.get(previous);
+      if (pending !== undefined) {
+        const released =
+          Buffer.byteLength(previous) + Buffer.byteLength(pending);
+        phase.pendingReferences.delete(previous);
+        phase.pendingReferenceBytes -= released;
+        context.pendingReferenceBytes -= released;
+      }
+      const retained = context.content.get(previous);
+      if (retained !== undefined) {
+        context.content.delete(previous);
+        context.contentBytes -=
+          Buffer.byteLength(previous) + Buffer.byteLength(retained);
+      }
+    }
+    context.referenceSlots ??= new Map();
+    context.referenceSlots.set(named, key);
+  }
   if (!reserveVerificationMetadata(context, phase.options, charge)) return;
   phase.pendingReferences.set(key, value);
   phase.pendingReferenceBytes += charge;

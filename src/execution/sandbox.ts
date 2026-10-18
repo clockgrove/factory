@@ -391,16 +391,24 @@ export type CommandSandboxAvailability =
 
 let availability: CommandSandboxAvailability | undefined;
 
+let failure: { at: number; result: CommandSandboxAvailability } | undefined;
+/** How long a failed probe answers before bubblewrap is probed again. */
+const FAILURE_RETRY_MS = 30_000;
+
 /**
  * Whether bubblewrap starts a sandbox on this host, probed with the same
  * namespaces and system mounts every command gets. Success is kept for the
- * process; a failure is probed again next time, so a transient one never
- * turns the sandbox off.
+ * process. A failure answers for 30 seconds and is then probed again, so a
+ * transient one never turns the sandbox off and a broken host is not
+ * re-probed on every call.
  */
 export function commandSandboxAvailability(): CommandSandboxAvailability {
   if (availability) return availability;
+  if (failure && Date.now() - failure.at < FAILURE_RETRY_MS)
+    return failure.result;
   const probed = probeCommandSandbox();
   if (probed.available) availability = probed;
+  else failure = { at: Date.now(), result: probed };
   return probed;
 }
 

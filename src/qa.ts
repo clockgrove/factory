@@ -319,7 +319,8 @@ function assertProofShape(entry: AcceptanceCoverage): void {
   };
   // A semantic proof retained from an earlier release names one entry.
   const legacy =
-    proof?.kind?.endsWith("-semantic") &&
+    (proof?.kind === "result-semantic" ||
+      proof?.kind === "integrated-semantic") &&
     Object.hasOwn(proof, "acceptanceIndex")
       ? ["acceptanceIndex"]
       : [];

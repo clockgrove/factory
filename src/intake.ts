@@ -74,6 +74,7 @@ import {
   readQueueHistory,
   requireProjectQueueEffects,
   retainedQueueCommandOutcome,
+  locallyClaimedObjectives,
   verifyQueueObservation,
   type VerifiedQueueObservation,
   withQueueMutationLock,
@@ -1968,6 +1969,9 @@ async function runIntakeOwned(
       bindRecoveryCheckpointControllerScope(handle),
     );
     const runs = new Set<Promise<void>>();
+    // Runs asked to hand off because they wait behind an overlap while the
+    // service stops; their handoff is not the service's.
+    const yielded = new Set<number>();
     const idle = () =>
       pauseObservation(
         queuePollSeconds(config) * 1000,
@@ -2027,7 +2031,7 @@ async function runIntakeOwned(
             });
         } catch (error) {
           if (error instanceof CoordinatorHandoff) {
-            handingOff = true;
+            if (!yielded.delete(selected)) handingOff = true;
             return;
           }
           const observation = {
@@ -2083,6 +2087,25 @@ async function runIntakeOwned(
         }
         if (stopping) {
           if (active.size) {
+            // A run held behind an overlapping Objective, perhaps the very one
+            // that stopped, would wait forever: it hands off and stays queued.
+            for (const [objective, control] of activeControls()) {
+              if (yielded.has(objective)) continue;
+              let held: ReturnType<typeof plannedExecutionConflict>;
+              try {
+                held = plannedExecutionConflict(
+                  config,
+                  readContinuation(config.repository, objective),
+                );
+              } catch {
+                held = undefined;
+              }
+              if (!held) continue;
+              yielded.add(objective);
+              void control({ objective, action: "handoff" }).catch(
+                () => undefined,
+              );
+            }
             await idle();
             continue;
           }
@@ -2137,11 +2160,25 @@ async function runIntakeOwned(
         ) {
           const reasons: Record<string, string> = {};
           const selected: number[] = [];
+          // With several slots, an unsettled claim of an Objective this
+          // service does not run (a stopped run awaiting recovery) holds a
+          // slot too: the next claim would refuse it.
+          const claimed =
+            slots > 1
+              ? (locallyClaimedObjectives(config) ?? [])
+              : ([] as number[]);
           for (const entry of observed.entries.filter(
             (entry) => entry.state === "queued",
           )) {
             if (active.size + selected.length >= slots) break;
             if (active.has(entry.objective)) continue;
+            const held = new Set([...active.keys(), ...selected, ...claimed]);
+            held.delete(entry.objective);
+            if (held.size >= slots) {
+              reasons[entry.objective] =
+                `All ${slots} dispatch slots are held (${[...held].map((id) => `#${id}`).join(", ")})`;
+              continue;
+            }
             // Retired terminal history needs nothing and is never acted on (#1457).
             const read = readScannedContinuation(
               config.repository,
@@ -2155,12 +2192,16 @@ async function runIntakeOwned(
               if (splitReadyToClose(config.repository, state))
                 try {
                   const runtime = objectiveRuntime(entry.objective);
-                  await settleSplitParent({
-                    config: runtime.config,
-                    github: runtime.services.github,
-                    parent: entry.objective,
-                    lockParent: false,
-                  });
+                  // Its children may be settling it concurrently: take its
+                  // lock; a busy lock means one of them closes it.
+                  await withObjectiveDelegation(lock, () =>
+                    settleSplitParent({
+                      config: runtime.config,
+                      github: runtime.services.github,
+                      parent: entry.objective,
+                      lockParent: true,
+                    }),
+                  );
                 } catch (error) {
                   reasons[entry.objective] =
                     `Closing the split Objective failed: ${error instanceof Error ? error.message : String(error)}`;

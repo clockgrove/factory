@@ -3421,8 +3421,21 @@ export async function handOffStoppedRefusal(
   else await settleStoppedProjectQueueRun(config, state, lock);
 }
 
-/** Neutral stopped-owner handoff; never cancels, resumes or retries the original run. */
-export async function settleStoppedProjectQueueRun(
+/**
+ * Neutral stopped-owner handoff; never cancels, resumes or retries the
+ * original run. It reads settled history, so it takes its turn with queue
+ * mutations other controllers may be making.
+ */
+export function settleStoppedProjectQueueRun(
+  config: FactoryConfig,
+  state: ContinuationState,
+  lock: ControllerLock,
+): Promise<void> {
+  return withQueueMutationLock(config.repository, () =>
+    settleStoppedProjectQueueRunOwned(config, state, lock),
+  );
+}
+async function settleStoppedProjectQueueRunOwned(
   config: FactoryConfig,
   state: ContinuationState,
   lock: ControllerLock,

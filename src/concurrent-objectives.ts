@@ -130,24 +130,49 @@ function terminal(state: ContinuationState): boolean {
 }
 
 /**
+ * Which other Objectives' runs are unfinished, by run identity, read from
+ * their snapshots outside the guard (snapshots can be large). An unreadable
+ * snapshot is unfinished: unknown is not finished.
+ */
+function unfinishedRuns(
+  repository: string,
+  except: number,
+): Map<number, string | true | false> {
+  const runs = new Map<number, string | true | false>();
+  for (const objective of objectiveIds(repository)) {
+    if (objective === except || !readLease(repository, objective)) continue;
+    try {
+      const state = readScannedContinuation(repository, objective);
+      runs.set(
+        objective,
+        state === "history" || !state || terminal(state) ? false : state.runId,
+      );
+    } catch {
+      runs.set(objective, true);
+    }
+  }
+  return runs;
+}
+
+/**
  * The admitted footprints of other unfinished Objectives. A lease counts while
  * its Objective's current run is unfinished, whether or not its controller is
- * alive: a stopped Objective's remaining work still owns those paths. An
- * unreadable snapshot counts too; unknown is not finished.
+ * alive: a stopped Objective's remaining work still owns those paths. Leases
+ * are read again here, so one written since `runs` was read counts too.
  */
-function activeLeases(repository: string, except: number): ExecutionLease[] {
+function activeLeases(
+  repository: string,
+  except: number,
+  runs: Map<number, string | true | false>,
+): ExecutionLease[] {
   return objectiveIds(repository).flatMap((objective) => {
     if (objective === except) return [];
     const lease = readLease(repository, objective);
     if (!lease) return [];
-    let state: ReturnType<typeof readScannedContinuation>;
-    try {
-      state = readScannedContinuation(repository, objective);
-    } catch {
-      return [lease];
-    }
-    if (state === "history" || !state || state.runId !== lease.runId) return [];
-    return terminal(state) ? [] : [lease];
+    const run = runs.get(objective);
+    return run === undefined || run === true || run === lease.runId
+      ? [lease]
+      : [];
   });
 }
 
@@ -182,10 +207,16 @@ function conflictFor(
   objective: number,
   paths: string[],
   own: ExecutionLease | undefined,
+  runs = unfinishedRuns(repository, objective),
 ): ExecutionConflict | undefined {
-  for (const lease of activeLeases(repository, objective)) {
-    if (own && !earlier(lease, own)) continue;
-    const shared = overlap(paths, lease.ownedPaths);
+  // Paths an amendment added since admission yield to every active lease,
+  // later ones included; admitted paths yield only to earlier leases.
+  const added = own
+    ? paths.filter((path) => !own.ownedPaths.includes(path))
+    : paths;
+  for (const lease of activeLeases(repository, objective, runs)) {
+    const checked = !own || earlier(lease, own) ? paths : added;
+    const shared = overlap(checked, lease.ownedPaths);
     if (shared.length) return { objective: lease.objective, paths: shared };
   }
   return undefined;
@@ -205,11 +236,13 @@ export function admitExecution(
 ): ExecutionConflict | undefined {
   const { repository } = config;
   const objective = state.objective;
+  const runs = unfinishedRuns(repository, objective);
+  // The guarded step reads only the small lease files.
   return withHostGuard(repository, "execution-admission", () => {
     const previous = readLease(repository, objective);
     const own = previous?.runId === state.runId ? previous : undefined;
     const paths = footprint(state);
-    const conflict = conflictFor(repository, objective, paths, own);
+    const conflict = conflictFor(repository, objective, paths, own, runs);
     if (conflict) return conflict;
     if (
       !own ||

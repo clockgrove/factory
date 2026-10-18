@@ -1457,6 +1457,13 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
     assert.equal(admitExecution(sharedConfig, disjoint), undefined);
     // The earlier admission keeps running when re-admitted at its next pass.
     assert.equal(admitExecution(sharedConfig, first), undefined);
+    // A path an amendment adds yields to a later admission that owns it.
+    const amended = structuredClone(first);
+    amended.graph.items[0].ownedPaths = ["src/", "docs/guide.md"];
+    assert.deepEqual(admitExecution(sharedConfig, amended), {
+      objective: 4,
+      paths: ["docs/guide.md"],
+    });
     // Host capacity: another live controller's reservation fills the ceiling.
     const firstLock = acquireObjectiveLock(shared, 2),
       secondLock = acquireObjectiveLock(shared, 4);

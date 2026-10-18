@@ -1599,7 +1599,8 @@ async function runObjectiveOwned(
     );
   if (isExecutionState(runResult!) && objectiveComplete(runResult!))
     await settleParentOfChild(config, services.github, objective, {
-      lockParent: !options.observeControl,
+      // The service's runs take the parent's lock through its delegation.
+      lockParent: !options.ownerLock,
     });
   return runResult!;
 }

@@ -7,8 +7,9 @@ import { objectiveComplete } from "./completion.js";
 import {
   type FactoryConfig,
   factoryAuthorityDigest,
-  factoryConfigDigest,
   maxActiveObjectives,
+  queueConfigDigest,
+  queueControlBinding,
   stateRoot,
 } from "./config.js";
 import type {
@@ -299,7 +300,7 @@ function view(
     authority: "github-project",
     complete: !!observed,
     repository: config.repository,
-    configDigest: factoryConfigDigest(config),
+    configDigest: queueConfigDigest(config),
     objectives: entries.map((entry) => entry.objective),
     bodyDigests: Object.fromEntries(
       entries.map((entry) => [entry.objective, entry.bodyDigest]),
@@ -492,8 +493,7 @@ async function projectControlRequest(
       ...input,
       operation,
       protocol: "project-queue-v1",
-      authorityDigest: factoryAuthorityDigest(config),
-      configDigest: factoryConfigDigest(config),
+      ...queueControlBinding(config),
     },
     command: { id: randomUUID(), deadlineAt },
   };
@@ -501,18 +501,8 @@ async function projectControlRequest(
     ? await requestForegroundQueueControl(config.repository, request, {
         deadlineAt,
         onAcknowledgment: scope?.onAcknowledgment,
-        // The owner executes it under its own configuration, which must be
-        // the command's: its frozen continuation names it.
-        eligible: (owner) => {
-          try {
-            return (
-              readContinuation(config.repository, owner.objective)
-                ?.configDigest === factoryConfigDigest(config)
-            );
-          } catch {
-            return false;
-          }
-        },
+        // Any provider's run of this installation's queue accepts it.
+        binding: queueControlBinding(config),
       })
     : await requestControl(config.repository, request, {
         deadlineAt,
@@ -785,7 +775,7 @@ function commandAcknowledgment(
     scope: "target",
     complete: false,
     repository: config.repository,
-    configDigest: factoryConfigDigest(config),
+    configDigest: queueConfigDigest(config),
     command,
     control: current.control,
     mode: current.control.mode,
@@ -1379,7 +1369,7 @@ function authenticatedQueueCommand(
     request.objective !== 0 ||
     request.input?.protocol !== "project-queue-v1" ||
     request.input?.authorityDigest !== factoryAuthorityDigest(config) ||
-    request.input?.configDigest !== factoryConfigDigest(config) ||
+    request.input?.configDigest !== queueConfigDigest(config) ||
     typeof operation !== "string" ||
     !["enqueue", "watch", "pause", "resume", "drain", "dequeue"].includes(
       operation,

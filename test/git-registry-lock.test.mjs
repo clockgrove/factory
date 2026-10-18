@@ -20,6 +20,8 @@ import test from "node:test";
 import {
   factoryAuthorityDigest,
   factoryConfigDigest,
+  queueControlBinding,
+  resolveProvider,
   stateRoot,
   validateConfig,
 } from "../dist/config.js";
@@ -44,6 +46,7 @@ import { resolveAutonomy } from "../dist/repair-policy.js";
 import {
   ControllerCommandIncompleteError,
   requestControl,
+  requestForegroundQueueControl,
   serveControl,
 } from "../dist/coordinator-control.js";
 import { validateWorkItem } from "../dist/validation.js";
@@ -1316,8 +1319,70 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
   if (!collectedExecution) {
     // With no service, a live foreground owner executes the installation's
     // queue commands and returns their completion after the terminal archive
-    // acknowledgment; the forwarding command publishes nothing itself.
-    const foregroundLock = acquireObjectiveLock(repository, 1);
+    // acknowledgment; the forwarding command publishes nothing itself. The
+    // owner runs another provider than the command's default: queue commands
+    // bind the queue's authority and default configuration, which every
+    // provider of the installation shares.
+    const { planning, execution } = config;
+    const otherSelection = { ...selection, model: "unused-other-check" };
+    const file = Object.fromEntries(
+      Object.entries(config).flatMap(([key, value]) =>
+        key === "planning"
+          ? [
+              ["defaultProvider", "codex"],
+              [
+                "providers",
+                {
+                  codex: { planning, execution },
+                  other: {
+                    planning: {
+                      ...planning,
+                      planner: otherSelection,
+                      reviewer: otherSelection,
+                    },
+                    execution: {
+                      ...execution,
+                      harness: { ...execution.harness, ...otherSelection },
+                    },
+                  },
+                },
+              ],
+            ]
+          : key === "execution"
+            ? []
+            : [[key, value]],
+      ),
+    );
+    assert.equal(
+      factoryConfigDigest(resolveProvider(file, "codex")),
+      factoryConfigDigest(config),
+    );
+    const other = resolveProvider(file, "other");
+    assert.notEqual(factoryConfigDigest(other), factoryConfigDigest(config));
+    assert.deepEqual(queueControlBinding(other), queueControlBinding(config));
+    // A run started before a shared queue setting changed keeps the old queue
+    // authority: it neither receives nor executes this queue's commands.
+    const stale = validateConfig({
+      ...other,
+      queue: { ...other.queue, objectiveDeadlineSeconds: 120 },
+    });
+    assert.notEqual(
+      factoryAuthorityDigest(stale),
+      factoryAuthorityDigest(config),
+    );
+    const staleLock = acquireObjectiveLock(
+      repository,
+      1,
+      queueControlBinding(stale),
+    );
+    const staleQueue = foregroundQueueControl(stale, github);
+    const staleServer = await serveControl(
+      repository,
+      staleLock,
+      (request) => staleQueue(request),
+      1,
+    );
+    let foregroundLock;
     let stop;
     const stopped = new Promise((resolve) => {
       stop = resolve;
@@ -1326,33 +1391,67 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
     const listening = new Promise((resolve) => {
       serving = resolve;
     });
-    const owner = withRecoveryCheckpointControllerVerification(
-      {
-        config,
-        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
-      },
-      async () => {
-        const queue = bindRecoveryCheckpointControllerScope(
-          foregroundQueueControl(config, github),
-        );
-        const server = await serveControl(
-          repository,
-          foregroundLock,
-          (request) => queue(request),
-          1,
-        );
-        serving();
-        await stopped;
-        await new Promise((resolve) => server.close(resolve));
-      },
-    );
+    let owner;
     try {
+      const before = writes;
+      await assert.rejects(
+        intakeControl(config, "pause", undefined, github),
+        /Objective #1 run with other shared settings .*nothing was sent/,
+      );
+      // Sent anyway, the stale owner refuses it before any effect.
+      await assert.rejects(
+        requestForegroundQueueControl(
+          repository,
+          {
+            objective: 0,
+            action: "project-queue",
+            input: {
+              operation: "pause",
+              protocol: "project-queue-v1",
+              ...queueControlBinding(config),
+            },
+            command: { id: randomUUID(), deadlineAt: Date.now() + 60_000 },
+          },
+          {
+            deadlineAt: Date.now() + 60_000,
+            binding: queueControlBinding(stale),
+          },
+        ),
+        /Project queue control protocol or authority binding differs/,
+      );
+      assert.equal(writes, before);
+      foregroundLock = acquireObjectiveLock(
+        repository,
+        5,
+        queueControlBinding(other),
+      );
+      owner = withRecoveryCheckpointControllerVerification(
+        {
+          config: other,
+          buildClosure: () => buildRecoveryCheckpointClosure({ config: other }),
+        },
+        async () => {
+          const queue = bindRecoveryCheckpointControllerScope(
+            foregroundQueueControl(other, github),
+          );
+          const server = await serveControl(
+            repository,
+            foregroundLock,
+            (request) => queue(request),
+            5,
+          );
+          serving();
+          await stopped;
+          await new Promise((resolve) => server.close(resolve));
+        },
+      );
       await listening;
       const status = await intakeControl(config, "status", undefined, github);
-      assert.deepEqual(status.activeObjectives, [1]);
-      const before = writes;
+      assert.deepEqual(status.activeObjectives, [1, 5]);
+      // The lowest-numbered owner of this queue executes it, past the stale one.
       const paused = await intakeControl(config, "pause", undefined, github);
       assert.equal(paused.mode, "paused");
+      assert.equal(paused.configDigest, factoryConfigDigest(config));
       assert.equal(JSON.parse(controlMetadata).mode, "paused");
       assert.equal(writes, before + 1);
       assert.equal(gitPersistenceStatus(config).pendingChanges, false);
@@ -1378,7 +1477,10 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
     } finally {
       stop();
       await owner;
-      releaseControllerLock(objectiveLockPath(repository, 1), foregroundLock);
+      if (foregroundLock)
+        releaseControllerLock(objectiveLockPath(repository, 5), foregroundLock);
+      await new Promise((resolve) => staleServer.close(resolve));
+      releaseControllerLock(objectiveLockPath(repository, 1), staleLock);
     }
   }
   if (!collectedExecution) {

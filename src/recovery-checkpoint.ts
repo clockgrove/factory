@@ -33,6 +33,7 @@ import {
   type FactoryConfig,
   factoryAuthorityDigest,
   factoryConfigDigest,
+  queueConfigDigest,
   stateRoot,
 } from "./config.js";
 import { LocalContentStore } from "./content/local.js";
@@ -2606,7 +2607,7 @@ function checkpointOperation<T>(
         const forwarded = operation.forwarded;
         if (
           forwarded &&
-          (forwarded.configDigest !== factoryConfigDigest(input.config) ||
+          (forwarded.configDigest !== queueConfigDigest(input.config) ||
             forwarded.authorityDigest !== factoryAuthorityDigest(input.config))
         )
           throw new Error(
@@ -2661,7 +2662,12 @@ function assertCommandBinding(
   )
     throw new Error("Invalid checkpoint command binding");
 }
-/** Only the producer's awaited terminal barrier creates this IPC receipt. */
+/**
+ * Only the producer's awaited terminal barrier creates this IPC receipt. A
+ * Project queue command binds the queue's configuration (queueConfigDigest),
+ * so a run on any provider of the installation returns the receipt the
+ * service would.
+ */
 export async function withRecoveryCheckpointCommandOperation<T>(
   input: {
     config: FactoryConfig;
@@ -2675,7 +2681,7 @@ export async function withRecoveryCheckpointCommandOperation<T>(
 }> {
   assertCommandBinding(request);
   const captured = structuredClone(request);
-  const configDigest = factoryConfigDigest(input.config);
+  const configDigest = queueConfigDigest(input.config);
   const authorityDigest = factoryAuthorityDigest(input.config);
   let checkpointCompletion: RecoveryCheckpointCommandCompletion | undefined;
   const result = await checkpointOperation(
@@ -2684,7 +2690,7 @@ export async function withRecoveryCheckpointCommandOperation<T>(
     { queueControlVerification: true },
     (status) => {
       if (
-        configDigest !== factoryConfigDigest(input.config) ||
+        configDigest !== queueConfigDigest(input.config) ||
         authorityDigest !== factoryAuthorityDigest(input.config)
       )
         throw new Error("Checkpoint command configuration changed");
@@ -2757,7 +2763,7 @@ export function acceptForwardedCheckpointCompletion(
   if (
     receipt.schemaVersion !== 1 ||
     receipt.repository !== scope.config.repository ||
-    receipt.configDigest !== factoryConfigDigest(scope.config) ||
+    receipt.configDigest !== queueConfigDigest(scope.config) ||
     receipt.authorityDigest !== factoryAuthorityDigest(scope.config) ||
     canonical(receipt.request) !== canonical(request)
   )

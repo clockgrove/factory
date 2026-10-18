@@ -1414,6 +1414,52 @@ export function factoryAuthorityDigest(config: FactoryConfig): string {
 }
 
 /**
+ * The configuration the installation's Project queue runs with: the default provider's.
+ * A configuration resolved for another provider carries the default as `queueProvider`;
+ * swapping it back in place reproduces the default resolution, key order included. Queue
+ * commands and their receipts bind this, so they mean the same whichever provider a run uses.
+ */
+export function queueConfiguration(config: FactoryConfig): FactoryConfig {
+  const provider = config.queueProvider;
+  if (!provider) return config;
+  return Object.fromEntries(
+    Object.entries(config).flatMap(([key, value]) =>
+      key === "queueProvider"
+        ? []
+        : [
+            [
+              key,
+              key === "planning" || key === "execution" ? provider[key] : value,
+            ],
+          ],
+    ),
+  ) as FactoryConfig;
+}
+
+/** The configuration digest of the installation's Project queue (see queueConfiguration). */
+export function queueConfigDigest(config: FactoryConfig): string {
+  return factoryConfigDigest(queueConfiguration(config));
+}
+
+/**
+ * What a controller that executes Project queue commands accepts: the queue's authority and
+ * configuration. Every provider of one installation shares it; a change to the Project,
+ * autonomy or queue settings, or to any other shared setting, does not.
+ */
+export interface QueueControlBinding {
+  authorityDigest: string;
+  configDigest: string;
+}
+export function queueControlBinding(
+  config: FactoryConfig,
+): QueueControlBinding {
+  return {
+    authorityDigest: factoryAuthorityDigest(config),
+    configDigest: queueConfigDigest(config),
+  };
+}
+
+/**
  * The most queued Objectives one installation runs at once. Each run in the
  * service process listens for its own SIGTERM handoff, and Node warns above
  * ten listeners per signal.

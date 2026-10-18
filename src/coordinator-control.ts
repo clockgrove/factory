@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, existsSync, openSync, rmSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { join } from "node:path";
-import { stateRoot } from "./config.js";
+import { type QueueControlBinding, stateRoot } from "./config.js";
 import {
   currentProcessDeadlineAt,
   currentProcessSignal,
@@ -324,7 +324,8 @@ function forwardedQueueCommand(request: ControlRequest): boolean {
 
 /**
  * Send a Project queue command to the lowest-numbered live foreground owner
- * that `eligible` admits (one running the command's own configuration).
+ * whose identity names the command's queue `binding`: any provider's run of
+ * the same installation queue. The owner authenticates the binding again.
  * `handled: false` means nothing was sent: no foreground owner remains, or the
  * service now owns the installation, so the caller resolves its owner again.
  */
@@ -334,7 +335,7 @@ export async function requestForegroundQueueControl(
   options: {
     deadlineAt: number;
     onAcknowledgment?: (value: unknown) => void;
-    eligible: (owner: { objective: number }) => boolean;
+    binding: QueueControlBinding;
   },
 ): Promise<{ handled: boolean; result?: unknown }> {
   if (!forwardedQueueCommand(request) || !request.command)
@@ -354,10 +355,14 @@ export async function requestForegroundQueueControl(
       return { handled: false };
     const owners = liveObjectiveOwners(repository);
     if (!owners.length) return { handled: false };
-    const owner = owners.find(options.eligible);
+    const owner = owners.find(
+      (entry) =>
+        entry.queue?.authorityDigest === options.binding.authorityDigest &&
+        entry.queue.configDigest === options.binding.configDigest,
+    );
     if (!owner)
       throw new Error(
-        `Foreground runs of ${owners.map((entry) => `Objective #${entry.objective}`).join(", ")} use another configuration, so none can execute this queue command; nothing was sent. Run it once one of them ends, or with the provider they run`,
+        `Foreground runs of ${owners.map((entry) => `Objective #${entry.objective}`).join(", ")} run with other shared settings than this command (such as the Project, autonomy or queue settings), so none can execute it; nothing was sent. Run it once one of them ends`,
       );
     currentProcessSignal()?.throwIfAborted();
     const reply = await sendControl(

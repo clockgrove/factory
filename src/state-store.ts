@@ -49,6 +49,7 @@ import {
   factoryConfigDigest,
   factoryAuthorityDigest,
   type FactoryConfig,
+  type QueueControlBinding,
 } from "./config.js";
 import {
   ARCHIVED_EVIDENCE,
@@ -608,6 +609,8 @@ export interface ControllerOwner {
   startTime: string;
   objective: number;
   token: string;
+  /** A foreground run that executes the installation's Project queue commands names what it accepts. */
+  queue?: QueueControlBinding;
 }
 
 export function readControllerOwner(path: string): ControllerOwner | undefined {
@@ -629,7 +632,16 @@ export function readControllerOwner(path: string): ControllerOwner | undefined {
     Number(owner.pid) <= 0 ||
     typeof owner.startTime !== "string" ||
     !Number.isSafeInteger(owner.objective) ||
-    typeof owner.token !== "string"
+    typeof owner.token !== "string" ||
+    (owner.queue !== undefined &&
+      (!owner.queue ||
+        typeof owner.queue !== "object" ||
+        Object.keys(owner.queue).sort().join() !==
+          "authorityDigest,configDigest" ||
+        Object.values(owner.queue).some(
+          (digest) =>
+            typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest),
+        )))
   )
     throw new Error(
       "Controller lock identity is invalid; operator direction required",
@@ -754,6 +766,7 @@ export async function withObjectiveDelegation<T>(
 export function acquireObjectiveLock(
   repository: string,
   objective: number,
+  queue?: QueueControlBinding,
 ): ControllerLock {
   mkdirSync(objectiveRoot(repository, objective), {
     recursive: true,
@@ -766,6 +779,7 @@ export function acquireObjectiveLock(
     {
       guard: `${installation}.acquire`,
       owned: `Objective #${objective}`,
+      queue,
       conflict: () => {
         const owner = liveControllerOwner(installation);
         const self =
@@ -786,6 +800,8 @@ export function acquireControllerLock(
     guard?: string;
     owned?: string;
     conflict?: () => string | undefined;
+    /** Recorded in the owner identity (ControllerOwner.queue). */
+    queue?: QueueControlBinding;
   } = {},
 ): ControllerLock {
   // Serialize stale-owner replacement as well as creation (a crashed holder's
@@ -813,6 +829,7 @@ export function acquireControllerLock(
           startTime: identity.startTime,
           token,
           objective,
+          ...(scope.queue && { queue: scope.queue }),
         }),
       );
       fsyncSync(fd);

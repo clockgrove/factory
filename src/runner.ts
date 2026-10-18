@@ -23,6 +23,7 @@ import type { FactoryConfig } from "./config.js";
 import {
   factoryConfigDigest,
   maxActiveObjectives,
+  queueControlBinding,
   stateRoot,
 } from "./config.js";
 import type {
@@ -669,8 +670,21 @@ async function runObjectiveOwned(
   const lockPath = options.ownerLock
     ? installationLockPath(config.repository)
     : objectiveLockPath(config.repository, objective);
+  // A foreground run with a Project queue executes the installation's queue
+  // commands while no service runs; its owner identity names the queue binding
+  // it accepts, so a command reaches it whichever provider it runs.
+  const servesQueueControl =
+    !!options.queueControl &&
+    !options.observeControl &&
+    !!config.queue?.project &&
+    config.gitPersistence?.scope === "private-history";
   const lock =
-    options.ownerLock ?? acquireObjectiveLock(config.repository, objective);
+    options.ownerLock ??
+    acquireObjectiveLock(
+      config.repository,
+      objective,
+      servesQueueControl ? queueControlBinding(config) : undefined,
+    );
   if (options.ownerLock) {
     const recorded = readControllerOwner(lockPath);
     const identity = linuxProcessIdentity(process.pid);
@@ -949,10 +963,7 @@ async function runObjectiveOwned(
     // Bound inside the controller's checkpoint scope: a command reuses this
     // owner's verifier and owns its own operation and acknowledgment.
     const queueControl =
-      options.queueControl &&
-      !options.observeControl &&
-      config.queue?.project &&
-      config.gitPersistence?.scope === "private-history"
+      servesQueueControl && options.queueControl
         ? bindRecoveryCheckpointControllerScope(options.queueControl)
         : undefined;
     const handle = async (

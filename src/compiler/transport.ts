@@ -42,6 +42,8 @@ export interface PlanningModelOptions {
   /** The installation's configured selectors, shown to compile and graph review. */
   reviewArtifacts?: readonly ReviewArtifactSelector[];
   reviewCapacityRetryDelaysMs?: readonly number[];
+  /** Backoff before each fresh session after the provider rejected a login it was sent. */
+  credentialRetryDelaysMs?: readonly number[];
   wait?: (milliseconds: number) => Promise<void>;
 }
 

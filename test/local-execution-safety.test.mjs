@@ -8,7 +8,9 @@ import {
   hydrateWorkerInputSources,
   resolveWorkItemSources,
 } from "../dist/compiler/sources.js";
-import { step, repeatKey } from "../dist/step.js";
+import { step, repeatKey, waitOf } from "../dist/step.js";
+import { AuthenticationRequiredError } from "../dist/contracts.js";
+import { claudeCredentialRejected } from "../dist/execution/claude.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -4337,7 +4339,8 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         },
       );
       assert.equal(timeoutInvocation.providerAttempt, 1);
-      assert.equal(timeoutInvocation.providerMaxAttempts, 1);
+      // Only a login rejected before any model turn may use the other two.
+      assert.equal(timeoutInvocation.providerMaxAttempts, 3);
       assert.equal(
         timeoutEvents.filter((event) => event.type === "started").length,
         1,
@@ -4436,6 +4439,138 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a login rejected before any model turn retries, then stops for the operator", async () => {
+  // Claude Agent SDK result fields decide, never the error text.
+  const rejected = (fields) => ({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    num_turns: 1,
+    result: "Failed to authenticate. API Error: 401",
+    ...fields,
+  });
+  assert.equal(
+    claudeCredentialRejected(rejected({ api_error_status: 401 }), false),
+    true,
+  );
+  assert.equal(
+    claudeCredentialRejected(rejected({ api_error_status: 401 }), true),
+    false,
+    "a 401 after a model response may follow paid work",
+  );
+  assert.equal(
+    claudeCredentialRejected(rejected({ api_error_status: 403 }), false),
+    false,
+  );
+  assert.equal(claudeCredentialRejected(rejected({}), false), false);
+  assert.equal(
+    claudeCredentialRejected(
+      {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Not logged in"],
+      },
+      false,
+    ),
+    false,
+  );
+
+  let rejections = 0;
+  let credentialRejected = true;
+  const attempts = [];
+  const waits = [];
+  const observations = [];
+  const transport = {
+    provider: "claude-agent-sdk",
+    adapter: "credential-rotation-check",
+    selection: () => ({ model: "unused", reasoningEffort: "low" }),
+    settings: () => ({}),
+    run: async ({ turn, invocation }) => {
+      attempts.push(invocation.providerAttempt);
+      if (rejections > 0) {
+        rejections--;
+        turn.failureClass = "provider-authentication";
+        throw new AuthenticationRequiredError(
+          "Claude planning is not authenticated (401)",
+          { provider: "claude", command: "claude auth login" },
+          credentialRejected,
+        );
+      }
+      turn.ended = true;
+      turn.response = JSON.stringify({ diagnosis: "settled" });
+    },
+  };
+  const model = new StructuredPlanningModel(transport, {
+    wait: async (milliseconds) => {
+      waits.push(milliseconds);
+    },
+  });
+  const request = () => ({
+    purpose: "diagnosis",
+    objective: "Inspect this exact complete failure source.",
+    baseSha: "a".repeat(40),
+    sources: [{ path: "failure-test.mjs", content: "assert.ok(false);\n" }],
+    schema: { type: "object" },
+    invocation: {
+      invocationId: randomUUID(),
+      phase: "diagnosis",
+      ordinal: 0,
+      observe: (observation) => observations.push(observation),
+    },
+  });
+  // The retries run inside one paid call: one in-flight marker, no paid fault.
+  const plan = (state) =>
+    step(
+      state,
+      { scope: "objective", name: "plan", paid: true },
+      (context) => context.paid(() => model.generateStructured(request())),
+      { save: () => undefined },
+    );
+
+  rejections = 1;
+  const recovered = {};
+  assert.deepEqual(await plan(recovered), { diagnosis: "settled" });
+  assert.deepEqual(attempts, [1, 2]);
+  assert.deepEqual(waits, [3_000]);
+  assert.equal(recovered.repeats, undefined);
+  assert.equal(waitOf(recovered, "objective"), undefined);
+  const retry = observations.find(
+    (observation) => observation.type === "retry-scheduled",
+  );
+  assert.equal(retry.failureClass, "provider-authentication");
+  assert.equal(retry.providerAttempt, 1);
+  assert.equal(retry.providerMaxAttempts, 3);
+
+  // A login that stays rejected keeps the operator stop after two retries.
+  attempts.length = 0;
+  waits.length = 0;
+  rejections = 5;
+  const stopped = {};
+  await assert.rejects(plan(stopped), AuthenticationRequiredError);
+  assert.deepEqual(attempts, [1, 2, 3]);
+  assert.deepEqual(waits, [3_000, 6_000]);
+  assert.equal(waitOf(stopped, "objective").kind, "prerequisite");
+  assert.match(waitOf(stopped, "objective").fix, /claude auth login/);
+  assert.equal(
+    stopped.repeats?.[repeatKey("objective", "plan")]?.paid,
+    undefined,
+  );
+  assert.equal(
+    stopped.repeats?.[repeatKey("objective", "plan")]?.inFlight,
+    undefined,
+  );
+
+  // Any other authentication failure stops at once.
+  attempts.length = 0;
+  waits.length = 0;
+  rejections = 1;
+  credentialRejected = false;
+  await assert.rejects(plan({}), AuthenticationRequiredError);
+  assert.deepEqual(attempts, [1]);
+  assert.deepEqual(waits, []);
 });
 
 test("diagnosis dispatch intent follows complete admission before real process effects", async (t) => {

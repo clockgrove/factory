@@ -16,6 +16,7 @@ import {
   type ApprovedPlaybook,
   type ApprovedPlaybookPin,
   assertApprovedPlaybookPin,
+  AuthenticationRequiredError,
   CompletedModelInvocationError,
   type ModelInvocationContext,
   type ModelInvocationPhase,
@@ -199,6 +200,23 @@ export const DEFAULT_REVIEW_CAPACITY_RETRY_DELAYS_MS = [250, 1_000] as const;
 const MAX_REVIEW_CAPACITY_RETRIES = 2;
 
 const MAX_REVIEW_CAPACITY_RETRY_DELAY_MS = 10_000;
+
+/**
+ * Objective phases that retry a rejected login (#1528). Clients sharing one
+ * login rotate its token; a session that read it just before the rotation
+ * gets a 401. Operator commands (propose, dream) keep their single attempt.
+ */
+const CREDENTIAL_RETRY_PHASES = new Set<ModelInvocationPhase>([
+  "compile",
+  "diagnosis",
+  ...REVIEW_PHASES,
+]);
+
+export const DEFAULT_CREDENTIAL_RETRY_DELAYS_MS = [3_000, 6_000] as const;
+
+const MAX_CREDENTIAL_RETRIES = 2;
+
+const MAX_CREDENTIAL_RETRY_DELAY_MS = 30_000;
 
 const humanPrerequisiteGuidance = (fields: string) =>
   `When human-owned accounts, credentials, environments or approvals block the plan, consolidate every known prerequisite in the ${fields}: cite its requirement, explain why it is needed, give only source-supported setup steps and verification commands, and distinguish observed readiness from missing or unknown facts. Ask precise questions for unknown setup requirements; never invent vendor instructions or ask for secret values in chat. Identify independent work only when the supplied evidence establishes its existing admission and independence; a proposed plan admits no Work Item. Checklist guidance grants no execution, deployment, spending or credential authority.`;
@@ -717,6 +735,7 @@ export class StructuredPlanningModel implements PlanningModel {
   approvedPlaybook?: ApprovedPlaybook;
   approvedPlaybookPin?: ApprovedPlaybookPin;
   private readonly reviewCapacityRetryDelaysMs: readonly number[];
+  private readonly credentialRetryDelaysMs: readonly number[];
   private readonly wait: (milliseconds: number) => Promise<void>;
   private readonly providerTurnElapsedTimeoutMs: number;
   private readonly reviewArtifacts?: readonly ReviewArtifactSelector[];
@@ -773,6 +792,22 @@ export class StructuredPlanningModel implements PlanningModel {
     )
       throw new Error(
         "Review capacity retry policy exceeds its bounded attempts or delay",
+      );
+    this.credentialRetryDelaysMs = [
+      ...(options.credentialRetryDelaysMs ??
+        DEFAULT_CREDENTIAL_RETRY_DELAYS_MS),
+    ];
+    if (
+      this.credentialRetryDelaysMs.length > MAX_CREDENTIAL_RETRIES ||
+      this.credentialRetryDelaysMs.some(
+        (delay) =>
+          !Number.isSafeInteger(delay) ||
+          delay < 0 ||
+          delay > MAX_CREDENTIAL_RETRY_DELAY_MS,
+      )
+    )
+      throw new Error(
+        "Credential retry policy exceeds its bounded attempts or delay",
       );
     this.wait = options.wait ?? ((milliseconds) => time.sleep(milliseconds));
     if (options.reviewArtifacts?.length)
@@ -943,10 +978,15 @@ export class StructuredPlanningModel implements PlanningModel {
     const retryDelays = REVIEW_PHASES.has(args.defaultPhase)
       ? this.reviewCapacityRetryDelaysMs
       : [];
+    const credentialDelays = CREDENTIAL_RETRY_PHASES.has(args.defaultPhase)
+      ? this.credentialRetryDelaysMs
+      : [];
     // Capacity retries retain their existing bound. A quiet response timeout
     // preserves an uncertain outcome, not evidence that an unchanged call helps.
-    const maxAttempts = retryDelays.length + 1;
+    const maxAttempts = retryDelays.length + credentialDelays.length + 1;
     invocation.providerMaxAttempts = maxAttempts;
+    let capacityRetries = 0;
+    let credentialRetries = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       assertStepAdmission();
       invocation.providerAttempt = attempt;
@@ -974,14 +1014,29 @@ export class StructuredPlanningModel implements PlanningModel {
             ),
           );
         }
-        const retryCapacity =
+        let delay: number;
+        let failureClass: string;
+        if (
           error instanceof ProviderCapacityFailure &&
-          attempt <= retryDelays.length;
-        if (!retryCapacity || attempt === maxAttempts) throw error;
+          capacityRetries < retryDelays.length
+        ) {
+          delay = retryDelays[capacityRetries++]!;
+          failureClass = "provider-capacity";
+        } else if (
+          // Rejected before any model turn: nothing was paid, and the next
+          // attempt's fresh session reads the shared login again. A login
+          // that stays rejected keeps its operator stop.
+          error instanceof AuthenticationRequiredError &&
+          error.credentialRejected &&
+          credentialRetries < credentialDelays.length
+        ) {
+          delay = credentialDelays[credentialRetries++]!;
+          failureClass = "provider-authentication";
+        } else throw error;
         // Backoff consumes the same admission, rather than delaying a fresh
         // deadline until the next attempt. Expiry is surfaced by its preflight.
         const retryDelayMs = Math.min(
-          retryDelays[attempt - 1]!,
+          delay,
           Math.max(0, Date.parse(deadlineAt) - Date.now()),
         );
         assertStepAdmission();
@@ -994,13 +1049,13 @@ export class StructuredPlanningModel implements PlanningModel {
           provider: this.transport.provider,
           model: selection.model,
           reasoningEffort: selection.reasoningEffort,
-          failureClass: "provider-capacity",
+          failureClass,
           retryDelayMs,
         });
         await this.wait(retryDelayMs);
       }
     }
-    throw new Error("Review capacity retry loop exhausted unexpectedly");
+    throw new Error("Provider retry loop exhausted unexpectedly");
   }
 
   private async runStructuredAttempt<T>(
@@ -1254,6 +1309,7 @@ export class StructuredPlanningModel implements PlanningModel {
   ): StructuredPlanningModel {
     const scoped = new StructuredPlanningModel(this.transport, {
       reviewCapacityRetryDelaysMs: this.reviewCapacityRetryDelaysMs,
+      credentialRetryDelaysMs: this.credentialRetryDelaysMs,
       wait: this.wait,
       providerTurnElapsedTimeoutMs: this.providerTurnElapsedTimeoutMs,
       reviewArtifacts: this.reviewArtifacts,

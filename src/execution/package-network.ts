@@ -8,6 +8,7 @@
  * structurally (YAML and JSON), never matched as text. Package names still
  * reach the registry in its lookups: that channel remains.
  */
+import { posix } from "node:path";
 import { parse } from "yaml";
 import { pinnedGitRaw } from "../process.js";
 
@@ -121,12 +122,31 @@ function configuredRegistries(
   return origins;
 }
 
-/** A local or VCS specifier: never fetched from a registry. */
-const localSpecifier = (value: unknown) =>
-  typeof value === "string" &&
-  /^(?:link|file|git|git\+[a-z]+|github|gitlab|bitbucket|workspace):/i.test(
-    value,
-  );
+/** A relative path that, from `from`, stays inside the checkout. */
+function insideCheckout(from: string, target: string): boolean {
+  if (!target || target.includes("\0") || posix.isAbsolute(target))
+    return false;
+  const resolved = posix.normalize(posix.join(from, target));
+  return resolved !== ".." && !resolved.startsWith("../");
+}
+
+/**
+ * Whether an importer's specifier or resolved version may stand beside a
+ * registry-only install. A registry range or version may. `workspace:` ranges
+ * and `link:` paths to directories inside the checkout (sibling workspace
+ * packages) may too: they fetch nothing. Any other protocol (`file:`, git,
+ * hosted, an http URL) or a link out of the checkout may not.
+ */
+function importerEntryAllowed(importer: string, value: unknown): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== "string") return false;
+  if (value.startsWith("workspace:")) return true;
+  if (value.startsWith("link:"))
+    return insideCheckout(importer, value.slice("link:".length));
+  const colon = value.indexOf(":");
+  // A plain range or version (`^1.2.0`, `1.2.0(peer@2.0.0)`) names no protocol.
+  return colon < 0 || (colon > value.indexOf("(") && value.indexOf("(") >= 0);
+}
 
 /** pnpm-lock.yaml: every package resolves by integrity from a registry origin. */
 function pnpmLockfileFromRegistries(
@@ -138,8 +158,9 @@ function pnpmLockfileFromRegistries(
   const importers = lock.importers;
   if (importers !== undefined) {
     if (!importers || typeof importers !== "object") return false;
-    for (const importer of Object.values(importers)) {
+    for (const [path, importer] of Object.entries(importers)) {
       if (!importer || typeof importer !== "object") return false;
+      if (!insideCheckout(".", path)) return false;
       for (const group of [
         "dependencies",
         "devDependencies",
@@ -153,7 +174,10 @@ function pnpmLockfileFromRegistries(
             string,
             unknown
           >;
-          if (localSpecifier(specifier) || localSpecifier(version))
+          if (
+            !importerEntryAllowed(path, specifier) ||
+            !importerEntryAllowed(path, version)
+          )
             return false;
         }
       }
@@ -196,7 +220,18 @@ function npmLockfileFromRegistries(
     if (!entry || typeof entry !== "object") return false;
     const fields = entry as Record<string, unknown>;
     if (path === "") continue;
-    if (fields.link === true) return false;
+    if (!insideCheckout(".", path)) return false;
+    // A workspace link points at a directory inside the checkout: no fetch.
+    if (fields.link === true) {
+      if (
+        typeof fields.resolved !== "string" ||
+        !insideCheckout(".", fields.resolved)
+      )
+        return false;
+      continue;
+    }
+    // A workspace package's own folder is checkout source, not a download.
+    if (!path.split("/").includes("node_modules")) continue;
     if (fields.resolved === undefined) {
       // Only bundled packages arrive without a resolved URL.
       if (fields.inBundle !== true) return false;

@@ -3,6 +3,7 @@ import {
   STRICT_COMMAND_SANDBOX,
   sandboxCandidateBounds,
 } from "./sandbox.js";
+import { diskBytes } from "./disk-use.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -91,7 +92,6 @@ import {
   pinnedGitAsync,
   pinnedGitMagicAsync,
   pinnedGitRaw,
-  pinnedGitRawInput,
   processGroupExists,
   removeWorktree,
   sanitizedWorkerEnvironment,
@@ -729,9 +729,8 @@ export function privateStagingExclusions(
  * Bound what `add -A` would stage, before host-side Git reads any of it: the
  * changed and untracked paths outside private staging, counted, and sized by
  * lstat. Git hashes a sparse file's whole apparent size, so that counts.
- * Not counted: `excluded` paths (asset destinations, which collection
- * unstages) and, while Git LFS's clean filter is configured, paths it
- * filters, whose bytes Git LFS stores and Git hashes only as a pointer.
+ * A preallocated file counts at its allocated blocks (diskBytes). Not
+ * counted: `excluded` paths (asset destinations, which collection unstages).
  * `inspect` still sees every path; `exceeded` makes the error for a
  * candidate over a bound.
  */
@@ -783,23 +782,6 @@ export function assertCandidateBounds(
     ),
   ].filter((path) => !privateStagingPath(path));
   const uncounted = new Set(options.excluded);
-  if (
-    prospective.length &&
-    pinnedGit(worktree, "config", "--default", "", "--get", "filter.lfs.clean")
-  ) {
-    const attributes = pinnedGitRawInput(
-      worktree,
-      `${prospective.join("\0")}\0`,
-      "check-attr",
-      "-z",
-      "--stdin",
-      "filter",
-    )
-      .toString("utf8")
-      .split("\0");
-    for (let index = 0; index + 2 < attributes.length; index += 3)
-      if (attributes[index + 2] === "lfs") uncounted.add(attributes[index]!);
-  }
   const counted = prospective.filter((path) => !uncounted.has(path));
   if (counted.length > bounds.maxFiles)
     throw exceeded(
@@ -813,7 +795,7 @@ export function assertCandidateBounds(
       throw workFault(`${label} has an unsafe path`);
     if (uncounted.has(path)) continue;
     const info = lstatSync(file, { throwIfNoEntry: false });
-    bytes += info?.isFile() ? info.size : 0;
+    bytes += info?.isFile() ? diskBytes(info) : 0;
   }
   if (bytes > bounds.maxBytes)
     throw exceeded(

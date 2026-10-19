@@ -33,9 +33,11 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { Worker } from "node:worker_threads";
 import { StepFault } from "../fault.js";
 import { type BubblewrapLaunch, workerToolchainPath } from "../process.js";
 import { record, refuseUnknownFields } from "../unknown-fields.js";
+import type { DiskUse } from "./disk-use.js";
 
 export const real = (path: string) =>
   existsSync(path) ? realpathSync(path) : resolve(path);
@@ -642,57 +644,52 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
 }
 
 /**
- * The checkout's lstat bytes and entries (files, links, directories) when a
+ * The checkout's disk use and entries (files, links, directories) when a
  * run's first command started, by the run's private TMPDIR: its growth is
  * measured from there. An entry goes once that TMPDIR is gone.
  */
 const checkoutBaselines = new Map<string, DiskUse>();
 
-interface DiskUse {
-  bytes: number;
-  entries: number;
+/**
+ * Disk use under `root` (see diskUseSync), measured in a worker thread so
+ * the controller's event loop keeps running while a large tree is walked.
+ */
+function diskUse(root: string, limit: number, skip?: string): Promise<DiskUse> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./disk-use.js", import.meta.url), {
+      workerData: { diskUse: [root, limit, skip] },
+    });
+    worker.once("message", (message: { use?: DiskUse; error?: string }) =>
+      message.use ? resolve(message.use) : reject(new Error(message.error)),
+    );
+    worker.once("error", reject);
+    worker.once("exit", (code) =>
+      reject(new Error(`Disk measurement of ${root} ended (${code})`)),
+    );
+  });
 }
 
 /**
- * Lstat bytes (a sparse file at its apparent size) and entries under
- * `root`, never following a link and skipping `skip`; it stops once more
- * than `limit` entries are counted. A directory it cannot read is refused,
- * since what it holds cannot be counted.
+ * Records the checkout a run's commands start from, once per run (by its
+ * private TMPDIR). Await it before each command; sandboxDiskOverflow
+ * measures growth from it.
  */
-function diskUse(root: string, limit: number, skip?: string): DiskUse {
-  const use = { bytes: 0, entries: 0 };
-  const pending = [root];
-  while (pending.length && use.entries <= limit) {
-    const directory = pending.pop()!;
-    let names: string[];
-    try {
-      names = readdirSync(directory);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw new Error(`${directory} cannot be read to measure its disk use`);
-    }
-    for (const name of names) {
-      const path = join(directory, name);
-      if (path === skip) continue;
-      const entry = lstatSync(path, { throwIfNoEntry: false });
-      if (!entry) continue;
-      use.entries += 1;
-      use.bytes += entry.size;
-      if (entry.isDirectory()) pending.push(path);
-    }
-  }
-  return use;
-}
-
-/** Records the checkout a run's commands start from, once per run. */
-function recordCheckoutBaseline(checkout: string, temporary: string): void {
+export async function recordSandboxBaseline(input: {
+  checkout: string;
+  temporary: string;
+}): Promise<void> {
+  const temporary = realpathSync(input.temporary);
   for (const run of checkoutBaselines.keys())
     if (!existsSync(run)) checkoutBaselines.delete(run);
+  if (checkoutBaselines.has(temporary)) return;
+  const checkout = realpathSync(input.checkout);
+  const baseline = await diskUse(
+    checkout,
+    Number.POSITIVE_INFINITY,
+    join(checkout, ".git"),
+  );
   if (!checkoutBaselines.has(temporary))
-    checkoutBaselines.set(
-      temporary,
-      diskUse(checkout, Number.POSITIVE_INFINITY, join(checkout, ".git")),
-    );
+    checkoutBaselines.set(temporary, baseline);
 }
 
 const mebibytes = (bytes: number) => (bytes / 1024 ** 2).toFixed(1);
@@ -701,16 +698,17 @@ const mebibytes = (bytes: number) => (bytes / 1024 ** 2).toFixed(1);
  * Whether a sandboxed command left its run over the sandbox's disk budget
  * (`sandbox.limits`): its private HOME and TMPDIR hold at most `homeMiB` and
  * `tmpMiB`, its checkout (without `.git`) grew by at most `checkoutMiB` since
- * the run's first command started, and together they add at most `files`
- * entries. Checked after each command, since HOME, TMPDIR and the checkout
- * last the whole run; the answer names what is over, or is undefined.
+ * the run's first command started (recordSandboxBaseline), and together they
+ * add at most `files` entries. Checked after each command, since HOME,
+ * TMPDIR and the checkout last the whole run; the answer names what is
+ * over, or is undefined.
  */
-export function sandboxDiskOverflow(
+export async function sandboxDiskOverflow(
   input: Pick<
     SandboxedCommandInput,
     "checkout" | "home" | "temporary" | "policy"
   >,
-): string | undefined {
+): Promise<string | undefined> {
   const limits = { ...DEFAULT_SANDBOX_LIMITS, ...input.policy.limits };
   const checkout = realpathSync(input.checkout);
   const temporary = realpathSync(input.temporary);
@@ -722,22 +720,17 @@ export function sandboxDiskOverflow(
     root: string,
     limit: number,
     skip?: string,
-  ): DiskUse | undefined => {
-    try {
-      return diskUse(root, limit, skip);
-    } catch (error) {
+  ): Promise<DiskUse | undefined> =>
+    diskUse(root, limit, skip).catch((error) => {
       over.push(error instanceof Error ? error.message : String(error));
       return undefined;
-    }
-  };
+    });
   const files = limits.files;
-  const grown = measured(
-    checkout,
-    baseline.entries + files,
-    join(checkout, ".git"),
-  );
-  const home = measured(realpathSync(input.home), files);
-  const scratch = measured(temporary, files);
+  const [grown, home, scratch] = await Promise.all([
+    measured(checkout, baseline.entries + files, join(checkout, ".git")),
+    measured(realpathSync(input.home), files),
+    measured(temporary, files),
+  ]);
   if (grown && grown.bytes - baseline.bytes > limits.checkoutMiB * 1024 ** 2)
     over.push(
       `the checkout grew by ${mebibytes(grown.bytes - baseline.bytes)} MiB, more than sandbox.limits.checkoutMiB (${limits.checkoutMiB} MiB)`,
@@ -822,11 +815,6 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   bubblewrap?: BubblewrapLaunch;
 } {
   const found = commandSandboxAvailability();
-  // Checkout growth is measured from where the run's first command started.
-  recordCheckoutBaseline(
-    realpathSync(input.checkout),
-    realpathSync(input.temporary),
-  );
   if (!found.available) {
     // Unsandboxed only by explicit choice and only without bubblewrap: an
     // installed one that fails is a fault, never a reason to run bare.

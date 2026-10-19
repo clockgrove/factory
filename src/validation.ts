@@ -26,6 +26,7 @@ import type { FailedValidationEvidence } from "./failed-validation.js";
 import {
   type CommandSandboxPolicy,
   STRICT_COMMAND_SANDBOX,
+  recordSandboxBaseline,
   sandboxDiskOverflow,
   sandboxedCommand,
 } from "./execution/sandbox.js";
@@ -626,6 +627,10 @@ export async function validateCheckout(
         home = mkdtempSync(join(tmpdir(), "factory-install-home-"));
         installHomes.push(home);
       }
+      await recordSandboxBaseline({
+        checkout: worktree,
+        temporary: temporaryRoot,
+      });
       const launch = sandboxedCommand({
         command: check,
         checkout: worktree,
@@ -674,23 +679,24 @@ export async function validateCheckout(
         outputObserver?.({ index, stream, output: trailing, final: true });
       }
       const output = `${stdout}${stderr}`;
+      const durationMs = Date.now() - started;
+      const overflow = await sandboxDiskOverflow({
+        checkout: worktree,
+        home,
+        temporary: temporaryRoot,
+        policy: sandbox,
+      });
       commandObserver?.({
         index,
-        passed: result.status === 0,
+        passed: result.status === 0 && !overflow,
         exitCode: result.status ?? -1,
-        durationMs: Date.now() - started,
+        durationMs,
         output,
       });
       if (hasUnresolvedSubprocesses())
         throw new Error(
           "Validation subprocess ownership unresolved; checkout retained",
         );
-      const overflow = sandboxDiskOverflow({
-        checkout: worktree,
-        home,
-        temporary: temporaryRoot,
-        policy: sandbox,
-      });
       partial.postCommandStatus = candidateStatus();
       if (!preparing)
         partial.commands.push({
@@ -715,8 +721,11 @@ export async function validateCheckout(
         // base, the same install worked there, so its failure is the
         // environment's: it repeats and charges no repair (#839). A changed
         // manifest or lockfile may be what broke it: the candidate's fault.
+        // Over the disk budget, only the verified install, run first with an
+        // empty HOME, is: earlier commands could have filled the budget.
         if (
           packageBootstrap(check) !== undefined &&
+          (!overflow || install) &&
           !dependencyInputsChanged(worktree, acceptedBaseSha, commit)
         )
           throw new StepFault(transient(detail, false));

@@ -19,6 +19,7 @@ import {
 import {
   type CommandSandboxPolicy,
   commandSandboxAvailability,
+  recordSandboxBaseline,
   STRICT_COMMAND_SANDBOX,
   sandboxDiskOverflow,
   sandboxedCommand,
@@ -179,6 +180,7 @@ export async function runSandboxedCommand(input: {
   const temporary = join(input.root, "tmp");
   mkdirSync(home, { recursive: true, mode: 0o700 });
   mkdirSync(temporary, { recursive: true, mode: 0o700 });
+  await recordSandboxBaseline({ checkout: input.worktree, temporary });
   const launch = sandboxedCommand({
     command: input.command,
     checkout: input.worktree,
@@ -200,6 +202,7 @@ export async function runSandboxedCommand(input: {
   const output = boundedOutput();
   const deadline = AbortSignal.timeout(input.timeoutMs);
   const started = Date.now();
+  let ran: { exitCode: number | null; timedOut: boolean };
   try {
     const result = await subprocessAsync(
       launch.file,
@@ -217,19 +220,7 @@ export async function runSandboxedCommand(input: {
       undefined,
       { stdout: false, stderr: false },
     );
-    const overflow = sandboxDiskOverflow({
-      checkout: input.worktree,
-      home,
-      temporary,
-      policy: input.policy,
-    });
-    if (overflow) throw new Error(`the command ran, but ${overflow}`);
-    return {
-      exitCode: result.status,
-      timedOut: false,
-      durationMs: Date.now() - started,
-      output: output.text(),
-    };
+    ran = { exitCode: result.status, timedOut: false };
   } catch (error) {
     // Cancellation stops the whole process group and proves it gone first;
     // an unproved stop stays an error.
@@ -237,13 +228,18 @@ export async function runSandboxedCommand(input: {
       throw new Error("the Factory shell closed while the command ran");
     if (!deadline.aborted || error instanceof UnsettledSubprocessError)
       throw error;
-    return {
-      exitCode: null,
-      timedOut: true,
-      durationMs: Date.now() - started,
-      output: output.text(),
-    };
+    ran = { exitCode: null, timedOut: true };
   }
+  const durationMs = Date.now() - started;
+  // What it wrote counts whether it finished or was stopped.
+  const overflow = await sandboxDiskOverflow({
+    checkout: input.worktree,
+    home,
+    temporary,
+    policy: input.policy,
+  });
+  if (overflow) throw new Error(`the command ran, but ${overflow}`);
+  return { ...ran, durationMs, output: output.text() };
 }
 
 /** One adapter-owned server whose only tool runs a command in the sandbox. */

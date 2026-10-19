@@ -137,8 +137,8 @@ function plainRange(value: string): boolean {
   return colon < 0 || (colon > value.indexOf("(") && value.indexOf("(") >= 0);
 }
 
-/** An npm package name, scoped or not (legacy uppercase included). */
-const NPM_PACKAGE_NAME = /^(?:@[\w.~-]+\/)?[\w.~-]+$/;
+/** An npm package name, scoped or not, with no leading dot (legacy uppercase included). */
+const NPM_PACKAGE_NAME = /^(?:@[\w~-][\w.~-]*\/)?[\w~-][\w.~-]*$/;
 
 /**
  * Whether an importer's specifier or resolved version may stand beside a
@@ -224,9 +224,12 @@ function plainYaml(text: string, path: string): unknown[] | NetworkRefusal {
   return plain;
 }
 
-/** `major.minor.patch` with no prerelease or build, as numbers. */
+/**
+ * `major.minor.patch` with no prerelease or build, as numbers: no whitespace,
+ * `v` prefix or leading zeros.
+ */
 function releaseVersion(value: string): number[] | undefined {
-  const found = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(value.trim());
+  const found = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
   return found ? found.slice(1).map(Number) : undefined;
 }
 
@@ -300,7 +303,7 @@ function satisfiesComparators(version: number[], set: string): boolean {
 }
 
 /** Whether `version` is `range` or satisfies it; unknown is refused. */
-function satisfiesRange(version: unknown, range: string): boolean {
+export function satisfiesRange(version: unknown, range: string): boolean {
   if (typeof version !== "string") return false;
   if (version === range) return true;
   const release = releaseVersion(version);
@@ -536,7 +539,15 @@ export function installNetworkRefusal(
         devEngines: manifest.devEngines,
       };
     };
-    const pinned = manager(commit);
+    let pinned: ReturnType<typeof manager>;
+    try {
+      pinned = manager(commit);
+    } catch (error) {
+      // Unreadable is Factory's limit only when the candidate left the file
+      // as the base has it; one the candidate changed is its to fix.
+      if (!changed(worktree, base, commit, ["package.json"])) throw error;
+      return { reason: "the candidate's package.json cannot be read" };
+    }
     if (!isDeepStrictEqual(manager(base), pinned))
       return {
         reason: "package.json changes its packageManager or devEngines",

@@ -34,6 +34,10 @@ import {
   workerValidationCommands,
 } from "../dist/execution/claude-validation.js";
 import {
+  installNetworkRefusal,
+  satisfiesRange,
+} from "../dist/execution/package-network.js";
+import {
   assertCommandSandboxConfig,
   commandSandboxAvailability,
   commandSandboxStatus,
@@ -628,6 +632,30 @@ test("host-side Git never enters a nested repository sandboxed code could write"
   }
 });
 
+test("a locked package manager version satisfies only the range forms Factory reads", () => {
+  for (const [version, range, expected] of [
+    ["12.6.0", "12.6.0", true],
+    ["12.6.3", "^12.0.0", true],
+    ["13.0.0", "^12.0.0", false],
+    ["12.6.9", "~12.6.0", true],
+    ["12.7.0", "~12.6.0", false],
+    ["12.6.0", "12.6", true],
+    ["12.6.0", "12.x", true],
+    ["11.9.0", "^10 || ^11", true],
+    ["12.0.0", "^10 || ^11", false],
+    ["12.6.0", "^12.6.0-rc.1", false],
+    ["12.6.0-rc.1", "^12.0.0", false],
+    ["012.6.0", "^12", false],
+    ["v12.6.0", "^12", false],
+    [" 12.6.0", "^12", false],
+  ])
+    assert.equal(
+      satisfiesRange(version, range),
+      expected,
+      `${version} ${range}`,
+    );
+});
+
 // Real registry packages without dependencies, with their integrity, read
 // from the public registry: an install with the network fetches them there,
 // through pasta. Undefined without egress.
@@ -924,9 +952,12 @@ test("a verified install reaches only its configured registry, and commands are 
   // version satisfies: has-flag is in no store yet, so only the registry
   // can supply it. (onFail keeps npm, which runs the install here, from
   // enforcing the pnpm pin.)
-  const devEngines = (version) => ({
-    packageManager: { name: "pnpm", version, onFail: "ignore" },
+  const devEngines = (version, name = "pnpm") => ({
+    packageManager: { name, version, onFail: "ignore" },
   });
+  // The specifier pnpm writes for a devEngines range is the range itself.
+  const devLock = pnpm12.replace("specifier: 12.6.0", "specifier: ^12.0.0");
+  assert.notEqual(devLock, pnpm12);
   const both = {
     "is-number": tarball(registry, "is-number"),
     "has-flag": tarball(registry, "has-flag"),
@@ -937,7 +968,7 @@ test("a verified install reaches only its configured registry, and commands are 
     undefined,
     devEngines("^12.0.0"),
   );
-  writeFileSync(join(worktree, "pnpm-lock.yaml"), pnpm12);
+  writeFileSync(join(worktree, "pnpm-lock.yaml"), devLock);
   const devPinned = commit("pin pnpm 12 through devEngines");
   write(worktree, both, undefined, devEngines("^12.0.0"));
   await validate(
@@ -972,6 +1003,64 @@ test("a verified install reaches only its configured registry, and commands are 
       assert.equal(faultOf(error).kind, "work");
       return true;
     },
+  );
+  // A devEngines entry for another package manager, or in the array form,
+  // names no pnpm for the lockfile's pin to match: offline.
+  for (const [index, entry] of [
+    devEngines("^12.0.0", "yarn"),
+    {
+      packageManager: [{ name: "pnpm", version: "^12.0.0", onFail: "ignore" }],
+    },
+  ].entries()) {
+    write(
+      worktree,
+      { "is-number": tarball(registry, "is-number") },
+      undefined,
+      entry,
+    );
+    const unmatched = commit(`pin pnpm through devEngines ${index}`);
+    write(worktree, both, undefined, entry);
+    await assert.rejects(
+      validate(
+        commit(`pnpm 12 locked beside an unmatched devEngines ${index}`),
+        30 + index,
+        [install],
+        unmatched,
+        join(stores, "empty-store"),
+      ),
+      (error) => {
+        assert.match(error.message, offline);
+        assert.match(
+          error.message,
+          /because pnpm-lock\.yaml pins pnpm@12\.6\.0 as the package manager/,
+        );
+        assert.equal(faultOf(error).kind, "work");
+        return true;
+      },
+    );
+  }
+  // A package.json the candidate changed into invalid JSON is its to fix,
+  // not a configuration fault; one it left as the base has it is Factory's
+  // limit.
+  write(worktree, { "is-number": tarball(registry, "is-number") });
+  const valid = commit("a readable package.json");
+  writeFileSync(join(worktree, "package.json"), "{");
+  const broken = commit("an unreadable package.json");
+  assert.deepEqual(
+    installNetworkRefusal(worktree, valid.commit, broken.commit),
+    {
+      reason: "the candidate's package.json cannot be read",
+    },
+  );
+  writeFileSync(join(worktree, "a.txt"), "unrelated\n");
+  writeFileSync(join(worktree, "package-lock.json"), "{}");
+  assert.equal(
+    installNetworkRefusal(
+      worktree,
+      broken.commit,
+      commit("a lockfile beside it").commit,
+    )?.unverified,
+    true,
   );
   // A base lockfile Factory cannot read, which the candidate left alone, is
   // Factory's limit, not the candidate's: a configuration fault.

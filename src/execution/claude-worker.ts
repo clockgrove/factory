@@ -12,7 +12,10 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
-import { UnsettledSubprocessError } from "../process.js";
+import {
+  keepSandboxesInProcessGroup,
+  UnsettledSubprocessError,
+} from "../process.js";
 import {
   type AgentSessionRef,
   AuthenticationRequiredError,
@@ -323,6 +326,8 @@ async function main(): Promise<void> {
   const [inputPath, resultPath] = process.argv.slice(2);
   if (!inputPath || !resultPath)
     throw new Error("Claude worker requires input and result paths");
+  // The controller proves this group gone; its sandboxes stay in it (#1575).
+  keepSandboxesInProcessGroup();
   const input = JSON.parse(
     readFileSync(inputPath, "utf8"),
   ) as ClaudeWorkerInput;

@@ -203,6 +203,7 @@ export async function runSandboxedCommand(input: {
       {
         cwd: input.worktree,
         env: launch.env,
+        bubblewrap: launch.bubblewrap,
         signal: input.signal
           ? AbortSignal.any([deadline, input.signal])
           : deadline,

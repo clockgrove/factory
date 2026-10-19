@@ -42,6 +42,7 @@ import {
 } from "./claude-session.js";
 import { workItemPrompt } from "./harness-support.js";
 import {
+  killGroup,
   launchWorker,
   observeWorker,
   stopUnrecordedWorker,
@@ -413,10 +414,9 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     const data = this.require(handle);
     const current = linuxProcessIdentity(data.pid);
     if (!current) {
+      // A sandbox the dead worker started (#1575): its group is still ours.
       if (processGroupExists(data.pid))
-        throw new Error(
-          "Worker cessation remains unresolved; checkout retained",
-        );
+        await killGroup(data.pid, "Claude harness");
       return;
     }
     if (current.startTime !== data.startTime || current.group !== data.pid)

@@ -1,5 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
+import {
+  type ChildProcess,
+  type SpawnOptions,
+  spawn,
+  spawnSync,
+} from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -17,8 +22,9 @@ import {
 import { readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { type Fault, transient, withFault } from "./fault.js";
+import { type Fault, StepFault, transient, withFault } from "./fault.js";
 import {
   assertOrigin,
   boundRepository,
@@ -1704,9 +1710,15 @@ export function resolveLocalExecutable(
   );
 }
 
-export function linuxProcessIdentity(
-  pid: number,
-): { group: number; startTime: string; state: string } | null {
+export function linuxProcessIdentity(pid: number): {
+  group: number;
+  startTime: string;
+  state: string;
+  parent: number;
+  session: number;
+  /** The controlling terminal's device number; 0 for none. */
+  terminal: number;
+} | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const close = stat.lastIndexOf(") ");
@@ -1719,7 +1731,14 @@ export function linuxProcessIdentity(
     const startTime = fields[19];
     if (!Number.isSafeInteger(group) || !startTime || !fields[0])
       throw new Error(`Cannot parse process identity for ${pid}`);
-    return { group, startTime, state: fields[0] };
+    return {
+      group,
+      startTime,
+      state: fields[0],
+      parent: Number(fields[1]),
+      session: Number(fields[3]),
+      terminal: Number(fields[4]),
+    };
   } catch (error) {
     if (
       ["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")
@@ -1893,6 +1912,174 @@ async function groupEnds(
   return true;
 }
 
+/** Waits for `promise`, but for at most `milliseconds`. */
+async function bounded(
+  promise: Promise<unknown>,
+  milliseconds: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    promise,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, milliseconds);
+    }),
+  ]);
+  clearTimeout(timer);
+}
+
+/** A bubblewrap launch that writes `--json-status-fd` documents to stdio 3. */
+export interface BubblewrapLaunch {
+  statusFd: 3;
+}
+
+/** A sandbox's PID-namespace init, as this process's PID namespace sees it. */
+interface SandboxInit {
+  pid: number;
+  startTime: string;
+}
+
+/**
+ * What bubblewrap reported: `child-pid` once it cloned the sandbox's init,
+ * before any mount; `exit-code` only after setup finished and the command
+ * was executed. A missing `exit-code` from a bubblewrap that exited by
+ * itself is a setup failure, never the command's (#1573).
+ */
+interface BubblewrapStatus {
+  /** `gone` when the init had already ended; `unknown` when not identified. */
+  init?: SandboxInit | "gone" | "unknown";
+  executed: boolean;
+  /** Bubblewrap's own error output, bounded. */
+  stderr: string;
+  /** Every writer closed the status pipe. */
+  ended: Promise<void>;
+  finished: boolean;
+  /** Runs once the init is identified or the status pipe ended. */
+  whenReported: (action: () => void) => void;
+}
+
+const BUBBLEWRAP_STATUS_LIMIT = 65_536;
+
+function watchBubblewrap(child: ChildProcess): BubblewrapStatus {
+  const stream = child.stdio[3] as Readable | null | undefined;
+  const waiting: (() => void)[] = [];
+  const report = () => {
+    for (const action of waiting.splice(0)) action();
+  };
+  const status: BubblewrapStatus = {
+    executed: false,
+    stderr: "",
+    ended: Promise.resolve(),
+    finished: !stream,
+    whenReported: (action) => {
+      if (status.init !== undefined || status.finished) action();
+      else waiting.push(action);
+    },
+  };
+  child.stderr?.on("data", (chunk: Buffer) => {
+    if (status.stderr.length < 4_096)
+      status.stderr += chunk.toString("utf8").slice(0, 4_096);
+  });
+  if (!stream) return status;
+  status.ended = new Promise<void>((resolve) => {
+    stream.once("close", resolve);
+    stream.once("end", resolve);
+    stream.once("error", resolve);
+  }).then(() => {
+    status.finished = true;
+    report();
+  });
+  let text = "";
+  let read = 0;
+  stream.on("data", (chunk: Buffer) => {
+    read += chunk.length;
+    // Only bubblewrap holds the pipe (it closes it in the sandbox).
+    if (read > BUBBLEWRAP_STATUS_LIMIT) {
+      stream.destroy();
+      return;
+    }
+    text += chunk.toString("utf8");
+    // Flat documents, one or more per read, possibly split across reads.
+    for (let end = text.indexOf("}"); end >= 0; end = text.indexOf("}")) {
+      const document = text.slice(0, end + 1);
+      text = text.slice(end + 1);
+      let value: Record<string, unknown>;
+      try {
+        value = JSON.parse(document) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (Number.isSafeInteger(value["exit-code"])) status.executed = true;
+      const pid = value["child-pid"];
+      if (status.init !== undefined || !Number.isSafeInteger(pid)) continue;
+      status.init = sandboxInit(child, pid as number);
+      report();
+    }
+  });
+  return status;
+}
+
+/**
+ * The init bubblewrap reported, identified while bubblewrap is still
+ * unreaped so its pid cannot name another process's child: our bubblewrap's
+ * child, or `gone` when no process has the pid (it was reaped, which empties
+ * its namespace). Anything else, such as a bubblewrap that died first and
+ * left its init reparented, is `unknown`.
+ */
+function sandboxInit(
+  child: ChildProcess,
+  pid: number,
+): BubblewrapStatus["init"] {
+  try {
+    const identity = linuxProcessIdentity(pid);
+    if (!identity) return "gone";
+    if (
+      child.exitCode !== null ||
+      child.signalCode !== null ||
+      identity.parent !== child.pid
+    )
+      return "unknown";
+    return identity.state === "Z"
+      ? "gone"
+      : { pid, startTime: identity.startTime };
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Whether the init has ended. A zombie init has ended too: an init exits
+ * only after the kernel ended every other process in its namespace.
+ */
+function sandboxInitEnded(init: SandboxInit): boolean {
+  const current = linuxProcessIdentity(init.pid);
+  return (
+    !current || current.startTime !== init.startTime || current.state === "Z"
+  );
+}
+
+let sandboxGroup: number | undefined;
+
+/**
+ * For a launched worker, whose controller proves its process group gone
+ * (#1575): bubblewrap and the sandbox's init then stay in that group rather
+ * than in one of their own, so that proof covers them even when the worker
+ * is SIGKILLed. Only a process that leads its own session and group with no
+ * controlling terminal may, so no sandbox shares a terminal.
+ */
+export function keepSandboxesInProcessGroup(): void {
+  const self = linuxProcessIdentity(process.pid);
+  if (
+    !self ||
+    self.group !== process.pid ||
+    self.session !== process.pid ||
+    self.terminal !== 0
+  )
+    throw new Error(
+      "Only a process leading its own session and process group, without a controlling terminal, keeps its sandboxes in its group",
+    );
+  sandboxGroup = process.pid;
+}
+
 /** A bidirectional input channel inside the same owned subprocess lifecycle. */
 export interface SubprocessInputChannel {
   signal?: AbortSignal;
@@ -1915,6 +2102,8 @@ export async function subprocessAsync(
   options: SpawnOptions & {
     /** Records the child's identity before any input; a throw stops it. */
     spawned?: (owner: NativeProcessOwner) => void;
+    /** The command is sandboxedCommand's bubblewrap launch. */
+    bubblewrap?: BubblewrapLaunch;
   } = {},
   input?: string | InteractiveSubprocessInput,
   observe?: (stream: "stdout" | "stderr", chunk: Buffer) => void,
@@ -1945,13 +2134,20 @@ export async function subprocessAsync(
   const scope = processCancellation.getStore();
   let stoppedLeftovers = 0;
   // `options.signal` (such as a deadline) also stops the whole process group.
-  const { signal: extra, spawned, ...spawnOptions } = options;
+  const { signal: extra, spawned, bubblewrap, ...spawnOptions } = options;
   const signal =
     scope?.signal && extra
       ? AbortSignal.any([scope.signal, extra])
       : (scope?.signal ?? extra);
   signal?.throwIfAborted();
   const interactive = typeof input === "object" ? input : undefined;
+  if (bubblewrap && (spawnOptions.stdio || interactive || spawned))
+    throw new Error(
+      "A sandboxed command takes no stdio, interactive input or spawn record",
+    );
+  // In a worker that keeps its sandboxes in its own group, bubblewrap is not
+  // a group of its own: its init is stopped and proved gone instead.
+  const joined = bubblewrap !== undefined && sandboxGroup === process.pid;
   const cancellationGraceMs = interactive?.cancellationGraceMs ?? 0;
   if (
     !Number.isSafeInteger(cancellationGraceMs) ||
@@ -1963,7 +2159,12 @@ export async function subprocessAsync(
     );
   assertProcessActive();
   signal?.throwIfAborted();
-  const child = spawn(file, args, { ...spawnOptions, detached: true });
+  const child = spawn(file, args, {
+    ...spawnOptions,
+    ...(bubblewrap && { stdio: ["pipe", "pipe", "pipe", "pipe"] }),
+    detached: !joined,
+  });
+  const sandbox = bubblewrap && watchBubblewrap(child);
   let error: Error | undefined;
   let inputError: unknown;
   let inputFailed = false;
@@ -1990,8 +2191,35 @@ export async function subprocessAsync(
   let cancellationError: unknown;
   let aborted = false;
   let cancelTimer: NodeJS.Timeout | undefined;
+  let unreportedTimer: NodeJS.Timeout | undefined;
+  // The sandbox's init ends every process in its namespace; bubblewrap ends
+  // with it. Each is signalled only while it is the exact recorded process.
+  const stopSandbox = () => {
+    clearTimeout(unreportedTimer);
+    const init = sandbox?.init;
+    try {
+      if (
+        typeof init === "object" &&
+        linuxProcessIdentity(init.pid)?.startTime === init.startTime
+      )
+        process.kill(init.pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH")
+        cancellationError = error;
+    }
+    // Node signals no process once it reaped bubblewrap.
+    child.kill("SIGKILL");
+  };
   const kill = () => {
     if (!child.pid) return;
+    if (joined && sandbox) {
+      // An init cloned but not yet reported would outlive a bubblewrap
+      // stopped now: wait for the report, which comes before any mount,
+      // for at most a second; an init still unreported then stays unknown.
+      unreportedTimer ??= setTimeout(stopSandbox, 1_000);
+      sandbox.whenReported(stopSandbox);
+      return;
+    }
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch (error) {
@@ -2042,7 +2270,8 @@ export async function subprocessAsync(
       throw new Error(
         "Interactive subprocess ownership could not be established",
       );
-    if (owned) scope?.observe?.(owned, false);
+    // A recorded owner leads its own group; a joined sandbox does not.
+    if (owned && !joined) scope?.observe?.(owned, false);
     if (spawned) {
       // The child is stopped and settled below: a plain failure, not unknown.
       const owner = owned && nativeProcessOwner(owned.pid);
@@ -2090,7 +2319,44 @@ export async function subprocessAsync(
   signal?.removeEventListener("abort", cancel);
   clearTimeout(cancelTimer);
   if (aborted) kill();
-  if (aborted && child.pid) {
+  if (joined && sandbox) {
+    // bubblewrap is reaped. Its init, which it reported in this PID
+    // namespace, must be gone as well; while any process of the namespace
+    // runs, the init does.
+    const sandboxEnds = async (milliseconds: number) => {
+      const deadline = Date.now() + milliseconds;
+      await bounded(sandbox.ended, milliseconds);
+      for (;;) {
+        const init = sandbox.init;
+        if (
+          init === "gone" ||
+          (typeof init === "object" && sandboxInitEnded(init)) ||
+          // A bubblewrap that exited by itself without a report cloned none.
+          (init === undefined && sandbox.finished && child.signalCode === null)
+        )
+          return true;
+        if (typeof init !== "object" || Date.now() >= deadline) return false;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    let ended = await sandboxEnds(
+      aborted ? 1_000 : LINGERING_DESCENDANTS_GRACE_MS,
+    );
+    if (!ended) {
+      stopSandbox();
+      ended = !cancellationError && (await sandboxEnds(1_000));
+    }
+    if (!ended) {
+      if (scope) scope.unresolved = true;
+      observed({ event: "cessation", status: "unavailable" });
+      throw new UnsettledSubprocessError(
+        "Sandboxed command cessation could not be verified; outcome unknown",
+        { cause: cancellationError },
+      );
+    }
+  } else if (aborted && child.pid) {
+    // The sandbox's init, if any, is in bubblewrap's group: its end is
+    // part of the group's.
     // SIGKILL is asynchronous. Allow the kernel to reap runnable descendants.
     if (cancellationError || !(await groupEnds(child.pid, 1_000))) {
       if (scope) scope.unresolved = true;
@@ -2142,7 +2408,7 @@ export async function subprocessAsync(
     child.stdout?.destroy();
     child.stderr?.destroy();
   }
-  if (owned) scope?.observe?.(owned, true);
+  if (owned && !joined) scope?.observe?.(owned, true);
   // Interactive clients observe `closed` and reject pending protocol waits.
   // A client cannot postpone process settlement by retaining an input promise.
   if (inputTask) await Promise.race([inputTask, closed]);
@@ -2150,6 +2416,18 @@ export async function subprocessAsync(
     throw new Error("Owned subprocess cancelled after verified cessation");
   if (error) throw error;
   if (inputFailed) throw inputError;
+  if (sandbox && child.signalCode === null) {
+    await bounded(sandbox.ended, 1_000);
+    // bubblewrap exited by itself and never executed the command: its
+    // setup (a mount or namespace) failed. The host's fault, not the
+    // command's, whatever its exit status.
+    if (!sandbox.executed)
+      throw new StepFault({
+        kind: "config",
+        detail: `The command sandbox could not be set up (bubblewrap exit ${status}), so the command did not run: ${sandbox.stderr.trim().slice(0, 1_000) || "no detail"}`,
+        fix: "Keep every sandbox mount source (the PATH's toolchains, sandbox.readOnlyPaths, sandbox.packageStore, the checkout) in place while Factory runs, and let bubblewrap create namespaces on this host",
+      });
+  }
   return {
     status,
     stdout: Buffer.concat(output.stdout).toString("utf8"),

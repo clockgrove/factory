@@ -31,13 +31,29 @@ import {
   commandSandboxAvailability,
   commandSandboxStatus,
   STRICT_COMMAND_SANDBOX,
+  sandboxedCommand,
 } from "../dist/execution/sandbox.js";
+import { killGroup, launchWorker } from "../dist/execution/worker-process.js";
+import { faultOf } from "../dist/fault.js";
+import {
+  linuxProcessIdentity,
+  processGroupExists,
+  subprocessAsync,
+} from "../dist/process.js";
 import { validateTree, validateWorkItem } from "../dist/validation.js";
 
 const status = (worktree) =>
   execFileSync("git", ["-C", worktree, "status", "--porcelain"], {
     encoding: "utf8",
   });
+
+// A host directory outside every temporary directory: the repository's
+// ignored `.factory`.
+const outsideTemporary = () => {
+  const parent = new URL("../.factory/", import.meta.url).pathname;
+  mkdirSync(parent, { recursive: true });
+  return mkdtempSync(join(parent, "sandbox-"));
+};
 
 test("declared validation runs on a snapshot and leaves the worktree unchanged", async () => {
   const worktree = join(
@@ -281,7 +297,7 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   rmSync(dirname(worktree), { recursive: true, force: true });
 });
 
-test("declared commands run in an OS sandbox that hides the host and keeps loopback", async () => {
+test("declared commands run in an OS sandbox that hides the host and keeps loopback", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-command-sandbox-"));
   const worktree = join(root, "worktree");
   execFileSync("git", ["init", "-q", worktree]);
@@ -332,7 +348,10 @@ test("declared commands run in an OS sandbox that hides the host and keeps loopb
   }
   const outside = join(root, "outside");
   mkdirSync(outside);
-  const store = join(root, "package-store");
+  // A package store lies outside the shared temporary directories.
+  const stores = outsideTemporary();
+  t.after(() => rmSync(stores, { recursive: true, force: true }));
+  const store = join(stores, "package-store");
   const quote = (path) => `'${path}'`;
   const policy = {
     required: true,
@@ -543,8 +562,10 @@ test("host-side Git never enters a nested repository sandboxed code could write"
   }
 });
 
-test("a verified install reaches only its configured registry, and commands are resource-limited", async () => {
+test("a verified install reaches only its configured registry, and commands are resource-limited", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-install-network-"));
+  const stores = outsideTemporary();
+  t.after(() => rmSync(stores, { recursive: true, force: true }));
   // Real dependency tarballs served on host loopback, standing in for the
   // configured registry: only an install in the host's network reaches it.
   const tarballs = {};
@@ -637,7 +658,7 @@ test("a verified install reaches only its configured registry, and commands are 
     const sandbox = {
       required: true,
       network: "package-install",
-      packageStore: join(root, "store"),
+      packageStore: join(stores, "store"),
       readOnlyPaths: [],
       limits: { tmpMiB: 64, processes: 512 },
     };
@@ -758,7 +779,7 @@ test("a verified install reaches only its configured registry, and commands are 
         undefined,
         false,
         [],
-        { ...sandbox, packageStore: join(root, "empty-store") },
+        { ...sandbox, packageStore: join(stores, "empty-store") },
       ),
       /ECONNREFUSED/,
     );
@@ -846,13 +867,167 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
   assert.match(long.output, /last\n$/);
 });
 
-// A host directory outside every temporary directory: the repository's
-// ignored `.factory`.
-const outsideTemporary = () => {
-  const parent = new URL("../.factory/", import.meta.url).pathname;
-  mkdirSync(parent, { recursive: true });
-  return mkdtempSync(join(parent, "sandbox-"));
+// One command as validation launches it, and its run.
+const launchIn = (root, command, readOnlyPaths) =>
+  sandboxedCommand({
+    command,
+    checkout: join(root, "worktree"),
+    temporary: join(root, "tmp"),
+    home: join(root, "home"),
+    env: { PATH: process.env.PATH },
+    network: false,
+    packageInstall: false,
+    policy: { ...STRICT_COMMAND_SANDBOX, readOnlyPaths },
+  });
+const runIn = (root, launch) =>
+  subprocessAsync(launch.file, launch.args, {
+    cwd: join(root, "worktree"),
+    env: launch.env,
+    bubblewrap: launch.bubblewrap,
+  });
+const sandboxRoot = (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-sandbox-setup-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const name of ["tmp", "home"]) mkdirSync(join(root, name));
+  execFileSync("git", ["init", "-q", join(root, "worktree")]);
+  return root;
 };
+
+test("a sandbox that cannot be set up is a configuration fault, not the command's failure", {
+  skip: new URL("..", import.meta.url).pathname.startsWith(`${tmpdir()}/`),
+}, async (t) => {
+  const root = sandboxRoot(t);
+  const tools = outsideTemporary();
+  t.after(() => rmSync(tools, { recursive: true, force: true }));
+  // A command that runs and fails is the command's failure.
+  const failed = await runIn(
+    root,
+    launchIn(root, `test -d '${tools}' && exit 1`, [tools]),
+  );
+  assert.equal(failed.status, 1);
+  // A mount source that vanishes after the arguments were built: bubblewrap
+  // exits 1 before the command runs, which is the host's fault (#1573).
+  const launch = launchIn(root, "exit 0", [tools]);
+  rmSync(tools, { recursive: true });
+  const error = await runIn(root, launch).then(
+    () => assert.fail("a sandbox that could not be set up ran"),
+    (error) => error,
+  );
+  assert.equal(faultOf(error).kind, "config");
+  assert.match(error.message, /could not be set up \(bubblewrap exit 1\)/);
+  assert.match(error.message, /Can't find source path/);
+});
+
+test("a SIGKILLed worker's sandboxed command is gone before its group is proved gone", {
+  skip: new URL("..", import.meta.url).pathname.startsWith(`${tmpdir()}/`),
+}, async (t) => {
+  const root = sandboxRoot(t);
+  const vanishing = outsideTemporary();
+  t.after(() => rmSync(vanishing, { recursive: true, force: true }));
+  const dist = new URL("../dist/", import.meta.url).href;
+  // A worker as launchWorker starts one: its own session and group, no
+  // terminal. Its sandboxes stay in that group, as the Claude worker's do.
+  const script = join(root, "worker.mjs");
+  writeFileSync(
+    script,
+    `import { execFileSync } from "node:child_process";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { faultOf } from "${dist}fault.js";
+import { keepSandboxesInProcessGroup, subprocessAsync } from "${dist}process.js";
+import { sandboxedCommand, STRICT_COMMAND_SANDBOX } from "${dist}execution/sandbox.js";
+keepSandboxesInProcessGroup();
+const [requestPath, resultPath] = process.argv.slice(2);
+const { root, vanishing } = JSON.parse(readFileSync(requestPath, "utf8"));
+const launch = (command, readOnlyPaths = []) => sandboxedCommand({
+  command, checkout: join(root, "worktree"), temporary: join(root, "tmp"),
+  home: join(root, "home"), env: { PATH: process.env.PATH }, network: false,
+  packageInstall: false, policy: { ...STRICT_COMMAND_SANDBOX, readOnlyPaths },
+});
+const run = (built, signal) => subprocessAsync(built.file, built.args, {
+  cwd: join(root, "worktree"), env: built.env, bubblewrap: built.bubblewrap, signal,
+});
+const report = {};
+report.exit = (await run(launch("exit 7"))).status;
+const unmounted = launch("exit 0", [vanishing]);
+rmSync(vanishing, { recursive: true });
+report.setup = await run(unmounted).catch((error) => faultOf(error).kind);
+report.timeout = await run(launch("sleep 61.5 & sleep 61.5"), AbortSignal.timeout(1_000))
+  .catch((error) => error.message);
+// Proved gone before the run returned.
+report.left = execFileSync("ps", ["-eo", "args"], { encoding: "utf8" })
+  .split("\\n").filter((line) => line.trim() === "sleep 61.5").length;
+writeFileSync(join(root, "report.json"), JSON.stringify(report));
+await run(launch("sleep 62.5 & sleep 62.5"));
+writeFileSync(resultPath, "{}");
+`,
+  );
+  const worker = await launchWorker({
+    root: join(root, "harness"),
+    identity: "sandboxed",
+    input: { root, vanishing },
+    script,
+    env: process.env,
+    label: "Test",
+  });
+  t.after(() => killGroup(worker.pid, "Test").catch(() => undefined));
+  const members = () =>
+    readdirSync("/proc")
+      .filter((name) => /^\d+$/.test(name))
+      .map((name) => {
+        try {
+          return {
+            pid: Number(name),
+            ...linuxProcessIdentity(Number(name)),
+            args: readFileSync(`/proc/${name}/cmdline`, "utf8"),
+          };
+        } catch {
+          return { pid: Number(name) };
+        }
+      })
+      .filter((entry) => entry.group === worker.pid && entry.state !== "Z");
+  const deadline = Date.now() + 60_000;
+  let sleeps = [];
+  while (sleeps.length < 2) {
+    assert.ok(Date.now() < deadline, readFileSync(worker.logPath, "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    sleeps = members().filter(
+      (entry) => entry.args === "sleep\u000062.5\u0000",
+    );
+  }
+  // In the worker's group: what it ran in its sandboxes ended as it
+  // reported, with nothing left over once a stopped command returned.
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(root, "report.json"), "utf8")),
+    {
+      exit: 7,
+      setup: "config",
+      timeout: "Owned subprocess cancelled after verified cessation",
+      left: 0,
+    },
+  );
+  // bubblewrap, the sandbox's PID-namespace init and the command are
+  // members of the worker's group, so the controller's proof covers them.
+  const bubblewrap = members().filter((entry) =>
+    entry.args.split("\u0000")[0].endsWith("bwrap"),
+  );
+  const outer = bubblewrap.find((entry) => entry.parent === worker.pid);
+  const init = bubblewrap.find((entry) => entry.parent === outer?.pid);
+  assert.ok(outer && init, JSON.stringify(bubblewrap));
+  const alive = ({ pid, startTime }) => {
+    const current = linuxProcessIdentity(pid);
+    return current?.startTime === startTime && current.state !== "Z";
+  };
+  // SIGKILL only the worker; its sandbox outlives it until its death
+  // signal arrives. The proof that the group is gone (as the harness
+  // gives it) holds only once the init and the command are gone too.
+  process.kill(worker.pid, "SIGKILL");
+  await killGroup(worker.pid, "Test");
+  assert.equal(processGroupExists(worker.pid), false);
+  assert.equal(alive(init), false);
+  assert.equal(alive(outer), false);
+  for (const sleep of sleeps) assert.equal(alive(sleep), false);
+});
 
 test("no toolchain or read-only path mounts the host's /tmp or its sockets", {
   skip:
@@ -902,6 +1077,21 @@ test("no toolchain or read-only path mounts the host's /tmp or its sockets", {
   await assert.rejects(
     run("true", { ...STRICT_COMMAND_SANDBOX, readOnlyPaths: [sockets] }),
     /sandbox\.readOnlyPaths entry .* shared temporary/,
+  );
+  // And a package store there, which another user could create first; it
+  // is refused before it is created. One that others can write is refused.
+  const store = join(root, "store");
+  await assert.rejects(
+    run("true", { ...STRICT_COMMAND_SANDBOX, packageStore: store }),
+    /sandbox\.packageStore .* shared temporary/,
+  );
+  assert.equal(existsSync(store), false);
+  const writable = join(tools, "store");
+  mkdirSync(writable);
+  chmodSync(writable, 0o777);
+  await assert.rejects(
+    run("true", { ...STRICT_COMMAND_SANDBOX, packageStore: writable }),
+    /sandbox\.packageStore .* group- or world-writable/,
   );
 });
 

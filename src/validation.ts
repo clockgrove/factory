@@ -628,7 +628,7 @@ export async function validateCheckout(
       const result = await subprocessAsync(
         launch.file,
         launch.args,
-        { cwd: worktree, env: launch.env },
+        { cwd: worktree, env: launch.env, bubblewrap: launch.bubblewrap },
         undefined,
         (stream, chunk) => {
           const original = originalStreams[stream];

@@ -835,9 +835,12 @@ function validateAmendment(
         old,
       ) &&
       old.ownedPaths.every((path) => next.ownedPaths.includes(path));
-    // Review judges a result only against these fields, so ownership that
-    // changes without them leaves the approved change unreviewable (#1610).
+    // Review judges a result only against these fields, so an operator
+    // answer that widens the reattempted item without them leaves the
+    // approved change unreviewable (#1610).
     if (
+      widened &&
+      pending.decisions?.some((entry) => entry.answer) &&
       !isDeepStrictEqual(
         [...next.ownedPaths].sort(),
         [...old.ownedPaths].sort(),
@@ -847,7 +850,7 @@ function validateAmendment(
       isDeepStrictEqual(next.nonGoals, old.nonGoals)
     )
       throw new Error(
-        `Work Item ${old.id} changes its owned paths but not its acceptance, brief or non-goals; state the behaviour the changed paths serve, including any operator answer`,
+        `Work Item ${old.id} changes its owned paths after an operator answer but not its acceptance, brief or non-goals; state the behaviour the answer approved`,
       );
     if (
       changed &&

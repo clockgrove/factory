@@ -1874,9 +1874,19 @@ async function runIntakeOwned(
     controlTail = result.catch(() => undefined);
     return result;
   };
+  // Node opens its inspector on an unhandled SIGUSR1. With one slot the
+  // run takes cancellation by it; with several, cancellation comes only
+  // through the control endpoint, and the lock records which (#1590).
+  const ignoreSignal = () => {
+    if (slots > 1)
+      process.stderr.write(
+        `Factory ignored SIGUSR1: this service runs up to ${slots} Objectives and cancels them only through its control endpoint (\`factory cancel\`).\n`,
+      );
+  };
+  process.on("SIGUSR1", ignoreSignal);
   process.on("SIGTERM", onHandoff);
   try {
-    retargetControllerLock(lockPath, lock, 0);
+    retargetControllerLock(lockPath, lock, 0, slots === 1);
     assertRestoredInstallationDispatchReady(config);
     // Cold preparation owns the existing lease and exposes no readiness or
     // dispatch until the controller's remote-only verifier is authenticated.
@@ -1993,6 +2003,7 @@ async function runIntakeOwned(
           // lock, so several run side by side and each claim names one.
           const result = await withObjectiveDelegation(lock, () =>
             runObjective(objectiveConfig, selected, objectiveServices, {
+              signalCancel: slots === 1,
               // Children of a split are admitted through this controller's
               // own authenticated queue command path.
               admitChildObjectives: (objectives, expectedBodyDigests) =>
@@ -2323,6 +2334,7 @@ async function runIntakeOwned(
         await new Promise<void>((resolve) => server!.close(() => resolve()));
     } finally {
       releaseControllerLock(lockPath, lock);
+      process.off("SIGUSR1", ignoreSignal);
     }
   }
 }

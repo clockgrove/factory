@@ -14,6 +14,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -25,6 +26,7 @@ import {
   stopRecordedSandboxes,
 } from "../process.js";
 import { parseAuthenticationRequest } from "./harness-support.js";
+import { commandSandboxAvailability } from "./sandbox.js";
 
 export interface WorkerHandleData {
   pid: number;
@@ -46,6 +48,12 @@ function workerPaths(root: string, identity: string) {
 /** Where a worker records the command sandboxes it starts (#1575). */
 export function workerSandboxRecords(resultPath: string): string {
   return resultPath.replace(/\.result\.json$/, ".sandboxes");
+}
+
+/** The bubblewrap sandboxed commands run, as `sandboxedCommand` finds it. */
+export function sandboxBubblewrap(): string | undefined {
+  const found = commandSandboxAvailability();
+  return found.available ? realpathSync(found.executable) : undefined;
 }
 
 /**
@@ -147,7 +155,10 @@ export async function stopUnrecordedWorker(
     await killGroup(group, label);
   }
   // The worker is gone; so must be every sandbox it recorded.
-  await stopRecordedSandboxes(workerSandboxRecords(paths.resultPath));
+  await stopRecordedSandboxes(
+    workerSandboxRecords(paths.resultPath),
+    sandboxBubblewrap,
+  );
   rmSync(`${paths.requestPath}.codex-home`, { recursive: true, force: true });
   for (const path of [paths.requestPath, paths.resultPath, paths.pidPath])
     rmSync(path, { force: true });

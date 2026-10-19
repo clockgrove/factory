@@ -45,6 +45,7 @@ import { workItemPrompt } from "./harness-support.js";
 import {
   launchWorker,
   observeWorker,
+  sandboxBubblewrap,
   stopUnrecordedWorker,
   type WorkerHandleData,
   workerSandboxRecords,
@@ -419,7 +420,10 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
   async cancel(handle: HarnessHandle): Promise<void> {
     const data = this.require(handle);
     await this.stopWorker(data);
-    await stopRecordedSandboxes(workerSandboxRecords(data.resultPath));
+    await stopRecordedSandboxes(
+      workerSandboxRecords(data.resultPath),
+      sandboxBubblewrap,
+    );
   }
 
   private async stopWorker(data: WorkerHandleData): Promise<void> {

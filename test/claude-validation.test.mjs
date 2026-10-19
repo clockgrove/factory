@@ -41,6 +41,7 @@ import {
 import { ClaudeAgentSdkHarness } from "../dist/execution/claude.js";
 import {
   launchWorker,
+  sandboxBubblewrap,
   workerSandboxRecords,
 } from "../dist/execution/worker-process.js";
 import { faultOf } from "../dist/fault.js";
@@ -956,8 +957,10 @@ test("a killed worker's command sandbox is stopped and proved gone before the wo
   const command = "touch started && exec sleep 31.75";
 
   // The worker is SIGKILLed while its command runs. The sandbox is detached
-  // in bubblewrap's own group, so the worker's group never covered it: the
-  // cessation proof reports the worker gone only once the sandbox is too.
+  // in bubblewrap's own group, so the worker's group never covers it; the
+  // cancel finds its record, and returns with the sandbox gone and the record
+  // removed. --die-with-parent usually ends the sandbox first, so this does
+  // not show the race the proof closes; the next case shows the stop itself.
   const killed = await start(command);
   const record = await running(killed);
   assert.equal(record.owner.group, record.owner.pid);
@@ -972,14 +975,16 @@ test("a killed worker's command sandbox is stopped and proved gone before the wo
   // identity: here the worker still runs, so nothing else would end it.
   const live = await start(command);
   const liveRecord = await running(live);
-  await stopRecordedSandboxes(live.records);
+  await stopRecordedSandboxes(live.records, sandboxBubblewrap);
   assert.ok(gone(liveRecord));
   await live.cancel();
 
   // A recorded identity that no longer matches (the pid now names another
   // process, which leads its own group) is never signalled: the outcome is
-  // unknown until that group is gone. So is a spawn the worker may have been
-  // killed during, before it recorded bubblewrap's identity.
+  // unknown until that group is gone. So is one that matches but runs
+  // another executable than bubblewrap, and, within this boot, a spawn the
+  // worker may have been killed during, before it recorded bubblewrap's
+  // identity. Such a spawn from an earlier boot is gone.
   const other = spawn("sleep", ["29.25"], { detached: true, stdio: "ignore" });
   t.after(() => {
     try {
@@ -998,17 +1003,34 @@ test("a killed worker's command sandbox is stopped and proved gone before the wo
     }),
   );
   const unknown = (error) => error instanceof UnsettledSubprocessError;
-  await assert.rejects(stopRecordedSandboxes(reused), unknown);
+  const stop = (directory) =>
+    stopRecordedSandboxes(directory, sandboxBubblewrap);
+  await assert.rejects(stop(reused), unknown);
   assert.ok(alive(owner));
   assert.ok(existsSync(join(reused, "a.json")));
+  const otherExecutable = join(root, "other-executable.sandboxes");
+  mkdirSync(otherExecutable);
+  writeFileSync(join(otherExecutable, "a.json"), JSON.stringify({ owner }));
+  await assert.rejects(stop(otherExecutable), unknown);
+  assert.ok(alive(owner));
+  assert.ok(existsSync(join(otherExecutable, "a.json")));
+  const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   const inFlight = join(root, "in-flight.sandboxes");
   mkdirSync(inFlight);
-  writeFileSync(join(inFlight, "a.json"), "{}");
-  await assert.rejects(stopRecordedSandboxes(inFlight), unknown);
+  writeFileSync(join(inFlight, "a.json"), JSON.stringify({ boot }));
+  await assert.rejects(stop(inFlight), unknown);
   assert.ok(existsSync(join(inFlight, "a.json")));
+  const earlierBoot = join(root, "earlier-boot.sandboxes");
+  mkdirSync(earlierBoot);
+  writeFileSync(
+    join(earlierBoot, "a.json"),
+    JSON.stringify({ boot: "00000000-0000-0000-0000-000000000000" }),
+  );
+  await stop(earlierBoot);
+  assert.equal(existsSync(earlierBoot), false);
   process.kill(-other.pid, "SIGKILL");
   while (processGroupExists(owner.group)) await wait();
-  await stopRecordedSandboxes(reused);
+  await stop(reused);
   assert.equal(existsSync(reused), false);
 
   // A command that ends normally: the worker removes its record itself.

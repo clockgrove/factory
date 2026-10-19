@@ -1831,13 +1831,14 @@ export function nativeProcessDisposition(
 }
 
 /**
- * One bubblewrap launch a worker recorded for its controller (#1575): empty
- * while the spawn may be in flight, then bubblewrap's identity, then also its
- * PID namespace init's. The sandbox is detached in bubblewrap's own group;
- * the init stays in that group, and every other sandbox process is in its
- * namespace, which ends with the init.
+ * One bubblewrap launch a worker recorded for its controller (#1575): only
+ * its boot while the spawn may be in flight, then bubblewrap's identity, then
+ * also its PID namespace init's. The sandbox is detached in bubblewrap's own
+ * group; the init stays in that group, and every other sandbox process is in
+ * its namespace, which ends with the init.
  */
 interface SandboxRecord {
+  boot?: string;
   owner?: NativeProcessOwner;
   init?: { pid: number; startTime: string };
 }
@@ -1870,14 +1871,19 @@ const SANDBOX_CESSATION_MS = 2_000;
 /**
  * Stop each sandbox recorded in `directory` by a worker that is proved gone,
  * prove it gone and remove its record. Only an exactly verified identity
- * (pid, start time, process group, in this boot, user and PID namespace) is
+ * (pid, start time, process group, in this boot, user and PID namespace)
+ * running `bubblewrap()`, the executable sandboxed commands use, is
  * signalled, so a reused pid or group is never. A sandbox is gone once
  * bubblewrap's group is empty: that holds its init, whose exit ends the
- * namespace's other processes. A record without an identity (a spawn the
- * worker may have been killed during), from another namespace or user, or
- * a group still present after the stop, leaves the outcome unknown.
+ * namespace's other processes. A record of an earlier boot is gone. In this
+ * boot, a record without an identity (a spawn the worker may have been
+ * killed during), from another namespace or user, of another executable, or
+ * whose group is still present after the stop, leaves the outcome unknown.
  */
-export async function stopRecordedSandboxes(directory: string): Promise<void> {
+export async function stopRecordedSandboxes(
+  directory: string,
+  bubblewrap: () => string | undefined,
+): Promise<void> {
   let names: string[];
   try {
     names = readdirSync(directory);
@@ -1888,6 +1894,16 @@ export async function stopRecordedSandboxes(directory: string): Promise<void> {
   const matches = (pid: number, startTime: string) => {
     const current = linuxProcessIdentity(pid);
     return current?.startTime === startTime ? current : undefined;
+  };
+  const running = (pid: number) => {
+    let executable: string | undefined;
+    try {
+      executable = readlinkSync(`/proc/${pid}/exe`);
+    } catch {
+      return false;
+    }
+    const expected = bubblewrap();
+    return expected !== undefined && executable === expected;
   };
   const kill = (pid: number) => {
     try {
@@ -1912,6 +1928,12 @@ export async function stopRecordedSandboxes(directory: string): Promise<void> {
     }
     const owner = record?.owner;
     const init = record?.init;
+    const boot = record?.boot ?? owner?.boot;
+    // A later boot ended every process of this one.
+    if (typeof boot === "string" && boot !== currentBoot()) {
+      rmSync(path, { force: true });
+      continue;
+    }
     if (
       !isNativeProcessOwner(owner) ||
       owner.boot === undefined ||
@@ -1923,37 +1945,48 @@ export async function stopRecordedSandboxes(directory: string): Promise<void> {
       unproved++;
       continue;
     }
-    if (owner.boot === currentBoot()) {
-      if (
-        owner.uid !== process.getuid?.() ||
-        owner.namespace !== readlinkSync("/proc/self/ns/pid")
-      ) {
-        unproved++;
-        continue;
-      }
-      const initRuns = () => {
-        const current = init && matches(init.pid, init.startTime);
-        return current !== undefined && current.state !== "Z";
-      };
-      const present = () => processGroupExists(owner.group) || initRuns();
-      if (matches(owner.pid, owner.startTime)?.group === owner.group)
-        kill(-owner.group);
-      if (initRuns()) kill(init!.pid);
-      const deadline = Date.now() + SANDBOX_CESSATION_MS;
-      while (present() && Date.now() < deadline)
-        await new Promise<void>((resolve) => setTimeout(resolve, 10));
-      if (present()) {
-        unproved++;
-        continue;
-      }
+    if (
+      owner.boot !== boot ||
+      owner.uid !== process.getuid?.() ||
+      owner.namespace !== readlinkSync("/proc/self/ns/pid")
+    ) {
+      unproved++;
+      continue;
     }
-    // A later boot ended every process of this one.
+    const live = (pid: number, startTime: string) => {
+      const current = matches(pid, startTime);
+      return current && current.state !== "Z" ? current : undefined;
+    };
+    const initRuns = () =>
+      init !== undefined && !!live(init.pid, init.startTime);
+    const present = () => processGroupExists(owner.group) || initRuns();
+    const leader = live(owner.pid, owner.startTime);
+    // A recorded identity running anything but bubblewrap is never signalled.
+    if (
+      (leader && !running(owner.pid)) ||
+      (init && initRuns() && !running(init.pid))
+    ) {
+      unproved++;
+      continue;
+    }
+    if (leader?.group === owner.group) kill(-owner.group);
+    if (init && initRuns()) kill(init.pid);
+    const deadline = Date.now() + SANDBOX_CESSATION_MS;
+    while (present() && Date.now() < deadline)
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    if (present()) {
+      unproved++;
+      continue;
+    }
     rmSync(path, { force: true });
   }
-  if (unproved)
+  if (unproved) {
+    const scope = processCancellation.getStore();
+    if (scope) scope.unresolved = true;
     throw new UnsettledSubprocessError(
       `${unproved} recorded command sandbox(es) could not be proved gone; outcome unknown`,
     );
+  }
   rmSync(directory, { recursive: true, force: true });
 }
 
@@ -2174,7 +2207,7 @@ export async function subprocessAsync(
     bubblewrap && sandboxRecords
       ? join(sandboxRecords, `${randomUUID()}.json`)
       : undefined;
-  if (record) writeSandboxRecord(record, {});
+  if (record) writeSandboxRecord(record, { boot: currentBoot() });
   let child: ChildProcess;
   try {
     child = spawn(file, args, {
@@ -2192,7 +2225,7 @@ export async function subprocessAsync(
     try {
       const owner = nativeProcessOwner(child.pid);
       if (!owner) throw new Error("Sandbox ownership could not be established");
-      recorded = { owner };
+      recorded = { boot: owner.boot, owner };
       writeSandboxRecord(record, recorded);
     } catch (cause) {
       recordError = cause;
@@ -2238,7 +2271,10 @@ export async function subprocessAsync(
   let aborted = false;
   let cancelTimer: NodeJS.Timeout | undefined;
   const kill = () => {
-    if (!child.pid) return;
+    // Only while the child is unreaped does its pid, and so its group's id,
+    // still name it; a reaped leader's group id may be reused.
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null)
+      return;
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch (error) {
@@ -2337,7 +2373,8 @@ export async function subprocessAsync(
   const status = await exited;
   signal?.removeEventListener("abort", cancel);
   clearTimeout(cancelTimer);
-  if (aborted) kill();
+  // The child is reaped now, so its group is not signalled again: it must
+  // be gone by itself, or the outcome is unknown.
   if (aborted && child.pid) {
     // SIGKILL is asynchronous. Allow the kernel to reap runnable descendants.
     if (cancellationError || !(await groupEnds(child.pid, 1_000))) {

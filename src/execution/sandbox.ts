@@ -657,6 +657,8 @@ const checkoutBaselines = new Map<string, DiskUse>();
 function diskUse(root: string, limit: number, skip?: string): Promise<DiskUse> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL("./disk-use.js", import.meta.url), {
+      // The parent's flags (such as --input-type) do not apply to a file.
+      execArgv: [],
       workerData: { diskUse: [root, limit, skip] },
     });
     worker.once("message", (message: { use?: DiskUse; error?: string }) =>

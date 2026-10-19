@@ -2246,24 +2246,6 @@ export class RealGitHubGateway implements GitHubGateway {
     settled(key);
   }
 
-  /** Whether `sha` has any check run or commit status. */
-  private async hasChecks(sha: string): Promise<boolean> {
-    const runs = await this.api<{ total_count?: unknown }>(
-      "GET",
-      `commits/${sha}/check-runs?per_page=1`,
-    );
-    if (typeof runs.total_count !== "number")
-      throw new Error("Base CI response lacks a check run count");
-    if (runs.total_count > 0) return true;
-    const statuses = await this.api<{ total_count?: unknown }>(
-      "GET",
-      `commits/${sha}/status?per_page=1`,
-    );
-    if (typeof statuses.total_count !== "number")
-      throw new Error("Base CI response lacks a status count");
-    return statuses.total_count > 0;
-  }
-
   /** When `sha` was committed, as GitHub reports it; undefined if it does not. */
   private async commitTime(sha: string): Promise<string | undefined> {
     const commit = await this.api<{
@@ -2400,7 +2382,11 @@ export class RealGitHubGateway implements GitHubGateway {
       const conclusion = run.conclusion ?? "";
       if (
         run.head_sha !== identity.headSha ||
-        failedChecks.some((check) => check.name === run.name) ||
+        // One entry per name and conclusion: a cancelled run of a name
+        // never hides another run of that name that failed (#1640).
+        failedChecks.some(
+          (check) => check.name === run.name && check.conclusion === conclusion,
+        ) ||
         !(
           [
             "failure",
@@ -2430,7 +2416,11 @@ export class RealGitHubGateway implements GitHubGateway {
       if (
         typeof status.context === "string" &&
         ["error", "failure"].includes(String(status.state)) &&
-        !failedChecks.some((check) => check.name === status.context)
+        !failedChecks.some(
+          (check) =>
+            check.name === status.context &&
+            check.conclusion === String(status.state),
+        )
       )
         failedChecks.push({
           name: status.context,
@@ -2560,20 +2550,11 @@ export class RealGitHubGateway implements GitHubGateway {
       ),
     ];
     if (unreported && mergeReadiness === "ready") mergeReadiness = "waiting";
-    // A head just published can have no check runs or statuses before
-    // GitHub registers its CI. When the base has checks, the head's are
-    // pending, not passing (#1640).
     const open = !detail.merged && detail.state !== "closed";
-    const unregistered =
-      open &&
-      !runs.length &&
-      !contexts.length &&
-      !statuses.total_count &&
-      (await this.hasChecks(detail.base.sha));
     // When the pending set last changed, from GitHub's times; any unknown
     // time leaves it unknown, so the wait stays unbounded.
     let pendingSince: string | undefined;
-    if (open && (pendingChecks.length || unregistered)) {
+    if (open && pendingChecks.length) {
       const times = [
         ...runs
           .filter((run) => run.status !== "completed")
@@ -2581,9 +2562,7 @@ export class RealGitHubGateway implements GitHubGateway {
         ...contexts
           .filter((status) => status.state === "pending")
           .map((status) => status.updated_at),
-        ...(unreported || unregistered
-          ? [await this.commitTime(identity.headSha)]
-          : []),
+        ...(unreported ? [await this.commitTime(identity.headSha)] : []),
       ].map((time) => (typeof time === "string" ? Date.parse(time) : NaN));
       if (times.length && times.every(Number.isFinite))
         pendingSince = new Date(Math.max(...times)).toISOString();
@@ -2618,7 +2597,6 @@ export class RealGitHubGateway implements GitHubGateway {
       checks: failing
         ? "failing"
         : unreported ||
-            unregistered ||
             runs.some((run) => run.status !== "completed") ||
             (statuses.total_count > 0 && statuses.state === "pending")
           ? "pending"

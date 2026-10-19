@@ -87,17 +87,19 @@ export function deliveryReadiness(
   // GitHub merges past a check the repository does not require; Factory
   // does not (#1637). The evidence names each check, so a repair can fix it.
   const failed = observation.failedChecks ?? [];
-  const listed = failed
-    .map(
-      (check) =>
-        `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})`,
-    )
-    .join("; ");
-  if (
-    failed.some((check) => !["cancelled", "stale"].includes(check.conclusion))
-  )
+  const listed = (checks: typeof failed) =>
+    checks
+      .map(
+        (check) =>
+          `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})`,
+      )
+      .join("; ");
+  const broken = failed.filter(
+    (check) => !["cancelled", "stale"].includes(check.conclusion),
+  );
+  if (broken.length)
     throw work(
-      `Checks failed on PR #${pullRequest} at ${expectedHead}: ${listed}`,
+      `Checks failed on PR #${pullRequest} at ${expectedHead}: ${listed(broken)}`,
     );
   // A run cancelled (often by another PR's run in a shared concurrency
   // group) or gone stale says nothing about the change; a repair cannot fix
@@ -105,8 +107,8 @@ export function deliveryReadiness(
   if (failed.length)
     throw new StepFault(
       decision(
-        `Checks on PR #${pullRequest} ended cancelled or stale, and nothing re-ran them: ${failed.map((check) => check.name).join(", ")}. Re-run them, then retry, or cancel?`,
-        `Checks cancelled on PR #${pullRequest} at ${expectedHead}: ${listed}`,
+        `Checks on PR #${pullRequest} ended cancelled or stale, and nothing re-ran them: ${[...new Set(failed.map((check) => check.name))].join(", ")}. Re-run them, then retry, or cancel?`,
+        `Checks cancelled on PR #${pullRequest} at ${expectedHead}: ${listed(failed)}`,
       ),
     );
   // A gateway without protection readiness gates on every check.
@@ -158,7 +160,7 @@ export function deliveryReadiness(
   if (waiting && now() - since >= ESCALATE_AFTER_MS)
     throw new StepFault(
       decision(
-        `Checks on PR #${pullRequest} have been pending since ${observation.pendingSince}: ${pending ?? "none reported on its head"}. Complete or re-run them, or merge the PR by hand, then retry; or cancel?`,
+        `Checks on PR #${pullRequest} have been pending since ${observation.pendingSince}: ${pending ?? "unnamed"}. Complete or re-run them, or merge the PR by hand, then retry; or cancel?`,
         waiting,
       ),
     );

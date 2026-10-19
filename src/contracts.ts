@@ -1285,8 +1285,8 @@ export interface DeliveryObservation {
   /**
    * When the pending set last changed, from GitHub's own times: the latest
    * start of a check still running, update of a pending status, or, for a
-   * check not reported yet, the head commit. Absent when nothing is pending
-   * or a time is unknown.
+   * required check not reported yet, the head commit. Absent when nothing
+   * is pending or a time is unknown.
    */
   pendingSince?: string;
   /**

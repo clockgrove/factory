@@ -95,6 +95,14 @@ export function deliveryDescription(
           )}${evidence.commands.length > 20 ? `\n- ${evidence.commands.length - 20} further commands passed.` : ""}`
       : "Controller command validation receipts are unavailable for this candidate.",
   );
+  // A check that failed once on this exact tree, then passed (#1595).
+  const failed = evidence?.flakyRerun?.evidence?.commands.find(
+    (receipt) => !receipt.passed && receipt.treeSha === request.treeSha,
+  );
+  if (verified && evidence.flakyRerun)
+    parts.push(
+      `Possibly flaky: the controller's first validation run of this candidate failed${failed ? ` at ${code(failed.command)} (exit ${failed.exitCode ?? "unknown"})` : ""} after the worker's validation passed on it, and its one rerun passed.`,
+    );
   parts.push(
     `Candidate commit: ${code(request.changeRef)}\n\nCandidate tree: ${code(request.treeSha)}`,
   );

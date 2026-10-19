@@ -67,6 +67,11 @@ export interface CodexPlanningModelOptions extends PlanningModelOptions {
   transport?: "exec" | "app-server";
   /** Canonical-source-only file reads for exec planners; enabled by default. */
   sourceArtifacts?: boolean;
+  /**
+   * The operator's `sandbox.required`; absent is strict. As root, the read
+   * shell of tree reviews and source reads runs only when it is false.
+   */
+  sandboxRequired?: boolean;
 }
 
 /** Which configured model selection a planning call uses. */

@@ -111,7 +111,8 @@ export function executionProfileChoices(
 /**
  * What a worker can execute, decided by its harness kind. Codex workers have
  * a sandboxed shell. Claude workers have one (run_command) when Write and
- * Validate are granted and the command sandbox runs on this host; otherwise,
+ * Validate are granted and the command sandbox runs on this host for a
+ * controller that is not root (factoryShellAuthorized); otherwise,
  * like Copilot workers, only checkout file tools and the item's authorized
  * validation. Registered and managed adapters declare neither, so planning
  * treats them as shell-less.

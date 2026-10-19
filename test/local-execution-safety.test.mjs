@@ -25,6 +25,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { commandSandboxPolicy } from "../dist/execution/sandbox.js";
 import { checkStagedCandidate } from "../dist/execution/staged-candidate.js";
 import {
   collectWorktreeResult,
@@ -176,6 +177,12 @@ import {
   materializeClaudeSnapshot,
   parseClaudeResultSnapshot,
 } from "../dist/execution/claude-managed-transfer.js";
+
+// As root, a Codex worker starts only when sandbox.required is false.
+const rootOptionalSandbox =
+  process.geteuid?.() === 0
+    ? { ...commandSandboxPolicy(), required: false }
+    : undefined;
 
 function git(checkout, ...args) {
   return execFileSync("git", ["-C", checkout, ...args], {
@@ -1142,6 +1149,9 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
           1,
           store,
           "codex",
+          undefined,
+          undefined,
+          rootOptionalSandbox,
         );
         await withRecoveryCheckpointScope(
           {
@@ -2781,39 +2791,52 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       context.admitEffect = async () => {
         throw hold;
       };
-      const driver = new LocalExecutionDriver(
-        checkout,
-        join(stateRoot(preparedState.repository), "worktrees"),
-        new CodexHarness(join(root, "prepared-credentials"), "off", {
-          model: "unused",
-          reasoningEffort: "low",
-        }),
-        1,
-        store,
-        "codex",
-        undefined,
-        {
-          repository: preparedState.repository,
-          configDigest: preparedState.configDigest,
-          policy,
-        },
-      );
-      await assert.rejects(
-        driver.start(
+      const driverWith = (sandbox) =>
+        new LocalExecutionDriver(
+          checkout,
+          join(stateRoot(preparedState.repository), "worktrees"),
+          new CodexHarness(join(root, "prepared-credentials"), "off", {
+            model: "unused",
+            reasoningEffort: "low",
+          }),
+          1,
+          store,
+          "codex",
+          undefined,
           {
-            item: preparedState.graph.items.find((item) => item.id === "api"),
-            baseSha: executionBase,
-            attemptId: attempt,
-            objectiveBody,
-            ...(retainedFailedResult && { retainedFailedResult }),
-            captureContext: {
-              objective: 1,
-              runId: preparedState.runId,
-              attemptId: attempt,
-            },
+            repository: preparedState.repository,
+            configDigest: preparedState.configDigest,
+            policy,
           },
-          context,
-        ),
+          sandbox,
+        );
+      const request = {
+        item: preparedState.graph.items.find((item) => item.id === "api"),
+        baseSha: executionBase,
+        attemptId: attempt,
+        objectiveBody,
+        ...(retainedFailedResult && { retainedFailedResult }),
+        captureContext: {
+          objective: 1,
+          runId: preparedState.runId,
+          attemptId: attempt,
+        },
+      };
+      if (rootOptionalSandbox) {
+        // Root under the strict sandbox: the Codex start is refused before
+        // any checkpoint, so no prepared launch strands the item, and the
+        // same start proceeds once sandbox.required is false.
+        await assert.rejects(
+          driverWith(undefined).start(request, context),
+          (error) =>
+            error.fault?.kind === "config" &&
+            /runs as root/.test(error.message),
+        );
+        assert.equal(work.execution, undefined);
+        assert.equal(existsSync(preparedFile), false);
+      }
+      await assert.rejects(
+        driverWith(rootOptionalSandbox).start(request, context),
         (error) => error === hold,
       );
       assertDurableValue(
@@ -3014,6 +3037,9 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       1,
       store,
       "codex",
+      undefined,
+      undefined,
+      rootOptionalSandbox,
     );
     await assert.rejects(
       blockedDriver.start(
@@ -4091,6 +4117,10 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         undefined,
         [],
         reviewHomes,
+        undefined,
+        undefined,
+        undefined,
+        rootOptionalSandbox?.required,
       );
       const abortReason = new Error(
         "Review stopped before native process startup",
@@ -4207,6 +4237,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
           directory: reviewTree.directory,
           workspace: "read",
           network: false,
+          required: rootOptionalSandbox?.required,
         },
       });
       const legacyConfigPath = join(legacyHome.env.CODEX_HOME, "config.toml");
@@ -4335,6 +4366,13 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         checkout,
         selection,
         selection,
+        undefined,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        rootOptionalSandbox?.required,
       );
       const timeoutInvocation = {
         invocationId: randomUUID(),

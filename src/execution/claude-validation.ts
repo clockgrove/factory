@@ -541,15 +541,17 @@ export async function createFactoryValidationMcp(
     /** After the turn: did a passing run cover the files the worker returns, with a handoff collection accepts? */
     evidence: async () => {
       let finalTreeValidated: boolean | undefined = false;
+      let finalTree: string | undefined;
       if (passedTrees.size)
         try {
+          const tree = await workerFilesTree(
+            input.worktree,
+            input.snapshot?.candidateBounds,
+          );
           finalTreeValidated =
-            passedTrees.has(
-              await workerFilesTree(
-                input.worktree,
-                input.snapshot?.candidateBounds,
-              ),
-            ) && checkWorkHandoff(input.worktree, input.handoff).passed;
+            passedTrees.has(tree) &&
+            checkWorkHandoff(input.worktree, input.handoff).passed;
+          if (finalTreeValidated) finalTree = tree;
         } catch {
           // Collection classifies an unstageable worktree itself.
           finalTreeValidated = undefined;
@@ -560,6 +562,7 @@ export async function createFactoryValidationMcp(
         runs,
         passed,
         ...(finalTreeValidated !== undefined && { finalTreeValidated }),
+        ...(finalTree && { finalTree }),
       };
     },
   };

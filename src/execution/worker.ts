@@ -181,7 +181,11 @@ async function runCodexWorker(
       resume: Boolean(session.resumeThreadId),
     }),
     config: discovery ? CODEX_TREE_REVIEW_CONFIG : "",
-    sandbox: { ...sandbox, directory: request.worktree },
+    sandbox: {
+      ...sandbox,
+      directory: request.worktree,
+      required: request.commandSandbox?.required,
+    },
     keep: discovery ? [] : allowedSecretNames,
   });
   let invocationStarted = false;

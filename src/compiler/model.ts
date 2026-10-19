@@ -1766,6 +1766,7 @@ export class CodexPlanningModel extends StructuredPlanningModel {
         options.transport,
         options.sourceArtifacts,
         options.reviewEffort,
+        options.sandboxRequired,
       ),
       { ...options, checkout },
     );

@@ -52,6 +52,7 @@ import {
 import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { requestControl, serveControl } from "../dist/coordinator-control.js";
+import { deliveryDescription } from "../dist/delivery/description.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
 import {
@@ -2499,6 +2500,83 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     synchronizeWorkItemPause(owner);
     assert.equal(owner.workPause.signal.aborted, false);
     assert.equal(owner.pause.signal.aborted, true);
+    // The worker's Validate passed this tree with these commands (#1595):
+    // the controller's failed run is saved, then rerun once in a fresh
+    // checkout before the failure stands, and both runs reach diagnosis.
+    const rerunState = structuredClone(state);
+    const rerunWork = rerunState.work.local;
+    rerunWork.validationRerun = { treeSha, commands: [command] };
+    let beforeRerun;
+    let runs = 0;
+    const rerunStep = (stepState) =>
+      validateItem({
+        state: stepState,
+        item: graph.items[0],
+        save: () => {
+          if (stepState === rerunState && rerunWork.validationRerun.failure)
+            beforeRerun ??= structuredClone(rerunState);
+        },
+        validate: () => {
+          runs++;
+          return validate();
+        },
+      });
+    await assert.rejects(rerunStep(rerunState), (error) => {
+      assert.ok(error instanceof CandidateValidationFailure, error.stack);
+      assert.match(
+        error.message,
+        /^Validation failed twice on tree [a-f0-9]{40}, [^\n]*\nFirst run: Validation command failed \(1\): [^]*\nRerun: Validation command failed \(1\): /,
+      );
+      assert.equal(error.failedValidation.commands[0].exitCode, 1);
+      rerunWork.status = "failed";
+      recordWorkFailure(rerunState, "local", error);
+      return true;
+    });
+    assert.equal(runs, 2);
+    const [, diagnosed] = repairEvidence(rerunState, graph.items[0], []);
+    assert.equal(diagnosed.record.evidence.commands[0].exitCode, 1);
+    assert.deepEqual(
+      diagnosed.firstRun,
+      rerunWork.validationRerun.failure.evidence,
+    );
+    assert.equal(diagnosed.firstRun.commands[0].exitCode, 1);
+    // A restart after the first failure was saved runs only the rerun; the
+    // restored readiness lets it pass, flagged with the failed run.
+    saveState(statePath(config.repository, 1), beforeRerun);
+    const resumed = readState(config.repository, 1);
+    assert.deepEqual(
+      resumed.work.local.validationRerun,
+      beforeRerun.work.local.validationRerun,
+    );
+    writeFileSync(ready, "readiness restored between runs\n");
+    runs = 0;
+    const flaky = await rerunStep(resumed);
+    assert.equal(runs, 1);
+    assert.equal(flaky.commands[0].exitCode, 0);
+    assert.deepEqual(
+      flaky.flakyRerun,
+      beforeRerun.work.local.validationRerun.failure,
+    );
+    resumed.work.local.validation = flaky;
+    saveState(statePath(config.repository, 1), resumed);
+    assert.deepEqual(
+      readState(config.repository, 1).work.local.validation.flakyRerun,
+      flaky.flakyRerun,
+    );
+    assert.match(
+      deliveryDescription(
+        checkout,
+        { item: graph.items[0], baseSha: commit, treeSha, changeRef: commit },
+        {
+          repository: config.repository,
+          objective: 1,
+          issue: 1,
+          validation: flaky,
+        },
+      ),
+      /Possibly flaky: the controller's first validation run of this candidate failed at <code>[^<]+<\/code> \(exit 1\)/,
+    );
+    rmSync(ready);
     await assert.rejects(validationStep, (error) => {
       assert.ok(error instanceof CandidateValidationFailure, error.stack);
       assert.equal(error.failedValidation.commands[0].exitCode, 1);
@@ -2551,13 +2629,21 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     } finally {
       console.log = print;
     }
-    assert.equal(logs.length, 4);
+    // The worker output, then each failed controller run of the attempt,
+    // the first failure and its rerun included, with its complete output.
     assert.equal(logs[0], "worker done");
-    assert.match(
-      logs[1],
-      /^Controller validation command 0 failed \(exit 1\) at /,
-    );
-    assert.deepEqual(logs.slice(2), ["readiness marker missing", ""]);
+    const failedRuns = logs.slice(1);
+    assert.ok(failedRuns.length >= 3 && failedRuns.length % 3 === 0);
+    for (let index = 0; index < failedRuns.length; index += 3) {
+      assert.match(
+        failedRuns[index],
+        /^Controller validation command 0 failed \(exit 1\) at /,
+      );
+      assert.deepEqual(failedRuns.slice(index + 1, index + 3), [
+        "readiness marker missing",
+        "",
+      ]);
+    }
     const attempt = work.attempt;
     rereviewWorkItem(config, 1, request);
     Object.assign(state, readState(config.repository, 1));

@@ -19,7 +19,12 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { LocalContentStore } from "../dist/content/local.js";
-import { runSandboxedCommand } from "../dist/execution/claude-shell.js";
+import { createCodexHome } from "../dist/codex-planning-isolation.js";
+import {
+  factoryShellAuthorized,
+  runSandboxedCommand,
+} from "../dist/execution/claude-shell.js";
+import { CodexHarness } from "../dist/execution/local.js";
 import { copyOwnedFile } from "../dist/execution/claude-files.js";
 import {
   checkWorkHandoff,
@@ -1122,4 +1127,36 @@ test("a root controller runs no sandboxed command unless the sandbox is optional
   });
   assert.equal(optional.mode, "bubblewrap");
   assert.match(optional.detail, /root-only host files/);
+  // Claude's shell would require the sandbox anyway, so it is withheld even
+  // where the optional sandbox is available.
+  assert.equal(
+    factoryShellAuthorized({
+      config: {
+        tools: ["Write", "Validate"],
+        allowedTools: ["Write", "Validate"],
+      },
+    }),
+    false,
+  );
+  // Codex's own sandbox reads them too: no Codex worker starts, fresh or
+  // resumed, and no Codex shell gets a permission profile.
+  const rootFault = (error) =>
+    error.fault?.kind === "config" && /runs as root/.test(error.message);
+  const harness = new CodexHarness(join(root, "credentials"), "off", {
+    model: "unused",
+    reasoningEffort: "low",
+  });
+  await assert.rejects(
+    harness.start({ worktree, commandSandbox: STRICT_COMMAND_SANDBOX }),
+    rootFault,
+  );
+  const shell = { directory: worktree, workspace: "read", network: false };
+  assert.throws(
+    () => createCodexHome({ config: "", sandbox: shell }),
+    rootFault,
+  );
+  createCodexHome({
+    config: "",
+    sandbox: { ...shell, required: false },
+  }).dispose();
 });

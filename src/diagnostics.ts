@@ -2312,6 +2312,21 @@ export function statusDocument(
         })) ?? [],
       selectedAssetSet: current.selectedAssetSet ?? null,
       acceptancePending: pendingDecision(current.acceptancePending),
+      // The first controller run of this tree failed; its one rerun passed (#1595).
+      flakyValidation: current.validation?.flakyRerun
+        ? (() => {
+            const failed =
+              current.validation.flakyRerun.evidence?.commands.find(
+                (receipt) => !receipt.passed,
+              );
+            return {
+              command: failed
+                ? redactDiagnosticDetail(failed.command, secrets)
+                : null,
+              exitCode: failed?.exitCode ?? null,
+            };
+          })()
+        : null,
       lastError: current.error
         ? redactDiagnosticDetail(current.error, secrets)
         : null,

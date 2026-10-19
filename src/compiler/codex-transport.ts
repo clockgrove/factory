@@ -269,6 +269,7 @@ export class CodexPlanningTransport implements PlanningTransport {
     private transport: "exec" | "app-server" = "exec",
     private sourceArtifacts = transport === "exec",
     private reviewEffort?: CodexPlanningModelOptions["reviewEffort"],
+    private sandboxRequired?: boolean,
   ) {
     if (sourceArtifacts && transport !== "exec")
       throw new Error("Planning source artifacts require the exec transport");
@@ -1011,6 +1012,7 @@ export class CodexPlanningTransport implements PlanningTransport {
               directory: args.tree ?? sourceDirectory!,
               workspace: "read",
               network: false,
+              required: this.sandboxRequired,
             },
           }
         : {

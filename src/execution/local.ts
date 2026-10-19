@@ -24,7 +24,10 @@ import {
   assertAgentSessionRef,
   assertAgentSessionScope,
 } from "../agent-session.js";
-import { releaseCodexHome } from "../codex-planning-isolation.js";
+import {
+  assertCodexCommandsAllowed,
+  releaseCodexHome,
+} from "../codex-planning-isolation.js";
 import { LocalContentStore } from "../content/local.js";
 import type {
   CodexModelSelection,
@@ -332,6 +335,8 @@ export class CodexHarness implements AgentHarness {
    * unrecorded start of it spawned is stopped first (#585).
    */
   async start(request: HarnessRequest): Promise<HarnessHandle> {
+    // Every fresh and resumed worker turn starts here, before its process.
+    assertCodexCommandsAllowed(request.commandSandbox?.required);
     assertWorkerSourceFiles(request);
     if ((request.item.kind === "discovery") !== Boolean(request.discovery))
       throw new Error(
@@ -2016,6 +2021,10 @@ export class LocalExecutionDriver implements ExecutionDriver {
         "Assigned execution adapter cannot enforce the requested native child-agent prohibition; no provider call was made",
       );
     this.assertDiscoveryCapability(request.item, harness);
+    // Before any checkpoint or admitted effect, so a refusal leaves no
+    // prepared launch to resolve once the operator fixes the setting.
+    if ((harness as unknown) instanceof CodexHarness)
+      assertCodexCommandsAllowed(this.commandSandbox.required);
     if (request.item.kind === "discovery") {
       if (
         !request.discovery ||

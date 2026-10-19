@@ -32,6 +32,8 @@ export async function probeCodexReadiness(input: {
   credentialDirectory: string;
   network: "host" | "off";
   allowedSecretNames?: string[];
+  /** The operator's `sandbox.required`; absent is strict. */
+  sandboxRequired?: boolean;
 }): Promise<HarnessReadiness> {
   const selectedOutside = input.outsideDirectory ?? homedir();
   if (![input.workspace, selectedOutside].every(isAbsolute))
@@ -98,6 +100,7 @@ export async function probeCodexReadiness(input: {
       directory: workspace,
       workspace: "write",
       network: input.network === "host",
+      required: input.sandboxRequired,
     },
     keep: input.allowedSecretNames,
   });

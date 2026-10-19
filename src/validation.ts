@@ -341,6 +341,7 @@ function dependencyInputsChanged(
       path === "pnpm-lock.yaml" ||
       path === "package-lock.json" ||
       path === "pnpm-workspace.yaml" ||
+      path === ".npmrc" ||
       path === "package.json" ||
       path.endsWith("/package.json"),
   );

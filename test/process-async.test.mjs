@@ -3036,6 +3036,21 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       JSON.parse(reviewArtifactEvidence(finalOwnImages)[0].content).origin,
       undefined,
     );
+    // Reordering selectors mid-run moves the index, never the identity: the
+    // same command and candidate must not carry its image a second time.
+    const reorderedFinalEvidence = structuredClone(freshFinalEvidence);
+    reorderedFinalEvidence.reviewArtifacts[0].selectorIndex = 5;
+    assert.equal(
+      (
+        await loadReviewArtifactObservations(
+          checkout,
+          reorderedFinalEvidence,
+          [itemImageObservation],
+          imageStore,
+        )
+      ).length,
+      1,
+    );
     const changedTree = execFileSync(
       "git",
       ["-C", checkout, "hash-object", "-t", "tree", "-w", "--stdin"],

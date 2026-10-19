@@ -1,7 +1,7 @@
 import {
   assertReviewArtifactSelection,
-  assertReviewArtifactSelectors,
   assertReviewArtifactSelectionSources,
+  joinReviewArtifactSelectors,
 } from "./review-artifacts.js";
 import { existsSync, mkdirSync } from "node:fs";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
@@ -2625,10 +2625,10 @@ export function rereviewWorkItem(
         input.reviewArtifacts,
         item.validation.map((check) => check.command),
       );
-      assertReviewArtifactSelectors([
-        ...(config.reviewArtifacts ?? []),
-        ...input.reviewArtifacts,
-      ]);
+      joinReviewArtifactSelectors(
+        config.reviewArtifacts,
+        input.reviewArtifacts,
+      );
       assertReviewArtifactSelectionSources(
         config.checkout,
         treeSha,

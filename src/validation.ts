@@ -55,6 +55,7 @@ import {
   assertReviewArtifactSelectors,
   assertReviewArtifacts,
   captureReviewArtifacts,
+  LocatorMarkerFault,
   MAX_REVIEW_IMAGE_BYTES,
   type ReviewArtifactSelector,
 } from "./review-artifacts.js";
@@ -1388,7 +1389,14 @@ export async function validateWorkItem(
       packageInputsVerified: true,
       packageInputsBase: acceptedBaseSha,
     },
-  );
+  ).catch((error: unknown) => {
+    // A coding item only selects text it owns, so the marker its own command
+    // failed to print is the candidate's to repair. QA and final validation
+    // keep the configuration fault: nothing there can change the producer.
+    if (item.kind === "work" && error instanceof LocatorMarkerFault)
+      throw new CandidateValidationFailure(error.message);
+    throw error;
+  });
   // Keep the installation selector identity when only this item's producers
   // were selected. QA and final validation still use the complete selection.
   for (const artifact of evidence.reviewArtifacts ?? [])

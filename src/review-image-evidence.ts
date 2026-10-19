@@ -141,11 +141,7 @@ export async function loadReviewArtifactObservations(
 ): Promise<LoadedReviewArtifact[]> {
   const loaded = await loadReviewArtifacts(checkout, current, store);
   const key = (artifact: ReviewImageArtifactEvidence) =>
-    JSON.stringify([
-      artifact.selectorIndex,
-      artifact.command,
-      artifact.candidate.path,
-    ]);
+    JSON.stringify([artifact.command, artifact.candidate.path]);
   const supplied = new Set(loaded.map(({ identity }) => key(identity)));
   let totalBytes = loaded.reduce(
     (sum, artifact) => sum + artifact.imageBytes.length,

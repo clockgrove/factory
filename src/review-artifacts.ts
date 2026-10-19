@@ -15,6 +15,7 @@ import type {
   ContentStore,
   ValidationCommandReceipt,
 } from "./contracts.js";
+import { canonical } from "./canonical-json.js";
 import { StepFault } from "./fault.js";
 import { pinnedGitRaw } from "./process.js";
 import { refuseUnknownFields } from "./unknown-fields.js";
@@ -202,6 +203,51 @@ const matchesPattern = (pattern: string, name: string) => {
     name.endsWith(tail)
   );
 };
+/** A text locator whose marker the command did not print exactly once before an absolute path. */
+export class LocatorMarkerFault extends StepFault {
+  constructor(detail: string, fix: string) {
+    super({ kind: "config", detail, fix });
+    this.name = "LocatorMarkerFault";
+  }
+}
+
+const describeSelector = (selector: ReviewArtifactSelector) =>
+  "text" in selector
+    ? `${JSON.stringify(selector.command)} (text ${JSON.stringify(selector.text.source)})`
+    : `${JSON.stringify(selector.command)} (image ${JSON.stringify(selector.image.file)})`;
+
+/**
+ * Join the installation's selectors with a QA item's own. Identical selectors
+ * collapse, so promoting a QA selection into the installation configuration
+ * never duplicates it. What remains in conflict, or more than eight, is a
+ * configuration fault naming every selector in force.
+ */
+export function joinReviewArtifactSelectors(
+  installation: readonly ReviewArtifactSelector[] = [],
+  selection: readonly ReviewArtifactSelector[] = [],
+): ReviewArtifactSelector[] {
+  const seen = new Set<string>();
+  const joined = [...installation, ...selection].filter((selector) => {
+    const identity = canonical(selector);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+  try {
+    assertReviewArtifactSelectors(joined);
+  } catch (error) {
+    throw new StepFault(
+      {
+        kind: "config",
+        detail: `The installation reviewArtifacts and this item's reviewArtifactSelection cannot be used together (${error instanceof Error ? error.message : String(error)}); selectors in force: ${joined.map(describeSelector).join(", ")}`,
+        fix: "Remove the conflicting selector from the installation reviewArtifacts or from the item's reviewArtifactSelection (at most eight distinct selectors in all), then resume",
+      },
+      { cause: error },
+    );
+  }
+  return joined;
+}
+
 export function assertReviewArtifactSelectors(
   value: unknown,
 ): asserts value is ReviewArtifactSelector[] | undefined {
@@ -812,14 +858,14 @@ async function captureTextArtifact(
       .toString("utf8")
       .split(/\r?\n/)
       .flatMap((line) => line.split(prefix).slice(1));
-    // The command and the installation's selector disagree: a configuration
-    // fault naming the selector, which resumes once the operator fixes either.
+    // The command and the selector disagree. Coding validation turns this
+    // into the owning candidate's repairable fault; everywhere else it stays
+    // a configuration fault that resumes once the operator fixes either.
     if (markers.length !== 1 || !isAbsolute(markers[0]!))
-      throw new StepFault({
-        kind: "config",
-        detail: `Text artifact locator requires one complete absolute path: the reviewArtifacts selector with command ${JSON.stringify(args.command)} and source ${JSON.stringify(selector.text.source)} expects exactly one stdout path after ${JSON.stringify(prefix)}, but ${markers.length === 1 ? "the path the command printed after it is not absolute" : `the command printed it ${markers.length === 0 ? "nowhere" : `${markers.length} times`}`}`,
-        fix: `Update or remove this reviewArtifacts selector in the installation configuration (or make its command print exactly one absolute path after ${JSON.stringify(prefix)}), then resume`,
-      });
+      throw new LocatorMarkerFault(
+        `Text artifact locator requires one complete absolute path: the reviewArtifacts selector with command ${JSON.stringify(args.command)} and source ${JSON.stringify(selector.text.source)} expects exactly one stdout path after ${JSON.stringify(prefix)}, but ${markers.length === 1 ? "the path the command printed after it is not absolute" : `the command printed it ${markers.length === 0 ? "nowhere" : `${markers.length} times`}`}`,
+        `Update or remove this reviewArtifacts selector in the installation configuration (or make its command print exactly one absolute path after ${JSON.stringify(prefix)}), then resume`,
+      );
     const temporaryRoot = realpathSync(args.temporaryRoot);
     const directory = realpathSync(markers[0]!);
     const directoryPath = relative(temporaryRoot, directory);

@@ -68,6 +68,7 @@ import {
   assertReviewArtifactSelection,
   assertReviewArtifacts,
   captureReviewArtifacts,
+  joinReviewArtifactSelectors,
 } from "../dist/review-artifacts.js";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -300,7 +301,17 @@ else {const dir=fs.mkdtempSync(p.join(os.tmpdir(),'proof-'));fs.writeFileSync(p.
       await assert.rejects(
         () =>
           coding(mode, commit, tree, ["producer/"], selectors(check), check),
-        mode === "missing" ? staleLocator(check) : /exceeds.*bound/,
+        mode === "missing"
+          ? (error) => {
+              // The item owns the producer, so its worker repairs the marker;
+              // the same fault stays a configuration fault in final validation.
+              const fault = attachedFault(error);
+              assert.equal(fault?.kind, "work");
+              assert.ok(fault.evidence.detail.includes(check));
+              assert.ok(fault.evidence.detail.includes("printed it nowhere"));
+              return true;
+            }
+          : /exceeds.*bound/,
       );
     }
     await assert.rejects(
@@ -1133,8 +1144,10 @@ else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.
         };
       },
     };
+    // The operator promotes the QA selection into the installation selectors:
+    // the join de-duplicates identical selectors instead of failing (#1641).
     await runQaItem({
-      config,
+      config: { ...config, reviewArtifacts: selectors },
       root,
       state: resumed,
       item: resumed.graph.items[1],
@@ -1152,6 +1165,24 @@ else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.
     });
     assert.equal(resumed.work.qa.status, "done");
     assert.equal(resumed.work.qa.attempt, work.attempt);
+    // More than eight distinct selectors is a configuration fault naming them.
+    assert.throws(
+      () =>
+        joinReviewArtifactSelectors(
+          selectors,
+          Array.from({ length: 7 }, (_, index) => ({
+            ...selectors[0],
+            command: `${commands[0]} ${index}`,
+          })),
+        ),
+      (error) => {
+        const fault = attachedFault(error);
+        assert.equal(fault?.kind, "config");
+        assert.ok(fault.detail.includes(commands[0]));
+        assert.match(fault.fix, /at most eight/);
+        return true;
+      },
+    );
     assert.ok(events.some((x) => x.operation === "qa-validation-output"));
     const artifacts = resumed.work.qa.validation.reviewArtifacts;
     assert.equal(artifacts.length, 2);

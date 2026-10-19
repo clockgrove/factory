@@ -10,7 +10,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import { finalObjectiveCommands, planningSources } from "./compiler.js";
+import {
+  finalObjectiveCommands,
+  planningSources,
+  undeclaredObjectiveCommands,
+} from "./compiler.js";
 import type { FactoryConfig } from "./config.js";
 import type { PlanningLocalExecutables, WorkGraph } from "./contracts.js";
 import {
@@ -19,6 +23,7 @@ import {
   pinnedGitRaw,
 } from "./process.js";
 import { redactDiagnosticDetail } from "./diagnostics.js";
+import { childIdentity } from "./objective-split.js";
 
 export interface ExecutablePreflightObservation {
   origin: "work-item" | "final";
@@ -373,7 +378,15 @@ export function preflightObjective(
   body: string,
   baseSha: string,
 ): PlanningLocalExecutables | undefined {
-  planningSources(body, baseSha, config.checkout);
+  const sources = planningSources(body, baseSha, config.checkout);
+  // A Factory-created child carries its parent's prose; the parent was checked.
+  const named = childIdentity(body)
+    ? []
+    : undeclaredObjectiveCommands(body, sources, baseSha, config.checkout);
+  if (named.length)
+    throw new Error(
+      `Objective names ${named.map((command) => `\`${command}\``).join(", ")} but declares no final command. Final commands are only Acceptance bullets that are exactly one backticked command; planning cannot add them. Add each command the integrated result must pass under Acceptance as its own bullet, for example:\n${named.map((command) => `- \`${command}\``).join("\n")}\nIf the Objective needs no final command, remove the backticks from those mentions.`,
+    );
   const finalCommands = finalObjectiveCommands(body);
   const observations: PlanningLocalExecutables["observations"] = [];
   const root = mkdtempSync(join(tmpdir(), "factory-preflight-"));

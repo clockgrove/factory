@@ -55,6 +55,7 @@ export {
   assertObjectiveCriteria,
   commandAuthority,
   planningSources,
+  undeclaredObjectiveCommands,
   validateGraphSources,
 } from "./compiler/sources.js";
 

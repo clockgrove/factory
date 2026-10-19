@@ -749,6 +749,44 @@ export function finalObjectiveCommands(body: string): string[] {
   });
 }
 
+/**
+ * Inline backticked commands the body names when it declares no final
+ * command: each is a command the base or a pinned source declares. Only
+ * Acceptance command bullets become Final commands, so these are a likely
+ * omission the planner cannot repair.
+ */
+export function undeclaredObjectiveCommands(
+  body: string,
+  sources: PlanningSource[],
+  baseSha: string,
+  checkout: string,
+): string[] {
+  if (finalObjectiveCommands(body).length) return [];
+  const spans = markdownLines(body).flatMap(({ text, fenced }) =>
+    fenced
+      ? []
+      : [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1]!.trim()),
+  );
+  const declared = (command: string) =>
+    authorizedCommand(
+      { command, provenance: "base-observed", source: "package.json" },
+      baseSha,
+      sources,
+      checkout,
+    ) ||
+    sources.some(
+      (source) =>
+        source.path !== "OBJECTIVE" &&
+        authorizedCommand(
+          { command, provenance: "source-declared", source: source.path },
+          baseSha,
+          sources,
+          checkout,
+        ),
+    );
+  return [...new Set(spans)].filter((span) => span && declared(span));
+}
+
 export function objectiveCriteria(body: string): string[] {
   assertObjectiveTemplate(body);
   const section = objectiveSection(body, ["Acceptance"]);

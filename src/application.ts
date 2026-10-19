@@ -441,6 +441,7 @@ export function composePlanningModel(
         transport: config.planning.codex?.transport ?? "exec",
         sourceArtifacts: config.planning.codex?.sourceArtifacts,
         reviewEffort: config.planning.reviewEffort,
+        sandboxRequired: commandSandboxPolicy(config).required,
         ...(retainedSessions
           ? {
               sessionRoot: join(

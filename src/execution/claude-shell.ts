@@ -47,7 +47,9 @@ interface ShellInput {
  * Write and Validate together authorize the shell, on a host with the
  * sandbox. Not when project or local Claude settings load: the shell could
  * write their hooks into the worktree, and the Claude CLI runs those
- * outside the sandbox.
+ * outside the sandbox. Not as root either: `run_command` always requires the
+ * sandbox, whose root rule refuses every command a root controller runs,
+ * even where sandbox.required false makes the sandbox available.
  */
 export function factoryShellAuthorized(input: ShellInput): boolean {
   const granted = (tool: string) =>
@@ -59,6 +61,7 @@ export function factoryShellAuthorized(input: ShellInput): boolean {
     !input.config.settingSources?.some(
       (source) => source === "project" || source === "local",
     ) &&
+    process.geteuid?.() !== 0 &&
     commandSandboxAvailability().available
   );
 }

@@ -964,6 +964,8 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   env: Record<string, string>;
   sandbox: "bubblewrap" | "none";
   bubblewrap?: BubblewrapLaunch;
+  /** Why a networked install runs offline: pasta is unavailable. */
+  offline?: string;
 } {
   const found = commandSandboxAvailability();
   if (!found.available) {
@@ -1113,6 +1115,13 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   // offline: never in the host's network namespace.
   const online = input.network ? packageInstallNetwork() : undefined;
   const pasta = online?.available ? online : undefined;
+  // An install without the network runs its package manager offline: it
+  // installs from the store or fails at once, naming what is missing,
+  // instead of waiting on registry lookups that cannot succeed.
+  if (input.packageInstall && !pasta) {
+    env.npm_config_offline = "true";
+    env.pnpm_config_offline = "true";
+  }
   // Name resolution through pasta's DNS forwarder, written where the host's
   // /etc/resolv.conf leads (often outside /etc).
   const resolver =
@@ -1185,6 +1194,7 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
     ],
     env,
     sandbox: "bubblewrap",
+    ...(online && !online.available && { offline: online.detail }),
     bubblewrap: {
       statusFd: 3,
       ...(pasta && {

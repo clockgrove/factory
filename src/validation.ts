@@ -231,6 +231,10 @@ async function hydrateSelectedLfsBytes(
  */
 const FAILED_OUTPUT_HEAD = 2_000;
 const FAILED_OUTPUT_TAIL = 8_000;
+/** pnpm's and npm's errors for a package an offline install cannot fetch. */
+const OFFLINE_PACKAGES_MISSING =
+  /\b(?:ERR_PNPM_NO_OFFLINE_(?:META|TARBALL)|ENOTCACHED)\b/;
+
 function failedOutput(output: string): string {
   const omitted = output.length - FAILED_OUTPUT_HEAD - FAILED_OUTPUT_TAIL;
   if (omitted <= 0) return output;
@@ -721,6 +725,20 @@ export async function validateCheckout(
         const failed = `Validation command failed (${overflow ? "disk budget" : result.status}): ${check}: `;
         // People read the bounded form; diagnosis reads the complete output.
         const detail = `${failed}${overflow ?? failedOutput(output)}`;
+        // A networked install that ran offline, without pasta, and found
+        // packages missing from the store (the package managers' offline
+        // error codes) failed for the host's lack of network, whatever the
+        // candidate changed: the operator's fix, never a repair (#1623).
+        if (
+          launch.offline !== undefined &&
+          !overflow &&
+          OFFLINE_PACKAGES_MISSING.test(output)
+        )
+          throw new StepFault({
+            kind: "config",
+            detail: `${failed}the install ran offline, because ${launch.offline}, and the package store lacks packages it needs:\n${failedOutput(output)}`,
+            fix: "Install passt so pasta is on Factory's PATH, and run Factory as a regular user, so verified installs reach the configured registry; then resume.",
+          });
         // The dependency install is the controller's own bootstrap step. When
         // the candidate left every manifest and lockfile as at the accepted
         // base, the same install worked there, so its failure is the

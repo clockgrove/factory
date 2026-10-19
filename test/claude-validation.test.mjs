@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   truncateSync,
@@ -672,8 +673,9 @@ test("a verified install reaches only its configured registry, and commands are 
   const other = "https://registry.yarnpkg.com/";
   const tarball = (origin, name) =>
     `${origin}${name}/-/${name}-${packages[name].version}.tgz`;
-  // How an install without the network fails: at once, resolving the host.
-  const offline = /EAI_AGAIN|ENOTFOUND|ENETUNREACH/;
+  // How an install without the network fails: at once, npm running offline
+  // and finding the package in no cache.
+  const offline = /ENOTCACHED/;
   const write = (worktree, dependencies) => {
     const manifest = {
       name: "installing",
@@ -1637,6 +1639,98 @@ test("without pasta a networked install runs offline, and status says so", {
   assert.equal(launch.args.includes("--share-net"), false);
   // No network at all: only the sandbox's own loopback.
   assert.equal((await runIn(root, launch)).status, 0);
+  // A verified install granted the network runs npm offline instead: with a
+  // registry package its store lacks, it fails at once, as the host's fault.
+  const tools = join(empty, "tools");
+  mkdirSync(tools);
+  for (const tool of ["git", "npm"])
+    symlinkSync(
+      realpathSync(
+        originalPath
+          .split(":")
+          .map((directory) => join(directory, tool))
+          .find((path) => existsSync(path)),
+      ),
+      join(tools, tool),
+    );
+  symlinkSync(process.execPath, join(tools, "node"));
+  process.env.PATH = tools;
+  const worktree = join(root, "worktree");
+  const manifest = {
+    name: "offline",
+    version: "1.0.0",
+    dependencies: { "is-number": "7.0.0" },
+  };
+  writeFileSync(join(worktree, "package.json"), JSON.stringify(manifest));
+  writeFileSync(
+    join(worktree, "package-lock.json"),
+    JSON.stringify({
+      ...manifest,
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "": manifest,
+        "node_modules/is-number": {
+          version: "7.0.0",
+          resolved:
+            "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+          integrity:
+            "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==",
+        },
+      },
+    }),
+  );
+  execFileSync("git", ["-C", worktree, "add", "."]);
+  execFileSync("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-qm",
+    "base",
+  ]);
+  const head = (revision) =>
+    execFileSync("git", ["-C", worktree, "rev-parse", revision], {
+      encoding: "utf8",
+    }).trim();
+  const started = Date.now();
+  const error = await validateTree(
+    worktree,
+    join(root, "validation"),
+    head("HEAD"),
+    head("HEAD^{tree}"),
+    ["npm ci --ignore-scripts"],
+    undefined,
+    undefined,
+    [],
+    undefined,
+    head("HEAD"),
+    false,
+    undefined,
+    undefined,
+    undefined,
+    {
+      ...STRICT_COMMAND_SANDBOX,
+      network: "package-install",
+      packageInputsVerified: true,
+      packageInputsBase: head("HEAD"),
+    },
+  ).then(
+    () => assert.fail("an offline install without its package passed"),
+    (error) => error,
+  );
+  const fault = faultOf(error);
+  assert.equal(fault.kind, "config", error.message);
+  assert.match(
+    fault.detail,
+    /ran offline, because pasta \(passt\) is not on Factory's PATH/,
+  );
+  assert.match(fault.detail, /ENOTCACHED/);
+  assert.match(fault.fix, /Install passt/);
+  assert.ok(Date.now() - started < 60_000);
 });
 
 test("a sandbox whose network pasta cannot set up never runs its command", {

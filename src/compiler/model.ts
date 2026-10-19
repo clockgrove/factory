@@ -689,7 +689,7 @@ ${reviewArtifacts?.length ? `${REVIEW_ARTIFACT_GUIDANCE} Judge runtime-evidence 
     request.amendment
       ? `
 
-This is an amendment. Compare the complete previous and proposed graphs: started or completed items must stay unchanged (except that the item whose failed attempt proposed the discovery may own more paths, when its acceptance needs them and the Objective allows changing them; it is then attempted again), pending items must keep their obligations (equivalent wording is fine), and new work must be within the discovery's scope. A new item may own a path a completed item owns, when it depends on that item and fixes a defect in the file: that is not a duplicate owner, because the completed item cannot run again.`
+This is an amendment. Compare the complete previous and proposed graphs: started or completed items must stay unchanged (except that the item whose failed attempt proposed the discovery may own more paths, when its acceptance needs them and the Objective allows changing them, and restate its acceptance, brief and non-goals for the discovery and any operator answer; it is then attempted again), pending items must keep their obligations (equivalent wording is fine), and new work must be within the discovery's scope. A new item may own a path a completed item owns, when it depends on that item and fixes a defect in the file: that is not a duplicate owner, because the completed item cannot run again.`
       : ""
   }${
     request.executionProfiles

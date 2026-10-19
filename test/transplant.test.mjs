@@ -1096,7 +1096,15 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       items: currentGraph.items.map((item, index) => ({
         kind: "retained",
         id: item.id,
-        ...(index === 0 ? { addedOwnedPaths: ["additional.ts"] } : {}),
+        // The reattempted item restates the behaviour its wider ownership serves.
+        ...(index === 0
+          ? {
+              addedOwnedPaths: ["additional.ts"],
+              acceptance: [...item.acceptance, "Additional behaviour."],
+              brief: item.brief,
+              nonGoals: item.nonGoals,
+            }
+          : {}),
       })),
       coverage: [
         {
@@ -1116,6 +1124,10 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
     assert.deepEqual(resumed.wire.decode(choices), decoded);
     assert.deepEqual(decoded.items[0], {
       ...currentGraph.items[0],
+      acceptance: [
+        ...currentGraph.items[0].acceptance,
+        "Additional behaviour.",
+      ],
       ownedPaths: ["part-0.ts", "additional.ts"],
     });
     assert.deepEqual(decoded.items.slice(1), currentGraph.items.slice(1));

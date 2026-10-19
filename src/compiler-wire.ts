@@ -664,6 +664,9 @@ export function compilerWire(
                 ? [
                     choice([reattempt], {
                       addedOwnedPaths: { type: "array", items: text },
+                      acceptance: itemSchema.properties!.acceptance!,
+                      brief: itemSchema.properties!.brief!,
+                      nonGoals: itemSchema.properties!.nonGoals!,
                     }),
                   ]
                 : []),
@@ -1147,7 +1150,13 @@ export function compilerWire(
           const widens = retained !== undefined && retained.id === reattempt;
           keys(
             item,
-            ["kind", "id", ...(widens ? ["addedOwnedPaths"] : [])],
+            [
+              "kind",
+              "id",
+              ...(widens
+                ? ["addedOwnedPaths", "acceptance", "brief", "nonGoals"]
+                : []),
+            ],
             "retained item",
           );
           if (!retained || referenced.has(retained.id))
@@ -1158,7 +1167,17 @@ export function compilerWire(
           const added = widens
             ? strings(item.addedOwnedPaths, "addedOwnedPaths")
             : [];
+          const restated = widens && {
+            acceptance: strings(item.acceptance, "acceptance"),
+            nonGoals: strings(item.nonGoals, "nonGoals"),
+            brief: item.brief,
+          };
+          if (restated && typeof restated.brief !== "string")
+            throw new Error("Planner brief must be text");
           item = structuredClone(retained) as unknown as ObjectValue;
+          // The item is attempted again: it restates the behaviour its
+          // (possibly wider) ownership serves.
+          if (restated) Object.assign(item, restated);
           if (widens)
             item.ownedPaths = [
               ...retained.ownedPaths,

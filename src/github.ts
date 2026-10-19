@@ -2246,6 +2246,33 @@ export class RealGitHubGateway implements GitHubGateway {
     settled(key);
   }
 
+  /** Whether `sha` has any check run or commit status. */
+  private async hasChecks(sha: string): Promise<boolean> {
+    const runs = await this.api<{ total_count?: unknown }>(
+      "GET",
+      `commits/${sha}/check-runs?per_page=1`,
+    );
+    if (typeof runs.total_count !== "number")
+      throw new Error("Base CI response lacks a check run count");
+    if (runs.total_count > 0) return true;
+    const statuses = await this.api<{ total_count?: unknown }>(
+      "GET",
+      `commits/${sha}/status?per_page=1`,
+    );
+    if (typeof statuses.total_count !== "number")
+      throw new Error("Base CI response lacks a status count");
+    return statuses.total_count > 0;
+  }
+
+  /** When `sha` was committed, as GitHub reports it; undefined if it does not. */
+  private async commitTime(sha: string): Promise<string | undefined> {
+    const commit = await this.api<{
+      committer?: { date?: unknown } | null;
+    }>("GET", `git/commits/${sha}`);
+    const date = commit.committer?.date;
+    return typeof date === "string" ? date : undefined;
+  }
+
   /**
    * The check names the repository requires on `branch`: its rulesets and
    * its classic branch protection (from the protection route, else from the
@@ -2327,6 +2354,7 @@ export class RealGitHubGateway implements GitHubGateway {
       status: string;
       conclusion: string | null;
       html_url: string;
+      started_at?: string | null;
       app?: { id?: number } | null;
     }[] = [];
     for (let page = 1; ; page++) {
@@ -2339,7 +2367,12 @@ export class RealGitHubGateway implements GitHubGateway {
       runs.push(...result.check_runs);
       if (result.check_runs.length < 100) break;
     }
-    type Status = { context?: unknown; state?: unknown; target_url?: unknown };
+    type Status = {
+      context?: unknown;
+      state?: unknown;
+      target_url?: unknown;
+      updated_at?: unknown;
+    };
     const contexts: Status[] = [];
     let combined: { state: string; total_count: number; statuses?: unknown };
     for (let page = 1; ; page++) {
@@ -2355,8 +2388,13 @@ export class RealGitHubGateway implements GitHubGateway {
     }
     const statuses = combined;
     // Every check on the head that ended without success, required or not
-    // (#1637). A cancelled (or stale) run whose name has another run on the
-    // head that succeeded or is still running was superseded, not failed.
+    // (#1637). A cancelled (or stale) run with another run of the same check
+    // (name and app, #1640) on the head that succeeded or is still running
+    // was superseded, not failed.
+    const sameCheck = (a: (typeof runs)[number], b: (typeof runs)[number]) =>
+      a.name === b.name &&
+      typeof a.app?.id === "number" &&
+      a.app.id === b.app?.id;
     const failedChecks: FailedCheck[] = [];
     for (const run of runs) {
       const conclusion = run.conclusion ?? "";
@@ -2373,7 +2411,7 @@ export class RealGitHubGateway implements GitHubGateway {
           (["cancelled", "stale"].includes(conclusion) &&
             !runs.some(
               (other) =>
-                other.name === run.name &&
+                sameCheck(other, run) &&
                 other.head_sha === identity.headSha &&
                 (other.status !== "completed" ||
                   other.conclusion === "success"),
@@ -2522,6 +2560,34 @@ export class RealGitHubGateway implements GitHubGateway {
       ),
     ];
     if (unreported && mergeReadiness === "ready") mergeReadiness = "waiting";
+    // A head just published can have no check runs or statuses before
+    // GitHub registers its CI. When the base has checks, the head's are
+    // pending, not passing (#1640).
+    const open = !detail.merged && detail.state !== "closed";
+    const unregistered =
+      open &&
+      !runs.length &&
+      !contexts.length &&
+      !statuses.total_count &&
+      (await this.hasChecks(detail.base.sha));
+    // When the pending set last changed, from GitHub's times; any unknown
+    // time leaves it unknown, so the wait stays unbounded.
+    let pendingSince: string | undefined;
+    if (open && (pendingChecks.length || unregistered)) {
+      const times = [
+        ...runs
+          .filter((run) => run.status !== "completed")
+          .map((run) => run.started_at),
+        ...contexts
+          .filter((status) => status.state === "pending")
+          .map((status) => status.updated_at),
+        ...(unreported || unregistered
+          ? [await this.commitTime(identity.headSha)]
+          : []),
+      ].map((time) => (typeof time === "string" ? Date.parse(time) : NaN));
+      if (times.length && times.every(Number.isFinite))
+        pendingSince = new Date(Math.max(...times)).toISOString();
+    }
     // Every name with any run (whatever its state or conclusion) or status
     // on the exact head; both reads above are of that commit.
     const reportedChecks = [
@@ -2539,6 +2605,7 @@ export class RealGitHubGateway implements GitHubGateway {
       ...(reportedChecks.length ? { reportedChecks } : {}),
       ...(failedChecks.length ? { failedChecks } : {}),
       ...(pendingChecks.length ? { pendingChecks } : {}),
+      ...(pendingSince ? { pendingSince } : {}),
       ...(mergeReadiness ? { mergeReadiness } : {}),
       ...(!detail.merged && detail.state === "closed" && detail.closed_at
         ? { closedAt: detail.closed_at }
@@ -2551,6 +2618,7 @@ export class RealGitHubGateway implements GitHubGateway {
       checks: failing
         ? "failing"
         : unreported ||
+            unregistered ||
             runs.some((run) => run.status !== "completed") ||
             (statuses.total_count > 0 && statuses.state === "pending")
           ? "pending"

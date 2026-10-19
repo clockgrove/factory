@@ -191,7 +191,7 @@ const PENDING_POLL_MS = 30_000;
 /** Status reports an outage once a run of faults will have lasted this long. */
 const OUTAGE_AFTER_MS = 60_000;
 /** After this much running time a run of faults offers the operator cancel. */
-const ESCALATE_AFTER_MS = 24 * 60 * 60_000;
+export const ESCALATE_AFTER_MS = 24 * 60 * 60_000;
 /** Paid faults a paid step repeats; the next one is a decision. */
 const PAID_FAULT_LIMIT = 3;
 

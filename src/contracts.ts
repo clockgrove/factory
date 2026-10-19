@@ -1273,7 +1273,8 @@ export interface DeliveryObservation {
   checks: "pending" | "passing" | "failing";
   /**
    * Check runs and commit statuses on this exact head that ended without
-   * success (failed, cancelled, timed out, errored), required or not.
+   * success (failed, cancelled, timed out, errored), required or not. A
+   * cancelled or stale run here has no successor of the same name and app.
    */
   failedChecks?: FailedCheck[];
   /**
@@ -1281,6 +1282,13 @@ export interface DeliveryObservation {
    * checks not reported yet.
    */
   pendingChecks?: string[];
+  /**
+   * When the pending set last changed, from GitHub's own times: the latest
+   * start of a check still running, update of a pending status, or, for a
+   * check not reported yet, the head commit. Absent when nothing is pending
+   * or a time is unknown.
+   */
+  pendingSince?: string;
   /**
    * Authenticated target protection readiness; absent only on custom
    * gateways. `ready`: GitHub allows the merge, even with checks the

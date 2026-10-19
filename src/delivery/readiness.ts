@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import type { WorkGraph, DeliveryObservation } from "../contracts.js";
+import { now } from "../clock.js";
 import { decision, StepFault } from "../fault.js";
 import type { FactoryState } from "../state.js";
+import { ESCALATE_AFTER_MS } from "../step.js";
 import { notYet, settled } from "./lag.js";
 
 export function assertPreIntegrationCheckShape(graph: WorkGraph): void {
@@ -56,10 +58,11 @@ export function assertPreIntegrationCheckSources(
 /**
  * Whether a published PR may merge. Returns undefined when it may (or has
  * already merged), or what it is waiting for. Any check on the head that
- * ended without success, required or not, or a conflict with the base, is
- * `work` on the published result (#1637). Every check must settle, and a
- * source-required one must succeed by name. A PR made a draft, or closed
- * without merging, is a decision.
+ * failed, required or not, or a conflict with the base, is `work` on the
+ * published result (#1637). Every check must settle, and a source-required
+ * one must succeed by name. A PR made a draft, closed without merging, with
+ * only cancelled checks nothing re-ran, or with the same checks pending for
+ * a day, is a decision (#1640).
  */
 export function deliveryReadiness(
   pullRequest: number,
@@ -84,14 +87,27 @@ export function deliveryReadiness(
   // GitHub merges past a check the repository does not require; Factory
   // does not (#1637). The evidence names each check, so a repair can fix it.
   const failed = observation.failedChecks ?? [];
-  if (failed.length)
+  const listed = failed
+    .map(
+      (check) =>
+        `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})`,
+    )
+    .join("; ");
+  if (
+    failed.some((check) => !["cancelled", "stale"].includes(check.conclusion))
+  )
     throw work(
-      `Checks failed on PR #${pullRequest} at ${expectedHead}: ${failed
-        .map(
-          (check) =>
-            `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})`,
-        )
-        .join("; ")}`,
+      `Checks failed on PR #${pullRequest} at ${expectedHead}: ${listed}`,
+    );
+  // A run cancelled (often by another PR's run in a shared concurrency
+  // group) or gone stale says nothing about the change; a repair cannot fix
+  // it (#1640).
+  if (failed.length)
+    throw new StepFault(
+      decision(
+        `Checks on PR #${pullRequest} ended cancelled or stale, and nothing re-ran them: ${failed.map((check) => check.name).join(", ")}. Re-run them, then retry, or cancel?`,
+        `Checks cancelled on PR #${pullRequest} at ${expectedHead}: ${listed}`,
+      ),
     );
   // A gateway without protection readiness gates on every check.
   const protection = observation.mergeReadiness;
@@ -126,13 +142,27 @@ export function deliveryReadiness(
       )
     );
   });
-  if (named.length)
-    return `Awaiting successful exact-head source-required checks: ${named.join(", ")}`;
+  const pending = observation.pendingChecks?.length
+    ? observation.pendingChecks.join(", ")
+    : undefined;
   // Checks the repository does not require still running: GitHub would
   // merge now, but their result could still be a failure.
-  if (protection === "waiting" || observation.checks === "pending")
-    return `Awaiting checks and protection readiness on PR #${pullRequest}${observation.pendingChecks?.length ? `: ${observation.pendingChecks.join(", ")}` : ""}`;
-  return undefined;
+  const waiting = named.length
+    ? `Awaiting successful exact-head source-required checks: ${named.join(", ")}`
+    : protection === "waiting" || observation.checks === "pending"
+      ? `Awaiting checks and protection readiness on PR #${pullRequest}${pending ? `: ${pending}` : ""}`
+      : undefined;
+  // A check held for an approval or a runner, or a status nobody completes,
+  // never settles on its own: after a day with the same pending set, ask.
+  const since = Date.parse(observation.pendingSince ?? "");
+  if (waiting && now() - since >= ESCALATE_AFTER_MS)
+    throw new StepFault(
+      decision(
+        `Checks on PR #${pullRequest} have been pending since ${observation.pendingSince}: ${pending ?? "none reported on its head"}. Complete or re-run them, or merge the PR by hand, then retry; or cancel?`,
+        waiting,
+      ),
+    );
+  return waiting;
 }
 
 /**

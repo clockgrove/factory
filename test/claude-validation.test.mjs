@@ -885,6 +885,13 @@ test("a verified install reaches only its configured registry, and commands are 
       "specifier: 12.5.0\n        version: 12.5.0",
       /because pnpm-lock\.yaml pins pnpm@12\.5\.0 as the package manager/,
     ],
+    // A changed lockfile Factory cannot read is the candidate's to fix,
+    // never a configuration stop.
+    [
+      "configDependencies: {}",
+      "configDependencies: {}\n    configDependencies: {}",
+      /because the candidate's pnpm-lock\.yaml cannot be verified/,
+    ],
   ].entries()) {
     assert.ok(pnpm12.includes(from));
     writeFileSync(join(worktree, "pnpm-lock.yaml"), pnpm12.replace(from, to));

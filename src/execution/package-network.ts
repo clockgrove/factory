@@ -379,7 +379,8 @@ function npmLockfileRefusal(
  * against the attempt's `base`, or undefined when it may: its package
  * inputs unchanged (the fast path), or its configuration unchanged and
  * every lockfile resolving only from the configured registry origins.
- * Unknown is offline, and marked unverified.
+ * Unknown is offline. Unverified marks what Factory could not check: the
+ * base's registry configuration, a base lockfile or a Git read.
  */
 export function installNetworkRefusal(
   worktree: string,
@@ -429,11 +430,24 @@ export function installNetworkRefusal(
     const npm = file(worktree, commit, "package-lock.json");
     if (pnpm === undefined && npm === undefined)
       return { reason: "no lockfile pins what it fetches" };
+    // Only the base's own lockfile, unreadable here, is Factory's limit; one
+    // the candidate changed is the candidate's to make verifiable.
+    const lockfile = (path: string, refusal: NetworkRefusal | undefined) =>
+      refusal?.unverified && changed(worktree, base, commit, [path])
+        ? {
+            reason: `the candidate's ${path} cannot be verified: ${refusal.reason}`,
+          }
+        : refusal;
     return (
       (pnpm !== undefined
-        ? pnpmLockfileRefusal(pnpm, registries, pinned.packageManager)
+        ? lockfile(
+            "pnpm-lock.yaml",
+            pnpmLockfileRefusal(pnpm, registries, pinned.packageManager),
+          )
         : undefined) ??
-      (npm !== undefined ? npmLockfileRefusal(npm, registries) : undefined)
+      (npm !== undefined
+        ? lockfile("package-lock.json", npmLockfileRefusal(npm, registries))
+        : undefined)
     );
   } catch (error) {
     return {

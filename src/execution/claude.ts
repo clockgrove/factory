@@ -26,6 +26,7 @@ import {
   linuxProcessIdentity,
   processGroupExists,
   sanitizedWorkerEnvironment,
+  stopRecordedSandboxes,
   UnsettledSubprocessError,
 } from "../process.js";
 import { serviceLoginEnvironment } from "../provider-credentials.js";
@@ -46,6 +47,7 @@ import {
   observeWorker,
   stopUnrecordedWorker,
   type WorkerHandleData,
+  workerSandboxRecords,
 } from "./worker-process.js";
 
 export interface ClaudeWorkerInput {
@@ -409,8 +411,18 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
     return { ...observed, session: this.sessionReceipt(data, result.session) };
   }
 
+  /**
+   * Stop the worker's process group and prove it gone, then each command
+   * sandbox it recorded (#1575): detached in their own groups, they are
+   * outside the worker's.
+   */
   async cancel(handle: HarnessHandle): Promise<void> {
     const data = this.require(handle);
+    await this.stopWorker(data);
+    await stopRecordedSandboxes(workerSandboxRecords(data.resultPath));
+  }
+
+  private async stopWorker(data: WorkerHandleData): Promise<void> {
     const current = linuxProcessIdentity(data.pid);
     if (!current) {
       if (processGroupExists(data.pid))

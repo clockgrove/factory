@@ -19,7 +19,11 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import type { HarnessObservation } from "../contracts.js";
-import { linuxProcessIdentity, processGroupExists } from "../process.js";
+import {
+  linuxProcessIdentity,
+  processGroupExists,
+  stopRecordedSandboxes,
+} from "../process.js";
 import { parseAuthenticationRequest } from "./harness-support.js";
 
 export interface WorkerHandleData {
@@ -37,6 +41,11 @@ function workerPaths(root: string, identity: string) {
     logPath: resolve(join(root, `${identity}.log`)),
     pidPath: resolve(join(root, `${identity}.pid`)),
   };
+}
+
+/** Where a worker records the command sandboxes it starts (#1575). */
+export function workerSandboxRecords(resultPath: string): string {
+  return resultPath.replace(/\.result\.json$/, ".sandboxes");
 }
 
 /**
@@ -137,6 +146,8 @@ export async function stopUnrecordedWorker(
     } else if (!processGroupExists(group)) continue;
     await killGroup(group, label);
   }
+  // The worker is gone; so must be every sandbox it recorded.
+  await stopRecordedSandboxes(workerSandboxRecords(paths.resultPath));
   rmSync(`${paths.requestPath}.codex-home`, { recursive: true, force: true });
   for (const path of [paths.requestPath, paths.resultPath, paths.pidPath])
     rmSync(path, { force: true });

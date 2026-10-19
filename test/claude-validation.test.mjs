@@ -1058,6 +1058,75 @@ test("a run's HOME, TMPDIR and checkout growth stay within the sandbox's disk bu
       candidateFiles: 1024,
     },
   });
+  // Once Git LFS is installed for the repository, Git cleans what it hashes
+  // into the shared LFS store. Neither the candidate bound nor a command
+  // over the budget lets host-side Git hash the bytes a candidate put under
+  // its own LFS attributes.
+  const media = join(root, "media");
+  const inMedia = (...args) =>
+    execFileSync(
+      "git",
+      [
+        "-C",
+        media,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        ...args,
+      ],
+      { encoding: "utf8" },
+    ).trim();
+  execFileSync("git", ["init", "-q", media]);
+  for (const [key, value] of [
+    ["filter.lfs.clean", "git-lfs clean -- %f"],
+    ["filter.lfs.smudge", "git-lfs smudge -- %f"],
+    ["filter.lfs.process", "git-lfs filter-process"],
+    ["filter.lfs.required", "true"],
+  ])
+    inMedia("config", key, value);
+  writeFileSync(join(media, "empty.bin"), "");
+  inMedia("add", "empty.bin");
+  inMedia("commit", "-qm", "base");
+  const stored = () =>
+    existsSync(join(media, ".git", "lfs", "objects"))
+      ? readdirSync(join(media, ".git", "lfs", "objects"), {
+          recursive: true,
+        }).length
+      : 0;
+  writeFileSync(
+    join(media, ".gitattributes"),
+    "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+  );
+  writeFileSync(join(media, "empty.bin"), Buffer.alloc(48 * 1024 ** 2, 1));
+  await assert.rejects(
+    workerFilesTree(media, { maxBytes: 16 * 1024 ** 2, maxFiles: 64 }),
+    /Worker snapshot exceeds the admitted byte bound/,
+  );
+  assert.equal(stored(), 0);
+  writeFileSync(join(media, "empty.bin"), "");
+  inMedia("add", ".gitattributes", "empty.bin");
+  inMedia("commit", "-qm", "media under LFS");
+  assert.equal(stored(), 0);
+  const overBudget = await validateTree(
+    media,
+    join(root, "media-validation"),
+    inMedia("rev-parse", "HEAD"),
+    inMedia("rev-parse", "HEAD^{tree}"),
+    [write("empty.bin", 48)],
+    undefined,
+    undefined,
+    [],
+    undefined,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    sandbox,
+  ).catch((error) => error);
+  assert.match(String(overBudget.message), /the checkout grew by 48\.0 MiB/);
+  assert.equal(stored(), 0);
 });
 
 test("a worker's shell runs in its checkout inside the same sandbox, bounded", async () => {

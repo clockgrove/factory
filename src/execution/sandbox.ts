@@ -662,7 +662,10 @@ function diskUse(root: string, limit: number, skip?: string): Promise<DiskUse> {
       workerData: { diskUse: [root, limit, skip] },
     });
     worker.once("message", (message: { use?: DiskUse; error?: string }) =>
-      message.use ? resolve(message.use) : reject(new Error(message.error)),
+      Number.isSafeInteger(message.use?.bytes) &&
+      Number.isSafeInteger(message.use?.entries)
+        ? resolve(message.use!)
+        : reject(new Error(message.error ?? "Disk measurement failed")),
     );
     worker.once("error", reject);
     worker.once("exit", (code) =>

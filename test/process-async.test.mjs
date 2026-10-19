@@ -61,6 +61,7 @@ import {
   summarizeFormalHistory,
   withDiagnosticSession,
 } from "../dist/diagnostics.js";
+import { runDiagnosticsCommand } from "../dist/diagnostics-cli.js";
 import {
   materializeWorkerSources,
   workItemPrompt,
@@ -2258,7 +2259,7 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     // External host readiness the command can see only through the
     // operator's read-only sandbox allowance.
     const ready = join(external, "ready");
-    const command = `${process.execPath} -e 'process.exit(require("node:fs").existsSync(${JSON.stringify(ready)}) ? 0 : 1)'`;
+    const command = `${process.execPath} -e 'const ready = require("node:fs").existsSync(${JSON.stringify(ready)}); if (!ready) console.error("readiness marker missing"); process.exitCode = ready ? 0 : 1'`;
     const sandbox = {
       required: true,
       network: "off",
@@ -2314,7 +2315,7 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     const work = {
       status: "running",
       step: "validate",
-      attempt: "one-implementation",
+      attempt: randomUUID(),
       baseSha: commit,
       executionBaseSha: commit,
       graphRevisionDigest: graphDigest(graph),
@@ -2367,7 +2368,17 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
         commit,
         treeSha,
         [command],
-        undefined,
+        // The runner's private diagnostics record of each command.
+        (entry) =>
+          new DiagnosticEmitter(config.repository, 1).emit({
+            runId: state.runId,
+            itemId: "local",
+            attemptId: work.attempt,
+            operation: "validation-command",
+            outcome: entry.passed ? "completed" : "failed",
+            metadata: { commandIndex: entry.index, exitCode: entry.exitCode },
+            detail: entry.output,
+          }),
         undefined,
         [],
         undefined,
@@ -2521,11 +2532,38 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     );
     state.coordinator.processes = [];
     saveState(statePath(config.repository, 1), state);
+    // `--logs` prints the worker's output, then the failed controller
+    // validation command's complete output (#1596).
+    const harness = join(stateRoot(config.repository), "harness");
+    mkdirSync(harness, { recursive: true });
+    writeFileSync(join(harness, `${work.attempt}.log`), "worker done\n", {
+      mode: 0o600,
+    });
+    const logs = [];
+    const print = console.log;
+    console.log = (line) => logs.push(line);
+    try {
+      await runDiagnosticsCommand(
+        { ...config, policy: { allowedSecretNames: [] } },
+        1,
+        ["--logs", "local"],
+      );
+    } finally {
+      console.log = print;
+    }
+    assert.equal(logs.length, 4);
+    assert.equal(logs[0], "worker done");
+    assert.match(
+      logs[1],
+      /^Controller validation command 0 failed \(exit 1\) at /,
+    );
+    assert.deepEqual(logs.slice(2), ["readiness marker missing", ""]);
+    const attempt = work.attempt;
     rereviewWorkItem(config, 1, request);
     Object.assign(state, readState(config.repository, 1));
     Object.assign(work, state.work.local);
     state.work.local = work;
-    assert.equal(work.attempt, "one-implementation");
+    assert.equal(work.attempt, attempt);
     assert.equal(work.changeRef, commit);
     assert.equal(work.treeSha, treeSha);
     assert.deepEqual(work.recovery.history[0].work.failedValidation, original);

@@ -74,16 +74,26 @@ import {
 } from "./state.js";
 import { clearRepeats, type StepClock, StepPaused, step } from "./step.js";
 
-/** The exact collected candidate exists, but settled local validation failed: a wrong result. */
+/**
+ * The exact collected candidate exists, but settled local validation failed: a wrong result.
+ * The message is what people read (the Work Item error); the evidence detail,
+ * recorded as the failure, keeps the complete output for diagnosis (#1596).
+ */
 export class CandidateValidationFailure extends Error {
   readonly failedValidation?: FailedValidationEvidence;
-  constructor(detail: string, failedValidation?: FailedValidationEvidence) {
+  readonly evidenceDetail: string;
+  constructor(
+    detail: string,
+    failedValidation?: FailedValidationEvidence,
+    evidenceDetail = detail,
+  ) {
     super(detail);
     if (failedValidation) {
       assertFailedValidationEvidence(failedValidation);
       this.failedValidation = structuredClone(failedValidation);
     }
-    attachFault(this, { kind: "work", evidence: { detail } });
+    this.evidenceDetail = evidenceDetail;
+    attachFault(this, { kind: "work", evidence: { detail: evidenceDetail } });
   }
 }
 /** The controller could not prepare validation; the candidate was never judged. */
@@ -121,7 +131,12 @@ export function recordWorkFailure(
 ): boolean {
   const work = state.work[id]!;
   if (typeof error === "object" && error !== null) failedItems.set(error, id);
-  const detail = error instanceof Error ? error.message : String(error);
+  const detail =
+    error instanceof CandidateValidationFailure
+      ? error.evidenceDetail
+      : error instanceof Error
+        ? error.message
+        : String(error);
   const fault = faultOf(error);
   // A discovery staged beside a wrong result is reviewed like one beside a
   // collected result (#820).

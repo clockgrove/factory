@@ -1721,7 +1721,7 @@ export function renderStatusText(
       lines.push(
         "",
         `${item.id}: ${item.lastError ?? "failed"}`,
-        `  Evidence: ${configurationCommand(`factory diagnostics --objective ${view.objective} --logs ${item.id}`, configuration)}`,
+        `  Evidence (worker output, then the complete output of a failed validation command): ${configurationCommand(`factory diagnostics --objective ${view.objective} --logs ${item.id}`, configuration)}`,
       );
   }
   if (

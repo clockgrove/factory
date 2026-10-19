@@ -676,10 +676,11 @@ test("a verified install reaches only its configured registry, and commands are 
   // How an install without the network fails: at once, npm running offline
   // and finding the package in no cache.
   const offline = /ENOTCACHED/;
-  const write = (worktree, dependencies) => {
+  const write = (worktree, dependencies, packageManager) => {
     const manifest = {
       name: "installing",
       version: "1.0.0",
+      ...(packageManager && { packageManager }),
       dependencies: Object.fromEntries(
         Object.keys(dependencies).map((name) => [name, packages[name].version]),
       ),
@@ -748,7 +749,7 @@ test("a verified install reaches only its configured registry, and commands are 
   };
   // The caller that verified these package inputs passes the base, as
   // validateWorkItem, final validation and readiness do.
-  const validate = (target, number, commands = [install]) =>
+  const validate = (target, number, commands = [install], inputs = base) =>
     validateTree(
       worktree,
       join(root, `validation-${number}`),
@@ -759,7 +760,7 @@ test("a verified install reaches only its configured registry, and commands are 
       undefined,
       [],
       undefined,
-      base.commit,
+      inputs.commit,
       false,
       undefined,
       undefined,
@@ -767,7 +768,7 @@ test("a verified install reaches only its configured registry, and commands are 
       {
         ...sandbox,
         packageInputsVerified: true,
-        packageInputsBase: base.commit,
+        packageInputsBase: inputs.commit,
       },
     );
   const limited = [
@@ -822,6 +823,87 @@ test("a verified install reaches only its configured registry, and commands are 
     validate(commit("hide a tarball behind a merge key"), 4),
     offline,
   );
+  // pnpm 12's own lockfile, beside a base that pins pnpm 12 (the pnpm that
+  // wrote the fixture; npm ignores it): two documents (the package
+  // manager's, then the project's) and an `npm:` alias. The install still
+  // reaches the registry for a package the store lacks (#1628).
+  const pnpm = "pnpm@12.6.0";
+  write(worktree, { "is-number": tarball(registry, "is-number") }, pnpm);
+  const pinned = commit("pin pnpm 12");
+  const pnpm12 = readFileSync(
+    new URL("fixtures/pnpm-12-lockfile.yaml", import.meta.url),
+    "utf8",
+  );
+  writeFileSync(join(worktree, "pnpm-lock.yaml"), pnpm12);
+  write(
+    worktree,
+    {
+      "is-number": tarball(registry, "is-number"),
+      ms: tarball(registry, "ms"),
+    },
+    pnpm,
+  );
+  await validate(
+    commit("pnpm 12 lockfile with an npm: alias"),
+    6,
+    [install, "test -f node_modules/ms/package.json"],
+    pinned,
+  );
+  // Either document still refuses a foreign tarball, an anchor or another
+  // package manager: the install runs offline, and its failure says why.
+  write(
+    worktree,
+    {
+      "is-number": tarball(registry, "is-number"),
+      "has-flag": tarball(registry, "has-flag"),
+    },
+    pnpm,
+  );
+  for (const [index, [from, to, reason]] of [
+    [
+      "  pnpm@12.6.0:\n    resolution: {",
+      `  pnpm@12.6.0:\n    resolution: {tarball: '${other}pnpm/-/pnpm-12.6.0.tgz', `,
+      /because pnpm-lock\.yaml resolves pnpm@12\.6\.0 other than by integrity from a configured registry/,
+    ],
+    [
+      "  has-flag@4.0.0:\n    resolution: {",
+      `  has-flag@4.0.0:\n    resolution: {tarball: '${tarball(other, "has-flag")}', `,
+      /because pnpm-lock\.yaml resolves has-flag@4\.0\.0 other than/,
+    ],
+    [
+      "configDependencies: {}",
+      "configDependencies: &none {}",
+      /because pnpm-lock\.yaml is not plain YAML: it has an anchor/,
+    ],
+    [
+      "  is-number@7.0.0: {}",
+      "  is-number@7.0.0: &none {}",
+      /because pnpm-lock\.yaml is not plain YAML: it has an anchor/,
+    ],
+    [
+      "specifier: 12.6.0\n        version: 12.6.0",
+      "specifier: 12.5.0\n        version: 12.5.0",
+      /because pnpm-lock\.yaml pins pnpm@12\.5\.0 as the package manager/,
+    ],
+  ].entries()) {
+    assert.ok(pnpm12.includes(from));
+    writeFileSync(join(worktree, "pnpm-lock.yaml"), pnpm12.replace(from, to));
+    await assert.rejects(
+      validate(
+        commit(`refused pnpm 12 lockfile ${index}`),
+        7 + index,
+        [install],
+        pinned,
+      ),
+      (error) => {
+        assert.match(error.message, offline);
+        assert.match(error.message, reason);
+        // The candidate's lockfile kept it offline: its fault to repair.
+        assert.equal(faultOf(error).kind, "work");
+        return true;
+      },
+    );
+  }
   // An accepted base without package configuration, and a predecessor
   // Work Item's unaccepted output that adds its own registry. A dependent
   // item that keeps it passes the package-input check, but installs

@@ -31,7 +31,7 @@ import {
   sandboxedCommand,
 } from "./execution/sandbox.js";
 import { StepFault, transient } from "./fault.js";
-import { installMayUseNetwork } from "./execution/package-network.js";
+import { installNetworkRefusal } from "./execution/package-network.js";
 import { indexHasGitlinks } from "./execution/staged-candidate.js";
 import { lfsFiltered } from "./media.js";
 import { ownsPath } from "./ownership.js";
@@ -621,12 +621,17 @@ export async function validateCheckout(
         sandbox.packageInputsVerified === true &&
         packageBootstrap(check) !== undefined;
       // Network only from the configured registries: unchanged package
-      // configuration and a lockfile that resolves only there.
-      const online =
-        install &&
-        sandbox.network === "package-install" &&
-        sandbox.packageInputsBase !== undefined &&
-        installMayUseNetwork(worktree, sandbox.packageInputsBase, commit);
+      // configuration and a lockfile that resolves only there. A refused
+      // grant keeps why, so an offline failure names its cause.
+      const networkBase =
+        install && sandbox.network === "package-install"
+          ? sandbox.packageInputsBase
+          : undefined;
+      const refused =
+        networkBase !== undefined
+          ? installNetworkRefusal(worktree, networkBase, commit)
+          : undefined;
+      const online = networkBase !== undefined && !refused;
       let home = homeRoot;
       if (install) {
         home = mkdtempSync(join(tmpdir(), "factory-install-home-"));
@@ -723,22 +728,35 @@ export async function validateCheckout(
       // Past the sandbox's disk budget the command failed, whatever it exited.
       if (result.status !== 0 || overflow) {
         const failed = `Validation command failed (${overflow ? "disk budget" : result.status}): ${check}: `;
-        // People read the bounded form; diagnosis reads the complete output.
-        const detail = `${failed}${overflow ?? failedOutput(output)}`;
-        // A networked install that ran offline, without pasta, and found
+        // An install that would have had the network, ran offline and found
         // packages missing from the store (the package managers' offline
-        // error codes) failed for the host's lack of network, whatever the
-        // candidate changed: the operator's fix, never a repair (#1623).
-        if (
-          launch.offline !== undefined &&
-          !overflow &&
-          OFFLINE_PACKAGES_MISSING.test(output)
-        )
+        // error codes).
+        const offlineMissing =
+          !overflow && OFFLINE_PACKAGES_MISSING.test(output);
+        // Without pasta, it failed for the host's lack of network, whatever
+        // the candidate changed: the operator's fix, never a repair (#1623).
+        if (launch.offline !== undefined && offlineMissing)
           throw new StepFault({
             kind: "config",
             detail: `${failed}the install ran offline, because ${launch.offline}, and the package store lacks packages it needs:\n${failedOutput(output)}`,
             fix: "Install passt so pasta is on Factory's PATH, and run Factory as a regular user, so verified installs reach the configured registry; then resume.",
           });
+        // When Factory could not verify its package inputs, the limit is
+        // Factory's, not the candidate's (#1628).
+        if (refused?.unverified && offlineMissing)
+          throw new StepFault({
+            kind: "config",
+            detail: `${failed}the install ran offline, because ${refused.reason}, and the package store lacks packages it needs:\n${failedOutput(output)}`,
+            fix: "Keep the base's registry configuration literal http(s) URLs and its lockfiles plain YAML or JSON, or warm packageStore with the packages the install needs; then resume.",
+          });
+        // A grant the candidate's package inputs refused stays its fault,
+        // but says why the install was offline.
+        const offlineBecause =
+          refused && offlineMissing
+            ? `the install ran offline, because ${refused.reason}, and the package store lacks packages it needs:\n`
+            : "";
+        // People read the bounded form; diagnosis reads the complete output.
+        const detail = `${failed}${offlineBecause}${overflow ?? failedOutput(output)}`;
         // The dependency install is the controller's own bootstrap step. When
         // the candidate left every manifest and lockfile as at the accepted
         // base, the same install worked there, so its failure is the
@@ -758,7 +776,7 @@ export async function validateCheckout(
           retainFailedValidation && !preparing && !overflow
             ? partial
             : undefined,
-          `${failed}${overflow ? `${overflow}\n` : ""}${output}`,
+          `${failed}${offlineBecause}${overflow ? `${overflow}\n` : ""}${output}`,
         );
       }
       if (!preparing && contentStore && reviewArtifacts.length) {

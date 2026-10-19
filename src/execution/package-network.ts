@@ -10,7 +10,7 @@
  */
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isScalar, parse, parseDocument, visit } from "yaml";
+import { isScalar, parse, parseAllDocuments, visit } from "yaml";
 import { pinnedGitRaw } from "../process.js";
 
 /** Files that choose where an install fetches from and what it runs. */
@@ -131,12 +131,20 @@ function insideCheckout(from: string, target: string): boolean {
   return resolved !== ".." && !resolved.startsWith("../");
 }
 
+/** A registry range or version (`^1.2.0`, `1.2.0(peer@2.0.0)`) names no protocol. */
+function plainRange(value: string): boolean {
+  const colon = value.indexOf(":");
+  return colon < 0 || (colon > value.indexOf("(") && value.indexOf("(") >= 0);
+}
+
 /**
  * Whether an importer's specifier or resolved version may stand beside a
- * registry-only install. A registry range or version may. `workspace:` ranges
- * and `link:` paths to directories inside the checkout (sibling workspace
- * packages) may too: they fetch nothing. Any other protocol (`file:`, git,
- * hosted, an http URL) or a link out of the checkout may not.
+ * registry-only install. A registry range or version may, and so may an
+ * `npm:<name>@<range>` alias: it resolves from the registry like the range
+ * would. `workspace:` ranges and `link:` paths to directories inside the
+ * checkout (sibling workspace packages) may too: they fetch nothing. Any
+ * other protocol (`file:`, git, hosted, an http URL) or a link out of the
+ * checkout may not.
  */
 function importerEntryAllowed(importer: string, value: unknown): boolean {
   if (value === undefined) return true;
@@ -144,135 +152,215 @@ function importerEntryAllowed(importer: string, value: unknown): boolean {
   if (value.startsWith("workspace:")) return true;
   if (value.startsWith("link:"))
     return insideCheckout(importer, value.slice("link:".length));
-  const colon = value.indexOf(":");
-  // A plain range or version (`^1.2.0`, `1.2.0(peer@2.0.0)`) names no protocol.
-  return colon < 0 || (colon > value.indexOf("(") && value.indexOf("(") >= 0);
+  if (value.startsWith("npm:")) {
+    const aliased = value.slice("npm:".length);
+    // `name` or `name@range`; a scoped name starts with its own `@`.
+    const at = aliased.indexOf("@", 1);
+    const name = at < 0 ? aliased : aliased.slice(0, at);
+    return (
+      name.length > 0 &&
+      !name.includes(":") &&
+      (at < 0 || plainRange(aliased.slice(at + 1)))
+    );
+  }
+  return plainRange(value);
+}
+
+/** Why the install stays offline, and whether Factory could not check. */
+export interface NetworkRefusal {
+  reason: string;
+  /**
+   * Factory could not read or check the package inputs: the environment's
+   * limit, not something the candidate's policy broke.
+   */
+  unverified?: true;
 }
 
 /**
- * The YAML as plain data, or undefined when Factory and a package manager
- * could read it differently: pnpm's YAML reader applies `<<` merge keys,
- * which YAML 1.2 does not, so a lockfile with merge keys, anchors, aliases,
- * explicit tags or duplicate keys is never read as data here.
+ * Each YAML document as plain data, or why not. A document Factory and a
+ * package manager could read differently is never read as data: pnpm's
+ * YAML reader applies `<<` merge keys, which YAML 1.2 does not, so merge
+ * keys, anchors, aliases and explicit tags are refused. pnpm 12 writes its
+ * lockfile as two documents when `packageManager` is pinned (the package
+ * manager's own, then the project's); each is read under the same rules.
  */
-function plainYaml(text: string): unknown {
-  const document = parseDocument(text, { uniqueKeys: true, merge: false });
-  if (document.errors.length) return undefined;
-  let plain = true;
-  visit(document, {
-    Alias: () => {
-      plain = false;
-      return visit.BREAK;
-    },
-    Node: (_key, node) => {
-      if (node.anchor || node.tag) {
-        plain = false;
+function plainYaml(text: string, path: string): unknown[] | NetworkRefusal {
+  const documents = parseAllDocuments(text, { uniqueKeys: true, merge: false });
+  if (!documents.length) return { reason: `${path} has no YAML document` };
+  const plain: unknown[] = [];
+  for (const document of documents) {
+    if (document.errors.length)
+      return {
+        reason: `Factory could not read ${path} as YAML: ${document.errors[0]?.message.split("\n")[0]}`,
+        unverified: true,
+      };
+    let found: string | undefined;
+    visit(document, {
+      Alias: () => {
+        found = "an alias";
         return visit.BREAK;
-      }
-    },
-    Pair: (_key, pair) => {
-      if (isScalar(pair.key) && pair.key.value === "<<") {
-        plain = false;
-        return visit.BREAK;
-      }
-    },
-  });
-  return plain ? document.toJS() : undefined;
+      },
+      Node: (_key, node) => {
+        if (node.anchor || node.tag) {
+          found = node.anchor ? "an anchor" : "a tag";
+          return visit.BREAK;
+        }
+      },
+      Pair: (_key, pair) => {
+        if (isScalar(pair.key) && pair.key.value === "<<") {
+          found = "a merge key";
+          return visit.BREAK;
+        }
+      },
+    });
+    if (found)
+      return {
+        reason: `${path} is not plain YAML: it has ${found}`,
+      };
+    plain.push(document.toJS());
+  }
+  return plain;
 }
 
-/** pnpm-lock.yaml: every package resolves by integrity from a registry origin. */
-function pnpmLockfileFromRegistries(
+/**
+ * Why pnpm-lock.yaml is not registry-only, or undefined: in every document,
+ * importers name registry ranges, aliases or sibling packages, the package
+ * manager pinned is the one `packageManager` names, and every package
+ * resolves by integrity from a registry origin.
+ */
+function pnpmLockfileRefusal(
   text: string,
   registries: Set<string>,
-): boolean {
-  const lock = plainYaml(text) as Record<string, unknown> | null;
-  if (!lock || typeof lock !== "object") return false;
-  const importers = lock.importers;
-  if (importers !== undefined) {
-    if (!importers || typeof importers !== "object") return false;
-    for (const [path, importer] of Object.entries(importers)) {
-      if (!importer || typeof importer !== "object") return false;
-      if (!insideCheckout(".", path)) return false;
-      for (const group of [
-        "dependencies",
-        "devDependencies",
-        "optionalDependencies",
-      ]) {
-        const dependencies = (importer as Record<string, unknown>)[group];
-        if (dependencies === undefined) continue;
-        if (!dependencies || typeof dependencies !== "object") return false;
-        for (const entry of Object.values(dependencies)) {
-          const { specifier, version } = (entry ?? {}) as Record<
-            string,
-            unknown
-          >;
-          if (
-            !importerEntryAllowed(path, specifier) ||
-            !importerEntryAllowed(path, version)
-          )
-            return false;
+  packageManager: unknown,
+): NetworkRefusal | undefined {
+  const path = "pnpm-lock.yaml";
+  const documents = plainYaml(text, path);
+  if (!Array.isArray(documents)) return documents;
+  // `name@version`, optionally `+sha…`: what pnpm itself pins.
+  const pinned =
+    typeof packageManager === "string"
+      ? /^((?:@[^@/]+\/)?[^@]+)@([^+]+)(?:\+.*)?$/.exec(packageManager)
+      : null;
+  for (const document of documents) {
+    const lock = document as Record<string, unknown> | null;
+    if (!lock || typeof lock !== "object")
+      return { reason: `${path} has a document that is not a mapping` };
+    const importers = lock.importers;
+    if (importers !== undefined) {
+      if (!importers || typeof importers !== "object")
+        return { reason: `${path} has malformed importers` };
+      for (const [importer, entries] of Object.entries(importers)) {
+        if (!entries || typeof entries !== "object")
+          return { reason: `${path} has a malformed importer ${importer}` };
+        if (!insideCheckout(".", importer))
+          return { reason: `${path} has an importer outside the checkout` };
+        const groups = entries as Record<string, unknown>;
+        for (const group of [
+          "dependencies",
+          "devDependencies",
+          "optionalDependencies",
+          "configDependencies",
+          "packageManagerDependencies",
+        ]) {
+          const dependencies = groups[group];
+          if (dependencies === undefined) continue;
+          if (!dependencies || typeof dependencies !== "object")
+            return { reason: `${path} has malformed ${group}` };
+          for (const [name, entry] of Object.entries(dependencies)) {
+            const { specifier, version } = (entry ?? {}) as Record<
+              string,
+              unknown
+            >;
+            if (
+              !importerEntryAllowed(importer, specifier) ||
+              !importerEntryAllowed(importer, version)
+            )
+              return {
+                reason: `${path} has ${name} in ${importer} from outside the registry (${String(specifier)})`,
+              };
+            // Only the package manager package.json pins, at its version.
+            if (
+              group === "packageManagerDependencies" &&
+              (!pinned || name !== pinned[1] || version !== pinned[2])
+            )
+              return {
+                reason: `${path} pins ${name}@${String(version)} as the package manager, not the packageManager package.json names`,
+              };
+          }
         }
       }
     }
-  }
-  const packages = lock.packages ?? {};
-  if (!packages || typeof packages !== "object") return false;
-  for (const entry of Object.values(packages)) {
-    if (!entry || typeof entry !== "object") return false;
-    const resolution = (entry as Record<string, unknown>).resolution;
-    if (!resolution || typeof resolution !== "object") return false;
-    const fields = resolution as Record<string, unknown>;
-    // Only a registry resolution: its integrity and, at most, its tarball.
-    // Git, directory and other typed resolutions carry other keys.
-    if (
-      Object.keys(fields).some(
-        (key) => key !== "integrity" && key !== "tarball",
-      ) ||
-      typeof fields.integrity !== "string"
-    )
-      return false;
-    // pnpm omits the tarball for the default registry's own URL.
-    if (fields.tarball !== undefined) {
-      const found = origin(fields.tarball);
-      if (!found || !registries.has(found)) return false;
+    const packages = lock.packages ?? {};
+    if (!packages || typeof packages !== "object")
+      return { reason: `${path} has malformed packages` };
+    for (const [name, entry] of Object.entries(packages)) {
+      const refused = {
+        reason: `${path} resolves ${name} other than by integrity from a configured registry`,
+      };
+      if (!entry || typeof entry !== "object") return refused;
+      const resolution = (entry as Record<string, unknown>).resolution;
+      if (!resolution || typeof resolution !== "object") return refused;
+      const fields = resolution as Record<string, unknown>;
+      // Only a registry resolution: its integrity and, at most, its tarball.
+      // Git, directory and other typed resolutions carry other keys.
+      if (
+        Object.keys(fields).some(
+          (key) => key !== "integrity" && key !== "tarball",
+        ) ||
+        typeof fields.integrity !== "string"
+      )
+        return refused;
+      // pnpm omits the tarball for the default registry's own URL.
+      if (fields.tarball !== undefined) {
+        const found = origin(fields.tarball);
+        if (!found || !registries.has(found)) return refused;
+      }
     }
   }
-  return true;
+  return undefined;
 }
 
-/** package-lock.json: every resolved package comes from a registry origin. */
-function npmLockfileFromRegistries(
+/** Why package-lock.json is not registry-only, or undefined. */
+function npmLockfileRefusal(
   text: string,
   registries: Set<string>,
-): boolean {
+): NetworkRefusal | undefined {
   let lock: unknown;
   try {
     lock = JSON.parse(text);
-  } catch {
-    return false;
+  } catch (error) {
+    return {
+      reason: `Factory could not read package-lock.json as JSON: ${(error as Error).message}`,
+      unverified: true,
+    };
   }
-  if (!lock || typeof lock !== "object") return false;
+  if (!lock || typeof lock !== "object")
+    return { reason: "package-lock.json is not an object" };
   const packages = (lock as Record<string, unknown>).packages;
-  if (!packages || typeof packages !== "object") return false;
+  if (!packages || typeof packages !== "object")
+    return { reason: "package-lock.json has no packages" };
   for (const [path, entry] of Object.entries(packages)) {
-    if (!entry || typeof entry !== "object") return false;
+    const refused = {
+      reason: `package-lock.json resolves ${path} other than by integrity from a configured registry`,
+    };
+    if (!entry || typeof entry !== "object") return refused;
     const fields = entry as Record<string, unknown>;
     if (path === "") continue;
-    if (!insideCheckout(".", path)) return false;
+    if (!insideCheckout(".", path)) return refused;
     // A workspace link points at a directory inside the checkout: no fetch.
     if (fields.link === true) {
       if (
         typeof fields.resolved !== "string" ||
         !insideCheckout(".", fields.resolved)
       )
-        return false;
+        return refused;
       continue;
     }
     // A workspace package's own folder is checkout source, not a download.
     if (!path.split("/").includes("node_modules")) continue;
     if (fields.resolved === undefined) {
       // Only bundled packages arrive without a resolved URL.
-      if (fields.inBundle !== true) return false;
+      if (fields.inBundle !== true) return refused;
       continue;
     }
     const found = origin(fields.resolved);
@@ -281,22 +369,23 @@ function npmLockfileFromRegistries(
       !registries.has(found) ||
       typeof fields.integrity !== "string"
     )
-      return false;
+      return refused;
   }
-  return true;
+  return undefined;
 }
 
 /**
- * Whether a verified install of `commit` may reach the network, judged
- * against the attempt's `base`: its package inputs unchanged (the fast
- * path), or its configuration unchanged and every lockfile resolving only
- * from the configured registry origins. Unknown is offline.
+ * Why a verified install of `commit` may not reach the network, judged
+ * against the attempt's `base`, or undefined when it may: its package
+ * inputs unchanged (the fast path), or its configuration unchanged and
+ * every lockfile resolving only from the configured registry origins.
+ * Unknown is offline, and marked unverified.
  */
-export function installMayUseNetwork(
+export function installNetworkRefusal(
   worktree: string,
   base: string,
   commit: string,
-): boolean {
+): NetworkRefusal | undefined {
   try {
     if (
       !changed(worktree, base, commit, [
@@ -305,8 +394,12 @@ export function installMayUseNetwork(
         ...LOCKFILES,
       ])
     )
-      return true;
-    if (changed(worktree, base, commit, CONFIGURATION)) return false;
+      return undefined;
+    if (changed(worktree, base, commit, CONFIGURATION))
+      return {
+        reason:
+          "its package-manager configuration (.npmrc, pnpm-workspace.yaml, pnpmfiles) differs from the base",
+      };
     // package.json may change here, but not the package manager it pins:
     // pnpm would download and run that version.
     const manager = (revision: string) => {
@@ -318,19 +411,34 @@ export function installMayUseNetwork(
         devEngines: manifest.devEngines,
       };
     };
-    if (!isDeepStrictEqual(manager(base), manager(commit))) return false;
+    const pinned = manager(commit);
+    if (!isDeepStrictEqual(manager(base), pinned))
+      return {
+        reason: "package.json changes its packageManager or devEngines",
+      };
     const registries = configuredRegistries(worktree, base);
-    if (!registries) return false;
+    if (!registries)
+      return {
+        reason:
+          "Factory could not read the base's registry configuration exactly (an environment reference or a non-http registry)",
+        unverified: true,
+      };
     if (file(worktree, commit, "npm-shrinkwrap.json") !== undefined)
-      return false;
+      return { reason: "it has an npm-shrinkwrap.json" };
     const pnpm = file(worktree, commit, "pnpm-lock.yaml");
-    if (pnpm !== undefined && !pnpmLockfileFromRegistries(pnpm, registries))
-      return false;
     const npm = file(worktree, commit, "package-lock.json");
-    if (npm !== undefined && !npmLockfileFromRegistries(npm, registries))
-      return false;
-    return pnpm !== undefined || npm !== undefined;
-  } catch {
-    return false;
+    if (pnpm === undefined && npm === undefined)
+      return { reason: "no lockfile pins what it fetches" };
+    return (
+      (pnpm !== undefined
+        ? pnpmLockfileRefusal(pnpm, registries, pinned.packageManager)
+        : undefined) ??
+      (npm !== undefined ? npmLockfileRefusal(npm, registries) : undefined)
+    );
+  } catch (error) {
+    return {
+      reason: `Factory could not check its package inputs: ${(error as Error).message}`,
+      unverified: true,
+    };
   }
 }

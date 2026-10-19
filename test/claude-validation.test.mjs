@@ -41,6 +41,7 @@ import {
   sandboxedCommand,
 } from "../dist/execution/sandbox.js";
 import { ClaudeAgentSdkHarness } from "../dist/execution/claude.js";
+import { claudeQueryOptions } from "../dist/execution/claude-options.js";
 import {
   launchWorker,
   sandboxBubblewrap,
@@ -1217,6 +1218,38 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
   assert.ok(long.output.length < 300_000);
   assert.match(long.output, /bytes of output omitted/);
   assert.match(long.output, /last\n$/);
+  // Glob and Grep walk the checkout on the host, where a link the shell made
+  // could lead out of it: with the shell granted they are neither offered nor
+  // allowed.
+  const files = ["Read", "Edit", "Write", "Glob", "Grep", "Validate"];
+  const input = {
+    config: {
+      tools: files,
+      allowedTools: files,
+      model: "claude-test",
+      permissionMode: "dontAsk",
+      settingSources: [],
+      maxTurns: 1,
+    },
+    request: {
+      worktree,
+      item: { title: "t", goal: "g", acceptance: [], ownedPaths: ["a.txt"] },
+    },
+  };
+  assert.equal(factoryShellAuthorized(input), true);
+  const options = claudeQueryOptions(input, {}, new AbortController());
+  assert.deepEqual(options.tools, ["Read", "Edit", "Write"]);
+  for (const [tool, toolInput] of [
+    ["Grep", { pattern: "x", path: "." }],
+    ["Glob", { pattern: "*" }],
+    ["Read", { file_path: join(worktree, "a.txt") }],
+  ]) {
+    const decision = await options.canUseTool(tool, toolInput, {
+      toolUseID: tool,
+      signal: new AbortController().signal,
+    });
+    assert.equal(decision.behavior, tool === "Read" ? "allow" : "deny", tool);
+  }
 });
 
 test("a killed worker's command sandbox is stopped and proved gone before the worker is ceased", async (t) => {

@@ -177,6 +177,32 @@ function privatePaths(
 }
 
 /**
+ * Whether a read-only mount of `path` could show a sandbox host sockets,
+ * which such a mount still lets a process connect to (a user bus, a
+ * container daemon, a terminal multiplexer, an SSH agent): it is, holds or
+ * lies in a runtime directory, or it is or holds a shared temporary
+ * directory or, unless `temporaryChildren` is false, lies in one, where any
+ * host process keeps them.
+ */
+function showsHostSockets(path: string, temporaryChildren = true): boolean {
+  const runtime = [
+    "/run",
+    "/var/run",
+    "/proc",
+    "/sys",
+    "/dev",
+    ...(process.env.XDG_RUNTIME_DIR ? [process.env.XDG_RUNTIME_DIR] : []),
+  ].map(real);
+  const temporary = ["/tmp", "/var/tmp", tmpdir()].map(real);
+  return (
+    runtime.some((root) => within(path, root) || within(root, path)) ||
+    temporary.some(
+      (root) => within(root, path) || (temporaryChildren && within(path, root)),
+    )
+  );
+}
+
+/**
  * The directories a sandboxed shell reads, never writes, so the tools on its
  * PATH run: every PATH directory, and the directory of the real file behind
  * each link in one. A directory named `bin` or `sbin` stands for its install
@@ -185,9 +211,11 @@ function privatePaths(
  * directories can contain unrelated private files; mount only bin there.
  *
  * Nothing here may show the operator's HOME as a whole, a login (SSH, gh,
- * Codex, Claude, Copilot), Factory's config or state, or the checkout's git
- * directory. A PATH directory that would is a configuration error; a link
- * that leads into one is left unmounted, so that tool does not run.
+ * Codex, Claude, Copilot), Factory's config or state, the checkout's git
+ * directory, or host sockets in a runtime or shared temporary directory. A
+ * PATH directory that would is a configuration error; a link that leads into
+ * one, or that the operator cannot follow, is left unmounted, so that tool
+ * does not run.
  */
 export function toolchainDirectories(
   source: NodeJS.ProcessEnv,
@@ -195,6 +223,8 @@ export function toolchainDirectories(
   audience: string,
 ): string[] {
   const { home, exposes } = privatePaths(source, workspace);
+  const hidden = (directory: string) =>
+    exposes(directory) || showsHostSockets(directory);
   const root = (directory: string) => {
     const prefix = dirname(directory);
     if (
@@ -202,11 +232,12 @@ export function toolchainDirectories(
       !basename(prefix).startsWith(".") &&
       dirname(prefix) !== home &&
       dirname(prefix) !== windowsProfile(prefix) &&
-      !exposes(prefix)
+      !hidden(prefix)
     )
       return prefix;
-    return exposes(directory) ? undefined : directory;
+    return hidden(directory) ? undefined : directory;
   };
+  const refused = `would show ${audience} your HOME, a login, Factory's own files, runtime sockets or the shared temporary directory`;
   const roots = new Set<string>();
   for (const entry of (source.PATH ?? "").split(":")) {
     // A relative entry resolves inside the worktree, which is mounted.
@@ -215,16 +246,23 @@ export function toolchainDirectories(
     if (!statSync(directory).isDirectory() || within(directory, workspace))
       continue;
     const mount = root(directory);
-    if (!mount)
-      throw new Error(
-        `PATH entry ${entry} would show ${audience} your HOME, a login or Factory's own files. Remove it from the PATH Factory runs with, or move its tools to a directory of their own.`,
-      );
     // A linked PATH directory is mounted under the name the PATH uses too.
-    roots.add(mount).add(resolve(entry));
+    const named = resolve(entry);
+    if (!mount || hidden(named))
+      throw new Error(
+        `PATH entry ${entry} ${refused}. Remove it from the PATH Factory runs with, or move its tools to a directory of their own.`,
+      );
+    roots.add(mount).add(named);
     for (const item of readdirSync(directory, { withFileTypes: true })) {
       if (!item.isSymbolicLink()) continue;
-      const target = real(join(directory, item.name));
-      if (!statSync(target, { throwIfNoEntry: false })?.isFile()) continue;
+      let target: string;
+      try {
+        target = realpathSync(join(directory, item.name));
+        if (!statSync(target).isFile()) continue;
+      } catch {
+        // A link the operator cannot follow names no tool that could run.
+        continue;
+      }
       // A link into a login directory stays unmounted: that tool does not run.
       const linked = root(dirname(target));
       if (linked) roots.add(linked);
@@ -238,7 +276,7 @@ export function toolchainDirectories(
     const mount = root(runtime);
     if (!mount)
       throw new Error(
-        `Factory's Node runtime at ${runtime} would show ${audience} your HOME, a login or Factory's own files. Install Node in a directory of its own.`,
+        `Factory's Node runtime at ${runtime} ${refused}. Install Node in a directory of its own.`,
       );
     roots.add(mount);
   }
@@ -398,7 +436,7 @@ function systemMounts(): string[] {
   return args;
 }
 
-/** Namespaces and lifetime; the process stays in the caller's process group. */
+/** Namespaces and lifetime: the sandbox ends with the process that spawned bubblewrap. */
 const ISOLATION = ["--unshare-all", "--die-with-parent", "--cap-drop", "ALL"];
 
 function bubblewrapExecutable(): string | undefined {
@@ -501,6 +539,20 @@ function probeCommandSandbox(): CommandSandboxAvailability {
   };
 }
 
+/**
+ * Under a root controller bubblewrap's user namespace maps to the host's
+ * root, which owns root-only files (`/etc/shadow`, SSH host keys): dropped
+ * capabilities and `--uid` do not change that. Commands cannot run as another
+ * user instead, since the checkout, HOME and TMPDIR they write are root's.
+ */
+const runsAsRoot = () => process.geteuid?.() === 0;
+
+const ROOT_DETAIL =
+  "Factory runs as root, so sandboxed commands would read root-only host files such as /etc/shadow and SSH host keys";
+
+const ROOT_FIX =
+  "Run Factory as an unprivileged user. Only if commands may read root-only host files, set sandbox.required to false in the Factory configuration.";
+
 const UNAVAILABLE_FIX =
   "Install bubblewrap (`bwrap`) and allow unprivileged user namespaces on this host. Only if commands must run unsandboxed here, set sandbox.required to false in the Factory configuration.";
 
@@ -517,11 +569,18 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
     network: policy.network,
     ...(policy.packageStore && { packageStore: policy.packageStore }),
   };
+  if (found.available && runsAsRoot() && policy.required)
+    return {
+      mode: "unavailable",
+      ...shared,
+      detail: `${ROOT_DETAIL}; Factory refuses to run worker-caused commands`,
+      fix: ROOT_FIX,
+    };
   if (found.available)
     return {
       mode: "bubblewrap",
       ...shared,
-      detail: `${found.version} at ${found.executable}; network ${policy.network === "off" ? "off for every command" : "only for verified package installs"}; at most ${policy.limits?.processes ?? DEFAULT_SANDBOX_LIMITS.processes} processes; private /tmp ${found.tmpfsSize ? `${policy.limits?.tmpMiB ?? DEFAULT_SANDBOX_LIMITS.tmpMiB} MiB` : "unsized (this bubblewrap has no --size)"}`,
+      detail: `${runsAsRoot() ? `${ROOT_DETAIL}, as sandbox.required false allows; ` : ""}${found.version} at ${found.executable}; network ${policy.network === "off" ? "off for every command" : "only for verified package installs"}; at most ${policy.limits?.processes ?? DEFAULT_SANDBOX_LIMITS.processes} processes; private /tmp ${found.tmpfsSize ? `${policy.limits?.tmpMiB ?? DEFAULT_SANDBOX_LIMITS.tmpMiB} MiB` : "unsized (this bubblewrap has no --size)"}`,
     };
   if (!policy.required && !found.installed)
     return {
@@ -579,11 +638,12 @@ const HOST_DIRECTORY_VARIABLES = [
  * The process to spawn for `command`: `sh -c` inside bubblewrap, or plain
  * `sh -c` only when the operator set `sandbox.required` false and bubblewrap
  * is not installed. Spawn it detached (as subprocessAsync does): that makes
- * bubblewrap a session leader without a controlling terminal, inside the
- * caller's process group, which the caller stops and proves gone. A process
- * that leaves the group inside the sandbox still ends with it: when the
- * command exits, the PID namespace's init exits and the kernel kills the
- * rest first. Throws a configuration fault when the sandbox cannot run.
+ * bubblewrap the leader of its own session and process group, without a
+ * controlling terminal, and the caller stops that group and proves it gone.
+ * A process that leaves the group inside the sandbox still ends with it:
+ * when the command exits, the PID namespace's init exits and the kernel
+ * kills the rest first. Throws a configuration fault when the sandbox cannot
+ * run, or when Factory runs as root and sandbox.required is not false.
  */
 export function sandboxedCommand(input: SandboxedCommandInput): {
   file: string;
@@ -607,31 +667,22 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
       sandbox: "none",
     };
   }
+  if (runsAsRoot() && input.policy.required)
+    throw configFault(
+      `${ROOT_DETAIL}. Factory refuses to run worker-caused commands as root.`,
+      ROOT_FIX,
+    );
   const checkout = realpathSync(input.checkout);
   const temporary = realpathSync(input.temporary);
   const home = realpathSync(input.home);
   // Exposure is judged against the operator's real HOME and Factory's paths.
   const { exposes } = privatePaths(process.env, checkout);
-  // Runtime directories hold sockets, which a read-only mount still lets a
-  // process connect to (a user bus, a container daemon, a terminal).
-  const runtime = [
-    "/run",
-    "/var/run",
-    "/proc",
-    "/sys",
-    "/dev",
-    ...(process.env.XDG_RUNTIME_DIR ? [process.env.XDG_RUNTIME_DIR] : []),
-  ].map(real);
-  const temporaryRoots = ["/tmp", tmpdir()].map(real);
-  const unsafe = (path: string, field: string) => {
-    if (
-      exposes(path) ||
-      runtime.some((root) => within(path, root) || within(root, path)) ||
-      temporaryRoots.some((root) => within(root, path))
-    )
+  // The package store may lie in a temporary directory; nothing read-only may.
+  const unsafe = (path: string, field: string, temporaryChildren = true) => {
+    if (exposes(path) || showsHostSockets(path, temporaryChildren))
       throw configFault(
         `${field} ${path} would show sandboxed commands your HOME, a login, Factory's own files, runtime sockets or the shared temporary directory`,
-        `Point ${field} at a directory of its own`,
+        `Point ${field} at a directory of its own, outside /tmp and the runtime directories`,
       );
   };
   // Factory's own launcher stays off the PATH, as for workers.
@@ -668,7 +719,7 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   if (input.policy.packageStore) {
     mkdirSync(input.policy.packageStore, { recursive: true, mode: 0o700 });
     const store = realpathSync(input.policy.packageStore);
-    unsafe(store, "sandbox.packageStore");
+    unsafe(store, "sandbox.packageStore", false);
     if (
       [checkout, temporary, home].some(
         (path) => within(store, path) || within(path, store),

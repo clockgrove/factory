@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { LocalContentStore } from "../dist/content/local.js";
 import { runSandboxedCommand } from "../dist/execution/claude-shell.js";
@@ -28,6 +28,7 @@ import {
 } from "../dist/execution/claude-validation.js";
 import {
   commandSandboxAvailability,
+  commandSandboxStatus,
   STRICT_COMMAND_SANDBOX,
 } from "../dist/execution/sandbox.js";
 import { validateTree } from "../dist/validation.js";
@@ -758,4 +759,92 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
   assert.ok(long.output.length < 300_000);
   assert.match(long.output, /bytes of output omitted/);
   assert.match(long.output, /last\n$/);
+});
+
+// A host directory outside every temporary directory: the repository's
+// ignored `.factory`.
+const outsideTemporary = () => {
+  const parent = new URL("../.factory/", import.meta.url).pathname;
+  mkdirSync(parent, { recursive: true });
+  return mkdtempSync(join(parent, "sandbox-"));
+};
+
+test("no toolchain or read-only path mounts the host's /tmp or its sockets", {
+  skip:
+    process.geteuid?.() === 0 ||
+    new URL("..", import.meta.url).pathname.startsWith(`${tmpdir()}/`),
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-sandbox-mounts-"));
+  const tools = outsideTemporary();
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(tools, { recursive: true, force: true });
+  });
+  const worktree = join(root, "worktree");
+  execFileSync("git", ["init", "-q", worktree]);
+  // A PATH tool that links to a file directly in /tmp would make /tmp a
+  // toolchain root; a link loop names no tool the operator can follow.
+  const marker = join(tmpdir(), `factory-host-${basename(root)}`);
+  writeFileSync(marker, "host\n");
+  t.after(() => rmSync(marker, { force: true }));
+  symlinkSync(marker, join(tools, "host-tool"));
+  symlinkSync(join(tools, "loop-b"), join(tools, "loop-a"));
+  symlinkSync(join(tools, "loop-a"), join(tools, "loop-b"));
+  const originalPath = process.env.PATH;
+  t.after(() => {
+    process.env.PATH = originalPath;
+  });
+  const run = (command, policy = STRICT_COMMAND_SANDBOX) =>
+    runSandboxedCommand({
+      worktree,
+      root: `${worktree}.shell`,
+      command,
+      timeoutMs: 60_000,
+      policy,
+    });
+  process.env.PATH = `${tools}:${originalPath}`;
+  const hidden = await run(`! test -e '${marker}'`);
+  assert.equal(hidden.exitCode, 0, hidden.output);
+  // A PATH directory in /tmp is refused, not mounted.
+  const temporaryBin = join(root, "bin");
+  mkdirSync(temporaryBin);
+  process.env.PATH = `${temporaryBin}:${originalPath}`;
+  await assert.rejects(run("true"), /PATH entry .* shared temporary/);
+  process.env.PATH = originalPath;
+  // So is any read-only path under /tmp, where host sockets live (#1574).
+  const sockets = join(root, "sockets");
+  mkdirSync(sockets);
+  await assert.rejects(
+    run("true", { ...STRICT_COMMAND_SANDBOX, readOnlyPaths: [sockets] }),
+    /sandbox\.readOnlyPaths entry .* shared temporary/,
+  );
+});
+
+test("a root controller runs no sandboxed command unless the sandbox is optional", {
+  skip: process.geteuid?.() !== 0 || !commandSandboxAvailability().available,
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-sandbox-root-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const worktree = join(root, "worktree");
+  execFileSync("git", ["init", "-q", worktree]);
+  // bubblewrap's namespace maps to the host's root, which owns these.
+  await assert.rejects(
+    runSandboxedCommand({
+      worktree,
+      root: `${worktree}.shell`,
+      command: "cat /etc/shadow",
+      timeoutMs: 60_000,
+      policy: STRICT_COMMAND_SANDBOX,
+    }),
+    /runs as root/,
+  );
+  const strict = commandSandboxStatus(STRICT_COMMAND_SANDBOX);
+  assert.equal(strict.mode, "unavailable");
+  assert.match(strict.fix, /unprivileged user/);
+  const optional = commandSandboxStatus({
+    ...STRICT_COMMAND_SANDBOX,
+    required: false,
+  });
+  assert.equal(optional.mode, "bubblewrap");
+  assert.match(optional.detail, /root-only host files/);
 });

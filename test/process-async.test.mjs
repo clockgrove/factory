@@ -2201,6 +2201,11 @@ test("collection settles an exited owned group before removing scratch", async (
 
 test("settled validation reuses its exact Git result once and retains the failed capture", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-validation-rereview-"));
+  // A read-only sandbox path lies outside every temporary directory: in the
+  // repository's ignored `.factory`.
+  const ignored = new URL("../.factory/", import.meta.url).pathname;
+  mkdirSync(ignored, { recursive: true });
+  const external = mkdtempSync(join(ignored, "external-"));
   const checkout = join(root, "target");
   mkdirSync(checkout);
   const git = (...args) =>
@@ -2252,8 +2257,6 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     );
     // External host readiness the command can see only through the
     // operator's read-only sandbox allowance.
-    const external = join(root, "external");
-    mkdirSync(external);
     const ready = join(external, "ready");
     const command = `${process.execPath} -e 'process.exit(require("node:fs").existsSync(${JSON.stringify(ready)}) ? 0 : 1)'`;
     const sandbox = {
@@ -3629,6 +3632,7 @@ process.exit(23);`;
     assert.deepEqual(readState(config.repository, 1), validationHistory);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
   }
 });
 

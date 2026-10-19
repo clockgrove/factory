@@ -1895,16 +1895,6 @@ export async function stopRecordedSandboxes(
     const current = linuxProcessIdentity(pid);
     return current?.startTime === startTime ? current : undefined;
   };
-  const running = (pid: number) => {
-    let executable: string | undefined;
-    try {
-      executable = readlinkSync(`/proc/${pid}/exe`);
-    } catch {
-      return false;
-    }
-    const expected = bubblewrap();
-    return expected !== undefined && executable === expected;
-  };
   const kill = (pid: number) => {
     try {
       process.kill(pid, "SIGKILL");
@@ -1960,17 +1950,36 @@ export async function stopRecordedSandboxes(
     const initRuns = () =>
       init !== undefined && !!live(init.pid, init.startTime);
     const present = () => processGroupExists(owner.group) || initRuns();
+    // What a recorded identity runs now. One that exited between the checks
+    // is gone, not foreign; one whose executable is unreadable stays unknown.
+    const executable = (pid: number, startTime: string) => {
+      try {
+        const expected = bubblewrap();
+        return expected !== undefined &&
+          readlinkSync(`/proc/${pid}/exe`) === expected
+          ? "bubblewrap"
+          : "other";
+      } catch {
+        return live(pid, startTime) ? "unreadable" : "gone";
+      }
+    };
     const leader = live(owner.pid, owner.startTime);
+    const leaderRuns = leader && executable(owner.pid, owner.startTime);
+    const initRunsNow =
+      init && initRuns() ? executable(init.pid, init.startTime) : undefined;
     // A recorded identity running anything but bubblewrap is never signalled.
     if (
-      (leader && !running(owner.pid)) ||
-      (init && initRuns() && !running(init.pid))
+      leaderRuns === "other" ||
+      leaderRuns === "unreadable" ||
+      initRunsNow === "other" ||
+      initRunsNow === "unreadable"
     ) {
       unproved++;
       continue;
     }
-    if (leader?.group === owner.group) kill(-owner.group);
-    if (init && initRuns()) kill(init.pid);
+    if (leaderRuns === "bubblewrap" && leader?.group === owner.group)
+      kill(-owner.group);
+    if (init && initRunsNow === "bubblewrap") kill(init.pid);
     const deadline = Date.now() + SANDBOX_CESSATION_MS;
     while (present() && Date.now() < deadline)
       await new Promise<void>((resolve) => setTimeout(resolve, 10));

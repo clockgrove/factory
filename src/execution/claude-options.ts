@@ -71,12 +71,20 @@ function claudeToolPath(
 /**
  * Glob and Grep walk the worktree on the host. A granted shell can link any
  * host path into it, so they are withheld wherever the shell is authorized;
- * its find and rg walk the same files inside the sandbox.
+ * the shell's find walks the same files inside the sandbox.
  */
 const hostWalkTools = ["Glob", "Grep"];
 
 function nativeToolWithheld(input: ClaudeWorkerInput, toolName: string) {
   return hostWalkTools.includes(toolName) && factoryShellAuthorized(input);
+}
+
+/** The SDK built-in tools a worker is offered. */
+export function claudeNativeTools(input: ClaudeWorkerInput): string[] {
+  return input.config.tools.filter(
+    (tool) =>
+      tool !== validateToolConfigName && !nativeToolWithheld(input, tool),
+  );
 }
 
 const deniedMessage =
@@ -231,10 +239,7 @@ export function claudeQueryOptions(
     // names the equivalent provider option `effort`.
     effort: config.reasoningEffort,
     // Validate is Factory's own tool, served below, not an SDK built-in.
-    tools: config.tools.filter(
-      (tool) =>
-        tool !== validateToolConfigName && !nativeToolWithheld(input, tool),
-    ),
+    tools: claudeNativeTools(input),
     // Bare allowedTools bypass canUseTool in the Claude SDK. Keep Factory's
     // configured allow-list in the host policy below, never in this SDK field.
     allowedTools: [],

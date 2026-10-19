@@ -1237,18 +1237,25 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
     },
   };
   assert.equal(factoryShellAuthorized(input), true);
+  assert.equal((await run(`ln -s '${secret}' leak`)).exitCode, 0);
   const options = claudeQueryOptions(input, {}, new AbortController());
   assert.deepEqual(options.tools, ["Read", "Edit", "Write"]);
   for (const [tool, toolInput] of [
     ["Grep", { pattern: "x", path: "." }],
     ["Glob", { pattern: "*" }],
     ["Read", { file_path: join(worktree, "a.txt") }],
+    // A link the shell makes to a host file is not inside the checkout.
+    ["Read", { file_path: join(worktree, "leak") }],
   ]) {
     const decision = await options.canUseTool(tool, toolInput, {
       toolUseID: tool,
       signal: new AbortController().signal,
     });
-    assert.equal(decision.behavior, tool === "Read" ? "allow" : "deny", tool);
+    assert.equal(
+      decision.behavior,
+      toolInput.file_path === join(worktree, "a.txt") ? "allow" : "deny",
+      tool,
+    );
   }
 });
 

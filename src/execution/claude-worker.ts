@@ -35,7 +35,7 @@ import {
   factoryMcpToolName,
   type PreparedClaudeEnvironment,
 } from "./claude-environment.js";
-import { claudeQueryOptions } from "./claude-options.js";
+import { claudeNativeTools, claudeQueryOptions } from "./claude-options.js";
 import {
   type ClaudeSessionData,
   claudeHistoryDigest,
@@ -161,7 +161,7 @@ function assertInitialization(
       `Claude SDK selected reasoning effort ${String(message.effort)}, expected ${config.reasoningEffort}`,
     );
   const validating = workerValidationCommands(input).length > 0;
-  const configuredTools = new Set(config.tools);
+  const configuredTools = new Set(claudeNativeTools(input));
   if (request.environment?.mcp) configuredTools.add(factoryMcpToolName);
   if (validating) configuredTools.add(factoryValidationToolName);
   const fileTools = factoryFilesAuthorized(input);

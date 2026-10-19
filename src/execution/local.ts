@@ -729,28 +729,39 @@ export function assertCandidateBounds(
   label: string,
   inspect?: (path: string) => void,
 ): void {
+  // Git prints names as raw bytes. A name that is not UTF-8 would decode to
+  // another path, which lstat misses and Git still hashes.
+  const names = (output: Buffer) => {
+    try {
+      return new TextDecoder("utf-8", { fatal: true })
+        .decode(output)
+        .split("\0");
+    } catch {
+      throw workFault(`${label} has an unsafe path`);
+    }
+  };
   const prospective = [
     ...new Set(
       [
-        ...pinnedGitRaw(
-          worktree,
-          "diff",
-          "--name-only",
-          "--no-renames",
-          "-z",
-          "HEAD",
-        )
-          .toString("utf8")
-          .split("\0"),
-        ...pinnedGitRaw(
-          worktree,
-          "ls-files",
-          "--others",
-          "--exclude-standard",
-          "-z",
-        )
-          .toString("utf8")
-          .split("\0"),
+        ...names(
+          pinnedGitRaw(
+            worktree,
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "HEAD",
+          ),
+        ),
+        ...names(
+          pinnedGitRaw(
+            worktree,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+          ),
+        ),
       ].filter(Boolean),
     ),
   ].filter((path) => !privateStagingPath(path));

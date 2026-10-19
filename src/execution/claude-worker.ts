@@ -12,7 +12,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
-import type { UnsettledSubprocessError } from "../process.js";
+import { UnsettledSubprocessError } from "../process.js";
 import {
   type AgentSessionRef,
   AuthenticationRequiredError,
@@ -856,6 +856,21 @@ async function main(): Promise<void> {
       } catch {
         /* Preserve the authoritative provider failure. */
       }
+    }
+    // Settle the shell and Validate before the result, as the success path
+    // does: an unproved stop found while they close still makes it unknown,
+    // and so does one that does not close within the bound.
+    for (const owned of [validation, shell]) {
+      if (!owned) continue;
+      const closing = owned.close().then(() => true);
+      const settled = await (turn.signal.aborted
+        ? Promise.race([closing, delay(CLI_EXIT_WAIT_MS, false)])
+        : turn.race(closing)
+      ).catch(() => false);
+      if (!settled)
+        unsettled ??= new UnsettledSubprocessError(
+          "Claude worker tool did not settle; outcome unknown",
+        );
     }
     const failure = unsettled ?? error;
     writeHarnessResult(resultPath, {

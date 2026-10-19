@@ -183,6 +183,7 @@ export async function workerFilesTree(
   // Host-side Git must not enter a repository the worker wrote.
   assertNoNestedGit(worktree);
   // Nor hash, into the shared object store, more than collection could retain.
+  // A run_command on its own queue may grow a file after this: disk use only.
   if (bounds) assertCandidateBounds(worktree, bounds, "Worker snapshot");
   // A separate index from HEAD: the worker's own index never holds what this
   // stages, so a nested repository made meanwhile never becomes a gitlink

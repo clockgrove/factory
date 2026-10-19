@@ -518,6 +518,16 @@ test("host-side Git never enters a nested repository sandboxed code could write"
     workerFilesTree(bounded, bounds),
     /Worker snapshot exceeds the admitted file bound/,
   );
+  for (const name of ["b", "c", "d"]) rmSync(join(bounded, name));
+  // A name that is not UTF-8 cannot pass as another path lstat misses.
+  const raw = Buffer.concat([Buffer.from(`${bounded}/`), Buffer.from([0xff])]);
+  writeFileSync(raw, "");
+  truncateSync(raw, 50 * 1024 * 1024);
+  await assert.rejects(
+    workerFilesTree(bounded, bounds),
+    /Worker snapshot has an unsafe path/,
+  );
+  rmSync(raw);
   assert.equal(objects(), stored);
   // A directory the worker made unreadable is its fault, found before
   // host-side Git reads the checkout. Root reads it anyway.

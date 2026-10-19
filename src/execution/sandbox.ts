@@ -296,7 +296,7 @@ export interface CommandSandboxPolicy {
    */
   packageInputsVerified?: true;
   /**
-   * The attempt's base commit. A verified install reaches the network only
+   * The Objective's accepted base. A verified install reaches the network only
    * when its lockfiles and package-manager configuration are byte-identical
    * to this commit's: a candidate's lockfile could otherwise name tarball
    * URLs that carry the repository's contents anywhere.

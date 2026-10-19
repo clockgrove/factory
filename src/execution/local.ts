@@ -2021,6 +2021,10 @@ export class LocalExecutionDriver implements ExecutionDriver {
         "Assigned execution adapter cannot enforce the requested native child-agent prohibition; no provider call was made",
       );
     this.assertDiscoveryCapability(request.item, harness);
+    // Before any checkpoint or admitted effect, so a refusal leaves no
+    // prepared launch to resolve once the operator fixes the setting.
+    if ((harness as unknown) instanceof CodexHarness)
+      assertCodexCommandsAllowed(this.commandSandbox.required);
     if (request.item.kind === "discovery") {
       if (
         !request.discovery ||

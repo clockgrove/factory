@@ -2629,13 +2629,21 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     } finally {
       console.log = print;
     }
-    assert.equal(logs.length, 4);
+    // The worker output, then each failed controller run of the attempt,
+    // the first failure and its rerun included, with its complete output.
     assert.equal(logs[0], "worker done");
-    assert.match(
-      logs[1],
-      /^Controller validation command 0 failed \(exit 1\) at /,
-    );
-    assert.deepEqual(logs.slice(2), ["readiness marker missing", ""]);
+    const failedRuns = logs.slice(1);
+    assert.ok(failedRuns.length >= 3 && failedRuns.length % 3 === 0);
+    for (let index = 0; index < failedRuns.length; index += 3) {
+      assert.match(
+        failedRuns[index],
+        /^Controller validation command 0 failed \(exit 1\) at /,
+      );
+      assert.deepEqual(failedRuns.slice(index + 1, index + 3), [
+        "readiness marker missing",
+        "",
+      ]);
+    }
     const attempt = work.attempt;
     rereviewWorkItem(config, 1, request);
     Object.assign(state, readState(config.repository, 1));

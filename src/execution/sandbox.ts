@@ -486,6 +486,20 @@ function systemMounts(): string[] {
 const ISOLATION = ["--unshare-all", "--die-with-parent", "--cap-drop", "ALL"];
 
 /**
+ * Holds a networked command inside its sandbox until Factory writes `go` to
+ * fd 4, once pasta configured the namespace. bubblewrap's own `--block-fd`
+ * takes end of file as release, so a Factory that died during the hold
+ * would release the command, in a sandbox that outlives it; here end of
+ * file, or anything but `go`, runs nothing (exit 125) and the sandbox ends.
+ */
+const RELEASE_GATE = [
+  "/bin/sh",
+  "-c",
+  'IFS= read -r go <&4; exec 4<&-; [ "$go" = go ] || exit 125; exec "$@"',
+  "gate",
+];
+
+/**
  * The sandbox's /dev. bubblewrap's `--dev` also mounts a devpts, for which
  * it runs the command in a second user namespace, nested in the one that
  * owns the network namespace: pasta, joining the command's, could not
@@ -1134,8 +1148,6 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
       // finished and the command was executed.
       "--json-status-fd",
       "3",
-      // Held until pasta configured the network namespace.
-      ...(pasta ? ["--block-fd", "4"] : []),
       ...ISOLATION,
       ...systemMounts(),
       "--proc",
@@ -1162,6 +1174,7 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
       "--chdir",
       checkout,
       "--",
+      ...(pasta ? RELEASE_GATE : []),
       prlimit,
       `--nproc=${limits.processes}`,
       "--",

@@ -2092,10 +2092,11 @@ async function groupEnds(
 export interface BubblewrapLaunch {
   statusFd: 3;
   /**
-   * User-mode networking for the sandbox's own network namespace.
-   * bubblewrap holds the command on `--block-fd 4` until pasta, run with
-   * these arguments against the sandbox's process, has configured it; stdio
-   * 5 carries `resolver` for `--ro-bind-data 5`.
+   * User-mode networking for the sandbox's own network namespace. The
+   * command waits in the sandbox for `go` on stdio 4, written once pasta,
+   * run with these arguments against the sandbox's process, has configured
+   * it; end of file runs nothing. Stdio 5 carries `resolver` for
+   * `--ro-bind-data 5`.
    */
   network?: { pasta: string; args: string[]; resolver?: string };
 }
@@ -2196,8 +2197,8 @@ const networkFault = (detail: string) =>
   });
 
 /**
- * Configures the network namespace of a sandbox bubblewrap holds on its
- * block fd: runs pasta against the sandbox's first process, a member of
+ * Configures the network namespace of a sandbox whose command waits for
+ * its release on stdio 4: runs pasta against the sandbox's first process, a member of
  * bubblewrap's group, and waits until pasta's pid file says it configured
  * the namespace. `starting` runs before pasta is spawned, and `started`
  * receives it as soon as it runs, so the caller records and settles it
@@ -2412,7 +2413,7 @@ export async function subprocessAsync(
           "pipe",
           "pipe",
           "pipe",
-          // The block fd, and the resolver's data.
+          // The release, and the resolver's data.
           ...(network ? (["pipe"] as const) : []),
           ...(network?.resolver !== undefined ? (["pipe"] as const) : []),
         ],
@@ -2448,8 +2449,9 @@ export async function subprocessAsync(
         // bubblewrap's identity stays recorded; its group holds the init.
       }
     });
-  // Writing or closing it releases the held command: only once pasta
-  // configured its network, or once bubblewrap's group is proven gone.
+  // `go` on it releases the held command, only once pasta configured its
+  // network; closing it runs nothing, and is left until bubblewrap's group
+  // is proven gone.
   const stdio = child.stdio as unknown as (Writable | null | undefined)[];
   const block = network ? stdio[4] : undefined;
   block?.on("error", () => undefined);
@@ -2583,6 +2585,7 @@ export async function subprocessAsync(
   }
   let pasta: PastaProcess | undefined;
   let networkTask: Promise<void> | undefined;
+  let released = false;
   if (network && sandbox && !inputFailed) {
     if (!owned) {
       inputFailed = true;
@@ -2613,7 +2616,9 @@ export async function subprocessAsync(
         },
       )
         .then((connected) => {
-          if (connected) block?.end("1");
+          if (!connected) return;
+          released = true;
+          block?.end("go\n");
         })
         .catch((cause) => {
           // Killed with its group, never released: it never runs offline.
@@ -2662,8 +2667,8 @@ export async function subprocessAsync(
     }
   }
   if (network) {
-    // bubblewrap's group is gone, with any command it held: the block fd
-    // releases nothing now. pasta goes with the namespace it served.
+    // bubblewrap's group is gone, with any command it held: closing its
+    // release now runs nothing. pasta goes with the namespace it served.
     await networkTask;
     if (aborted ? child.pid : owned) {
       block?.destroy();
@@ -2738,6 +2743,10 @@ export async function subprocessAsync(
         fix: "Keep every sandbox mount source (the PATH's toolchains, sandbox.readOnlyPaths, sandbox.packageStore, the checkout) in place while Factory runs, and let bubblewrap create namespaces on this host",
       });
   }
+  // A networked command never released ran nothing (its gate exits 125):
+  // the host's fault, never the command's.
+  if (network && !released)
+    throw networkFault(`it was never released (bubblewrap exit ${status})`);
   return {
     status,
     stdout: Buffer.concat(output.stdout).toString("utf8"),

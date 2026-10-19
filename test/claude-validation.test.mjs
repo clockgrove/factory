@@ -1630,6 +1630,80 @@ test("a sandbox whose network pasta cannot set up never runs its command", {
   assert.equal(existsSync(join(root, "worktree", "ran")), false);
 });
 
+test("a networked install whose spawner dies during the hold never runs", {
+  skip:
+    process.geteuid?.() === 0 ||
+    !commandSandboxAvailability().available ||
+    !installNetwork.available,
+}, async (t) => {
+  const root = sandboxRoot(t);
+  // A pasta that starts 3 seconds late, and says when it was started.
+  const wrappers = outsideTemporary();
+  t.after(() => rmSync(wrappers, { recursive: true, force: true }));
+  const started = join(root, "pasta.pid");
+  writeFileSync(
+    join(wrappers, "pasta"),
+    [
+      "#!/bin/sh",
+      `case "$1" in --help) exec '${installNetwork.executable}' "$@";; esac`,
+      `echo $$ > '${started}'`,
+      "sleep 3",
+      `exec '${installNetwork.executable}' "$@"`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(wrappers, "pasta"), 0o755);
+  // A process that launches a networked install as validation does, and
+  // records bubblewrap's identity.
+  const dist = new URL("../dist/", import.meta.url).href;
+  const script = join(root, "spawner.mjs");
+  const owner = join(root, "owner.json");
+  writeFileSync(
+    script,
+    [
+      'import { writeFileSync } from "node:fs";',
+      `import { STRICT_COMMAND_SANDBOX, sandboxedCommand } from "${dist}execution/sandbox.js";`,
+      `import { subprocessAsync } from "${dist}process.js";`,
+      "const [root, wrappers, owner] = process.argv.slice(2);",
+      "const path = process.env.PATH;",
+      "process.env.PATH = `${wrappers}:${path}`;",
+      "const launch = sandboxedCommand({ command: 'touch ran', checkout: `${root}/worktree`, temporary: `${root}/tmp`, home: `${root}/home`, env: { PATH: path }, network: true, packageInstall: true, policy: { ...STRICT_COMMAND_SANDBOX, network: 'package-install' } });",
+      "await subprocessAsync(launch.file, launch.args, { cwd: `${root}/worktree`, env: launch.env, bubblewrap: launch.bubblewrap, spawned: (spawned) => writeFileSync(owner, JSON.stringify(spawned)) });",
+    ].join("\n"),
+  );
+  const spawner = spawn(process.execPath, [script, root, wrappers, owner], {
+    stdio: "ignore",
+  });
+  const wait = () => new Promise((resolve) => setTimeout(resolve, 20));
+  // During the hold: bubblewrap runs and pasta is still starting.
+  while (!existsSync(started)) {
+    assert.equal(spawner.exitCode, null);
+    await wait();
+  }
+  const sandbox = JSON.parse(readFileSync(owner, "utf8"));
+  const pasta = Number(readFileSync(started, "utf8"));
+  const pastaIdentity = linuxProcessIdentity(pasta);
+  assert.ok(pastaIdentity);
+  spawner.kill("SIGKILL");
+  // The sandbox ends without its command, and the late pasta with it.
+  const alive = () => {
+    const current = linuxProcessIdentity(pasta);
+    return (
+      current?.startTime === pastaIdentity.startTime && current.state !== "Z"
+    );
+  };
+  const deadline = Date.now() + 15_000;
+  while (
+    (nativeProcessDisposition(sandbox) !== "settled" || alive()) &&
+    Date.now() < deadline
+  )
+    await wait();
+  assert.equal(nativeProcessDisposition(sandbox), "settled");
+  assert.equal(alive(), false);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(existsSync(join(root, "worktree", "ran")), false);
+});
+
 test("no toolchain or read-only path mounts the host's /tmp or its sockets", {
   skip:
     process.geteuid?.() === 0 ||

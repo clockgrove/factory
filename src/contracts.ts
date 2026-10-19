@@ -1277,6 +1277,11 @@ export interface DeliveryObservation {
    */
   failedChecks?: FailedCheck[];
   /**
+   * Check names on this exact head still running or pending, and required
+   * checks not reported yet.
+   */
+  pendingChecks?: string[];
+  /**
    * Authenticated target protection readiness; absent only on custom
    * gateways. `ready`: GitHub allows the merge, even with checks the
    * repository does not require still running or failed; `conflict`: the

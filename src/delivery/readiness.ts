@@ -131,7 +131,7 @@ export function deliveryReadiness(
   // Checks the repository does not require still running: GitHub would
   // merge now, but their result could still be a failure.
   if (protection === "waiting" || observation.checks === "pending")
-    return `Awaiting checks and protection readiness on PR #${pullRequest}`;
+    return `Awaiting checks and protection readiness on PR #${pullRequest}${observation.pendingChecks?.length ? `: ${observation.pendingChecks.join(", ")}` : ""}`;
   return undefined;
 }
 

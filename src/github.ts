@@ -2354,12 +2354,6 @@ export class RealGitHubGateway implements GitHubGateway {
       if (listed.length < 100) break;
     }
     const statuses = combined;
-    const failing =
-      runs.some(
-        (run) =>
-          run.conclusion !== null &&
-          !["success", "neutral", "skipped"].includes(run.conclusion),
-      ) || ["error", "failure"].includes(statuses.state);
     // Every check on the head that ended without success, required or not
     // (#1637). A cancelled (or stale) run whose name has another run on the
     // head that succeeded or is still running was superseded, not failed.
@@ -2407,6 +2401,9 @@ export class RealGitHubGateway implements GitHubGateway {
             ? { url: status.target_url }
             : {}),
         });
+    // From the evidence above: a superseded cancelled run drops out, and its
+    // replacement, still running, keeps the checks pending.
+    const failing = failedChecks.length > 0;
     const checksByName = new Map<string, typeof runs>();
     for (const run of runs) {
       const group = checksByName.get(run.name);
@@ -2505,7 +2502,25 @@ export class RealGitHubGateway implements GitHubGateway {
       ...runs.map((run) => run.name),
       ...contexts.map((status) => status.context),
     ]);
-    const unreported = requiredChecks.some((name) => !reported.has(name));
+    const unreportedChecks = requiredChecks.filter(
+      (name) => !reported.has(name),
+    );
+    const unreported = unreportedChecks.length > 0;
+    // Checks still running, statuses still pending, and required checks
+    // not reported yet, by name for the CI wait.
+    const pendingChecks = [
+      ...new Set(
+        [
+          ...runs
+            .filter((run) => run.status !== "completed")
+            .map((run) => run.name),
+          ...contexts
+            .filter((status) => status.state === "pending")
+            .map((status) => status.context),
+          ...unreportedChecks,
+        ].filter((name): name is string => typeof name === "string" && !!name),
+      ),
+    ];
     if (unreported && mergeReadiness === "ready") mergeReadiness = "waiting";
     // Every name with any run (whatever its state or conclusion) or status
     // on the exact head; both reads above are of that commit.
@@ -2523,6 +2538,7 @@ export class RealGitHubGateway implements GitHubGateway {
       namedChecks,
       ...(reportedChecks.length ? { reportedChecks } : {}),
       ...(failedChecks.length ? { failedChecks } : {}),
+      ...(pendingChecks.length ? { pendingChecks } : {}),
       ...(mergeReadiness ? { mergeReadiness } : {}),
       ...(!detail.merged && detail.state === "closed" && detail.closed_at
         ? { closedAt: detail.closed_at }

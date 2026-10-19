@@ -221,9 +221,10 @@ async function hydrateSelectedLfsBytes(
 }
 
 /**
- * A failed command's output as its recorded failure keeps it: the start and
- * the end, where test runners report failures (#1596). The complete output
- * stays in the private diagnostics log (`factory diagnostics --logs ITEM`).
+ * A failed command's output as the Work Item error shows it: the start and
+ * the end, where test runners report failures (#1596). The failure's
+ * evidence keeps the complete output for diagnosis and the next attempt, and
+ * `factory diagnostics --logs ITEM` prints it from the private diagnostics log.
  * The tail is at least the 8,000 characters worker Validate shows.
  */
 const FAILED_OUTPUT_HEAD = 2_000;
@@ -698,7 +699,9 @@ export async function validateCheckout(
           }),
         });
       if (result.status !== 0) {
-        const detail = `Validation command failed (${result.status}): ${check}: ${failedOutput(output)}`;
+        const failed = `Validation command failed (${result.status}): ${check}: `;
+        // People read the bounded form; diagnosis reads the complete output.
+        const detail = `${failed}${failedOutput(output)}`;
         // The dependency install is the controller's own bootstrap step. When
         // the candidate left every manifest and lockfile as at the accepted
         // base, the same install worked there, so its failure is the
@@ -712,6 +715,7 @@ export async function validateCheckout(
         throw new CandidateValidationFailure(
           detail,
           retainFailedValidation && !preparing ? partial : undefined,
+          `${failed}${output}`,
         );
       }
       if (!preparing && contentStore && reviewArtifacts.length) {

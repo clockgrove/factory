@@ -515,22 +515,27 @@ test("independent prepared change is replayed on the observed integration head",
       actualFailure = error;
     }
     recordWorkFailure(commandState, commandItem.id, actualFailure);
-    // The recorded failure keeps the output's start and its end, where the
-    // failing test is, around a marker; diagnostics keep the complete output.
-    const recorded = commandWork.recovery.failure.detail;
-    assert.equal(recorded, actualFailure.message);
+    // The Work Item error people read keeps the output's start and its end,
+    // where the failing test is, around a marker (#1596).
+    const shown = actualFailure.message;
     assert.ok(
-      recorded.startsWith(
+      shown.startsWith(
         "Validation command failed (1): node z-failing.test.mjs: build and check noise 0\n",
       ),
     );
-    assert.match(recorded, /\n\[… \d+ characters of output omitted …\]\n/);
+    assert.match(shown, /\n\[… \d+ characters of output omitted …\]\n/);
     assert.ok(
-      recorded.endsWith(
+      shown.endsWith(
         "build and check noise 1999\nz-failing.test.mjs:7: retained candidate failure\n",
       ),
     );
-    assert.ok(recorded.length < 10_200);
+    assert.ok(shown.length < 10_200);
+    // The recorded failure, which diagnosis reads, keeps the complete output.
+    const recorded = commandWork.recovery.failure.detail;
+    assert.equal(
+      recorded,
+      `Validation command failed (1): node z-failing.test.mjs: ${Array.from({ length: 2000 }, (_, i) => `build and check noise ${i}\n`).join("")}z-failing.test.mjs:7: retained candidate failure\n`,
+    );
     assert.equal(
       commandWork.failedValidation.evidence.commands[0].passed,
       false,

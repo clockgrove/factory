@@ -38,13 +38,8 @@ import {
   STRICT_COMMAND_SANDBOX,
   sandboxedCommand,
 } from "../dist/execution/sandbox.js";
-import { killGroup, launchWorker } from "../dist/execution/worker-process.js";
 import { faultOf } from "../dist/fault.js";
-import {
-  linuxProcessIdentity,
-  processGroupExists,
-  subprocessAsync,
-} from "../dist/process.js";
+import { subprocessAsync } from "../dist/process.js";
 import { validateTree, validateWorkItem } from "../dist/validation.js";
 
 const status = (worktree) =>
@@ -923,117 +918,6 @@ test("a sandbox that cannot be set up is a configuration fault, not the command'
   assert.match(error.message, /Can't find source path/);
 });
 
-test("a SIGKILLed worker's sandboxed command is gone before its group is proved gone", {
-  skip: new URL("..", import.meta.url).pathname.startsWith(`${tmpdir()}/`),
-}, async (t) => {
-  const root = sandboxRoot(t);
-  const vanishing = outsideTemporary();
-  t.after(() => rmSync(vanishing, { recursive: true, force: true }));
-  const dist = new URL("../dist/", import.meta.url).href;
-  // A worker as launchWorker starts one: its own session and group, no
-  // terminal. Its sandboxes stay in that group, as the Claude worker's do.
-  const script = join(root, "worker.mjs");
-  writeFileSync(
-    script,
-    `import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { faultOf } from "${dist}fault.js";
-import { keepSandboxesInProcessGroup, subprocessAsync } from "${dist}process.js";
-import { sandboxedCommand, STRICT_COMMAND_SANDBOX } from "${dist}execution/sandbox.js";
-keepSandboxesInProcessGroup();
-const [requestPath, resultPath] = process.argv.slice(2);
-const { root, vanishing } = JSON.parse(readFileSync(requestPath, "utf8"));
-const launch = (command, readOnlyPaths = []) => sandboxedCommand({
-  command, checkout: join(root, "worktree"), temporary: join(root, "tmp"),
-  home: join(root, "home"), env: { PATH: process.env.PATH }, network: false,
-  packageInstall: false, policy: { ...STRICT_COMMAND_SANDBOX, readOnlyPaths },
-});
-const run = (built, signal) => subprocessAsync(built.file, built.args, {
-  cwd: join(root, "worktree"), env: built.env, bubblewrap: built.bubblewrap, signal,
-});
-const report = {};
-report.exit = (await run(launch("exit 7"))).status;
-const unmounted = launch("exit 0", [vanishing]);
-rmSync(vanishing, { recursive: true });
-report.setup = await run(unmounted).catch((error) => faultOf(error).kind);
-report.timeout = await run(launch("sleep 61.5 & sleep 61.5"), AbortSignal.timeout(1_000))
-  .catch((error) => error.message);
-// Proved gone before the run returned.
-report.left = execFileSync("ps", ["-eo", "args"], { encoding: "utf8" })
-  .split("\\n").filter((line) => line.trim() === "sleep 61.5").length;
-writeFileSync(join(root, "report.json"), JSON.stringify(report));
-await run(launch("sleep 62.5 & sleep 62.5"));
-writeFileSync(resultPath, "{}");
-`,
-  );
-  const worker = await launchWorker({
-    root: join(root, "harness"),
-    identity: "sandboxed",
-    input: { root, vanishing },
-    script,
-    env: process.env,
-    label: "Test",
-  });
-  t.after(() => killGroup(worker.pid, "Test").catch(() => undefined));
-  const members = () =>
-    readdirSync("/proc")
-      .filter((name) => /^\d+$/.test(name))
-      .map((name) => {
-        try {
-          return {
-            pid: Number(name),
-            ...linuxProcessIdentity(Number(name)),
-            args: readFileSync(`/proc/${name}/cmdline`, "utf8"),
-          };
-        } catch {
-          return { pid: Number(name) };
-        }
-      })
-      .filter((entry) => entry.group === worker.pid && entry.state !== "Z");
-  const deadline = Date.now() + 60_000;
-  let sleeps = [];
-  while (sleeps.length < 2) {
-    assert.ok(Date.now() < deadline, readFileSync(worker.logPath, "utf8"));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    sleeps = members().filter(
-      (entry) => entry.args === "sleep\u000062.5\u0000",
-    );
-  }
-  // In the worker's group: what it ran in its sandboxes ended as it
-  // reported, with nothing left over once a stopped command returned.
-  assert.deepEqual(
-    JSON.parse(readFileSync(join(root, "report.json"), "utf8")),
-    {
-      exit: 7,
-      setup: "config",
-      timeout: "Owned subprocess cancelled after verified cessation",
-      left: 0,
-    },
-  );
-  // bubblewrap, the sandbox's PID-namespace init and the command are
-  // members of the worker's group, so the controller's proof covers them.
-  const bubblewrap = members().filter((entry) =>
-    entry.args.split("\u0000")[0].endsWith("bwrap"),
-  );
-  const outer = bubblewrap.find((entry) => entry.parent === worker.pid);
-  const init = bubblewrap.find((entry) => entry.parent === outer?.pid);
-  assert.ok(outer && init, JSON.stringify(bubblewrap));
-  const alive = ({ pid, startTime }) => {
-    const current = linuxProcessIdentity(pid);
-    return current?.startTime === startTime && current.state !== "Z";
-  };
-  // SIGKILL only the worker; its sandbox outlives it until its death
-  // signal arrives. The proof that the group is gone (as the harness
-  // gives it) holds only once the init and the command are gone too.
-  process.kill(worker.pid, "SIGKILL");
-  await killGroup(worker.pid, "Test");
-  assert.equal(processGroupExists(worker.pid), false);
-  assert.equal(alive(init), false);
-  assert.equal(alive(outer), false);
-  for (const sleep of sleeps) assert.equal(alive(sleep), false);
-});
-
 test("no toolchain or read-only path mounts the host's /tmp or its sockets", {
   skip:
     process.geteuid?.() === 0 ||
@@ -1091,6 +975,28 @@ test("no toolchain or read-only path mounts the host's /tmp or its sockets", {
     /sandbox\.packageStore .* shared temporary/,
   );
   assert.equal(existsSync(store), false);
+  // So is one reached through a link into /tmp, or under a directory others
+  // can write, before anything is created there.
+  symlinkSync(root, join(tools, "into-tmp"));
+  await assert.rejects(
+    run("true", {
+      ...STRICT_COMMAND_SANDBOX,
+      packageStore: join(tools, "into-tmp", "linked", "store"),
+    }),
+    /sandbox\.packageStore .* shared temporary/,
+  );
+  assert.equal(existsSync(join(root, "linked")), false);
+  const open = join(tools, "open");
+  mkdirSync(open);
+  chmodSync(open, 0o777);
+  await assert.rejects(
+    run("true", {
+      ...STRICT_COMMAND_SANDBOX,
+      packageStore: join(open, "nested", "store"),
+    }),
+    /sandbox\.packageStore .* which others can write/,
+  );
+  assert.equal(existsSync(join(open, "nested")), false);
   const writable = join(tools, "store");
   mkdirSync(writable);
   chmodSync(writable, 0o777);

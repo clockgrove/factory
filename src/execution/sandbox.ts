@@ -29,6 +29,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  relative,
   resolve,
   sep,
 } from "node:path";
@@ -638,8 +639,7 @@ const HOST_DIRECTORY_VARIABLES = [
  * reads bubblewrap's status, so a setup failure is a configuration fault,
  * never the command's failure, and makes bubblewrap the leader of its own
  * session and process group, without a controlling terminal, which it stops
- * and proves gone (in a worker that keeps its sandboxes in its own group, the
- * group is the worker's). A process that leaves the group inside the sandbox
+ * and proves gone. A process that leaves the group inside the sandbox
  * still ends with it: when the command exits, the PID namespace's init exits
  * and the kernel kills the rest first. Throws a configuration fault when the
  * sandbox cannot run, or when Factory runs as root and sandbox.required is
@@ -717,9 +717,26 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   const writable = [checkout, temporary, home];
   let readOnlyStore: string | undefined;
   if (input.policy.packageStore) {
-    // Not in a shared temporary directory, where another user could create
-    // it first (installs write it), and checked before it is created.
-    unsafe(real(input.policy.packageStore), "sandbox.packageStore");
+    // Not in a shared temporary directory, nor in any directory others can
+    // write, where another user could create or replace it first (installs
+    // write it): checked through its nearest existing ancestor's real path
+    // before it is created.
+    let existing = input.policy.packageStore;
+    while (!existsSync(existing)) existing = dirname(existing);
+    const planned = join(
+      realpathSync(existing),
+      relative(existing, input.policy.packageStore),
+    );
+    unsafe(planned, "sandbox.packageStore");
+    for (let parent = dirname(planned); ; parent = dirname(parent)) {
+      const entry = statSync(parent, { throwIfNoEntry: false });
+      if (entry && (entry.mode & 0o022) !== 0 && (entry.mode & 0o1000) === 0)
+        throw configFault(
+          `sandbox.packageStore ${planned} lies in ${parent}, which others can write`,
+          "Point sandbox.packageStore at a directory whose parents only you (or root) can write",
+        );
+      if (parent === dirname(parent)) break;
+    }
     mkdirSync(input.policy.packageStore, { recursive: true, mode: 0o700 });
     const store = realpathSync(input.policy.packageStore);
     unsafe(store, "sandbox.packageStore");

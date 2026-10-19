@@ -691,10 +691,6 @@ export async function validateCheckout(
         temporary: temporaryRoot,
         policy: sandbox,
       });
-      if (overflow)
-        throw new CandidateValidationFailure(
-          `Validation command failed (disk budget): ${check}: ${overflow}`,
-        );
       partial.postCommandStatus = candidateStatus();
       if (!preparing)
         partial.commands.push({
@@ -709,10 +705,11 @@ export async function validateCheckout(
             stoppedLeftovers: result.stoppedLeftovers,
           }),
         });
-      if (result.status !== 0) {
-        const failed = `Validation command failed (${result.status}): ${check}: `;
+      // Past the sandbox's disk budget the command failed, whatever it exited.
+      if (result.status !== 0 || overflow) {
+        const failed = `Validation command failed (${overflow ? "disk budget" : result.status}): ${check}: `;
         // People read the bounded form; diagnosis reads the complete output.
-        const detail = `${failed}${failedOutput(output)}`;
+        const detail = `${failed}${overflow ?? failedOutput(output)}`;
         // The dependency install is the controller's own bootstrap step. When
         // the candidate left every manifest and lockfile as at the accepted
         // base, the same install worked there, so its failure is the
@@ -725,8 +722,11 @@ export async function validateCheckout(
           throw new StepFault(transient(detail, false));
         throw new CandidateValidationFailure(
           detail,
-          retainFailedValidation && !preparing ? partial : undefined,
-          `${failed}${output}`,
+          // Its receipt records the exit, which an overflow passed.
+          retainFailedValidation && !preparing && !overflow
+            ? partial
+            : undefined,
+          `${failed}${overflow ? `${overflow}\n` : ""}${output}`,
         );
       }
       if (!preparing && contentStore && reviewArtifacts.length) {

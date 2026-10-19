@@ -320,6 +320,13 @@ export interface CommandSandboxConfig {
     checkoutMiB?: number;
     /** Files and directories that checkout growth, HOME and TMPDIR may hold together (default 1000000). */
     files?: number;
+    /**
+     * Without private-history gitPersistence checkpoint bounds, the most a
+     * worker's candidate may stage, in MiB (default 2048, GitHub's limit for
+     * one push) and files (default 100000).
+     */
+    candidateMiB?: number;
+    candidateFiles?: number;
     /** RLIMIT_NPROC: processes the operator's account may have while it runs (default 4096). */
     processes?: number;
   };
@@ -330,6 +337,8 @@ export const DEFAULT_SANDBOX_LIMITS = {
   homeMiB: 4096,
   checkoutMiB: 8192,
   files: 1_000_000,
+  candidateMiB: 2048,
+  candidateFiles: 100_000,
   processes: 4096,
 };
 
@@ -376,6 +385,8 @@ export function assertCommandSandboxConfig(value: unknown): void {
       homeMiB: 16,
       checkoutMiB: 16,
       files: 1024,
+      candidateMiB: 16,
+      candidateFiles: 1024,
       processes: 64,
     };
     refuseUnknownFields(limits, Object.keys(minimums), "sandbox.limits");
@@ -427,6 +438,18 @@ export function commandSandboxPolicy(config?: {
     ...(sandbox.packageStore && { packageStore: sandbox.packageStore }),
     readOnlyPaths: [...(sandbox.readOnlyPaths ?? [])],
     limits: { ...DEFAULT_SANDBOX_LIMITS, ...sandbox.limits },
+  };
+}
+
+/** What a worker's candidate may stage without checkpoint bounds. */
+export function sandboxCandidateBounds(policy: CommandSandboxPolicy): {
+  maxBytes: number;
+  maxFiles: number;
+} {
+  const limits = { ...DEFAULT_SANDBOX_LIMITS, ...policy.limits };
+  return {
+    maxBytes: limits.candidateMiB * 1024 ** 2,
+    maxFiles: limits.candidateFiles,
   };
 }
 

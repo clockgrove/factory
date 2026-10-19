@@ -556,7 +556,35 @@ test("host-side Git never enters a nested repository sandboxed code could write"
     /Worker snapshot exceeds the admitted byte bound: 2147483649 bytes, at most 2147483648/,
   );
   git(bounded, "checkout", "--", "a.txt");
+  // sandbox.limits sets them without checkpoint bounds.
+  truncateSync(join(bounded, "a.txt"), 17 * 1024 ** 2);
+  await assert.rejects(
+    runDeclaredValidation(bounded, ["true"], 9, undefined, undefined, {
+      ...STRICT_COMMAND_SANDBOX,
+      limits: { ...STRICT_COMMAND_SANDBOX.limits, candidateMiB: 16 },
+    }),
+    /Worker snapshot exceeds the admitted byte bound: 17825792 bytes, at most 16777216/,
+  );
+  git(bounded, "checkout", "--", "a.txt");
   assert.equal(objects(), stored);
+  // Media under Git LFS's clean filter never count: Git LFS stores their
+  // bytes and Git hashes only a pointer. Without the filter they count.
+  writeFileSync(
+    join(bounded, ".gitattributes"),
+    "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+  );
+  git(bounded, "add", ".gitattributes");
+  git(bounded, "commit", "-qm", "media under LFS");
+  writeFileSync(join(bounded, "media.bin"), Buffer.alloc(2 * 1024 ** 2, 1));
+  await assert.rejects(
+    workerFilesTree(bounded, bounds),
+    /Worker snapshot exceeds the admitted byte bound: 2097152 bytes/,
+  );
+  git(bounded, "config", "filter.lfs.clean", "git-lfs clean -- %f");
+  git(bounded, "config", "filter.lfs.smudge", "git-lfs smudge -- %f");
+  git(bounded, "config", "filter.lfs.process", "git-lfs filter-process");
+  await workerFilesTree(bounded, bounds);
+  rmSync(join(bounded, "media.bin"));
   // A directory the worker made unreadable is its fault, found before
   // host-side Git reads the checkout. Root reads it anyway.
   if (process.getuid() !== 0) {
@@ -803,6 +831,18 @@ test("a run's HOME, TMPDIR and checkout growth stay within the sandbox's disk bu
   const worktree = join(root, "worktree");
   execFileSync("git", ["init", "-q", worktree]);
   writeFileSync(join(worktree, ".gitignore"), "out/\n");
+  // A dependency-free npm project, so the exact install runs offline.
+  const manifest = { name: "budgeted", version: "1.0.0" };
+  writeFileSync(join(worktree, "package.json"), JSON.stringify(manifest));
+  writeFileSync(
+    join(worktree, "package-lock.json"),
+    JSON.stringify({
+      ...manifest,
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": manifest },
+    }),
+  );
   // The repository's own files are not growth: 24 MiB, over every limit.
   writeFileSync(join(worktree, "data.bin"), Buffer.alloc(24 * 1024 ** 2));
   execFileSync("git", ["-C", worktree, "add", "."]);
@@ -843,7 +883,7 @@ test("a run's HOME, TMPDIR and checkout growth stay within the sandbox's disk bu
       undefined,
       [],
       undefined,
-      undefined,
+      read("HEAD"),
       false,
       undefined,
       undefined,
@@ -888,6 +928,17 @@ test("a run's HOME, TMPDIR and checkout growth stay within the sandbox's disk bu
     assert.match(String(failure.message), over);
     assert.equal(faultOf(failure)?.kind, "work");
   }
+  // The dependency install on the accepted base's package inputs is the
+  // environment's, as when it fails (#839): it repeats, charging no repair.
+  const install = await validate([
+    `head -c ${16 * 1024 * 1024 - 512} /dev/zero > "$HOME/fill"`,
+    "npm ci --ignore-scripts",
+  ]).catch((error) => error);
+  assert.match(
+    String(install.message),
+    /^Validation command failed \(disk budget\): npm ci --ignore-scripts: the sandbox disk budget is exceeded: HOME holds/,
+  );
+  assert.equal(faultOf(install)?.kind, "transient");
   // The private /tmp is a sized tmpfs where bubblewrap can size one: there
   // the write itself fails.
   if (commandSandboxAvailability().tmpfsSize)
@@ -918,13 +969,24 @@ test("a run's HOME, TMPDIR and checkout growth stay within the sandbox's disk bu
   );
   assert.equal((await shell("rm -r out")).exitCode, 0);
   // The limits are validated strictly.
-  for (const limits of [{ homeMiB: 8 }, { checkoutMiB: 1.5 }, { disk: 1 }])
+  for (const limits of [
+    { homeMiB: 8 },
+    { checkoutMiB: 1.5 },
+    { candidateMiB: 8 },
+    { disk: 1 },
+  ])
     assert.throws(
       () => assertCommandSandboxConfig({ limits }),
       /sandbox\.limits/,
     );
   assertCommandSandboxConfig({
-    limits: { homeMiB: 16, checkoutMiB: 16, files: 1024 },
+    limits: {
+      homeMiB: 16,
+      checkoutMiB: 16,
+      files: 1024,
+      candidateMiB: 16,
+      candidateFiles: 1024,
+    },
   });
 });
 

@@ -26,10 +26,10 @@ import { assertNoNestedGit, indexHasGitlinks } from "./staged-candidate.js";
 import {
   type CommandSandboxPolicy,
   STRICT_COMMAND_SANDBOX,
+  sandboxCandidateBounds,
 } from "./sandbox.js";
 import {
   assertCandidateBounds,
-  DEFAULT_CANDIDATE_BOUNDS,
   FACTORY_EMAIL,
   privateStagingExclusions,
   workerValidationRoot,
@@ -75,7 +75,7 @@ interface WorkerSnapshot {
    * Work Item's unaccepted output; absent, it stays offline.
    */
   acceptedBaseSha?: string;
-  /** Staged no larger than collection could retain; absent, the default bounds. */
+  /** Staged no larger than collection could retain; absent, sandbox.limits' bounds. */
   candidateBounds?: { maxBytes: number; maxFiles: number };
 }
 
@@ -179,17 +179,13 @@ function bounded(text: string): string {
 /** The tree of the worker's current files without private staging, as collection stages them. */
 export async function workerFilesTree(
   worktree: string,
-  bounds?: WorkerSnapshot["candidateBounds"],
+  bounds = sandboxCandidateBounds(STRICT_COMMAND_SANDBOX),
 ): Promise<string> {
   // Host-side Git must not enter a repository the worker wrote.
   assertNoNestedGit(worktree);
   // Nor hash, into the shared object store, more than collection could retain.
   // A run_command on its own queue may grow a file after this: disk use only.
-  assertCandidateBounds(
-    worktree,
-    bounds ?? DEFAULT_CANDIDATE_BOUNDS,
-    "Worker snapshot",
-  );
+  assertCandidateBounds(worktree, bounds, "Worker snapshot");
   // A separate index from HEAD: the worker's own index never holds what this
   // stages, so a nested repository made meanwhile never becomes a gitlink
   // there for another Git call to enter.
@@ -251,7 +247,10 @@ export async function runDeclaredValidation(
   ran: number;
   failed: number;
 }> {
-  const tree = await workerFilesTree(worktree, snapshot.candidateBounds);
+  const tree = await workerFilesTree(
+    worktree,
+    snapshot.candidateBounds ?? sandboxCandidateBounds(sandbox),
+  );
   let ran = 0;
   let failed = 0;
   const commit = (
@@ -551,7 +550,8 @@ export async function createFactoryValidationMcp(
         try {
           const tree = await workerFilesTree(
             input.worktree,
-            input.snapshot?.candidateBounds,
+            input.snapshot?.candidateBounds ??
+              sandboxCandidateBounds(input.sandbox ?? STRICT_COMMAND_SANDBOX),
           );
           finalTreeValidated =
             passedTrees.has(tree) &&

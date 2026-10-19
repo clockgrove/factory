@@ -1234,7 +1234,7 @@ async function main(): Promise<void> {
 
 // Node opens its inspector on an unhandled SIGUSR1. Factory takes the signal
 // only as a run's cancellation, so outside a run's handler it does nothing.
-process.on("SIGUSR1", () => {});
+process.on("SIGUSR1", () => undefined);
 
 main().catch((error: unknown) => {
   if (error instanceof ControllerCommandIncompleteError && error.returned)

@@ -84,6 +84,8 @@ interface StatusItemView extends WaitView {
   attemptKind?: string | null;
   pullRequest: number | null;
   acceptancePending: PendingDecisionView | null;
+  /** The result's first controller validation failed and its one rerun passed. */
+  flakyValidation?: { command: string | null; exitCode: number | null } | null;
   candidateAssetSets: string[];
   assetSets?: {
     id: string;
@@ -1657,7 +1659,10 @@ export function renderStatusText(
             ? item.step === "approve-result"
               ? "criterion decision"
               : "asset selection"
-            : (wait?.detail ?? "");
+            : (wait?.detail ??
+              (item.flakyValidation
+                ? `possibly flaky: validation${item.flakyValidation.command ? ` ${short(item.flakyValidation.command, 50)}` : ""} failed once, rerun passed`
+                : ""));
       return [
         item.id,
         `${item.status}${item.step ? ` (${item.step})` : ""}${itemAttempt(item)}`,

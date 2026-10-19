@@ -39,6 +39,7 @@ import {
 import { assertPublicationIntents } from "./delivery/publication.js";
 import { assertPreIntegrationCheckShape } from "./delivery/readiness.js";
 import {
+  assertFailedValidationEvidence,
   assertFailedValidationRecord,
   type FailedValidationRecord,
 } from "./failed-validation.js";
@@ -193,6 +194,17 @@ export interface WorkState {
   replacedHeads?: string[];
   treeSha?: string;
   validation?: ValidationEvidence;
+  /**
+   * The worker's own Validate passed on this collected tree with these
+   * commands, so a controller failure of it is run once more before it
+   * stands (#1595). `failure` is that first failed run, saved before the
+   * rerun starts.
+   */
+  validationRerun?: {
+    treeSha: string;
+    commands: string[];
+    failure?: import("./validation-evidence.js").FirstValidationFailure;
+  };
   /** Partial unsuccessful validation, separate from pass-only acceptance evidence. */
   failedValidation?: FailedValidationRecord;
   acceptancePending?: AcceptancePending;
@@ -935,9 +947,25 @@ function acceptancePending(
   }
 }
 
+/** A failed first run of exactly this tree (#1595). */
+function firstValidationFailure(
+  value: unknown,
+  treeSha: string,
+  label: string,
+): void {
+  const failure = record(value, label);
+  string(failure.detail, `${label}.detail`);
+  if (failure.evidence === undefined) return;
+  assertFailedValidationEvidence(failure.evidence);
+  if (failure.evidence.treeSha !== treeSha)
+    throw new Error(`${label} is not bound to its tree`);
+}
+
 function validationEvidence(value: unknown, label: string): string[] {
   const evidence = record(value, label);
   const treeSha = sha(evidence.treeSha, `${label}.treeSha`);
+  if (evidence.flakyRerun !== undefined)
+    firstValidationFailure(evidence.flakyRerun, treeSha, `${label}.flakyRerun`);
   assertRetainedReviewEvidence(evidence as unknown as ValidationEvidence);
   assertSelectedLfsValidation(evidence.selectedLfs, treeSha);
   assertValidationWorktreeObservation(
@@ -1481,6 +1509,18 @@ export function parseFactoryState(
         item.acceptanceDecisions,
         `${id}.acceptanceDecisions`,
       );
+    if (item.validationRerun !== undefined) {
+      const rerun = record(item.validationRerun, `${id}.validationRerun`);
+      const treeSha = sha(rerun.treeSha, `${id}.validationRerun.treeSha`);
+      if (!strings(rerun.commands, `${id}.validationRerun.commands`).length)
+        throw new Error(`Work Item ${id} validationRerun lacks its commands`);
+      if (rerun.failure !== undefined)
+        firstValidationFailure(
+          rerun.failure,
+          treeSha,
+          `${id}.validationRerun.failure`,
+        );
+    }
     if (item.validation !== undefined) {
       if (record(item.validation, `${id}.validation`).preparation !== undefined)
         throw new Error(

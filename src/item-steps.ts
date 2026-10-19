@@ -20,7 +20,7 @@ import {
 } from "./recovery-checkpoint.js";
 import { workerContext } from "./execution/checkpoint.js";
 import { cancelledFault, faultOf, workFault } from "./fault.js";
-import { repeatKey, StepPaused, step } from "./step.js";
+import { assertStepAdmission, repeatKey, StepPaused, step } from "./step.js";
 import type { FactoryState } from "./state.js";
 import {
   agentSessionContinuation,
@@ -42,6 +42,7 @@ import {
   reviewAcceptance,
   type ValidationEvidence,
 } from "./validation.js";
+import { CandidateValidationFailure } from "./work-repair.js";
 
 interface ItemStep {
   state: FactoryState;
@@ -276,14 +277,55 @@ export function workerIdentity(work: FactoryState["work"][string]): string {
   return work.worker ? `${work.attempt}-${work.worker}` : work.attempt!;
 }
 
-/** Validate the exact result; a stale validation worktree is replaced. */
+/**
+ * Validate the exact result; a stale validation worktree is replaced. When
+ * the worker's own Validate passed on this same tree with the same commands
+ * (`validationRerun`), a failed run is saved and validation runs once more
+ * in a fresh checkout before the failure stands (#1595): a pass then
+ * carries the failed run as `flakyRerun`, a second failure carries both
+ * runs. A restart after the save runs only the rerun.
+ */
 export function validateItem(
   args: ItemStep & { validate: () => Promise<ValidationEvidence> },
 ): Promise<ValidationEvidence> {
+  const work = args.state.work[args.item.id]!;
+  const commands = args.item.validation.map((check) => check.command);
   return step(
     args.state,
     { scope: scopeOf(args), name: "validate" },
-    () => args.validate(),
+    async () => {
+      for (;;) {
+        const rerun =
+          work.validationRerun?.treeSha === work.treeSha &&
+          isDeepStrictEqual(work.validationRerun?.commands, commands)
+            ? work.validationRerun
+            : undefined;
+        const first = rerun?.failure;
+        try {
+          const evidence = await args.validate();
+          return first
+            ? { ...evidence, flakyRerun: structuredClone(first) }
+            : evidence;
+        } catch (error) {
+          if (!rerun || !(error instanceof CandidateValidationFailure))
+            throw error;
+          if (first)
+            throw new CandidateValidationFailure(
+              `Validation failed twice on tree ${work.treeSha}, which the worker's Validate passed with the same commands.\nFirst run: ${first.detail}\nRerun: ${error.message}`,
+              error.failedValidation,
+            );
+          rerun.failure = {
+            detail: error.message,
+            ...(error.failedValidation && {
+              evidence: structuredClone(error.failedValidation),
+            }),
+          };
+          args.save();
+          // Between runs is a safe point: a pause resumes at the rerun.
+          assertStepAdmission();
+        }
+      }
+    },
     { save: args.save, signal: args.signal, pause: args.pause },
   );
 }

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ContentRef, ValidationCommandReceipt } from "./contracts.js";
+import type { FailedValidationEvidence } from "./failed-validation.js";
 import type { ReviewArtifactEvidence } from "./review-artifacts.js";
 import type { HydrationReceipt } from "./media.js";
 import type {
@@ -42,6 +43,17 @@ export interface ValidationEvidence {
   criteria?: CriterionEvidence[];
   /** Bounded complete literal entries cited by this tree's successful review. */
   reviewEvidence?: RetainedReviewLiteral[];
+  /**
+   * The controller's first run of this tree failed and its one rerun passed
+   * (#1595): a flaky or environment-sensitive check. Never acceptance.
+   */
+  flakyRerun?: FirstValidationFailure;
+}
+
+/** The controller's failed first run of a tree the worker's Validate passed. */
+export interface FirstValidationFailure {
+  detail: string;
+  evidence?: FailedValidationEvidence;
 }
 
 /**

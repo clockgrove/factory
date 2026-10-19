@@ -636,6 +636,12 @@ export function repairEvidence(
           ? "available"
           : "unavailable",
       record: work.failedValidation ?? null,
+      // The same tree's earlier failed run, before its one rerun (#1595).
+      ...(work.failedValidation &&
+      work.validationRerun?.failure &&
+      work.validationRerun.treeSha === work.treeSha
+        ? { firstRun: work.validationRerun.failure.evidence ?? null }
+        : {}),
       ...(failure.semanticRefusal
         ? { passingValidation: work.validation }
         : {}),

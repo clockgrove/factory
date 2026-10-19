@@ -12,7 +12,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
-import { UnsettledSubprocessError } from "../process.js";
+import { recordSandboxesIn, UnsettledSubprocessError } from "../process.js";
 import {
   type AgentSessionRef,
   AuthenticationRequiredError,
@@ -82,6 +82,7 @@ import { WorkerInteractionCapture } from "./interaction-capture.js";
 import { indexHasGitlinks } from "./staged-candidate.js";
 import { workerShellRoot } from "./local.js";
 import { toolActivity } from "./tool-activity.js";
+import { workerSandboxRecords } from "./worker-process.js";
 
 function progressEvent(
   message: SDKMessage,
@@ -326,6 +327,10 @@ async function main(): Promise<void> {
   const input = JSON.parse(
     readFileSync(inputPath, "utf8"),
   ) as ClaudeWorkerInput;
+  // The shell's and Validate's sandboxes run in groups of their own, outside
+  // this worker's: the controller stops them by these records once the
+  // worker is gone (#1575).
+  recordSandboxesIn(workerSandboxRecords(resultPath));
   const redactionValues = claudeAuthenticationValues(process.env);
   const progressPath = resultPath.replace(
     /\.result\.json$/,

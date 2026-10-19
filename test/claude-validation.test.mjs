@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -39,8 +39,21 @@ import {
   STRICT_COMMAND_SANDBOX,
   sandboxedCommand,
 } from "../dist/execution/sandbox.js";
+import { ClaudeAgentSdkHarness } from "../dist/execution/claude.js";
+import {
+  launchWorker,
+  sandboxBubblewrap,
+  workerSandboxRecords,
+} from "../dist/execution/worker-process.js";
 import { faultOf } from "../dist/fault.js";
-import { subprocessAsync } from "../dist/process.js";
+import {
+  linuxProcessIdentity,
+  nativeProcessOwner,
+  processGroupExists,
+  stopRecordedSandboxes,
+  subprocessAsync,
+  UnsettledSubprocessError,
+} from "../dist/process.js";
 import { validateTree, validateWorkItem } from "../dist/validation.js";
 
 const status = (worktree) =>
@@ -1123,6 +1136,168 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
   assert.ok(long.output.length < 300_000);
   assert.match(long.output, /bytes of output omitted/);
   assert.match(long.output, /last\n$/);
+});
+
+test("a killed worker's command sandbox is stopped and proved gone before the worker is ceased", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-sandbox-cessation-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // A worker launched as the Claude worker is: it records its sandboxes as
+  // the Claude worker does, then its shell runs one command.
+  const dist = new URL("../dist/", import.meta.url).href;
+  const script = join(root, "worker.mjs");
+  writeFileSync(
+    script,
+    [
+      'import { readFileSync } from "node:fs";',
+      `import { recordSandboxesIn } from "${dist}process.js";`,
+      `import { runSandboxedCommand } from "${dist}execution/claude-shell.js";`,
+      `import { STRICT_COMMAND_SANDBOX } from "${dist}execution/sandbox.js";`,
+      `import { workerSandboxRecords } from "${dist}execution/worker-process.js";`,
+      "const [requestPath, resultPath] = process.argv.slice(2);",
+      'const { worktree, command } = JSON.parse(readFileSync(requestPath, "utf8"));',
+      "recordSandboxesIn(workerSandboxRecords(resultPath));",
+      "const result = await runSandboxedCommand({ worktree, root: `${worktree}.shell`, command, timeoutMs: 120_000, policy: STRICT_COMMAND_SANDBOX });",
+      "process.exitCode = result.exitCode ?? 1;",
+    ].join("\n"),
+  );
+  const harnessRoot = join(root, "harness");
+  const harness = new ClaudeAgentSdkHarness(harnessRoot, {});
+  let attempts = 0;
+  const start = async (command) => {
+    const identity = `attempt-${++attempts}`;
+    const worktree = join(root, identity);
+    execFileSync("git", ["init", "-q", worktree]);
+    const data = await launchWorker({
+      root: harnessRoot,
+      identity,
+      input: { worktree, command },
+      script,
+      env: process.env,
+      label: "Test",
+    });
+    const cancel = () => harness.cancel({ identity, data });
+    return {
+      data,
+      worktree,
+      records: workerSandboxRecords(data.resultPath),
+      cancel,
+    };
+  };
+  const alive = ({ pid, startTime }) => {
+    const current = linuxProcessIdentity(pid);
+    return current?.startTime === startTime && current.state !== "Z";
+  };
+  const wait = () => new Promise((resolve) => setTimeout(resolve, 20));
+  // The command runs, and its record names bubblewrap and the init.
+  const running = async (worker) => {
+    for (;;) {
+      if (existsSync(join(worker.worktree, "started"))) {
+        const names = readdirSync(worker.records).filter((name) =>
+          name.endsWith(".json"),
+        );
+        assert.equal(names.length, 1);
+        const record = JSON.parse(
+          readFileSync(join(worker.records, names[0]), "utf8"),
+        );
+        if (record.init) return record;
+      }
+      assert.ok(alive(worker.data), readFileSync(worker.data.logPath, "utf8"));
+      await wait();
+    }
+  };
+  const gone = (record) =>
+    !alive(record.owner) &&
+    !alive(record.init) &&
+    !processGroupExists(record.owner.group) &&
+    !execFileSync("ps", ["-eo", "args"], { encoding: "utf8" })
+      .split("\n")
+      .some((line) => line.trim() === "sleep 31.75");
+  const command = "touch started && exec sleep 31.75";
+
+  // The worker is SIGKILLed while its command runs. The sandbox is detached
+  // in bubblewrap's own group, so the worker's group never covers it; the
+  // cancel finds its record, and returns with the sandbox gone and the record
+  // removed. --die-with-parent usually ends the sandbox first, so this does
+  // not show the race the proof closes; the next case shows the stop itself.
+  const killed = await start(command);
+  const record = await running(killed);
+  assert.equal(record.owner.group, record.owner.pid);
+  assert.notEqual(record.owner.group, killed.data.pid);
+  assert.equal(linuxProcessIdentity(record.init.pid).group, record.owner.group);
+  process.kill(killed.data.pid, "SIGKILL");
+  await killed.cancel();
+  assert.ok(gone(record));
+  assert.equal(existsSync(killed.records), false);
+
+  // The controller's proof itself stops a live sandbox by its verified
+  // identity: here the worker still runs, so nothing else would end it.
+  const live = await start(command);
+  const liveRecord = await running(live);
+  await stopRecordedSandboxes(live.records, sandboxBubblewrap);
+  assert.ok(gone(liveRecord));
+  await live.cancel();
+
+  // A recorded identity that no longer matches (the pid now names another
+  // process, which leads its own group) is never signalled: the outcome is
+  // unknown until that group is gone. So is one that matches but runs
+  // another executable than bubblewrap, and, within this boot, a spawn the
+  // worker may have been killed during, before it recorded bubblewrap's
+  // identity. Such a spawn from an earlier boot is gone.
+  const other = spawn("sleep", ["29.25"], { detached: true, stdio: "ignore" });
+  t.after(() => {
+    try {
+      process.kill(-other.pid, "SIGKILL");
+    } catch {}
+  });
+  const owner = nativeProcessOwner(other.pid);
+  const stale = String(Number(owner.startTime) - 1);
+  const reused = join(root, "reused.sandboxes");
+  mkdirSync(reused);
+  writeFileSync(
+    join(reused, "a.json"),
+    JSON.stringify({
+      owner: { ...owner, startTime: stale },
+      init: { pid: other.pid, startTime: stale },
+    }),
+  );
+  const unknown = (error) => error instanceof UnsettledSubprocessError;
+  const stop = (directory) =>
+    stopRecordedSandboxes(directory, sandboxBubblewrap);
+  await assert.rejects(stop(reused), unknown);
+  assert.ok(alive(owner));
+  assert.ok(existsSync(join(reused, "a.json")));
+  const otherExecutable = join(root, "other-executable.sandboxes");
+  mkdirSync(otherExecutable);
+  writeFileSync(join(otherExecutable, "a.json"), JSON.stringify({ owner }));
+  await assert.rejects(stop(otherExecutable), unknown);
+  assert.ok(alive(owner));
+  assert.ok(existsSync(join(otherExecutable, "a.json")));
+  const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  const inFlight = join(root, "in-flight.sandboxes");
+  mkdirSync(inFlight);
+  writeFileSync(join(inFlight, "a.json"), JSON.stringify({ boot }));
+  await assert.rejects(stop(inFlight), unknown);
+  assert.ok(existsSync(join(inFlight, "a.json")));
+  const earlierBoot = join(root, "earlier-boot.sandboxes");
+  mkdirSync(earlierBoot);
+  writeFileSync(
+    join(earlierBoot, "a.json"),
+    JSON.stringify({ boot: "00000000-0000-0000-0000-000000000000" }),
+  );
+  await stop(earlierBoot);
+  assert.equal(existsSync(earlierBoot), false);
+  process.kill(-other.pid, "SIGKILL");
+  while (processGroupExists(owner.group)) await wait();
+  await stop(reused);
+  assert.equal(existsSync(reused), false);
+
+  // A command that ends normally: the worker removes its record itself.
+  const done = await start("touch started");
+  while (alive(done.data)) await wait();
+  assert.ok(existsSync(join(done.worktree, "started")));
+  assert.deepEqual(readdirSync(done.records), []);
+  await done.cancel();
+  assert.equal(existsSync(done.records), false);
 });
 
 // One command as validation launches it, and its run.

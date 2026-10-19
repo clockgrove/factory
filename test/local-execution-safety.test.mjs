@@ -803,14 +803,24 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
         consumerIndices: [],
         criterionIndex: 0,
       },
+      {
+        kind: "verification",
+        summary: "A proof map without its recipients",
+        paths: ["schema.json"],
+        criterionIndex: 0,
+      },
     ]) {
       writeFileSync(
         join(checkout, ".factory-handoff.json"),
         JSON.stringify({ notes: [note] }),
       );
+      // The rejection is marked as the manifest's, so the stop names a retry.
       await assert.rejects(
         () => collectWorktreeResult(checkout, checkout, request, store, {}),
-        /Handoff/,
+        (error) =>
+          /Handoff/.test(error.message) &&
+          faultOf(error).kind === "work" &&
+          faultOf(error).evidence.handoff === true,
       );
       assert.equal(git(checkout, "rev-parse", "HEAD"), request.baseSha);
       assert.deepEqual(

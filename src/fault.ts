@@ -14,6 +14,11 @@ interface FailureEvidence {
   detail: string;
   /** A discovery the worker staged with its wrong result; reviewed as an amendment. */
   discovery?: import("./contracts.js").WorkDiscovery;
+  /**
+   * The rejected part is the private handoff manifest: no owned file holds
+   * it, so a repair cannot fix it and a new attempt rewrites it.
+   */
+  handoff?: true;
 }
 
 export type Fault =

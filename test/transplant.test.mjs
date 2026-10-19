@@ -50,6 +50,7 @@ import {
 } from "../dist/controller-capabilities.js";
 import { deliveryDescription } from "../dist/delivery/description.js";
 import { transplantIndependentChange } from "../dist/delivery/transplant.js";
+import { StepFault } from "../dist/fault.js";
 import { graphDigest } from "../dist/graph-amendments.js";
 import { validPromptSections } from "../dist/prompt-bytes.js";
 import { coverageObligations } from "../dist/qa.js";
@@ -287,6 +288,34 @@ test("independent prepared change is replayed on the observed integration head",
       }).workRepairDiagnosis.mode,
       "focused-semantic-refusal",
     );
+    // A handoff manifest still invalid at collection is private staging, not
+    // an owned file: no diagnosed repair is charged, and the stop names retry.
+    const handoff = structuredClone(state);
+    handoff.work.right.step = "execute";
+    assert.equal(
+      recordWorkFailure(
+        handoff,
+        item.id,
+        new StepFault({
+          kind: "work",
+          evidence: {
+            detail:
+              "Handoff manifest is invalid:\n- note 0: missing key consumerIndices",
+            handoff: true,
+          },
+        }),
+      ),
+      false,
+    );
+    const handoffFailure = handoff.work.right.recovery.failure;
+    assert.equal(handoffFailure.classification, "decision");
+    assert.equal(handoffFailure.event, undefined);
+    assert(
+      handoffFailure.decision.endsWith(
+        "`factory retry --objective 1 --item right`",
+      ),
+    );
+    assert(!handoffFailure.decision.includes("factory repair"));
     recordWorkFailure(
       state,
       item.id,

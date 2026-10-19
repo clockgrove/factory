@@ -49,6 +49,7 @@ import {
   claudeRawTokenUsage,
 } from "./claude-usage.js";
 import {
+  checkWorkHandoff,
   createFactoryValidationMcp,
   factoryValidationServerName,
   factoryValidationToolName,
@@ -201,6 +202,9 @@ function assertInitialization(
 
 /** Continuations of one attempt's conversation after a turn-limit stop. */
 const MAX_TURN_LIMIT_CONTINUATIONS = 2;
+
+/** Turns that return a handoff manifest collection would reject to its worker. */
+const MAX_HANDOFF_REFUSALS = 2;
 
 /**
  * Backoff before each fresh query after the API rejected the worker's login
@@ -573,6 +577,7 @@ async function main(): Promise<void> {
     turns.send(prompt);
     let stream = query({ prompt: turns.messages(), options });
     let continuations = 0;
+    let handoffRefusals = 0;
     let validationRequested = false;
     let credentialRetries = 0;
     let result: SDKResultMessage | undefined;
@@ -755,6 +760,25 @@ async function main(): Promise<void> {
         capture.request(continuation);
         turns.send(continuation);
         continue;
+      }
+      if (
+        message.type === "result" &&
+        !resultError(message) &&
+        handoffRefusals < MAX_HANDOFF_REFUSALS
+      ) {
+        // Collection rejects the whole result for an invalid manifest; the
+        // worker that wrote it corrects it from the exact errors instead.
+        const handoff = checkWorkHandoff(input.request.worktree, {
+          peers: input.request.handoffPeers ?? [],
+          acceptance: input.request.item.acceptance,
+        });
+        if (!handoff.passed) {
+          handoffRefusals += 1;
+          const refusal = `Your result is not finished. ${handoff.text}\nThen give your final report.`;
+          capture.request(refusal);
+          turns.send(refusal);
+          continue;
+        }
       }
       if (
         message.type === "result" &&

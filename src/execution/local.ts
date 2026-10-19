@@ -1385,13 +1385,25 @@ export async function collectWorktreeResult(
   candidateBounds = sandboxCandidateBounds(STRICT_COMMAND_SANDBOX),
 ): Promise<ExecutionResult> {
   const handoffPath = join(worktree, ".factory-handoff.json");
-  const handoffNotes = judgedAsWork(() =>
-    readWorkHandoff(
+  let handoffNotes: ReturnType<typeof readWorkHandoff>;
+  try {
+    handoffNotes = readWorkHandoff(
       worktree,
       request.handoffPeers,
       request.item.acceptance.length,
-    ),
-  );
+    );
+  } catch (error) {
+    throw new StepFault(
+      {
+        kind: "work",
+        evidence: {
+          detail: error instanceof Error ? error.message : String(error),
+          handoff: true,
+        },
+      },
+      { cause: error },
+    );
+  }
   if (handoffNotes) {
     if (
       pinnedGit(worktree, "ls-tree", "HEAD", "--", ".factory-handoff.json") ||

@@ -142,12 +142,16 @@ export function recordWorkFailure(
   // collected result (#820).
   if (fault.kind === "work" && fault.evidence.discovery && work.attempt)
     recordWorkerDiscovery(state, id, fault.evidence.discovery);
+  // An invalid handoff manifest is private staging, not an owned file: no
+  // diagnosed repair can change it, so the operator starts a new attempt.
+  const handoff = fault.kind === "work" && fault.evidence.handoff === true;
   // A published result that fails (a failed check, a conflict) is repaired
   // by a new attempt that republishes the branch with a lease.
   const isolated =
     !work.integratedSha &&
     !state.coordinator?.cancelError &&
-    fault.kind === "work";
+    fault.kind === "work" &&
+    !handoff;
   const event = isolated
     ? itemEvent(id, work.step ?? "execute", work.recovery?.history?.length ?? 0)
     : undefined;
@@ -171,7 +175,9 @@ export function recordWorkFailure(
     decision:
       fault.kind === "decision"
         ? `${fault.question} Answer with ${retry}, or cancel`
-        : `The result failed after it was integrated or while the Objective was cancelling; inspect it, then ${retry} or cancel`,
+        : handoff
+          ? `The worker's .factory-handoff.json stayed invalid, so its result was not accepted; no owned file holds the manifest, so a repair cannot fix it. Start a new attempt with ${retry}`
+          : `The result failed after it was integrated or while the Objective was cancelling; inspect it, then ${retry} or cancel`,
     config: `${fault.kind === "config" ? fault.fix : detail}; then ${retry}`,
     transient: `Interrupted outside a repeatable step; check the provider, network or GitHub status, then ${retry}`,
     defect: `Factory hit a defect; report it (evidence: \`factory diagnostics --objective ${state.objective} --logs ${id}\`), then start a new attempt with ${retry}`,

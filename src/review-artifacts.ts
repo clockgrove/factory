@@ -15,6 +15,7 @@ import type {
   ContentStore,
   ValidationCommandReceipt,
 } from "./contracts.js";
+import { StepFault } from "./fault.js";
 import { pinnedGitRaw } from "./process.js";
 import { refuseUnknownFields } from "./unknown-fields.js";
 
@@ -807,33 +808,31 @@ async function captureTextArtifact(
         "Text artifact locator lacks complete bounded original stdout",
       );
     textBytes(args.stdoutBytes, "text/plain");
-    const matches = args.stdoutBytes
+    const markers = args.stdoutBytes
       .toString("utf8")
       .split(/\r?\n/)
-      .flatMap((line) => {
-        const index = line.indexOf(prefix);
-        if (index < 0) return [];
-        if (line.indexOf(prefix, index + prefix.length) >= 0)
-          throw new Error("Text artifact locator is ambiguous");
-        return [line.slice(index + prefix.length)];
+      .flatMap((line) => line.split(prefix).slice(1));
+    // The command and the installation's selector disagree: a configuration
+    // fault naming the selector, which resumes once the operator fixes either.
+    if (markers.length !== 1 || !isAbsolute(markers[0]!))
+      throw new StepFault({
+        kind: "config",
+        detail: `Text artifact locator requires one complete absolute path: the reviewArtifacts selector with command ${JSON.stringify(args.command)} and source ${JSON.stringify(selector.text.source)} expects exactly one stdout path after ${JSON.stringify(prefix)}, but ${markers.length === 1 ? "the path the command printed after it is not absolute" : `the command printed it ${markers.length === 0 ? "nowhere" : `${markers.length} times`}`}`,
+        fix: `Update or remove this reviewArtifacts selector in the installation configuration (or make its command print exactly one absolute path after ${JSON.stringify(prefix)}), then resume`,
       });
-    if (matches.length !== 1 || !isAbsolute(matches[0]!))
-      throw new Error(
-        "Text artifact locator requires one complete absolute path",
-      );
     const temporaryRoot = realpathSync(args.temporaryRoot);
-    const directory = realpathSync(matches[0]!);
+    const directory = realpathSync(markers[0]!);
     const directoryPath = relative(temporaryRoot, directory);
     path(directoryPath);
     if (!lstatSync(directory).isDirectory())
       throw new Error("Text artifact locator is not a directory");
     absolutePath(args.temporaryRoot);
-    absolutePath(matches[0]);
+    absolutePath(markers[0]);
     locator = {
       temporaryRoot: args.temporaryRoot,
       resolvedTemporaryRoot: temporaryRoot,
       stdoutPathPrefix: prefix,
-      directory: matches[0]!,
+      directory: markers[0]!,
       resolvedDirectory: directory,
     };
     for (const selected of selector.text.locator.files ?? []) {

@@ -15,7 +15,12 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { assertKnownFlags } from "../dist/cli-flags.js";
-import { factoryConfigDigest, stateRoot } from "../dist/config.js";
+import {
+  factoryAuthorityDigest,
+  factoryConfigDigest,
+  stateRoot,
+} from "../dist/config.js";
+import { attachedFault } from "../dist/fault.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import {
   graphDigest,
@@ -43,6 +48,7 @@ import {
   releaseControllerLock,
   objectiveLockPath,
   restoredContinuationOwnershipHold,
+  continuationConfigurationMatches,
 } from "../dist/state-store.js";
 import { finalizeObjective } from "../dist/runner/finalization.js";
 import { objectiveReviewEvidence } from "../dist/result-evidence.js";
@@ -65,6 +71,24 @@ import {
 } from "../dist/review-artifacts.js";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+
+// A text locator the command no longer satisfies is the installation's
+// selector at fault: a resumable configuration fault naming it and the fix.
+const staleLocator =
+  (command, printed = "printed it nowhere") =>
+  (error) => {
+    const fault = attachedFault(error);
+    assert.equal(fault?.kind, "config");
+    for (const part of [
+      JSON.stringify(command),
+      '"producer/report.cjs"',
+      '"Runtime evidence: "',
+      printed,
+    ])
+      assert.ok(fault.detail.includes(part), fault.detail);
+    assert.match(fault.fix, /Update or remove this reviewArtifacts selector/);
+    return true;
+  };
 
 test("coding text capture follows producer ownership while final capture remains complete", async () => {
   const root = mkdtempSync(join(tmpdir(), "factory-coding-proof-"));
@@ -276,7 +300,7 @@ else {const dir=fs.mkdtempSync(p.join(os.tmpdir(),'proof-'));fs.writeFileSync(p.
       await assert.rejects(
         () =>
           coding(mode, commit, tree, ["producer/"], selectors(check), check),
-        mode === "missing" ? /one complete absolute path/ : /exceeds.*bound/,
+        mode === "missing" ? staleLocator(check) : /exceeds.*bound/,
       );
     }
     await assert.rejects(
@@ -322,7 +346,25 @@ else {const dir=fs.mkdtempSync(p.join(os.tmpdir(),'proof-'));fs.writeFileSync(p.
     assert.equal(finalBinding.origin, undefined);
     await assert.rejects(
       () => final("missing-final", commit, tree, command("missing")),
-      /one complete absolute path/,
+      staleLocator(command("missing")),
+    );
+    // Two markers are as stale as none: the selector, not the Objective, is wrong.
+    writeFileSync(
+      join(checkout, "producer/twice.cjs"),
+      "console.log('Runtime evidence: /a\\nRuntime evidence: /b');\n",
+    );
+    git("add", ".");
+    git("commit", "-m", "Print the marker twice");
+    const twice = `${process.execPath} producer/twice.cjs`;
+    await assert.rejects(
+      () =>
+        final(
+          "ambiguous-final",
+          git("rev-parse", "HEAD"),
+          git("rev-parse", "HEAD^{tree}"),
+          twice,
+        ),
+      staleLocator(twice, "printed it 2 times"),
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1055,6 +1097,16 @@ else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.
       undefined,
     );
     assert.deepEqual(resumed.work.qa.reviewArtifactSelection, selectors);
+    // Installation selectors choose review evidence, never authority: adding,
+    // changing or removing them keeps the started Objective resumable (#1635).
+    for (const reviewArtifacts of [selectors, selectors.slice(1)]) {
+      const changed = { ...config, reviewArtifacts };
+      assert.equal(continuationConfigurationMatches(resumed, changed), true);
+      assert.equal(
+        factoryAuthorityDigest(changed),
+        factoryAuthorityDigest(config),
+      );
+    }
     assert.equal(consumption(resumed).resultRereviews, 1);
     resumed.coordinator.mode = "running";
     const store = new LocalContentStore(join(root, "objects"));

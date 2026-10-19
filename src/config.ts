@@ -1316,13 +1316,17 @@ function executionWithoutWorkerLimits(
  * Project status, diagnostic `capture`, the command `sandbox` host settings, the archive's operational limits (`gitPersistence`
  * maxBytes, maxFiles, timeoutMs and coalesceMs) and worker run limits
  * (`withoutWorkerLimits`). The archive's
- * identity (remote, ref, visibility, scope) stays bound. Key order is kept, so a
- * configuration without them digests exactly as before.
+ * identity (remote, ref, visibility, scope) stays bound. `reviewArtifacts` is out too:
+ * selectors only choose review evidence and grant no command, source or provider
+ * authority, and each capture records its own command, tree, source digest and body
+ * identities, so a started Objective resumes with the current selectors (#1635). Key
+ * order is kept, so a configuration without them digests exactly as before.
  */
 function withoutOperationalSettings(config: FactoryConfig): FactoryConfig {
   return Object.fromEntries(
     Object.entries(config).flatMap(([key, value]) => {
-      if (key === "capture" || key === "sandbox") return [];
+      if (key === "capture" || key === "sandbox" || key === "reviewArtifacts")
+        return [];
       if (key === "execution")
         return [[key, executionWithoutWorkerLimits(value as ExecutionConfig)]];
       if (key === "queueProvider") {

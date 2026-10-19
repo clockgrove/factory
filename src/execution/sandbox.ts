@@ -553,7 +553,7 @@ export type CommandSandboxAvailability =
       available: true;
       executable: string;
       version: string;
-      /** This bubblewrap can size a tmpfs (`--size`, 0.10 and later). */
+      /** This bubblewrap can size a tmpfs (`--size`; 0.9 can). */
       tmpfsSize: boolean;
     }
   | { available: false; installed: boolean; detail: string };
@@ -1176,6 +1176,7 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
       "--",
       ...(pasta ? RELEASE_GATE : []),
       prlimit,
+      // RLIMIT_NPROC counts every process of the user, not this sandbox's.
       `--nproc=${limits.processes}`,
       "--",
       "/bin/sh",

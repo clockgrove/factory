@@ -26,6 +26,7 @@ import {
   linuxProcessIdentity,
   processGroupExists,
   sanitizedWorkerEnvironment,
+  UnsettledSubprocessError,
 } from "../process.js";
 import { serviceLoginEnvironment } from "../provider-credentials.js";
 import {
@@ -458,6 +459,16 @@ export class ClaudeAgentSdkHarness implements AgentHarness {
           throw new AuthenticationRequiredError(
             observed.detail ?? "Claude authentication required",
             observed.authentication,
+          );
+        // The worker could not prove a subprocess it started stopped: a
+        // writer may remain in the checkout, so the outcome is unknown.
+        if (
+          existsSync(data.resultPath) &&
+          (readWorkerJson(data.resultPath) as { unsettled?: unknown } | null)
+            ?.unsettled === true
+        )
+          throw new UnsettledSubprocessError(
+            `${observed.detail ?? "Claude worker subprocess cessation is unproved"}; checkout retained`,
           );
         throw workFault(observed.detail ?? "Claude harness worker failed");
       }

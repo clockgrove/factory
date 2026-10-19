@@ -718,6 +718,67 @@ export function privateStagingExclusions(
     )
     .map((name) => `:(exclude,literal)${name}`);
 }
+/**
+ * Bound what `add -A` would stage, before host-side Git reads any of it: the
+ * changed and untracked paths outside private staging, counted, and sized by
+ * lstat. Git hashes a sparse file's whole apparent size, so that counts.
+ */
+export function assertCandidateBounds(
+  worktree: string,
+  bounds: { maxBytes: number; maxFiles: number },
+  label: string,
+  inspect?: (path: string) => void,
+): void {
+  // Git prints names as raw bytes. A name that is not UTF-8 would decode to
+  // another path, which lstat misses and Git still hashes.
+  const names = (output: Buffer) => {
+    try {
+      return new TextDecoder("utf-8", { fatal: true })
+        .decode(output)
+        .split("\0");
+    } catch {
+      throw workFault(`${label} has an unsafe path`);
+    }
+  };
+  const prospective = [
+    ...new Set(
+      [
+        ...names(
+          pinnedGitRaw(
+            worktree,
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "HEAD",
+          ),
+        ),
+        ...names(
+          pinnedGitRaw(
+            worktree,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+          ),
+        ),
+      ].filter(Boolean),
+    ),
+  ].filter((path) => !privateStagingPath(path));
+  if (prospective.length > bounds.maxFiles)
+    throw new Error(`${label} exceeds the admitted file bound`);
+  let bytes = 0;
+  for (const path of prospective) {
+    inspect?.(path);
+    const file = resolve(worktree, path);
+    if (!file.startsWith(`${resolve(worktree)}${sep}`))
+      throw workFault(`${label} has an unsafe path`);
+    const info = lstatSync(file, { throwIfNoEntry: false });
+    bytes += info?.isFile() ? info.size : 0;
+  }
+  if (bytes > bounds.maxBytes)
+    throw new Error(`${label} exceeds the admitted byte bound`);
+}
 /** The first path under the worktree Factory cannot read, if any. */
 function firstUnreadable(directory: string, relative = ""): string | undefined {
   let names: string[];
@@ -1182,50 +1243,18 @@ export async function freezeRejectedCollection(args: {
     assertNoNestedGit(args.worktree);
     if (pinnedGit(args.worktree, "rev-parse", "HEAD") !== args.request.baseSha)
       throw workFault("Rejected worker changed its admitted HEAD");
-    const prospective = [
-      ...new Set(
-        [
-          ...pinnedGitRaw(
-            args.worktree,
-            "diff",
-            "--name-only",
-            "--no-renames",
-            "-z",
-            "HEAD",
-          )
-            .toString("utf8")
-            .split("\0"),
-          ...pinnedGitRaw(
-            args.worktree,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-          )
-            .toString("utf8")
-            .split("\0"),
-        ].filter(Boolean),
-      ),
-    ].filter(
-      (path) =>
-        ![...PRIVATE_STAGING, ".factory-media"].some(
-          (name) => path === name || path.startsWith(name + "/"),
-        ),
+    assertCandidateBounds(
+      args.worktree,
+      {
+        maxBytes: bounds.maxBytes - usedBytes,
+        maxFiles: bounds.maxFiles - usedFiles,
+      },
+      "Rejected candidate",
+      (path) => {
+        if (!ownsPath(path, args.request.item.ownedPaths))
+          throw workFault("Rejected candidate exceeds ownership");
+      },
     );
-    let prospectiveBytes = 0;
-    if (prospective.length + usedFiles > bounds.maxFiles)
-      throw new Error("Rejected candidate exceeds the admitted file bound");
-    for (const path of prospective) {
-      if (!ownsPath(path, args.request.item.ownedPaths))
-        throw workFault("Rejected candidate exceeds ownership");
-      const file = resolve(args.worktree, path);
-      if (!file.startsWith(`${resolve(args.worktree)}${sep}`))
-        throw workFault("Rejected candidate has an unsafe path");
-      const info = lstatSync(file, { throwIfNoEntry: false });
-      prospectiveBytes += info?.isFile() ? info.size : 0;
-    }
-    if (prospectiveBytes + usedBytes > bounds.maxBytes)
-      throw new Error("Rejected candidate exceeds the admitted byte bound");
     await pinnedGitMagicAsync(
       args.worktree,
       "add",
@@ -2156,11 +2185,12 @@ export class LocalExecutionDriver implements ExecutionDriver {
           false,
           undefined,
           undefined,
-          // assertPinnedNpmScripts checked these commands' inputs above.
+          // assertPinnedNpmScripts checked these commands' inputs above; the
+          // network grant compares them with the accepted base.
           {
             ...this.commandSandbox,
             packageInputsVerified: true,
-            packageInputsBase: request.baseSha,
+            packageInputsBase: readiness.acceptedBaseSha,
           },
         );
         if (context?.cancelled())
@@ -2288,11 +2318,11 @@ export class LocalExecutionDriver implements ExecutionDriver {
       const sourceDelivery = request.discovery
         ? undefined
         : materializeWorkerSources(worktree, request);
+      const checkpointBounds = privateCheckpointBounds();
       const preparedHarnessRequest: HarnessRequest = {
-        ...(sourceDelivery && {
-          sourceBaseSha: request.sourceBaseSha,
-          sourceDelivery,
-        }),
+        // The accepted base also anchors worker Validate's package network.
+        ...(request.sourceBaseSha && { sourceBaseSha: request.sourceBaseSha }),
+        ...(sourceDelivery && { sourceDelivery }),
         ...(request.handoffPeers && {
           handoffPeers: structuredClone(request.handoffPeers),
         }),
@@ -2358,6 +2388,12 @@ export class LocalExecutionDriver implements ExecutionDriver {
           },
         }),
         commandSandbox: structuredClone(this.commandSandbox),
+        ...(checkpointBounds && {
+          candidateBounds: {
+            maxBytes: checkpointBounds.maxBytes,
+            maxFiles: checkpointBounds.maxFiles,
+          },
+        }),
       };
       const preparedHandle: ExecutionHandle = {
         provider: "local",

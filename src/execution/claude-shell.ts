@@ -241,6 +241,8 @@ export async function createFactoryShellMcp(input: {
   root: string;
   config: ShellInput["config"];
   sandbox?: CommandSandboxPolicy;
+  /** A command whose stop is unproved: the attempt's outcome is unknown. */
+  onUnsettled?: (error: UnsettledSubprocessError) => void;
 }) {
   if (!factoryShellAuthorized(input))
     throw new Error(
@@ -253,7 +255,8 @@ export async function createFactoryShellMcp(input: {
     import("zod"),
   ]);
   let ready = false;
-  // An unproved stop leaves the outcome unknown: no further commands.
+  // An unproved stop leaves the outcome unknown: no further commands, and
+  // the owner ends the attempt.
   let unsettled = false;
   const closed = new AbortController();
   let queue: Promise<unknown> = Promise.resolve();
@@ -305,7 +308,10 @@ export async function createFactoryShellMcp(input: {
               ],
             };
           } catch (error) {
-            if (error instanceof UnsettledSubprocessError) unsettled = true;
+            if (error instanceof UnsettledSubprocessError) {
+              unsettled = true;
+              input.onUnsettled?.(error);
+            }
             return {
               isError: true,
               content: [

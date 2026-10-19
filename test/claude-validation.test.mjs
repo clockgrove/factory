@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -15,7 +16,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { LocalContentStore } from "../dist/content/local.js";
 import { runSandboxedCommand } from "../dist/execution/claude-shell.js";
@@ -28,9 +29,10 @@ import {
 } from "../dist/execution/claude-validation.js";
 import {
   commandSandboxAvailability,
+  commandSandboxStatus,
   STRICT_COMMAND_SANDBOX,
 } from "../dist/execution/sandbox.js";
-import { validateTree } from "../dist/validation.js";
+import { validateTree, validateWorkItem } from "../dist/validation.js";
 
 const status = (worktree) =>
   execFileSync("git", ["-C", worktree, "status", "--porcelain"], {
@@ -500,6 +502,45 @@ test("host-side Git never enters a nested repository sandboxed code could write"
     /submodule gitlinks/,
   );
   assert.equal(existsSync(marker), false);
+  // Nor does it hash more than collection could retain into the shared
+  // object store: a sparse file counts at its apparent size.
+  const bounded = repository("bounded");
+  const objects = () => git(bounded, "count-objects", "-v");
+  const stored = objects();
+  const bounds = { maxBytes: 1024 * 1024, maxFiles: 2 };
+  truncateSync(join(bounded, "a.txt"), 2 * 1024 ** 3);
+  await assert.rejects(
+    workerFilesTree(bounded, bounds),
+    /Worker snapshot exceeds the admitted byte bound/,
+  );
+  git(bounded, "checkout", "--", "a.txt");
+  for (const name of ["b", "c", "d"]) writeFileSync(join(bounded, name), name);
+  await assert.rejects(
+    workerFilesTree(bounded, bounds),
+    /Worker snapshot exceeds the admitted file bound/,
+  );
+  for (const name of ["b", "c", "d"]) rmSync(join(bounded, name));
+  // A name that is not UTF-8 cannot pass as another path lstat misses.
+  const raw = Buffer.concat([Buffer.from(`${bounded}/`), Buffer.from([0xff])]);
+  writeFileSync(raw, "");
+  truncateSync(raw, 50 * 1024 * 1024);
+  await assert.rejects(
+    workerFilesTree(bounded, bounds),
+    /Worker snapshot has an unsafe path/,
+  );
+  rmSync(raw);
+  assert.equal(objects(), stored);
+  // A directory the worker made unreadable is its fault, found before
+  // host-side Git reads the checkout. Root reads it anyway.
+  if (process.getuid() !== 0) {
+    mkdirSync(join(bounded, "locked"));
+    chmodSync(join(bounded, "locked"), 0);
+    await assert.rejects(
+      workerFilesTree(bounded),
+      /Worker left an unreadable path: locked/,
+    );
+    chmodSync(join(bounded, "locked"), 0o755);
+  }
 });
 
 test("a verified install reaches only its configured registry, and commands are resource-limited", async () => {
@@ -593,6 +634,13 @@ test("a verified install reaches only its configured registry, and commands are 
     write(worktree, { dep: `${registry}dep/-/dep-1.0.0.tgz` });
     const base = commit("base");
     const install = "npm ci --ignore-scripts";
+    const sandbox = {
+      required: true,
+      network: "package-install",
+      packageStore: join(root, "store"),
+      readOnlyPaths: [],
+      limits: { tmpMiB: 64, processes: 512 },
+    };
     // The caller that verified these package inputs passes the base, as
     // validateWorkItem, final validation and readiness do.
     const validate = (target, number, commands = [install]) =>
@@ -612,11 +660,7 @@ test("a verified install reaches only its configured registry, and commands are 
         undefined,
         undefined,
         {
-          required: true,
-          network: "package-install",
-          packageStore: join(root, "store"),
-          readOnlyPaths: [],
-          limits: { tmpMiB: 64, processes: 512 },
+          ...sandbox,
           packageInputsVerified: true,
           packageInputsBase: base.commit,
         },
@@ -674,6 +718,48 @@ test("a verified install reaches only its configured registry, and commands are 
     );
     await assert.rejects(
       validate(commit("hide a tarball behind a merge key"), 4),
+      /ECONNREFUSED/,
+    );
+    assert.equal(requests.length, before);
+    // An accepted base without package configuration, and a predecessor
+    // Work Item's unaccepted output that adds its own registry. A dependent
+    // item that keeps it passes the package-input check, but installs
+    // offline even with nothing stored: the network grant compares with the
+    // accepted base.
+    rmSync(join(worktree, "pnpm-lock.yaml"));
+    rmSync(join(worktree, ".npmrc"));
+    write(worktree, { dep: `${registry}dep/-/dep-1.0.0.tgz` });
+    const accepted = commit("accepted base without configuration");
+    writeFileSync(
+      join(worktree, ".npmrc"),
+      `registry=http://localhost:${server.address().port}/\nfetch-retries=0\n`,
+    );
+    const predecessor = commit("name a registry");
+    writeFileSync(join(worktree, "a.txt"), "dependent\n");
+    const dependent = commit("dependent item");
+    await assert.rejects(
+      validateWorkItem(
+        worktree,
+        join(root, "validation-5"),
+        {
+          kind: "work",
+          ownedPaths: ["a.txt"],
+          validation: [{ command: install, provenance: "source-declared" }],
+        },
+        dependent.commit,
+        dependent.tree,
+        accepted.commit,
+        undefined,
+        undefined,
+        predecessor.commit,
+        [],
+        undefined,
+        [],
+        undefined,
+        false,
+        [],
+        { ...sandbox, packageStore: join(root, "empty-store") },
+      ),
       /ECONNREFUSED/,
     );
     assert.equal(requests.length, before);
@@ -758,4 +844,92 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
   assert.ok(long.output.length < 300_000);
   assert.match(long.output, /bytes of output omitted/);
   assert.match(long.output, /last\n$/);
+});
+
+// A host directory outside every temporary directory: the repository's
+// ignored `.factory`.
+const outsideTemporary = () => {
+  const parent = new URL("../.factory/", import.meta.url).pathname;
+  mkdirSync(parent, { recursive: true });
+  return mkdtempSync(join(parent, "sandbox-"));
+};
+
+test("no toolchain or read-only path mounts the host's /tmp or its sockets", {
+  skip:
+    process.geteuid?.() === 0 ||
+    new URL("..", import.meta.url).pathname.startsWith(`${tmpdir()}/`),
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-sandbox-mounts-"));
+  const tools = outsideTemporary();
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(tools, { recursive: true, force: true });
+  });
+  const worktree = join(root, "worktree");
+  execFileSync("git", ["init", "-q", worktree]);
+  // A PATH tool that links to a file directly in /tmp would make /tmp a
+  // toolchain root; a link loop names no tool the operator can follow.
+  const marker = join(tmpdir(), `factory-host-${basename(root)}`);
+  writeFileSync(marker, "host\n");
+  t.after(() => rmSync(marker, { force: true }));
+  symlinkSync(marker, join(tools, "host-tool"));
+  symlinkSync(join(tools, "loop-b"), join(tools, "loop-a"));
+  symlinkSync(join(tools, "loop-a"), join(tools, "loop-b"));
+  const originalPath = process.env.PATH;
+  t.after(() => {
+    process.env.PATH = originalPath;
+  });
+  const run = (command, policy = STRICT_COMMAND_SANDBOX) =>
+    runSandboxedCommand({
+      worktree,
+      root: `${worktree}.shell`,
+      command,
+      timeoutMs: 60_000,
+      policy,
+    });
+  process.env.PATH = `${tools}:${originalPath}`;
+  const hidden = await run(`! test -e '${marker}'`);
+  assert.equal(hidden.exitCode, 0, hidden.output);
+  // A PATH directory in /tmp is refused, not mounted.
+  const temporaryBin = join(root, "bin");
+  mkdirSync(temporaryBin);
+  process.env.PATH = `${temporaryBin}:${originalPath}`;
+  await assert.rejects(run("true"), /PATH entry .* shared temporary/);
+  process.env.PATH = originalPath;
+  // So is any read-only path under /tmp, where host sockets live (#1574).
+  const sockets = join(root, "sockets");
+  mkdirSync(sockets);
+  await assert.rejects(
+    run("true", { ...STRICT_COMMAND_SANDBOX, readOnlyPaths: [sockets] }),
+    /sandbox\.readOnlyPaths entry .* shared temporary/,
+  );
+});
+
+test("a root controller runs no sandboxed command unless the sandbox is optional", {
+  skip: process.geteuid?.() !== 0 || !commandSandboxAvailability().available,
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-sandbox-root-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const worktree = join(root, "worktree");
+  execFileSync("git", ["init", "-q", worktree]);
+  // bubblewrap's namespace maps to the host's root, which owns these.
+  await assert.rejects(
+    runSandboxedCommand({
+      worktree,
+      root: `${worktree}.shell`,
+      command: "cat /etc/shadow",
+      timeoutMs: 60_000,
+      policy: STRICT_COMMAND_SANDBOX,
+    }),
+    /runs as root/,
+  );
+  const strict = commandSandboxStatus(STRICT_COMMAND_SANDBOX);
+  assert.equal(strict.mode, "unavailable");
+  assert.match(strict.fix, /unprivileged user/);
+  const optional = commandSandboxStatus({
+    ...STRICT_COMMAND_SANDBOX,
+    required: false,
+  });
+  assert.equal(optional.mode, "bubblewrap");
+  assert.match(optional.detail, /root-only host files/);
 });

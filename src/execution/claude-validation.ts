@@ -11,6 +11,7 @@ import {
   pinnedGit,
   pinnedGitAsync,
   pinnedGitIndexAsync,
+  UnsettledSubprocessError,
 } from "../process.js";
 import { workHandoffSchema } from "../objective-knowledge.js";
 import {
@@ -27,6 +28,7 @@ import {
   STRICT_COMMAND_SANDBOX,
 } from "./sandbox.js";
 import {
+  assertCandidateBounds,
   FACTORY_EMAIL,
   privateStagingExclusions,
   workerValidationRoot,
@@ -56,8 +58,24 @@ interface ValidationEnvironmentInput {
   sandbox?: CommandSandboxPolicy;
   /** The controller's package authority for these commands (source-declared ones, a pinned update). */
   packageAuthority?: PackageScriptAuthority;
+  /** The snapshot's accepted base and bounds (see WorkerSnapshot). */
+  snapshot?: WorkerSnapshot;
   /** Each completed run's structured facts, for the worker's progress stream. */
   onRun?: (facts: ValidationRunFacts) => void;
+  /** A run whose subprocess cessation is unproved: the attempt's outcome is unknown. */
+  onUnsettled?: (error: UnsettledSubprocessError) => void;
+}
+
+/** What the controller fixed for every worker snapshot of this attempt. */
+interface WorkerSnapshot {
+  /**
+   * The Objective's accepted base. A verified install reaches the network
+   * only when its package inputs match this commit's, never a predecessor
+   * Work Item's unaccepted output; absent, it stays offline.
+   */
+  acceptedBaseSha?: string;
+  /** Staged no larger than collection could retain. */
+  candidateBounds?: { maxBytes: number; maxFiles: number };
 }
 
 /** A completed worker validation run: counts and identities, never output. */
@@ -158,9 +176,15 @@ function bounded(text: string): string {
 }
 
 /** The tree of the worker's current files without private staging, as collection stages them. */
-export async function workerFilesTree(worktree: string): Promise<string> {
+export async function workerFilesTree(
+  worktree: string,
+  bounds?: WorkerSnapshot["candidateBounds"],
+): Promise<string> {
   // Host-side Git must not enter a repository the worker wrote.
   assertNoNestedGit(worktree);
+  // Nor hash, into the shared object store, more than collection could retain.
+  // A run_command on its own queue may grow a file after this: disk use only.
+  if (bounds) assertCandidateBounds(worktree, bounds, "Worker snapshot");
   // A separate index from HEAD: the worker's own index never holds what this
   // stages, so a nested repository made meanwhile never becomes a gitlink
   // there for another Git call to enter.
@@ -214,6 +238,7 @@ export async function runDeclaredValidation(
   outputs?: ValidationOutputs,
   sandbox: CommandSandboxPolicy = STRICT_COMMAND_SANDBOX,
   packageAuthority: PackageScriptAuthority = {},
+  snapshot: WorkerSnapshot = {},
 ): Promise<{
   passed: boolean;
   text: string;
@@ -221,7 +246,7 @@ export async function runDeclaredValidation(
   ran: number;
   failed: number;
 }> {
-  const tree = await workerFilesTree(worktree);
+  const tree = await workerFilesTree(worktree, snapshot.candidateBounds);
   let ran = 0;
   let failed = 0;
   const commit = (
@@ -240,8 +265,9 @@ export async function runDeclaredValidation(
     )
   ).trim();
   // The controller's package-input check, against the attempt's base: only
-  // when it passes may an install write the shared store or use the network
-  // the operator allowed. Otherwise the run continues without either.
+  // when it passes may an install write the shared store, and use the
+  // network the operator allowed when its inputs match the accepted base.
+  // Otherwise the run continues without either.
   let packageInputsVerified = false;
   try {
     assertPinnedNpmScripts(
@@ -260,7 +286,6 @@ export async function runDeclaredValidation(
     packageInputsBase: _base,
     ...policy
   } = sandbox;
-  const base = pinnedGit(worktree, "rev-parse", "HEAD");
   const root = join(workerValidationRoot(worktree), `${run}`);
   let produced = "";
   const inspectSettled =
@@ -290,7 +315,13 @@ export async function runDeclaredValidation(
       undefined,
       inspectSettled,
       packageInputsVerified
-        ? { ...policy, packageInputsVerified: true, packageInputsBase: base }
+        ? {
+            ...policy,
+            packageInputsVerified: true,
+            ...(snapshot.acceptedBaseSha && {
+              packageInputsBase: snapshot.acceptedBaseSha,
+            }),
+          }
         : policy,
     );
     return {
@@ -429,6 +460,7 @@ export async function createFactoryValidationMcp(
               outputs,
               input.sandbox,
               input.packageAuthority,
+              input.snapshot,
             );
             return { declared, handoff };
           });
@@ -466,6 +498,8 @@ export async function createFactoryValidationMcp(
               content: [{ type: "text" as const, text: parts.join("\n\n") }],
             };
           } catch (error) {
+            if (error instanceof UnsettledSubprocessError)
+              input.onUnsettled?.(error);
             return {
               isError: true,
               content: [
@@ -510,8 +544,12 @@ export async function createFactoryValidationMcp(
       if (passedTrees.size)
         try {
           finalTreeValidated =
-            passedTrees.has(await workerFilesTree(input.worktree)) &&
-            checkWorkHandoff(input.worktree, input.handoff).passed;
+            passedTrees.has(
+              await workerFilesTree(
+                input.worktree,
+                input.snapshot?.candidateBounds,
+              ),
+            ) && checkWorkHandoff(input.worktree, input.handoff).passed;
         } catch {
           // Collection classifies an unstageable worktree itself.
           finalTreeValidated = undefined;

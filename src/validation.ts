@@ -1315,11 +1315,13 @@ export async function validateWorkItem(
     { commands: [] },
     selectedArtifacts,
     undefined,
-    // The package inputs were just checked for exactly these commands.
+    // The package inputs were just checked for exactly these commands. The
+    // network grant compares them with the accepted base, never a
+    // predecessor's unaccepted output (which could name its own registry).
     {
       ...sandbox,
       packageInputsVerified: true,
-      packageInputsBase: predecessorSha ?? acceptedBaseSha,
+      packageInputsBase: acceptedBaseSha,
     },
   );
   // Keep the installation selector identity when only this item's producers

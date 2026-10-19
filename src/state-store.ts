@@ -605,6 +605,8 @@ export interface ControllerLock {
 
 export interface ControllerOwner {
   intake?: boolean;
+  /** The service with one slot: its run takes cancellation by SIGUSR1. */
+  signalCancel?: boolean;
   pid: number;
   startTime: string;
   objective: number;
@@ -861,6 +863,7 @@ export function retargetControllerLock(
   path: string,
   lock: ControllerLock,
   objective: number,
+  signalCancel: boolean,
 ): void {
   const current = readControllerOwner(path);
   const identity = linuxProcessIdentity(process.pid);
@@ -874,7 +877,10 @@ export function retargetControllerLock(
   const temporary = `${path}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, "wx", 0o600);
   try {
-    writeFileSync(fd, JSON.stringify({ ...current, objective, intake: true }));
+    writeFileSync(
+      fd,
+      JSON.stringify({ ...current, objective, intake: true, signalCancel }),
+    );
     fsyncSync(fd);
   } finally {
     closeSync(fd);

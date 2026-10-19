@@ -22,7 +22,6 @@ import { objectiveComplete } from "./completion.js";
 import type { FactoryConfig } from "./config.js";
 import {
   factoryConfigDigest,
-  maxActiveObjectives,
   queueControlBinding,
   stateRoot,
 } from "./config.js";
@@ -591,6 +590,8 @@ async function runObjectiveUnscoped(
     observeControl?: (
       handler: ((request: ControlRequest) => Promise<unknown>) | undefined,
     ) => void | Promise<void>;
+    /** The service with one slot, as its lock records: SIGUSR1 cancels this run. */
+    signalCancel?: boolean;
     admitChildObjectives?: AdmitChildObjectives;
     /**
      * The service: this run waits behind an overlapping Objective. Returns
@@ -1257,8 +1258,7 @@ async function runObjectiveOwned(
   process.on("SIGTERM", handoff);
   // With several service runs in one process, a signal would cancel them
   // all; they take cancellation through the service's control only.
-  const cancelSignal =
-    !options.observeControl || maxActiveObjectives(config) === 1;
+  const cancelSignal = !options.observeControl || options.signalCancel === true;
   if (cancelSignal) process.on("SIGUSR1", cancel);
   let progressTask: Promise<void> | undefined;
   // Presentation never decides the controller's fate (#1276). When one of its
@@ -1703,17 +1703,20 @@ async function cancelObjectiveOwned(
   );
   if (installation?.intake) {
     // The service runs this Objective under its own lock in its own process.
-    // With one slot it runs nothing else, so the signal reaches only this
-    // run; with several, a signal would cancel every run.
+    // Its lock records whether it runs one slot, so the signal reaches only
+    // this run; with several, a signal would cancel every run, so they take
+    // cancellation only through the control endpoint (#1590).
     if (
-      maxActiveObjectives(config) === 1 &&
+      installation.signalCancel === true &&
       objectiveOwner?.pid === installation.pid
     ) {
       process.kill(installation.pid, "SIGUSR1");
       return "requested";
     }
     throw new Error(
-      `The service owns Objective #${objective} but its control endpoint is unavailable; run this again in a moment`,
+      installation.signalCancel === true
+        ? `The service owns Objective #${objective} but its control endpoint is unavailable; run this again in a moment`
+        : `The service owns Objective #${objective} and, running several Objectives, cancels it only through its control endpoint, which is unavailable; run this again in a moment`,
     );
   }
   const owner = installation ?? objectiveOwner;

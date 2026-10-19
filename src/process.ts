@@ -1830,6 +1830,195 @@ export function nativeProcessDisposition(
   return "settled";
 }
 
+/**
+ * One bubblewrap launch a worker recorded for its controller (#1575): only
+ * its boot while the spawn may be in flight, then bubblewrap's identity, then
+ * also its PID namespace init's. The sandbox is detached in bubblewrap's own
+ * group; the init stays in that group, and every other sandbox process is in
+ * its namespace, which ends with the init. A networked sandbox also records
+ * its pasta: empty while that spawn may be in flight, then its identity.
+ */
+interface SandboxRecord {
+  boot?: string;
+  owner?: NativeProcessOwner;
+  init?: { pid: number; startTime: string };
+  pasta?: { pid?: number; startTime?: string };
+}
+let sandboxRecords: string | undefined;
+
+/**
+ * Record each bubblewrap launch of this process in `directory`, so a
+ * controller that outlives it can stop the sandbox and prove it gone. Only
+ * a worker process calls this.
+ */
+export function recordSandboxesIn(directory: string): void {
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  sandboxRecords = directory;
+}
+
+/**
+ * Replace a record whole. Written and renamed before the process acts on it,
+ * it survives this process's death; it matters only within this boot, which
+ * ends every process it names, so it is not synced.
+ */
+function writeSandboxRecord(path: string, record: SandboxRecord): void {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, JSON.stringify(record), { flag: "wx", mode: 0o600 });
+  renameSync(temporary, path);
+}
+
+/** How long a recorded sandbox may take to end after its stop. */
+const SANDBOX_CESSATION_MS = 2_000;
+
+/**
+ * Stop each sandbox recorded in `directory` by a worker that is proved gone,
+ * prove it gone and remove its record. Only an exactly verified identity
+ * (pid, start time, process group, in this boot, user and PID namespace)
+ * running `bubblewrap()`, the executable sandboxed commands use, is
+ * signalled, so a reused pid or group is never. A sandbox is gone once
+ * bubblewrap's group is empty: that holds its init, whose exit ends the
+ * namespace's other processes. A recorded pasta is stopped too, known by
+ * its identity as the leader of its own group: it re-executes itself and is
+ * not dumpable, so what it runs cannot be read. A record of an earlier boot
+ * is gone. In this
+ * boot, a record without an identity (a spawn the worker may have been
+ * killed during), from another namespace or user, of another executable, or
+ * whose group is still present after the stop, leaves the outcome unknown.
+ */
+export async function stopRecordedSandboxes(
+  directory: string,
+  bubblewrap: () => string | undefined,
+): Promise<void> {
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const matches = (pid: number, startTime: string) => {
+    const current = linuxProcessIdentity(pid);
+    return current?.startTime === startTime ? current : undefined;
+  };
+  const kill = (pid: number) => {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  };
+  let unproved = 0;
+  for (const name of names) {
+    const path = join(directory, name);
+    // An unrenamed write: a spawn it preceded has its own earlier record.
+    if (name.endsWith(".tmp")) {
+      rmSync(path, { force: true });
+      continue;
+    }
+    let record: SandboxRecord | undefined;
+    try {
+      record = JSON.parse(readFileSync(path, "utf8")) as SandboxRecord;
+    } catch {
+      record = undefined;
+    }
+    const owner = record?.owner;
+    const init = record?.init;
+    const recordedPasta = record?.pasta;
+    const boot = record?.boot ?? owner?.boot;
+    // A later boot ended every process of this one.
+    if (typeof boot === "string" && boot !== currentBoot()) {
+      rmSync(path, { force: true });
+      continue;
+    }
+    if (
+      !isNativeProcessOwner(owner) ||
+      owner.boot === undefined ||
+      (init !== undefined &&
+        (!Number.isSafeInteger(init.pid) ||
+          init.pid <= 0 ||
+          typeof init.startTime !== "string")) ||
+      (recordedPasta !== undefined &&
+        (!Number.isSafeInteger(recordedPasta.pid) ||
+          recordedPasta.pid! <= 0 ||
+          typeof recordedPasta.startTime !== "string"))
+    ) {
+      unproved++;
+      continue;
+    }
+    const pasta = recordedPasta as
+      | { pid: number; startTime: string }
+      | undefined;
+    if (
+      owner.boot !== boot ||
+      owner.uid !== process.getuid?.() ||
+      owner.namespace !== readlinkSync("/proc/self/ns/pid")
+    ) {
+      unproved++;
+      continue;
+    }
+    const live = (pid: number, startTime: string) => {
+      const current = matches(pid, startTime);
+      return current && current.state !== "Z" ? current : undefined;
+    };
+    const initRuns = () =>
+      init !== undefined && !!live(init.pid, init.startTime);
+    const pastaRuns = () =>
+      pasta !== undefined && !!live(pasta.pid, pasta.startTime);
+    const present = () =>
+      processGroupExists(owner.group) || initRuns() || pastaRuns();
+    // What a recorded identity runs now. One that exited between the checks
+    // is gone, not foreign; one whose executable is unreadable stays unknown.
+    const executable = (pid: number, startTime: string) => {
+      try {
+        const expected = bubblewrap();
+        return expected !== undefined &&
+          readlinkSync(`/proc/${pid}/exe`) === expected
+          ? "bubblewrap"
+          : "other";
+      } catch {
+        return live(pid, startTime) ? "unreadable" : "gone";
+      }
+    };
+    const leader = live(owner.pid, owner.startTime);
+    const leaderRuns = leader && executable(owner.pid, owner.startTime);
+    const initRunsNow =
+      init && initRuns() ? executable(init.pid, init.startTime) : undefined;
+    const pastaNow = pasta && live(pasta.pid, pasta.startTime);
+    // A recorded identity running anything but bubblewrap is never
+    // signalled, nor a pasta that left its own group.
+    if (
+      leaderRuns === "other" ||
+      leaderRuns === "unreadable" ||
+      initRunsNow === "other" ||
+      initRunsNow === "unreadable" ||
+      (pastaNow && pastaNow.group !== pasta.pid)
+    ) {
+      unproved++;
+      continue;
+    }
+    if (leaderRuns === "bubblewrap" && leader?.group === owner.group)
+      kill(-owner.group);
+    if (init && initRunsNow === "bubblewrap") kill(init.pid);
+    if (pastaNow) kill(pasta.pid);
+    const deadline = Date.now() + SANDBOX_CESSATION_MS;
+    while (present() && Date.now() < deadline)
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    if (present()) {
+      unproved++;
+      continue;
+    }
+    rmSync(path, { force: true });
+  }
+  if (unproved) {
+    const scope = processCancellation.getStore();
+    if (scope) scope.unresolved = true;
+    throw new UnsettledSubprocessError(
+      `${unproved} recorded command sandbox(es) could not be proved gone; outcome unknown`,
+    );
+  }
+  rmSync(directory, { recursive: true, force: true });
+}
+
 interface OwnedSubprocess {
   pid: number;
   startTime: string;
@@ -1929,7 +2118,10 @@ interface BubblewrapStatus {
 
 const BUBBLEWRAP_STATUS_LIMIT = 65_536;
 
-function watchBubblewrap(child: ChildProcess): BubblewrapStatus {
+function watchBubblewrap(
+  child: ChildProcess,
+  onChildPid: (pid: number) => void,
+): BubblewrapStatus {
   const stream = child.stdio[3] as Readable | null | undefined;
   let reported: (pid: number | undefined) => void = () => undefined;
   const status: BubblewrapStatus = {
@@ -1971,8 +2163,10 @@ function watchBubblewrap(child: ChildProcess): BubblewrapStatus {
       try {
         const value = JSON.parse(document) as Record<string, unknown>;
         if (Number.isSafeInteger(value["exit-code"])) status.executed = true;
-        if (Number.isSafeInteger(value["child-pid"]))
+        if (Number.isSafeInteger(value["child-pid"])) {
+          onChildPid(value["child-pid"] as number);
           reported(value["child-pid"] as number);
+        }
       } catch {
         // Not a status document; it reports nothing.
       }
@@ -2005,8 +2199,9 @@ const networkFault = (detail: string) =>
  * Configures the network namespace of a sandbox bubblewrap holds on its
  * block fd: runs pasta against the sandbox's first process, a member of
  * bubblewrap's group, and waits until pasta's pid file says it configured
- * the namespace. `started` receives pasta as soon as it runs, so the caller
- * settles it whatever happens. Resolves true when the command may be
+ * the namespace. `starting` runs before pasta is spawned, and `started`
+ * receives it as soon as it runs, so the caller records and settles it
+ * whatever happens. Resolves true when the command may be
  * released, false when bubblewrap ended first (its own setup failure, which
  * its status reports); throws a configuration fault when pasta could not
  * configure the namespace, so the command must never be released.
@@ -2015,6 +2210,7 @@ async function connectSandbox(
   bwrap: ChildProcess,
   status: BubblewrapStatus,
   network: NonNullable<BubblewrapLaunch["network"]>,
+  starting: () => void,
   started: (pasta: PastaProcess) => void,
 ): Promise<boolean> {
   const ended = () => bwrap.exitCode !== null || bwrap.signalCode !== null;
@@ -2023,6 +2219,7 @@ async function connectSandbox(
   const held = linuxProcessIdentity(target);
   if (!held || held.group !== bwrap.pid)
     throw networkFault(`process ${target} is not bubblewrap's sandbox`);
+  starting();
   const directory = mkdtempSync(join(tmpdir(), "factory-pasta-"));
   const pidFile = join(directory, "pid");
   const child = spawn(
@@ -2198,22 +2395,59 @@ export async function subprocessAsync(
   assertProcessActive();
   signal?.throwIfAborted();
   const network = bubblewrap?.network;
-  const child = spawn(file, args, {
-    ...spawnOptions,
-    ...(bubblewrap && {
-      stdio: [
-        "pipe",
-        "pipe",
-        "pipe",
-        "pipe",
-        // The block fd, and the resolver's data.
-        ...(network ? (["pipe"] as const) : []),
-        ...(network?.resolver !== undefined ? (["pipe"] as const) : []),
-      ],
-    }),
-    detached: true,
-  });
-  const sandbox = bubblewrap && watchBubblewrap(child);
+  // A worker's sandbox is recorded before it can start, for its controller
+  // (#1575); a record still without an identity is a spawn in flight.
+  const record =
+    bubblewrap && sandboxRecords
+      ? join(sandboxRecords, `${randomUUID()}.json`)
+      : undefined;
+  if (record) writeSandboxRecord(record, { boot: currentBoot() });
+  let child: ChildProcess;
+  try {
+    child = spawn(file, args, {
+      ...spawnOptions,
+      ...(bubblewrap && {
+        stdio: [
+          "pipe",
+          "pipe",
+          "pipe",
+          "pipe",
+          // The block fd, and the resolver's data.
+          ...(network ? (["pipe"] as const) : []),
+          ...(network?.resolver !== undefined ? (["pipe"] as const) : []),
+        ],
+      }),
+      detached: true,
+    });
+  } catch (error) {
+    if (record) rmSync(record, { force: true });
+    throw error;
+  }
+  let recordError: unknown;
+  let recorded: SandboxRecord | undefined;
+  if (record && child.pid)
+    try {
+      const owner = nativeProcessOwner(child.pid);
+      if (!owner) throw new Error("Sandbox ownership could not be established");
+      recorded = { boot: owner.boot, owner };
+      writeSandboxRecord(record, recorded);
+    } catch (cause) {
+      recordError = cause;
+    }
+  const sandbox =
+    bubblewrap &&
+    watchBubblewrap(child, (pid) => {
+      if (!record || !recorded?.owner) return;
+      // The init is bubblewrap's child, in its group until it exits.
+      const init = linuxProcessIdentity(pid);
+      if (init?.group !== recorded.owner.group) return;
+      recorded = { ...recorded, init: { pid, startTime: init.startTime } };
+      try {
+        writeSandboxRecord(record, recorded);
+      } catch {
+        // bubblewrap's identity stays recorded; its group holds the init.
+      }
+    });
   // Writing or closing it releases the held command: only once pasta
   // configured its network, or once bubblewrap's group is proven gone.
   const stdio = child.stdio as unknown as (Writable | null | undefined)[];
@@ -2249,7 +2483,10 @@ export async function subprocessAsync(
   let aborted = false;
   let cancelTimer: NodeJS.Timeout | undefined;
   const kill = () => {
-    if (!child.pid) return;
+    // Only while the child is unreaped does its pid, and so its group's id,
+    // still name it; a reaped leader's group id may be reused.
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null)
+      return;
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch (error) {
@@ -2296,6 +2533,7 @@ export async function subprocessAsync(
   );
   let inputTask: Promise<void> | undefined;
   try {
+    if (recordError !== undefined) throw recordError;
     if (interactive && (!owned || identity?.group !== owned.pid))
       throw new Error(
         "Interactive subprocess ownership could not be established",
@@ -2351,14 +2589,29 @@ export async function subprocessAsync(
       inputError = networkFault("bubblewrap could not be identified");
       kill();
     } else
-      networkTask = connectSandbox(child, sandbox, network, (started) => {
-        pasta = started;
-        if (started.owner)
-          scope?.observe?.(
-            { pid: started.owner.pid, startTime: started.owner.startTime },
-            false,
-          );
-      })
+      networkTask = connectSandbox(
+        child,
+        sandbox,
+        network,
+        // A worker records its pasta beside its sandbox, for its controller.
+        () => {
+          if (!record || !recorded?.owner) return;
+          recorded = { ...recorded, pasta: {} };
+          writeSandboxRecord(record, recorded);
+        },
+        (started) => {
+          pasta = started;
+          if (!started.owner) return;
+          const identity = {
+            pid: started.owner.pid,
+            startTime: started.owner.startTime,
+          };
+          scope?.observe?.(identity, false);
+          if (!record || !recorded?.owner) return;
+          recorded = { ...recorded, pasta: identity };
+          writeSandboxRecord(record, recorded);
+        },
+      )
         .then((connected) => {
           if (connected) block?.end("1");
         })
@@ -2373,7 +2626,8 @@ export async function subprocessAsync(
   const status = await exited;
   signal?.removeEventListener("abort", cancel);
   clearTimeout(cancelTimer);
-  if (aborted) kill();
+  // The child is reaped now, so its group is not signalled again: it must
+  // be gone by itself, or the outcome is unknown.
   if (aborted && child.pid) {
     // SIGKILL is asynchronous. Allow the kernel to reap runnable descendants.
     if (cancellationError || !(await groupEnds(child.pid, 1_000))) {
@@ -2431,6 +2685,12 @@ export async function subprocessAsync(
         );
       rmSync(served.directory, { recursive: true, force: true });
     }
+  }
+  // bubblewrap's group, and with it the sandbox, is gone; without a child,
+  // nothing ran.
+  if (record && (owned || aborted || !child.pid)) {
+    recorded = undefined;
+    rmSync(record, { force: true });
   }
   // The group is gone, and with it every copy of the output pipes it held. A
   // process that left the group can still hold them: stop reading then.

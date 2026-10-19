@@ -697,20 +697,24 @@ export async function validateCheckout(
         throw new Error(
           "Validation subprocess ownership unresolved; checkout retained",
         );
-      partial.postCommandStatus = candidateStatus();
-      if (!preparing)
-        partial.commands.push({
-          index,
-          command: check,
-          passed: result.status === 0,
-          exitCode: result.status,
-          treeSha,
-          worktreeStatusBefore,
-          worktreeStatusAfter: partial.postCommandStatus,
-          ...(result.stoppedLeftovers && {
-            stoppedLeftovers: result.stoppedLeftovers,
-          }),
-        });
+      // Over the budget no host-side Git reads the checkout: `git status`
+      // would hash what the command wrote, through any clean filter.
+      if (!overflow) {
+        partial.postCommandStatus = candidateStatus();
+        if (!preparing)
+          partial.commands.push({
+            index,
+            command: check,
+            passed: result.status === 0,
+            exitCode: result.status,
+            treeSha,
+            worktreeStatusBefore,
+            worktreeStatusAfter: partial.postCommandStatus,
+            ...(result.stoppedLeftovers && {
+              stoppedLeftovers: result.stoppedLeftovers,
+            }),
+          });
+      }
       // Past the sandbox's disk budget the command failed, whatever it exited.
       if (result.status !== 0 || overflow) {
         const failed = `Validation command failed (${overflow ? "disk budget" : result.status}): ${check}: `;

@@ -756,13 +756,16 @@ export function assertCandidateBounds(
       throw workFault(`${label} has an unsafe path`);
     }
   };
+  // Neither listing reads file contents: diff-index (without --cached)
+  // names every path whose stat differs from the index, where diff would
+  // hash it, through any clean filter (Git LFS's stores what it cleans).
   const prospective = [
     ...new Set(
       [
         ...names(
           pinnedGitRaw(
             worktree,
-            "diff",
+            "diff-index",
             "--name-only",
             "--no-renames",
             "-z",

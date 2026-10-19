@@ -2019,6 +2019,22 @@ export function locallyAdmitted(
   }
 }
 /**
+ * A cancelled run whose every native scope and Work Item is disposed holds
+ * nothing: its unsettled owner claim is bookkeeping, neither a dispatch slot
+ * nor owned work that blocks removal. Any doubt answers false.
+ */
+export function cancelledRunQuiescent(
+  config: FactoryConfig,
+  objective: number,
+): boolean {
+  try {
+    const state = readContinuation(config.repository, objective);
+    return !!state && cancelledContinuationResourceHold(state) === undefined;
+  } catch {
+    return false;
+  }
+}
+/**
  * Objectives other than `except` whose local owner claims are unsettled: each
  * holds a dispatch slot until its run settles. Unreadable history answers
  * undefined (unknown).
@@ -2033,7 +2049,8 @@ export function locallyClaimedObjectives(
         localQueueHistory(config).flatMap((record) =>
           record.kind === "project-queue-owner" &&
           !record.settled &&
-          record.objective !== except
+          record.objective !== except &&
+          !cancelledRunQuiescent(config, record.objective)
             ? [record.objective]
             : [],
         ),
@@ -3087,7 +3104,11 @@ async function claimProjectQueueRunOwned(
   const slots = maxActiveObjectives(config);
   const assertSlot = (history: QueueRecord[]) => {
     const active = [
-      ...new Set(unsettledOf(history, false).map((claim) => claim.objective)),
+      ...new Set(
+        unsettledOf(history, false)
+          .map((claim) => claim.objective)
+          .filter((id) => !cancelledRunQuiescent(config, id)),
+      ),
     ];
     if (active.length < slots) return;
     throw new Error(

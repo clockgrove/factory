@@ -75,6 +75,7 @@ import {
   readQueueHistory,
   requireProjectQueueEffects,
   retainedQueueCommandOutcome,
+  cancelledRunQuiescent,
   locallyClaimedObjectives,
   verifyQueueObservation,
   type VerifiedQueueObservation,
@@ -1213,12 +1214,13 @@ async function applyControlMutation(
       const state = read === "history" ? undefined : read;
       if (
         (state && !terminal(state)) ||
-        current.history.some(
+        (current.history.some(
           (record) =>
             record.kind === "project-queue-owner" &&
             record.objective === entry.objective &&
             !record.settled,
-        )
+        ) &&
+          !cancelledRunQuiescent(config, entry.objective))
       )
         throw new Error(
           `Objective #${entry.objective} has unfinished owned work; use supported cancellation before removal`,

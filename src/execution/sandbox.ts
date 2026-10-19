@@ -8,6 +8,8 @@
  * metadata read-only, a private HOME and TMPDIR, and nothing else: not the
  * operator's HOME, logins, SSH keys, gh or provider configuration, nor
  * Factory's own configuration, data or state. Network is off; loopback works.
+ * A verified package install may get outbound network in its own namespace,
+ * through pasta (packageInstallNetwork), never the host's.
  *
  * Codex workers keep Codex's own sandbox; this one covers what runs outside it.
  */
@@ -483,22 +485,53 @@ function systemMounts(): string[] {
 /** Namespaces and lifetime: the sandbox ends with the process that spawned bubblewrap. */
 const ISOLATION = ["--unshare-all", "--die-with-parent", "--cap-drop", "ALL"];
 
-function bubblewrapExecutable(): string | undefined {
-  const candidates = [
-    "/usr/bin/bwrap",
-    "/usr/local/bin/bwrap",
-    ...(process.env.PATH ?? "")
-      .split(delimiter)
-      .filter((entry) => isAbsolute(entry))
-      .map((entry) => join(entry, "bwrap")),
+/**
+ * The sandbox's /dev. bubblewrap's `--dev` also mounts a devpts, for which
+ * it runs the command in a second user namespace, nested in the one that
+ * owns the network namespace: pasta, joining the command's, could not
+ * configure that network. So a networked command gets the same devices
+ * without pseudo-terminals.
+ */
+function devices(pseudoTerminals: boolean): string[] {
+  if (pseudoTerminals) return ["--dev", "/dev"];
+  return [
+    "--tmpfs",
+    "/dev",
+    ...["null", "zero", "full", "random", "urandom", "tty"].flatMap((name) => [
+      "--dev-bind",
+      `/dev/${name}`,
+      `/dev/${name}`,
+    ]),
+    ...["stdin", "stdout", "stderr"].flatMap((name, fd) => [
+      "--symlink",
+      `/proc/self/fd/${fd}`,
+      `/dev/${name}`,
+    ]),
+    "--symlink",
+    "/proc/self/fd",
+    "/dev/fd",
   ];
-  return candidates.find((candidate) => {
-    try {
-      return statSync(candidate).isFile();
-    } catch {
-      return false;
-    }
-  });
+}
+
+const isFile = (path: string) => {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/** `name` in each absolute directory of Factory's PATH. */
+const onPath = (name: string) =>
+  (process.env.PATH ?? "")
+    .split(delimiter)
+    .filter((entry) => isAbsolute(entry))
+    .map((entry) => join(entry, name));
+
+function bubblewrapExecutable(): string | undefined {
+  return ["/usr/bin/bwrap", "/usr/local/bin/bwrap", ...onPath("bwrap")].find(
+    isFile,
+  );
 }
 
 export type CommandSandboxAvailability =
@@ -600,20 +633,114 @@ const ROOT_FIX =
 const UNAVAILABLE_FIX =
   "Install bubblewrap (`bwrap`) and allow unprivileged user namespaces on this host. Only if commands must run unsandboxed here, set sandbox.required to false in the Factory configuration.";
 
+/**
+ * Where pasta answers the sandbox's DNS queries: it forwards them to the
+ * host's resolver, which may itself listen on the host's loopback.
+ */
+const PASTA_DNS = "169.254.1.1";
+
+/** Per pasta executable, the arguments that stop its gateway mapping, if any. */
+const pastaGateway = new Map<string, string[] | undefined>();
+
+export type PackageInstallNetwork =
+  | { available: true; executable: string; args: string[] }
+  | { available: false; detail: string };
+
+/**
+ * How a verified package install reaches the network: in the sandbox's own
+ * network namespace, through pasta (passt) on Factory's PATH, which makes
+ * the install's connections from the host. pasta maps its gateway address
+ * to the host's loopback, and forwards ports between the namespaces, unless
+ * told not to: both are turned off, so the install reaches neither host
+ * loopback services nor, in a namespace of its own, abstract sockets. The
+ * gateway mapping is `--map-host-loopback none` in newer passt and
+ * `--no-map-gw` before, read once per executable from its `--help`.
+ * Without a pasta that can turn it off, installs run offline: never in the
+ * host's network namespace.
+ */
+export function packageInstallNetwork(): PackageInstallNetwork {
+  if (runsAsRoot())
+    return {
+      available: false,
+      detail: "Factory runs as root, and pasta is not run as root",
+    };
+  const executable = onPath("pasta").find(isFile);
+  if (!executable)
+    return {
+      available: false,
+      detail: "pasta (passt) is not on Factory's PATH",
+    };
+  if (!pastaGateway.has(executable)) {
+    const help = spawnSync(executable, ["--help"], {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: {},
+    });
+    if (help.error)
+      return {
+        available: false,
+        detail: `${executable} --help could not run: ${help.error.message}`,
+      };
+    const text = `${help.stdout}${help.stderr}`;
+    pastaGateway.set(
+      executable,
+      /--map-host-loopback\b/.test(text)
+        ? ["--map-host-loopback", "none"]
+        : /--no-map-gw\b/.test(text)
+          ? ["--no-map-gw"]
+          : undefined,
+    );
+  }
+  const gateway = pastaGateway.get(executable);
+  if (!gateway)
+    return {
+      available: false,
+      detail: `${executable} cannot stop mapping its gateway address to the host's loopback`,
+    };
+  return {
+    available: true,
+    executable,
+    args: [
+      "--config-net",
+      "--foreground",
+      "--quiet",
+      ...gateway,
+      // No port forwarding into or out of the namespace.
+      ...["-t", "none", "-u", "none", "-T", "none", "-U", "none"],
+      "--dns-forward",
+      PASTA_DNS,
+    ],
+  };
+}
+
 /** What status and setup show about the sandbox commands run in. */
 export function commandSandboxStatus(policy: CommandSandboxPolicy): {
   mode: "bubblewrap" | "unsandboxed" | "unavailable";
   network: CommandSandboxPolicy["network"];
+  /** With `package-install`: "isolated (pasta)", or "offline: " and why. */
+  installNetwork?: string;
   packageStore?: string;
   detail: string;
   fix?: string;
 } {
   const found = commandSandboxAvailability();
   const limits = { ...DEFAULT_SANDBOX_LIMITS, ...policy.limits };
+  const install =
+    policy.network === "package-install" ? packageInstallNetwork() : undefined;
   const shared = {
     network: policy.network,
+    ...(install && {
+      installNetwork: install.available
+        ? "isolated (pasta)"
+        : `offline: ${install.detail}`,
+    }),
     ...(policy.packageStore && { packageStore: policy.packageStore }),
   };
+  const network = !install
+    ? "network off for every command"
+    : install.available
+      ? `network only for verified package installs, in their own network namespace through ${install.executable}, without host loopback`
+      : `network off for every command: verified package installs run offline, because ${install.detail} (install passt to give them the network)`;
   if (found.available && runsAsRoot() && policy.required)
     return {
       mode: "unavailable",
@@ -625,7 +752,7 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
     return {
       mode: "bubblewrap",
       ...shared,
-      detail: `${runsAsRoot() ? `${ROOT_DETAIL}, as sandbox.required false allows; ` : ""}${found.version} at ${found.executable}; network ${policy.network === "off" ? "off for every command" : "only for verified package installs"}; at most ${limits.processes} processes; private /tmp ${found.tmpfsSize ? `${limits.tmpMiB} MiB` : "unsized (this bubblewrap has no --size)"}; after each command at most ${limits.homeMiB} MiB in HOME, ${limits.tmpMiB} MiB in TMPDIR, ${limits.checkoutMiB} MiB of checkout growth and ${limits.files} files`,
+      detail: `${runsAsRoot() ? `${ROOT_DETAIL}, as sandbox.required false allows; ` : ""}${found.version} at ${found.executable}; ${network}; at most ${limits.processes} processes; private /tmp ${found.tmpfsSize ? `${limits.tmpMiB} MiB` : "unsized (this bubblewrap has no --size)"}; after each command at most ${limits.homeMiB} MiB in HOME, ${limits.tmpMiB} MiB in TMPDIR, ${limits.checkoutMiB} MiB of checkout growth and ${limits.files} files`,
     };
   if (!policy.required && !found.installed)
     return {
@@ -774,7 +901,10 @@ export interface SandboxedCommandInput {
   home: string;
   /** The command's environment before sandboxing; HOME and host paths are replaced. */
   env: Record<string, string>;
-  /** This command may reach the network (the policy decides which may). */
+  /**
+   * This command may reach the network (the policy decides which may): in
+   * its own network namespace through pasta, or, without pasta, not at all.
+   */
   network: boolean;
   /**
    * A verified dependency install: the package store is writable and
@@ -805,9 +935,11 @@ const HOST_DIRECTORY_VARIABLES = [
  * session and process group, without a controlling terminal, which it stops
  * and proves gone. A process that leaves the group inside the sandbox
  * still ends with it: when the command exits, the PID namespace's init exits
- * and the kernel kills the rest first. Throws a configuration fault when the
- * sandbox cannot run, or when Factory runs as root and sandbox.required is
- * not false.
+ * and the kernel kills the rest first. A networked command's launch names
+ * pasta: subprocessAsync runs it, recorded, against the held sandbox and
+ * releases the command only once it configured the namespace, then proves
+ * pasta gone too. Throws a configuration fault when the sandbox cannot run,
+ * or when Factory runs as root and sandbox.required is not false.
  */
 export function sandboxedCommand(input: SandboxedCommandInput): {
   file: string;
@@ -960,16 +1092,16 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   // The checkout's `.git` stays read-only, so no command repoints it.
   const git = join(checkout, ".git");
   if (existsSync(git)) mounts.set(git, "ro");
-  const network: string[] = [];
-  if (input.network) {
-    network.push("--share-net");
-    // Name resolution: /etc/resolv.conf often links outside /etc.
-    if (existsSync("/etc/resolv.conf")) {
-      const resolver = realpathSync("/etc/resolv.conf");
-      if (!system.some((root) => within(resolver, root)))
-        mounts.set(resolver, "ro");
-    }
-  }
+  // A network grant runs in the sandbox's own namespace through pasta, or
+  // offline: never in the host's network namespace.
+  const online = input.network ? packageInstallNetwork() : undefined;
+  const pasta = online?.available ? online : undefined;
+  // Name resolution through pasta's DNS forwarder, written where the host's
+  // /etc/resolv.conf leads (often outside /etc).
+  const resolver =
+    pasta && existsSync("/etc/resolv.conf")
+      ? realpathSync("/etc/resolv.conf")
+      : undefined;
   // Process limit: RLIMIT_NPROC, set by util-linux prlimit inside the sandbox.
   const prlimit = ["/usr/bin/prlimit", "/bin/prlimit"].find((path) =>
     existsSync(path),
@@ -999,13 +1131,13 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
       // finished and the command was executed.
       "--json-status-fd",
       "3",
+      // Held until pasta configured the network namespace.
+      ...(pasta ? ["--block-fd", "4"] : []),
       ...ISOLATION,
-      ...network,
       ...systemMounts(),
       "--proc",
       "/proc",
-      "--dev",
-      "/dev",
+      ...devices(!pasta),
       ...sized("/dev/shm"),
       ...sized("/tmp"),
       // Each mount binds the source resolved now, so a link changed after the
@@ -1019,6 +1151,7 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
           );
         return [access === "rw" ? "--bind" : "--ro-bind", source, path];
       }),
+      ...(resolver ? ["--ro-bind-data", "5", resolver] : []),
       // Mount points' parents live on the sandbox's own root: keep it
       // read-only, so only the mounts named writable take writes.
       "--remount-ro",
@@ -1035,6 +1168,15 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
     ],
     env,
     sandbox: "bubblewrap",
-    bubblewrap: { statusFd: 3 },
+    bubblewrap: {
+      statusFd: 3,
+      ...(pasta && {
+        network: {
+          pasta: pasta.executable,
+          args: pasta.args,
+          ...(resolver && { resolver: `nameserver ${PASTA_DNS}\n` }),
+        },
+      }),
+    },
   };
 }

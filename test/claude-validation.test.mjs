@@ -36,11 +36,16 @@ import {
   assertCommandSandboxConfig,
   commandSandboxAvailability,
   commandSandboxStatus,
+  packageInstallNetwork,
   STRICT_COMMAND_SANDBOX,
   sandboxedCommand,
 } from "../dist/execution/sandbox.js";
 import { faultOf } from "../dist/fault.js";
-import { subprocessAsync } from "../dist/process.js";
+import {
+  nativeProcessDisposition,
+  subprocessAsync,
+  withProcessCancellation,
+} from "../dist/process.js";
 import { validateTree, validateWorkItem } from "../dist/validation.js";
 
 const status = (worktree) =>
@@ -610,231 +615,240 @@ test("host-side Git never enters a nested repository sandboxed code could write"
   }
 });
 
-test("a verified install reaches only its configured registry, and commands are resource-limited", async (t) => {
+// Real registry packages without dependencies, with their integrity, read
+// from the public registry: an install with the network fetches them there,
+// through pasta. Undefined without egress.
+const registryPackages = async (names) => {
+  try {
+    const found = {};
+    for (const [name, version] of Object.entries(names)) {
+      const response = await fetch(
+        `https://registry.npmjs.org/${name}/${version}`,
+        { signal: AbortSignal.timeout(15_000) },
+      );
+      if (!response.ok) return undefined;
+      const { dist } = await response.json();
+      found[name] = { version, integrity: dist.integrity };
+    }
+    return found;
+  } catch {
+    return undefined;
+  }
+};
+const installNetwork = packageInstallNetwork();
+const packages = await registryPackages({
+  "is-number": "7.0.0",
+  isarray: "2.0.5",
+  ms: "2.1.3",
+  "has-flag": "4.0.0",
+});
+
+test("a verified install reaches only its configured registry, and commands are resource-limited", {
+  skip:
+    (!installNetwork.available &&
+      `installs run offline here: ${installNetwork.detail}`) ||
+    (!packages && "no egress to https://registry.npmjs.org from this host"),
+}, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "factory-install-network-"));
   const stores = outsideTemporary();
-  t.after(() => rmSync(stores, { recursive: true, force: true }));
-  // Real dependency tarballs served on host loopback, standing in for the
-  // configured registry: only an install in the host's network reaches it.
-  const tarballs = {};
-  for (const name of ["dep", "added", "foreign", "merged"]) {
-    const pack = join(root, "pack", name);
-    mkdirSync(join(pack, "package"), { recursive: true });
-    writeFileSync(
-      join(pack, "package", "package.json"),
-      JSON.stringify({ name, version: "1.0.0" }),
-    );
-    execFileSync("tar", ["-czf", join(pack, "p.tgz"), "-C", pack, "package"]);
-    tarballs[name] = readFileSync(join(pack, "p.tgz"));
-  }
-  const requests = [];
-  // npm also asks the registry for audits and its own version.
-  const fetched = () => requests.filter((url) => url.includes(".tgz"));
-  const server = createServer((request, response) => {
-    requests.push(request.url);
-    const name = request.url.split("/")[1];
-    response.end(tarballs[name] ?? "");
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(stores, { recursive: true, force: true });
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  try {
-    const registry = `http://127.0.0.1:${server.address().port}/`;
-    const integrity = (bytes) =>
-      `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
-    const write = (worktree, dependencies) => {
-      const manifest = {
+  const registry = "https://registry.npmjs.org/";
+  // Another registry origin, serving the same packages.
+  const other = "https://registry.yarnpkg.com/";
+  const tarball = (origin, name) =>
+    `${origin}${name}/-/${name}-${packages[name].version}.tgz`;
+  // How an install without the network fails: at once, resolving the host.
+  const offline = /EAI_AGAIN|ENOTFOUND|ENETUNREACH/;
+  const write = (worktree, dependencies) => {
+    const manifest = {
+      name: "installing",
+      version: "1.0.0",
+      dependencies: Object.fromEntries(
+        Object.keys(dependencies).map((name) => [name, packages[name].version]),
+      ),
+    };
+    writeFileSync(join(worktree, "package.json"), JSON.stringify(manifest));
+    writeFileSync(
+      join(worktree, "package-lock.json"),
+      JSON.stringify({
         name: "installing",
         version: "1.0.0",
-        dependencies: Object.fromEntries(
-          Object.keys(dependencies).map((name) => [name, "1.0.0"]),
-        ),
-      };
-      writeFileSync(join(worktree, "package.json"), JSON.stringify(manifest));
-      writeFileSync(
-        join(worktree, "package-lock.json"),
-        JSON.stringify({
-          name: "installing",
-          version: "1.0.0",
-          lockfileVersion: 3,
-          requires: true,
-          packages: {
-            "": manifest,
-            ...Object.fromEntries(
-              Object.entries(dependencies).map(([name, resolved]) => [
-                `node_modules/${name}`,
-                {
-                  version: "1.0.0",
-                  resolved,
-                  integrity: integrity(tarballs[name]),
-                },
-              ]),
-            ),
-          },
-        }),
-      );
-    };
-    const worktree = join(root, "worktree");
-    execFileSync("git", ["init", "-q", worktree]);
-    const commit = (message) => {
-      execFileSync("git", ["-C", worktree, "add", "."]);
-      execFileSync("git", [
-        "-C",
-        worktree,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.com",
-        "commit",
-        "-qm",
-        message,
-      ]);
-      const read = (revision) =>
-        execFileSync("git", ["-C", worktree, "rev-parse", revision], {
-          encoding: "utf8",
-        }).trim();
-      return { commit: read("HEAD"), tree: read("HEAD^{tree}") };
-    };
-    // The base configures the registry; its lockfile resolves there.
-    // No fetch retries, so an offline install fails at once.
-    writeFileSync(
-      join(worktree, ".npmrc"),
-      `registry=${registry}\nfetch-retries=0\n`,
-    );
-    writeFileSync(join(worktree, ".gitignore"), "node_modules/\n");
-    write(worktree, { dep: `${registry}dep/-/dep-1.0.0.tgz` });
-    const base = commit("base");
-    const install = "npm ci --ignore-scripts";
-    const sandbox = {
-      required: true,
-      network: "package-install",
-      packageStore: join(stores, "store"),
-      readOnlyPaths: [],
-      limits: { tmpMiB: 64, processes: 512 },
-    };
-    // The caller that verified these package inputs passes the base, as
-    // validateWorkItem, final validation and readiness do.
-    const validate = (target, number, commands = [install]) =>
-      validateTree(
-        worktree,
-        join(root, `validation-${number}`),
-        target.commit,
-        target.tree,
-        commands,
-        undefined,
-        undefined,
-        [],
-        undefined,
-        base.commit,
-        false,
-        undefined,
-        undefined,
-        undefined,
-        {
-          ...sandbox,
-          packageInputsVerified: true,
-          packageInputsBase: base.commit,
+        lockfileVersion: 3,
+        requires: true,
+        packages: {
+          "": manifest,
+          ...Object.fromEntries(
+            Object.entries(dependencies).map(([name, resolved]) => [
+              `node_modules/${name}`,
+              {
+                version: packages[name].version,
+                resolved,
+                integrity: packages[name].integrity,
+              },
+            ]),
+          ),
         },
-      );
-    const limited = [
-      `test "$(awk '/Max processes/{print $3}' /proc/self/limits)" = 512`,
-      ...(commandSandboxAvailability().tmpfsSize
-        ? [`test "$(df -k /tmp | awk 'NR==2{print $2}')" = 65536`]
-        : []),
-    ];
-    // The base lockfile: the install fetches from the registry.
-    await validate(base, 1, [install, ...limited]);
-    assert.deepEqual(fetched(), ["/dep/-/dep-1.0.0.tgz"]);
-    // A candidate adding a dependency from the configured registry still
-    // reaches it.
-    write(worktree, {
-      dep: `${registry}dep/-/dep-1.0.0.tgz`,
-      added: `${registry}added/-/added-1.0.0.tgz`,
-    });
-    await validate(commit("add a registry dependency"), 2);
-    assert.deepEqual(fetched(), [
-      "/dep/-/dep-1.0.0.tgz",
-      "/added/-/added-1.0.0.tgz",
+      }),
+    );
+  };
+  const worktree = join(root, "worktree");
+  execFileSync("git", ["init", "-q", worktree]);
+  const commit = (message) => {
+    execFileSync("git", ["-C", worktree, "add", "."]);
+    execFileSync("git", [
+      "-C",
+      worktree,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "-qm",
+      message,
     ]);
-    // One naming a tarball on another host installs offline: no request
-    // leaves, and the install fails where it connects (npm retries).
-    write(worktree, {
-      dep: `${registry}dep/-/dep-1.0.0.tgz`,
-      foreign: `http://localhost:${server.address().port}/foreign/x.tgz?repository-contents`,
-    });
-    const before = requests.length;
-    await assert.rejects(
-      validate(commit("add a foreign tarball"), 3),
-      /ECONNREFUSED/,
+    const read = (revision) =>
+      execFileSync("git", ["-C", worktree, "rev-parse", revision], {
+        encoding: "utf8",
+      }).trim();
+    return { commit: read("HEAD"), tree: read("HEAD^{tree}") };
+  };
+  // The base configures the registry; its lockfile resolves there.
+  // No fetch retries, so an offline install fails at once.
+  writeFileSync(
+    join(worktree, ".npmrc"),
+    `registry=${registry}\nfetch-retries=0\n`,
+  );
+  writeFileSync(join(worktree, ".gitignore"), "node_modules/\n");
+  write(worktree, { "is-number": tarball(registry, "is-number") });
+  const base = commit("base");
+  const install = "npm ci --ignore-scripts";
+  const sandbox = {
+    required: true,
+    network: "package-install",
+    packageStore: join(stores, "store"),
+    readOnlyPaths: [],
+    limits: { tmpMiB: 64, processes: 512 },
+  };
+  // The caller that verified these package inputs passes the base, as
+  // validateWorkItem, final validation and readiness do.
+  const validate = (target, number, commands = [install]) =>
+    validateTree(
+      worktree,
+      join(root, `validation-${number}`),
+      target.commit,
+      target.tree,
+      commands,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      base.commit,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      {
+        ...sandbox,
+        packageInputsVerified: true,
+        packageInputsBase: base.commit,
+      },
     );
-    assert.equal(requests.length, before);
-    // A pnpm lockfile hiding a foreign tarball behind a YAML merge key (which
-    // pnpm's reader applies and YAML 1.2 does not) keeps the install offline,
-    // although the npm lockfile alone would be allowed.
-    write(worktree, {
-      dep: `${registry}dep/-/dep-1.0.0.tgz`,
-      merged: `${registry}merged/-/merged-1.0.0.tgz`,
-    });
-    writeFileSync(
-      join(worktree, "pnpm-lock.yaml"),
-      [
-        "lockfileVersion: '9.0'",
-        "packages:",
-        "  merged@1.0.0:",
-        "    resolution:",
-        `      integrity: ${integrity(tarballs.merged)}`,
-        `      <<: {tarball: 'http://localhost:${server.address().port}/merged/x.tgz'}`,
-        "",
-      ].join("\n"),
-    );
-    await assert.rejects(
-      validate(commit("hide a tarball behind a merge key"), 4),
-      /ECONNREFUSED/,
-    );
-    assert.equal(requests.length, before);
-    // An accepted base without package configuration, and a predecessor
-    // Work Item's unaccepted output that adds its own registry. A dependent
-    // item that keeps it passes the package-input check, but installs
-    // offline even with nothing stored: the network grant compares with the
-    // accepted base.
-    rmSync(join(worktree, "pnpm-lock.yaml"));
-    rmSync(join(worktree, ".npmrc"));
-    write(worktree, { dep: `${registry}dep/-/dep-1.0.0.tgz` });
-    const accepted = commit("accepted base without configuration");
-    writeFileSync(
-      join(worktree, ".npmrc"),
-      `registry=http://localhost:${server.address().port}/\nfetch-retries=0\n`,
-    );
-    const predecessor = commit("name a registry");
-    writeFileSync(join(worktree, "a.txt"), "dependent\n");
-    const dependent = commit("dependent item");
-    await assert.rejects(
-      validateWorkItem(
-        worktree,
-        join(root, "validation-5"),
-        {
-          kind: "work",
-          ownedPaths: ["a.txt"],
-          validation: [{ command: install, provenance: "source-declared" }],
-        },
-        dependent.commit,
-        dependent.tree,
-        accepted.commit,
-        undefined,
-        undefined,
-        predecessor.commit,
-        [],
-        undefined,
-        [],
-        undefined,
-        false,
-        [],
-        { ...sandbox, packageStore: join(stores, "empty-store") },
-      ),
-      /ECONNREFUSED/,
-    );
-    assert.equal(requests.length, before);
-  } finally {
-    server.close();
-  }
+  const limited = [
+    `test "$(awk '/Max processes/{print $3}' /proc/self/limits)" = 512`,
+    ...(commandSandboxAvailability().tmpfsSize
+      ? [`test "$(df -k /tmp | awk 'NR==2{print $2}')" = 65536`]
+      : []),
+  ];
+  // The base lockfile: the install fetches from the registry.
+  await validate(base, 1, [
+    install,
+    "test -f node_modules/is-number/package.json",
+    ...limited,
+  ]);
+  // A candidate adding a dependency from the configured registry still
+  // reaches it.
+  write(worktree, {
+    "is-number": tarball(registry, "is-number"),
+    isarray: tarball(registry, "isarray"),
+  });
+  await validate(commit("add a registry dependency"), 2, [
+    install,
+    "test -f node_modules/isarray/package.json",
+  ]);
+  // One naming a tarball on another origin installs offline, from a store
+  // that lacks it, so it fails without reaching that origin.
+  write(worktree, {
+    "is-number": tarball(registry, "is-number"),
+    ms: `${tarball(other, "ms")}?repository-contents`,
+  });
+  await assert.rejects(validate(commit("add a foreign tarball"), 3), offline);
+  // A pnpm lockfile hiding a foreign tarball behind a YAML merge key (which
+  // pnpm's reader applies and YAML 1.2 does not) keeps the install offline,
+  // although the npm lockfile alone would be allowed.
+  write(worktree, {
+    "is-number": tarball(registry, "is-number"),
+    "has-flag": tarball(registry, "has-flag"),
+  });
+  writeFileSync(
+    join(worktree, "pnpm-lock.yaml"),
+    [
+      "lockfileVersion: '9.0'",
+      "packages:",
+      "  has-flag@4.0.0:",
+      "    resolution:",
+      `      integrity: ${packages["has-flag"].integrity}`,
+      `      <<: {tarball: '${tarball(other, "has-flag")}'}`,
+      "",
+    ].join("\n"),
+  );
+  await assert.rejects(
+    validate(commit("hide a tarball behind a merge key"), 4),
+    offline,
+  );
+  // An accepted base without package configuration, and a predecessor
+  // Work Item's unaccepted output that adds its own registry. A dependent
+  // item that keeps it passes the package-input check, but installs
+  // offline even with nothing stored: the network grant compares with the
+  // accepted base.
+  rmSync(join(worktree, "pnpm-lock.yaml"));
+  rmSync(join(worktree, ".npmrc"));
+  write(worktree, { "is-number": tarball(registry, "is-number") });
+  const accepted = commit("accepted base without configuration");
+  writeFileSync(
+    join(worktree, ".npmrc"),
+    `registry=${other}\nfetch-retries=0\n`,
+  );
+  const predecessor = commit("name a registry");
+  writeFileSync(join(worktree, "a.txt"), "dependent\n");
+  const dependent = commit("dependent item");
+  await assert.rejects(
+    validateWorkItem(
+      worktree,
+      join(root, "validation-5"),
+      {
+        kind: "work",
+        ownedPaths: ["a.txt"],
+        validation: [{ command: install, provenance: "source-declared" }],
+      },
+      dependent.commit,
+      dependent.tree,
+      accepted.commit,
+      undefined,
+      undefined,
+      predecessor.commit,
+      [],
+      undefined,
+      [],
+      undefined,
+      false,
+      [],
+      { ...sandbox, packageStore: join(stores, "empty-store") },
+    ),
+    offline,
+  );
 });
 
 test("a run's HOME, TMPDIR and checkout growth stay within the sandbox's disk budget", async (t) => {
@@ -1174,6 +1188,182 @@ test("a sandbox that cannot be set up is a configuration fault, not the command'
   assert.equal(faultOf(error).kind, "config");
   assert.match(error.message, /could not be set up \(bubblewrap exit 1\)/);
   assert.match(error.message, /Can't find source path/);
+});
+
+// Probes, run in the sandbox, of what the host serves: its loopback HTTP
+// server, directly and through the sandbox's gateway address, and its
+// abstract Unix socket; and of the public registry, when `egress` names it.
+const NETWORK_PROBE = `
+const { readFileSync } = require("node:fs");
+const http = require("node:http");
+const [port, abstract, egress] = process.argv.slice(2);
+// The default route's gateway, little-endian hex in /proc/net/route.
+const route = readFileSync("/proc/net/route", "utf8")
+  .split("\\n").slice(1).map((line) => line.trim().split(/\\s+/))
+  .find((fields) => fields[1] === "00000000");
+const gateway = route?.[2].match(/../g).reverse()
+  .map((byte) => Number.parseInt(byte, 16)).join(".");
+const get = (options) => new Promise((resolve) => {
+  const request = http.get({ ...options, timeout: 3000 }, (response) => {
+    let body = "";
+    response.on("data", (chunk) => { body += chunk; });
+    response.on("end", () => resolve(body));
+  });
+  request.on("timeout", () => request.destroy(new Error("timeout")));
+  request.on("error", (error) => resolve(error.code ?? error.message));
+});
+(async () => {
+  console.log(JSON.stringify({
+    interfaces: readFileSync("/proc/net/dev", "utf8").split("\\n").slice(2)
+      .map((line) => line.split(":")[0].trim()).filter(Boolean),
+    loopback: await get({ host: "127.0.0.1", port }),
+    gateway: gateway ? await get({ host: gateway, port }) : "no gateway",
+    abstract: await get({ socketPath: "\\0" + abstract, path: "/" }),
+    egress: egress
+      ? await fetch(egress, { signal: AbortSignal.timeout(15000) }).then(
+          (response) => response.status,
+          (error) => String(error.cause?.code ?? error),
+        )
+      : "not probed",
+  }));
+})();
+`;
+
+// A networked verified install's launch, as validation makes it.
+const installLaunch = (root, command, path = process.env.PATH) =>
+  sandboxedCommand({
+    command,
+    checkout: join(root, "worktree"),
+    temporary: join(root, "tmp"),
+    home: join(root, "home"),
+    env: { PATH: path },
+    network: true,
+    packageInstall: true,
+    policy: { ...STRICT_COMMAND_SANDBOX, network: "package-install" },
+  });
+
+test("a networked install reaches outbound hosts only, from its own network namespace", {
+  skip:
+    process.geteuid?.() === 0 ||
+    !commandSandboxAvailability().available ||
+    (!installNetwork.available &&
+      /not on Factory's PATH/.test(installNetwork.detail) &&
+      "pasta (passt) is not installed"),
+}, async (t) => {
+  assert.equal(installNetwork.available, true, installNetwork.detail);
+  const root = sandboxRoot(t);
+  // What the host serves only to itself: a loopback HTTP server and an
+  // abstract Unix socket, both answering with a marker.
+  const marker = `host-only-${basename(root)}`;
+  const serve = (listen) =>
+    new Promise((resolve) => {
+      const server = createServer((request, response) => response.end(marker));
+      t.after(() => server.close());
+      server.listen(listen, () => resolve(server));
+    });
+  const loopback = await serve({ host: "127.0.0.1", port: 0 });
+  const abstract = `factory-${basename(root)}`;
+  await serve({ path: `\0${abstract}` });
+  const egress = "https://registry.npmjs.org/-/ping";
+  const online = await fetch(egress, {
+    signal: AbortSignal.timeout(15_000),
+  }).then(
+    (response) => response.ok,
+    () => false,
+  );
+  if (!online) t.diagnostic(`egress not probed: ${egress} is unreachable here`);
+  writeFileSync(join(root, "worktree", "probe.cjs"), NETWORK_PROBE);
+  const launch = installLaunch(
+    root,
+    `node probe.cjs ${loopback.address().port} ${abstract} ${online ? egress : ""}`,
+  );
+  assert.equal(launch.bubblewrap.network.pasta, installNetwork.executable);
+  assert.equal(launch.args.includes("--share-net"), false);
+  // Every process the run starts is recorded, and settled once proven gone:
+  // bubblewrap's group and pasta.
+  const processes = new Map();
+  const result = await withProcessCancellation(
+    undefined,
+    () => runIn(root, launch),
+    (process, settled) =>
+      processes.set(`${process.pid}:${process.startTime}`, settled),
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const seen = JSON.parse(result.stdout);
+  // Its own namespace: loopback and pasta's interface, not the host's.
+  assert.equal(seen.interfaces.length, 2, result.stdout);
+  assert.ok(seen.interfaces.includes("lo"), result.stdout);
+  for (const probe of ["loopback", "gateway", "abstract"])
+    assert.notEqual(seen[probe], marker, `${probe}: ${result.stdout}`);
+  assert.notEqual(seen.gateway, "no gateway", result.stdout);
+  if (online) assert.equal(seen.egress, 200, result.stdout);
+  assert.equal(processes.size, 2);
+  assert.deepEqual([...processes.values()], [true, true]);
+});
+
+test("without pasta a networked install runs offline, and status says so", {
+  skip: process.geteuid?.() === 0 || !commandSandboxAvailability().available,
+}, async (t) => {
+  const root = sandboxRoot(t);
+  // A PATH without pasta.
+  const empty = outsideTemporary();
+  const originalPath = process.env.PATH;
+  t.after(() => {
+    process.env.PATH = originalPath;
+    rmSync(empty, { recursive: true, force: true });
+  });
+  process.env.PATH = empty;
+  const status = commandSandboxStatus({
+    ...STRICT_COMMAND_SANDBOX,
+    network: "package-install",
+  });
+  const launch = installLaunch(
+    root,
+    `test "$(tail -n +3 /proc/net/dev | cut -d: -f1 | tr -d ' ')" = lo`,
+    originalPath,
+  );
+  process.env.PATH = originalPath;
+  assert.equal(status.mode, "bubblewrap");
+  assert.equal(
+    status.installNetwork,
+    "offline: pasta (passt) is not on Factory's PATH",
+  );
+  assert.match(status.detail, /verified package installs run offline/);
+  assert.equal(launch.bubblewrap.network, undefined);
+  assert.equal(launch.args.includes("--share-net"), false);
+  // No network at all: only the sandbox's own loopback.
+  assert.equal((await runIn(root, launch)).status, 0);
+});
+
+test("a sandbox whose network pasta cannot set up never runs its command", {
+  skip:
+    process.geteuid?.() === 0 ||
+    !commandSandboxAvailability().available ||
+    !installNetwork.available,
+}, async (t) => {
+  const root = sandboxRoot(t);
+  const launch = installLaunch(root, "touch ran");
+  // An option this pasta lacks: it exits before configuring anything.
+  launch.bubblewrap.network.args.push("--no-such-pasta-option");
+  let owner;
+  const error = await subprocessAsync(launch.file, launch.args, {
+    cwd: join(root, "worktree"),
+    env: launch.env,
+    bubblewrap: launch.bubblewrap,
+    spawned: (spawned) => {
+      owner = spawned;
+    },
+  }).then(
+    () => assert.fail("a sandbox without its network ran"),
+    (error) => error,
+  );
+  assert.equal(faultOf(error).kind, "config");
+  assert.match(error.message, /network could not be set up/);
+  assert.match(error.message, /--no-such-pasta-option/);
+  // bubblewrap's group, with the command it held, is gone: never released.
+  assert.equal(nativeProcessDisposition(owner), "settled");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(existsSync(join(root, "worktree", "ran")), false);
 });
 
 test("no toolchain or read-only path mounts the host's /tmp or its sockets", {

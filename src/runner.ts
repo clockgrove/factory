@@ -2726,6 +2726,8 @@ export function rereviewWorkItem(
     delete work.acceptancePending;
     delete work.failedValidation;
     delete work.validation;
+    // A rereview is a plain run the operator authorized, not a flaky rerun.
+    delete work.validationRerun;
     delete work.error;
     saveState(statePath(config.repository, objective), state);
     new DiagnosticEmitter(config.repository, objective).emit({

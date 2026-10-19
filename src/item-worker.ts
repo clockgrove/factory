@@ -405,9 +405,9 @@ export async function runWorker(
   recordWorkerDiscovery(state, item.id, result.discovery);
   work.changeRef = result.changeRef;
   work.treeSha = result.treeSha;
-  // Factory's Validate tool found a passing run of the commands it was given
-  // on the files the worker returned: a controller failure of this tree is
-  // run once more before it stands (#1595).
+  // Factory's Validate tool passed the commands it was given on exactly the
+  // tree collection returned: a controller failure of this tree is run once
+  // more before it stands (#1595).
   const validated = (
     result.evidence as { validation?: Record<string, unknown> } | undefined
   )?.validation;
@@ -415,6 +415,7 @@ export async function runWorker(
     validated?.kind === "factory-validation" &&
     validated.version === 1 &&
     validated.finalTreeValidated === true &&
+    validated.finalTree === result.treeSha &&
     attemptedItem.validation.length
   )
     work.validationRerun = {

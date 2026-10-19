@@ -138,6 +138,7 @@ async function harnessReadiness(
     credentialDirectory: credentials,
     network: config.policy.network,
     allowedSecretNames: config.policy.allowedSecretNames,
+    sandboxRequired: commandSandboxPolicy(config).required,
   });
   const document = {
     ...result,

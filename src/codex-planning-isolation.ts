@@ -32,6 +32,7 @@ import {
   toolchainDirectories,
   within,
 } from "./execution/sandbox.js";
+import { StepFault } from "./fault.js";
 import { workerToolchainPath } from "./process.js";
 
 /** Replaces native coding-agent boilerplate only for isolated read-only roles. */
@@ -123,6 +124,26 @@ interface CodexSandbox {
   directory: string;
   workspace: "read" | "write";
   network: boolean;
+  /** The operator's `sandbox.required`; absent is strict. */
+  required?: boolean;
+}
+
+/**
+ * The command sandbox's root rule (`execution/sandbox.ts`), for Codex's own
+ * sandbox: under a root controller its `:minimal` profile reads root-only
+ * host files (`/etc/shadow`, SSH host keys) too. A Codex shell runs as root
+ * only when `sandbox.required` is false.
+ */
+export function assertCodexCommandsAllowed(
+  required: boolean | undefined,
+): void {
+  if (process.geteuid?.() === 0 && required !== false)
+    throw new StepFault({
+      kind: "config",
+      detail:
+        "Factory runs as root, so sandboxed commands would read root-only host files such as /etc/shadow and SSH host keys. Factory refuses to run worker-caused commands as root.",
+      fix: "Run Factory as an unprivileged user. Only if commands may read root-only host files, set sandbox.required to false in the Factory configuration.",
+    });
 }
 
 /** The installed Codex runtime; its Linux sandbox helper re-executes it. */
@@ -510,6 +531,8 @@ export function createCodexHome(options: {
   sandbox?: CodexSandbox;
   keep?: readonly string[];
 }): CodexHome {
+  // Every Codex process with a shell has a permission profile.
+  if (options.sandbox) assertCodexCommandsAllowed(options.sandbox.required);
   if (options.owner !== undefined && !/^[a-f0-9]{64}$/.test(options.owner))
     throw new Error("Codex native home owner must be a stable adapter digest");
   if (options.resume && (!options.root || !options.owner))

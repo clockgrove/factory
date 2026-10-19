@@ -7,6 +7,7 @@ import { option } from "./cli-flags.js";
 import type { FactoryConfig } from "./config.js";
 import {
   readAgentTimeline,
+  readDiagnostics,
   readWorkerOutput,
   redactDiagnosticDetail,
 } from "./diagnostics.js";
@@ -40,7 +41,8 @@ function untilInterrupted(tick: () => void): Promise<void> {
  * `factory diagnostics`: the one observation command. Without a mode it prints the agent
  * timeline (`--follow` keeps printing); `--summary` prints the efficiency report (`--json` for
  * tools), `--analyze` reports on
- * retained interactions, `--logs ITEM` prints a Work Item's worker output and `--captures`
+ * retained interactions, `--logs ITEM` prints a Work Item's worker output, then the complete
+ * output of its failed controller validation commands, and `--captures`
  * lists retained captures (`--content ID` prints one).
  */
 export async function runDiagnosticsCommand(
@@ -108,11 +110,26 @@ export async function runDiagnosticsCommand(
     // A Claude worker reports its activity in the progress stream, not the
     // output log (#1325).
     const claude = claudeWorker(config.repository, attempt);
+    // Controller validation runs after the worker settles; a failed command's
+    // complete output follows the worker's (#1596).
+    const failedValidation = () =>
+      readDiagnostics(config.repository, objective).flatMap((event) =>
+        event.operation === "validation-command" &&
+        event.outcome === "failed" &&
+        event.itemId === item &&
+        event.attemptId === attempt
+          ? [
+              `Controller validation command ${event.metadata?.commandIndex ?? "unknown"} failed (exit ${event.metadata?.exitCode ?? "unknown"}) at ${event.at}; its complete output:`,
+              ...(event.detail ?? "").split("\n"),
+            ]
+          : [],
+      );
     const show = () => {
       const complete = claude
         ? renderWorkerProgress(config.repository, attempt)
         : readWorkerOutput(config.repository, attempt).split("\n");
       if (!claude) complete.pop();
+      complete.push(...failedValidation());
       for (const line of complete.slice(lines))
         console.log(redactDiagnosticDetail(line, secrets));
       lines = complete.length;

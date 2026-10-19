@@ -102,7 +102,9 @@ test("independent prepared change is replayed on the observed integration head",
     writeFileSync(join(root, "aa-unrelated.txt"), "x".repeat(127_500));
     const failedTest =
       "// Candidate test context.\n".repeat(40) +
-      'console.error("z-failing.test.mjs:7: retained candidate failure"); process.exit(1);\n';
+      // Build and check noise first; the failing test reports last (#1596).
+      "for (let i = 0; i < 2000; i++) console.log(`build and check noise ${i}`);\n" +
+      'console.error("z-failing.test.mjs:7: retained candidate failure"); process.exitCode = 1;\n';
     writeFileSync(join(root, "z-failing.test.mjs"), failedTest);
     writeFileSync(
       join(root, "large.txt"),
@@ -513,6 +515,27 @@ test("independent prepared change is replayed on the observed integration head",
       actualFailure = error;
     }
     recordWorkFailure(commandState, commandItem.id, actualFailure);
+    // The Work Item error people read keeps the output's start and its end,
+    // where the failing test is, around a marker (#1596).
+    const shown = actualFailure.message;
+    assert.ok(
+      shown.startsWith(
+        "Validation command failed (1): node z-failing.test.mjs: build and check noise 0\n",
+      ),
+    );
+    assert.match(shown, /\n\[… \d+ characters of output omitted …\]\n/);
+    assert.ok(
+      shown.endsWith(
+        "build and check noise 1999\nz-failing.test.mjs:7: retained candidate failure\n",
+      ),
+    );
+    assert.ok(shown.length < 10_200);
+    // The recorded failure, which diagnosis reads, keeps the complete output.
+    const recorded = commandWork.recovery.failure.detail;
+    assert.equal(
+      recorded,
+      `Validation command failed (1): node z-failing.test.mjs: ${Array.from({ length: 2000 }, (_, i) => `build and check noise ${i}\n`).join("")}z-failing.test.mjs:7: retained candidate failure\n`,
+    );
     assert.equal(
       commandWork.failedValidation.evidence.commands[0].passed,
       false,
@@ -525,6 +548,7 @@ test("independent prepared change is replayed on the observed integration head",
     assert.equal(commandEvidence[2].path, "z-failing.test.mjs");
     assert.equal(commandEvidence[2].content, failedTest);
     assert.equal(commandEvidence[2].complete, true);
+    assert.equal(commandEvidence[0].content, recorded);
     assert.equal(
       commandEvidence.find((entry) => entry.path === "aa-unrelated.txt")
         .complete,

@@ -1995,6 +1995,29 @@ export function localQueueHistory(config: FactoryConfig): QueueRecord[] {
       ),
     );
 }
+function unadmittedRunMessage(objective: number): string {
+  return `Foreground and queue dispatch require a current open, exact-content approved Project admission and running control; use factory queue add ${objective}, or factory queue resume for an intentionally paused queue`;
+}
+/**
+ * Refuse a first run the local receipts show was never admitted, or was
+ * withdrawn, before any slow preflight. Only the local receipts are read: an
+ * unreadable or partial history decides nothing, and the claim's full
+ * Project-backed admission check still runs before any work starts.
+ */
+export function refuseUnadmittedRun(
+  config: FactoryConfig,
+  objective: number,
+): void {
+  if (!config.queue?.project) return;
+  let entry: ReturnType<typeof retainedQueueEntry>;
+  try {
+    entry = retainedQueueEntry(config, localQueueHistory(config), objective);
+  } catch {
+    return;
+  }
+  if (entry?.state !== "queued")
+    throw new Error(unadmittedRunMessage(objective));
+}
 /**
  * Whether the local receipts show `objective` admitted to the queue under the
  * current queue authority. Unreadable or partial history answers false: status
@@ -3042,9 +3065,7 @@ async function claimProjectQueueRunOwned(
       card?.state !== "open" ||
       queueDigest(card.body) !== entry.bodyDigest
     )
-      throw new Error(
-        `Foreground and queue dispatch require a current open, exact-content approved Project admission and running control; use factory queue add ${objective}, or factory queue resume for an intentionally paused queue`,
-      );
+      throw new Error(unadmittedRunMessage(objective));
     // Historical admissions of settled terminal Objectives never dispatch.
     if (entry.authorityDigest !== factoryAuthorityDigest(config))
       throw new Error(

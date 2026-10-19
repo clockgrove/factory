@@ -49,6 +49,7 @@ import { operatorName } from "./operator.js";
 import {
   locallyAdmitted,
   locallyClaimedObjectives,
+  refuseUnadmittedRun,
   QueueAuthorityChanged,
 } from "./project-queue-state.js";
 import { runProposeCommand } from "./proposals.js";
@@ -492,6 +493,45 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
   }
 }
 type ServiceStatus = Parameters<typeof renderServiceStatus>[0];
+
+/**
+ * Refusals that need no recovery checkpoint: invalid `decide` arguments, and a
+ * first `run` the local queue receipts show was never admitted. They run before
+ * the command opens its checkpoint operation, whose verification and closing
+ * synchronization can take minutes. Nothing is mutated, so nothing needs
+ * durability; every other check, including the full Project-backed admission
+ * check, still runs in its original place.
+ */
+function refuseStatelessly(
+  command: string,
+  args: string[],
+  config: FactoryConfig,
+): void {
+  if (command === "decide" || command === "run") {
+    const objective = Number(option(args, "objective"));
+    if (!Number.isSafeInteger(objective) || objective <= 0)
+      throw new Error(`${command} requires --objective N`);
+  }
+  if (command === "decide") {
+    const outcome = option(args, "outcome");
+    if (
+      !option(args, "reason") ||
+      (outcome !== "accept" && outcome !== "refuse")
+    )
+      throw new Error("decide requires --outcome accept|refuse and --reason");
+    if (option(args, "question") !== undefined && !option(args, "answer"))
+      throw new Error("--question names the question an --answer answers");
+  }
+  if (command === "run") {
+    const objective = Number(option(args, "objective"));
+    if (
+      Number.isSafeInteger(objective) &&
+      objective > 0 &&
+      !readContinuation(config.repository, objective)
+    )
+      refuseUnadmittedRun(config, objective);
+  }
+}
 
 /** `factory decide`: the plan a run saved, or a result criterion, read from the Objective's state. */
 async function decideCommand(
@@ -1219,6 +1259,7 @@ async function main(): Promise<void> {
     args,
     option(args, "config") ?? configPath(),
   );
+  refuseStatelessly(command, args, config);
   await withRecoveryCheckpointOperation(
     {
       config,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -30,7 +31,7 @@ import {
   commandSandboxAvailability,
   STRICT_COMMAND_SANDBOX,
 } from "../dist/execution/sandbox.js";
-import { validateTree } from "../dist/validation.js";
+import { validateTree, validateWorkItem } from "../dist/validation.js";
 
 const status = (worktree) =>
   execFileSync("git", ["-C", worktree, "status", "--porcelain"], {
@@ -500,6 +501,35 @@ test("host-side Git never enters a nested repository sandboxed code could write"
     /submodule gitlinks/,
   );
   assert.equal(existsSync(marker), false);
+  // Nor does it hash more than collection could retain into the shared
+  // object store: a sparse file counts at its apparent size.
+  const bounded = repository("bounded");
+  const objects = () => git(bounded, "count-objects", "-v");
+  const stored = objects();
+  const bounds = { maxBytes: 1024 * 1024, maxFiles: 2 };
+  truncateSync(join(bounded, "a.txt"), 2 * 1024 ** 3);
+  await assert.rejects(
+    workerFilesTree(bounded, bounds),
+    /Worker snapshot exceeds the admitted byte bound/,
+  );
+  git(bounded, "checkout", "--", "a.txt");
+  for (const name of ["b", "c", "d"]) writeFileSync(join(bounded, name), name);
+  await assert.rejects(
+    workerFilesTree(bounded, bounds),
+    /Worker snapshot exceeds the admitted file bound/,
+  );
+  assert.equal(objects(), stored);
+  // A directory the worker made unreadable is its fault, found before
+  // host-side Git reads the checkout. Root reads it anyway.
+  if (process.getuid() !== 0) {
+    mkdirSync(join(bounded, "locked"));
+    chmodSync(join(bounded, "locked"), 0);
+    await assert.rejects(
+      workerFilesTree(bounded),
+      /Worker left an unreadable path: locked/,
+    );
+    chmodSync(join(bounded, "locked"), 0o755);
+  }
 });
 
 test("a verified install reaches only its configured registry, and commands are resource-limited", async () => {
@@ -593,6 +623,13 @@ test("a verified install reaches only its configured registry, and commands are 
     write(worktree, { dep: `${registry}dep/-/dep-1.0.0.tgz` });
     const base = commit("base");
     const install = "npm ci --ignore-scripts";
+    const sandbox = {
+      required: true,
+      network: "package-install",
+      packageStore: join(root, "store"),
+      readOnlyPaths: [],
+      limits: { tmpMiB: 64, processes: 512 },
+    };
     // The caller that verified these package inputs passes the base, as
     // validateWorkItem, final validation and readiness do.
     const validate = (target, number, commands = [install]) =>
@@ -612,11 +649,7 @@ test("a verified install reaches only its configured registry, and commands are 
         undefined,
         undefined,
         {
-          required: true,
-          network: "package-install",
-          packageStore: join(root, "store"),
-          readOnlyPaths: [],
-          limits: { tmpMiB: 64, processes: 512 },
+          ...sandbox,
           packageInputsVerified: true,
           packageInputsBase: base.commit,
         },
@@ -674,6 +707,48 @@ test("a verified install reaches only its configured registry, and commands are 
     );
     await assert.rejects(
       validate(commit("hide a tarball behind a merge key"), 4),
+      /ECONNREFUSED/,
+    );
+    assert.equal(requests.length, before);
+    // An accepted base without package configuration, and a predecessor
+    // Work Item's unaccepted output that adds its own registry. A dependent
+    // item that keeps it passes the package-input check, but installs
+    // offline even with nothing stored: the network grant compares with the
+    // accepted base.
+    rmSync(join(worktree, "pnpm-lock.yaml"));
+    rmSync(join(worktree, ".npmrc"));
+    write(worktree, { dep: `${registry}dep/-/dep-1.0.0.tgz` });
+    const accepted = commit("accepted base without configuration");
+    writeFileSync(
+      join(worktree, ".npmrc"),
+      `registry=http://localhost:${server.address().port}/\nfetch-retries=0\n`,
+    );
+    const predecessor = commit("name a registry");
+    writeFileSync(join(worktree, "a.txt"), "dependent\n");
+    const dependent = commit("dependent item");
+    await assert.rejects(
+      validateWorkItem(
+        worktree,
+        join(root, "validation-5"),
+        {
+          kind: "work",
+          ownedPaths: ["a.txt"],
+          validation: [{ command: install, provenance: "source-declared" }],
+        },
+        dependent.commit,
+        dependent.tree,
+        accepted.commit,
+        undefined,
+        undefined,
+        predecessor.commit,
+        [],
+        undefined,
+        [],
+        undefined,
+        false,
+        [],
+        { ...sandbox, packageStore: join(root, "empty-store") },
+      ),
       /ECONNREFUSED/,
     );
     assert.equal(requests.length, before);

@@ -144,7 +144,20 @@ function safeIgnoredLink(worktree: string, path: string): boolean {
  */
 export function assertNoNestedGit(root: string): void {
   const inspect = (directory: string, relative: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+      // A directory the worker made unreadable is its fault, as collection
+      // reports for any other unreadable path.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EACCES" || code === "EPERM")
+        throw workFault(`Worker left an unreadable path: ${relative || "."}`, {
+          cause: error,
+        });
+      throw error;
+    }
+    for (const entry of entries) {
       if (!relative && entry.name === ".git") continue;
       const path = relative ? `${relative}/${entry.name}` : entry.name;
       if (entry.name === ".git")

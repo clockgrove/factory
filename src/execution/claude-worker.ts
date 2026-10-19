@@ -12,6 +12,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_AGENT_SDK_ADAPTER_IDENTITY } from "../config.js";
+import type { UnsettledSubprocessError } from "../process.js";
 import {
   type AgentSessionRef,
   AuthenticationRequiredError,
@@ -351,6 +352,13 @@ async function main(): Promise<void> {
     { once: true },
   );
   let providerCompleted = false;
+  // A subprocess whose stop is unproved may still write the checkout: the
+  // attempt ends now, and its outcome is unknown, never complete.
+  let unsettled: UnsettledSubprocessError | undefined;
+  const onUnsettled = (error: UnsettledSubprocessError) => {
+    unsettled ??= error;
+    controller.abort(error);
+  };
   let prepared: PreparedClaudeEnvironment | undefined;
   let validation: PreparedClaudeValidation | undefined;
   let files: PreparedClaudeFiles | undefined;
@@ -437,6 +445,15 @@ async function main(): Promise<void> {
               packageManagerUpdate: input.request.packageManagerUpdate,
             }),
           },
+          snapshot: {
+            ...(input.request.sourceBaseSha && {
+              acceptedBaseSha: input.request.sourceBaseSha,
+            }),
+            ...(input.request.candidateBounds && {
+              candidateBounds: input.request.candidateBounds,
+            }),
+          },
+          onUnsettled,
           handoff: {
             peers: input.request.handoffPeers ?? [],
             acceptance: input.request.item.acceptance,
@@ -496,6 +513,7 @@ async function main(): Promise<void> {
           ...(input.request.commandSandbox && {
             sandbox: input.request.commandSandbox,
           }),
+          onUnsettled,
         }).then(async (environment) => {
           if (controller.signal.aborted) {
             await environment.close();
@@ -799,6 +817,7 @@ async function main(): Promise<void> {
         },
       };
     }
+    if (unsettled) throw unsettled;
     const assets = readProducedAssets(input.request);
     observeUsage("completed");
     capture.outcome("completed", usage.totals(), undefined, "protocol");
@@ -838,15 +857,17 @@ async function main(): Promise<void> {
         /* Preserve the authoritative provider failure. */
       }
     }
-    writeHarnessResult(
-      resultPath,
-      harnessFailure("claude", error, redactionValues),
-    );
+    const failure = unsettled ?? error;
+    writeHarnessResult(resultPath, {
+      ...harnessFailure("claude", failure, redactionValues),
+      // The controller keeps the checkout and records the outcome unknown.
+      ...(unsettled && { unsettled: true }),
+    });
     observeUsage("failed");
     capture.outcome(
       "failed",
       usage.totals(),
-      error,
+      failure,
       providerCompleted ? "protocol" : "provider",
     );
     process.exitCode = 1;

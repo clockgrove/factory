@@ -1129,6 +1129,8 @@ export interface HarnessRequest {
   validationLfs?: { members: ValidationLfsMember[]; store: string };
   /** The operator's OS sandbox policy for commands the worker causes; absent is strict. */
   commandSandbox?: import("./execution/sandbox.js").CommandSandboxPolicy;
+  /** The controller's admitted checkpoint bounds; a worker's snapshot stages no more than collection could retain. */
+  candidateBounds?: { maxBytes: number; maxFiles: number };
 }
 export interface HarnessHandle {
   /** Provider attempt identity, stable across controller restarts. */

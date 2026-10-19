@@ -137,6 +137,9 @@ function plainRange(value: string): boolean {
   return colon < 0 || (colon > value.indexOf("(") && value.indexOf("(") >= 0);
 }
 
+/** An npm package name, scoped or not (legacy uppercase included). */
+const NPM_PACKAGE_NAME = /^(?:@[\w.~-]+\/)?[\w.~-]+$/;
+
 /**
  * Whether an importer's specifier or resolved version may stand beside a
  * registry-only install. A registry range or version may, and so may an
@@ -158,8 +161,7 @@ function importerEntryAllowed(importer: string, value: unknown): boolean {
     const at = aliased.indexOf("@", 1);
     const name = at < 0 ? aliased : aliased.slice(0, at);
     return (
-      name.length > 0 &&
-      !name.includes(":") &&
+      NPM_PACKAGE_NAME.test(name) &&
       (at < 0 || plainRange(aliased.slice(at + 1)))
     );
   }
@@ -222,25 +224,147 @@ function plainYaml(text: string, path: string): unknown[] | NetworkRefusal {
   return plain;
 }
 
+/** `major.minor.patch` with no prerelease or build, as numbers. */
+function releaseVersion(value: string): number[] | undefined {
+  const found = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(value.trim());
+  return found ? found.slice(1).map(Number) : undefined;
+}
+
+function compareVersions(left: number[], right: number[]): number {
+  for (let index = 0; index < 3; index++) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference) return difference;
+  }
+  return 0;
+}
+
+/**
+ * Whether a release version satisfies one comparator set of an npm range:
+ * `^`, `~`, `>=`, `>`, `<=`, `<`, `=`, an exact version, or a partial
+ * (`12`, `12.6`, `12.x`, `*`). Anything else is not read: unknown is refused.
+ */
+function satisfiesComparators(version: number[], set: string): boolean {
+  for (const token of set.trim().split(/\s+/).filter(Boolean)) {
+    const found =
+      /^(\^|~|>=|<=|>|<|=)?v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?$/.exec(
+        token,
+      );
+    if (!found) return false;
+    const parts = found.slice(2, 5);
+    // The numbers before the first wildcard or missing part; a number after
+    // a wildcard (`1.x.3`) is not a range.
+    const given: number[] = [];
+    for (const part of parts) {
+      if (part === undefined || !/^\d+$/.test(part)) break;
+      given.push(Number(part));
+    }
+    if (parts.slice(given.length).some((part) => /^\d+$/.test(part ?? "")))
+      return false;
+    const low = [0, 1, 2].map((index) => given[index] ?? 0);
+    // The first version past everything sharing the first `length` parts.
+    const past = (length: number) =>
+      low.map((part, index) =>
+        index < length - 1 ? part : index === length - 1 ? part + 1 : 0,
+      );
+    const operator = found[1] ?? "";
+    const n = given.length;
+    let ok: boolean;
+    if (operator === ">=") ok = n === 0 || compareVersions(version, low) >= 0;
+    else if (operator === "<=")
+      ok =
+        n === 0 ||
+        (n === 3
+          ? compareVersions(version, low) <= 0
+          : compareVersions(version, past(n)) < 0);
+    else if (operator === ">")
+      ok =
+        n > 0 &&
+        (n === 3
+          ? compareVersions(version, low) > 0
+          : compareVersions(version, past(n)) >= 0);
+    else if (operator === "<") ok = n > 0 && compareVersions(version, low) < 0;
+    else {
+      // `=`, none, `^` and `~` are all a half-open interval from `low`.
+      let length = n;
+      if (operator === "^" && n > 0)
+        length = low[0] !== 0 || n === 1 ? 1 : low[1] !== 0 || n === 2 ? 2 : 3;
+      else if (operator === "~" && n > 0) length = n === 1 ? 1 : 2;
+      ok =
+        n === 0 ||
+        (compareVersions(version, low) >= 0 &&
+          compareVersions(version, past(length)) < 0);
+    }
+    if (!ok) return false;
+  }
+  return true;
+}
+
+/** Whether `version` is `range` or satisfies it; unknown is refused. */
+function satisfiesRange(version: unknown, range: string): boolean {
+  if (typeof version !== "string") return false;
+  if (version === range) return true;
+  const release = releaseVersion(version);
+  if (!release) return false;
+  return range
+    .split("||")
+    .some((set) => !/[-+]/.test(set) && satisfiesComparators(release, set));
+}
+
+/**
+ * The package manager package.json pins, as the name pnpm records it under
+ * `packageManagerDependencies` and what its locked version must satisfy: the
+ * root `packageManager` (`name@version`, optionally `+sha...`), else
+ * `devEngines.packageManager` (`{ name, version }`, an exact version or a
+ * range). Undefined when neither pins one Factory can read.
+ */
+function pinnedPackageManager(
+  packageManager: unknown,
+  devEngines: unknown,
+): { name: string; accepts: (version: unknown) => boolean } | undefined {
+  if (typeof packageManager === "string") {
+    const found = /^((?:@[^@/]+\/)?[^@]+)@([^+]+)(?:\+.*)?$/.exec(
+      packageManager,
+    );
+    return found
+      ? {
+          name: found[1] as string,
+          accepts: (version) => version === found[2],
+        }
+      : undefined;
+  }
+  const entry = (devEngines as Record<string, unknown> | null | undefined)
+    ?.packageManager as Record<string, unknown> | null | undefined;
+  if (
+    !entry ||
+    typeof entry !== "object" ||
+    typeof entry.name !== "string" ||
+    typeof entry.version !== "string"
+  )
+    return undefined;
+  const range = entry.version;
+  return {
+    name: entry.name,
+    accepts: (version) => satisfiesRange(version, range),
+  };
+}
+
 /**
  * Why pnpm-lock.yaml is not registry-only, or undefined: in every document,
  * importers name registry ranges, aliases or sibling packages, the package
- * manager pinned is the one `packageManager` names, and every package
- * resolves by integrity from a registry origin.
+ * manager pinned is the one `packageManager` (or, without it,
+ * `devEngines.packageManager`) names, and every package resolves by
+ * integrity from a registry origin.
  */
 function pnpmLockfileRefusal(
   text: string,
   registries: Set<string>,
   packageManager: unknown,
+  devEngines: unknown,
 ): NetworkRefusal | undefined {
   const path = "pnpm-lock.yaml";
   const documents = plainYaml(text, path);
   if (!Array.isArray(documents)) return documents;
-  // `name@version`, optionally `+sha…`: what pnpm itself pins.
-  const pinned =
-    typeof packageManager === "string"
-      ? /^((?:@[^@/]+\/)?[^@]+)@([^+]+)(?:\+.*)?$/.exec(packageManager)
-      : null;
+  const pinned = pinnedPackageManager(packageManager, devEngines);
   for (const document of documents) {
     const lock = document as Record<string, unknown> | null;
     if (!lock || typeof lock !== "object")
@@ -281,10 +405,10 @@ function pnpmLockfileRefusal(
             // Only the package manager package.json pins, at its version.
             if (
               group === "packageManagerDependencies" &&
-              (!pinned || name !== pinned[1] || version !== pinned[2])
+              (!pinned || name !== pinned.name || !pinned.accepts(version))
             )
               return {
-                reason: `${path} pins ${name}@${String(version)} as the package manager, not the packageManager package.json names`,
+                reason: `${path} pins ${name}@${String(version)} as the package manager, not the one package.json names (packageManager or devEngines.packageManager)`,
               };
           }
         }
@@ -442,7 +566,12 @@ export function installNetworkRefusal(
       (pnpm !== undefined
         ? lockfile(
             "pnpm-lock.yaml",
-            pnpmLockfileRefusal(pnpm, registries, pinned.packageManager),
+            pnpmLockfileRefusal(
+              pnpm,
+              registries,
+              pinned.packageManager,
+              pinned.devEngines,
+            ),
           )
         : undefined) ??
       (npm !== undefined

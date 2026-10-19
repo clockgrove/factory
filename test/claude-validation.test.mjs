@@ -676,11 +676,12 @@ test("a verified install reaches only its configured registry, and commands are 
   // How an install without the network fails: at once, npm running offline
   // and finding the package in no cache.
   const offline = /ENOTCACHED/;
-  const write = (worktree, dependencies, packageManager) => {
+  const write = (worktree, dependencies, packageManager, devEngines) => {
     const manifest = {
       name: "installing",
       version: "1.0.0",
       ...(packageManager && { packageManager }),
+      ...(devEngines && { devEngines }),
       dependencies: Object.fromEntries(
         Object.keys(dependencies).map((name) => [name, packages[name].version]),
       ),
@@ -749,7 +750,13 @@ test("a verified install reaches only its configured registry, and commands are 
   };
   // The caller that verified these package inputs passes the base, as
   // validateWorkItem, final validation and readiness do.
-  const validate = (target, number, commands = [install], inputs = base) =>
+  const validate = (
+    target,
+    number,
+    commands = [install],
+    inputs = base,
+    packageStore = sandbox.packageStore,
+  ) =>
     validateTree(
       worktree,
       join(root, `validation-${number}`),
@@ -767,6 +774,7 @@ test("a verified install reaches only its configured registry, and commands are 
       undefined,
       {
         ...sandbox,
+        packageStore,
         packageInputsVerified: true,
         packageInputsBase: inputs.commit,
       },
@@ -911,6 +919,87 @@ test("a verified install reaches only its configured registry, and commands are 
       },
     );
   }
+  // A repository pinning pnpm only through devEngines.packageManager (no
+  // packageManager field) still gets the grant, for a range the locked
+  // version satisfies: has-flag is in no store yet, so only the registry
+  // can supply it. (onFail keeps npm, which runs the install here, from
+  // enforcing the pnpm pin.)
+  const devEngines = (version) => ({
+    packageManager: { name: "pnpm", version, onFail: "ignore" },
+  });
+  const both = {
+    "is-number": tarball(registry, "is-number"),
+    "has-flag": tarball(registry, "has-flag"),
+  };
+  write(
+    worktree,
+    { "is-number": tarball(registry, "is-number") },
+    undefined,
+    devEngines("^12.0.0"),
+  );
+  writeFileSync(join(worktree, "pnpm-lock.yaml"), pnpm12);
+  const devPinned = commit("pin pnpm 12 through devEngines");
+  write(worktree, both, undefined, devEngines("^12.0.0"));
+  await validate(
+    commit("add a registry dependency beside a devEngines pin"),
+    20,
+    [install, "test -f node_modules/has-flag/package.json"],
+    devPinned,
+  );
+  // A range the locked pnpm does not satisfy keeps the install offline.
+  write(
+    worktree,
+    { "is-number": tarball(registry, "is-number") },
+    undefined,
+    devEngines("^11.0.0"),
+  );
+  const otherPinned = commit("pin another pnpm major through devEngines");
+  write(worktree, both, undefined, devEngines("^11.0.0"));
+  await assert.rejects(
+    validate(
+      commit("pnpm 12 locked beside a pnpm 11 devEngines range"),
+      21,
+      [install],
+      otherPinned,
+      join(stores, "empty-store"),
+    ),
+    (error) => {
+      assert.match(error.message, offline);
+      assert.match(
+        error.message,
+        /because pnpm-lock\.yaml pins pnpm@12\.6\.0 as the package manager/,
+      );
+      assert.equal(faultOf(error).kind, "work");
+      return true;
+    },
+  );
+  // A base lockfile Factory cannot read, which the candidate left alone, is
+  // Factory's limit, not the candidate's: a configuration fault.
+  write(worktree, { "is-number": tarball(registry, "is-number") });
+  writeFileSync(
+    join(worktree, "pnpm-lock.yaml"),
+    "lockfileVersion: '9.0'\nimporters: {}\nimporters: {}\n",
+  );
+  const unreadable = commit("base with a lockfile Factory cannot read");
+  write(worktree, both);
+  await assert.rejects(
+    validate(
+      commit("add a dependency beside an unreadable base lockfile"),
+      22,
+      [install],
+      unreadable,
+      join(stores, "empty-store"),
+    ),
+    (error) => {
+      assert.match(error.message, offline);
+      assert.match(
+        error.message,
+        /because Factory could not read pnpm-lock\.yaml as YAML/,
+      );
+      assert.equal(faultOf(error).kind, "config");
+      return true;
+    },
+  );
   // An accepted base without package configuration, and a predecessor
   // Work Item's unaccepted output that adds its own registry. A dependent
   // item that keeps it passes the package-input check, but installs

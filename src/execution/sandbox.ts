@@ -814,11 +814,17 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
       "/dev",
       ...sized("/dev/shm"),
       ...sized("/tmp"),
-      ...ordered.flatMap(([path, access]) => [
-        access === "rw" ? "--bind" : "--ro-bind",
-        path,
-        path,
-      ]),
+      // Each mount binds the source resolved now, so a link changed after the
+      // checks above cannot redirect it into host sockets.
+      ...ordered.flatMap(([path, access]) => {
+        const source = realpathSync(path);
+        if (source !== path && showsHostSockets(source))
+          throw configFault(
+            `${path} now leads to ${source}, which would show sandboxed commands runtime sockets or the shared temporary directory`,
+            "Keep the PATH's links pointing at toolchain directories while Factory runs",
+          );
+        return [access === "rw" ? "--bind" : "--ro-bind", source, path];
+      }),
       // Mount points' parents live on the sandbox's own root: keep it
       // read-only, so only the mounts named writable take writes.
       "--remount-ro",

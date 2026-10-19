@@ -1271,18 +1271,16 @@ export interface DeliveryObservation {
   /** When a closed PR was closed. */
   closedAt?: string;
   checks: "pending" | "passing" | "failing";
-  /** Names of completed check runs that failed on this exact head. */
-  failedChecks?: string[];
   /**
-   * Check names the repository's rulesets or branch protection require on
-   * the base branch; read only when a check failed.
+   * Check runs and commit statuses on this exact head that ended without
+   * success (failed, cancelled, timed out, errored), required or not.
    */
-  requiredChecks?: string[];
+  failedChecks?: FailedCheck[];
   /**
    * Authenticated target protection readiness; absent only on custom
-   * gateways. `ready` includes failing checks the repository does not
-   * require; `conflict`: the head conflicts with the base; `draft`: someone
-   * made the PR a draft.
+   * gateways. `ready`: GitHub allows the merge, even with checks the
+   * repository does not require still running or failed; `conflict`: the
+   * head conflicts with the base; `draft`: someone made the PR a draft.
    */
   mergeReadiness?: "ready" | "waiting" | "conflict" | "draft" | "behind";
 }
@@ -1702,6 +1700,14 @@ export interface NativeStackLayer {
   branch: string;
   headSha: string;
 }
+/** A check run or commit status that ended without success on a PR head. */
+export interface FailedCheck {
+  name: string;
+  /** The check run's conclusion, or the commit status's state. */
+  conclusion: string;
+  url?: string;
+}
+
 export interface NamedCheckEvidence {
   id: number;
   headSha: string;

@@ -55,11 +55,11 @@ export function assertPreIntegrationCheckSources(
 
 /**
  * Whether a published PR may merge. Returns undefined when it may (or has
- * already merged), or what it is waiting for. Only required checks gate: a
- * failed check the source or the repository's rules require, or a conflict
- * with the base, is `work` on the published result; checks the repository
- * does not require never block. A PR made a draft, or closed without
- * merging, is a decision.
+ * already merged), or what it is waiting for. Any check on the head that
+ * ended without success, required or not, or a conflict with the base, is
+ * `work` on the published result (#1637). Every check must settle, and a
+ * source-required one must succeed by name. A PR made a draft, or closed
+ * without merging, is a decision.
  */
 export function deliveryReadiness(
   pullRequest: number,
@@ -81,13 +81,17 @@ export function deliveryReadiness(
       ),
     );
   settled(`closed:${pullRequest}:${expectedHead}`);
-  // Source-required checks, and those the repository's rules require.
-  const failed = [
-    ...new Set([...requiredChecks, ...(observation.requiredChecks ?? [])]),
-  ].filter((name) => observation.failedChecks?.includes(name));
+  // GitHub merges past a check the repository does not require; Factory
+  // does not (#1637). The evidence names each check, so a repair can fix it.
+  const failed = observation.failedChecks ?? [];
   if (failed.length)
     throw work(
-      `Required checks failed on PR #${pullRequest} at ${expectedHead}: ${failed.join(", ")}`,
+      `Checks failed on PR #${pullRequest} at ${expectedHead}: ${failed
+        .map(
+          (check) =>
+            `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})`,
+        )
+        .join("; ")}`,
     );
   // A gateway without protection readiness gates on every check.
   const protection = observation.mergeReadiness;
@@ -124,13 +128,10 @@ export function deliveryReadiness(
   });
   if (named.length)
     return `Awaiting successful exact-head source-required checks: ${named.join(", ")}`;
-  if (
-    protection === "waiting" ||
-    (!protection && observation.checks === "pending")
-  )
-    return observation.failedChecks?.length
-      ? `GitHub blocks the merge of PR #${pullRequest}; failed checks: ${observation.failedChecks.join(", ")}`
-      : `Awaiting checks and protection readiness on PR #${pullRequest}`;
+  // Checks the repository does not require still running: GitHub would
+  // merge now, but their result could still be a failure.
+  if (protection === "waiting" || observation.checks === "pending")
+    return `Awaiting checks and protection readiness on PR #${pullRequest}`;
   return undefined;
 }
 
@@ -149,7 +150,7 @@ export function unreportedGates(
   if (observation.state !== "open") return [];
   return gates.filter(
     (name) =>
-      !observation.failedChecks?.includes(name) &&
+      !observation.failedChecks?.some((check) => check.name === name) &&
       !observation.reportedChecks?.includes(name),
   );
 }

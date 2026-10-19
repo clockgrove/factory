@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import * as time from "./clock.js";
 import type {
   ChildObjectiveProjection,
+  FailedCheck,
   GitHubGateway,
   GraphProjection,
   GraphProjectionEffectRequest,
@@ -2338,7 +2339,7 @@ export class RealGitHubGateway implements GitHubGateway {
       runs.push(...result.check_runs);
       if (result.check_runs.length < 100) break;
     }
-    type Status = { context?: unknown; state?: unknown };
+    type Status = { context?: unknown; state?: unknown; target_url?: unknown };
     const contexts: Status[] = [];
     let combined: { state: string; total_count: number; statuses?: unknown };
     for (let page = 1; ; page++) {
@@ -2359,28 +2360,53 @@ export class RealGitHubGateway implements GitHubGateway {
           run.conclusion !== null &&
           !["success", "neutral", "skipped"].includes(run.conclusion),
       ) || ["error", "failure"].includes(statuses.state);
-    // Completed runs that failed; cancelled or superseded runs did not.
-    const failedChecks = [
-      ...new Set([
-        ...runs
-          .filter((run) =>
-            [
-              "failure",
-              "timed_out",
-              "action_required",
-              "startup_failure",
-            ].includes(run.conclusion ?? ""),
-          )
-          .map((run) => run.name),
-        // Commit statuses: branch protection often requires these contexts.
-        ...contexts.flatMap((status) =>
-          typeof status.context === "string" &&
-          ["error", "failure"].includes(String(status.state))
-            ? [status.context]
-            : [],
-        ),
-      ]),
-    ];
+    // Every check on the head that ended without success, required or not
+    // (#1637). A cancelled (or stale) run whose name has another run on the
+    // head that succeeded or is still running was superseded, not failed.
+    const failedChecks: FailedCheck[] = [];
+    for (const run of runs) {
+      const conclusion = run.conclusion ?? "";
+      if (
+        run.head_sha !== identity.headSha ||
+        failedChecks.some((check) => check.name === run.name) ||
+        !(
+          [
+            "failure",
+            "timed_out",
+            "action_required",
+            "startup_failure",
+          ].includes(conclusion) ||
+          (["cancelled", "stale"].includes(conclusion) &&
+            !runs.some(
+              (other) =>
+                other.name === run.name &&
+                other.head_sha === identity.headSha &&
+                (other.status !== "completed" ||
+                  other.conclusion === "success"),
+            ))
+        )
+      )
+        continue;
+      failedChecks.push({
+        name: run.name,
+        conclusion,
+        ...(run.html_url ? { url: run.html_url } : {}),
+      });
+    }
+    // Commit statuses: the latest state of each context on the head.
+    for (const status of contexts)
+      if (
+        typeof status.context === "string" &&
+        ["error", "failure"].includes(String(status.state)) &&
+        !failedChecks.some((check) => check.name === status.context)
+      )
+        failedChecks.push({
+          name: status.context,
+          conclusion: String(status.state),
+          ...(typeof status.target_url === "string" && status.target_url
+            ? { url: status.target_url }
+            : {}),
+        });
     const checksByName = new Map<string, typeof runs>();
     for (const run of runs) {
       const group = checksByName.get(run.name);
@@ -2450,7 +2476,7 @@ export class RealGitHubGateway implements GitHubGateway {
           mergeReadiness = "waiting";
           break;
         // Mergeable; only checks the repository does not require are not
-        // passing.
+        // passing. Delivery still waits for or fails on those (#1637).
         case "UNSTABLE":
           mergeReadiness = "ready";
           break;
@@ -2470,11 +2496,9 @@ export class RealGitHubGateway implements GitHubGateway {
     }
     // GitHub can report a PR CLEAN before a required check registers on its
     // head. A required check with no run and no status yet is pending, so
-    // the merge waits for it (#626). Which checks are required also matters
-    // once one failed.
+    // the merge waits for it (#626).
     const requiredChecks =
-      mergeReadiness === "ready" ||
-      (failedChecks.length && !detail.merged && detail.state !== "closed")
+      mergeReadiness === "ready"
         ? await this.requiredChecks(detail.base.ref)
         : [];
     const reported = new Set<unknown>([
@@ -2499,9 +2523,6 @@ export class RealGitHubGateway implements GitHubGateway {
       namedChecks,
       ...(reportedChecks.length ? { reportedChecks } : {}),
       ...(failedChecks.length ? { failedChecks } : {}),
-      ...(failedChecks.length && requiredChecks.length
-        ? { requiredChecks }
-        : {}),
       ...(mergeReadiness ? { mergeReadiness } : {}),
       ...(!detail.merged && detail.state === "closed" && detail.closed_at
         ? { closedAt: detail.closed_at }
@@ -2670,7 +2691,7 @@ export class RealGitHubGateway implements GitHubGateway {
         if (after.merged)
           return observed(await this.confirmMerged(identity, after));
         // Readiness changed since it was observed: a conflict or a failed
-        // required check is work on the published result, not a decision.
+        // check is work on the published result, not a decision.
         const waiting = deliveryReadiness(
           identity.number,
           await this.observe(identity),
@@ -2812,8 +2833,8 @@ export class RealGitHubGateway implements GitHubGateway {
 
   /**
    * Why a merge-async ended without a merge, when readiness explains it: a
-   * required check still running or not yet reported on an open layer is a
-   * CI wait, and a failed one is work (#626). Otherwise it returns.
+   * check still running or a required one not yet reported on an open layer
+   * is a CI wait, and a failed one is work (#626). Otherwise it returns.
    */
   private async stackReadiness(layers: NativeStackLayer[]): Promise<void> {
     for (const layer of layers) {

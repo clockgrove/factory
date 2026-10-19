@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1253,6 +1254,25 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
       git(imported, "ls-tree", "HEAD", "--", ".factory-handoff.json"),
       "",
     );
+    // Without checkpoint bounds, collection stages no candidate over the
+    // default bounds (2 GiB): the worker's fault, found before Git hashes it.
+    const oversized = join(checkout, "oversized.bin");
+    writeFileSync(oversized, "");
+    truncateSync(oversized, 2 * 1024 ** 3 + 1);
+    const tooLarge = await collectWorktreeResult(
+      checkout,
+      checkout,
+      request,
+      store,
+      {},
+    ).catch((error) => error);
+    assert.match(
+      String(tooLarge.message),
+      /^Worker candidate exceeds the admitted byte bound: \d+ bytes, at most 2147483648$/,
+    );
+    assert.equal(faultOf(tooLarge)?.kind, "work");
+    assert.equal(git(checkout, "rev-parse", "HEAD"), request.baseSha);
+    rmSync(oversized);
     const result = await collectWorktreeResult(
       checkout,
       checkout,

@@ -33,6 +33,7 @@ import {
   workerValidationCommands,
 } from "../dist/execution/claude-validation.js";
 import {
+  assertCommandSandboxConfig,
   commandSandboxAvailability,
   commandSandboxStatus,
   STRICT_COMMAND_SANDBOX,
@@ -548,6 +549,13 @@ test("host-side Git never enters a nested repository sandboxed code could write"
     /Worker snapshot has an unsafe path/,
   );
   rmSync(raw);
+  // Without admitted checkpoint bounds the default ones apply: 2 GiB.
+  truncateSync(join(bounded, "a.txt"), 2 * 1024 ** 3 + 1);
+  await assert.rejects(
+    workerFilesTree(bounded),
+    /Worker snapshot exceeds the admitted byte bound: 2147483649 bytes, at most 2147483648/,
+  );
+  git(bounded, "checkout", "--", "a.txt");
   assert.equal(objects(), stored);
   // A directory the worker made unreadable is its fault, found before
   // host-side Git reads the checkout. Root reads it anyway.
@@ -787,6 +795,137 @@ test("a verified install reaches only its configured registry, and commands are 
   } finally {
     server.close();
   }
+});
+
+test("a run's HOME, TMPDIR and checkout growth stay within the sandbox's disk budget", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "factory-disk-budget-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const worktree = join(root, "worktree");
+  execFileSync("git", ["init", "-q", worktree]);
+  writeFileSync(join(worktree, ".gitignore"), "out/\n");
+  // The repository's own files are not growth: 24 MiB, over every limit.
+  writeFileSync(join(worktree, "data.bin"), Buffer.alloc(24 * 1024 ** 2));
+  execFileSync("git", ["-C", worktree, "add", "."]);
+  execFileSync("git", [
+    "-C",
+    worktree,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.com",
+    "commit",
+    "-qm",
+    "base",
+  ]);
+  const read = (revision) =>
+    execFileSync("git", ["-C", worktree, "rev-parse", revision], {
+      encoding: "utf8",
+    }).trim();
+  const sandbox = {
+    ...STRICT_COMMAND_SANDBOX,
+    limits: {
+      ...STRICT_COMMAND_SANDBOX.limits,
+      tmpMiB: 16,
+      homeMiB: 16,
+      checkoutMiB: 16,
+      files: 1024,
+    },
+  };
+  let runs = 0;
+  const validate = (commands) =>
+    validateTree(
+      worktree,
+      join(root, `validation-${++runs}`),
+      read("HEAD"),
+      read("HEAD^{tree}"),
+      commands,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      sandbox,
+    );
+  const write = (path, mebibytes) =>
+    `head -c ${mebibytes * 1024 * 1024} /dev/zero > ${path}`;
+  // Within the budget: HOME, TMPDIR and the checkout's ignored output.
+  const passed = await validate([
+    write('"$HOME/cache"', 12),
+    write('"$TMPDIR/scratch"', 12),
+    `mkdir out && ${write("out/build", 12)}`,
+    "test -s data.bin",
+  ]);
+  assert.equal(passed.commands.length, 4);
+  // Past it the command failed, a candidate's work fault naming the limit.
+  // HOME, TMPDIR and the checkout last the run, so commands add up.
+  for (const [commands, over] of [
+    [
+      [write('"$HOME/a"', 9), write('"$HOME/b"', 9)],
+      /HOME holds 18\.0 MiB, more than sandbox\.limits\.homeMiB \(16 MiB\)/,
+    ],
+    [
+      [write('"$TMPDIR/a"', 17)],
+      /TMPDIR holds 17\.0 MiB, more than sandbox\.limits\.tmpMiB \(16 MiB\)/,
+    ],
+    [
+      ["mkdir out", write("out/a", 9), write("out/b", 9)],
+      /the checkout grew by 18\.0 MiB, more than sandbox\.limits\.checkoutMiB \(16 MiB\)/,
+    ],
+    [
+      ["mkdir out && cd out && seq 1 1100 | xargs touch"],
+      /checkout growth, HOME and TMPDIR hold more than sandbox\.limits\.files \(1024\) files/,
+    ],
+  ]) {
+    const failure = await validate(commands).catch((error) => error);
+    assert.match(
+      String(failure.message),
+      /^Validation command failed \(disk budget\): .*: the sandbox disk budget is exceeded: /,
+    );
+    assert.match(String(failure.message), over);
+    assert.equal(faultOf(failure)?.kind, "work");
+  }
+  // The private /tmp is a sized tmpfs where bubblewrap can size one: there
+  // the write itself fails.
+  if (commandSandboxAvailability().tmpfsSize)
+    await assert.rejects(
+      validate([write("/tmp/a", 17)]),
+      /Validation command failed \(1\).*No space left on device/s,
+    );
+  // A worker's shell keeps its HOME and checkout between calls: the call
+  // that leaves them over the budget reports it, and the next can clean up.
+  execFileSync("git", ["-C", worktree, "worktree", "add", "-q", "../shell"]);
+  const shell = (command) =>
+    runSandboxedCommand({
+      worktree: join(root, "shell"),
+      root: join(root, "shell.root"),
+      command,
+      timeoutMs: 60_000,
+      policy: sandbox,
+    });
+  assert.equal((await shell(write('"$HOME/a"', 9))).exitCode, 0);
+  await assert.rejects(
+    shell(write('"$HOME/b"', 9)),
+    /^Error: the command ran, but the sandbox disk budget is exceeded: HOME holds 18\.0 MiB/,
+  );
+  assert.equal((await shell('rm "$HOME/b"')).exitCode, 0);
+  await assert.rejects(
+    shell(`mkdir out && ${write("out/a", 17)}`),
+    /the checkout grew by 17\.0 MiB/,
+  );
+  assert.equal((await shell("rm -r out")).exitCode, 0);
+  // The limits are validated strictly.
+  for (const limits of [{ homeMiB: 8 }, { checkoutMiB: 1.5 }, { disk: 1 }])
+    assert.throws(
+      () => assertCommandSandboxConfig({ limits }),
+      /sandbox\.limits/,
+    );
+  assertCommandSandboxConfig({
+    limits: { homeMiB: 16, checkoutMiB: 16, files: 1024 },
+  });
 });
 
 test("a worker's shell runs in its checkout inside the same sandbox, bounded", async () => {

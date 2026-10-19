@@ -724,15 +724,25 @@ export function privateStagingExclusions(
     .map((name) => `:(exclude,literal)${name}`);
 }
 /**
+ * What `add -A` may stage when no private-history `gitPersistence` admits
+ * checkpoint bounds: 2 GiB, GitHub's limit for one push, and 100000 files.
+ */
+export const DEFAULT_CANDIDATE_BOUNDS = {
+  maxBytes: 2 * 1024 ** 3,
+  maxFiles: 100_000,
+};
+/**
  * Bound what `add -A` would stage, before host-side Git reads any of it: the
  * changed and untracked paths outside private staging, counted, and sized by
  * lstat. Git hashes a sparse file's whole apparent size, so that counts.
+ * `exceeded` makes the error for a candidate over a bound.
  */
 export function assertCandidateBounds(
   worktree: string,
   bounds: { maxBytes: number; maxFiles: number },
   label: string,
   inspect?: (path: string) => void,
+  exceeded: (detail: string) => Error = (detail) => new Error(detail),
 ): void {
   // Git prints names as raw bytes. A name that is not UTF-8 would decode to
   // another path, which lstat misses and Git still hashes.
@@ -771,7 +781,9 @@ export function assertCandidateBounds(
     ),
   ].filter((path) => !privateStagingPath(path));
   if (prospective.length > bounds.maxFiles)
-    throw new Error(`${label} exceeds the admitted file bound`);
+    throw exceeded(
+      `${label} exceeds the admitted file bound: ${prospective.length} files, at most ${bounds.maxFiles}`,
+    );
   let bytes = 0;
   for (const path of prospective) {
     inspect?.(path);
@@ -782,7 +794,9 @@ export function assertCandidateBounds(
     bytes += info?.isFile() ? info.size : 0;
   }
   if (bytes > bounds.maxBytes)
-    throw new Error(`${label} exceeds the admitted byte bound`);
+    throw exceeded(
+      `${label} exceeds the admitted byte bound: ${bytes} bytes, at most ${bounds.maxBytes}`,
+    );
 }
 /** The first path under the worktree Factory cannot read, if any. */
 function firstUnreadable(directory: string, relative = ""): string | undefined {
@@ -1468,6 +1482,15 @@ export async function collectWorktreeResult(
   // verifies the same bytes again.
   // Before host-side Git stages anything: no nested repository it would enter.
   assertNoNestedGit(worktree);
+  // Nor, unless checkpoint bounds admit it, more than the default bounds.
+  if (!privateCheckpointBounds())
+    assertCandidateBounds(
+      worktree,
+      DEFAULT_CANDIDATE_BOUNDS,
+      "Worker candidate",
+      undefined,
+      workFault,
+    );
   try {
     await pinnedGitMagicAsync(
       worktree,

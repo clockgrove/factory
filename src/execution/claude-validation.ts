@@ -29,6 +29,7 @@ import {
 } from "./sandbox.js";
 import {
   assertCandidateBounds,
+  DEFAULT_CANDIDATE_BOUNDS,
   FACTORY_EMAIL,
   privateStagingExclusions,
   workerValidationRoot,
@@ -74,7 +75,7 @@ interface WorkerSnapshot {
    * Work Item's unaccepted output; absent, it stays offline.
    */
   acceptedBaseSha?: string;
-  /** Staged no larger than collection could retain. */
+  /** Staged no larger than collection could retain; absent, the default bounds. */
   candidateBounds?: { maxBytes: number; maxFiles: number };
 }
 
@@ -184,7 +185,11 @@ export async function workerFilesTree(
   assertNoNestedGit(worktree);
   // Nor hash, into the shared object store, more than collection could retain.
   // A run_command on its own queue may grow a file after this: disk use only.
-  if (bounds) assertCandidateBounds(worktree, bounds, "Worker snapshot");
+  assertCandidateBounds(
+    worktree,
+    bounds ?? DEFAULT_CANDIDATE_BOUNDS,
+    "Worker snapshot",
+  );
   // A separate index from HEAD: the worker's own index never holds what this
   // stages, so a nested repository made meanwhile never becomes a gitlink
   // there for another Git call to enter.

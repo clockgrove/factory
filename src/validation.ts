@@ -26,6 +26,7 @@ import type { FailedValidationEvidence } from "./failed-validation.js";
 import {
   type CommandSandboxPolicy,
   STRICT_COMMAND_SANDBOX,
+  sandboxDiskOverflow,
   sandboxedCommand,
 } from "./execution/sandbox.js";
 import { StepFault, transient } from "./fault.js";
@@ -683,6 +684,16 @@ export async function validateCheckout(
       if (hasUnresolvedSubprocesses())
         throw new Error(
           "Validation subprocess ownership unresolved; checkout retained",
+        );
+      const overflow = sandboxDiskOverflow({
+        checkout: worktree,
+        home,
+        temporary: temporaryRoot,
+        policy: sandbox,
+      });
+      if (overflow)
+        throw new CandidateValidationFailure(
+          `Validation command failed (disk budget): ${check}: ${overflow}`,
         );
       partial.postCommandStatus = candidateStatus();
       if (!preparing)

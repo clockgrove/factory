@@ -20,6 +20,7 @@ import {
   type CommandSandboxPolicy,
   commandSandboxAvailability,
   STRICT_COMMAND_SANDBOX,
+  sandboxDiskOverflow,
   sandboxedCommand,
 } from "./sandbox.js";
 
@@ -216,6 +217,13 @@ export async function runSandboxedCommand(input: {
       undefined,
       { stdout: false, stderr: false },
     );
+    const overflow = sandboxDiskOverflow({
+      checkout: input.worktree,
+      home,
+      temporary,
+      policy: input.policy,
+    });
+    if (overflow) throw new Error(`the command ran, but ${overflow}`);
     return {
       exitCode: result.status,
       timedOut: false,

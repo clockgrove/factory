@@ -309,14 +309,29 @@ export interface CommandSandboxConfig {
   readOnlyPaths?: string[];
   /** Resource limits for each command; omitted fields use the defaults. */
   limits?: {
-    /** Size of the private /tmp and /dev/shm, each, in MiB (default 1024). */
+    /**
+     * Size of the private /tmp and /dev/shm, each, and the most the private
+     * TMPDIR may hold, in MiB (default 1024).
+     */
     tmpMiB?: number;
+    /** The most the private HOME may hold, in MiB (default 4096). */
+    homeMiB?: number;
+    /** The most a run's commands may grow their checkout by, in MiB (default 8192). */
+    checkoutMiB?: number;
+    /** Files and directories that checkout growth, HOME and TMPDIR may hold together (default 1000000). */
+    files?: number;
     /** RLIMIT_NPROC: processes the operator's account may have while it runs (default 4096). */
     processes?: number;
   };
 }
 
-export const DEFAULT_SANDBOX_LIMITS = { tmpMiB: 1024, processes: 4096 };
+export const DEFAULT_SANDBOX_LIMITS = {
+  tmpMiB: 1024,
+  homeMiB: 4096,
+  checkoutMiB: 8192,
+  files: 1_000_000,
+  processes: 4096,
+};
 
 /** The effective policy; strict unless the operator's configuration relaxes it. */
 export interface CommandSandboxPolicy {
@@ -324,7 +339,7 @@ export interface CommandSandboxPolicy {
   network: "off" | "package-install";
   packageStore?: string;
   readOnlyPaths: string[];
-  limits: { tmpMiB: number; processes: number };
+  limits: typeof DEFAULT_SANDBOX_LIMITS;
   /**
    * Set only by a caller that checked these commands' package inputs
    * (assertPinnedNpmScripts) on this exact tree; without it no install gets
@@ -356,18 +371,24 @@ export function assertCommandSandboxConfig(value: unknown): void {
   );
   if (sandbox.limits !== undefined) {
     const limits = record(sandbox.limits, "sandbox.limits");
-    refuseUnknownFields(limits, ["tmpMiB", "processes"], "sandbox.limits");
-    const integer = (value: unknown, minimum: number) =>
-      value === undefined ||
-      (Number.isSafeInteger(value) && (value as number) >= minimum);
-    if (!integer(limits.tmpMiB, 16))
-      throw new Error(
-        "sandbox.limits.tmpMiB must be an integer of at least 16",
-      );
-    if (!integer(limits.processes, 64))
-      throw new Error(
-        "sandbox.limits.processes must be an integer of at least 64",
-      );
+    const minimums = {
+      tmpMiB: 16,
+      homeMiB: 16,
+      checkoutMiB: 16,
+      files: 1024,
+      processes: 64,
+    };
+    refuseUnknownFields(limits, Object.keys(minimums), "sandbox.limits");
+    for (const [name, minimum] of Object.entries(minimums)) {
+      const value = limits[name];
+      if (
+        value !== undefined &&
+        (!Number.isSafeInteger(value) || (value as number) < minimum)
+      )
+        throw new Error(
+          `sandbox.limits.${name} must be an integer of at least ${minimum}`,
+        );
+    }
   }
   if (sandbox.required !== undefined && typeof sandbox.required !== "boolean")
     throw new Error("sandbox.required must be a boolean");
@@ -563,6 +584,7 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
   fix?: string;
 } {
   const found = commandSandboxAvailability();
+  const limits = { ...DEFAULT_SANDBOX_LIMITS, ...policy.limits };
   const shared = {
     network: policy.network,
     ...(policy.packageStore && { packageStore: policy.packageStore }),
@@ -578,7 +600,7 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
     return {
       mode: "bubblewrap",
       ...shared,
-      detail: `${runsAsRoot() ? `${ROOT_DETAIL}, as sandbox.required false allows; ` : ""}${found.version} at ${found.executable}; network ${policy.network === "off" ? "off for every command" : "only for verified package installs"}; at most ${policy.limits?.processes ?? DEFAULT_SANDBOX_LIMITS.processes} processes; private /tmp ${found.tmpfsSize ? `${policy.limits?.tmpMiB ?? DEFAULT_SANDBOX_LIMITS.tmpMiB} MiB` : "unsized (this bubblewrap has no --size)"}`,
+      detail: `${runsAsRoot() ? `${ROOT_DETAIL}, as sandbox.required false allows; ` : ""}${found.version} at ${found.executable}; network ${policy.network === "off" ? "off for every command" : "only for verified package installs"}; at most ${limits.processes} processes; private /tmp ${found.tmpfsSize ? `${limits.tmpMiB} MiB` : "unsized (this bubblewrap has no --size)"}; after each command at most ${limits.homeMiB} MiB in HOME, ${limits.tmpMiB} MiB in TMPDIR, ${limits.checkoutMiB} MiB of checkout growth and ${limits.files} files`,
     };
   if (!policy.required && !found.installed)
     return {
@@ -594,6 +616,130 @@ export function commandSandboxStatus(policy: CommandSandboxPolicy): {
       ? "Make bubblewrap able to start a sandbox on this host (unprivileged user namespaces); sandbox.required false applies only where bubblewrap is not installed."
       : UNAVAILABLE_FIX,
   };
+}
+
+/**
+ * The checkout's lstat bytes and entries (files, links, directories) when a
+ * run's first command started, by the run's private TMPDIR: its growth is
+ * measured from there. An entry goes once that TMPDIR is gone.
+ */
+const checkoutBaselines = new Map<string, DiskUse>();
+
+interface DiskUse {
+  bytes: number;
+  entries: number;
+}
+
+/**
+ * Lstat bytes (a sparse file at its apparent size) and entries under
+ * `root`, never following a link and skipping `skip`; it stops once more
+ * than `limit` entries are counted. A directory it cannot read is refused,
+ * since what it holds cannot be counted.
+ */
+function diskUse(root: string, limit: number, skip?: string): DiskUse {
+  const use = { bytes: 0, entries: 0 };
+  const pending = [root];
+  while (pending.length && use.entries <= limit) {
+    const directory = pending.pop()!;
+    let names: string[];
+    try {
+      names = readdirSync(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw new Error(`${directory} cannot be read to measure its disk use`);
+    }
+    for (const name of names) {
+      const path = join(directory, name);
+      if (path === skip) continue;
+      const entry = lstatSync(path, { throwIfNoEntry: false });
+      if (!entry) continue;
+      use.entries += 1;
+      use.bytes += entry.size;
+      if (entry.isDirectory()) pending.push(path);
+    }
+  }
+  return use;
+}
+
+/** Records the checkout a run's commands start from, once per run. */
+function recordCheckoutBaseline(checkout: string, temporary: string): void {
+  for (const run of checkoutBaselines.keys())
+    if (!existsSync(run)) checkoutBaselines.delete(run);
+  if (!checkoutBaselines.has(temporary))
+    checkoutBaselines.set(
+      temporary,
+      diskUse(checkout, Number.POSITIVE_INFINITY, join(checkout, ".git")),
+    );
+}
+
+const mebibytes = (bytes: number) => (bytes / 1024 ** 2).toFixed(1);
+
+/**
+ * Whether a sandboxed command left its run over the sandbox's disk budget
+ * (`sandbox.limits`): its private HOME and TMPDIR hold at most `homeMiB` and
+ * `tmpMiB`, its checkout (without `.git`) grew by at most `checkoutMiB` since
+ * the run's first command started, and together they add at most `files`
+ * entries. Checked after each command, since HOME, TMPDIR and the checkout
+ * last the whole run; the answer names what is over, or is undefined.
+ */
+export function sandboxDiskOverflow(
+  input: Pick<
+    SandboxedCommandInput,
+    "checkout" | "home" | "temporary" | "policy"
+  >,
+): string | undefined {
+  const limits = { ...DEFAULT_SANDBOX_LIMITS, ...input.policy.limits };
+  const checkout = realpathSync(input.checkout);
+  const temporary = realpathSync(input.temporary);
+  const baseline = checkoutBaselines.get(temporary);
+  if (!baseline)
+    throw new Error("The sandbox measured no checkout before the command");
+  const over: string[] = [];
+  const measured = (
+    root: string,
+    limit: number,
+    skip?: string,
+  ): DiskUse | undefined => {
+    try {
+      return diskUse(root, limit, skip);
+    } catch (error) {
+      over.push(error instanceof Error ? error.message : String(error));
+      return undefined;
+    }
+  };
+  const files = limits.files;
+  const grown = measured(
+    checkout,
+    baseline.entries + files,
+    join(checkout, ".git"),
+  );
+  const home = measured(realpathSync(input.home), files);
+  const scratch = measured(temporary, files);
+  if (grown && grown.bytes - baseline.bytes > limits.checkoutMiB * 1024 ** 2)
+    over.push(
+      `the checkout grew by ${mebibytes(grown.bytes - baseline.bytes)} MiB, more than sandbox.limits.checkoutMiB (${limits.checkoutMiB} MiB)`,
+    );
+  if (home && home.bytes > limits.homeMiB * 1024 ** 2)
+    over.push(
+      `HOME holds ${mebibytes(home.bytes)} MiB, more than sandbox.limits.homeMiB (${limits.homeMiB} MiB)`,
+    );
+  if (scratch && scratch.bytes > limits.tmpMiB * 1024 ** 2)
+    over.push(
+      `TMPDIR holds ${mebibytes(scratch.bytes)} MiB, more than sandbox.limits.tmpMiB (${limits.tmpMiB} MiB)`,
+    );
+  const entries =
+    grown && home && scratch
+      ? Math.max(0, grown.entries - baseline.entries) +
+        home.entries +
+        scratch.entries
+      : 0;
+  if (entries > files)
+    over.push(
+      `checkout growth, HOME and TMPDIR hold more than sandbox.limits.files (${files}) files`,
+    );
+  return over.length
+    ? `the sandbox disk budget is exceeded: ${over.join("; ")}. Remove what the commands wrote there, or raise sandbox.limits in the Factory configuration.`
+    : undefined;
 }
 
 const configFault = (detail: string, fix: string) =>
@@ -653,6 +799,11 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   bubblewrap?: BubblewrapLaunch;
 } {
   const found = commandSandboxAvailability();
+  // Checkout growth is measured from where the run's first command started.
+  recordCheckoutBaseline(
+    realpathSync(input.checkout),
+    realpathSync(input.temporary),
+  );
   if (!found.available) {
     // Unsandboxed only by explicit choice and only without bubblewrap: an
     // installed one that fails is a fault, never a reason to run bare.

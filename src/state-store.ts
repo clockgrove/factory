@@ -3,7 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { LocalContentStore } from "./content/local.js";
-import type { ContentRef } from "./contracts.js";
+import type { AgentSessionRef, ContentRef } from "./contracts.js";
+import { graphDigest } from "./graph-amendments.js";
 import { decodeAccountingRecord } from "./accounting.js";
 import {
   pinnedGit,
@@ -1029,6 +1030,36 @@ export function cancelledContinuationResourceHold(
   );
 }
 
+/**
+ * A graph revision replaces a Work Item's execution but keeps its worker
+ * session, whose scope names the old graph. That session can never continue,
+ * so its own native settlement receipt is the only proof left to check.
+ */
+function supersededWorkerSessionSettled(
+  state: ContinuationState,
+  ref: AgentSessionRef,
+): boolean {
+  if (
+    !isExecutionState(state) ||
+    ref.scope.role !== "implementation" ||
+    ref.status !== "ready" ||
+    ref.scope.graphDigest === graphDigest(state.graph) ||
+    ref.executionIdentity ===
+      state.work[ref.scope.itemId]?.execution?.identity ||
+    (ref.currentTurn !== undefined &&
+      (ref.currentTurn.terminal !== "completed" ||
+        ref.currentTurn.resources !== "settled"))
+  )
+    return false;
+  const native = ref.data as
+    | { nativeEof?: unknown; workerSettled?: unknown; settled?: unknown }
+    | undefined;
+  return (
+    (native?.nativeEof === true && native.workerSettled === true) ||
+    native?.settled === true
+  );
+}
+
 function continuationOwnershipHold(
   state: ContinuationState,
   cancelledInvocations = false,
@@ -1082,10 +1113,11 @@ function continuationOwnershipHold(
           !state.restoration &&
           isExecutionState(state) &&
           ref.scope.role === "implementation" &&
-          collectedLocalWorkerSessionSettled(
+          (collectedLocalWorkerSessionSettled(
             state.work[ref.scope.itemId]?.execution,
             ref,
-          )
+          ) ||
+            supersededWorkerSessionSettled(state, ref))
         ) &&
         (!ref.currentTurn?.terminal ||
           ref.currentTurn.resources !== "settled")) ||

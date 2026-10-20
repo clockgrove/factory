@@ -603,6 +603,31 @@ test("an exact operator decline preserves a real result and permits ordinary com
       /Foreign native session/,
     );
     assert.equal(restoredContinuationOwnershipHold(state, true), undefined);
+    // A graph revision replaced an earlier attempt's execution but kept its
+    // worker session; its own settlement receipt is the remaining proof.
+    const superseded = structuredClone(state);
+    const old = {
+      ...structuredClone(session),
+      scope: { ...session.scope, graphDigest: hash("superseded graph") },
+      identity: "superseded-native-worker",
+      executionIdentity: "superseded-attempt",
+    };
+    superseded.agentSessions[
+      JSON.stringify(["implementation", item.id, old.scope.graphDigest])
+    ] = old;
+    assert.equal(
+      restoredContinuationOwnershipHold(superseded, true),
+      undefined,
+    );
+    assert.match(
+      restoredContinuationOwnershipHold(superseded),
+      /Foreign native session/,
+    );
+    old.data.workerSettled = false;
+    assert.match(
+      restoredContinuationOwnershipHold(superseded, true),
+      /Foreign native session/,
+    );
     // This ownership-only preflight supplies no archive acceptance or restore;
     // even a typed restoration context must retain the portable fence.
     const originalBytes = Buffer.from(JSON.stringify(state));

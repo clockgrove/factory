@@ -986,11 +986,21 @@ export function cancelledContinuationResourceHold(
         ),
       ])
     : [];
+  // An amendment compilation runs in the same planning scope as a diagnosis;
+  // after cancellation its unrecorded response is history too.
+  const compilations = isExecutionState(state)
+    ? [state.pendingAmendment, ...(state.rejectedAmendments ?? [])]
+    : [];
   if (
-    diagnoses.some(
+    (diagnoses.some(
       (invocation) =>
         invocation?.submitted && invocation.response === undefined,
-    ) &&
+    ) ||
+      compilations.some(
+        (amendment) =>
+          amendment?.planningInvocation &&
+          amendment.planningInvocation.response === undefined,
+      )) &&
     !sessions.some(
       (ref) =>
         ref.scope.role === "planning" &&
@@ -1001,7 +1011,7 @@ export function cancelledContinuationResourceHold(
         ref.currentTurn?.resources === "settled",
     )
   )
-    return "Unresolved diagnosis has no disposed same-run planning scope";
+    return "Unresolved diagnosis or amendment compilation has no disposed same-run planning scope";
   if (
     isExecutionState(state) &&
     Object.values(state.work).some(
@@ -1021,7 +1031,7 @@ export function cancelledContinuationResourceHold(
 
 function continuationOwnershipHold(
   state: ContinuationState,
-  cancelledDiagnosis = false,
+  cancelledInvocations = false,
   cancelledPlanning = false,
   sourceHostCollectedWorkers = false,
   collectingLocalItem?: string,
@@ -1095,7 +1105,7 @@ function continuationOwnershipHold(
     return "Submitted planning invocation has no authenticated settlement";
   if (isPreparationState(state)) return undefined;
   if (
-    !cancelledDiagnosis &&
+    !cancelledInvocations &&
     Object.values(state.work).some((work) =>
       work.recovery?.history?.some(
         (entry) =>
@@ -1127,7 +1137,7 @@ function continuationOwnershipHold(
     }
     const recovery = (work as import("./state.js").WorkState).recovery;
     if (
-      !cancelledDiagnosis &&
+      !cancelledInvocations &&
       recovery?.diagnosisInvocation?.submitted &&
       recovery.diagnosisInvocation.response === undefined
     )
@@ -1140,7 +1150,8 @@ function continuationOwnershipHold(
     ...(state.rejectedAmendments ?? []),
   ]) {
     if (
-      (amendment?.planningInvocation &&
+      (!cancelledInvocations &&
+        amendment?.planningInvocation &&
         amendment.planningInvocation.response === undefined) ||
       (amendment?.reviewInvocation &&
         amendment.reviewInvocation.response === undefined)

@@ -1807,6 +1807,8 @@ export interface GitHubGateway {
       author?: string;
       /** Close as not planned (a cancelled Objective's Work Item); default completed. */
       reason?: "not_planned";
+      /** A cancelled Objective closes only what is still open: an issue already closed is settled. */
+      cancellation?: true;
     },
   ): Promise<void>;
   projectGraph(request: GraphProjection): Promise<ProjectedGraph>;

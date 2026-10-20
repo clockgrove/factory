@@ -53,6 +53,7 @@ import {
   restoredContinuationOwnershipHold,
   readContinuation,
   readControllerOwner,
+  readScannedContinuation,
   liveControllerOwner,
   liveObjectiveOwners,
   installationLockPath,
@@ -532,12 +533,16 @@ function checkIntakeLocalServiceState(
     throw new Error(
       `The background service is not set up; run \`${setupCommand(configPath, requiredProviderCredentials(config))}\``,
     );
-  for (const id of intake.objectives)
+  for (const id of intake.objectives) {
+    // Retired terminal history is never acted on, so a snapshot shape this
+    // version no longer reads cannot stop the service (#1457).
+    if (readScannedContinuation(config.repository, id) === "history") continue;
     checkObjectiveServiceState(
       queuedObjectiveConfig(config, id, configPath),
       id,
       configPath,
     );
+  }
   return intake;
 }
 /** The owned controller already authenticated this complete current observation. */

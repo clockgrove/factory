@@ -406,7 +406,8 @@ export async function closeWorkItem(
 
 /**
  * A cancelled Objective leaves no Work Item to do: close every Work Item issue
- * that did not complete as not planned. Repeats like closeWorkItem: the
+ * that did not complete as not planned; one already closed, such as work
+ * delivered outside Factory, is left as it is. Repeats like closeWorkItem: the
  * gateway keys the closure to the issue's identity and posts its comment once.
  */
 export async function closeCancelledWorkItems(
@@ -425,6 +426,7 @@ export async function closeCancelledWorkItems(
       {
         workItem: { objective: state.objective, id: itemId },
         reason: "not_planned",
+        cancellation: true,
         ...(state.issueAuthor ? { author: state.issueAuthor } : {}),
       },
     );

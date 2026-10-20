@@ -910,6 +910,7 @@ export class RealGitHubGateway implements GitHubGateway {
       workItem?: { objective: number; id: string };
       author?: string;
       reason?: "not_planned";
+      cancellation?: true;
     },
   ): Promise<void> {
     const issue = await this.api<Issue>("GET", `issues/${number}`);
@@ -925,6 +926,10 @@ export class RealGitHubGateway implements GitHubGateway {
       throw foreignChange(
         `Issue #${number} identity changed; operator direction required`,
       );
+    // Cancellation leaves no Work Item to do. An issue already closed, by
+    // Factory or outside it, needs nothing more; waiting for a comment that
+    // was never posted would hold the cancellation forever.
+    if (expected.cancellation && issue.state === "closed") return;
     // The completion comment carries a marker, so a repeat after a lost
     // response finds it instead of posting it twice.
     // Cancellation has its own marker: a Work Item retried after cancel

@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "0.3.72",
+  "version": "0.3.73",
   "description": "Run source-grounded development Objectives in a target repository.",
   "author": {
     "name": "Clockgrove",

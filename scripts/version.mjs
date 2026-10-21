@@ -1,6 +1,7 @@
 // Keep every published version identity in step: package, lockfile, each
 // host's plugin manifest and marketplace ref. Used by
 // maintainers and the release workflow.
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -74,6 +75,20 @@ export function bump(version, root = ".") {
     factoryPlugin(marketplace).source.ref = `v${version}`;
     writeJson(root, path, marketplace);
   }
+
+  // JSON.stringify expands short arrays; leave the files as format:check wants.
+  execFileSync(
+    resolve(root, "node_modules/.bin/biome"),
+    [
+      "format",
+      "--write",
+      "--no-errors-on-unmatched",
+      ...Object.values(files),
+      ...plugins,
+      ...marketplaces,
+    ],
+    { cwd: root, stdio: "inherit" },
+  );
 }
 
 function main(args) {

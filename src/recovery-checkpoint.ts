@@ -5679,10 +5679,11 @@ function verifierDirectory(repository: string): string {
 /**
  * One installation keeps a sealed copy of the remote-only verifier of its
  * last closed controller, so a new process fetches only what is new instead
- * of the whole archive. Trust is unchanged: every object in it arrived
- * through a strict fetch from the configured remote (index-pack --strict plus
- * the connectivity check), and the seal pins the exact object files that hold
- * them, as a controller already pins them between its own reads. No process
+ * of the whole archive. Trust comes from the remote: a controller re-hashes
+ * every adopted object with a full strict fsck before reading it, then either
+ * matches the remote's exact tip hash or strictly fetches what is new. The
+ * seal, which sits beside the objects, is only a cheap change detector that
+ * skips copying a store that changed since it was sealed. No process
  * writes the sealed copy: each controller copies its object files into its
  * own verifier, so concurrent processes each start from it, and a closing
  * controller replaces it by atomic renames. A replaced copy takes a
@@ -5763,12 +5764,12 @@ async function retainVerifier(
 }
 /**
  * Start this controller's verifier from the installation's sealed copy. It is
- * used only when its seal names this exact binding and every object file is
- * literally the one sealed (type, device, inode, mode, size and times, which
- * any write changes), before and after copying; only object files are copied,
- * and the Git metadata is this verifier's own. Any difference discards the
- * sealed copy, and the read starts from an empty verifier with a full strict
- * fetch, as before.
+ * copied only when its seal names this exact binding and every object file is
+ * the one sealed (type, device, inode, mode, size and times), before and after
+ * copying; only object files are copied, and the Git metadata is this
+ * verifier's own. The copy is still unauthenticated: the first read re-hashes
+ * it (see freshArchiveOwnedStrict). Any difference discards the sealed copy,
+ * and the read starts from an empty verifier with a full strict fetch.
  */
 function adoptRetainedVerifier(
   config: FactoryConfig,
@@ -5839,14 +5840,18 @@ function adoptRetainedVerifier(
     delete context.negotiationTip;
     delete context.adoptedTip;
     rmSync(directory, { recursive: true, force: true });
-    // A changed or unusable sealed copy is not offered again.
-    const discarded = join(dirname(shared), `verify-${randomUUID()}.git`);
-    try {
-      renameSync(shared, discarded);
-      rmSync(discarded, { recursive: true, force: true });
-    } catch {
-      // Already replaced or removed by another process.
-    }
+    discardSharedVerifier(config.repository);
+  }
+}
+/** A changed, corrupt or failing sealed copy is not offered again. */
+function discardSharedVerifier(repository: string): void {
+  const shared = paths(repository).verifier;
+  const discarded = join(dirname(shared), `verify-${randomUUID()}.git`);
+  try {
+    renameSync(shared, discarded);
+    rmSync(discarded, { recursive: true, force: true });
+  } catch {
+    // Already replaced or removed by another process.
   }
 }
 async function freshArchiveOwnedStrict(
@@ -5866,6 +5871,7 @@ async function freshArchiveOwnedStrict(
   let hintUsed = false;
   let verifierAdopted = false;
   let fetchSkipped = false;
+  let adoptedMaterial: "none" | "verified" | "rejected" = "none";
   let observedTip: string | undefined;
   let semanticBodyReads:
     | { refs: number; bytes: number; fallback: boolean }
@@ -5883,6 +5889,7 @@ async function freshArchiveOwnedStrict(
       negotiationHintArgument: hintUsed,
       verifierAdopted,
       fetchSkipped,
+      adoptedMaterial,
       lineageEntries: context?.lineages.size ?? 0,
       referenceEntries: context?.content.size ?? 0,
       metadataBytes: context ? verificationMetadataBytes(context) : 0,
@@ -5906,6 +5913,34 @@ async function freshArchiveOwnedStrict(
     const adoptedTip = context?.adoptedTip;
     verifierAdopted = Boolean(adoptedTip);
     if (context) delete context.adoptedTip;
+    if (adoptedTip && context) {
+      // The seal sits beside the objects it describes, so it only detects
+      // change cheaply and proves nothing. Git does not re-hash objects on
+      // ordinary reads, so the adopted store is fully re-hashed once, before
+      // anything reads it. Corrupt material discards the sealed copy and
+      // this read starts from an empty verifier with a full strict fetch.
+      observed.start("adopted-material");
+      try {
+        await gitRemote(directory, options, [
+          "fsck",
+          "--full",
+          "--strict",
+          "--no-reflogs",
+          "--no-dangling",
+          adoptedTip,
+        ]);
+        adoptedMaterial = "verified";
+      } catch (error) {
+        if (error instanceof UnsettledSubprocessError) throw error;
+        adoptedMaterial = "rejected";
+        verifierAdopted = false;
+        delete context.objects;
+        context.objectBytes = 0;
+        delete context.negotiationTip;
+        rmSync(directory, { recursive: true, force: true });
+        discardSharedVerifier(config.repository);
+      }
+    }
     initializeGit(directory, options);
     if (context) chmodSync(directory, 0o700);
     if (context) assertRemoteOnlyVerifier(directory, options);
@@ -5935,11 +5970,11 @@ async function freshArchiveOwnedStrict(
     // FETCH_HEAD; every check below uses only this settled successful fetch.
     observed.start("fetch");
     // A cold start on an adopted verifier whose sealed tip is still the
-    // remote's exact ref needs no fetch: that tip was authenticated by an
-    // earlier strict fetch, its commit ID fixes every reachable object by
-    // hash, and the sealed object files are unchanged. The exact ref
-    // observation below is then this read's remote observation boundary.
-    // Any other tip, an absent ref or an absent commit fetches as usual.
+    // remote's exact ref needs no fetch: the fresh exact ref observation
+    // names that commit ID, which fixes every reachable object by hash, and
+    // fsck above re-hashed every adopted object and checked its links. The
+    // ref observation is then this read's remote observation boundary. Any
+    // other tip, an absent ref or an absent commit fetches as usual.
     const holdsCommit = (commit: string) => {
       try {
         return (
@@ -6357,6 +6392,8 @@ async function freshArchiveOwnedStrict(
     return result;
   } catch (error) {
     observed.fail(error);
+    // A sealed copy whose first read failed is not offered again.
+    if (verifierAdopted) discardSharedVerifier(config.repository);
     if (error instanceof UnsettledSubprocessError) {
       settled = false;
       if (context) {
@@ -7149,9 +7186,15 @@ async function packPublisher(
       }
       if (loose.length < PUBLISHER_LOOSE_THRESHOLD) return;
       observed.start("pack");
-      // A pass stopped by its timeout leaves only its temporary files.
-      for (const name of readdirSync(join(objects, "pack")))
-        if (name.startsWith("tmp_"))
+      // A pass stopped by its timeout leaves only its temporary files, or a
+      // pack Git renamed into place before its index, which no reader uses.
+      const packs = readdirSync(join(objects, "pack"));
+      for (const name of packs)
+        if (
+          name.startsWith("tmp_") ||
+          (/^pack-[a-f0-9]+\.pack$/.test(name) &&
+            !packs.includes(name.replace(/\.pack$/, ".idx")))
+        )
           rmSync(join(objects, "pack", name), { force: true });
       let bytes = 0;
       for (const oid of loose) {

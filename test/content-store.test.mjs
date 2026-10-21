@@ -3285,6 +3285,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.deepEqual(verifierDirectories(), []);
   let [fetchObserved] = fetchObservations(observationOffset);
   assert.equal(fetchObserved.metadata.verifierAdopted, true);
+  assert.equal(fetchObserved.metadata.adoptedMaterial, "verified");
   assert.equal(fetchObserved.metadata.negotiationHintArgument, true);
   assert.equal(fetchObserved.metadata.fetchSkipped, false);
   // An unchanged archive tip is read from the sealed verifier without a fetch.
@@ -3330,6 +3331,99 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   [fetchObserved] = fetchObservations(observationOffset);
   assert.equal(fetchObserved.metadata.verifierAdopted, false);
   assert.equal(fetchObserved.metadata.negotiationHintArgument, false);
+  assert.deepEqual(verifierDirectories(), []);
+  // The seal only detects change: a forged object under a rewritten seal is
+  // caught by re-hashing the adopted store, and the read fetches in full.
+  const tipCommit = execFileSync("git", [
+    "--git-dir",
+    retainedVerifier,
+    "cat-file",
+    "commit",
+    advancedTip,
+  ]);
+  const forgedCommit = Buffer.from(tipCommit);
+  forgedCommit[forgedCommit.length - 2] ^= 1;
+  const forgedDirectory = join(
+    retainedVerifier,
+    "objects",
+    advancedTip.slice(0, 2),
+  );
+  mkdirSync(forgedDirectory, { recursive: true });
+  rmSync(join(forgedDirectory, advancedTip.slice(2)), { force: true });
+  writeFileSync(
+    join(forgedDirectory, advancedTip.slice(2)),
+    deflateSync(
+      Buffer.concat([
+        Buffer.from(`commit ${forgedCommit.length}\0`),
+        forgedCommit,
+      ]),
+    ),
+  );
+  const resealed = [];
+  const reseal = (path, name) => {
+    const stat = fs.lstatSync(path, { bigint: true });
+    resealed.push([
+      name,
+      [
+        stat.isDirectory() ? "d" : "f",
+        stat.dev,
+        stat.ino,
+        stat.mode,
+        stat.size,
+        stat.mtimeNs,
+        stat.ctimeNs,
+      ].join(":"),
+    ]);
+    if (stat.isDirectory())
+      for (const child of readdirSync(path).sort())
+        reseal(join(path, child), `${name}/${child}`);
+  };
+  reseal(join(retainedVerifier, "objects"), "objects");
+  const sealPath = join(retainedVerifier, "factory-verifier.json");
+  writeFileSync(
+    sealPath,
+    JSON.stringify({
+      ...JSON.parse(readFileSync(sealPath)),
+      objects: resealed,
+    }),
+  );
+  observationOffset = statSync(diagnosticPath(repository, 0)).size;
+  await withRecoveryCheckpointOperation(
+    operationInput,
+    async () => {
+      assert.equal(
+        (await readVerifiedRecoveryCheckpoint(config)).commitSha,
+        advancedTip,
+      );
+      const directory = join(state, "recovery", verifierDirectories()[0]);
+      assert.deepEqual(
+        execFileSync("git", [
+          "--git-dir",
+          directory,
+          "cat-file",
+          "commit",
+          advancedTip,
+        ]),
+        tipCommit,
+      );
+    },
+    { queueControlVerification: true },
+  );
+  [fetchObserved] = fetchObservations(observationOffset);
+  assert.equal(fetchObserved.metadata.adoptedMaterial, "rejected");
+  assert.equal(fetchObserved.metadata.negotiationHintArgument, false);
+  // A sealed copy whose first read fails is not offered again.
+  assert(existsSync(retainedVerifier));
+  await withRecoveryCheckpointOperation(
+    operationInput,
+    async () => {
+      await assert.rejects(
+        readVerifiedRecoveryCheckpoint(config, "0".repeat(40)),
+      );
+      assert(!existsSync(retainedVerifier));
+    },
+    { queueControlVerification: true },
+  );
   assert.deepEqual(verifierDirectories(), []);
   // Packing the publisher keeps every object and the archive ref, and a
   // controller's cached publisher material then only re-authenticates.

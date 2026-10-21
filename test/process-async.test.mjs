@@ -1150,10 +1150,16 @@ test("a fast non-Actions check waits for Actions to register (#1687)", async () 
         baseRefName: "main",
         mergeStateStatus: "CLEAN",
       }),
+      jobLogTail: async () =>
+        "2026-10-21T00:00:00.0000000Z \x1b[31mnot ok\x1b[0m 1 - adds\n",
     };
     const github = new RealGitHubGateway("o/r", undefined, client);
     return deliveryReadiness(7, await github.observe(id), [], sha);
   };
+  // A failed job's log tail reaches the failure without colour codes (#1693).
+  const failing = { ...cla, id: 3, conclusion: "failure" };
+  Object.assign(failing, { name: "test", app: { slug: "github-actions" } });
+  await assert.rejects(observe([cla, failing], 30), /test:\nnot ok 1 - adds$/);
   assert.match(await observe([cla], 1), /Awaiting Actions checks/);
   // Past the settle window, Actions skipped the head: it merges.
   assert.equal(await observe([cla], 30), undefined);

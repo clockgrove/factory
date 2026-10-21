@@ -185,6 +185,10 @@ const LOG_TAIL_CHARS = 3000;
 /** Bytes of job log asked for, and the most read if the range is ignored. */
 const LOG_TAIL_BYTES = 64 * 1024;
 const LOG_READ_CAP_BYTES = 1024 * 1024;
+/** ANSI CSI and OSC sequences, and other two-byte escapes, in job logs. */
+const ANSI_ESCAPE =
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: matches terminal escapes.
+  /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 
 /**
  * A list that has not caught up yet, where the caller bounds the repeat
@@ -2405,6 +2409,8 @@ export class RealGitHubGateway implements GitHubGateway {
         if (log)
           parts.push(
             log
+              // Colour codes would spend the bound without saying anything.
+              .replace(ANSI_ESCAPE, "")
               .trimEnd()
               .split("\n")
               .slice(-LOG_TAIL_LINES)

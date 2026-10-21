@@ -530,8 +530,8 @@ export interface PlanningRequest<T> {
     ciOnlyCommands?: string[];
     previousGraph?: WorkGraph;
     immutableItemIds?: string[];
-    /** The retained item whose failed attempt proposed the amendment; its ownership may widen. */
-    reattemptItemId?: string;
+    /** Retained failed items attempted again; their ownership and dependencies may widen. */
+    reattemptItemIds?: string[];
     /** Observed current code; never normative sources or command authority. */
     currentImplementationEvidence?: ResultReviewEvidenceSource[];
     /**

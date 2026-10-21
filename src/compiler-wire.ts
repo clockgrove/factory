@@ -208,9 +208,11 @@ export function compilerWire(
       );
     retainedItems.set(id, structuredClone(item));
   }
-  // The failed attempt that proposed this amendment runs again: its retained
-  // choice may add owned paths, and nothing else of it changes.
-  const reattempt = retainedItems.get(context.reattemptItemId ?? "")?.id;
+  // Failed items attempted again: each retained choice may add owned paths
+  // and dependencies and restate its behaviour; nothing else of it changes.
+  const reattempts = new Set(
+    (context.reattemptItemIds ?? []).filter((id) => retainedItems.has(id)),
+  );
   const obligations = request.coverageObligations ?? [];
   if (!obligations.length)
     throw new Error("Codex compilation requires controller obligations");
@@ -657,13 +659,15 @@ export function compilerWire(
                 id: { type: "string", enum: ids },
                 ...more,
               });
-            const kept = ids.filter((id) => id !== reattempt);
+            const kept = ids.filter((id) => !reattempts.has(id));
+            const widening = ids.filter((id) => reattempts.has(id));
             return [
               ...(kept.length ? [choice(kept)] : []),
-              ...(reattempt && ids.includes(reattempt)
+              ...(widening.length
                 ? [
-                    choice([reattempt], {
+                    choice(widening, {
                       addedOwnedPaths: { type: "array", items: text },
+                      addedDependencies: { type: "array", items: text },
                       acceptance: itemSchema.properties!.acceptance!,
                       brief: itemSchema.properties!.brief!,
                       nonGoals: itemSchema.properties!.nonGoals!,
@@ -1147,14 +1151,20 @@ export function compilerWire(
             typeof item.id === "string"
               ? retainedItems.get(item.id)
               : undefined;
-          const widens = retained !== undefined && retained.id === reattempt;
+          const widens = retained !== undefined && reattempts.has(retained.id);
           keys(
             item,
             [
               "kind",
               "id",
               ...(widens
-                ? ["addedOwnedPaths", "acceptance", "brief", "nonGoals"]
+                ? [
+                    "addedOwnedPaths",
+                    "addedDependencies",
+                    "acceptance",
+                    "brief",
+                    "nonGoals",
+                  ]
                 : []),
             ],
             "retained item",
@@ -1167,6 +1177,9 @@ export function compilerWire(
           const added = widens
             ? strings(item.addedOwnedPaths, "addedOwnedPaths")
             : [];
+          const addedDependencies = widens
+            ? strings(item.addedDependencies, "addedDependencies")
+            : [];
           const restated = widens && {
             acceptance: strings(item.acceptance, "acceptance"),
             nonGoals: strings(item.nonGoals, "nonGoals"),
@@ -1178,13 +1191,17 @@ export function compilerWire(
           // The item is attempted again: it restates the behaviour its
           // (possibly wider) ownership serves.
           if (restated) Object.assign(item, restated);
-          if (widens)
+          if (widens) {
             item.ownedPaths = [
               ...retained.ownedPaths,
               ...new Set(
                 added.filter((path) => !ownsPath(path, retained.ownedPaths)),
               ),
             ];
+            item.dependencies = [
+              ...new Set([...retained.dependencies, ...addedDependencies]),
+            ];
+          }
         } else {
           if (typeof item.id === "string" && retainedItems.has(item.id))
             throw new Error(
@@ -1417,7 +1434,7 @@ export function compilerWire(
             // A started item's review is settled: it judged only the
             // obligations it owned then. It keeps proving those, with the
             // exact earlier proof; it cannot judge a newly assigned one.
-            if (retainedItems.has(owner.id) && owner.id !== reattempt) {
+            if (retainedItems.has(owner.id) && !reattempts.has(owner.id)) {
               const previous = context.previousGraph?.coverage?.find(
                 (old) =>
                   old.criterionId === criterionId &&

@@ -729,7 +729,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       currentGraph,
       discovery: { paths: ["additional.ts"] },
       immutableItemIds: currentGraph.items.map((item) => item.id),
-      reattemptItemId: "part-0",
+      reattemptItems: [{ id: "part-0" }],
     };
     const instructions = renderPlanningInstructions(
       body,
@@ -746,7 +746,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
         instructions,
         previousGraph: currentGraph,
         immutableItemIds: amendment.immutableItemIds,
-        reattemptItemId: "part-0",
+        reattemptItemIds: ["part-0"],
       },
       coverageObligations: obligations,
       controllerCapabilities: installedControllerCapabilities(),
@@ -1139,6 +1139,8 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
         ...(index === 0
           ? {
               addedOwnedPaths: ["additional.ts"],
+              // A split-out prerequisite becomes its dependency (#1644).
+              addedDependencies: ["part-1"],
               acceptance: [...item.acceptance, "Additional behaviour."],
               brief: item.brief,
               nonGoals: item.nonGoals,
@@ -1168,6 +1170,7 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
         "Additional behaviour.",
       ],
       ownedPaths: ["part-0.ts", "additional.ts"],
+      dependencies: ["part-1"],
     });
     assert.deepEqual(decoded.items.slice(1), currentGraph.items.slice(1));
     assert.equal(JSON.stringify(currentGraph), before);

@@ -6,6 +6,9 @@ import type { FactoryState } from "../state.js";
 import { ESCALATE_AFTER_MS } from "../step.js";
 import { notYet, settled } from "./lag.js";
 
+/** Failed checks a fault names one by one; the rest are counted. */
+const LISTED_CHECKS = 10;
+
 export function assertPreIntegrationCheckShape(graph: WorkGraph): void {
   const gates = graph.requiredPreIntegrationChecks;
   if (gates === undefined) return;
@@ -87,19 +90,30 @@ export function deliveryReadiness(
   // GitHub merges past a check the repository does not require; Factory
   // does not (#1637). The evidence names each check, so a repair can fix it.
   const failed = observation.failedChecks ?? [];
+  // A large matrix lists its first checks and counts the rest.
+  const bounded = (items: string[], separator: string) =>
+    items.length > LISTED_CHECKS
+      ? `${items.slice(0, LISTED_CHECKS).join(separator)}${separator}and ${items.length - LISTED_CHECKS} more`
+      : items.join(separator);
   const listed = (checks: typeof failed) =>
-    checks
-      .map(
+    bounded(
+      checks.map(
         (check) =>
           `${check.name} (${check.conclusion}${check.url ? `, ${check.url}` : ""})`,
-      )
-      .join("; ");
+      ),
+      "; ",
+    );
   const broken = failed.filter(
     (check) => !["cancelled", "stale"].includes(check.conclusion),
   );
   if (broken.length)
     throw work(
-      `Checks failed on PR #${pullRequest} at ${expectedHead}: ${listed(broken)}`,
+      [
+        `Checks failed on PR #${pullRequest} at ${expectedHead}: ${listed(broken)}`,
+        ...broken.flatMap((check) =>
+          check.excerpt ? [`${check.name}:\n${check.excerpt}`] : [],
+        ),
+      ].join("\n\n"),
     );
   // A run cancelled (often by another PR's run in a shared concurrency
   // group) or gone stale says nothing about the change; a repair cannot fix
@@ -107,7 +121,7 @@ export function deliveryReadiness(
   if (failed.length)
     throw new StepFault(
       decision(
-        `Checks on PR #${pullRequest} ended cancelled or stale, and nothing re-ran them: ${[...new Set(failed.map((check) => check.name))].join(", ")}. Re-run them, then retry, or cancel?`,
+        `Checks on PR #${pullRequest} ended cancelled or stale, and nothing re-ran them: ${bounded([...new Set(failed.map((check) => check.name))], ", ")}. Re-run them, then retry, or cancel?`,
         `Checks cancelled on PR #${pullRequest} at ${expectedHead}: ${listed(failed)}`,
       ),
     );

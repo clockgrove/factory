@@ -248,6 +248,8 @@ export interface CoordinatorDisposition {
   processes?: { pid: number; startTime: string }[];
   /** The operator's mode a rejection hold overrode; its replacement restores it. */
   requestedMode?: "running" | "paused" | "draining";
+  /** The service handed this drain back itself: its next dispatch resumes it. */
+  drainedBy?: "service";
 }
 
 /** Preparation shares the atomic state path; no executable graph is invented. */
@@ -481,14 +483,18 @@ export function planningRevisionGrantable(state: ContinuationState): boolean {
 export function setCoordinatorMode(
   state: ContinuationState,
   mode: CoordinatorDisposition["mode"],
+  drainedBy?: "service",
 ): void {
   if (!state.coordinator) return;
+  delete state.coordinator.drainedBy;
   if (rejectionHoldsPause(state)) {
     state.coordinator.mode = "paused";
     state.coordinator.requestedMode = mode;
   } else {
     state.coordinator.mode = mode;
     delete state.coordinator.requestedMode;
+    if (mode === "draining" && drainedBy)
+      state.coordinator.drainedBy = drainedBy;
   }
 }
 

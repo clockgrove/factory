@@ -312,7 +312,7 @@ export async function runObjectivePass(
     owner.snapshot = continuation;
     checkRequiredEnvironment(config, continuation?.autonomy);
     if (owner.handoff && continuation?.coordinator) {
-      setCoordinatorMode(continuation, "draining");
+      setCoordinatorMode(continuation, "draining", owner.handoffBy);
       saveState(path, continuation);
     }
     let preparation =
@@ -759,7 +759,7 @@ export async function runObjectivePass(
       owner.workPause.abort(new Error("Coordinator handoff requested"));
       await Promise.allSettled(active.values());
       if (owner.snapshot?.coordinator) {
-        setCoordinatorMode(owner.snapshot, "draining");
+        setCoordinatorMode(owner.snapshot, "draining", owner.handoffBy);
         saveState(path, owner.snapshot);
       }
       throw new CoordinatorHandoff();

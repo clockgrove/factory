@@ -818,6 +818,9 @@ export async function prepareObjective(args: {
       issueByItemId: {},
       coordinator: {
         mode: owner.handoff ? "draining" : (owner.initialMode ?? "running"),
+        ...(owner.handoff && owner.handoffBy
+          ? { drainedBy: owner.handoffBy }
+          : {}),
         phase: "planning",
         phaseStartedAt: new Date().toISOString(),
         ...(owner.deadlineAt ? { deadlineAt: owner.deadlineAt } : {}),

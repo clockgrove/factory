@@ -1723,6 +1723,12 @@ try {
               assert.ok((await running) instanceof CoordinatorHandoff);
               const handedOff = readContinuation(config.repository, 1);
               assert.equal(handedOff.coordinator.mode, "draining");
+              // The service's own drain, which its next dispatch resumes; an
+              // operator's drain over it is the operator's (#1701).
+              assert.equal(handedOff.coordinator.drainedBy, "service");
+              const operatorDrain = structuredClone(handedOff);
+              setCoordinatorMode(operatorDrain, "draining");
+              assert.equal(operatorDrain.coordinator.drainedBy, undefined);
               assert.equal(handedOff.runId, original.runId);
               assert.equal(handedOff.baseSha, original.baseSha);
               assert.equal(

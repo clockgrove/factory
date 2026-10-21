@@ -826,6 +826,16 @@ async function runObjectiveOwned(
   };
   /** A handoff: stop at the next safe point and release ownership. */
   const releaseOwnership = () => {
+    // A service run's handoff from running is the service's own drain; one
+    // that finds the operator's pause or drain keeps it the operator's.
+    if (
+      !owner.handoff &&
+      options.observeControl &&
+      (owner.snapshot
+        ? owner.snapshot.coordinator?.mode === "running"
+        : !owner.initialMode)
+    )
+      owner.handoffBy = "service";
     owner.handoff = true;
     if (owner.snapshot) {
       owner.pause.abort(new Error("Coordinator handoff requested"));
@@ -1024,7 +1034,8 @@ async function runObjectiveOwned(
         );
         // A replacement lifts the rejection's pause: when the restored mode
         // is running, this owner continues at once, as after resume (#1645).
-        if (held && owner.handoff) setCoordinatorMode(state, "draining");
+        if (held && owner.handoff)
+          setCoordinatorMode(state, "draining", owner.handoffBy);
         else if (held && state.coordinator?.mode === "running")
           owner.pause = new AbortController();
         persist();
@@ -1058,6 +1069,7 @@ async function runObjectiveOwned(
             : ["drain", "handoff"].includes(request.action)
               ? "draining"
               : "running",
+          owner.handoff ? owner.handoffBy : undefined,
         );
         persist();
         wake();
@@ -1275,7 +1287,7 @@ async function runObjectiveOwned(
   const handoff = () => {
     releaseOwnership();
     if (owner.snapshot?.coordinator) {
-      setCoordinatorMode(owner.snapshot, "draining");
+      setCoordinatorMode(owner.snapshot, "draining", owner.handoffBy);
       persist();
     }
     wake();

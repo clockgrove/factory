@@ -154,6 +154,8 @@ export function canHandoff(
 
 export interface LocalOwner {
   handoff?: boolean;
+  /** A service run's handoff: the drain it leaves is the service's own. */
+  handoffBy?: "service";
   /** Cessation received before the authentic first snapshot is published. */
   initialMode?: "paused" | "draining";
   /** Exact Issue body admitted by the Project claim, before any planning. */

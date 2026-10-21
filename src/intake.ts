@@ -1975,8 +1975,8 @@ async function runIntakeOwned(
     // Runs asked to hand off because they wait behind an overlap while the
     // service stops; their handoff is not the service's.
     const yielded = new Set<number>();
-    // Objectives this service handed back to the queue: their handoff left
-    // them draining, so their next run here resumes them.
+    // Selected Objectives whose drain the service left itself (its own
+    // handoff, before or after a restart): their run here resumes them.
     const requeued = new Set<number>();
     const idle = () =>
       pauseObservation(
@@ -2019,7 +2019,6 @@ async function runIntakeOwned(
               onExecutionHeld: () => {
                 if (slots <= 1 || handingOff || localMode) return false;
                 yielded.add(selected);
-                requeued.add(selected);
                 return true;
               },
               observeControl: async (handler) => {
@@ -2129,7 +2128,6 @@ async function runIntakeOwned(
               }
               if (!held) continue;
               yielded.add(objective);
-              requeued.add(objective);
               void control({ objective, action: "handoff" }).catch(
                 () => undefined,
               );
@@ -2252,15 +2250,16 @@ async function runIntakeOwned(
                 "Retained failure/cancellation requires supported recovery";
               break;
             }
-            // A drain this service did not hand back itself (the operator's,
-            // or one from before a restart) holds until resume: running it
-            // would only idle in a slot (#1701).
+            // The operator's pause or drain holds until resume: running it
+            // would only idle in a slot. The service's own drain resumes (#1701).
+            const coordinator = state?.coordinator;
             if (
-              state?.coordinator?.mode === "draining" &&
-              !requeued.has(entry.objective)
+              coordinator?.mode === "paused" ||
+              (coordinator?.mode === "draining" &&
+                coordinator.drainedBy !== "service")
             ) {
               reasons[entry.objective] =
-                `Coordinator is draining; run \`factory resume --objective ${entry.objective}\` to continue it`;
+                `Coordinator is ${coordinator.mode}; run \`factory resume --objective ${entry.objective}\` to continue it`;
               continue;
             }
             // A planned Objective whose owned paths overlap an earlier active
@@ -2311,6 +2310,8 @@ async function runIntakeOwned(
                   entry.objective,
                   options.backgroundConfigurationPath,
                 );
+              if (coordinator?.mode === "draining")
+                requeued.add(entry.objective);
               selected.push(entry.objective);
             } catch (error) {
               holdFor(error);

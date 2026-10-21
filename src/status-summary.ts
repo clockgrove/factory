@@ -1851,6 +1851,8 @@ interface ServiceStatusDocument {
     /** Every Objective a live controller runs; foreground runs side by side. */
     activeObjectives?: number[];
     waitingObjectives?: { objective: number; reason: string }[];
+    /** An installation-level fault holding all new dispatch. */
+    installationHold?: { at: string; error: string };
     /** Upgrade drain: no new dispatch while the active runs finish. */
     finishing?: boolean;
     observation?: { error?: string; needsDecision?: number };
@@ -1861,10 +1863,17 @@ interface ServiceStatusDocument {
 /** The service and queue as text lines, each problem followed by the command that answers it. */
 export function renderServiceStatus(document: ServiceStatusDocument): string[] {
   const { service, queue } = document;
-  // An Objective waiting for a person comes first: nothing else moves it.
-  const lines: string[] = (document.waitingObjectives ?? []).map(
-    (entry) =>
-      `Objective #${entry.objective} waits for you: ${short(entry.reason ?? entry.summary, 160)}; ${entry.command ? `next \`${entry.command}\`` : `\`factory status --objective ${entry.objective}\` names the command`}, or \`factory cancel --objective ${entry.objective}\``,
+  // A hold waiting for a person comes first: nothing else moves it.
+  const lines: string[] = queue.installationHold
+    ? [
+        `Dispatch held for the installation: ${short(queue.installationHold.error, 200)}; fix it, then \`factory queue resume\``,
+      ]
+    : [];
+  lines.push(
+    ...(document.waitingObjectives ?? []).map(
+      (entry) =>
+        `Objective #${entry.objective} waits for you: ${short(entry.reason ?? entry.summary, 160)}; ${entry.command ? `next \`${entry.command}\`` : `\`factory status --objective ${entry.objective}\` names the command`}, or \`factory cancel --objective ${entry.objective}\``,
+    ),
   );
   if (service.supported === false)
     lines.push(

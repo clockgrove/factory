@@ -5835,6 +5835,68 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     ).map((item) => item.id),
     ["independent", "join"],
   );
+  // The planner is told the ownership, local-evidence, per-item validation
+  // and design-note rules that the lint below and graph review enforce.
+  for (const rule of [
+    /A shared file \(index, contracts barrel, router, registry, manifest, docs map\) has exactly one owner/,
+    /Final review and hosted or post-publication CI run nothing in Factory validation/,
+    /Never copy every declared script onto every item/,
+    /declares a design checklist, the brief answers each of its questions/,
+  ])
+    assert.match(compilation.call.prompt, rule);
+  const lintOf = (plan) => {
+    let refused;
+    assert.throws(
+      () =>
+        compilation.wire.decode({
+          contextId: wireGraph.contextId,
+          outcome: { kind: "graph", graph: plan },
+        }),
+      (error) => {
+        refused = error;
+        return error.name === "PlannerChoiceError";
+      },
+    );
+    return refused;
+  };
+  // Two items owning overlapping paths with no dependency between them are
+  // refused as one correction naming both; a dependency admits them.
+  const overlapping = structuredClone(wireGraph);
+  overlapping.items.push({
+    ...overlapping.items[0],
+    id: "sibling",
+    ownedPaths: ["shared/"],
+  });
+  overlapping.items[0].ownedPaths = ["shared/index.md"];
+  const overlap = lintOf(overlapping);
+  assert.match(
+    overlap.message,
+    /^Plan standard: Work Items independent and sibling own overlapping paths \(shared\/index\.md and shared\/\) and neither depends on the other: narrow/,
+  );
+  assert.deepEqual(overlap.itemIds.sort(), ["independent", "sibling"]);
+  overlapping.items.at(-1).dependencies = ["join"];
+  compilation.wire.decode({
+    contextId: wireGraph.contextId,
+    outcome: { kind: "graph", graph: overlapping },
+  });
+  // Once the plan selects a validation command, a work item without one and
+  // a final-review proof whose owner runs none have no local evidence.
+  const unproved = structuredClone(wireGraph);
+  unproved.items[0].validation = [
+    { kind: "base-observed", command: "npm test", source: "package.json" },
+  ];
+  unproved.coverage[0].proof = { kind: "final-review" };
+  const evidence = lintOf(unproved);
+  assert.deepEqual(evidence.itemIds, ["join"]);
+  assert.match(
+    evidence.message,
+    /Work Item join has no validation command, so its acceptance has no local executable evidence: .*decisionRequired; Coverage of ".*" is proved only by final-review, and its owner join runs no validation command/,
+  );
+  unproved.items[1].validation = unproved.items[0].validation;
+  compilation.wire.decode({
+    contextId: wireGraph.contextId,
+    outcome: { kind: "graph", graph: unproved },
+  });
   const routeDefaults = {
     ...common,
     resources: [],

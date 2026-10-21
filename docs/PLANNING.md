@@ -8,22 +8,28 @@ The rules live in `src/compiler/work-item-rubric.ts`. The planner and the graph 
 
 ## A Work Item
 
-| Field       | Rule                                                                                                                                |
-| ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Goal        | One sentence: the outcome.                                                                                                          |
-| Contract    | Only what other items or users rely on (names, semantics, formats), stated once in the brief and repeated in each consumer's brief. |
-| Acceptance  | Observable behaviour, invariants and refusal classes at the contract level. Each entry is checkable from outside the code.          |
-| Evidence    | The repository tests or commands that prove the acceptance.                                                                         |
-| Constraints | What must not change or must not be used, as non-goals.                                                                             |
-| Docs        | What a reader needs documented, where the target's AGENTS.md doc map puts it.                                                       |
+| Field       | Rule                                                                                                                                      |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Goal        | One sentence: the outcome.                                                                                                                |
+| Contract    | Only what other items or users rely on (names, semantics, formats), stated once in the brief and repeated in each consumer's brief.       |
+| Acceptance  | Observable behaviour, invariants and refusal classes at the contract level. Each entry is checkable from outside the code.                |
+| Evidence    | The repository tests or commands that prove the acceptance, run by the item's own validation. Final review or CI is never the only proof. |
+| Validation  | The commands the item's owned paths affect, plus the repository's standard check command. Not every declared script.                      |
+| Design note | Where the repository declares a design checklist, a short answer to each question in the brief.                                           |
+| Constraints | What must not change or must not be used, as non-goals.                                                                                   |
+| Docs        | What a reader needs documented, where the target's AGENTS.md doc map puts it.                                                             |
 
-**Never:** internal mechanisms, line numbers or ranges, file-by-file edit lists, reading lists, one entry per malformed field or error path, "existing tests unchanged" prose, or restated source text.
+**Never:** internal mechanisms, line numbers or ranges, file-by-file edit lists, names for new internal symbols, classes or tests, test prose, reading lists, one entry per malformed field or error path, "existing tests unchanged" prose, or restated source text.
 
 **Keep:** invariants across inputs or steps (step-size independence, determinism), the real upstream producer named by its type, and existing helpers and conventions named by name. These raise result quality.
 
 **Size:** one outcome per item. About 15 acceptance entries is a signal, not a target: above it, split the item or say in its brief why it is one outcome.
 
 **Briefs** carry settled decisions and cross-item contracts the worker cannot get from the repository. Workers read the code themselves.
+
+**Ownership is narrow.** An item owns the files its change needs, not a whole source tree or shared folder. A shared file (index, contracts barrel, router, docs map) has one owner, and the items that need its change depend on that owner; consumers of a shared layer then run in parallel.
+
+**No silent deferral.** Where proof needs an environment local validation lacks, the planner asks through `decisionRequired` instead of leaving it to final review or hosted CI.
 
 **Existing tests are protected by default.** An item changes an existing assertion, golden or baseline only when its acceptance states that behaviour change and why.
 
@@ -43,7 +49,14 @@ All three happen in the planner's one session. Self-checking is a filter; the in
 - **Consistent acceptance.** Graph review reads each item's acceptance entries against each other, its brief and the Objective's constraints, non-goals and operator decisions. A contradiction, such as one entry capping what another requires to hold independently of that cap, or an entry no implementation can meet together with the others, is a fix finding. Why: such a plan passes review and then fails every worker attempt.
 - **Sourced numbers.** Every numeric limit, budget, retry count or timeout in a plan comes from a pinned source, the repository or an operator decision. Otherwise the item states the property the value protects and leaves the value to the worker; a value users would observe is an operator decision. Why: an invented number reads as a requirement and binds the worker and reviewer to it.
 - **Result review** judges behaviour. It does not refuse a criterion because the code reaches the stated behaviour another way than a plan happened to describe. It refuses an unannounced change to an existing test.
-- **Lint before review.** Before any paid review, Factory refuses an item with more than 15 acceptance entries and no `oneOutcomeReason`, and an acceptance entry that cites a line number next to a source file name. The planner gets both as one correction. Amendments skip this lint; graph review judges them.
+- **Lint before review.** Before any paid review, Factory refuses:
+  - an item with more than 15 acceptance entries and no `oneOutcomeReason`;
+  - an acceptance entry that cites a line number next to a source file name;
+  - two items that own the same or overlapping paths when neither depends on the other, directly or transitively. Why: the scheduler would run them one after the other anyway, and wide shared ownership turns a plan into a serial chain;
+  - when the plan selects any validation command (so the repository has one), a work item without a validation command, and a criterion proved only by final review or CI whose owner runs none. Why: final review and hosted CI run nothing inside Factory validation.
+
+  The planner gets all of these as one correction. Amendments skip this lint; graph review judges them.
+
 - **Obligations are proved at owner level.** A covered Objective criterion or source exit item names its owner and proof kind. For item or QA review, the owner's review judges the obligation itself, with the owner's acceptance as a whole as its proof. No proof points at a single acceptance entry. Code still checks that each obligation has exactly one owner, the owner exists and the proof kind fits the owner. In an amendment, an already-reviewed item keeps only the semantic proofs it had; a newly assigned obligation needs final review or new work.
 
 ## Engineering standard
@@ -59,6 +72,8 @@ The worker gets the standard before its self-review. Result review refuses a vio
 Workers and result review also share `DESIGN_CHECKLIST`: six questions about design risks that criteria rarely name and passing tests do not reveal. Authority: each new action has the narrowest grant that fits it. Growth: new stored state has an enforced bound or retention. Attribution: a recorded actor is the principal that acted. Hot path: per-request paths gain no avoidable work. Test independence: a reference test's expected side does not run the code under test. Sourced numbers: each new limit names its origin.
 
 The worker answers each question in a `design` note in `.factory-handoff.json` before writing code, with `designRisk` naming the question, and updates the answer with file:line evidence before finishing. Where the target's AGENTS.md, or a document it maps, declares its own design checklist, the worker answers it in one more note with `designRisk: "repository"`; it adds to the generic questions. Result review verifies each answer against the code and refuses the criterion whose implementation contains a design defect, with or without a note. Design notes, like verification notes, index one result's review: other workers and repository memory do not receive them.
+
+The planner sees the repository's checklist too. Where one is declared, each brief carries a short answer per question, so the worker's notes start from a design settled at plan level. Why: the checklist reached only workers and result review, so plans never applied it.
 
 ## Example
 

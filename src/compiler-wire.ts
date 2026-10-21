@@ -23,7 +23,7 @@ import {
   assertChildObjectives,
   type ChildObjectiveSpec,
 } from "./objective-split.js";
-import { ownsPath } from "./ownership.js";
+import { ownsPath, pathsOverlap } from "./ownership.js";
 import {
   aggregateAcceptance,
   coverageCriterion,
@@ -128,6 +128,93 @@ function planStandardLint(item: ObjectValue, reason: string | null): string[] {
       findings.push(
         `Work Item ${String(item.id)} acceptance ${at} cites a line number: state the behaviour instead; the worker finds the lines in the code`,
       );
+  return findings;
+}
+
+/** Proofs that run nothing inside Factory validation: the final reviewer's judgment, or hosted CI. */
+const NON_LOCAL_PROOFS = new Set([
+  "final-review",
+  "integrated-ci",
+  "published-ci",
+]);
+
+/**
+ * The plan standard's graph-level lint, on the same terms as planStandardLint:
+ * items that may run concurrently own disjoint paths, and every acceptance has
+ * local executable evidence. Local evidence is checked only when the plan
+ * selects some validation command, which shows the repository has one.
+ */
+function planGraphLint(
+  graph: WorkGraph,
+  linted: Set<string>,
+  /** In a split, each item's child Objective: children run as separate Objectives. */
+  childOf: ReadonlyMap<string, string>,
+): string[] {
+  const findings: string[] = [];
+  const byId = new Map(graph.items.map((item) => [item.id, item]));
+  const ancestors = new Map<string, Set<string>>();
+  const ancestorsOf = (id: string): Set<string> => {
+    const known = ancestors.get(id);
+    if (known) return known;
+    const found = new Set<string>();
+    ancestors.set(id, found);
+    for (const dependency of byId.get(id)?.dependencies ?? []) {
+      if (!byId.has(dependency)) continue;
+      found.add(dependency);
+      for (const ancestor of ancestorsOf(dependency)) found.add(ancestor);
+    }
+    return found;
+  };
+  for (const [at, left] of graph.items.entries())
+    for (const right of graph.items.slice(at + 1)) {
+      const shared = left.ownedPaths.flatMap((a) =>
+        right.ownedPaths.filter((b) => pathsOverlap(a, b)).map((b) => [a, b]),
+      );
+      // Opposite branches of one condition never both run.
+      const exclusive =
+        left.condition !== undefined &&
+        left.condition.conditionId === right.condition?.conditionId &&
+        left.condition.when !== right.condition.when;
+      if (
+        !shared.length ||
+        exclusive ||
+        childOf.get(left.id) !== childOf.get(right.id) ||
+        ancestorsOf(left.id).has(right.id) ||
+        ancestorsOf(right.id).has(left.id)
+      )
+        continue;
+      linted.add(left.id).add(right.id);
+      findings.push(
+        `Work Items ${left.id} and ${right.id} own overlapping paths (${shared.map(([a, b]) => (a === b ? a : `${a} and ${b}`)).join(", ")}) and neither depends on the other: narrow each item's ownedPaths to the files its change needs, give a shared file (index, barrel, router, registry, docs map) exactly one owner, and make the other item depend on that owner`,
+      );
+    }
+  if (!graph.items.some((item) => item.validation.length)) return findings;
+  const localEvidence = (id: string): boolean => {
+    const item = byId.get(id);
+    return Boolean(
+      item &&
+        (item.validation.length ||
+          (item.children ?? []).some((child) => localEvidence(child))),
+    );
+  };
+  for (const item of graph.items)
+    if ((item.kind ?? "work") === "work" && !item.validation.length) {
+      linted.add(item.id);
+      findings.push(
+        `Work Item ${item.id} has no validation command, so its acceptance has no local executable evidence: select the authorized commands that run the tests it owns, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
+      );
+    }
+  for (const entry of graph.coverage ?? [])
+    if (
+      NON_LOCAL_PROOFS.has(entry.proof.kind) &&
+      !localEvidence(entry.itemId)
+    ) {
+      const criterion = coverageCriterion(entry).replace(/\s+/g, " ").trim();
+      linted.add(entry.itemId);
+      findings.push(
+        `Coverage of "${criterion.length > 120 ? `${criterion.slice(0, 117)}...` : criterion}" is proved only by ${entry.proof.kind}, and its owner ${entry.itemId} runs no validation command: give the owner a local command that proves it, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
+      );
+    }
   return findings;
 }
 
@@ -1757,6 +1844,16 @@ export function compilerWire(
           });
         }
         assertDeclaredConditions(graph);
+      }
+      if (!context.previousGraph) {
+        const childOf = new Map<string, string>();
+        const split = splittable ? (wire.split as ObjectValue | null) : null;
+        if (split && Array.isArray(split.children))
+          for (const child of split.children as (ObjectValue | null)[])
+            if (Array.isArray(child?.itemIds))
+              for (const id of child.itemIds)
+                childOf.set(id, String(child.key));
+        lint.push(...planGraphLint(graph, linted, childOf));
       }
       // Last, so a plan that passes every other check gets these as one
       // batched correction instead of a paid review finding.

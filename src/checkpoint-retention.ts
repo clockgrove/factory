@@ -234,7 +234,7 @@ const ATTEMPT_ID =
  * That commit holds every worker return and original the material produced;
  * the harness logs and progress streams are never archived, and are reclaimed
  * by design. A cancelled run that still holds resources, or an Objective
- * with a live controller, is left for a later pass. Attempts are read from
+ * whose lock another owner holds, is left for a later pass. Attempts are read from
  * the parsed snapshot; a snapshot in a shape this version does not read
  * identifies nothing, and its material stays. Content bodies are not
  * reclaimed: the store deduplicates by digest across Objectives, so a body
@@ -247,35 +247,28 @@ export async function reclaimRetiredMaterial(
   const root = directory(config.repository);
   if (!existsSync(root)) return 0;
   const {
+    acquireObjectiveLock,
     cancelledContinuationResourceHold,
-    liveControllerOwner,
     objectiveLockPath,
     objectiveRoot,
     parsePortableContinuation,
+    releaseControllerLock,
     statePath,
   } = await import("./state-store.js");
   const { isExecutionState } = await import("./state.js");
   const { removeWorktree } = await import("./process.js");
   const { sweepValidationWorktrees } = await import("./validation.js");
   const state = stateRoot(config.repository);
-  let reclaimed = 0;
-  for (const name of readdirSync(root).sort()) {
-    const match = /^([1-9][0-9]*)\.json$/.exec(name);
-    if (!match) continue;
-    const objective = Number(match[1]);
-    const record = readRetirement(config.repository, objective);
-    if (!record || record.reclaimed) continue;
-    const snapshot = statePath(config.repository, objective);
-    if (!existsSync(snapshot)) continue;
-    const bytes = readFileSync(snapshot);
-    if (
-      stateDigest(bytes) !== record.stateDigest ||
-      !acknowledged(record.evidenceCommit) ||
-      liveControllerOwner(objectiveLockPath(config.repository, objective))
-    )
-      continue;
+  // Under the Objective's own lock, so no retry or run can resume it and use
+  // this material meanwhile; the snapshot is checked again under it.
+  const reclaimOne = async (
+    objective: number,
+    record: RetirementRecord,
+  ): Promise<boolean> => {
+    const bytes = readFileSync(statePath(config.repository, objective));
+    if (stateDigest(bytes) !== record.stateDigest) return false;
     const value = JSON.parse(bytes.toString("utf8"));
-    if (!terminalHistory(value)) continue;
+    if (!terminalHistory(value)) return false;
     let continuation: ReturnType<typeof parsePortableContinuation>;
     try {
       continuation = parsePortableContinuation(
@@ -288,13 +281,13 @@ export async function reclaimRetiredMaterial(
         ...record,
         reclaimed: "unreadable",
       });
-      continue;
+      return false;
     }
     if (
       continuation.cancelledAt &&
       cancelledContinuationResourceHold(continuation)
     )
-      continue;
+      return false;
     const attempts = new Set<string>();
     if (isExecutionState(continuation))
       for (const work of Object.values(continuation.work))
@@ -334,7 +327,42 @@ export async function reclaimRetiredMaterial(
       state,
     );
     writeRetirement(config.repository, { ...record, reclaimed: "complete" });
-    reclaimed++;
+    return true;
+  };
+  let reclaimed = 0;
+  for (const name of readdirSync(root).sort()) {
+    const match = /^([1-9][0-9]*)\.json$/.exec(name);
+    if (!match) continue;
+    const objective = Number(match[1]);
+    // One Objective's failure leaves its material for a later pass only.
+    try {
+      const record = readRetirement(config.repository, objective);
+      if (!record || record.reclaimed) continue;
+      const snapshot = statePath(config.repository, objective);
+      if (
+        !existsSync(snapshot) ||
+        stateDigest(readFileSync(snapshot)) !== record.stateDigest ||
+        !acknowledged(record.evidenceCommit)
+      )
+        continue;
+      let lock: ReturnType<typeof acquireObjectiveLock>;
+      try {
+        lock = acquireObjectiveLock(config.repository, objective);
+      } catch {
+        // A live owner of this Objective or of the installation.
+        continue;
+      }
+      try {
+        if (await reclaimOne(objective, record)) reclaimed++;
+      } finally {
+        releaseControllerLock(
+          objectiveLockPath(config.repository, objective),
+          lock,
+        );
+      }
+    } catch {
+      // Left in place; the next acknowledged publication tries again.
+    }
   }
   return reclaimed;
 }

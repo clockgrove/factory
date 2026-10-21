@@ -631,6 +631,19 @@ test("an exact operator decline preserves a real result and permits ordinary com
       executionIdentity: "failed-attempt",
     };
     assert.equal(restoredContinuationOwnershipHold(retried, true), undefined);
+    // Without its own settlement receipt or execution identity it still holds.
+    const unsettled = structuredClone(retried);
+    unsettled.agentSessions[`${key}#retried`].data.workerSettled = false;
+    assert.match(
+      restoredContinuationOwnershipHold(unsettled, true),
+      /Foreign native session/,
+    );
+    const anonymous = structuredClone(retried);
+    delete anonymous.agentSessions[`${key}#retried`].executionIdentity;
+    assert.match(
+      restoredContinuationOwnershipHold(anonymous, true),
+      /Foreign native session/,
+    );
     old.data.workerSettled = false;
     assert.match(
       restoredContinuationOwnershipHold(superseded, true),

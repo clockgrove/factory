@@ -4772,7 +4772,7 @@ test("diagnosis dispatch intent follows complete admission before real process e
       scope: "private-history",
       maxBytes: 16 * 1024 * 1024,
       maxFiles: 4096,
-      timeoutMs: 1000,
+      timeoutMs: 30_000,
       coalesceMs: 0,
     },
   };

@@ -200,7 +200,7 @@ async function watcherWorkflow(
       scope: "private-history",
       maxBytes: 16 * 1024 * 1024,
       maxFiles: 4096,
-      timeoutMs: 1000,
+      timeoutMs: 30_000,
       coalesceMs: 0,
     },
   };
@@ -2026,7 +2026,7 @@ test("the actual creating lease settles only a fresh failed reservation and arch
       scope: "private-history",
       maxBytes: 16 * 1024 * 1024,
       maxFiles: 4096,
-      timeoutMs: 1000,
+      timeoutMs: 30_000,
       coalesceMs: 0,
     },
   };

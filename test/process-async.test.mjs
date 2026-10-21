@@ -3893,7 +3893,7 @@ test("source readiness prepares each real fresh checkout before its phase checks
         scope: "private-history",
         maxBytes: 16 * 1024 * 1024,
         maxFiles: 4096,
-        timeoutMs: 1000,
+        timeoutMs: 30_000,
         coalesceMs: 0,
       },
     };

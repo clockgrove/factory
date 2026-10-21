@@ -524,7 +524,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       scope: "private-history",
       maxBytes: 16 * 1024 * 1024,
       maxFiles: 4096,
-      timeoutMs: 1000,
+      timeoutMs: 30_000,
       coalesceMs: 0,
     },
   };

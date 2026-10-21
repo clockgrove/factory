@@ -101,9 +101,12 @@ export class LocalContentStore implements ContentStore {
   reclaimArchived(
     commit: string,
     digests: Iterable<string>,
-    /** Stops before the next deletion; the rest stay for a later pass. */
+    /**
+     * Stops before the next deletion once one body is deleted, so every call
+     * makes progress; the rest stay for a later pass.
+     */
     expired: () => boolean = () => false,
-  ): number {
+  ): { deleted: number; complete: boolean } {
     if (!/^[a-f0-9]{40,64}$/.test(commit))
       throw new Error("Invalid archive commit");
     const candidates = [...digests].filter(
@@ -122,7 +125,7 @@ export class LocalContentStore implements ContentStore {
       : [];
     let deleted = 0;
     for (const [index, digest] of candidates.entries()) {
-      if (expired()) break;
+      if (deleted && expired()) return { deleted, complete: false };
       const body = join(this.root, digest.slice(0, 2), digest);
       if (sizes[index] !== `blob ${lstatSync(body).size}`) continue;
       const entry = this.archivedPath(digest);
@@ -133,7 +136,7 @@ export class LocalContentStore implements ContentStore {
       rmSync(body, { force: true });
       deleted++;
     }
-    return deleted;
+    return { deleted, complete: true };
   }
 
   private publisherGit(args: string[], input?: string, maxBuffer?: number) {

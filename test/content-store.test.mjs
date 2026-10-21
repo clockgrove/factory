@@ -1247,7 +1247,18 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(JSON.parse(readFileSync(retired6)).bodies, undefined);
   assert(closure.contentRefs.every((ref) => existsSync(bodyPath(ref))));
   for (const path of reclaimable) assert.equal(existsSync(path), true, path);
-  assert.equal((await maintainRecoveryCheckpoint(config)).complete, true);
+  // A pass with no budget left still takes one step, so passes finish (F1).
+  const finished = () =>
+    [6, 7].every((objective) => {
+      const record = JSON.parse(
+        readFileSync(join(state, "recovery", "retired", `${objective}.json`)),
+      );
+      return record.reclaimed && record.bodies;
+    });
+  for (let passes = 0; !finished(); passes++) {
+    assert(passes < 40, "every zero-budget pass makes progress");
+    await maintainRecoveryCheckpoint(config, { budgetMs: 0 });
+  }
   assert.equal(
     JSON.parse(readFileSync(join(state, "recovery", "retired", "6.json")))
       .bodies,

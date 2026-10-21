@@ -4436,6 +4436,22 @@ function verificationKey(
     options,
   });
 }
+/**
+ * What a sealed verifier copy is bound to: the installation and its archive,
+ * not the command's configuration or authority. The copy holds only raw
+ * remote objects and a tip, and every read re-hashes what it uses, so a CLI
+ * command and the service on different providers share one copy instead of
+ * re-keying each other's (#1714).
+ */
+function sealKey(config: FactoryConfig, options: GitPersistenceConfig): string {
+  return hash(
+    canonical({
+      stateRoot: stateRoot(config.repository),
+      binding: binding(config, options),
+      options,
+    }),
+  );
+}
 function verificationMetadataBudget(options: GitPersistenceConfig): number {
   // One encoded metadata pool, bounded by half the archive byte allowance and
   // at most 64 MiB. It must hold one archive's working set (body facts, the
@@ -6036,7 +6052,7 @@ async function retainVerifier(
       if (!objects) return false;
     }
     writeAtomic(join(directory, VERIFIER_SEAL), {
-      key: hash(verification.key),
+      key: sealKey(config, options),
       tip,
       objects: [...objects!],
     });
@@ -6081,7 +6097,7 @@ function adoptRetainedVerifier(
       !stat.isDirectory() ||
       stat.uid !== process.getuid?.() ||
       stat.mode & 0o077 ||
-      seal?.key !== hash(context.key) ||
+      seal?.key !== sealKey(config, options) ||
       typeof seal.tip !== "string" ||
       !/^[a-f0-9]{40,64}$/.test(seal.tip) ||
       !Array.isArray(seal.objects) ||
@@ -7496,6 +7512,8 @@ const PUBLISHER_PACK_BYTES = 256 * 1024 * 1024;
 async function packPublisher(
   config: FactoryConfig,
   options: GitPersistenceConfig,
+  /** Called once the publication lock is held. */
+  locked: () => void = () => undefined,
 ): Promise<boolean> {
   const p = paths(config.repository);
   const loose: string[] = [];
@@ -7507,6 +7525,7 @@ async function packPublisher(
   );
   try {
     await withCheckpointPublication(p.publicationGuard, async () => {
+      locked();
       const objects = join(p.git, "objects");
       for (const prefix of readdirSync(objects).sort()) {
         if (!/^[a-f0-9]{2}$/.test(prefix)) continue;
@@ -7569,11 +7588,17 @@ async function publishCheckpoint(
 }
 /**
  * One bounded maintenance pass is MAINTENANCE_BUDGET_MS: it starts no pack
- * batch and no reclaim step after it. A started pack batch is bounded by its
- * own caps (about two seconds), and a started reclaim step is one worktree
- * removal or one body deletion.
+ * batch and no reclaim step after it, except that reclaim always takes its
+ * first step, so every pass makes progress. A started pack batch is bounded by
+ * its own caps (about two seconds); a started reclaim step is one worktree
+ * removal, one body deletion, or listing one Objective's bodies.
  */
 const MAINTENANCE_BUDGET_MS = 10_000;
+/**
+ * Packing waits this long for the publication lock, then skips this pass: a
+ * publication in any process has priority over housekeeping.
+ */
+const PACK_LOCK_WAIT_MS = 100;
 export interface RecoveryCheckpointMaintenance {
   /** False when the budget ran out with work left; the next pass continues. */
   complete: boolean;
@@ -7584,29 +7609,57 @@ export interface RecoveryCheckpointMaintenance {
  * batch is loose, then reclaim retired Objectives' local material (see
  * reclaimRetiredMaterial). Only saves space: skipping it never breaks a read,
  * because loose objects stay readable and the content store reads a body
- * back from the publisher only after reclaim deleted it.
+ * back from the publisher only after reclaim deleted it. `signal` stops the
+ * pass at once: it ends a pack batch's Git commands (a killed batch leaves
+ * every object in place) and reclaim before its next step.
  */
 export async function maintainRecoveryCheckpoint(
   config: FactoryConfig,
-  options: { budgetMs?: number; expired?: () => boolean } = {},
+  options: { budgetMs?: number; signal?: AbortSignal } = {},
 ): Promise<RecoveryCheckpointMaintenance> {
   const persistence = settings(config);
   if (!persistence) return { complete: true, reclaimedObjectives: 0 };
   const deadline = Date.now() + (options.budgetMs ?? MAINTENANCE_BUDGET_MS);
-  const expired = () => Date.now() >= deadline || !!options.expired?.();
+  const stopped = () => !!options.signal?.aborted;
+  const expired = () => Date.now() >= deadline || stopped();
   let complete = true;
-  while (
-    await serializePublication(config.repository, () =>
-      packPublisher(config, persistence),
-    )
-  )
+  for (;;) {
+    // An in-process publication is running or queued: skip, never wait.
+    if (publications.has(config.repository)) break;
+    const attempt = new AbortController();
+    let held = false;
+    const wait = setTimeout(() => {
+      if (!held) attempt.abort();
+    }, PACK_LOCK_WAIT_MS);
+    const signals = [attempt.signal, options.signal, currentProcessSignal()];
+    let more: boolean;
+    try {
+      more = await serializePublication(config.repository, () =>
+        withProcessCancellation(
+          AbortSignal.any(signals.filter((signal) => signal !== undefined)),
+          () =>
+            packPublisher(config, persistence, () => {
+              held = true;
+            }),
+        ),
+      );
+    } finally {
+      clearTimeout(wait);
+    }
+    if (!held || !more) break;
     if (expired()) {
       complete = false;
       break;
     }
+  }
   let reclaimedObjectives = 0;
-  if (persistence.scope === "private-history" && !expired())
-    reclaimedObjectives = await reclaimRetired(config, persistence, expired);
+  if (persistence.scope === "private-history" && !stopped())
+    reclaimedObjectives = await reclaimRetired(
+      config,
+      persistence,
+      () => Date.now() >= deadline,
+      stopped,
+    );
   if (expired()) complete = false;
   return { complete, reclaimedObjectives };
 }
@@ -7616,7 +7669,7 @@ const maintenance = new Map<
     /** The acknowledged sequence the last complete pass started from. */
     sequence?: number;
     running?: Promise<void>;
-    stopped?: boolean;
+    stop?: AbortController;
   }
 >();
 /**
@@ -7637,11 +7690,12 @@ export function scheduleRecoveryCheckpointMaintenance(
     const sequence = journal(config, persistence).lastAcknowledged?.sequence;
     if (entry.running || sequence === undefined || entry.sequence === sequence)
       return;
-    entry.stopped = false;
+    const stop = new AbortController();
+    entry.stop = stop;
     const pass = scopes.exit(() =>
       own(async () => {
         const result = await maintainRecoveryCheckpoint(config, {
-          expired: () => !!entry.stopped,
+          signal: stop.signal,
         });
         if (result.complete) entry.sequence = sequence;
       }),
@@ -7655,15 +7709,26 @@ export function scheduleRecoveryCheckpointMaintenance(
     // Maintenance only saves space; the next idle point tries again.
   }
 }
-/** Stop a running background pass at its next step and wait for it. */
+/**
+ * Stop a running background pass and wait for it: a pack batch's Git
+ * commands end at once, and reclaim stops before its next step.
+ */
 export async function stopRecoveryCheckpointMaintenance(
   repository: string,
 ): Promise<void> {
   const entry = maintenance.get(repository);
   if (!entry?.running) return;
-  entry.stopped = true;
+  entry.stop?.abort();
   await entry.running;
 }
+/**
+ * An acknowledged commit's `blobs` tree names its bodies, and a commit never
+ * changes, so the listing is kept across passes: a large retired Objective
+ * resumed by later passes lists its evidence once. The most recent few
+ * commits are kept.
+ */
+const archivedBlobs = new Map<string, ReadonlySet<string>>();
+const ARCHIVED_BLOB_COMMITS = 8;
 /**
  * Reclaim the local material of retired Objectives (see
  * reclaimRetiredMaterial). It only saves space: a failure or an expired
@@ -7673,9 +7738,9 @@ async function reclaimRetired(
   config: FactoryConfig,
   options: GitPersistenceConfig,
   expired: () => boolean,
+  stopped: () => boolean,
 ): Promise<number> {
   let reclaimed = 0;
-  const archived = new Map<string, ReadonlySet<string>>();
   const observed = checkpointObservation(
     config,
     "recovery-checkpoint-reclaim",
@@ -7689,7 +7754,8 @@ async function reclaimRetired(
       (commit) => {
         // The publisher holds every object it wrote (packPublisher drops
         // none): an acknowledged commit's `blobs` tree names its bodies.
-        let digests = archived.get(commit);
+        const key = `${config.repository}\0${commit}`;
+        let digests = archivedBlobs.get(key);
         if (!digests) {
           digests = new Set(
             git(paths(config.repository).git, options, [
@@ -7702,11 +7768,16 @@ async function reclaimRetired(
               .split("\0")
               .filter((name) => /^[a-f0-9]{64}$/.test(name)),
           );
-          archived.set(commit, digests);
+        }
+        archivedBlobs.delete(key);
+        archivedBlobs.set(key, digests);
+        for (const old of archivedBlobs.keys()) {
+          if (archivedBlobs.size <= ARCHIVED_BLOB_COMMITS) break;
+          archivedBlobs.delete(old);
         }
         return digests;
       },
-      expired,
+      { expired, stopped },
     );
     observed.complete();
   } catch (error) {

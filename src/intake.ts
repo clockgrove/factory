@@ -2252,6 +2252,17 @@ async function runIntakeOwned(
                 "Retained failure/cancellation requires supported recovery";
               break;
             }
+            // A drain this service did not hand back itself (the operator's,
+            // or one from before a restart) holds until resume: running it
+            // would only idle in a slot (#1701).
+            if (
+              state?.coordinator?.mode === "draining" &&
+              !requeued.has(entry.objective)
+            ) {
+              reasons[entry.objective] =
+                `Coordinator is draining; run \`factory resume --objective ${entry.objective}\` to continue it`;
+              continue;
+            }
             // A planned Objective whose owned paths overlap an earlier active
             // one would only wait: the next queued Objective runs instead.
             const conflict =

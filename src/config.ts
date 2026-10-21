@@ -33,6 +33,11 @@ import {
   type ReviewArtifactSelector,
 } from "./review-artifacts.js";
 import { refuseUnknownFields } from "./unknown-fields.js";
+import {
+  PACKAGE_SCRIPT_FORMS,
+  packageScriptCommands,
+  packageScriptInvocation,
+} from "./validation.js";
 
 export type CodexReasoningEffort =
   | "minimal"
@@ -758,6 +763,14 @@ export function validateConfig(value: unknown): FactoryConfig {
         "finalValidation must list requiredCommands or ciOnlyCommands; omit the section to require none",
       );
     const listed = Object.fromEntries(lists);
+    // The form check preflight applies; executable authority needs the base tree.
+    const unsupported = packageScriptCommands(
+      listed.requiredCommands ?? [],
+    ).find((command) => !packageScriptInvocation(command));
+    if (unsupported !== undefined)
+      throw new Error(
+        `finalValidation.requiredCommands lists ${unsupported}, an unsupported package script form; use ${PACKAGE_SCRIPT_FORMS}`,
+      );
     const both = (listed.requiredCommands ?? []).find((command) =>
       listed.ciOnlyCommands?.includes(command),
     );

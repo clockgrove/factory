@@ -1313,6 +1313,10 @@ export function assertPinnedNpmScripts(
   }
 }
 
+/** The script forms {@link packageScriptInvocation} accepts, for diagnostics. */
+export const PACKAGE_SCRIPT_FORMS =
+  "`npm test`, `pnpm test`, `pnpm check`, `npm run NAME` or `pnpm run NAME`, with no other arguments";
+
 /** Supported root script forms; shell wrappers and package-manager flags are ambiguous. */
 export function packageScriptInvocation(
   check: string,

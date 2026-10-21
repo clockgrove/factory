@@ -186,6 +186,16 @@ test("required final-validation commands follow the Objective's and bind authori
       () => validateConfigFile({ ...file, finalValidation }),
       /^Error: finalValidation/,
     );
+  // Unsupported script forms fail at config load, naming the accepted forms.
+  for (const command of ["pnpm test:long-run", "npm run qualify --workspace y"])
+    assert.throws(
+      () =>
+        validateConfigFile({
+          ...file,
+          finalValidation: { requiredCommands: [command] },
+        }),
+      /^Error: finalValidation\.requiredCommands lists .*`npm run NAME`/,
+    );
 });
 
 test("CI-only commands are never validation commands (#1667)", () => {

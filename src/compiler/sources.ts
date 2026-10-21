@@ -22,6 +22,7 @@ import { GraphValidationError } from "../scheduler.js";
 import {
   PINNED_PNPM_BOOTSTRAP,
   packageBootstrap,
+  PACKAGE_SCRIPT_FORMS,
   packageScriptInvocation,
   packageManagerVersionProbe,
   assertPinnedNpmScripts,
@@ -1282,7 +1283,7 @@ export function assertRequiredFinalCommands(
       )
     )
       throw new Error(
-        `Required final-validation command has no executable authority at the accepted base: ${command}. Package scripts must use a supported root npm/pnpm invocation with fixed script bodies, hooks and configuration; correct or remove it in the installation's finalValidation.requiredCommands.`,
+        `Required final-validation command has no executable authority at the accepted base: ${command}. Package scripts must use ${PACKAGE_SCRIPT_FORMS}, with fixed script bodies, hooks and configuration; correct or remove it in the installation's finalValidation.requiredCommands.`,
       );
 }
 

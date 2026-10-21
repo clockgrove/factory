@@ -1269,7 +1269,16 @@ export async function restoreRecoveryCheckpoint(args: {
     const checkpoint = await readVerifiedRecoveryCheckpoint(
       config,
       args.checkpoint,
+      undefined,
+      true,
     );
+    // A retired Objective's snapshot is read from its evidence commit and
+    // restored as if this checkpoint held it (#1657).
+    const archived = checkpoint.archivedSnapshots ?? [];
+    const manifestFiles = [
+      ...checkpoint.manifest.files,
+      ...archived.map(({ file }) => file),
+    ];
     const source = checkpoint.manifest.authority;
     if (source && source.authorityDigest !== factoryAuthorityDigest(config))
       throw new Error(
@@ -1278,6 +1287,8 @@ export async function restoreRecoveryCheckpoint(args: {
     const bytes = new Map<string, Buffer>();
     const key = (ref: ContentRef) =>
       JSON.stringify([ref.digest, ref.bytes, ref.mediaType]);
+    for (const { file, bytes: snapshot } of archived)
+      bytes.set(key(file.ref), Buffer.from(snapshot));
     for (const ref of [
       ...checkpoint.manifest.files.map((file) => file.ref),
       ...checkpoint.manifest.contentRefs,
@@ -1309,7 +1320,7 @@ export async function restoreRecoveryCheckpoint(args: {
       evidenceCommit: string;
     }[] = [];
     const gitObjects = new Map<string, { sha: string; kind: string }>();
-    for (const file of checkpoint.manifest.files) {
+    for (const file of manifestFiles) {
       if (file.kind === "continuation") {
         const match = /^objectives\/([1-9][0-9]*)\/state\.json$/.exec(
           file.path,
@@ -1520,7 +1531,7 @@ export async function restoreRecoveryCheckpoint(args: {
       );
     const store = new LocalContentStore(join(root, "content"));
     for (const ref of [
-      ...checkpoint.manifest.files.map((file) => file.ref),
+      ...manifestFiles.map((file) => file.ref),
       ...checkpoint.manifest.contentRefs,
     ])
       store.putBytes(await readBytes(ref), { mediaType: ref.mediaType });

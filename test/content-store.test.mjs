@@ -1213,8 +1213,8 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     true,
   );
   // The acknowledged checkpoint holds the cancelled Objective's complete
-  // evidence, so it is retired (#1307): later closures keep only its exact
-  // snapshot and an archived gap, without its bodies or accounting.
+  // evidence, so it is retired (#1307): later closures keep only an archived
+  // gap, without its snapshot (#1657), bodies or accounting.
   const retiredClosure = await buildClosure();
   assert.equal(
     retiredClosure.gaps.some(
@@ -1227,10 +1227,9 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   );
   assert.equal(
     retiredClosure.files.some(
-      (file) =>
-        file.path === "objectives/1/state.json" && file.kind === "continuation",
+      (file) => file.path === "objectives/1/state.json",
     ),
-    true,
+    false,
   );
   assert.equal(
     retiredClosure.gaps.some((gap) => gap.path === "objectives/5/state.json"),
@@ -3894,6 +3893,25 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     accountingSeal,
     archivedEvidence.readVerifiedBlob,
   );
+  // A cold read of the current checkpoint reads only active work: the retired
+  // snapshot is named by its archived gap and held only at its evidence
+  // commit (#1657). Restoration below reads it there on demand.
+  const retiredSnapshot = archivedEvidence.manifest.files.find(
+    (file) => file.path === "objectives/1/state.json",
+  ).ref;
+  assert.equal(
+    recovered.manifest.gaps.find(
+      (gap) => gap.path === "objectives/1/state.json",
+    )?.evidenceCommit,
+    retirement.evidenceCommit,
+  );
+  assert.equal(
+    [
+      ...recovered.manifest.files.map((file) => file.ref),
+      ...recovered.manifest.contentRefs,
+    ].some((ref) => ref.digest === retiredSnapshot.digest),
+    false,
+  );
   // The late record is never lost: it is live, or it retired with a later
   // snapshot and is held by that snapshot's evidence commit.
   const lateArchived = retirement.accounting.includes(latePath);
@@ -3939,6 +3957,10 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(historicalRestore.checkpoint, recovered.commitSha);
   assert.equal(historicalRestore.disposition, "inspection");
   const restoredPreparation = readContinuation(repository, 1);
+  assert.deepEqual(
+    restoredPreparation.restoration.original.snapshot,
+    retiredSnapshot,
+  );
   assert.equal(restoredPreparation.schemaVersion, 20);
   assert.equal(restoredPreparation.restoration.status, "held");
   assert.equal(

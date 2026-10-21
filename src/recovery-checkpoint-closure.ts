@@ -1460,7 +1460,23 @@ async function buildRecoveryCheckpointClosureLocal(input: {
   gaps.push(...(memory.gaps as RecoveryClosureGap[]));
   if (scope === "private-history") {
     // Terminal Objectives whose complete evidence an acknowledged checkpoint
-    // already holds keep only their snapshot here (#1307).
+    // already holds leave their evidence in the archive history (#1307), and
+    // their snapshot too (#1657): the checkpoint keeps only an archived gap
+    // naming the evidence commit, so a cold read scales with active work.
+    // Restoration reads the snapshot there on request. An Objective whose
+    // Project claim is unsettled, or settled by a cancellation with verified
+    // first-run lineage, keeps its snapshot: settlement and that lineage
+    // check read it from every later checkpoint.
+    const { localQueueHistory } = await import("./project-queue-state.js");
+    const claimed = new Set(
+      localQueueHistory(config).flatMap((record) =>
+        record.kind === "project-queue-owner" &&
+        (!record.settled ||
+          record.settled.cancellation?.lineage?.kind === "verified-first-run")
+          ? [record.objective]
+          : [],
+      ),
+    );
     const objectiveDirectory = join(root, "objectives");
     const objectiveIds = existsSync(objectiveDirectory)
       ? readdirSync(objectiveDirectory)
@@ -1492,7 +1508,7 @@ async function buildRecoveryCheckpointClosureLocal(input: {
         path,
         privateOriginalFingerprint(path, root),
       );
-      if (retained) {
+      if (retained && !claimed.has(Number(id))) {
         const record = retiredHistoryEvidence(
           config.repository,
           Number(id),
@@ -1554,22 +1570,14 @@ async function buildRecoveryCheckpointClosureLocal(input: {
         const snapshot =
           name === "state.json" ? snapshots.get(Number(id)) : undefined;
         if (snapshot && "retained" in snapshot) {
-          const { ref } = snapshot.retained;
           gaps.push({
             path: `objectives/${id}/state.json`,
             availability: ARCHIVED_EVIDENCE,
             required: false,
             reason:
-              "Retired terminal Objective: its complete evidence is in the archive history",
+              "Retired terminal Objective: its snapshot and complete evidence are in the archive history",
             evidenceCommit: retired.get(Number(id))!.evidenceCommit,
           });
-          files.push({
-            kind: "continuation",
-            path: `objectives/${id}/state.json`,
-            ref,
-            visibility: "private",
-          });
-          refs.set(refKey(ref), ref);
           continue;
         }
         if (!snapshot && !existsSync(path)) continue;
@@ -1602,24 +1610,27 @@ async function buildRecoveryCheckpointClosureLocal(input: {
                 store.verifyPrivateBytes(ref);
                 refs.set(refKey(ref), ref);
               }
+            const archived = !state && !claimed.has(Number(id));
             gaps.push({
               path: `objectives/${id}/state.json`,
               availability: ARCHIVED_EVIDENCE,
               required: false,
-              reason:
-                "Retired terminal Objective: its complete evidence is in the archive history",
+              reason: archived
+                ? "Retired terminal Objective: its snapshot and complete evidence are in the archive history"
+                : "Retired terminal Objective: its complete evidence is in the archive history",
               evidenceCommit: retired.get(Number(id))!.evidenceCommit,
             });
-            await include(`objectives/${id}/${name}`, "continuation", bytes);
+            if (!archived) {
+              await include(`objectives/${id}/${name}`, "continuation", bytes);
+              continue;
+            }
             if (
-              !state &&
               snapshot &&
               snapshot.readAtNs - snapshot.ctimeNs > RACY_SNAPSHOT_NS
             )
               retainRetiredCheckpointSnapshot(path, {
                 fingerprint: snapshot.fingerprint,
                 digest: snapshot.digest,
-                ref: files.at(-1)!.ref,
               });
             continue;
           }

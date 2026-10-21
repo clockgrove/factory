@@ -148,6 +148,11 @@ export interface VerifiedRecoveryCheckpoint {
   readVerifiedBlob(ref: ContentRef): Promise<Uint8Array>;
   /** Exact first-dispatch ancestry, requested only by supported cancellation. */
   queueOwnerLineage?: VerifiedQueueOwnerLineage;
+  /**
+   * Retired snapshots this checkpoint names only by an archived gap, read on
+   * request from their evidence commits (see readArchivedSnapshots).
+   */
+  archivedSnapshots?: { file: RecoveryCheckpointFile; bytes: Uint8Array }[];
 }
 export interface QueueCheckpointWitness {
   commitSha: string;
@@ -2470,14 +2475,13 @@ export function retainRecoveryCheckpointGitPack(
   context.gitPackBytes = charge;
 }
 /**
- * A retired Objective snapshot this controller read, hashed and retained in
- * an earlier closure: its exact private-file fingerprint, `stateDigest` and
- * content address. It was terminal and not a restored record.
+ * A retired Objective snapshot this controller read, hashed and left out of an
+ * earlier closure: its exact private-file fingerprint and `stateDigest`. It was
+ * terminal and not a restored record.
  */
 export interface RetiredCheckpointSnapshot {
   fingerprint: string;
   digest: string;
-  ref: ContentRef;
 }
 function retiredSnapshotContext() {
   const scope = scopes.getStore();
@@ -2513,7 +2517,6 @@ export function retainRetiredCheckpointSnapshot(
   path: string,
   snapshot: RetiredCheckpointSnapshot,
 ): void {
-  assertRef(snapshot.ref);
   if (!/^[a-f0-9]{64}$/.test(snapshot.digest))
     throw new Error("Invalid retired checkpoint snapshot identity");
   const active = retiredSnapshotContext();
@@ -4240,6 +4243,108 @@ function readArchive(
     payloadDigest: hash(manifestBytes),
   };
 }
+/**
+ * A retired terminal Objective's snapshot leaves the current checkpoint once
+ * an acknowledged evidence commit holds it in full (#1657): the checkpoint
+ * keeps only its archived gap, so a cold read never reads it. Restoration
+ * reads each such snapshot on request, here, from its evidence commit, which
+ * must be in the verified ancestry of `commitSha`. The commit, trees and
+ * manifest each path resolves through are checked against their IDs, the
+ * manifest against this binding, and each body against its digest. A missing
+ * snapshot or evidence commit fails loudly.
+ */
+function readArchivedSnapshots(
+  directory: string,
+  commitSha: string,
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+  manifest: RecoveryCheckpointManifest,
+): { file: RecoveryCheckpointFile; bytes: Uint8Array }[] {
+  const present = new Set(manifest.files.map((file) => file.path));
+  const byCommit = new Map<string, string[]>();
+  for (const gap of manifest.gaps)
+    if (
+      gap.availability === ARCHIVED_EVIDENCE &&
+      gap.required === false &&
+      gap.evidenceCommit &&
+      /^objectives\/[1-9][0-9]*\/state\.json$/.test(gap.path) &&
+      !present.has(gap.path)
+    )
+      byCommit.set(gap.evidenceCommit, [
+        ...(byCommit.get(gap.evidenceCommit) ?? []),
+        gap.path,
+      ]);
+  const selected: { file: RecoveryCheckpointFile; oid: string }[] = [];
+  for (const [evidence, wanted] of byCommit) {
+    if (!reachableFrom(directory, options, evidence, commitSha))
+      throw new Error(
+        "Archived evidence commit is absent from the verified checkpoint history",
+      );
+    const [commit, tree, blobs, manifestObject] = authenticatedObjects(
+      directory,
+      options,
+      [
+        evidence,
+        `${evidence}^{tree}`,
+        `${evidence}:blobs`,
+        `${evidence}:checkpoint.json`,
+      ],
+    );
+    if (
+      commit?.type !== "commit" ||
+      commit.oid !== evidence ||
+      tree?.type !== "tree" ||
+      blobs?.type !== "tree" ||
+      manifestObject?.type !== "blob"
+    )
+      throw new VerifierIntegrityFailure(
+        "Archived evidence commit objects are missing or of another type",
+      );
+    const held = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(manifestObject.bytes),
+    ) as RecoveryCheckpointManifest;
+    assertManifest(held, binding(config, options), options);
+    if (canonical(held) !== manifestObject.bytes.toString("utf8"))
+      throw new Error(
+        "Archived evidence manifest does not retain canonical exact bytes",
+      );
+    for (const path of wanted) {
+      const file = held.files.find(
+        (entry) => entry.path === path && entry.kind === "continuation",
+      );
+      if (
+        !file ||
+        held.gaps.some(
+          (gap) => gap.path === path && gap.availability === ARCHIVED_EVIDENCE,
+        )
+      )
+        throw new Error(
+          "Archived evidence commit does not hold the retired snapshot in full",
+        );
+      const oid = git(directory, options, [
+        "rev-parse",
+        "--verify",
+        `${evidence}:blobs/${file.ref.digest}`,
+      ])
+        .toString("utf8")
+        .trim();
+      selected.push({ file, oid });
+    }
+  }
+  // Bounded like any body batch; each body is checked against its digest.
+  const bodies = readRecoveryCheckpointBodies(directory, options, [
+    ...new Map(
+      selected.map(({ file, oid }) => [
+        file.ref.digest,
+        { ref: file.ref, oid },
+      ]),
+    ).values(),
+  ]);
+  return selected.map(({ file }) => ({
+    file,
+    bytes: Uint8Array.from(bodies.get(file.ref.digest)!),
+  }));
+}
 async function inspectReachableHistory(
   directory: string,
   options: GitPersistenceConfig,
@@ -5267,6 +5372,7 @@ async function freshArchive(
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   /** The independent ACK of this controller's own pushed candidate. */
   candidateAck = false,
+  archivedSnapshots = false,
 ) {
   const context = scopes.getStore()?.verification;
   if (!context)
@@ -5277,6 +5383,9 @@ async function freshArchive(
       inspectHistory,
       lineageRequest,
       observeCapacity,
+      undefined,
+      false,
+      archivedSnapshots,
     );
   if (
     context.closed ||
@@ -5310,6 +5419,7 @@ async function freshArchive(
       observeCapacity,
       context,
       candidateAck,
+      archivedSnapshots,
     );
   } finally {
     release();
@@ -5711,6 +5821,7 @@ async function freshArchiveOwned(
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   context?: QueueVerificationContext,
   candidateAck = false,
+  archivedSnapshots = false,
 ) {
   const scope = scopes.getStore();
   const observed = checkpointObservation(
@@ -5736,6 +5847,7 @@ async function freshArchiveOwned(
       observeCapacity,
       context,
       candidateAck,
+      archivedSnapshots,
     );
   // An adopted verifier that failed integrity has already been discarded
   // with the sealed copy; the read is repeated once from an empty verifier.
@@ -6008,6 +6120,7 @@ async function freshArchiveOwnedStrict(
   observeCapacity?: (capacity: QueueLineageCapacity) => void,
   context?: QueueVerificationContext,
   candidateAck = false,
+  archivedSnapshots = false,
 ) {
   const directory = context?.directory ?? verifierDirectory(config.repository);
   const adopt = Boolean(context && !context.directory);
@@ -6499,6 +6612,17 @@ async function freshArchiveOwnedStrict(
     observed.start("requested-lineage");
     const result = {
       ...archive,
+      ...(archivedSnapshots
+        ? {
+            archivedSnapshots: readArchivedSnapshots(
+              directory,
+              commit,
+              config,
+              options,
+              archive.manifest,
+            ),
+          }
+        : {}),
       queueRecords: records,
       ...(lineage ? { queueOwnerLineage: lineage } : {}),
       ...(inspectHistory
@@ -6605,6 +6729,8 @@ export async function readVerifiedRecoveryCheckpoint(
   config: FactoryConfig,
   commitSha?: string,
   lineageRequest?: QueueOwnerLineageRequest,
+  /** Also read retired snapshots from their evidence commits (restore). */
+  archivedSnapshots = false,
 ): Promise<VerifiedRecoveryCheckpoint> {
   const options = settings(config);
   if (!options) throw new Error("Git persistence is not configured");
@@ -6617,8 +6743,14 @@ export async function readVerifiedRecoveryCheckpoint(
     commitSha,
     false,
     lineageRequest,
+    undefined,
+    false,
+    archivedSnapshots,
   );
   return {
+    ...(archive.archivedSnapshots
+      ? { archivedSnapshots: archive.archivedSnapshots }
+      : {}),
     manifest: archive.manifest,
     commitSha: archive.commitSha,
     remoteTip: archive.remoteTip,

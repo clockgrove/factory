@@ -37,6 +37,7 @@ import { prerequisitesDigest } from "../native-prerequisite-evidence.js";
 import { retainAcceptedPlanningDecision } from "../planning-decision-context.js";
 import type { FactoryState, PreparationState } from "../state.js";
 import { saveState } from "../state-store.js";
+import { plannedReviewArtifacts } from "../review-artifacts.js";
 import {
   canHandoff,
   configuredDiagnosticSecrets,
@@ -129,6 +130,7 @@ export async function projectPreparedObjective(args: {
     throw new Error(
       "Accepted plan was reviewed with other required final-validation commands than the installation's; plan again",
     );
+  plannedReviewArtifacts(plan.reviewArtifactSelectors, config.reviewArtifacts);
   const graph = plan.graph;
   if (
     [12, 14, 16, 18, 20].includes(preparation.schemaVersion) &&
@@ -362,6 +364,9 @@ export function activateProjectedObjective(args: {
     autonomy: preparation.autonomy,
     capacity,
     planGraphDigest: plan.graphDigest,
+    ...(plan.reviewArtifactSelectors
+      ? { reviewArtifactSelectors: plan.reviewArtifactSelectors }
+      : {}),
     ...(plan.prerequisites
       ? {
           prerequisitesDigest: prerequisitesDigest(plan.prerequisites),

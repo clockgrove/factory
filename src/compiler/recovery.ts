@@ -100,6 +100,7 @@ import {
   PlanningNeedsDecision,
   withPlannerAdmission,
 } from "./planning.js";
+import type { ReviewArtifactSelector } from "../review-artifacts.js";
 import { planningSources } from "./sources.js";
 
 /** Compile and independently review a candidate without GitHub or run-state writes. */
@@ -613,6 +614,8 @@ async function compilePlanAdmitted(
   workflowRecipe?: WorkflowRecipeInput,
   requiredFinalCommands: readonly string[] = [],
   ciOnlyCommands: readonly string[] = [],
+  /** The installation's selectors compile and graph review see. */
+  reviewArtifactSelectors: readonly ReviewArtifactSelector[] = [],
 ): Promise<PlanCandidate> {
   const { state, save } = context;
   if (workflowRecipe) assertWorkflowRecipeInput(workflowRecipe);
@@ -721,6 +724,7 @@ async function compilePlanAdmitted(
       workflowRecipe,
       operatorPlanningDecisions(record),
       requiredFinalCommands,
+      reviewArtifactSelectors,
     );
     const retained = retainedPlanningReview(record, packet, configDigest);
     if (
@@ -1058,6 +1062,7 @@ async function compilePlanAdmitted(
         workflowRecipe,
         operatorPlanningDecisions(record),
         requiredFinalCommands,
+        reviewArtifactSelectors,
       );
       const retained = retainedPlanningReview(record, packet, configDigest);
       record.review = retained.review;

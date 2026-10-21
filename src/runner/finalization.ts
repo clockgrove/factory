@@ -14,6 +14,7 @@ import {
 import { join } from "node:path";
 import { objectiveCriteria, planningSources } from "../compiler.js";
 import { closeObjectiveIssue, sealFinalAcceptance } from "../completion.js";
+import { plannedReviewArtifacts } from "../review-artifacts.js";
 import { type FactoryConfig, maxActiveObjectives } from "../config.js";
 import type {
   ContentStore,
@@ -309,7 +310,10 @@ export async function finalizeObjective(args: {
                 entry.final,
               ),
           },
-          config.reviewArtifacts,
+          plannedReviewArtifacts(
+            state.reviewArtifactSelectors,
+            config.reviewArtifacts,
+          ),
           undefined,
           // assertPinnedNpmScripts checked these commands' inputs above.
           {

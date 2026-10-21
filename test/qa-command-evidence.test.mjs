@@ -1190,25 +1190,40 @@ else { if(process.env.TMPDIR!==process.env.TMP || process.env.TMP!==process.env.
         };
       },
     };
+    const qaRun = (reviewArtifacts) =>
+      runQaItem({
+        config: { ...config, reviewArtifacts },
+        root,
+        state: resumed,
+        item: resumed.graph.items[1],
+        github: {
+          defaultBranch: async () => "main",
+          closeIssue: async () => {},
+        },
+        model,
+        objectiveBody: body,
+        store,
+        save() {},
+        cancelled: () => false,
+        diagnostics: {
+          emit: (x) => events.push(x),
+          emitStream: (x) => events.push(x),
+          modelObserver: () => () => {},
+        },
+      });
+    // A selector the plan was reviewed with and the installation since
+    // dropped is a configuration fault naming it (#1641).
+    resumed.reviewArtifactSelectors = [selectors[1]];
+    await assert.rejects(qaRun(selectors.slice(0, 1)), (error) => {
+      const fault = attachedFault(error);
+      assert.equal(fault?.kind, "config");
+      assert.ok(fault.detail.includes(selectors[1].text.source));
+      return true;
+    });
+    delete resumed.reviewArtifactSelectors;
     // The operator promotes the QA selection into the installation selectors:
     // the join de-duplicates identical selectors instead of failing (#1641).
-    await runQaItem({
-      config: { ...config, reviewArtifacts: selectors },
-      root,
-      state: resumed,
-      item: resumed.graph.items[1],
-      github: { defaultBranch: async () => "main", closeIssue: async () => {} },
-      model,
-      objectiveBody: body,
-      store,
-      save() {},
-      cancelled: () => false,
-      diagnostics: {
-        emit: (x) => events.push(x),
-        emitStream: (x) => events.push(x),
-        modelObserver: () => () => {},
-      },
-    });
+    await qaRun(selectors);
     assert.equal(resumed.work.qa.status, "done");
     assert.equal(resumed.work.qa.attempt, work.attempt);
     // More than eight distinct selectors is a configuration fault naming them.

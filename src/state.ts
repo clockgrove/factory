@@ -561,6 +561,8 @@ export interface FactoryState {
   capacity: import("./config.js").Capacity;
   /** Digest of the accepted plan's graph; the root of every graph revision. */
   planGraphDigest: string;
+  /** The installation's review-artifact selectors the accepted plan was compiled and reviewed with. */
+  reviewArtifactSelectors?: import("./review-artifacts.js").ReviewArtifactSelector[];
   /** Native predecessor facts the plan was made with; absent when it had none. */
   prerequisitesDigest?: string;
   /** Immutable authenticated admission facts, bound to prerequisitesDigest. */

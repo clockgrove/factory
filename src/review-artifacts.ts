@@ -248,6 +248,28 @@ export function joinReviewArtifactSelectors(
   return joined;
 }
 
+/**
+ * The installation's selectors, refused as a configuration fault when it no
+ * longer has one the plan was compiled and reviewed with: briefs may route
+ * proof through it (#1641). Added selectors are fine.
+ */
+export function plannedReviewArtifacts(
+  planned: readonly ReviewArtifactSelector[] | undefined,
+  installation: readonly ReviewArtifactSelector[] = [],
+): readonly ReviewArtifactSelector[] {
+  const configured = new Set(installation.map(canonical));
+  const missing = (planned ?? []).filter(
+    (selector) => !configured.has(canonical(selector)),
+  );
+  if (missing.length)
+    throw new StepFault({
+      kind: "config",
+      detail: `This Objective's plan was compiled and reviewed with reviewArtifacts selectors the installation no longer configures, so its briefs may route proof through them: ${missing.map(describeSelector).join(", ")}`,
+      fix: "Restore these selectors in the installation reviewArtifacts (other selectors may stay or be added), or cancel the Objective and plan it again, then resume",
+    });
+  return installation;
+}
+
 export function assertReviewArtifactSelectors(
   value: unknown,
 ): asserts value is ReviewArtifactSelector[] | undefined {

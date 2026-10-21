@@ -21,7 +21,10 @@ import { reviewItem } from "./item-steps.js";
 import { validationLfsMembersForItem } from "./media.js";
 import { packageManagerUpdate } from "./package-manager-update.js";
 import type { PhaseAdmission } from "./phase-admission.js";
-import { joinReviewArtifactSelectors } from "./review-artifacts.js";
+import {
+  joinReviewArtifactSelectors,
+  plannedReviewArtifacts,
+} from "./review-artifacts.js";
 import { currentProcessSignal, fetchHead, gitAsync } from "./process.js";
 import {
   environmentValidationIndices,
@@ -373,7 +376,10 @@ export async function runQaItem(args: {
           packageManagerUpdate(args.objectiveBody),
           true,
           joinReviewArtifactSelectors(
-            args.config.reviewArtifacts,
+            plannedReviewArtifacts(
+              state.reviewArtifactSelectors,
+              args.config.reviewArtifacts,
+            ),
             work.reviewArtifactSelection,
           ),
           commandSandboxPolicy(args.config),

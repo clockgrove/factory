@@ -270,6 +270,7 @@ function adoptedPlan(args: {
       undefined,
       undefined,
       requiredFinalCommands(config),
+      config.reviewArtifacts,
     );
     const candidate: PlanCandidate = {
       ...buildPlanCandidate(
@@ -439,6 +440,7 @@ async function planObjectiveObserved(
       workflowRecipe,
       requiredFinalCommands(config),
       ciOnlyCommands(config),
+      config.reviewArtifacts,
     );
     diagnostics.emit({
       operation: "planning-preview",
@@ -944,6 +946,7 @@ export async function prepareObjective(args: {
                 workflowRecipe,
                 requiredFinalCommands(config),
                 ciOnlyCommands(config),
+                config.reviewArtifacts,
               ),
             true,
           );

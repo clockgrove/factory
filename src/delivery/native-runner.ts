@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { planningSources } from "../compiler.js";
 import { closeWorkItem } from "../completion.js";
+import { plannedReviewArtifacts } from "../review-artifacts.js";
 import type { FactoryConfig } from "../config.js";
 import type {
   ContentStore,
@@ -981,7 +982,10 @@ export async function runNativeGraph(args: {
                 workspacePackageAdditions(args.objectiveBody),
                 packageManagerUpdate(args.objectiveBody),
                 true,
-                config.reviewArtifacts,
+                plannedReviewArtifacts(
+                  state.reviewArtifactSelectors,
+                  config.reviewArtifacts,
+                ),
                 commandSandboxPolicy(config),
               ),
           });

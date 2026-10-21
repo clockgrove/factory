@@ -643,6 +643,8 @@ export interface PlanReviewRequest {
   finalCommands: string[];
   /** The installation's required final-validation commands, already in finalCommands. */
   requiredFinalCommands?: string[];
+  /** The installation's review-artifact selectors compile and graph review saw; absent when none. */
+  reviewArtifactSelectors?: import("./review-artifacts.js").ReviewArtifactSelector[];
   /** Check names from the base's workflows. */
   checkNames?: string[];
   /**

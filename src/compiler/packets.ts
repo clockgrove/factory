@@ -33,6 +33,7 @@ import {
 } from "../controller-capabilities.js";
 import { workflowCheckNames } from "../check-names.js";
 import type { PlanCandidate } from "./candidate.js";
+import type { ReviewArtifactSelector } from "../review-artifacts.js";
 
 export function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -76,6 +77,7 @@ export function planReviewPacket<
   workflowRecipe?: WorkflowRecipeInput,
   operatorDecisions?: D[],
   requiredFinalCommands: readonly string[] = [],
+  reviewArtifactSelectors: readonly ReviewArtifactSelector[] = [],
 ): PlanReviewRequest & { operatorDecisions?: D[] } {
   if (workflowRecipe) assertWorkflowRecipeInput(workflowRecipe);
   if (executionBounds) assertPlanningExecutionBounds(executionBounds);
@@ -109,6 +111,14 @@ export function planReviewPacket<
     ),
     ...(requiredFinalCommands.length
       ? { requiredFinalCommands: [...requiredFinalCommands] }
+      : {}),
+    // Bound so a selector removed after review is refused by name (#1641).
+    ...(reviewArtifactSelectors.length
+      ? {
+          reviewArtifactSelectors: structuredClone([
+            ...reviewArtifactSelectors,
+          ]),
+        }
       : {}),
     checkNames: workflowCheckNames(checkout, baseSha),
   };

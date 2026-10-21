@@ -18,6 +18,7 @@ import type {
   OperatorPlanningDecision,
   WorkGraph,
   PlanCommandAuthorization,
+  PlanReviewRequest,
 } from "../contracts.js";
 import {
   planningSources,
@@ -76,6 +77,8 @@ export interface PlanCandidate {
   finalCommands: string[];
   /** The installation's required final-validation commands this plan was reviewed with. */
   requiredFinalCommands?: string[];
+  /** The installation's review-artifact selectors this plan was compiled and reviewed with. */
+  reviewArtifactSelectors?: PlanReviewRequest["reviewArtifactSelectors"];
   /** Digest of the complete immutable packet supplied to independent review. */
   packetDigest: string;
   /** Digest of the packet digest and immutable independent-review result. */
@@ -178,6 +181,13 @@ export function buildPlanCandidate(
     ...(packet.requiredFinalCommands
       ? { requiredFinalCommands: [...packet.requiredFinalCommands] }
       : {}),
+    ...(packet.reviewArtifactSelectors
+      ? {
+          reviewArtifactSelectors: structuredClone(
+            packet.reviewArtifactSelectors,
+          ),
+        }
+      : {}),
     packetDigest,
     reviewDigest: reviewResultDigest(packetDigest, candidateReview),
     configDigest,
@@ -262,6 +272,7 @@ export function verifyPlanCandidate(
     candidate.workflowRecipe,
     candidate.operatorDecisions,
     candidate.requiredFinalCommands,
+    candidate.reviewArtifactSelectors,
   );
   if (
     (candidate.prerequisites &&

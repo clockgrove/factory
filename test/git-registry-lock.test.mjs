@@ -1749,6 +1749,13 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
       }),
       /Objective is not awaiting a result decision/,
     );
+    // `factory cancel` reaches it too (#1711): the service cancels a queued
+    // Objective no run owns; this completed one has nothing left to cancel.
+    assert.equal(
+      (await requestControl(repository, { objective: 1, action: "cancel" }))
+        .result,
+      "cancelled",
+    );
     assert.equal(injected, true);
     assert.equal(readState(repository, 1).objectiveClosure, "complete");
     assert.equal(

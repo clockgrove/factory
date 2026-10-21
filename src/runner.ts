@@ -1715,9 +1715,19 @@ async function cancelObjectiveUnscoped(
   driver: ExecutionDriver,
   github: GitHubGateway,
   planningModel?: PlanningModel,
+  /** False when the live installation owner cancels the Objective itself. */
+  forward = true,
 ): Promise<"requested" | "cancelled"> {
   return withGitHubDiagnostics(config, objective, () =>
-    cancelObjectiveOwned(config, objective, driver, github, planningModel),
+    forward
+      ? cancelObjectiveOwned(config, objective, driver, github, planningModel)
+      : cancelUnownedObjective(
+          config,
+          objective,
+          driver,
+          github,
+          planningModel,
+        ),
   );
 }
 
@@ -1766,6 +1776,23 @@ async function cancelObjectiveOwned(
     process.kill(owner.pid, "SIGUSR1");
     return "requested";
   }
+  return cancelUnownedObjective(
+    config,
+    objective,
+    driver,
+    github,
+    planningModel,
+  );
+}
+
+/** Cancel an Objective no run owns, under its own lock. */
+async function cancelUnownedObjective(
+  config: FactoryConfig,
+  objective: number,
+  driver: ExecutionDriver,
+  github: GitHubGateway,
+  planningModel?: PlanningModel,
+): Promise<"cancelled"> {
   const lockHandle = mutationLock(config, objective);
   try {
     const continuation = readContinuation(config.repository, objective);
@@ -3208,6 +3235,26 @@ export function cancelObjective(
     args[0],
     () => cancelObjectiveUnscoped(...args),
     undefined,
+  );
+}
+
+/**
+ * The live installation owner cancelling one of its queued Objectives that no
+ * run owns (#1711). As with decideStoppedObjective, its effects are admitted
+ * in the owner's own checkpoint scope.
+ */
+export function cancelStoppedObjective(
+  config: FactoryConfig,
+  objective: number,
+  services: Pick<ApplicationServices, "driver" | "github" | "planningModel">,
+): ReturnType<typeof cancelObjectiveUnscoped> {
+  return cancelObjectiveUnscoped(
+    config,
+    objective,
+    services.driver,
+    services.github,
+    services.planningModel,
+    false,
   );
 }
 

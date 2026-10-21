@@ -102,6 +102,7 @@ import { checkRequiredEnvironment } from "./repair-policy.js";
 import {
   type ApplicationServices,
   CoordinatorHandoff,
+  cancelStoppedObjective,
   collectStoppedWorkerReturns,
   decideStoppedObjective,
   parseDecisionInput,
@@ -1757,21 +1758,33 @@ async function runIntakeOwned(
     if (request.objective !== 0) {
       const control = active.get(request.objective)?.control;
       if (control) return control(request);
-      if (request.action === "decide") {
+      if (request.action === "decide" || request.action === "cancel") {
         // The Objective's run registers its control late and clears it early;
         // in those windows it may be writing state it has not saved yet.
         if (active.has(request.objective))
           throw new Error(
-            `Objective #${request.objective} is starting or settling under the service; retry the decision`,
+            `Objective #${request.objective} is starting or settling under the service; retry the ${request.action === "decide" ? "decision" : "cancellation"}`,
           );
-        // A queued Objective stopped for a person: the service owns the
-        // installation, so it records the decision itself, on the provider the
-        // Objective froze. This request is pending control, which holds new
-        // dispatch until it settles (#1290).
+        // A queued Objective no run owns, such as one stopped for a person:
+        // the service owns the installation, so it records the decision or
+        // the cancellation itself, on the provider the Objective froze. This
+        // request is pending control, which holds new dispatch until it
+        // settles (#1290, #1711).
         if (record.objectives.includes(request.objective)) {
-          const input = parseDecisionInput(request.input);
+          const input =
+            request.action === "decide"
+              ? parseDecisionInput(request.input)
+              : undefined;
           const { config: objectiveConfig, services: objectiveServices } =
             objectiveRuntime(request.objective);
+          if (!input)
+            return asInstallationOwner(lock, () =>
+              cancelStoppedObjective(
+                objectiveConfig,
+                request.objective,
+                objectiveServices,
+              ),
+            );
           return asInstallationOwner(lock, () =>
             decideStoppedObjective(
               objectiveConfig,

@@ -899,7 +899,7 @@ export async function supervise(
           artifact: candidate.cli,
           upgraded: false,
           draining: running,
-          next: `New dispatch is held while ${running.map((id) => `Objective #${id}`).join(", ")} finish${running.length === 1 ? "es" : ""}; \`factory status\` shows them. Run this upgrade again once none is running; \`factory queue resume\` cancels the drain`,
+          next: `New dispatch is held while ${running.map((id) => `Objective #${id}`).join(", ")} finish${running.length === 1 ? "es" : ""}; \`factory status\` shows them. One stopped for a person finishes with \`factory decide\` or \`factory cancel\`. Run this upgrade again once none is running; \`factory queue resume\` cancels the drain`,
         };
     }
     const beforeIntake =

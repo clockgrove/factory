@@ -814,7 +814,7 @@ export function amendmentImplementationEvidence(args: {
     complete,
     content: JSON.stringify({
       scope:
-        "Commands Factory's own validation ran in a fresh checkout of the named exact tree and observed exit 0. A pass proves only that command's assertion on that tree in Factory's validation environment, not the semantics of other trees.",
+        "Commands Factory's own validation ran in a fresh checkout of the named exact tree and observed exit 0. A pass proves only that command's assertion on that tree in Factory's validation environment, not the semantics of other trees. That environment differs from a worker's own shell: Factory's validation gives commands a private writable /tmp and TMPDIR, while a Codex worker's shell has a private TMPDIR but no /tmp or /var/tmp. A worker-side failure that depends on such a difference is not contradicted by a pass here.",
       passes,
     }),
   });

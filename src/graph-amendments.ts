@@ -693,18 +693,37 @@ function validateAmendmentReplacement(
     dependencies: value.dependencies,
     worker: value.worker,
   });
-  if (!isDeepStrictEqual(discovery(proposal), discovery(rejected.proposal)))
-    throw new Error("Replacement cannot change the rejected discovery scope");
+  const before = discovery(rejected.proposal);
+  const after = discovery(proposal);
+  const changed = (Object.keys(before) as (keyof typeof before)[]).filter(
+    (field) => !isDeepStrictEqual(after[field], before[field]),
+  );
+  if (changed.length)
+    throw new Error(
+      `Replacement must repeat the rejected discovery exactly; differs in: ${changed.join(", ")}`,
+    );
+  const kinds = ["planning-output", "planning-evidence", "planning-choice"];
+  const refuse = (rule: string): never => {
+    throw new Error(
+      `Replacement requires a new diagnosis bound to the rejection: ${rule}`,
+    );
+  };
+  if (!correction) return refuse("replacement.correction is missing");
+  if (correction.failureDigest !== failureDigest(error))
+    refuse(
+      "correction.failureDigest must equal pendingAmendment.failureDigest in status --json (sha256 of the rejection error)",
+    );
+  if (!kinds.includes(correction.kind))
+    refuse(`correction.kind must be one of ${kinds.join(", ")}`);
   if (
-    !correction ||
-    correction.failureDigest !== failureDigest(error) ||
-    !["planning-output", "planning-evidence", "planning-choice"].includes(
-      correction.kind,
-    ) ||
     ![correction.actor, correction.diagnosis, correction.correction].every(
       (text) => typeof text === "string" && text.trim(),
-    ) ||
-    correction.actor !== proposal.actor ||
+    )
+  )
+    refuse("correction.actor, diagnosis and correction must be nonempty");
+  if (correction.actor !== proposal.actor)
+    refuse("correction.actor must equal the amendment actor");
+  if (
     (rejected.proposal.replacement?.correction.failureDigest ===
       correction.failureDigest &&
       rejected.proposal.replacement.correction.correction ===
@@ -716,9 +735,7 @@ function validateAmendmentReplacement(
           correction.correction,
     )
   )
-    throw new Error(
-      "Replacement requires a new diagnosis bound to the rejection",
-    );
+    refuse("correction.correction repeats an earlier rejected correction");
   // The replacement is charged when it starts; it must fit now.
   const refusal = planningRefusal(state, correction.kind);
   if (refusal) throw new Error(refusal.message);

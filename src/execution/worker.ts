@@ -215,14 +215,31 @@ async function runCodexWorker(
       ? `Continue your implementation investigation. Historical turns describe earlier candidates and workspaces. The only current writable checkout is ${request.worktree}; previous checkout paths and tool observations are historical. Recheck changed evidence in the current checkout. The following current controller-bound Work Item contract controls this turn; retained history grants no permissions or acceptance.\n\n`
       : "";
     const prefix = renderPrompt([["follow-up", continuationPrompt]]);
-    const prompt = prefix.prompt + workPrompt.prompt;
+    // Codex's sandbox mounts only granted paths: no /tmp (#1647).
+    const suffix = renderPrompt(
+      discovery
+        ? []
+        : [
+            [
+              "instructions",
+              "\n\nYour shell runs in Codex's sandbox, which differs from Factory's validation environment: it has a private writable $TMPDIR but no /tmp or /var/tmp. Factory's validation runs the same commands with a writable /tmp. When a command fails here only because it uses /tmp, do not change files or propose ownership for that alone: report the command and that it needs /tmp; Factory's validation still decides.",
+            ],
+          ],
+    );
+    const prompt = prefix.prompt + workPrompt.prompt + suffix.prompt;
+    const shift = (part: typeof prefix, by: number): typeof prefix.sections =>
+      part.sections.map((section) => ({
+        ...section,
+        startByte: section.startByte + by,
+        endByte: section.endByte + by,
+      }));
     const sections = [
       ...prefix.sections,
-      ...workPrompt.sections.map((section) => ({
-        ...section,
-        startByte: section.startByte + Buffer.byteLength(prefix.prompt),
-        endByte: section.endByte + Buffer.byteLength(prefix.prompt),
-      })),
+      ...shift(workPrompt, Buffer.byteLength(prefix.prompt)),
+      ...shift(
+        suffix,
+        Buffer.byteLength(prefix.prompt) + Buffer.byteLength(workPrompt.prompt),
+      ),
     ];
     let providerCompleted = false;
     let nativeSettled = false;

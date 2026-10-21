@@ -19,7 +19,7 @@ import fs, {
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { deflateSync } from "node:zlib";
@@ -1027,6 +1027,102 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     },
     { observeMemory: false },
   );
+  // A cancelled execution run whose attempt left a worktree and harness
+  // files: once its archive commit is acknowledged they are reclaimed (#1657).
+  const reclaimedAttempt = randomUUID();
+  const reclaimedItem = {
+    id: "reclaim",
+    title: "Reclaim",
+    goal: "Reclaim",
+    acceptance: ["Reclaim"],
+    dependencies: [],
+    ownedPaths: ["api.md"],
+    resources: [],
+    brief: "Reclaim",
+    nonGoals: [],
+    validation: [],
+    citations: [],
+    sourceAssets: [],
+    expectedOutputRoles: [],
+    requiredLfsRoles: [],
+    minimumAssetSets: 0,
+  };
+  const reclaimedGraph = {
+    objective: 7,
+    baseSha: cancelled.baseSha,
+    items: [reclaimedItem],
+    coverage: [
+      {
+        criterionId: "b".repeat(64),
+        itemId: reclaimedItem.id,
+        source: {
+          path: "api.md",
+          digest: learningDigest(source.toString("utf8")),
+          text: source.toString("utf8").trim(),
+        },
+        proof: { kind: "result-semantic", acceptanceIndex: 0 },
+        environment: {
+          kind: "local",
+          readiness: "available",
+          probe: "",
+          preparedBy: "",
+        },
+      },
+    ],
+  };
+  saveState(
+    statePath(repository, 7),
+    {
+      schemaVersion: 7,
+      repository,
+      objective: 7,
+      runId: randomUUID(),
+      configDigest: factoryConfigDigest(config),
+      baseSha: cancelled.baseSha,
+      graph: reclaimedGraph,
+      planGraphDigest: graphDigest(reclaimedGraph),
+      publicationContract: "exact-request-v1",
+      objectiveCommands: [],
+      objectiveBodyDigest: "b".repeat(64),
+      approvedPlaybookPin: null,
+      approvedPlaybookAdmission: {
+        approvedPlaybookPin: null,
+        configDigest: factoryConfigDigest(config),
+        graphDigest: graphDigest(reclaimedGraph),
+        packetDigest: "c".repeat(64),
+        reviewDigest: "d".repeat(64),
+        sourcePacketDigest: "e".repeat(64),
+      },
+      capacity: { concurrency: 1 },
+      autonomy: resolveAutonomy(),
+      issueByItemId: { reclaim: 2 },
+      cancelRequested: true,
+      cancelledAt: new Date().toISOString(),
+      work: {
+        reclaim: {
+          status: "cancelled",
+          attempt: reclaimedAttempt,
+          baseSha: cancelled.baseSha,
+        },
+      },
+    },
+    { observeMemory: false },
+  );
+  const otherAttempt = randomUUID();
+  const reclaimable = [
+    join(state, "worktrees", reclaimedAttempt),
+    join(state, "worktrees", `${reclaimedAttempt}.validation-lfs`),
+    join(state, "harness", `${reclaimedAttempt}.log`),
+    join(state, "harness", `${reclaimedAttempt}-1.progress.ndjson`),
+    join(state, "objectives", "7", "validation", "run", "worktree"),
+  ];
+  const unrelatedHarness = join(state, "harness", `${otherAttempt}.log`);
+  for (const path of [...reclaimable, unrelatedHarness]) {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    if (path.endsWith(".log") || path.endsWith(".ndjson"))
+      writeFileSync(path, "local only\n", { mode: 0o600 });
+    else mkdirSync(path, { recursive: true, mode: 0o700 });
+  }
   // Installation-level accounting stays live when Objectives retire (#1307).
   retainWorkerAccounting(
     {
@@ -1334,6 +1430,17 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     buildClosure,
   });
   assert.equal(retirementCheckpoint.status, "acknowledged");
+  // The retired run's local material is reclaimed after acknowledgment; that
+  // of other attempts stays (#1657).
+  assert.equal(
+    JSON.parse(
+      readFileSync(join(state, "recovery", "retired", "7.json"), "utf8"),
+    ).reclaimed,
+    "complete",
+  );
+  for (const path of reclaimable) assert.equal(existsSync(path), false, path);
+  assert.equal(existsSync(unrelatedHarness), true);
+  assert.equal(existsSync(statePath(repository, 7)), true);
   assert.notEqual(
     retirementCheckpoint.lastAcknowledged.commitSha,
     firstCheckpoint.lastAcknowledged.commitSha,

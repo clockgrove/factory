@@ -40,6 +40,7 @@ import {
 import { LocalContentStore } from "./content/local.js";
 import {
   ARCHIVED_EVIDENCE,
+  reclaimRetiredMaterial,
   recordRetirement,
   terminalContinuation,
 } from "./checkpoint-retention.js";
@@ -7524,8 +7525,33 @@ async function publishCheckpoint(
   const packed = { acknowledged: false };
   const result = await publishCheckpointLocked(config, input, packed);
   const options = settings(config);
-  if (options && packed.acknowledged) await packPublisher(config, options);
+  if (options && packed.acknowledged) {
+    await packPublisher(config, options);
+    if (options.scope === "private-history") await reclaimRetired(config);
+  }
   return result;
+}
+/**
+ * After an acknowledged publication, reclaim the local material of retired
+ * Objectives (see reclaimRetiredMaterial). It only saves space: a failure
+ * leaves the material, and the next acknowledged publication tries again.
+ */
+async function reclaimRetired(config: FactoryConfig): Promise<void> {
+  let reclaimed = 0;
+  const observed = checkpointObservation(
+    config,
+    "recovery-checkpoint-reclaim",
+    () => ({ reclaimedObjectives: reclaimed }),
+  );
+  try {
+    observed.start("reclaim");
+    reclaimed = await reclaimRetiredMaterial(config, (commit) =>
+      acknowledgedArchiveCommit(config, commit),
+    );
+    observed.complete();
+  } catch (error) {
+    observed.fail(error);
+  }
 }
 async function publishCheckpointLocked(
   config: FactoryConfig,

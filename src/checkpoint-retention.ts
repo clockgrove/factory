@@ -1,14 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { stateRoot } from "./config.js";
+import { type FactoryConfig, stateRoot } from "./config.js";
 
 /**
  * Checkpoint retention (#1307). A terminal Objective's complete evidence is
@@ -33,6 +35,11 @@ export interface RetirementRecord {
    */
   accounting: string[];
   at: string;
+  /**
+   * Its local material was reclaimed (#1657), or its snapshot is in a shape
+   * this version does not read, so none is identified and it stays in place.
+   */
+  reclaimed?: "complete" | "unreadable";
 }
 
 /** The gap availability that marks a retired Objective's archived evidence. */
@@ -97,7 +104,10 @@ function readRetirement(
       value.accounting.some(
         (entry) => typeof entry !== "string" || !ACCOUNTING_PATH.test(entry),
       ) ||
-      typeof value.at !== "string"
+      typeof value.at !== "string" ||
+      (value.reclaimed !== undefined &&
+        value.reclaimed !== "complete" &&
+        value.reclaimed !== "unreadable")
     )
       return undefined;
     return value;
@@ -186,16 +196,19 @@ export function recordRetirement(
     accounting.some((entry) => !ACCOUNTING_PATH.test(entry))
   )
     throw new Error("Retirement evidence identity is invalid");
-  const record: RetirementRecord = {
+  writeRetirement(repository, {
     schemaVersion: 1,
     objective,
     stateDigest: digest,
     evidenceCommit,
     accounting: [...new Set(accounting)].sort(),
     at: new Date().toISOString(),
-  };
+  });
+}
+
+function writeRetirement(repository: string, record: RetirementRecord): void {
   mkdirSync(directory(repository), { recursive: true, mode: 0o700 });
-  const target = path(repository, objective);
+  const target = path(repository, record.objective);
   const temporary = `${target}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temporary, `${JSON.stringify(record)}\n`, {
@@ -206,4 +219,122 @@ export function recordRetirement(
   } finally {
     rmSync(temporary, { force: true });
   }
+}
+
+const ATTEMPT_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Reclaim the local material of retired Objectives (#1657): the worktrees of
+ * their attempts (with each worktree's validation, LFS and shell siblings),
+ * their attempts' harness files and their Objective's validation trees. A
+ * retirement qualifies only while it is honored: the local snapshot is still
+ * exactly the retired terminal history, not a restored record, and its
+ * evidence commit is in this installation's acknowledged archive history.
+ * That commit holds every worker return and original the material produced;
+ * the harness logs and progress streams are never archived, and are reclaimed
+ * by design. A cancelled run that still holds resources, or an Objective
+ * with a live controller, is left for a later pass. Attempts are read from
+ * the parsed snapshot; a snapshot in a shape this version does not read
+ * identifies nothing, and its material stays. Content bodies are not
+ * reclaimed: the store deduplicates by digest across Objectives, so a body
+ * cannot be shown to be unreferenced without a write barrier.
+ */
+export async function reclaimRetiredMaterial(
+  config: FactoryConfig,
+  acknowledged: (commit: string) => boolean,
+): Promise<number> {
+  const root = directory(config.repository);
+  if (!existsSync(root)) return 0;
+  const {
+    cancelledContinuationResourceHold,
+    liveControllerOwner,
+    objectiveLockPath,
+    objectiveRoot,
+    parsePortableContinuation,
+    statePath,
+  } = await import("./state-store.js");
+  const { isExecutionState } = await import("./state.js");
+  const { removeWorktree } = await import("./process.js");
+  const { sweepValidationWorktrees } = await import("./validation.js");
+  const state = stateRoot(config.repository);
+  let reclaimed = 0;
+  for (const name of readdirSync(root).sort()) {
+    const match = /^([1-9][0-9]*)\.json$/.exec(name);
+    if (!match) continue;
+    const objective = Number(match[1]);
+    const record = readRetirement(config.repository, objective);
+    if (!record || record.reclaimed) continue;
+    const snapshot = statePath(config.repository, objective);
+    if (!existsSync(snapshot)) continue;
+    const bytes = readFileSync(snapshot);
+    if (
+      stateDigest(bytes) !== record.stateDigest ||
+      !acknowledged(record.evidenceCommit) ||
+      liveControllerOwner(objectiveLockPath(config.repository, objective))
+    )
+      continue;
+    const value = JSON.parse(bytes.toString("utf8"));
+    if (!terminalHistory(value)) continue;
+    let continuation: ReturnType<typeof parsePortableContinuation>;
+    try {
+      continuation = parsePortableContinuation(
+        value,
+        config.repository,
+        objective,
+      );
+    } catch {
+      writeRetirement(config.repository, {
+        ...record,
+        reclaimed: "unreadable",
+      });
+      continue;
+    }
+    if (
+      continuation.cancelledAt &&
+      cancelledContinuationResourceHold(continuation)
+    )
+      continue;
+    const attempts = new Set<string>();
+    if (isExecutionState(continuation))
+      for (const work of Object.values(continuation.work))
+        for (const entry of [
+          work,
+          ...(work.recovery?.history ?? []).map((item) => item.work),
+        ])
+          for (const id of [entry.attempt, entry.execution?.identity])
+            if (typeof id === "string") {
+              const attempt = id.replace(/-[1-9][0-9]*$/, "");
+              if (ATTEMPT_ID.test(attempt)) attempts.add(attempt);
+            }
+    // `<attempt>`, a replacement worker's `<attempt>-<n>`, and their
+    // `.validation`, `.validation-lfs`, `.shell`, `.log`, `.progress.ndjson`
+    // and other siblings.
+    const owned = (entry: string) => {
+      const attempt = /^([0-9a-f-]{36})(?:-[1-9][0-9]*)?(?:\..+)?$/.exec(
+        entry,
+      )?.[1];
+      return attempt !== undefined && attempts.has(attempt);
+    };
+    const worktrees = join(state, "worktrees");
+    if (attempts.size && existsSync(worktrees))
+      for (const entry of readdirSync(worktrees).filter(owned)) {
+        const path = join(worktrees, entry);
+        if (lstatSync(path).isDirectory() && existsSync(join(path, ".git")))
+          await removeWorktree(config.checkout, path);
+        else rmSync(path, { recursive: true, force: true });
+      }
+    const harness = join(state, "harness");
+    if (attempts.size && existsSync(harness))
+      for (const entry of readdirSync(harness).filter(owned))
+        rmSync(join(harness, entry), { recursive: true, force: true });
+    await sweepValidationWorktrees(
+      config.checkout,
+      objectiveRoot(config.repository, objective),
+      state,
+    );
+    writeRetirement(config.repository, { ...record, reclaimed: "complete" });
+    reclaimed++;
+  }
+  return reclaimed;
 }

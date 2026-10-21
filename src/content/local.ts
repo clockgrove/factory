@@ -600,18 +600,23 @@ export class LocalContentStore implements ContentStore {
     if (!isAbsolute(destination) || existsSync(destination))
       throw new Error("Content destination must be a new absolute path");
     const fd = await this.openVerified(ref);
+    // Write and verify a sibling, then hard-link it into place: the link
+    // refuses an existing destination, and a failure leaves nothing there.
+    const temporary = `${destination}.${randomUUID()}.tmp`;
     try {
       mkdirSync(dirname(destination), { recursive: true });
       await pipeline(
         createReadStream("", { fd, start: 0, autoClose: false }),
-        createWriteStream(destination, {
+        createWriteStream(temporary, {
           flags: "wx",
           mode: fstatSync(fd).mode & 0o777,
         }),
       );
+      await verifyFile(temporary, ref);
+      linkSync(temporary, destination);
     } finally {
       closeSync(fd);
+      rmSync(temporary, { force: true });
     }
-    await verifyFile(destination, ref);
   }
 }

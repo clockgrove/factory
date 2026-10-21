@@ -56,6 +56,7 @@ import {
   withProcessCancellation,
 } from "./process.js";
 import {
+  QueueAuthorityChanged,
   admitQueueCommand,
   completeQueueCommand,
   createQueueCommand,
@@ -88,6 +89,7 @@ import {
   acceptForwardedCheckpointCompletion,
   bindRecoveryCheckpointControllerScope,
   checkpointRetentionGaps,
+  CheckpointAdmissionFailure,
   CheckpointProducerInventoryChanged,
   gitPersistenceStatus,
   isCheckpointAdmissionFailure,
@@ -122,6 +124,7 @@ import {
   installationContinuations,
   liveObjectiveOwners,
   readContinuation,
+  readControllerOwner,
   releaseControllerLock,
   readScannedContinuation,
   retargetControllerLock,
@@ -1613,7 +1616,10 @@ async function runIntakeOwned(
   // digest of the state it left. Each holds only itself: the service stays up
   // and dispatches the others (#1714). Any change to that state, such as a
   // decision or cancellation, releases it to the next pass.
-  const waiting = new Map<number, { reason: string; state: string }>();
+  const waiting = new Map<
+    number,
+    { reason: string; state: string; retryAt?: number }
+  >();
   const stateDigest = (state: ContinuationState | undefined) =>
     queueDigest(JSON.stringify(state ?? null));
   // Upgrade drain (`factory supervisor upgrade` with several Objectives): no
@@ -1755,7 +1761,14 @@ async function runIntakeOwned(
         : {}),
     activeObjective: [...active.keys()][0] ?? null,
     activeObjectives: [...active.keys()],
-    ...(waiting.size ? { waitingObjectives: [...waiting.keys()] } : {}),
+    ...(waiting.size
+      ? {
+          waitingObjectives: [...waiting].map(([objective, { reason }]) => ({
+            objective,
+            reason,
+          })),
+        }
+      : {}),
     maxActiveObjectives: slots,
     ...(finishing ? { finishing: true } : {}),
     // A run's stop holds new dispatch locally without pausing the other runs.
@@ -2070,6 +2083,39 @@ async function runIntakeOwned(
       stopping ??= observation;
       signalWake();
     };
+    /**
+     * A run failure that holds the whole installation, so the service stops:
+     * an archive limit, a held checkpoint or publication, a changed queue
+     * authority, or a lost installation lease. Anything else is the
+     * Objective's own and holds only it.
+     */
+    const installationWide = (error: unknown): boolean => {
+      let owned: boolean;
+      try {
+        owned = readControllerOwner(lockPath)?.token === lock.token;
+      } catch {
+        owned = false;
+      }
+      if (!owned || currentProcessSignal()?.aborted) return true;
+      const classes = [
+        ColdPublicationHeld,
+        QueueAuthorityChanged,
+        CheckpointAdmissionFailure,
+        CheckpointProducerInventoryChanged,
+      ];
+      const visit = (current: unknown, depth: number): boolean =>
+        current instanceof Error &&
+        depth < 8 &&
+        (classes.some((type) => current instanceof type) ||
+          (current instanceof AggregateError &&
+            current.errors.some((entry) => visit(entry, depth + 1))) ||
+          visit(current.cause, depth + 1));
+      return (
+        visit(error, 0) ||
+        onlyCheckpointBoundsExceeded(error) !== undefined ||
+        (error instanceof DOMException && error.name === "AbortError")
+      );
+    };
     const launch = (selected: number, reasons: Record<string, string>) => {
       const entry: { control?: (request: ControlRequest) => Promise<unknown> } =
         {};
@@ -2141,6 +2187,22 @@ async function runIntakeOwned(
             reasons,
             error: String(error),
           };
+          // A failure of this Objective alone holds only it, like a decision
+          // (#1714): its slot frees and the others keep dispatching. A change
+          // to its state, or a transient fault's retry time, releases it.
+          if (!installationWide(error)) {
+            const fault = attachedFault(error);
+            const retryAt =
+              fault?.kind === "transient" && fault.retryAt
+                ? Date.parse(fault.retryAt)
+                : Number.NaN;
+            waiting.set(selected, {
+              reason: `Run failed: ${String(error)}`,
+              state: stateDigest(readContinuation(config.repository, selected)),
+              ...(Number.isFinite(retryAt) ? { retryAt } : {}),
+            });
+            return;
+          }
           // A configured archive limit stops for the operator, who raises it
           // and continues (#1306): it needs a person, not a failure.
           const bounds = onlyCheckpointBoundsExceeded(error);
@@ -2282,9 +2344,13 @@ async function runIntakeOwned(
             if (read === "history") continue;
             const state = read;
             const wait = waiting.get(entry.objective);
-            if (wait && wait.state === stateDigest(state)) {
+            if (
+              wait &&
+              wait.state === stateDigest(state) &&
+              !(wait.retryAt && Date.now() >= wait.retryAt)
+            ) {
               reasons[entry.objective] =
-                `Waits for a decision: ${wait.reason}; \`factory status --objective ${entry.objective}\` names the command`;
+                `Waits for you: ${wait.reason}; \`factory status --objective ${entry.objective}\` names the command, or \`factory cancel --objective ${entry.objective}\``;
               continue;
             }
             waiting.delete(entry.objective);

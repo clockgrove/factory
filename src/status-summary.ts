@@ -1826,6 +1826,8 @@ interface ServiceStatusDocument {
     phase: string;
     summary: string;
     command?: string;
+    /** The service's hold reason: the run's wait or its failure. */
+    reason?: string;
   }[];
   currentObjective?: StatusView & StatusSummary;
   currentObjectiveError?: string;
@@ -1848,7 +1850,7 @@ interface ServiceStatusDocument {
     activeObjective?: number | null;
     /** Every Objective a live controller runs; foreground runs side by side. */
     activeObjectives?: number[];
-    waitingObjectives?: number[];
+    waitingObjectives?: { objective: number; reason: string }[];
     /** Upgrade drain: no new dispatch while the active runs finish. */
     finishing?: boolean;
     observation?: { error?: string; needsDecision?: number };
@@ -1862,7 +1864,7 @@ export function renderServiceStatus(document: ServiceStatusDocument): string[] {
   // An Objective waiting for a person comes first: nothing else moves it.
   const lines: string[] = (document.waitingObjectives ?? []).map(
     (entry) =>
-      `Objective #${entry.objective} waits for you: ${short(entry.summary, 120)}; ${entry.command ? `next \`${entry.command}\`` : `\`factory status --objective ${entry.objective}\` names the command`}`,
+      `Objective #${entry.objective} waits for you: ${short(entry.reason ?? entry.summary, 160)}; ${entry.command ? `next \`${entry.command}\`` : `\`factory status --objective ${entry.objective}\` names the command`}, or \`factory cancel --objective ${entry.objective}\``,
   );
   if (service.supported === false)
     lines.push(

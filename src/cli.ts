@@ -411,9 +411,9 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
     queue.activeObjectives ??
     (queue.activeObjective ? [queue.activeObjective] : []);
   // Objectives the live service holds for a person while it runs the others.
-  const waitingIds = queue.waitingObjectives ?? [];
+  const waiting = queue.waitingObjectives ?? [];
   const objective =
-    running[0] ?? waitingIds[0] ?? queue.observation?.needsDecision;
+    running[0] ?? waiting[0]?.objective ?? queue.observation?.needsDecision;
   const summaryOf = (id: number) => {
     try {
       const { document } = statusDocument(
@@ -449,7 +449,10 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
       summary: entry.summary,
     };
   });
-  const waitingObjectives = waitingIds.map(summaryOf);
+  const waitingObjectives = waiting.map(({ objective: id, reason }) => ({
+    ...summaryOf(id),
+    reason,
+  }));
   let current: Pick<
     ServiceStatus,
     "currentObjective" | "currentObjectiveError"

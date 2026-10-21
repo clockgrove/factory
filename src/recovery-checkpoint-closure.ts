@@ -837,6 +837,7 @@ async function verifyRoots(
   source: ContentStore | RecoveryReferenceReader,
   bounds: { maxBytes: number; maxFiles: number },
   knownStore?: LocalContentStore,
+  list = false,
 ): Promise<ContinuationReferences> {
   const description = {
     contentRefs: [] as ContentRef[],
@@ -850,7 +851,7 @@ async function verifyRoots(
     source === knownStore &&
     Object.getPrototypeOf(source) === LocalContentStore.prototype &&
     knownStore.readBytes === LocalContentStore.prototype.readBytes;
-  const signature = concrete && JSON.stringify([initialRoots, bounds]);
+  const signature = !list && concrete && JSON.stringify([initialRoots, bounds]);
   const cached = signature && knownStore.checkpointReferences(signature);
   if (cached) {
     for (const ref of [...cached.contentRefs, ...cached.originals])
@@ -897,172 +898,188 @@ async function verifyRoots(
         : `${root.kind}:${refKey(root.ref)}:${JSON.stringify(root.identity ?? null)}`;
     if (visited.has(key)) continue;
     visited.add(key);
-    const bytes = await read(root.ref);
-    if (root.kind === "restoration-original") {
-      const value = object(
-        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
-      );
-      const identity = root.identity!;
-      if (
-        value.repository !== identity.repository ||
-        (identity.objective !== undefined &&
-          value.objective !== identity.objective) ||
-        (identity.runId !== undefined && value.runId !== identity.runId) ||
-        (identity.configDigest !== undefined &&
-          value.configDigest !== identity.configDigest) ||
-        (identity.schemaVersion !== undefined &&
-          value.schemaVersion !== identity.schemaVersion)
-      )
-        throw new Error(
-          "Restoration original snapshot differs from its immutable identity",
+    try {
+      const bytes = await read(root.ref);
+      if (root.kind === "restoration-original") {
+        const value = object(
+          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
         );
-      merge(continuationReferences(value));
-    } else if (root.kind === "restoration-archive") {
-      const value = object(
-        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
-      );
-      const binding =
-        value.binding as import("./recovery-checkpoint.js").RecoveryCheckpointBinding;
-      assertRecoveryCheckpointManifest(value, binding, {
-        maxBytes: bounds.maxBytes,
-        maxFiles: bounds.maxFiles,
-      });
-      if (value.binding.repository !== root.identity!.repository)
-        throw new Error(
-          "Restoration archive repository differs from its continuation",
-        );
-      for (const ref of value.contentRefs) add(ref);
-      // A retired Objective in the source checkpoint is its snapshot only: its
-      // evidence is in the archive history and was never installed here, so it
-      // adds no original to verify (#1307), the same rule restore applies.
-      const archived = new Set(
-        (value.gaps as RecoveryClosureGap[])
-          .filter(
-            (gap) =>
-              gap.availability === ARCHIVED_EVIDENCE &&
-              gap.required === false &&
-              typeof gap.evidenceCommit === "string",
-          )
-          .map((gap) => gap.path),
-      );
-      for (const file of value.files) {
-        add(file.ref);
-        if (file.kind === "continuation" && !archived.has(file.path)) {
-          const match = /^objectives\/([1-9][0-9]*)\/state\.json$/.exec(
-            file.path,
+        const identity = root.identity!;
+        if (
+          value.repository !== identity.repository ||
+          (identity.objective !== undefined &&
+            value.objective !== identity.objective) ||
+          (identity.runId !== undefined && value.runId !== identity.runId) ||
+          (identity.configDigest !== undefined &&
+            value.configDigest !== identity.configDigest) ||
+          (identity.schemaVersion !== undefined &&
+            value.schemaVersion !== identity.schemaVersion)
+        )
+          throw new Error(
+            "Restoration original snapshot differs from its immutable identity",
           );
-          if (!match)
-            throw new Error("Restoration archive continuation path is invalid");
-          roots.push({
-            ref: file.ref,
-            kind: "restoration-original",
-            identity: {
-              repository: binding.repository,
-              objective: Number(match[1]),
-            },
-          });
-        }
-      }
-      for (const entry of value.gitObjects ?? [])
-        objects.set(`commit:${entry.commitSha}`, {
-          sha: entry.commitSha,
-          kind: "commit",
-          role: entry.role,
+        merge(continuationReferences(value));
+      } else if (root.kind === "restoration-archive") {
+        const value = object(
+          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+        );
+        const binding =
+          value.binding as import("./recovery-checkpoint.js").RecoveryCheckpointBinding;
+        assertRecoveryCheckpointManifest(value, binding, {
+          maxBytes: bounds.maxBytes,
+          maxFiles: bounds.maxFiles,
         });
-      gaps.push(...(value.gaps as RecoveryClosureGap[]));
-    } else if (root.kind === "accounting") {
-      const seal = root.accounting!;
-      // A seal names its exact records by content address, and memory
-      // observations and learning snapshots cite the same one, in their own
-      // key order: reuse its validated payload references by its canonical
-      // value and verify every record again.
-      const sealSignature = concrete && canonical(["accounting-seal", seal]);
-      const sealed =
-        sealSignature && knownStore!.checkpointReferences(sealSignature);
-      if (sealed) {
-        for (const ref of sealed.originals) {
-          originals.set(refKey(ref), { ...ref });
-          knownStore!.verifyPrivateBytes(ref);
-        }
-        for (const ref of sealed.contentRefs) add(ref);
-        continue;
-      }
-      const records = await assertAccountingSealContent(
-        seal.repository,
-        seal.objective,
-        seal.runId,
-        seal,
-        read,
-      );
-      const payloads: ContentRef[] = [];
-      for (const record of records) {
-        if (record.kind === "interaction") {
-          const payload = record.capture.content.reference?.payload;
-          if (payload) {
-            add(payload);
-            payloads.push(payload);
+        if (value.binding.repository !== root.identity!.repository)
+          throw new Error(
+            "Restoration archive repository differs from its continuation",
+          );
+        for (const ref of value.contentRefs) add(ref);
+        // A retired Objective in the source checkpoint is its snapshot only: its
+        // evidence is in the archive history and was never installed here, so it
+        // adds no original to verify (#1307), the same rule restore applies.
+        const archived = new Set(
+          (value.gaps as RecoveryClosureGap[])
+            .filter(
+              (gap) =>
+                gap.availability === ARCHIVED_EVIDENCE &&
+                gap.required === false &&
+                typeof gap.evidenceCommit === "string",
+            )
+            .map((gap) => gap.path),
+        );
+        for (const file of value.files) {
+          add(file.ref);
+          if (file.kind === "continuation" && !archived.has(file.path)) {
+            const match = /^objectives\/([1-9][0-9]*)\/state\.json$/.exec(
+              file.path,
+            );
+            if (!match)
+              throw new Error(
+                "Restoration archive continuation path is invalid",
+              );
+            roots.push({
+              ref: file.ref,
+              kind: "restoration-original",
+              identity: {
+                repository: binding.repository,
+                objective: Number(match[1]),
+              },
+            });
           }
         }
-      }
-      if (sealSignature)
-        knownStore!.retainCheckpointReferences(sealSignature, {
-          contentRefs: payloads,
-          gitObjects: [],
-          gaps: [],
-          originals: seal.records.map((ref) => ({ ...ref })),
-        });
-    } else if (root.kind === "discovery")
-      for (const entry of parseDiscoveryBody(bytes).entries) add(entry.content);
-    else if (root.kind === "memory") {
-      const record = decodeRepositoryMemoryManifest(root.binding!, bytes);
-      for (const body of record.bodies)
-        if (body.ref) {
-          add(body.ref);
-          merge(memoryReferences(body.role, await read(body.ref)));
+        for (const entry of value.gitObjects ?? [])
+          objects.set(`commit:${entry.commitSha}`, {
+            sha: entry.commitSha,
+            kind: "commit",
+            role: entry.role,
+          });
+        gaps.push(...(value.gaps as RecoveryClosureGap[]));
+      } else if (root.kind === "accounting") {
+        const seal = root.accounting!;
+        // A seal names its exact records by content address, and memory
+        // observations and learning snapshots cite the same one, in their own
+        // key order: reuse its validated payload references by its canonical
+        // value and verify every record again.
+        const sealSignature = concrete && canonical(["accounting-seal", seal]);
+        const sealed =
+          sealSignature && knownStore!.checkpointReferences(sealSignature);
+        if (sealed) {
+          for (const ref of sealed.originals) {
+            originals.set(refKey(ref), { ...ref });
+            knownStore!.verifyPrivateBytes(ref);
+          }
+          for (const ref of sealed.contentRefs) add(ref);
+          continue;
         }
-      for (const entry of record.sources) if (entry.ref) add(entry.ref);
-    } else {
-      const packet = object(
-        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
-      );
-      if (
-        packet.schemaVersion !== 1 ||
-        packet.iteration !== 1 ||
-        Object.keys(packet).sort().join() !==
-          "batches,body,envelope,iteration,manifest,parentGraphDigest,runId,schemaVersion"
-      )
-        throw new Error("Recovery expansion input has an unsupported schema");
-      const manifest = packet.manifest as DiscoveryOutputManifest;
-      assertDiscoveryOutputManifest(manifest);
-      add(manifest.body);
-      roots.push({ ref: manifest.body, kind: "discovery" });
-      for (const entry of parseDiscoveryBody(
-        Buffer.from(JSON.stringify(packet.body)),
-      ).entries)
-        add(entry.content);
-      objects.set(`commit:${manifest.source.commitSha}`, {
-        sha: manifest.source.commitSha,
-        kind: "commit",
-        role: "expansion-source",
-      });
-      objects.set(`tree:${manifest.source.treeSha}`, {
-        sha: manifest.source.treeSha,
-        kind: "tree",
-        role: "expansion-source-tree",
-      });
+        const records = await assertAccountingSealContent(
+          seal.repository,
+          seal.objective,
+          seal.runId,
+          seal,
+          read,
+        );
+        const payloads: ContentRef[] = [];
+        for (const record of records) {
+          if (record.kind === "interaction") {
+            const payload = record.capture.content.reference?.payload;
+            if (payload) {
+              add(payload);
+              payloads.push(payload);
+            }
+          }
+        }
+        if (sealSignature)
+          knownStore!.retainCheckpointReferences(sealSignature, {
+            contentRefs: payloads,
+            gitObjects: [],
+            gaps: [],
+            originals: seal.records.map((ref) => ({ ...ref })),
+          });
+      } else if (root.kind === "discovery")
+        for (const entry of parseDiscoveryBody(bytes).entries)
+          add(entry.content);
+      else if (root.kind === "memory") {
+        const record = decodeRepositoryMemoryManifest(root.binding!, bytes);
+        for (const body of record.bodies)
+          if (body.ref) {
+            add(body.ref);
+            let nested: Uint8Array;
+            try {
+              nested = await read(body.ref);
+            } catch (error) {
+              if (list && error instanceof AbsentBody) continue;
+              throw error;
+            }
+            merge(memoryReferences(body.role, nested));
+          }
+        for (const entry of record.sources) if (entry.ref) add(entry.ref);
+      } else {
+        const packet = object(
+          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+        );
+        if (
+          packet.schemaVersion !== 1 ||
+          packet.iteration !== 1 ||
+          Object.keys(packet).sort().join() !==
+            "batches,body,envelope,iteration,manifest,parentGraphDigest,runId,schemaVersion"
+        )
+          throw new Error("Recovery expansion input has an unsupported schema");
+        const manifest = packet.manifest as DiscoveryOutputManifest;
+        assertDiscoveryOutputManifest(manifest);
+        add(manifest.body);
+        roots.push({ ref: manifest.body, kind: "discovery" });
+        for (const entry of parseDiscoveryBody(
+          Buffer.from(JSON.stringify(packet.body)),
+        ).entries)
+          add(entry.content);
+        objects.set(`commit:${manifest.source.commitSha}`, {
+          sha: manifest.source.commitSha,
+          kind: "commit",
+          role: "expansion-source",
+        });
+        objects.set(`tree:${manifest.source.treeSha}`, {
+          sha: manifest.source.treeSha,
+          kind: "tree",
+          role: "expansion-source-tree",
+        });
+      }
+    } catch (error) {
+      // Listing only: a reclaimed manifest took its references with it.
+      if (!(list && error instanceof AbsentBody)) throw error;
     }
   }
-  for (const ref of refs.values()) {
-    originals.set(refKey(ref), { ...ref });
-    if (
-      knownStore &&
-      source === knownStore &&
-      Object.getPrototypeOf(source) === LocalContentStore.prototype &&
-      knownStore.readBytes === LocalContentStore.prototype.readBytes
-    )
-      knownStore.verifyPrivateBytes(ref);
-    else await read(ref);
-  }
+  if (!list)
+    for (const ref of refs.values()) {
+      originals.set(refKey(ref), { ...ref });
+      if (
+        knownStore &&
+        source === knownStore &&
+        Object.getPrototypeOf(source) === LocalContentStore.prototype &&
+        knownStore.readBytes === LocalContentStore.prototype.readBytes
+      )
+        knownStore.verifyPrivateBytes(ref);
+      else await read(ref);
+    }
   const result = {
     contentRefs: [...refs.values()],
     gitObjects: [...objects.values()],
@@ -1091,6 +1108,50 @@ export async function verifyMemoryBodyReferenceClosure(
   source: ContentStore | RecoveryReferenceReader,
 ): Promise<ContinuationReferences> {
   return verifyDescription(memoryReferences(role, bytes), source);
+}
+
+/** A body that is not in the local store; reclaim listing skips it. */
+class AbsentBody extends Error {}
+
+/**
+ * The content references of a local snapshot, without reading, hashing or
+ * restoring its bodies (#1707). Only the manifests and records that name
+ * further references are read, straight from the local store under `root`;
+ * one that is gone was reclaimed with the references it names, and is
+ * skipped, never restored through the archive. Callers act only on bodies an
+ * archive commit already holds.
+ */
+export async function listLocalContinuationReferences(
+  value: unknown,
+  root: string,
+): Promise<ContentRef[]> {
+  const description = continuationReferences(value);
+  const local: RecoveryReferenceReader = {
+    readBytes(ref) {
+      try {
+        return readFileSync(join(root, ref.digest.slice(0, 2), ref.digest));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          throw new AbsentBody(ref.digest);
+        throw error;
+      }
+    },
+  };
+  const expansion = await verifyRoots(
+    description.roots,
+    local,
+    { maxBytes: Number.MAX_SAFE_INTEGER, maxFiles: Number.MAX_SAFE_INTEGER },
+    undefined,
+    true,
+  );
+  return [
+    ...new Map(
+      [...description.contentRefs, ...expansion.contentRefs].map((ref) => [
+        refKey(ref),
+        ref,
+      ]),
+    ).values(),
+  ];
 }
 
 /** The local learning producer owns this concrete store, as memory does. */

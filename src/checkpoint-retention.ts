@@ -227,6 +227,14 @@ function writeRetirement(repository: string, record: RetirementRecord): void {
   }
 }
 
+/**
+ * Reclaim runs inline in the operator command that published (#1707). One
+ * Objective is never cut short, so a pass starts no new Objective after this
+ * budget; every acknowledged publication continues where the last one ended,
+ * since finished Objectives are skipped by their record.
+ */
+const RECLAIM_BUDGET_MS = 15_000;
+
 const ATTEMPT_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -271,7 +279,7 @@ export async function reclaimRetiredMaterial(
   const { removeWorktree } = await import("./process.js");
   const { sweepValidationWorktrees } = await import("./validation.js");
   const { LocalContentStore } = await import("./content/local.js");
-  const { verifyLocalContinuationReferenceClosure } = await import(
+  const { listLocalContinuationReferences } = await import(
     "./recovery-checkpoint-closure.js"
   );
   const state = stateRoot(config.repository);
@@ -354,9 +362,11 @@ export async function reclaimRetiredMaterial(
     if (!terminalHistory(value)) return;
     const holds = archived!(record.evidenceCommit);
     const store = new LocalContentStore(join(state, "content"));
-    const { contentRefs } = await verifyLocalContinuationReferenceClosure(
+    // Listed, not verified: reclaimArchived deletes only local bodies whose
+    // exact size the evidence commit holds as a blob (#1707).
+    const contentRefs = await listLocalContinuationReferences(
       value,
-      store,
+      join(state, "content"),
     );
     store.reclaimArchived(
       record.evidenceCommit,
@@ -367,6 +377,7 @@ export async function reclaimRetiredMaterial(
     writeRetirement(config.repository, { ...record, bodies: "complete" });
   };
   let reclaimed = 0;
+  const deadline = Date.now() + RECLAIM_BUDGET_MS;
   for (const name of readdirSync(root).sort()) {
     const match = /^([1-9][0-9]*)\.json$/.exec(name);
     if (!match) continue;
@@ -380,6 +391,8 @@ export async function reclaimRetiredMaterial(
         (record.reclaimed && (record.bodies || !archived))
       )
         continue;
+      // The rest waits for the next acknowledged publication.
+      if (Date.now() >= deadline) break;
       const snapshot = statePath(config.repository, objective);
       if (
         !existsSync(snapshot) ||

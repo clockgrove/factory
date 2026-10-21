@@ -66,6 +66,8 @@ import {
   onlyCheckpointBoundsExceeded,
   gitPersistenceStatus,
   inspectRecoveryCheckpoint,
+  maintainRecoveryCheckpoint,
+  stopRecoveryCheckpointMaintenance,
   synchronizeRecoveryCheckpoint,
   withRecoveryCheckpointOperation,
 } from "./recovery-checkpoint.js";
@@ -141,9 +143,10 @@ function help(): void {
       "      Collect terminal experience, propose a compact playbook, then explicitly approve its exact draft before advisory use",
       "  recipe --file ABSOLUTE_OBJECTIVE",
       "      Preview a pinned workflow recipe against the current checkout without model calls or admission",
-      "  persistence status | sync | inspect | restore [--checkpoint SHA]",
+      "  persistence status | sync | inspect | maintain | restore [--checkpoint SHA]",
       "  persistence reconcile --objective N",
       "      Inspect local and verified Git durability, or synchronize to the explicitly configured archive",
+      "      maintain runs one bounded housekeeping pass (pack the publisher, reclaim retired Objectives); the service runs it in the background",
       "  run --objective N [--deadline ISO_TIMESTAMP] [--provider NAME]",
       "      Plan if needed and run the Objective until it is done or needs you; the first run checks readiness and fixes its provider (--provider, else defaultProvider)",
       "  queue add N [N ...] | list | sync | remove N | pause | resume | drain",
@@ -278,12 +281,12 @@ async function persistenceCommand(args: string[], path: string): Promise<void> {
   const [action, ...rest] = words;
   if (
     rest.length ||
-    !["status", "sync", "inspect", "restore", "reconcile"].includes(
+    !["status", "sync", "inspect", "maintain", "restore", "reconcile"].includes(
       action ?? "",
     )
   )
     throw new Error(
-      "Use factory persistence status | sync | inspect | restore [--checkpoint SHA] | reconcile --objective N",
+      "Use factory persistence status | sync | inspect | maintain | restore [--checkpoint SHA] | reconcile --objective N",
     );
   const checkpoint = option(args, "checkpoint");
   const objectiveValue = option(args, "objective");
@@ -308,6 +311,8 @@ async function persistenceCommand(args: string[], path: string): Promise<void> {
   } else if (action === "status") result = gitPersistenceStatus(config);
   else if (action === "inspect")
     result = await inspectRecoveryCheckpoint(config);
+  else if (action === "maintain")
+    result = await maintainRecoveryCheckpoint(config);
   else
     result = await synchronizeRecoveryCheckpoint(config, {
       reason: "explicit",
@@ -1276,6 +1281,10 @@ async function main(): Promise<void> {
     option(args, "config") ?? configPath(),
   );
   refuseStatelessly(command, args, config);
+  // The command verifies the archive through the installation's sealed
+  // verifier copy (an incremental fetch and re-hashed reads), never a cold
+  // full verification while that copy exists. Housekeeping a foreground run
+  // started at an idle point stops before its terminal publication (#1714).
   await withRecoveryCheckpointOperation(
     {
       config,
@@ -1285,7 +1294,11 @@ async function main(): Promise<void> {
           scope: config.gitPersistence?.scope ?? "private-history",
         }),
     },
-    () => dispatchMain(),
+    () =>
+      dispatchMain().finally(() =>
+        stopRecoveryCheckpointMaintenance(config.repository),
+      ),
+    { queueControlVerification: true },
   );
 }
 

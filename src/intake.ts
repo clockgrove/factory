@@ -91,6 +91,8 @@ import {
   gitPersistenceStatus,
   isCheckpointAdmissionFailure,
   readVerifiedRecoveryCheckpoint,
+  scheduleRecoveryCheckpointMaintenance,
+  stopRecoveryCheckpointMaintenance,
   withRecoveryCheckpointCommandOperation,
   withRecoveryCheckpointOperation,
   withRecoveryCheckpointControllerVerification,
@@ -2044,12 +2046,20 @@ async function runIntakeOwned(
     // Selected Objectives whose drain the service left itself (its own
     // handoff, before or after a restart): their run here resumes them.
     const requeued = new Set<number>();
-    const idle = () =>
-      pauseObservation(
+    const idle = () => {
+      // Housekeeping runs bounded in the background between dispatch passes,
+      // never on an operator command or a run's settlement (#1714). A held
+      // owner serves control only.
+      if (!completedCheckpointFailure)
+        scheduleRecoveryCheckpointMaintenance(config, (task) =>
+          withObjectiveDelegation(lock, task),
+        );
+      return pauseObservation(
         queuePollSeconds(config) * 1000,
         heldUntil,
         registerWake,
       );
+    };
     /**
      * Hold new dispatch; the service stops once its other runs settle. Those
      * runs continue: this is not an operator pause.
@@ -2416,8 +2426,10 @@ async function runIntakeOwned(
         await idle();
       }
     } finally {
-      // The installation lease outlives every run it lent ownership to.
+      // The installation lease outlives every run it lent ownership to, and
+      // its background housekeeping.
       while (runs.size) await Promise.allSettled([...runs]);
+      await stopRecoveryCheckpointMaintenance(config.repository);
     }
   } finally {
     process.off("SIGTERM", onHandoff);

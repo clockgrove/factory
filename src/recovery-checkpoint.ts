@@ -2550,7 +2550,10 @@ export function withRecoveryCheckpointOperation<T>(
   options: {
     /** Only a caller forwarding the terminal result without later durable work may opt in. */
     forwardCompletedBarrier?: boolean;
-    /** Only explicitly bounded queue pause/resume/drain operations may opt in. */
+    /**
+     * Own a verifier for the operation's lifetime, started from the sealed
+     * copy and sealed again at close: queue commands and operator commands.
+     */
     queueControlVerification?: boolean;
   } = {},
 ): Promise<T> {
@@ -5951,6 +5954,18 @@ function verifierDirectory(repository: string): string {
     `verify-${process.pid}-${self?.startTime ?? "0"}-${randomUUID()}.git`,
   );
 }
+let coldVerificationReported = false;
+/**
+ * A full cold verification can take minutes on a large archive, so the
+ * command says so once instead of appearing to hang (#1714).
+ */
+function reportColdVerification(): void {
+  if (coldVerificationReported) return;
+  coldVerificationReported = true;
+  console.error(
+    "Factory: verifying the whole Git archive (no sealed verifier copy to reuse); this can take minutes on a large archive.",
+  );
+}
 /**
  * One installation keeps a sealed copy of the remote-only verifier of its
  * last closed controller, so a new process fetches only what is new instead
@@ -6248,6 +6263,9 @@ async function freshArchiveOwnedStrict(
         ? adoptedTip
         : undefined;
     fetchSkipped = Boolean(unchangedTip);
+    // With no sealed copy to start from (none yet, discarded, or a read
+    // outside a controller's verifier), the fetch verifies the whole archive.
+    if (!adoptedTip && !priorObjects) reportColdVerification();
     if (!unchangedTip)
       try {
         await gitRemote(directory, options, [
@@ -7455,18 +7473,18 @@ function coverDisposals(): void {
 /**
  * The publisher writes every body, tree and commit as a loose object and
  * holds no refs, so Git's own repack and gc would pack nothing; left alone it
- * grows to many times the packed archive. After an acknowledged publication,
- * once it holds at least PUBLISHER_LOOSE_THRESHOLD loose objects, one pass
- * packs a bounded batch of exactly those objects and then removes only loose
- * copies that a pack now holds (`git prune-packed`). No object, pack or ref
- * is ever dropped, so material an unacknowledged or in-flight publication
- * needs stays available. The pass holds the publication lock, so no
- * publication in any process sees the store change under it, and it runs
- * after the publication's own critical section, so it never delays that
- * acknowledgment. Each pass is bounded by PUBLISHER_PACK_OBJECTS and
- * PUBLISHER_PACK_BYTES (a few seconds) and by the transport timeout, so a
- * large existing loose store is drained over several publications instead of
- * stalling one. A failed or interrupted pass leaves every object in place.
+ * grows to many times the packed archive. In background maintenance (see
+ * maintainRecoveryCheckpoint), once it holds at least
+ * PUBLISHER_LOOSE_THRESHOLD loose objects, one pass packs a bounded batch of
+ * exactly those objects and then removes only loose copies that a pack now
+ * holds (`git prune-packed`). No object, pack or ref is ever dropped, so
+ * material an unacknowledged or in-flight publication needs stays available.
+ * The pass holds the publication lock, so no publication in any process sees
+ * the store change under it, and it never runs inside a publication. Each
+ * pass is bounded by PUBLISHER_PACK_OBJECTS and PUBLISHER_PACK_BYTES (a few
+ * seconds) and by the transport timeout, so a large existing loose store is
+ * drained over several passes. A failed or interrupted pass leaves every
+ * object in place. Returns whether a full batch is still loose.
  *
  * 2048 loose objects is about one hour of a busy installation's publications
  * and a few hundred MB of loose bodies; Git's own `gc.auto` default is 6700.
@@ -7478,7 +7496,7 @@ const PUBLISHER_PACK_BYTES = 256 * 1024 * 1024;
 async function packPublisher(
   config: FactoryConfig,
   options: GitPersistenceConfig,
-): Promise<void> {
+): Promise<boolean> {
   const p = paths(config.repository);
   const loose: string[] = [];
   const batch: string[] = [];
@@ -7532,9 +7550,11 @@ async function packPublisher(
       observed.complete();
     });
   } catch (error) {
-    // Packing only saves space; the publication is already acknowledged.
+    // Packing only saves space; the next pass tries again.
     observed.fail(error);
+    return false;
   }
+  return loose.length - batch.length >= PUBLISHER_LOOSE_THRESHOLD;
 }
 async function publishCheckpoint(
   config: FactoryConfig,
@@ -7542,25 +7562,118 @@ async function publishCheckpoint(
     buildClosure?: () => Promise<RecoveryCheckpointClosure>;
   },
 ): Promise<RecoveryCheckpointStatus> {
-  const packed = { acknowledged: false };
-  const result = await publishCheckpointLocked(config, input, packed);
-  const options = settings(config);
-  if (options && packed.acknowledged) {
-    await packPublisher(config, options);
-    if (options.scope === "private-history")
-      await reclaimRetired(config, options);
-  }
-  return result;
+  // A publication admits only its own closure. Packing and reclaim are
+  // background maintenance (maintainRecoveryCheckpoint), never on the
+  // operator path (#1714).
+  return publishCheckpointLocked(config, input);
 }
 /**
- * After an acknowledged publication, reclaim the local material of retired
- * Objectives (see reclaimRetiredMaterial). It only saves space: a failure
- * leaves the material, and the next acknowledged publication tries again.
+ * One bounded maintenance pass is MAINTENANCE_BUDGET_MS: it starts no pack
+ * batch and no reclaim step after it. A started pack batch is bounded by its
+ * own caps (about two seconds), and a started reclaim step is one worktree
+ * removal or one body deletion.
+ */
+const MAINTENANCE_BUDGET_MS = 10_000;
+export interface RecoveryCheckpointMaintenance {
+  /** False when the budget ran out with work left; the next pass continues. */
+  complete: boolean;
+  reclaimedObjectives: number;
+}
+/**
+ * One bounded housekeeping pass (#1714): pack the publisher while a full
+ * batch is loose, then reclaim retired Objectives' local material (see
+ * reclaimRetiredMaterial). Only saves space: skipping it never breaks a read,
+ * because loose objects stay readable and the content store reads a body
+ * back from the publisher only after reclaim deleted it.
+ */
+export async function maintainRecoveryCheckpoint(
+  config: FactoryConfig,
+  options: { budgetMs?: number; expired?: () => boolean } = {},
+): Promise<RecoveryCheckpointMaintenance> {
+  const persistence = settings(config);
+  if (!persistence) return { complete: true, reclaimedObjectives: 0 };
+  const deadline = Date.now() + (options.budgetMs ?? MAINTENANCE_BUDGET_MS);
+  const expired = () => Date.now() >= deadline || !!options.expired?.();
+  let complete = true;
+  while (
+    await serializePublication(config.repository, () =>
+      packPublisher(config, persistence),
+    )
+  )
+    if (expired()) {
+      complete = false;
+      break;
+    }
+  let reclaimedObjectives = 0;
+  if (persistence.scope === "private-history" && !expired())
+    reclaimedObjectives = await reclaimRetired(config, persistence, expired);
+  if (expired()) complete = false;
+  return { complete, reclaimedObjectives };
+}
+const maintenance = new Map<
+  string,
+  {
+    /** The acknowledged sequence the last complete pass started from. */
+    sequence?: number;
+    running?: Promise<void>;
+    stopped?: boolean;
+  }
+>();
+/**
+ * Start one background maintenance pass at an idle point, unless one is
+ * running or nothing was acknowledged since the last complete pass. The pass
+ * runs outside any checkpoint scope; `own` wraps it in the ownership it needs
+ * (the service lends its installation lease). Never throws.
+ */
+export function scheduleRecoveryCheckpointMaintenance(
+  config: FactoryConfig,
+  own: (task: () => Promise<void>) => Promise<void> = (task) => task(),
+): void {
+  try {
+    const persistence = settings(config);
+    if (!persistence) return;
+    const entry = maintenance.get(config.repository) ?? {};
+    maintenance.set(config.repository, entry);
+    const sequence = journal(config, persistence).lastAcknowledged?.sequence;
+    if (entry.running || sequence === undefined || entry.sequence === sequence)
+      return;
+    entry.stopped = false;
+    const pass = scopes.exit(() =>
+      own(async () => {
+        const result = await maintainRecoveryCheckpoint(config, {
+          expired: () => !!entry.stopped,
+        });
+        if (result.complete) entry.sequence = sequence;
+      }),
+    );
+    entry.running = pass
+      .catch(() => undefined)
+      .finally(() => {
+        delete entry.running;
+      });
+  } catch {
+    // Maintenance only saves space; the next idle point tries again.
+  }
+}
+/** Stop a running background pass at its next step and wait for it. */
+export async function stopRecoveryCheckpointMaintenance(
+  repository: string,
+): Promise<void> {
+  const entry = maintenance.get(repository);
+  if (!entry?.running) return;
+  entry.stopped = true;
+  await entry.running;
+}
+/**
+ * Reclaim the local material of retired Objectives (see
+ * reclaimRetiredMaterial). It only saves space: a failure or an expired
+ * budget leaves the material, and the next pass tries again.
  */
 async function reclaimRetired(
   config: FactoryConfig,
   options: GitPersistenceConfig,
-): Promise<void> {
+  expired: () => boolean,
+): Promise<number> {
   let reclaimed = 0;
   const archived = new Map<string, ReadonlySet<string>>();
   const observed = checkpointObservation(
@@ -7593,19 +7706,19 @@ async function reclaimRetired(
         }
         return digests;
       },
+      expired,
     );
     observed.complete();
   } catch (error) {
     observed.fail(error);
   }
+  return reclaimed;
 }
 async function publishCheckpointLocked(
   config: FactoryConfig,
   input: CheckpointAdmissionInput & {
     buildClosure?: () => Promise<RecoveryCheckpointClosure>;
   },
-  /** Set once this call acknowledged its own publication. */
-  packed: { acknowledged: boolean },
 ): Promise<RecoveryCheckpointStatus> {
   const options = settings(config);
   if (!options) return gitPersistenceStatus(config);
@@ -8135,7 +8248,6 @@ async function publishCheckpointLocked(
       );
       coverDisposals();
       completeCheckpointBasis(verification, full);
-      packed.acknowledged = true;
       return acknowledged;
     } catch (error) {
       if (error instanceof CheckpointRestart) throw error;

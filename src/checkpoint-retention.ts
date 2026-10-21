@@ -227,14 +227,6 @@ function writeRetirement(repository: string, record: RetirementRecord): void {
   }
 }
 
-/**
- * Reclaim runs inline in the operator command that published (#1707). One
- * Objective is never cut short, so a pass starts no new Objective after this
- * budget; every acknowledged publication continues where the last one ended,
- * since finished Objectives are skipped by their record.
- */
-const RECLAIM_BUDGET_MS = 15_000;
-
 const ATTEMPT_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -263,6 +255,14 @@ export async function reclaimRetiredMaterial(
   acknowledged: (commit: string) => boolean,
   /** The body digests an acknowledged archive commit holds. */
   archived?: (commit: string) => ReadonlySet<string>,
+  /**
+   * The pass's budget (#1714): checked before each Objective and before each
+   * removal or deletion inside one. An Objective stopped part way keeps its
+   * record unfinished, and the next pass repeats it: worktrees and harness
+   * files are found by listing, and bodies go leaves first (see
+   * reclaimBodies), so every remaining body is still listed.
+   */
+  expired: () => boolean = () => false,
 ): Promise<number> {
   const root = directory(config.repository);
   if (!existsSync(root)) return 0;
@@ -336,6 +336,7 @@ export async function reclaimRetiredMaterial(
     const worktrees = join(state, "worktrees");
     if (attempts.size && existsSync(worktrees))
       for (const entry of readdirSync(worktrees).filter(owned)) {
+        if (expired()) return false;
         const path = join(worktrees, entry);
         if (lstatSync(path).isDirectory() && existsSync(join(path, ".git")))
           await removeWorktree(config.checkout, path);
@@ -343,8 +344,11 @@ export async function reclaimRetiredMaterial(
       }
     const harness = join(state, "harness");
     if (attempts.size && existsSync(harness))
-      for (const entry of readdirSync(harness).filter(owned))
+      for (const entry of readdirSync(harness).filter(owned)) {
+        if (expired()) return false;
         rmSync(join(harness, entry), { recursive: true, force: true });
+      }
+    if (expired()) return false;
     await sweepValidationWorktrees(
       config.checkout,
       objectiveRoot(config.repository, objective),
@@ -375,11 +379,12 @@ export async function reclaimRetiredMaterial(
       [record.stateDigest, ...contentRefs.map((ref) => ref.digest)]
         .filter((digest) => holds.has(digest))
         .reverse(),
+      expired,
     );
+    if (expired()) return;
     writeRetirement(config.repository, { ...record, bodies: "complete" });
   };
   let reclaimed = 0;
-  const deadline = Date.now() + RECLAIM_BUDGET_MS;
   for (const name of readdirSync(root).sort()) {
     const match = /^([1-9][0-9]*)\.json$/.exec(name);
     if (!match) continue;
@@ -393,8 +398,8 @@ export async function reclaimRetiredMaterial(
         (record.reclaimed && (record.bodies || !archived))
       )
         continue;
-      // The rest waits for the next acknowledged publication.
-      if (Date.now() >= deadline) break;
+      // The rest waits for the next pass.
+      if (expired()) break;
       const snapshot = statePath(config.repository, objective);
       if (
         !existsSync(snapshot) ||
@@ -413,7 +418,12 @@ export async function reclaimRetiredMaterial(
         if (!record.reclaimed && (await reclaimOne(objective, record)))
           reclaimed++;
         const current = readRetirement(config.repository, objective);
-        if (archived && current?.reclaimed === "complete" && !current.bodies)
+        if (
+          archived &&
+          current?.reclaimed === "complete" &&
+          !current.bodies &&
+          !expired()
+        )
           await reclaimBodies(objective, current);
       } finally {
         releaseControllerLock(
@@ -422,7 +432,7 @@ export async function reclaimRetiredMaterial(
         );
       }
     } catch {
-      // Left in place; the next acknowledged publication tries again.
+      // Left in place; the next pass tries again.
     }
   }
   return reclaimed;

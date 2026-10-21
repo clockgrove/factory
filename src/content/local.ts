@@ -553,7 +553,15 @@ export class LocalContentStore implements ContentStore {
 
   /** A descriptor whose bytes match the ref, held from its verification on. */
   private async openVerified(ref: ContentRef): Promise<number> {
-    const fd = this.readThrough(ref, () => this.openObject(ref));
+    let fd: number;
+    try {
+      fd = this.readThrough(ref, () => this.openObject(ref));
+    } catch (error) {
+      // Absent, with or without its shard directory, and not archived.
+      if (missing(error))
+        throw new Error(`Content object ${ref.digest} is missing`);
+      throw error;
+    }
     try {
       const hash = createHash("sha256");
       let bytes = 0;

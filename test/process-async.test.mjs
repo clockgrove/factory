@@ -3650,8 +3650,29 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       unbound.work.local.recovery.failure.semanticRefusal,
       undefined,
     );
+    // Its diagnosis was submitted and never returned (#1661): the operator's
+    // retry settles it as abandoned, unanswered, and the handoff proceeds.
+    const lostDiagnosis = randomUUID();
+    unbound.work.local.recovery.diagnosisInvocation = {
+      id: lostDiagnosis,
+      submitted: true,
+      requestDigest: "a".repeat(64),
+    };
     saveState(statePath(config.repository, 3), unbound);
     assert.equal(retryWorkItem(retryConfig, 3, "local"), "attempt");
+    const settledRetry = readState(config.repository, 3);
+    for (const diagnosis of [
+      settledRetry.work.local.recovery.diagnosisInvocation,
+      settledRetry.work.local.recovery.history.at(-1).diagnosisInvocation,
+    ]) {
+      assert.equal(diagnosis.submitted, false);
+      assert.equal(diagnosis.response, undefined);
+      assert.deepEqual(diagnosis.abandoned, [lostDiagnosis]);
+    }
+    assert.doesNotMatch(
+      restoredContinuationOwnershipHold(settledRetry, true) ?? "",
+      /diagnosis/,
+    );
     assert.equal(git("rev-parse", "HEAD"), commit);
     // The operator retires the command that cannot pass in the sandbox
     // (#1667): only the operator, only a command the item runs, with a reason

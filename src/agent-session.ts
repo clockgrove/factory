@@ -30,6 +30,7 @@ import {
 } from "./recovery-checkpoint.js";
 import { settleInterruptedPaidCall } from "./step.js";
 import type { ContinuationState } from "./state.js";
+import type { WorkRecovery } from "./repair-policy.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -716,6 +717,42 @@ export async function settleAbandonedReviewTurns(
 }
 
 /**
+ * A submitted diagnosis settled without a native outcome: its id is recorded
+ * as abandoned (never answered) and the next diagnosis is a fresh invocation.
+ */
+function abandonedDiagnosis(
+  invocation: NonNullable<WorkRecovery["diagnosisInvocation"]>,
+): NonNullable<WorkRecovery["diagnosisInvocation"]> {
+  return {
+    id: randomUUID(),
+    submitted: false,
+    ...(invocation.rejected && {
+      rejected: structuredClone(invocation.rejected),
+    }),
+    abandoned: [...(invocation.abandoned ?? []), invocation.id],
+  };
+}
+
+/**
+ * The operator's retry of a Work Item settles each of its submitted
+ * diagnoses that has no response (current or archived) as abandoned: the
+ * retry decision ends them, their outcome stays unknown, and a late response
+ * no longer matches its invocation (#1661). One that holds native returns
+ * awaiting validation stays as it is.
+ */
+export function abandonRetriedDiagnoses(recovery: WorkRecovery): void {
+  for (const holder of [recovery, ...(recovery.history ?? [])]) {
+    const invocation = holder.diagnosisInvocation;
+    if (
+      invocation?.submitted &&
+      invocation.response === undefined &&
+      !invocation.nativeReturns?.length
+    )
+      holder.diagnosisInvocation = abandonedDiagnosis(invocation);
+  }
+}
+
+/**
  * A planning call that ended without a usable outcome leaves its invocation
  * submitted. Settle it as abandoned so the next call is a fresh invocation and
  * retry, refuse and cancel proceed:
@@ -812,14 +849,7 @@ export async function settleAbandonedPlanningTurn(
         { item: itemId! },
         "diagnose",
       );
-      recovery.diagnosisInvocation = {
-        id: randomUUID(),
-        submitted: false,
-        ...(invocation.rejected && {
-          rejected: structuredClone(invocation.rejected),
-        }),
-        abandoned: [...(invocation.abandoned ?? []), invocation.id],
-      };
+      recovery.diagnosisInvocation = abandonedDiagnosis(invocation);
     };
     restore = () => {
       undoMarker?.();

@@ -110,6 +110,7 @@ import {
 import { type ContinuationState, isExecutionState } from "./state.js";
 import {
   checkPreparedIntakeServiceState,
+  checkServiceState,
   queuedObjectiveConfig,
 } from "./supervision.js";
 import {
@@ -2287,6 +2288,18 @@ async function runIntakeOwned(
                   entry.objective,
                 );
               }
+              // Start readiness skips dequeued cards; one re-queued since
+              // is checked here before it runs (#1650).
+              if (options.backgroundConfigurationPath)
+                checkServiceState(
+                  queuedObjectiveConfig(
+                    config,
+                    entry.objective,
+                    options.backgroundConfigurationPath,
+                  ),
+                  entry.objective,
+                  options.backgroundConfigurationPath,
+                );
               selected.push(entry.objective);
             } catch (error) {
               holdFor(error);

@@ -3666,13 +3666,32 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       () => retire({ command, reason: "CI", actor: "factory-worker" }),
       /Only the operator can retire a validation command/,
     );
+    assert.throws(
+      () => retire({ command, reason: "CI", actor: "operator" }),
+      /last validation command; an item keeps at least one/,
+    );
+    // With a second command, the first one retires.
+    const kept = { command: "npm test", provenance: "base-observed" };
+    const twoCommands = structuredClone(unbound);
+    twoCommands.graph.items[0].validation.push(kept);
+    // Its receipts covered one command: here the item was cancelled first.
+    twoCommands.work.local = { status: "cancelled" };
+    saveState(
+      statePath(config.repository, 3),
+      JSON.parse(
+        JSON.stringify(twoCommands).replaceAll(
+          graphDigest(unbound.graph),
+          graphDigest(twoCommands.graph),
+        ),
+      ),
+    );
     assert.equal(
       retire({ command, reason: "covered by CI", actor: "operator" }),
       "attempt",
     );
     const retiredState = readState(config.repository, 3);
     assert.equal(retiredState.work.local.status, "pending");
-    assert.deepEqual(retiredState.graph.items[0].validation, []);
+    assert.deepEqual(retiredState.graph.items[0].validation, [kept]);
     assert.deepEqual(
       retiredState.graph.items[0].acceptance,
       unbound.graph.items[0].acceptance,

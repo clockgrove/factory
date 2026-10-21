@@ -93,6 +93,7 @@ import {
 import { preflightObjective } from "./local-preflight.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
 import {
+  assertCoverageShape,
   assertCoverageSources,
   coverageObligations,
   sourceObligationId,
@@ -215,6 +216,10 @@ export function retiredValidationGraph(
     throw new Error(
       `Work Item ${itemId} has no validation command ${JSON.stringify(command)}; its commands are ${JSON.stringify(item.validation.map((entry) => entry.command))}`,
     );
+  if (item.validation.length === 1)
+    throw new Error(
+      `${command} is Work Item ${itemId}'s last validation command; an item keeps at least one, so cancel or amend it instead`,
+    );
   item.validation.splice(index, 1);
   for (const entry of next.coverage ?? []) {
     if (entry.itemId !== itemId) continue;
@@ -250,6 +255,7 @@ export function retireValidationCommand(
       "Settle the pending graph amendment or expansion before retiring a validation command",
     );
   const graph = retiredValidationGraph(state.graph, retirement);
+  assertCoverageShape(graph);
   state.graphRevisions ??= [
     { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
   ];

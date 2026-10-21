@@ -1256,9 +1256,10 @@ export function assertRequiredFinalCommands(
   checkout: string,
   ciOnlyCommands: readonly string[] = [],
 ): void {
-  const ciOnly = finalObjectiveCommands(body).find((command) =>
-    ciOnlyCommands.includes(command),
-  );
+  const ciOnlySet = new Set(ciOnlyCommands.map(normalizedCommand));
+  const ciOnly = finalObjectiveCommands(body)
+    .map((command) => command.trim())
+    .find((command) => ciOnlySet.has(normalizedCommand(command)));
   if (ciOnly !== undefined)
     throw new Error(
       `Acceptance command ${ciOnly} is CI-only in the installation's finalValidation.ciOnlyCommands: it needs network, and final validation runs offline. Leave it to CI and remove it from the Objective's Acceptance commands, or remove it from ciOnlyCommands if it runs offline.`,
@@ -1323,9 +1324,10 @@ export function assertNoCiOnlyValidation(
   graph: WorkGraph,
   ciOnlyCommands: readonly string[],
 ): void {
+  const ciOnly = new Set(ciOnlyCommands.map(normalizedCommand));
   for (const item of workShapes(graph))
     for (const { command } of item.validation)
-      if (ciOnlyCommands.includes(command))
+      if (ciOnly.has(normalizedCommand(command)))
         throw new GraphValidationError(
           item.id,
           `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI; when a criterion needs it, ask through decisionRequired`,

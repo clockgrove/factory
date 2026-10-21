@@ -138,6 +138,9 @@ export function validateSplitGraph(args: {
           ? { approvedPlaybookPin: request.approvedPlaybookPin }
           : {}),
         ...(request.invocation ? { invocation: request.invocation } : {}),
+        ...(request.compileContext?.ciOnlyCommands
+          ? { ciOnlyCommands: request.compileContext.ciOnlyCommands }
+          : {}),
       });
     } catch (error) {
       throw refused(child.key, error);

@@ -238,6 +238,18 @@ test("CI-only commands are never validation commands (#1667)", () => {
       ),
     /^Error: Acceptance command npm run audit is CI-only/,
   );
+  // Commands compare as the rest of Factory compares them: spacing aside.
+  assert.throws(
+    () =>
+      assertRequiredFinalCommands(
+        [],
+        `## Acceptance\n- \`npm  run   audit\`\n`,
+        baseSha,
+        target,
+        [audit],
+      ),
+    /is CI-only/,
+  );
   // The planner is told, and graph validation refuses a Work Item that runs it.
   const request = prepareCompilationRequest({
     objective: 1,
@@ -264,6 +276,8 @@ test("CI-only commands are never validation commands (#1667)", () => {
     () => assertNoCiOnlyValidation(graph, [audit]),
     /^Error: Work Item deps validation runs npm run audit, which the installation marks CI-only/,
   );
+  graph.items[0].validation[1].command = " npm run  audit";
+  assert.throws(() => assertNoCiOnlyValidation(graph, [audit]), /CI-only/);
   graph.items[0].validation.pop();
   assertNoCiOnlyValidation(graph, [audit]);
 });

@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { buildAdaptiveContext } from "../adaptive-context.js";
 import {
   agentSessionContinuation,
+  settleAbandonedPlanningTurn,
   settleAbandonedReviewTurns,
 } from "../agent-session.js";
 import {
@@ -433,6 +434,11 @@ export async function finalizeObjective(args: {
             {
               role: "objective-review",
             },
+          );
+          // A diagnosis an archived attempt left held settles before the
+          // seal, which fixes every attempt's evidence (#1674).
+          await settleAbandonedPlanningTurn(state, planningModel, () =>
+            save(state),
           );
           return context.paid(() =>
             reviewAcceptance({

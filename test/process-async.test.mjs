@@ -96,6 +96,7 @@ import {
 import {
   assertCompletedCoverage,
   environmentValidationIndices,
+  finalReceiptsMatch,
   finalValidationSequence,
   objectivePreparationCommands,
   reusableEnvironmentValidationIndices,
@@ -4239,6 +4240,37 @@ test("source readiness prepares each real fresh checkout before its phase checks
       preparation: [setup],
       commands: [acceptance],
     });
+    assert.deepEqual(sequence([` ${install}`, acceptance, `${install} `]), {
+      preparation: [` ${install}`, setup],
+      commands: [acceptance],
+    });
+    // Only a source-declared exact bootstrap moves or leads.
+    const observed = structuredClone(bootstrapped);
+    observed.items[0].validation[0].provenance = "base-observed";
+    assert.deepEqual(sequence([acceptance], observed), {
+      preparation: [setup],
+      commands: [acceptance],
+    });
+    const nearMiss = "pnpm install --frozen-lockfile";
+    assert.deepEqual(sequence([setup, acceptance, nearMiss], graph), {
+      preparation: [],
+      commands: [setup, acceptance, nearMiss],
+    });
+    // Receipts must match the current sequence, or exactly the previous one.
+    const listed = [setup, acceptance, install];
+    assert.ok(finalReceiptsMatch(bootstrapped, listed, sequence(listed)));
+    assert.ok(
+      finalReceiptsMatch(bootstrapped, listed, {
+        preparation: [],
+        commands: listed,
+      }),
+    );
+    assert.ok(
+      !finalReceiptsMatch(bootstrapped, [acceptance, install], {
+        preparation: [install, setup],
+        commands: [acceptance, install],
+      }),
+    );
     const diagnosticRepository = "integration/fresh-readiness";
     const diagnostics = new DiagnosticEmitter(diagnosticRepository, 1);
     const observerConfigDigest = createHash("sha256")

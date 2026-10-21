@@ -76,7 +76,7 @@ import {
   assertCoverageShape,
   environmentValidationIndices,
   reusableEnvironmentValidationIndices,
-  finalValidationSequence,
+  finalReceiptsMatch,
   objectiveCandidate,
 } from "./qa.js";
 import {
@@ -2303,24 +2303,21 @@ export function parseFactoryState(
   if (state.finalValidation !== undefined) {
     const final = record(state.finalValidation, "finalValidation");
     const receiptCommands = validationEvidence(final, "finalValidation");
-    const expected = finalValidationSequence(
-      graph as unknown as WorkGraph,
-      strings(state.objectiveCommands, "objectiveCommands"),
-    );
-    if (JSON.stringify(receiptCommands) !== JSON.stringify(expected.commands))
-      throw new Error(
-        "Final validation receipts differ from declared Objective commands",
-      );
-    const expectedPreparation = expected.preparation;
     if (
-      JSON.stringify(
-        (final.preparation as { command: string }[] | undefined)?.map(
-          (entry) => entry.command,
-        ) ?? [],
-      ) !== JSON.stringify(expectedPreparation)
+      !finalReceiptsMatch(
+        graph as unknown as WorkGraph,
+        strings(state.objectiveCommands, "objectiveCommands"),
+        {
+          preparation:
+            (final.preparation as { command: string }[] | undefined)?.map(
+              (entry) => entry.command,
+            ) ?? [],
+          commands: receiptCommands,
+        },
+      )
     )
       throw new Error(
-        "Final preparation receipts differ from declared fresh-checkout prerequisites",
+        "Final validation receipts differ from the Objective's declared commands and fresh-checkout prerequisites",
       );
     const selections = (graph as unknown as WorkGraph).items.flatMap((item) => {
       const itemWork = (work as Record<string, WorkState>)[item.id];

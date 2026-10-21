@@ -886,11 +886,16 @@ export function reusableEnvironmentValidationIndices(
 export function finalValidationSequence(
   graph: WorkGraph,
   objectiveCommands: readonly string[],
-): { preparation: string[]; commands: string[] } {
+): FinalValidationSequence {
+  const key = (command: string) => command.trim();
   const isBootstrap = (command: string) =>
     packageBootstrap(command) !== undefined;
+  const listed = objectiveCommands.filter(isBootstrap);
   let commands = [
-    ...new Set(objectiveCommands.filter(isBootstrap)),
+    ...listed.filter(
+      (command, index) =>
+        listed.findIndex((other) => key(other) === key(command)) === index,
+    ),
     ...objectiveCommands.filter((command) => !isBootstrap(command)),
   ];
   // The bootstrap's position never decides whether the final commands
@@ -917,12 +922,57 @@ export function finalValidationSequence(
       ? { preparation, commands }
       : { preparation: [bootstrap], commands };
   // Preparation runs ahead of the final commands, so the bootstrap leads it.
-  commands = commands.filter((command) => command !== bootstrap);
+  commands = commands.filter((command) => key(command) !== key(bootstrap));
   preparation = [
     bootstrap,
-    ...preparation.filter((command) => command !== bootstrap),
+    ...preparation.filter((command) => key(command) !== key(bootstrap)),
   ];
   return { preparation, commands };
+}
+
+export interface FinalValidationSequence {
+  preparation: string[];
+  commands: string[];
+}
+
+/**
+ * The sequence final validation ran before the bootstrap was hoisted: declared
+ * prerequisites unless the final commands start with them, then the final
+ * commands as listed. Only for reading receipts recorded under that rule.
+ */
+function previousFinalValidationSequence(
+  graph: WorkGraph,
+  objectiveCommands: readonly string[],
+): FinalValidationSequence {
+  const declared = objectivePreparationCommands(graph);
+  return {
+    preparation: declared.every(
+      (command, index) => objectiveCommands[index] === command,
+    )
+      ? []
+      : declared,
+    commands: [...objectiveCommands],
+  };
+}
+
+/**
+ * Whether recorded final receipts ran the Objective's sequence: the current
+ * one, or exactly the previous one for a run recorded before the change.
+ */
+export function finalReceiptsMatch(
+  graph: WorkGraph,
+  objectiveCommands: readonly string[],
+  receipts: FinalValidationSequence,
+): boolean {
+  return [
+    finalValidationSequence(graph, objectiveCommands),
+    previousFinalValidationSequence(graph, objectiveCommands),
+  ].some(
+    (sequence) =>
+      JSON.stringify(sequence.preparation) ===
+        JSON.stringify(receipts.preparation) &&
+      JSON.stringify(sequence.commands) === JSON.stringify(receipts.commands),
+  );
 }
 
 /** Preparation authority only; no readiness or acceptance inferred from success. */

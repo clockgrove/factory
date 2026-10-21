@@ -77,7 +77,7 @@ import {
   environmentValidationIndices,
   reusableEnvironmentValidationIndices,
   objectiveCandidate,
-  objectivePreparationCommands,
+  finalPreparationCommands,
 } from "./qa.js";
 import {
   type Autonomy,
@@ -2310,15 +2310,10 @@ export function parseFactoryState(
       throw new Error(
         "Final validation receipts differ from declared Objective commands",
       );
-    const declaredPreparation = objectivePreparationCommands(
+    const expectedPreparation = finalPreparationCommands(
       graph as unknown as WorkGraph,
+      state.objectiveCommands as string[],
     );
-    const objectiveCommands = state.objectiveCommands as string[];
-    const expectedPreparation = declaredPreparation.every(
-      (command, index) => objectiveCommands[index] === command,
-    )
-      ? []
-      : declaredPreparation;
     if (
       JSON.stringify(
         (final.preparation as { command: string }[] | undefined)?.map(

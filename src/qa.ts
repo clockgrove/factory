@@ -9,6 +9,7 @@ import type {
 import { installedControllerCapabilities } from "./controller-capabilities.js";
 import { PlannerDecision } from "./fault.js";
 import type { FactoryState } from "./state.js";
+import { packageBootstrap } from "./validation.js";
 
 /** The accepted graph determines whether this run qualifies existing bytes or delivers changes. */
 function baselineQaGraph(graph: WorkGraph): boolean {
@@ -872,6 +873,39 @@ export function reusableEnvironmentValidationIndices(
       );
     });
   });
+}
+
+/**
+ * What final validation runs on its fresh checkout before the final commands:
+ * the graph's declared prerequisites, unless the final commands already start
+ * with them, led by the graph's source-declared package bootstrap when no
+ * final command installs. Only a bootstrap that runs first installs, so the
+ * final commands get dependencies even when none of them lists one.
+ */
+export function finalPreparationCommands(
+  graph: WorkGraph,
+  finalCommands: readonly string[],
+): string[] {
+  const declared = objectivePreparationCommands(graph);
+  const preparation = declared.every(
+    (command, index) => finalCommands[index] === command,
+  )
+    ? []
+    : declared;
+  const bootstrap = graph.items
+    .flatMap((item) => item.validation)
+    .find(
+      (check) =>
+        check.provenance === "source-declared" &&
+        packageBootstrap(check.command) !== undefined,
+    )?.command;
+  const sequence = [...preparation, ...finalCommands];
+  return bootstrap === undefined ||
+    !sequence.length ||
+    packageBootstrap(sequence[0]!) !== undefined ||
+    finalCommands.some((command) => packageBootstrap(command) !== undefined)
+    ? preparation
+    : [bootstrap, ...preparation.filter((command) => command !== bootstrap)];
 }
 
 /** Preparation authority only; no readiness or acceptance inferred from success. */

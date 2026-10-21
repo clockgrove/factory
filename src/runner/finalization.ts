@@ -30,7 +30,7 @@ import {
   assertCompletedCoverage,
   finalReviewCriteria,
   objectiveCandidate,
-  objectivePreparationCommands,
+  finalPreparationCommands,
 } from "../qa.js";
 import type { FactoryState } from "../state.js";
 import { awaitsOperator } from "../step.js";
@@ -210,14 +210,9 @@ export async function finalizeObjective(args: {
       },
     });
     const finalCommands = state.objectiveCommands;
-    const declaredPreparation = objectivePreparationCommands(graph);
     // Only an exact current-phase prefix executes the full declared sequence
     // before later acceptance. Historical/other-checkout success never dedupes.
-    const preparationCommands = declaredPreparation.every(
-      (command, index) => finalCommands[index] === command,
-    )
-      ? []
-      : declaredPreparation;
+    const preparationCommands = finalPreparationCommands(graph, finalCommands);
     // Guard the same complete sequence validation will execute. Separate
     // guards would miss cross-phase ordering and package-manager mixing.
     assertPinnedNpmScripts(

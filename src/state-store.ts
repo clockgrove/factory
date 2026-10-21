@@ -4,7 +4,6 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { LocalContentStore } from "./content/local.js";
 import type { AgentSessionRef, ContentRef } from "./contracts.js";
-import { graphDigest } from "./graph-amendments.js";
 import { decodeAccountingRecord } from "./accounting.js";
 import {
   pinnedGit,
@@ -1031,9 +1030,10 @@ export function cancelledContinuationResourceHold(
 }
 
 /**
- * A graph revision replaces a Work Item's execution but keeps its worker
- * session, whose scope names the old graph. That session can never continue,
- * so its own native settlement receipt is the only proof left to check.
+ * A graph revision or a retry replaces a Work Item's execution but keeps the
+ * earlier attempt's worker session. That session can never continue (it is
+ * bound to an execution that no longer exists), so its own native settlement
+ * receipt is the only proof left to check.
  */
 function supersededWorkerSessionSettled(
   state: ContinuationState,
@@ -1043,7 +1043,7 @@ function supersededWorkerSessionSettled(
     !isExecutionState(state) ||
     ref.scope.role !== "implementation" ||
     ref.status !== "ready" ||
-    ref.scope.graphDigest === graphDigest(state.graph) ||
+    ref.executionIdentity === undefined ||
     ref.executionIdentity ===
       state.work[ref.scope.itemId]?.execution?.identity ||
     (ref.currentTurn !== undefined &&

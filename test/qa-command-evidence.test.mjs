@@ -623,6 +623,14 @@ test("an exact operator decline preserves a real result and permits ordinary com
       restoredContinuationOwnershipHold(superseded),
       /Foreign native session/,
     );
+    // A retry under the same graph leaves the failed attempt's session too.
+    const retried = structuredClone(state);
+    retried.agentSessions[`${key}#retried`] = {
+      ...structuredClone(session),
+      identity: "retried-native-worker",
+      executionIdentity: "failed-attempt",
+    };
+    assert.equal(restoredContinuationOwnershipHold(retried, true), undefined);
     old.data.workerSettled = false;
     assert.match(
       restoredContinuationOwnershipHold(superseded, true),

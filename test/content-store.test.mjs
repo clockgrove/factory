@@ -3211,16 +3211,199 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     },
   );
   assert.deepEqual(verifierDirectories(), []);
+  // The closed controller sealed its verifier for the next process (#1657).
+  const retainedVerifier = join(state, "recovery", "verifier.git");
+  const sealedTip = () =>
+    JSON.parse(readFileSync(join(retainedVerifier, "factory-verifier.json")))
+      .tip;
+  const storedObjects = (directory) => {
+    const counts = Object.fromEntries(
+      execFileSync("git", ["--git-dir", directory, "count-objects", "-v"], {
+        encoding: "utf8",
+      })
+        .trim()
+        .split("\n")
+        .map((line) => line.split(": ")),
+    );
+    return Number(counts.count) + Number(counts["in-pack"]);
+  };
+  const packNames = (directory) =>
+    readdirSync(join(directory, "objects", "pack")).filter((name) =>
+      name.endsWith(".pack"),
+    );
+  const fetchObservations = (offset) =>
+    readFileSync(diagnosticPath(repository, 0))
+      .subarray(offset)
+      .toString("utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter(
+        (event) =>
+          event.operation === "recovery-checkpoint-archive" &&
+          event.outcome === "completed" &&
+          event.metadata.phase === "fetch",
+      );
+  const sealedPacks = packNames(retainedVerifier);
+  const sealedObjects = storedObjects(retainedVerifier);
+  const advancedTip = (
+    await synchronizeRecoveryCheckpoint(config, {
+      reason: "explicit",
+      buildClosure,
+    })
+  ).lastAcknowledged.commitSha;
+  assert.notEqual(advancedTip, sealedTip());
+  let observationOffset = statSync(diagnosticPath(repository, 0)).size;
   await withRecoveryCheckpointOperation(
     operationInput,
     async () => {
       await readVerifiedRecoveryCheckpoint(config);
       assert.equal(verifierDirectories().length, 1);
       assert.notEqual(verifierDirectories()[0], firstVerifier);
+      // A reused verifier copies the sealed packs and receives only new objects.
+      const directory = join(state, "recovery", verifierDirectories()[0]);
+      assert(sealedPacks.every((pack) => packNames(directory).includes(pack)));
+      const received = storedObjects(directory) - sealedObjects;
+      const history = Number(
+        execFileSync(
+          "git",
+          [
+            "--git-dir",
+            remote,
+            "rev-list",
+            "--objects",
+            "--count",
+            advancedTip,
+          ],
+          { encoding: "utf8" },
+        ).trim(),
+      );
+      assert(received > 0 && received < history, `${received} of ${history}`);
     },
     { queueControlVerification: true },
   );
   assert.deepEqual(verifierDirectories(), []);
+  let [fetchObserved] = fetchObservations(observationOffset);
+  assert.equal(fetchObserved.metadata.verifierAdopted, true);
+  assert.equal(fetchObserved.metadata.negotiationHintArgument, true);
+  assert.equal(fetchObserved.metadata.fetchSkipped, false);
+  // An unchanged archive tip is read from the sealed verifier without a fetch.
+  assert.equal(sealedTip(), advancedTip);
+  observationOffset = statSync(diagnosticPath(repository, 0)).size;
+  await withRecoveryCheckpointOperation(
+    operationInput,
+    async () => {
+      assert.equal(
+        (await readVerifiedRecoveryCheckpoint(config)).commitSha,
+        advancedTip,
+      );
+    },
+    { queueControlVerification: true },
+  );
+  [fetchObserved] = fetchObservations(observationOffset);
+  assert.equal(fetchObserved.metadata.fetchSkipped, true);
+  // A changed sealed object store is discarded for a full fresh fetch.
+  const planted = execFileSync(
+    "git",
+    ["--git-dir", retainedVerifier, "hash-object", "-w", "--stdin"],
+    { input: "not from the remote", encoding: "utf8" },
+  ).trim();
+  observationOffset = statSync(diagnosticPath(repository, 0)).size;
+  await withRecoveryCheckpointOperation(
+    operationInput,
+    async () => {
+      assert.equal(
+        (await readVerifiedRecoveryCheckpoint(config)).commitSha,
+        advancedTip,
+      );
+      const directory = join(state, "recovery", verifierDirectories()[0]);
+      assert.throws(() =>
+        execFileSync(
+          "git",
+          ["--git-dir", directory, "cat-file", "-e", planted],
+          { stdio: "pipe" },
+        ),
+      );
+    },
+    { queueControlVerification: true },
+  );
+  [fetchObserved] = fetchObservations(observationOffset);
+  assert.equal(fetchObserved.metadata.verifierAdopted, false);
+  assert.equal(fetchObserved.metadata.negotiationHintArgument, false);
+  assert.deepEqual(verifierDirectories(), []);
+  // Packing the publisher keeps every object and the archive ref, and a
+  // controller's cached publisher material then only re-authenticates.
+  const publisher = join(state, "recovery", "git.git");
+  const allObjects = (directory) =>
+    execFileSync(
+      "git",
+      [
+        "--git-dir",
+        directory,
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check=%(objectname)",
+      ],
+      { encoding: "utf8" },
+    )
+      .trim()
+      .split("\n");
+  const looseObjects = (directory) =>
+    Number(
+      execFileSync("git", ["--git-dir", directory, "count-objects", "-v"], {
+        encoding: "utf8",
+      }).match(/^count: (\d+)$/m)[1],
+    );
+  // Each publication carries a real state change.
+  const publishChange = () => {
+    saveState(statePath(repository, 1), cancelled);
+    return synchronizeRecoveryCheckpoint(config, {
+      reason: "explicit",
+      buildClosure,
+    });
+  };
+  await withRecoveryCheckpointControllerVerification(
+    operationInput,
+    async () => {
+      await readVerifiedRecoveryCheckpoint(config);
+      await publishChange();
+      // Unreferenced loose objects, like the publisher's own writes.
+      const source = join(root, "loose-source.git");
+      execFileSync("git", ["init", "-q", "--bare", source]);
+      execFileSync("git", ["--git-dir", source, "fast-import", "--quiet"], {
+        input: Array.from(
+          { length: 2048 },
+          (_, index) => `blob\ndata ${`body ${index}`.length}\nbody ${index}\n`,
+        ).join(""),
+      });
+      const [sourcePack] = readdirSync(join(source, "objects", "pack")).filter(
+        (name) => name.endsWith(".pack"),
+      );
+      execFileSync("git", ["--git-dir", publisher, "unpack-objects", "-q"], {
+        input: readFileSync(join(source, "objects", "pack", sourcePack)),
+      });
+      rmSync(source, { recursive: true, force: true });
+      const before = allObjects(publisher);
+      assert(looseObjects(publisher) >= 2048);
+      // This acknowledgment caches the publisher material, then packs it.
+      const packedTip = (await publishChange()).lastAcknowledged.commitSha;
+      assert.equal(looseObjects(publisher), 0);
+      const after = new Set(allObjects(publisher));
+      assert(before.every((oid) => after.has(oid)));
+      assert.equal(
+        execFileSync("git", ["--git-dir", publisher, "for-each-ref"], {
+          encoding: "utf8",
+        }),
+        "",
+      );
+      const next = (await publishChange()).lastAcknowledged.commitSha;
+      assert.notEqual(next, packedTip);
+      assert.equal(
+        (await readVerifiedRecoveryCheckpoint(config)).commitSha,
+        next,
+      );
+    },
+  );
   // Non-opted long-running scopes keep the original per-read disposable path.
   await withRecoveryCheckpointScope(operationInput, async () => {
     await readVerifiedRecoveryCheckpoint(config);

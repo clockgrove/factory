@@ -1,3 +1,5 @@
+// Isolated even when run with a bare `node --test`, not only via npm test.
+import "./isolate-env.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";

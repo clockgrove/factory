@@ -1,3 +1,5 @@
+// Isolated even when run with a bare `node --test`, not only via npm test.
+import "./isolate-env.mjs";
 import {
   checkpointPlanningDispatch,
   compilePlan,

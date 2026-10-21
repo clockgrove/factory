@@ -12,13 +12,14 @@ import {
   queueControlBinding,
   stateRoot,
 } from "./config.js";
-import type {
-  GitHubGateway,
-  ProjectQueueExpectedTarget,
-  ProjectQueueInspection,
-  ProjectQueuePlannedEffect,
-  ProjectQueuePlannedAction,
-  ProjectQueueWriteReceipt,
+import {
+  AuthenticationRequiredError,
+  type GitHubGateway,
+  type ProjectQueueExpectedTarget,
+  type ProjectQueueInspection,
+  type ProjectQueuePlannedEffect,
+  type ProjectQueuePlannedAction,
+  type ProjectQueueWriteReceipt,
 } from "./contracts.js";
 import {
   type ControlRequest,
@@ -363,19 +364,29 @@ export async function readIntake(
   }
 }
 /**
- * A fault of the installation, not of one Objective: a `config` fault
- * (credentials, permissions), or a full, read-only or failing disk under a
- * state write. Returns what to show the operator, else undefined.
+ * A fault of the installation, not of one Objective: rejected credentials or
+ * authorization (a provider login, or HTTP 401/403 behind a `config` fault),
+ * or a full, read-only or failing disk under a state write. Other `config`
+ * faults, such as a frozen binding mismatch, stay the Objective's own.
+ * Returns what to show the operator, else undefined.
  */
 function installationFault(error: unknown): string | undefined {
   const fault = attachedFault(error);
-  if (fault?.kind === "config") return `${fault.detail}. ${fault.fix}`;
   for (
     let current: unknown = error, depth = 0;
     current instanceof Error && depth < 8;
     current = current.cause, depth++
   ) {
-    const code = (current as { code?: unknown }).code;
+    if (current instanceof AuthenticationRequiredError)
+      return `${current.message}; run \`${current.authentication.command}\``;
+    const { code, status, statusCode } = current as {
+      code?: unknown;
+      status?: unknown;
+      statusCode?: unknown;
+    };
+    const http = typeof status === "number" ? status : statusCode;
+    if (fault?.kind === "config" && (http === 401 || http === 403))
+      return `${fault.detail}. ${fault.fix}`;
     if (
       typeof code === "string" &&
       ["ENOSPC", "EDQUOT", "EROFS", "EIO"].includes(code)

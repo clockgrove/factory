@@ -658,9 +658,11 @@ export function submitAmendment(
       delete state.errorItem;
     }
     // The rejection held the coordinator paused (`rejectionHoldsPause`);
-    // its replacement lifts that hold, so the next pass compiles it (#1645).
+    // its replacement lifts that hold and restores the mode the operator
+    // asked for meanwhile, running by default (#1645).
     if (state.coordinator?.mode === "paused") {
-      state.coordinator.mode = "running";
+      state.coordinator.mode = state.coordinator.requestedMode ?? "running";
+      delete state.coordinator.requestedMode;
       if (state.coordinator.waitReason === rejected.error)
         delete state.coordinator.waitReason;
     }
@@ -1135,6 +1137,8 @@ export function decideAmendment(
     for (const key of state.charges?.[event]?.allowances ?? [])
       releaseCharge(state, event, key);
     if (state.coordinator) {
+      // The mode the operator had set returns with the replacement.
+      state.coordinator.requestedMode = state.coordinator.mode;
       state.coordinator.mode = "paused";
       state.coordinator.waitReason = pending.error;
     }
@@ -1945,6 +1949,8 @@ async function advanceAmendment(args: {
     pending.phase = "rejected";
     pending.error = error instanceof Error ? error.message : String(error);
     if (state.coordinator) {
+      // The mode the operator had set returns with the replacement.
+      state.coordinator.requestedMode = state.coordinator.mode;
       state.coordinator.mode = "paused";
       state.coordinator.waitReason = pending.error;
     }

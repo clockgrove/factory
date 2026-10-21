@@ -107,6 +107,7 @@ import {
   charge,
   chargeRepair,
   consumption,
+  failureDigest,
   objectiveEvent,
   repairScopes,
   resolveAutonomy,
@@ -1365,6 +1366,126 @@ test("cancellation stops an owned shell and its process group", async () => {
       "Retained unresolved owned cancellation",
     );
     assert.equal(readState(config.repository, 1).cancelledAt, undefined);
+
+    // A live owner held by a rejected amendment (#1645): the replacement
+    // wakes it at once, unless the operator drained it during the hold.
+    const heldConfig = { ...config, delivery: { kind: "regular" } };
+    for (const drained of [true, false]) {
+      const discovery = {
+        scope: "in-scope",
+        reason: "Restore needs the new table",
+        evidence: ["README.md"],
+        ownership: ["README.md"],
+        acceptance: ["Preserve README"],
+        dependencies: [],
+      };
+      const error = "Amendment compilation refused";
+      const held = {
+        ...structuredClone(snapshot),
+        configDigest: factoryConfigDigest(heldConfig),
+        coordinator: {
+          mode: "paused",
+          requestedMode: "running",
+          phase: "waiting",
+          phaseStartedAt: new Date().toISOString(),
+          processes: [],
+          waitReason: error,
+        },
+        pendingAmendment: {
+          id: randomUUID(),
+          proposal: {
+            ...discovery,
+            actor: "operator",
+            expectedGraphDigest: graphDigest(graph),
+          },
+          phase: "rejected",
+          rejectionStage: "compilation",
+          error,
+          issueByItemId: { local: 2 },
+        },
+      };
+      delete held.cancelRequested;
+      held.approvedPlaybookAdmission.configDigest = held.configDigest;
+      // The rejected attempt was charged; one revision is left to replace it.
+      held.autonomy = resolveAutonomy({ allowances: { planningRevisions: 2 } });
+      charge(
+        held,
+        objectiveEvent("amend", held.pendingAmendment.id),
+        "planningRevisions",
+        ["$planning"],
+      );
+      saveState(statePath(config.repository, 1), held);
+      const lock = acquireInstallationLock(config.repository, 1);
+      let control;
+      let registered;
+      const ready = new Promise((resolve) => {
+        registered = resolve;
+      });
+      const running = runObjective(heldConfig, 1, services, {
+        ownerLock: lock,
+        observeControl: (handler) => {
+          control = handler;
+          if (handler) registered();
+        },
+      }).then(
+        () => undefined,
+        (failure) => failure,
+      );
+      try {
+        await ready;
+        if (drained) await control({ objective: 1, action: "drain" });
+        await control({
+          objective: 1,
+          action: "propose-amendment",
+          input: {
+            ...discovery,
+            actor: "operator",
+            expectedGraphDigest: graphDigest(graph),
+            replacement: {
+              amendmentId: held.pendingAmendment.id,
+              correction: {
+                kind: "planning-output",
+                failureDigest: failureDigest(error),
+                actor: "operator",
+                diagnosis: "The compiled graph lacked the owner",
+                correction: "Give the item the restore path",
+              },
+            },
+          },
+        });
+        const current = readContinuation(config.repository, 1);
+        assert.equal(current.pendingAmendment.phase, "ready");
+        assert.equal(current.coordinator.requestedMode, undefined);
+        // A held owner never settles on its own; a woken one runs its next
+        // pass at once and settles on what that pass meets.
+        const settled = await Promise.race([
+          running.then(() => true),
+          new Promise((resolve) =>
+            setTimeout(() => resolve(false), drained ? 500 : 10_000),
+          ),
+        ]);
+        assert.equal(
+          current.coordinator.mode,
+          drained ? "draining" : "running",
+        );
+        assert.equal(settled, !drained);
+        if (drained) {
+          await control({ objective: 1, action: "handoff" });
+          assert.ok((await running) instanceof CoordinatorHandoff);
+        } else
+          assert.notEqual(
+            readContinuation(config.repository, 1).coordinator.waitReason,
+            error,
+          );
+      } finally {
+        if (control)
+          await control({ objective: 1, action: "handoff" }).catch(
+            () => undefined,
+          );
+        await running;
+        releaseControllerLock(installationLockPath(config.repository), lock);
+      }
+    }
 
     // Actual pre-dispatch Codex receipts and owned homes exercise preparation
     // cancellation without native inference, GitHub calls or invented terminals.

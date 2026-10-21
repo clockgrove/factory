@@ -1015,8 +1015,8 @@ async function runObjectiveOwned(
           state,
           request.input as unknown as AmendmentProposal,
         );
-        // A replacement lifts the rejection's pause: this owner continues at
-        // once, as after resume, unless it is handing off (#1645).
+        // A replacement lifts the rejection's pause: when the restored mode
+        // is running, this owner continues at once, as after resume (#1645).
         if (held && owner.handoff) setCoordinatorMode(state, "draining");
         else if (held && state.coordinator?.mode === "running")
           owner.pause = new AbortController();

@@ -246,6 +246,8 @@ export interface CoordinatorDisposition {
   waitReason?: string;
   cancelError?: string;
   processes?: { pid: number; startTime: string }[];
+  /** The operator's mode a rejection hold overrode; its replacement restores it. */
+  requestedMode?: "running" | "paused" | "draining";
 }
 
 /** Preparation shares the atomic state path; no executable graph is invented. */
@@ -472,13 +474,22 @@ export function planningRevisionGrantable(state: ContinuationState): boolean {
   );
 }
 
-/** Set the coordinator's mode, unless a rejected amendment holds it paused. */
+/**
+ * Set the coordinator's mode, unless a rejected amendment holds it paused:
+ * then the requested mode is kept for the replacement to restore.
+ */
 export function setCoordinatorMode(
   state: ContinuationState,
   mode: CoordinatorDisposition["mode"],
 ): void {
-  if (state.coordinator)
-    state.coordinator.mode = rejectionHoldsPause(state) ? "paused" : mode;
+  if (!state.coordinator) return;
+  if (rejectionHoldsPause(state)) {
+    state.coordinator.mode = "paused";
+    state.coordinator.requestedMode = mode;
+  } else {
+    state.coordinator.mode = mode;
+    delete state.coordinator.requestedMode;
+  }
 }
 
 /** Existing native-stack slot: exact creation request, never an inferred remote identity. */

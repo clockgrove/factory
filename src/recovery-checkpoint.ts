@@ -4332,15 +4332,35 @@ function readArchivedSnapshots(
       selected.push({ file, oid });
     }
   }
-  // Bounded like any body batch; each body is checked against its digest.
-  const bodies = readRecoveryCheckpointBodies(directory, options, [
-    ...new Map(
-      selected.map(({ file, oid }) => [
-        file.ref.digest,
-        { ref: file.ref, oid },
-      ]),
-    ).values(),
-  ]);
+  // Retired snapshots accumulate with every retirement, so they are read in
+  // batches that each fit the archive limits (#1698); a snapshot that alone
+  // exceeds them still fails. Each body is checked against its digest.
+  const bodies = new Map<string, Buffer>();
+  let batch: { ref: ContentRef; oid: string }[] = [];
+  let batchBytes = 0;
+  const flush = () => {
+    for (const [digest, bytes] of readRecoveryCheckpointBodies(
+      directory,
+      options,
+      batch,
+    ))
+      bodies.set(digest, bytes);
+    batch = [];
+    batchBytes = 0;
+  };
+  for (const entry of new Map(
+    selected.map(({ file, oid }) => [file.ref.digest, { ref: file.ref, oid }]),
+  ).values()) {
+    if (
+      batch.length &&
+      (batch.length >= options.maxFiles ||
+        batchBytes + entry.ref.bytes > options.maxBytes)
+    )
+      flush();
+    batch.push(entry);
+    batchBytes += entry.ref.bytes;
+  }
+  if (batch.length) flush();
   return selected.map(({ file }) => ({
     file,
     bytes: Uint8Array.from(bodies.get(file.ref.digest)!),

@@ -189,12 +189,19 @@ function planGraphLint(
       );
     }
   if (!graph.items.some((item) => item.validation.length)) return findings;
+  // A read-only QA node checks the integrated result of the work it depends
+  // on (a published-CI targetItem is one of those dependencies), so their
+  // commands are its local evidence; an aggregate's are its children's.
   const localEvidence = (id: string): boolean => {
     const item = byId.get(id);
     return Boolean(
       item &&
         (item.validation.length ||
-          (item.children ?? []).some((child) => localEvidence(child))),
+          (item.children ?? []).some((child) => localEvidence(child)) ||
+          (item.kind === "qa" &&
+            [...ancestorsOf(item.id)].some(
+              (ancestor) => byId.get(ancestor)!.validation.length,
+            ))),
     );
   };
   for (const item of graph.items)

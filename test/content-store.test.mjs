@@ -5897,6 +5897,95 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     contextId: wireGraph.contextId,
     outcome: { kind: "graph", graph: unproved },
   });
+  // No false refusals. Above, sibling's overlap with independent is admitted
+  // through a transitive dependency (sibling -> join -> independent). Opposite
+  // branches of one condition never both run, so they may share paths.
+  const readonlyItem = (item, fields) => {
+    const copy = structuredClone(item);
+    for (const field of [
+      "ownedPaths",
+      "sourceAssets",
+      "media",
+      "newPackages",
+      "condition",
+    ])
+      delete copy[field];
+    return { ...copy, ...fields };
+  };
+  const branched = structuredClone(unproved);
+  branched.conditions = [
+    {
+      schemaVersion: 1,
+      id: "empty-inventory",
+      input: {
+        producerItemId: inventory.id,
+        role: specification.role,
+        schema: specification.schema,
+      },
+      predicate: { kind: "inventory-empty" },
+    },
+  ];
+  branched.items.push(
+    readonlyItem(branched.items[0], {
+      id: inventory.id,
+      kind: "discovery",
+      validation: [],
+      discovery: specification,
+    }),
+    ...[true, false].map((when) => ({
+      ...structuredClone(branched.items[0]),
+      id: `branch-${when}`,
+      ownedPaths: ["shared/"],
+      dependencies: [inventory.id],
+      condition: { conditionId: "empty-inventory", when },
+    })),
+  );
+  compilation.wire.decode({
+    contextId: wireGraph.contextId,
+    outcome: { kind: "graph", graph: branched },
+  });
+  // A hosted-CI criterion owned by read-only QA has local evidence in the
+  // commands of the work it checks, here its published-CI targetItem.
+  const ciCompilation = renderCompilationCall({
+    objective: criterion,
+    baseSha,
+    sources: [{ path: "OBJECTIVE", content: criterion }, ...sources],
+    compileContext: {
+      objectiveNumber: producer.objective,
+      instructions: "Preserve the migration contract.",
+    },
+    coverageObligations: graph.coverage.map(
+      ({ itemId, proof, environment, ...obligation }) => obligation,
+    ),
+    contextLookup: lookup.packet,
+    controllerCapabilities: installedControllerCapabilities(),
+    controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
+    checkNames: ["gate"],
+  });
+  const hosted = structuredClone(unproved);
+  hosted.contextId = ciCompilation.wire.data.contextId;
+  hosted.items.push(
+    readonlyItem(hosted.items[1], {
+      id: "hosted",
+      kind: "qa",
+      validation: [],
+      dependencies: ["join"],
+    }),
+  );
+  hosted.coverage[0] = {
+    ...hosted.coverage[0],
+    itemId: "hosted",
+    proof: { kind: "published-ci", checkIndex: 0, dependencyIndex: 0 },
+  };
+  assert.deepEqual(
+    ciCompilation.wire
+      .decode({
+        contextId: hosted.contextId,
+        outcome: { kind: "graph", graph: hosted },
+      })
+      .graph.coverage.map(({ itemId, proof }) => [itemId, proof.kind]),
+    [["hosted", "published-ci"]],
+  );
   const routeDefaults = {
     ...common,
     resources: [],

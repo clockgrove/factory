@@ -2342,7 +2342,8 @@ export class RealGitHubGateway implements GitHubGateway {
       conclusion: string | null;
       html_url: string;
       started_at?: string | null;
-      app?: { id?: number } | null;
+      app?: { id?: number; slug?: string } | null;
+      check_suite?: { id?: number } | null;
     }[] = [];
     for (let page = 1; ; page++) {
       const result = await this.api<{ check_runs: typeof runs }>(
@@ -2376,12 +2377,79 @@ export class RealGitHubGateway implements GitHubGateway {
     const statuses = combined;
     // Every check on the head that ended without success, required or not
     // (#1637). A cancelled (or stale) run with another run of the same check
-    // (name and app, #1640) on the head that succeeded or is still running
-    // was superseded, not failed.
-    const sameCheck = (a: (typeof runs)[number], b: (typeof runs)[number]) =>
-      a.name === b.name &&
-      typeof a.app?.id === "number" &&
-      a.app.id === b.app?.id;
+    // on the head that succeeded or is still running was superseded, not
+    // failed. The same check is the same name and app and, since every
+    // Actions run shares one app, the same workflow (#1640); an unknown
+    // identity is never superseded.
+    let suites: Map<number, number> | undefined;
+    /** The workflow of each Actions check suite on the head. */
+    const workflowSuites = async (): Promise<Map<number, number>> => {
+      if (suites) return suites;
+      suites = new Map();
+      type WorkflowRun = { check_suite_id?: unknown; workflow_id?: unknown };
+      try {
+        for (let page = 1; ; page++) {
+          const result = await this.api<{ workflow_runs?: WorkflowRun[] }>(
+            "GET",
+            `actions/runs?head_sha=${identity.headSha}&per_page=100&page=${page}`,
+          );
+          const listed = Array.isArray(result.workflow_runs)
+            ? result.workflow_runs
+            : [];
+          for (const run of listed)
+            if (
+              Number.isSafeInteger(run?.check_suite_id) &&
+              Number.isSafeInteger(run?.workflow_id)
+            )
+              suites.set(
+                run.check_suite_id as number,
+                run.workflow_id as number,
+              );
+          if (listed.length < 100) break;
+        }
+      } catch (error) {
+        // No Actions read access: the workflows stay unknown.
+        if (
+          !(
+            error instanceof GitHubRequestError &&
+            [403, 404].includes(error.status) &&
+            attachedFault(error)?.kind !== "transient"
+          )
+        )
+          throw error;
+      }
+      return suites;
+    };
+    const checkIdentity = async (
+      run: (typeof runs)[number],
+    ): Promise<string | undefined> => {
+      const app = run.app?.id;
+      if (typeof app !== "number" || !Number.isSafeInteger(app) || app <= 0)
+        return undefined;
+      if (run.app?.slug !== "github-actions") return `${run.name}\0${app}`;
+      const workflow = (await workflowSuites()).get(run.check_suite?.id ?? 0);
+      return workflow === undefined
+        ? undefined
+        : `${run.name}\0${app}\0${workflow}`;
+    };
+    const identities = new Map<(typeof runs)[number], string | undefined>();
+    if (
+      runs.some((run) => ["cancelled", "stale"].includes(run.conclusion ?? ""))
+    )
+      for (const run of runs) identities.set(run, await checkIdentity(run));
+    const superseded = (run: (typeof runs)[number]) => {
+      const id = identities.get(run);
+      return (
+        id !== undefined &&
+        runs.some(
+          (other) =>
+            other !== run &&
+            identities.get(other) === id &&
+            other.head_sha === identity.headSha &&
+            (other.status !== "completed" || other.conclusion === "success"),
+        )
+      );
+    };
     const failedChecks: FailedCheck[] = [];
     for (const run of runs) {
       const conclusion = run.conclusion ?? "";
@@ -2399,14 +2467,7 @@ export class RealGitHubGateway implements GitHubGateway {
             "action_required",
             "startup_failure",
           ].includes(conclusion) ||
-          (["cancelled", "stale"].includes(conclusion) &&
-            !runs.some(
-              (other) =>
-                sameCheck(other, run) &&
-                other.head_sha === identity.headSha &&
-                (other.status !== "completed" ||
-                  other.conclusion === "success"),
-            ))
+          (["cancelled", "stale"].includes(conclusion) && !superseded(run))
         )
       )
         continue;

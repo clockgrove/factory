@@ -1282,7 +1282,8 @@ export interface DeliveryObservation {
   /**
    * Check runs and commit statuses on this exact head that ended without
    * success (failed, cancelled, timed out, errored), required or not. A
-   * cancelled or stale run here has no successor of the same name and app.
+   * cancelled or stale run here has no successor of the same name, app
+   * and, for GitHub Actions, workflow.
    */
   failedChecks?: FailedCheck[];
   /**

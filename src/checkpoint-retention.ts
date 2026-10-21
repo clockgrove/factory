@@ -368,11 +368,13 @@ export async function reclaimRetiredMaterial(
       value,
       join(state, "content"),
     );
+    // Leaves before the manifests that list them: an interrupted pass never
+    // leaves a child no later listing can reach.
     store.reclaimArchived(
       record.evidenceCommit,
-      [record.stateDigest, ...contentRefs.map((ref) => ref.digest)].filter(
-        (digest) => holds.has(digest),
-      ),
+      [record.stateDigest, ...contentRefs.map((ref) => ref.digest)]
+        .filter((digest) => holds.has(digest))
+        .reverse(),
     );
     writeRetirement(config.repository, { ...record, bodies: "complete" });
   };

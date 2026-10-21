@@ -1002,6 +1002,9 @@ async function runObjectiveOwned(
       }
       if (request.objective !== objective)
         throw new Error("Objective identity differs from owner");
+      // An operator's pause or drain during a service handoff wins: the drain
+      // it leaves is the operator's, never resumed by the service (#1701).
+      if (["pause", "drain"].includes(request.action)) delete owner.handoffBy;
       const state = owner.snapshot;
       if (!state && ["pause", "drain", "handoff"].includes(request.action)) {
         if (request.action === "handoff") releaseOwnership();
@@ -1069,7 +1072,7 @@ async function runObjectiveOwned(
             : ["drain", "handoff"].includes(request.action)
               ? "draining"
               : "running",
-          owner.handoff ? owner.handoffBy : undefined,
+          request.action === "handoff" ? owner.handoffBy : undefined,
         );
         persist();
         wake();

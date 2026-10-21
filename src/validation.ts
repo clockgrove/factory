@@ -652,6 +652,9 @@ export async function validateCheckout(
           TMPDIR: temporaryRoot,
           TMP: temporaryRoot,
           TEMP: temporaryRoot,
+          // Factory fetches by SHA and never moves the checkout's
+          // remote-tracking branches, so base-relative checks use this (#1664).
+          ...(acceptedBaseSha && { FACTORY_BASE_SHA: acceptedBaseSha }),
         },
         network: online,
         packageInstall: install,

@@ -257,6 +257,23 @@ test("final review receives actual fresh integrated checkout provenance", async 
       evidence.worktreeObservation.checkoutPreparation.afterIntegrationSha,
       undefined,
     );
+    // Validation commands get the accepted base, since the checkout's
+    // remote-tracking branches are never refreshed (#1664).
+    const based = await validateTree(
+      checkout,
+      join(root, "based-validation"),
+      commit,
+      treeSha,
+      [
+        `test "$FACTORY_BASE_SHA" = ${baseSha} && git merge-base --is-ancestor "$FACTORY_BASE_SHA" HEAD`,
+      ],
+      undefined,
+      undefined,
+      [],
+      undefined,
+      baseSha,
+    );
+    assert.equal(based.commands[0].passed, true);
     const generic = join(root, "generic");
     await addWorktree(checkout, generic, commit);
     const genericEvidence = await validateCheckout(

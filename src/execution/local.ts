@@ -1544,11 +1544,14 @@ export async function collectWorktreeResult(
   // An empty result is still wrong, but a staged discovery is the worker's
   // account of why: it rides on the fault so Factory reviews it (#820). A
   // continued attempt that left its starting tree as it was resubmits the
-  // refused result, so it is empty too (#1313).
+  // refused result, so it is empty too (#1313), unless a diagnosed repair of
+  // a failed validation command continues it: that correction may be
+  // environmental, so the unchanged result is validated again (#1665).
   const unchangedContinuation =
     !assets.length &&
     paths.length > 0 &&
     request.retainedFailedResult !== undefined &&
+    request.retainedFailedResult.revalidate !== true &&
     pinnedGit(worktree, "write-tree") ===
       continuedRetainedTree(checkout, worktree, request);
   if ((!paths.length && !assets.length) || unchangedContinuation)
@@ -1631,7 +1634,7 @@ const retainedFailedNotContinued = (
 const retainedFailedContinued = (
   retained: NonNullable<ExecutionRequest["retainedFailedResult"]>,
 ): string =>
-  `\nRetained failed committed result, verified in this checkout: ${JSON.stringify(retained)}. Its files are already in your working tree: this attempt continues from that result, as uncommitted changes on top of the accepted base HEAD. It is unaccepted implementation context, not normative source or acceptance proof. Fix exactly what the findings and any diagnosed correction refuse, and keep the rest. Do not checkout, reset or cherry-pick the failed commit or the base; your result is collected from this working tree as usual. Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
+  `\nRetained failed committed result, verified in this checkout: ${JSON.stringify(retained)}. Its files are already in your working tree: this attempt continues from that result, as uncommitted changes on top of the accepted base HEAD. It is unaccepted implementation context, not normative source or acceptance proof. Fix exactly what the findings and any diagnosed correction refuse, and keep the rest. Do not checkout, reset or cherry-pick the failed commit or the base; your result is collected from this working tree as usual.${retained.revalidate ? " A validation command refused it and the diagnosed correction may be environmental: if the result needs no source change, leave the working tree as it is and it is validated and reviewed again." : ""} Missing prior unfinished uncommitted edits remain unavailable. All current validation and independent acceptance apply anew; old command passes do not prove this result.`;
 
 /** The worker brief suffixes the local driver may append for this request. */
 export function retainedFailedResultBriefs(

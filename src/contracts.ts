@@ -1,6 +1,7 @@
 import type { ExecutionProfileEnvironment } from "./config.js";
 import type { DesignRisk } from "./compiler/work-item-rubric.js";
 import type { ControllerCapabilitiesManifest } from "./controller-capabilities.js";
+import type { RetainedFailedResult } from "./repair-policy.js";
 import type {
   GraphReviewFinding,
   ReviewChoiceFinding,
@@ -926,11 +927,7 @@ export interface ExecutionRequest {
   /** The selected LFS bytes controller validation restores for this item at its base. */
   validationLfsMembers?: ValidationLfsMember[];
   /** Archived failed commit only; never an accepted execution base or proof. */
-  retainedFailedResult?: {
-    attemptId: string;
-    commitSha: string;
-    treeSha: string;
-  };
+  retainedFailedResult?: RetainedFailedResult;
   /** Trusted graph selection; never commands inferred from the authored brief. */
   environmentReadiness?: {
     validationIndices: number[];

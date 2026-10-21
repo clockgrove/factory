@@ -590,6 +590,19 @@ export function archiveAttempt(work: WorkState): WorkRecovery {
     ],
   };
 }
+/** An archived failed result, and whether it may be resubmitted unchanged. */
+export interface RetainedFailedResult {
+  attemptId: string;
+  commitSha: string;
+  treeSha: string;
+  /**
+   * A validation command refused it and a diagnosed repair corrected that:
+   * the correction may be environmental, so returning it unchanged
+   * resubmits it for validation and review instead of failing (#1665).
+   */
+  revalidate?: true;
+}
+
 /**
  * The exact unpublished failed result the next attempt continues from: a
  * wrong result refused at validation, retried or repaired with an
@@ -598,7 +611,7 @@ export function archiveAttempt(work: WorkState): WorkRecovery {
  */
 function retainedFailedResultContext(
   prior: NonNullable<WorkRecovery["history"]>[number] | undefined,
-): { attemptId: string; commitSha: string; treeSha: string } | undefined {
+): RetainedFailedResult | undefined {
   const work = prior?.work;
   if (
     prior?.failure?.classification !== "implementation" ||
@@ -617,6 +630,11 @@ function retainedFailedResultContext(
     attemptId: work.attempt,
     commitSha: work.changeRef,
     treeSha: work.treeSha,
+    ...(prior.correction !== undefined &&
+      prior.failure.validationCaptureDigest !== undefined &&
+      prior.failure.semanticRefusal === undefined && {
+        revalidate: true as const,
+      }),
   };
 }
 
@@ -631,7 +649,7 @@ function retainedFailedResultContext(
 export function retainedFailedResultFor(
   recovery: WorkRecovery | undefined,
   attempt?: string,
-): { attemptId: string; commitSha: string; treeSha: string } | undefined {
+): RetainedFailedResult | undefined {
   if (!recovery || recovery.freshBase) return undefined;
   const history = recovery.history ?? [];
   for (let index = history.length - 1; index >= 0; index--) {

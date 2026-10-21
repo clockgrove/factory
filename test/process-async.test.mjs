@@ -2675,6 +2675,14 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
         "",
       ]);
     }
+    // The re-review settles its unanswered diagnosis as abandoned (#1674).
+    const lost = randomUUID();
+    state.work.local.recovery.diagnosisInvocation = {
+      id: lost,
+      submitted: true,
+      requestDigest: "a".repeat(64),
+    };
+    saveState(statePath(config.repository, 1), state);
     const attempt = work.attempt;
     rereviewWorkItem(config, 1, request);
     Object.assign(state, readState(config.repository, 1));
@@ -2685,6 +2693,11 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
     assert.equal(work.treeSha, treeSha);
     assert.deepEqual(work.recovery.history[0].work.failedValidation, original);
     assert.deepEqual(work.recovery.history[0].failure, originalFailure);
+    for (const diagnosis of [
+      work.recovery.diagnosisInvocation,
+      work.recovery.history[0].diagnosisInvocation,
+    ])
+      assert.deepEqual(diagnosis.abandoned, [lost]);
     assert.equal(consumption(state).resultRereviews, 1);
     assert.equal(consumption(state).implementationRepairs, 0);
     assert.throws(() => rereviewWorkItem(config, 1, request), /not awaiting/);
@@ -3736,6 +3749,19 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       assert.equal(diagnosis.response, undefined);
       assert.deepEqual(diagnosis.abandoned, [lostDiagnosis]);
     }
+    assert.doesNotMatch(
+      restoredContinuationOwnershipHold(settledRetry, true) ?? "",
+      /diagnosis/,
+    );
+    // An archived diagnosis whose native return was retained but never
+    // answered keeps its refs and no longer holds the handoff (#1674).
+    settledRetry.work.local.recovery.history.at(-1).diagnosisInvocation = {
+      id: lostDiagnosis,
+      submitted: true,
+      nativeReturns: [
+        { digest: "b".repeat(64), bytes: 2, mediaType: "application/json" },
+      ],
+    };
     assert.doesNotMatch(
       restoredContinuationOwnershipHold(settledRetry, true) ?? "",
       /diagnosis/,

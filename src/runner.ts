@@ -2754,6 +2754,7 @@ export function rereviewWorkItem(
     const event = `item/${input.item}/result-rereview/${work.recovery?.history?.length ?? 0}`;
     charge(state, event, "resultRereviews", repairScopes(state, input.item));
     const recovery = archiveAttempt(work);
+    abandonRetriedDiagnoses(state, recovery);
     delete recovery.failure;
     delete recovery.correction;
     delete recovery.phase;

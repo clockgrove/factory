@@ -734,17 +734,20 @@ function abandonedDiagnosis(
 }
 
 /**
- * The operator's retry of a Work Item settles each of its submitted
- * diagnoses that has no response (current or archived) as abandoned: the
- * retry decision ends them, their outcome stays unknown, and a late response
- * no longer matches its invocation (#1661). One that holds native returns
- * awaiting validation stays as it is. A diagnosis whose planning turn is
- * still live or holds a completed result is not the retry's to end: the
- * retry is refused until a run settles that turn through its owner.
+ * Archiving a Work Item's attempt (a retry, a result re-review, an amendment's
+ * reattempt) settles each of its submitted diagnoses that has no response
+ * (current or archived) as abandoned: the decision ends them, their outcome
+ * stays unknown, and a late response no longer matches its invocation
+ * (#1661, #1674). One that holds native returns awaiting validation stays as
+ * it is. A diagnosis whose planning turn is still live or holds a completed
+ * result is never abandoned: an operator command ("refuse") is refused until
+ * a run settles that turn through its owner; a run's own archive ("keep")
+ * leaves it held for the run to settle.
  */
 export function abandonRetriedDiagnoses(
   state: ContinuationState,
   recovery: WorkRecovery,
+  onHeld: "refuse" | "keep" = "refuse",
 ): void {
   const unanswered = [recovery, ...(recovery.history ?? [])].filter(
     (holder) =>
@@ -761,14 +764,18 @@ export function abandonRetriedDiagnoses(
           ref.currentTurn.resources !== "settled" ||
           (ref.status === "ready" && ref.currentTurn.terminal === "completed")),
     );
-  if (unanswered.some((holder) => held(holder.diagnosisInvocation!.id)))
+  if (
+    onHeld === "refuse" &&
+    unanswered.some((holder) => held(holder.diagnosisInvocation!.id))
+  )
     throw new Error(
-      "A diagnosis of this Work Item is still held by its planning session; run the Objective to settle it, then retry",
+      "A diagnosis of this Work Item is still held by its planning session; run the Objective to settle it, then try again",
     );
   for (const holder of unanswered)
-    holder.diagnosisInvocation = abandonedDiagnosis(
-      holder.diagnosisInvocation!,
-    );
+    if (!held(holder.diagnosisInvocation!.id))
+      holder.diagnosisInvocation = abandonedDiagnosis(
+        holder.diagnosisInvocation!,
+      );
 }
 
 /**

@@ -1140,9 +1140,12 @@ function continuationOwnershipHold(
     !cancelledInvocations &&
     Object.values(state.work).some((work) =>
       work.recovery?.history?.some(
+        // A retained native return settles the archived call: no attempt
+        // resumes to validate it, and its refs stay as evidence (#1674).
         (entry) =>
           entry.diagnosisInvocation?.submitted &&
-          entry.diagnosisInvocation.response === undefined,
+          entry.diagnosisInvocation.response === undefined &&
+          !entry.diagnosisInvocation.nativeReturns?.length,
       ),
     )
   )

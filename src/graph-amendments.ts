@@ -1,4 +1,7 @@
-import { settleAbandonedPlanningTurn } from "./agent-session.js";
+import {
+  abandonRetriedDiagnoses,
+  settleAbandonedPlanningTurn,
+} from "./agent-session.js";
 import { Readable } from "node:stream";
 import { awaitCheckpointAdmission } from "./recovery-checkpoint.js";
 import {
@@ -1961,9 +1964,11 @@ async function advanceAmendment(args: {
       const work = state.work[reattempt]!;
       releaseCharge(state, work.recovery!.failure!.event!);
       clearRepeats(state, { item: reattempt });
+      const recovery = archiveUncorrectedAttempt(work);
+      abandonRetriedDiagnoses(state, recovery, "keep");
       state.work[reattempt] = {
         status: "pending",
-        recovery: { ...archiveUncorrectedAttempt(work), phase: "stopped" },
+        recovery: { ...recovery, phase: "stopped" },
       };
     }
     delete state.pendingAmendment;

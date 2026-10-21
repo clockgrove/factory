@@ -483,6 +483,7 @@ export async function compileObjective(
   contextLookup?: PlanningContextPacket,
   workflowRecipe?: WorkflowRecipeInput,
   revise?: PlanRevisionInput,
+  requiredFinalCommands: readonly string[] = [],
 ): Promise<WorkGraph> {
   const request = prepareCompilationRequest({
     objective,
@@ -502,6 +503,7 @@ export async function compileObjective(
     contextLookup,
     workflowRecipe,
     revise,
+    requiredFinalCommands,
   });
   const result = await model
     .generateStructured<WorkGraph | PlanningTurnResponse>(request)
@@ -562,6 +564,8 @@ export function prepareCompilationRequest(args: {
   contextLookup?: PlanningContextPacket;
   workflowRecipe?: WorkflowRecipeInput;
   revise?: PlanRevisionInput;
+  /** The installation's required final-validation commands; their scripts stay fixed. */
+  requiredFinalCommands?: readonly string[];
 }): PlanningRequest<WorkGraph> {
   const {
     objective,
@@ -605,7 +609,12 @@ export function prepareCompilationRequest(args: {
     revising,
   );
   const prompt = `Objective #${objective}\n${body}${instructions}`;
-  const scripts = fixedScripts(body, baseSha, checkout);
+  const scripts = fixedScripts(
+    body,
+    baseSha,
+    checkout,
+    args.requiredFinalCommands,
+  );
   return {
     ...(args.workflowRecipe ? { workflowRecipe: args.workflowRecipe } : {}),
     ...(args.contextLookup ? { contextLookup: args.contextLookup } : {}),

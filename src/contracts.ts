@@ -638,6 +638,8 @@ export interface PlanReviewRequest {
   graph: WorkGraph;
   commands: PlanCommandAuthorization[];
   finalCommands: string[];
+  /** The installation's required final-validation commands, already in finalCommands. */
+  requiredFinalCommands?: string[];
   /** Check names from the base's workflows. */
   checkNames?: string[];
   /**

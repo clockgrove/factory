@@ -11,11 +11,16 @@ import {
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import {
+  assertRequiredFinalCommands,
   finalObjectiveCommands,
   planningSources,
   undeclaredObjectiveCommands,
 } from "./compiler.js";
-import type { FactoryConfig } from "./config.js";
+import {
+  finalValidationCommands,
+  requiredFinalCommands,
+  type FactoryConfig,
+} from "./config.js";
 import type { PlanningLocalExecutables, WorkGraph } from "./contracts.js";
 import {
   localValidationEnvironment,
@@ -387,7 +392,12 @@ export function preflightObjective(
     throw new Error(
       `Objective names ${named.map((command) => `\`${command}\``).join(", ")} but declares no final command. Final commands are only Acceptance bullets that are exactly one backticked command; planning cannot add them. Add each command the integrated result must pass under Acceptance as its own bullet, for example:\n${named.map((command) => `- \`${command}\``).join("\n")}\nIf the Objective needs no final command, remove the backticks from those mentions.`,
     );
-  const finalCommands = finalObjectiveCommands(body);
+  const required = requiredFinalCommands(config);
+  assertRequiredFinalCommands(required, body, baseSha, config.checkout);
+  const finalCommands = finalValidationCommands(
+    finalObjectiveCommands(body),
+    required,
+  );
   const observations: PlanningLocalExecutables["observations"] = [];
   const root = mkdtempSync(join(tmpdir(), "factory-preflight-"));
   try {

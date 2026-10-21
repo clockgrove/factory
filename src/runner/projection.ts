@@ -8,11 +8,16 @@ import { graphProjectionControl } from "../graph-projection-control.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
+  assertRequiredFinalCommands,
   finalObjectiveCommands,
   type PlanCandidate,
   verifyPlanCandidate,
 } from "../compiler.js";
-import { finalValidationCommands, type FactoryConfig } from "../config.js";
+import {
+  finalValidationCommands,
+  requiredFinalCommands,
+  type FactoryConfig,
+} from "../config.js";
 import type {
   ApprovedPlaybookAdmission,
   ContentStore,
@@ -105,6 +110,21 @@ export async function projectPreparedObjective(args: {
     throw new Error(
       "Accepted plan execution profile policy differs from installation",
     );
+  // Required final-validation commands fail here, before any item starts,
+  // rather than at the end of final validation.
+  assertRequiredFinalCommands(
+    requiredFinalCommands(config),
+    issue.body,
+    baseSha,
+    config.checkout,
+  );
+  if (
+    JSON.stringify(plan.requiredFinalCommands ?? []) !==
+    JSON.stringify(requiredFinalCommands(config))
+  )
+    throw new Error(
+      "Accepted plan was reviewed with other required final-validation commands than the installation's; plan again",
+    );
   const graph = plan.graph;
   if (
     [12, 14, 16, 18, 20].includes(preparation.schemaVersion) &&
@@ -122,7 +142,7 @@ export async function projectPreparedObjective(args: {
         checkout: config.checkout,
         baseSha,
         graph,
-        finalCommands: finalValidationCommands(plan.finalCommands, config),
+        finalCommands: plan.finalCommands,
         objectiveBody: issue.body,
         privateRoot: root,
         credentialDirectory: join(root, "empty-gh-config"),
@@ -357,7 +377,7 @@ export function activateProjectedObjective(args: {
     graph,
     objectiveCommands: finalValidationCommands(
       finalObjectiveCommands(issue.body),
-      config,
+      requiredFinalCommands(config),
     ),
     objectiveBodyDigest: createHash("sha256").update(issue.body).digest("hex"),
     issueByItemId: projected.issueByItemId,

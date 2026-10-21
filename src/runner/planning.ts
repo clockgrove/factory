@@ -32,6 +32,7 @@ import type { FactoryConfig } from "../config.js";
 import { createPlanningContextResolver } from "../compiler/context-runtime.js";
 import {
   factoryConfigDigest,
+  requiredFinalCommands,
   resolveCapacity,
   validateTarget,
 } from "../config.js";
@@ -264,6 +265,10 @@ function adoptedPlan(args: {
       args.localExecutables,
       executionBounds,
       args.approvedPlaybookPin,
+      undefined,
+      undefined,
+      undefined,
+      requiredFinalCommands(config),
     );
     const candidate: PlanCandidate = {
       ...buildPlanCandidate(
@@ -431,6 +436,7 @@ async function planObjectiveObserved(
       preflightObjective(config, issue.body, baseSha),
       { configuredConcurrency: resolveCapacity(config).concurrency },
       workflowRecipe,
+      requiredFinalCommands(config),
     );
     diagnostics.emit({
       operation: "planning-preview",
@@ -934,6 +940,7 @@ export async function prepareObjective(args: {
                 localExecutables,
                 { configuredConcurrency: capacity.concurrency },
                 workflowRecipe,
+                requiredFinalCommands(config),
               ),
             true,
           );

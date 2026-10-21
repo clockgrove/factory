@@ -1467,19 +1467,23 @@ export function queueConfiguration(config: FactoryConfig): FactoryConfig {
   ) as FactoryConfig;
 }
 
+/** The commands this installation requires in every Objective's final validation. */
+export function requiredFinalCommands(config: FactoryConfig): string[] {
+  return config.finalValidation?.requiredCommands ?? [];
+}
+
 /**
  * An Objective's final validation commands: its own Acceptance commands, then
- * each installation-required command it does not already run.
+ * each installation-required command it does not already run. Planning, graph
+ * review and final validation all use this one list.
  */
 export function finalValidationCommands(
   objectiveCommands: readonly string[],
-  config: FactoryConfig,
+  required: readonly string[],
 ): string[] {
   return [
     ...objectiveCommands,
-    ...(config.finalValidation?.requiredCommands ?? []).filter(
-      (command) => !objectiveCommands.includes(command),
-    ),
+    ...required.filter((command) => !objectiveCommands.includes(command)),
   ];
 }
 

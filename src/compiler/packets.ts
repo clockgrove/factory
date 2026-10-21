@@ -1,3 +1,4 @@
+import { finalValidationCommands } from "../config.js";
 import { graphItems } from "./split.js";
 import { createHash } from "node:crypto";
 import {
@@ -74,6 +75,7 @@ export function planReviewPacket<
   contextLookup?: PlanningContextPacket,
   workflowRecipe?: WorkflowRecipeInput,
   operatorDecisions?: D[],
+  requiredFinalCommands: readonly string[] = [],
 ): PlanReviewRequest & { operatorDecisions?: D[] } {
   if (workflowRecipe) assertWorkflowRecipeInput(workflowRecipe);
   if (executionBounds) assertPlanningExecutionBounds(executionBounds);
@@ -101,7 +103,13 @@ export function planReviewPacket<
       sources,
       checkout,
     ),
-    finalCommands: finalObjectiveCommands(objective),
+    finalCommands: finalValidationCommands(
+      finalObjectiveCommands(objective),
+      requiredFinalCommands,
+    ),
+    ...(requiredFinalCommands.length
+      ? { requiredFinalCommands: [...requiredFinalCommands] }
+      : {}),
     checkNames: workflowCheckNames(checkout, baseSha),
   };
 }

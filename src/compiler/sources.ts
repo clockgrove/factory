@@ -17,6 +17,7 @@ import {
 } from "../workspace-membership.js";
 import type { PlanCandidate } from "./candidate.js";
 import { normalizedCommand } from "../qa.js";
+import { finalValidationCommands } from "../config.js";
 import { GraphValidationError } from "../scheduler.js";
 import {
   PINNED_PNPM_BOOTSTRAP,
@@ -1239,6 +1240,43 @@ export function planningSources(
   return sources;
 }
 
+/** The declaring source of installation-required final-validation commands. */
+const REQUIRED_COMMANDS_SOURCE =
+  "installation finalValidation.requiredCommands";
+
+/**
+ * Refuse an installation-required final-validation command the accepted base
+ * cannot run as a fixed command, with the check Acceptance commands get, so a
+ * bad entry fails before work starts instead of at final validation.
+ */
+export function assertRequiredFinalCommands(
+  requiredCommands: readonly string[],
+  body: string,
+  baseSha: string,
+  checkout: string,
+): void {
+  const sources = [
+    { path: "OBJECTIVE", content: body },
+    { path: REQUIRED_COMMANDS_SOURCE, content: requiredCommands.join("\n") },
+  ];
+  for (const command of requiredCommands)
+    if (
+      !authorizedCommand(
+        {
+          command,
+          provenance: "source-declared",
+          source: REQUIRED_COMMANDS_SOURCE,
+        },
+        baseSha,
+        sources,
+        checkout,
+      )
+    )
+      throw new Error(
+        `Required final-validation command has no executable authority at the accepted base: ${command}. Package scripts must use a supported root npm/pnpm invocation with fixed script bodies, hooks and configuration; correct or remove it in the installation's finalValidation.requiredCommands.`,
+      );
+}
+
 const MAX_CITATION_DIAGNOSTIC_VALUE_LENGTH = 120;
 
 const MAX_CITATION_DIAGNOSTIC_HEADINGS = 8;
@@ -1334,8 +1372,11 @@ export function fixedScripts(
   body: string,
   baseSha: string,
   checkout: string,
+  requiredCommands: readonly string[] = [],
 ): { name: string; body: string }[] {
-  const names = fixedPackageScripts(finalObjectiveCommands(body));
+  const names = fixedPackageScripts(
+    finalValidationCommands(finalObjectiveCommands(body), requiredCommands),
+  );
   if (!names.length) return [];
   let scripts: Record<string, unknown>;
   try {

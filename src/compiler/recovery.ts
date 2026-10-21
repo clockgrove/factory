@@ -611,6 +611,7 @@ async function compilePlanAdmitted(
   localExecutables?: PlanningLocalExecutables,
   executionBounds?: PlanningExecutionBounds,
   workflowRecipe?: WorkflowRecipeInput,
+  requiredFinalCommands: readonly string[] = [],
 ): Promise<PlanCandidate> {
   const { state, save } = context;
   if (workflowRecipe) assertWorkflowRecipeInput(workflowRecipe);
@@ -718,6 +719,7 @@ async function compilePlanAdmitted(
       record.contextLookup?.packet,
       workflowRecipe,
       operatorPlanningDecisions(record),
+      requiredFinalCommands,
     );
     const retained = retainedPlanningReview(record, packet, configDigest);
     if (
@@ -1037,6 +1039,7 @@ async function compilePlanAdmitted(
             answered = structuredClone(answer);
           },
         },
+        requiredFinalCommands,
       );
       packet = planReviewPacket(
         body,
@@ -1052,6 +1055,7 @@ async function compilePlanAdmitted(
         record.contextLookup?.packet,
         workflowRecipe,
         operatorPlanningDecisions(record),
+        requiredFinalCommands,
       );
       const retained = retainedPlanningReview(record, packet, configDigest);
       record.review = retained.review;

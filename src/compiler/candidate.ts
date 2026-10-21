@@ -74,6 +74,8 @@ export interface PlanCandidate {
   adoptedFrom?: { objective: number; key: string; reviewDigest: string };
   commands: PlanCommandAuthorization[];
   finalCommands: string[];
+  /** The installation's required final-validation commands this plan was reviewed with. */
+  requiredFinalCommands?: string[];
   /** Digest of the complete immutable packet supplied to independent review. */
   packetDigest: string;
   /** Digest of the packet digest and immutable independent-review result. */
@@ -173,6 +175,9 @@ export function buildPlanCandidate(
     graphDigest: digest(JSON.stringify(graph)),
     commands: packet.commands,
     finalCommands: packet.finalCommands,
+    ...(packet.requiredFinalCommands
+      ? { requiredFinalCommands: [...packet.requiredFinalCommands] }
+      : {}),
     packetDigest,
     reviewDigest: reviewResultDigest(packetDigest, candidateReview),
     configDigest,
@@ -256,6 +261,7 @@ export function verifyPlanCandidate(
     candidate.contextLookup,
     candidate.workflowRecipe,
     candidate.operatorDecisions,
+    candidate.requiredFinalCommands,
   );
   if (
     (candidate.prerequisites &&

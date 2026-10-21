@@ -59,7 +59,7 @@ import {
   validateGraph,
   validateGraphSources,
 } from "./compiler.js";
-import type { FactoryConfig } from "./config.js";
+import { requiredFinalCommands, type FactoryConfig } from "./config.js";
 import type {
   GitHubGateway,
   PlanningModel,
@@ -1460,6 +1460,8 @@ async function advanceAmendment(args: {
           undefined,
           state.planningRecovery?.contextLookup?.packet,
           args.workflowRecipe,
+          undefined,
+          requiredFinalCommands(config),
         );
       }
       admitAdvancedAmendmentFormat(state, pending.graph!);
@@ -1498,6 +1500,7 @@ async function advanceAmendment(args: {
         state.planningRecovery?.contextLookup?.packet,
         args.workflowRecipe,
         operatorDecisions,
+        requiredFinalCommands(config),
       );
       packet.amendment = {
         currentImplementationEvidence: amendmentImplementationEvidence({

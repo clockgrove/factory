@@ -1500,6 +1500,10 @@ test("a worker's shell runs in its checkout inside the same sandbox, bounded", a
     `${digest}  a.txt\n`,
   );
   assert.equal((await run('cat "$HOME/note"')).output, "kept\n");
+  // Package stores and caches live in the private HOME, never the checkout.
+  const caches =
+    'for d in "$pnpm_config_store_dir" "$npm_config_cache"; do case "$d" in "$HOME"/*) ;; *) exit 1;; esac; done';
+  assert.equal((await run(caches)).exitCode, 0);
   // Escapes fail: host secrets, .git, the network, the controller.
   for (const escape of [
     `! cat '${secret}'`,

@@ -28,6 +28,7 @@ import {
 } from "./codex-native-capture.js";
 import {
   gitMetadata,
+  packageCacheEnvironment,
   real,
   toolchainDirectories,
   within,
@@ -624,6 +625,9 @@ export function createCodexHome(options: {
     env.HOME = home;
     env.CODEX_HOME = codexHome;
     env.TMPDIR = temporary;
+    // Package caches stay in the private HOME, never in the worktree.
+    if (options.sandbox?.workspace === "write")
+      Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
     if (options.sandbox) env.GIT_OPTIONAL_LOCKS = "0";
     return {
       root,

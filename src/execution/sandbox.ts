@@ -931,6 +931,20 @@ export interface SandboxedCommandInput {
   policy: CommandSandboxPolicy;
 }
 
+/**
+ * Package-manager store and cache directories under `root`: the pnpm store
+ * and metadata cache and the npm cache. Set explicitly, since pnpm otherwise
+ * puts its store at the root of the project's mount when that differs from
+ * HOME's, which in a sandbox is the checkout itself.
+ */
+export function packageCacheEnvironment(root: string): Record<string, string> {
+  return {
+    pnpm_config_store_dir: join(root, "pnpm-store"),
+    pnpm_config_cache_dir: join(root, "pnpm-cache"),
+    npm_config_cache: join(root, "npm"),
+  };
+}
+
 /** Variables that name host directories the sandbox does not mount. */
 const HOST_DIRECTORY_VARIABLES = [
   "XDG_CONFIG_HOME",
@@ -1029,6 +1043,9 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   for (const name of HOST_DIRECTORY_VARIABLES) delete env[name];
   env.HOME = home;
   if (path !== undefined) env.PATH = path;
+  // Without a packageStore, package caches live in the private HOME, never
+  // in the checkout.
+  Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
   const writable = [checkout, temporary, home];
   let readOnlyStore: string | undefined;
   if (input.policy.packageStore) {
@@ -1075,9 +1092,7 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
     // only a verified install writes it and every other command reads it.
     if (input.packageInstall) writable.push(store);
     else readOnlyStore = store;
-    env.pnpm_config_store_dir = join(store, "pnpm-store");
-    env.pnpm_config_cache_dir = join(store, "pnpm-cache");
-    env.npm_config_cache = join(store, "npm");
+    Object.assign(env, packageCacheEnvironment(store));
   }
   if (input.packageInstall) {
     // An install runs no package-manager hooks, whatever the checkout says.

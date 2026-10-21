@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { WorkGraph, DeliveryObservation } from "../contracts.js";
 import { now } from "../clock.js";
-import { decision, StepFault } from "../fault.js";
+import { attachedFault, decision, StepFault } from "../fault.js";
 import type { FactoryState } from "../state.js";
 import { ESCALATE_AFTER_MS } from "../step.js";
 import { notYet, settled } from "./lag.js";
@@ -164,7 +164,59 @@ export function deliveryReadiness(
         waiting,
       ),
     );
-  return waiting;
+  if (waiting) return waiting;
+  return unregisteredChecks(pullRequest, observation, expectedHead);
+}
+
+/** How long a newly pushed head may show no checks before Factory asks. */
+export const CHECK_SETTLE_MS = 20 * 60_000;
+
+/** PR heads whose operator answered the no-checks question with a retry. */
+const mergeWithoutChecks = new Set<string>();
+
+/**
+ * A GitHub PR head with no check run or status at all, that may otherwise
+ * merge: Actions may not have created its check suites yet, or a path
+ * filter or push-only workflow never will. Wait a settle window from the
+ * push, then ask. The step's decision blocks re-entry until the operator's
+ * retry, so the next judgement of the same head is that answer: merge
+ * without checks. A restart forgets the answer and asks again (#1640).
+ */
+function unregisteredChecks(
+  pullRequest: number,
+  observation: DeliveryObservation,
+  expectedHead?: string,
+): string | undefined {
+  // Custom gateways report no protection readiness, nor registered checks.
+  if (
+    observation.state !== "open" ||
+    !observation.mergeReadiness ||
+    observation.reportedChecks?.length
+  )
+    return undefined;
+  const key = `unregistered:${pullRequest}:${expectedHead}`;
+  if (mergeWithoutChecks.has(key)) return undefined;
+  const question = decision(
+    `No checks registered on PR #${pullRequest}'s head ${expectedHead}: does a path filter or a push-only workflow skip it? Retry to merge it without checks, or cancel?`,
+    `PR #${pullRequest} shows no check run or status at ${expectedHead}${observation.pushedAt ? `, pushed at ${observation.pushedAt}` : ""}`,
+  );
+  const pushed = Date.parse(observation.pushedAt ?? "");
+  // GitHub's activity can lag the push for a moment; past that, ask.
+  if (!Number.isFinite(pushed)) {
+    const error = notYet(
+      key,
+      `PR #${pullRequest} shows no checks, and GitHub does not show when its head was pushed`,
+      question,
+    );
+    if (attachedFault(error)?.kind === "decision") mergeWithoutChecks.add(key);
+    throw error;
+  }
+  settled(key);
+  if (now() - pushed >= CHECK_SETTLE_MS) {
+    mergeWithoutChecks.add(key);
+    throw new StepFault(question);
+  }
+  return `Awaiting checks to register on PR #${pullRequest} (none since its push at ${observation.pushedAt})`;
 }
 
 /**

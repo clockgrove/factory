@@ -2251,13 +2251,33 @@ export class RealGitHubGateway implements GitHubGateway {
     settled(key);
   }
 
-  /** When `sha` was committed, as GitHub reports it; undefined if it does not. */
-  private async commitTime(sha: string): Promise<string | undefined> {
-    const commit = await this.api<{
-      committer?: { date?: unknown } | null;
-    }>("GET", `git/commits/${sha}`);
-    const date = commit.committer?.date;
-    return typeof date === "string" ? date : undefined;
+  /**
+   * When `sha` was pushed to `branch`, from the repository's activity;
+   * undefined when GitHub does not show it (not yet, or not to this login).
+   */
+  private async pushTime(
+    branch: string,
+    sha: string,
+  ): Promise<string | undefined> {
+    let activity: { after?: unknown; timestamp?: unknown }[];
+    try {
+      activity = await this.api<typeof activity>(
+        "GET",
+        `activity?ref=${encodeURIComponent(`refs/heads/${branch}`)}&per_page=100`,
+      );
+    } catch (error) {
+      if (
+        error instanceof GitHubRequestError &&
+        [403, 404].includes(error.status) &&
+        attachedFault(error)?.kind !== "transient"
+      )
+        return undefined;
+      throw error;
+    }
+    const push = Array.isArray(activity)
+      ? activity.find((event) => event?.after === sha)
+      : undefined;
+    return typeof push?.timestamp === "string" ? push.timestamp : undefined;
   }
 
   /**
@@ -2556,6 +2576,11 @@ export class RealGitHubGateway implements GitHubGateway {
     ];
     if (unreported && mergeReadiness === "ready") mergeReadiness = "waiting";
     const open = !detail.merged && detail.state !== "closed";
+    // When the head was pushed: a check not reported yet is measured from
+    // then, not from the commit, which predates publication (#1640).
+    let pushed: Promise<string | undefined> | undefined;
+    const headPushedAt = () =>
+      (pushed ??= this.pushTime(identity.branch, identity.headSha));
     // When the pending set last changed, from GitHub's times; any unknown
     // time leaves it unknown, so the wait stays unbounded.
     let pendingSince: string | undefined;
@@ -2567,7 +2592,7 @@ export class RealGitHubGateway implements GitHubGateway {
         ...contexts
           .filter((status) => status.state === "pending")
           .map((status) => status.updated_at),
-        ...(unreported ? [await this.commitTime(identity.headSha)] : []),
+        ...(unreported ? [await headPushedAt()] : []),
       ].map((time) => (typeof time === "string" ? Date.parse(time) : NaN));
       if (times.length && times.every(Number.isFinite))
         pendingSince = new Date(Math.max(...times)).toISOString();
@@ -2584,9 +2609,14 @@ export class RealGitHubGateway implements GitHubGateway {
         ].filter((name): name is string => typeof name === "string" && !!name),
       ),
     ];
+    // Nothing registered on the head yet: Actions may not have created its
+    // check suites, or a path filter or push-only workflow never will.
+    const pushedAt =
+      open && !reportedChecks.length ? await headPushedAt() : undefined;
     return {
       namedChecks,
       ...(reportedChecks.length ? { reportedChecks } : {}),
+      ...(pushedAt ? { pushedAt } : {}),
       ...(failedChecks.length ? { failedChecks } : {}),
       ...(pendingChecks.length ? { pendingChecks } : {}),
       ...(pendingSince ? { pendingSince } : {}),

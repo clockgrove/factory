@@ -1293,10 +1293,16 @@ export interface DeliveryObservation {
   /**
    * When the pending set last changed, from GitHub's own times: the latest
    * start of a check still running, update of a pending status, or, for a
-   * required check not reported yet, the head commit. Absent when nothing
-   * is pending or a time is unknown.
+   * required check not reported yet, the push of the head. Absent when
+   * nothing is pending or a time is unknown.
    */
   pendingSince?: string;
+  /**
+   * When an open PR's head was pushed, from GitHub's repository activity;
+   * observed only when no check has reported on the head. Absent when
+   * GitHub does not show it.
+   */
+  pushedAt?: string;
   /**
    * Authenticated target protection readiness; absent only on custom
    * gateways. `ready`: GitHub allows the merge, even with checks the

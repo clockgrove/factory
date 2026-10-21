@@ -23,7 +23,7 @@ import { currentProcessSignal, assertProcessActive } from "./process.js";
 import {
   ADD,
   INSPECT,
-  REMOVE,
+  ARCHIVE,
   UPDATE,
   SET_ADMISSION_FIELDS,
   ITEMS,
@@ -90,9 +90,9 @@ function mutationRequest(
   intent: ProjectQueueAction &
     Pick<ProjectQueueIntent, "binding" | "requestId" | "fieldId">,
 ) {
-  if (intent.action === "remove-card")
+  if (intent.action === "archive-card")
     return {
-      query: REMOVE,
+      query: ARCHIVE,
       variables: {
         input: {
           clientMutationId: intent.requestId,
@@ -149,9 +149,9 @@ function plannedMutationRequest(
   binding: ProjectQueueBinding,
   effect: ProjectQueuePlannedEffectInput,
 ) {
-  if (effect.action === "remove-card")
+  if (effect.action === "archive-card")
     return {
-      query: REMOVE,
+      query: ARCHIVE,
       variables: {
         input: {
           clientMutationId: effect.requestId,
@@ -246,7 +246,7 @@ export function assertProjectQueuePlannedEffect(
         ? ["target", "fieldId", "metadata"]
         : effect.action === "set-admission-fields"
           ? ["target", "orderFieldId", "metadataFieldId", "order", "metadata"]
-          : effect.action === "remove-card"
+          : effect.action === "archive-card"
             ? ["target"]
             : []),
   ]);
@@ -294,8 +294,8 @@ export function assertProjectQueuePlannedEffect(
       !Object.hasOwn(prior, "target")
     )
       throw new Error("Invalid declared Project queue Issue admission");
-  } else if (effect.action === "remove-card") {
-    // Removal deletes only the exact current card its own inspection proved.
+  } else if (effect.action === "archive-card") {
+    // Archive acts only on the exact current card its own inspection proved.
     const target = object(effect.target);
     only(target, ["itemId"]);
     if (
@@ -306,7 +306,7 @@ export function assertProjectQueuePlannedEffect(
       object(prior.target).itemId !== target.itemId ||
       object(prior.target).issueNodeId === undefined
     )
-      throw new Error("Invalid declared Project queue card removal");
+      throw new Error("Invalid declared Project queue card archive");
   } else if (
     effect.action === "set-metadata" ||
     effect.action === "set-admission-fields"
@@ -443,9 +443,9 @@ export function resolveProjectQueuePlannedEffect(
   let action: ProjectQueueAction;
   if (effect.action === "ensure-card")
     action = { action: effect.action, issueNodeId: effect.issueNodeId };
-  else if (effect.action === "remove-card") {
+  else if (effect.action === "archive-card") {
     if (!prior || prior.itemId !== effect.target.itemId)
-      throw new Error("Declared card removal lacks its exact previous target");
+      throw new Error("Declared card archive lacks its exact previous target");
     action = { action: effect.action, itemId: effect.target.itemId };
   } else {
     const itemId =
@@ -506,7 +506,7 @@ export function assertProjectQueueIntent(
         ? ["itemId", "metadata"]
         : action === "set-admission-fields"
           ? ["itemId", "order", "metadata"]
-          : action === "remove-card"
+          : action === "archive-card"
             ? ["itemId"]
             : []),
   ]);
@@ -540,13 +540,13 @@ export function assertProjectQueueIntent(
       intent.fieldId !== undefined
     )
       throw new Error("Invalid Project queue compound admission target");
-  } else if (action === "remove-card") {
+  } else if (action === "archive-card") {
     if (
       !nodeId(intent.itemId) ||
       intent.itemId === intent.binding.controlItemId ||
       intent.fieldId !== undefined
     )
-      throw new Error("Invalid Project queue card removal target");
+      throw new Error("Invalid Project queue card archive target");
   } else throw new Error("Unsupported Project queue action");
   const typed = value as ProjectQueueIntent;
   if (!same(typed.request, mutationRequest(typed)))
@@ -694,15 +694,17 @@ export function assertProjectQueueWriteReceipt(
   if (receipt.kind !== "response")
     throw new Error("Project queue mutation lacks an original response");
   const original = object(receipt.original);
-  if (intent.action === "remove-card") {
-    only(original, ["deleteProjectV2Item"]);
-    const response = object(original.deleteProjectV2Item);
+  if (intent.action === "archive-card") {
+    only(original, ["archiveProjectV2Item"]);
+    const response = object(original.archiveProjectV2Item);
+    const card = cardIdentity(response.item, intent.binding);
     if (
       response.clientMutationId !== intent.requestId ||
-      response.deletedItemId !== intent.itemId ||
-      receipt.itemId !== intent.itemId
+      card.id !== intent.itemId ||
+      receipt.itemId !== intent.itemId ||
+      card.isArchived !== true
     )
-      throw new Error("Project card removal response has another identity");
+      throw new Error("Project card archive response has another identity");
     return;
   }
   if (intent.action === "set-admission-fields") {
@@ -1442,8 +1444,8 @@ export function projectQueueReceiptTarget(
 ): ProjectQueueExpectedTarget {
   assertProjectQueueWriteReceipt(receipt);
   const intent = receipt.intent;
-  if (intent.action === "remove-card")
-    throw new Error("A removed Project card has no current target");
+  if (intent.action === "archive-card")
+    throw new Error("An archived Project card has no current target");
   const card =
     receipt.kind === "existing-read"
       ? object(receipt.original)
@@ -1874,7 +1876,7 @@ export async function projectQueueWriteOnGitHub(
   const action =
     request.action === "ensure-card"
       ? { action: request.action, issueNodeId: request.issueNodeId }
-      : request.action === "remove-card"
+      : request.action === "archive-card"
         ? { action: request.action, itemId: request.itemId }
         : request.action === "set-admission-fields"
           ? {
@@ -2074,7 +2076,7 @@ export async function projectQueueWriteOnGitHub(
     throw error;
   }
   try {
-    if (admitted.action === "remove-card") {
+    if (admitted.action === "archive-card") {
       const receipt: ProjectQueueWriteReceipt = {
         intent: admitted,
         itemId: admitted.itemId,

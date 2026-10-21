@@ -401,7 +401,7 @@ async function watcherWorkflow(
           ? {
               issue: structuredClone(card),
               membership: card.metadata
-                ? [{ itemId: card.itemId, archived: false }]
+                ? [{ itemId: card.itemId, archived: card.archived }]
                 : [],
             }
           : {}),
@@ -426,18 +426,17 @@ async function watcherWorkflow(
       };
       await request.beforeWrite(intent);
       writes++;
-      if (intent.action === "remove-card") {
-        card.metadata = card.order = null;
-        const deleted = {
-          clientMutationId: intent.requestId,
-          deletedItemId: card.itemId,
-        };
+      if (intent.action === "archive-card") {
+        card.archived = true;
+        const item = wireCard(false);
         return {
           intent,
           itemId: card.itemId,
           observedAt: new Date().toISOString(),
           kind: "response",
-          original: { deleteProjectV2Item: deleted },
+          original: {
+            archiveProjectV2Item: { clientMutationId: intent.requestId, item },
+          },
         };
       }
       const control = resolved.action.itemId === binding.controlItemId;
@@ -1904,11 +1903,11 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
             record.completed,
         ),
       );
-      // A withdrawn card is inert: removal deletes it from the Project, once.
+      // A withdrawn card is inert: removal archives it on the Project, once.
       const removed = await intakeControl(config, "dequeue", [1], github);
       assert.deepEqual(
         removed.targets.map((target) => [target.objective, target.state]),
-        [[1, "removed"]],
+        [[1, "archived"]],
       );
       assert.equal(writes, writesBefore + 2);
       await assert.rejects(

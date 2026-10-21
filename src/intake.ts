@@ -138,7 +138,7 @@ export interface IntakeAuthorization {
   watch?: true;
   bodyDigests: Record<string, string>;
   dequeued: number[];
-  /** Cards no current admission binds: nothing dispatches them, and `queue remove` deletes them. */
+  /** Cards no current admission binds: nothing dispatches them, and `queue remove` archives them. */
   inert?: number[];
   mode: QueueMode;
   remoteObservation?: {
@@ -761,7 +761,7 @@ export interface QueueCommandAcknowledgment {
   targets: {
     objective: number;
     itemId: string;
-    state: "queued" | "withdrawn" | "removed" | "roadmap";
+    state: "queued" | "withdrawn" | "archived" | "roadmap";
     observedAt: string;
   }[];
   globalObservation: {
@@ -1214,7 +1214,7 @@ async function applyControlMutation(
       completions: {
         objective: number;
         requestId: string;
-        state: "withdrawn" | "removed";
+        state: "withdrawn" | "archived";
       }[] = [];
     for (const [index, current] of observed.entries()) {
       const id = objectives[index]!,
@@ -1227,7 +1227,7 @@ async function applyControlMutation(
         entry?.state === "queued" &&
         entry.authorityDigest === factoryAuthorityDigest(config);
       // An inert card: withdrawn, admitted under an earlier authority, or
-      // without admission metadata. Removal deletes it from the Project.
+      // without admission metadata. Removal archives its Project card.
       if (
         !admitted &&
         (!card ||
@@ -1255,7 +1255,7 @@ async function applyControlMutation(
         );
       if (!admitted) {
         const operation = createQueueOperation(config, {
-          action: "remove",
+          action: "archive",
           scope: card!.issueNodeId,
           previousReceiptId: entry?.receiptId ?? null,
           approval: { kind: "queue-command" },
@@ -1263,19 +1263,19 @@ async function applyControlMutation(
           issueNodeId: card!.issueNodeId,
           bodyDigest: queueDigest(issue!.body),
         });
-        const removed = planEffect(
+        const archived = planEffect(
           config,
           plan,
           operation,
           current,
-          { action: "remove-card", target: { itemId: card!.itemId } },
+          { action: "archive-card", target: { itemId: card!.itemId } },
           { target: targetProof(current.inspection) ?? null },
           { metadata: first.inspection.control.metadata },
         );
         completions.push({
           objective: id,
-          requestId: removed.requestId,
-          state: "removed",
+          requestId: archived.requestId,
+          state: "archived",
         });
         continue;
       }

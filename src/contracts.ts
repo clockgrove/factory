@@ -1302,10 +1302,18 @@ export interface DeliveryObservation {
   pendingSince?: string;
   /**
    * When an open PR's head was pushed, from GitHub's repository activity;
-   * observed only when no check has reported on the head. Absent when
-   * GitHub does not show it.
+   * observed only when no GitHub Actions check has reported on the head.
+   * Absent when GitHub does not show it.
    */
   pushedAt?: string;
+  /** Whether a GitHub Actions check run is on this exact open PR head. */
+  actionsChecks?: boolean;
+  /**
+   * Whether the repository has an active Actions workflow; observed only
+   * when other checks, but none from Actions, reported on an open PR head.
+   * Absent when unknown.
+   */
+  actionsWorkflows?: boolean;
   /**
    * Authenticated target protection readiness; absent only on custom
    * gateways. `ready`: GitHub allows the merge, even with checks the

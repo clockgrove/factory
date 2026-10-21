@@ -2261,6 +2261,33 @@ export class RealGitHubGateway implements GitHubGateway {
   }
 
   /**
+   * Whether the repository has an active Actions workflow; undefined when
+   * GitHub does not show its workflows to this login.
+   */
+  private async actionsWorkflows(): Promise<boolean | undefined> {
+    try {
+      for (let page = 1; ; page++) {
+        const result = await this.api<{ workflows?: unknown }>(
+          "GET",
+          `actions/workflows?per_page=100&page=${page}`,
+        );
+        if (!Array.isArray(result.workflows)) return undefined;
+        if (result.workflows.some((flow) => flow?.state === "active"))
+          return true;
+        if (result.workflows.length < 100) return false;
+      }
+    } catch (error) {
+      if (
+        error instanceof GitHubRequestError &&
+        [403, 404].includes(error.status) &&
+        attachedFault(error)?.kind !== "transient"
+      )
+        return undefined;
+      throw error;
+    }
+  }
+
+  /**
    * When `sha` was pushed to `branch`, from the repository's activity;
    * undefined when GitHub does not show it (not yet, or not to this login).
    */
@@ -2764,14 +2791,24 @@ export class RealGitHubGateway implements GitHubGateway {
         ].filter((name): name is string => typeof name === "string" && !!name),
       ),
     ];
-    // Nothing registered on the head yet: Actions may not have created its
-    // check suites, or a path filter or push-only workflow never will.
-    const pushedAt =
-      open && !reportedChecks.length ? await headPushedAt() : undefined;
+    // No Actions check on the head yet: Actions may not have created its
+    // check suites, or a path filter or push-only workflow never will. A
+    // check from another app does not settle that (#1687).
+    const actionsChecks = runs.some(
+      (run) =>
+        run.head_sha === identity.headSha && run.app?.slug === "github-actions",
+    );
+    const pushedAt = open && !actionsChecks ? await headPushedAt() : undefined;
+    const actionsWorkflows =
+      open && !actionsChecks && reportedChecks.length
+        ? await this.actionsWorkflows()
+        : undefined;
     return {
       namedChecks,
       ...(reportedChecks.length ? { reportedChecks } : {}),
       ...(pushedAt ? { pushedAt } : {}),
+      ...(open ? { actionsChecks } : {}),
+      ...(actionsWorkflows !== undefined ? { actionsWorkflows } : {}),
       ...(failedChecks.length ? { failedChecks } : {}),
       ...(pendingChecks.length ? { pendingChecks } : {}),
       ...(pendingSince ? { pendingSince } : {}),

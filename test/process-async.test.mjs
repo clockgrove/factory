@@ -53,6 +53,7 @@ import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { requestControl, serveControl } from "../dist/coordinator-control.js";
 import { deliveryDescription } from "../dist/delivery/description.js";
+import { deliveryReadiness } from "../dist/delivery/readiness.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
 import {
@@ -1115,6 +1116,49 @@ setTimeout(() => {
     else process.env.XDG_STATE_HOME = previousStateHome;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a fast non-Actions check waits for Actions to register (#1687)", async () => {
+  const sha = "a".repeat(40);
+  const id = { number: 7, branch: "fix", headSha: sha };
+  const cla = { id: 1, name: "cla", head_sha: sha, status: "completed" };
+  Object.assign(cla, { conclusion: "success", html_url: "https://x/1" });
+  const observe = async (runs, minutesAgo) => {
+    const pushed = new Date(Date.now() - minutesAgo * 60_000).toISOString();
+    const responses = {
+      "pulls/7": { state: "open", merged: false, head: { sha, ref: "fix" } },
+      [`commits/${sha}/check-runs?filter=latest&per_page=100&page=1`]: {
+        check_runs: runs,
+      },
+      [`commits/${sha}/status?per_page=100&page=1`]: { total_count: 0 },
+      "activity?ref=refs%2Fheads%2Ffix&per_page=100": minutesAgo
+        ? [{ after: sha, timestamp: pushed }]
+        : [],
+      "actions/workflows?per_page=100&page=1": {
+        workflows: [{ state: "active" }],
+      },
+    };
+    Object.assign(responses["pulls/7"], { base: { ref: "main" } });
+    const client = {
+      request: async (_method, path) => responses[path.slice(10)] ?? {},
+      paginate: async () => [],
+      pullRequestReadiness: async () => ({
+        headRefOid: sha,
+        headRefName: "fix",
+        baseRefName: "main",
+        mergeStateStatus: "CLEAN",
+      }),
+    };
+    const github = new RealGitHubGateway("o/r", undefined, client);
+    return deliveryReadiness(7, await github.observe(id), [], sha);
+  };
+  assert.match(await observe([cla], 1), /Awaiting Actions checks/);
+  // Past the settle window, Actions skipped the head: it merges.
+  assert.equal(await observe([cla], 30), undefined);
+  const ci = { ...cla, id: 2, name: "ci", app: { slug: "github-actions" } };
+  assert.equal(await observe([cla, ci], 1), undefined);
+  // An unknown push time never merges.
+  await assert.rejects(observe([cla], 0), /not show when its head/);
 });
 
 test("cancellation stops an owned shell and its process group", async () => {

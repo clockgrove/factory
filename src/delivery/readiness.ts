@@ -186,12 +186,14 @@ export function deliveryReadiness(
 export const CHECK_SETTLE_MS = 20 * 60_000;
 
 /**
- * A GitHub PR head with no check run or status at all, that may otherwise
- * merge: Actions may not have created its check suites yet, or a path
- * filter or push-only workflow never will. Wait a settle window from the
- * push, then ask. Factory never merges without registered checks on its
- * own authority: the operator adds or fixes the checks, or merges by hand
- * (#1640).
+ * A GitHub PR head, that may otherwise merge, with no Actions check run:
+ * Actions may not have created its check suites yet, or a path filter or
+ * push-only workflow never will. A fast check from another app (a CLA bot,
+ * a deploy preview) does not end the wait (#1687). Wait a settle window
+ * from the push. Past it, when other checks passed, Actions skipped the
+ * head and it merges; with no check at all, ask. Factory never merges
+ * without registered checks on its own authority: the operator adds or
+ * fixes the checks, or merges by hand (#1640).
  */
 function unregisteredChecks(
   pullRequest: number,
@@ -199,28 +201,36 @@ function unregisteredChecks(
   expectedHead?: string,
 ): string | undefined {
   // Custom gateways report no protection readiness, nor registered checks.
+  if (observation.state !== "open" || !observation.mergeReadiness)
+    return undefined;
+  const others = Boolean(observation.reportedChecks?.length);
+  // Other checks reported: wait only while Actions may still register.
   if (
-    observation.state !== "open" ||
-    !observation.mergeReadiness ||
-    observation.reportedChecks?.length
+    others &&
+    (observation.actionsChecks || observation.actionsWorkflows === false)
   )
     return undefined;
   const key = `unregistered:${pullRequest}:${expectedHead}`;
   const question = decision(
-    `No checks registered on PR #${pullRequest}'s head ${expectedHead}: does a path filter or a push-only workflow skip it? Add or fix its checks, then retry; or merge the PR by hand, then retry; or cancel?`,
-    `PR #${pullRequest} shows no check run or status at ${expectedHead}${observation.pushedAt ? `, pushed at ${observation.pushedAt}` : ""}`,
+    others
+      ? `No Actions checks registered on PR #${pullRequest}'s head ${expectedHead}, and GitHub does not show when it was pushed. Inspect its checks, then retry; or merge the PR by hand, then retry; or cancel?`
+      : `No checks registered on PR #${pullRequest}'s head ${expectedHead}: does a path filter or a push-only workflow skip it? Add or fix its checks, then retry; or merge the PR by hand, then retry; or cancel?`,
+    `PR #${pullRequest} shows no ${others ? "Actions check run" : "check run or status"} at ${expectedHead}${observation.pushedAt ? `, pushed at ${observation.pushedAt}` : ""}`,
   );
   const pushed = Date.parse(observation.pushedAt ?? "");
   // GitHub's activity can lag the push for a moment; past that, ask.
   if (!Number.isFinite(pushed))
     throw notYet(
       key,
-      `PR #${pullRequest} shows no checks, and GitHub does not show when its head was pushed`,
+      `PR #${pullRequest} shows no ${others ? "Actions " : ""}checks, and GitHub does not show when its head was pushed`,
       question,
     );
   settled(key);
-  if (now() - pushed >= CHECK_SETTLE_MS) throw new StepFault(question);
-  return `Awaiting checks to register on PR #${pullRequest} (none since its push at ${observation.pushedAt})`;
+  if (now() - pushed >= CHECK_SETTLE_MS) {
+    if (others) return undefined;
+    throw new StepFault(question);
+  }
+  return `Awaiting ${others ? "Actions " : ""}checks to register on PR #${pullRequest} (none since its push at ${observation.pushedAt})`;
 }
 
 /**

@@ -39,12 +39,13 @@ import {
 import { selectProvider } from "./provider-selection.js";
 import { objectiveComplete } from "./completion.js";
 import { canHandoff } from "./runner/ownership.js";
+import { splitReadyToClose } from "./runner/split.js";
 import {
   type ControllerReadiness,
   ControllerReadinessPendingError,
   requestControl,
 } from "./coordinator-control.js";
-import { isExecutionState } from "./state.js";
+import { isExecutionState, type ContinuationState } from "./state.js";
 import { command, linuxProcessIdentity } from "./process.js";
 import {
   assertRestoredContinuationReady,
@@ -536,14 +537,41 @@ function checkIntakeLocalServiceState(
   for (const id of intake.objectives) {
     // Retired terminal history is never acted on, so a snapshot shape this
     // version no longer reads cannot stop the service (#1457).
-    if (readScannedContinuation(config.repository, id) === "history") continue;
-    checkObjectiveServiceState(
-      queuedObjectiveConfig(config, id, configPath),
-      id,
-      configPath,
-    );
+    const state = readScannedContinuation(config.repository, id);
+    if (state === "history") continue;
+    try {
+      checkObjectiveServiceState(
+        queuedObjectiveConfig(config, id, configPath),
+        id,
+        configPath,
+      );
+    } catch (error) {
+      // Only an Objective the service would dispatch or settle gates its
+      // start; a dequeued or finished one is reported instead (#1650).
+      if (serviceActsOn(config, intake, id, state)) throw error;
+      process.stderr.write(
+        `Factory: Objective ${id} is not dispatched by the service; its readiness is not checked: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
   }
   return intake;
+}
+/** Whether the dispatch loop runs or settles this queued Objective. */
+function serviceActsOn(
+  config: FactoryConfig,
+  intake: IntakeAuthorization,
+  objective: number,
+  state: ContinuationState | undefined,
+): boolean {
+  if (intake.dequeued.includes(objective)) return false;
+  if (
+    state &&
+    (state.cancelledAt ||
+      (isExecutionState(state) && objectiveComplete(state)) ||
+      splitSettled(state))
+  )
+    return splitReadyToClose(config.repository, state);
+  return true;
 }
 /** The owned controller already authenticated this complete current observation. */
 export function checkPreparedIntakeServiceState(

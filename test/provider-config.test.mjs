@@ -20,6 +20,7 @@ import { selectProvider } from "../dist/provider-selection.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
 import { saveState, statePath } from "../dist/state-store.js";
 import {
+  checkPreparedIntakeServiceState,
   checkServiceState,
   queuedObjectiveConfig,
 } from "../dist/supervision.js";
@@ -273,6 +274,20 @@ test("the service continues a started Objective on the provider it froze", () =>
     const { provider, source } = selectProvider(file, { objective: 8, flag });
     return `${provider}/${source}`;
   };
+  // Service start gates only on Objectives it would dispatch; a dequeued
+  // one with a stale binding is reported, not refused (#1650).
+  const intake = (dequeued) => ({
+    complete: true,
+    watch: true,
+    repository: file.repository,
+    objectives: [8],
+    dequeued,
+  });
+  assert.throws(
+    () => checkPreparedIntakeServiceState(service, path, intake([])),
+    /different configuration binding/,
+  );
+  checkPreparedIntakeServiceState(service, path, intake([8]));
   assert.equal(select(), "codex/unmatched");
   assert.equal(select("claude"), "claude/flag");
   // The remedy status prints must parse (#1426).

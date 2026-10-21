@@ -706,6 +706,13 @@ async function runObjectiveOwned(
     assertRestoredInstallationDispatchReady(config);
     snapshot = readContinuation(config.repository, objective);
     if (snapshot) assertRestoredContinuationReady(snapshot, config);
+    // The operator's drain (or a SIGTERM handoff) stopped this Objective on
+    // purpose: a foreground run does not lift it, and would only idle (#1645).
+    // The service resumes the Objectives it handed back itself.
+    if (!options.observeControl && snapshot?.coordinator?.mode === "draining")
+      throw new Error(
+        `Objective #${objective} is draining: its coordinator was drained or handed off. Run \`factory resume --objective ${objective}\`, then \`factory run --objective ${objective}\``,
+      );
     // A completed return left by the stopped controller refuses every
     // publication until collected, starting with the claim's admission.
     if (snapshot)

@@ -1520,6 +1520,10 @@ export function summarizeStatus(view: StatusView): StatusSummary {
   // and still accepts resume, decide and select, so those are named below.
   if (view.configurationChanged && view.runActive !== true)
     return configurationStop(view);
+  // A drain is the operator's stop: no answer runs until resume, so it is
+  // named before any decision (#1645).
+  const mode = view.coordinator?.mode;
+  if (mode === "draining") return heldMode(view, mode);
   // An Objective stopped outside any Work Item: inspect, then run it again.
   // A pending decision waits until then, since decide refuses a
   // stopped Objective; a failed item's retry or repair answers the stop.
@@ -1542,21 +1546,26 @@ export function summarizeStatus(view: StatusView): StatusSummary {
   const decision = decisionNeeded(view);
   if (decision) return decision;
   if (view.state === "failed") return failedItem(view)!;
-  // Only resume continues a drain, including owned work it holds back.
-  const mode = view.coordinator?.mode;
+  if (mode === "paused") return heldMode(view, mode);
+  return failedItem(view) ?? cancelledItem(view) ?? progress(view);
+}
+
+/** A paused or draining coordinator: only resume continues it, including owned work it holds back. */
+function heldMode(
+  view: ExecutionStatusView,
+  mode: "paused" | "draining",
+): StatusSummary {
   const settling =
     mode === "draining" &&
     view.work.some((item) => ["running", "published"].includes(item.status));
-  if (mode === "paused" || mode === "draining")
-    return {
-      phase: "waiting",
-      summary: `${mode === "paused" ? "paused" : settling ? "draining owned work" : "drained"}${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
-      nextAction: {
-        command: `factory resume --objective ${objective}`,
-        reason: `Resumes the Objective${view.runActive === true ? "" : `; then ${run(objective)}`}`,
-      },
-    };
-  return failedItem(view) ?? cancelledItem(view) ?? progress(view);
+  return {
+    phase: "waiting",
+    summary: `${mode === "paused" ? "paused" : settling ? "draining owned work" : "drained"}${view.coordinator?.waitReason ? `: ${short(view.coordinator.waitReason, 80)}` : ""}`,
+    nextAction: {
+      command: `factory resume --objective ${view.objective}`,
+      reason: `Resumes the Objective${view.runActive === true ? "" : `; then ${run(view.objective)}`}`,
+    },
+  };
 }
 
 const phaseLabel = (phase: StatusPhase) => phase.replaceAll("-", " ");

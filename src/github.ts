@@ -21,6 +21,7 @@ import type {
 import { notYet, settled } from "./delivery/lag.js";
 import type { NativeStackDelivery } from "./delivery/native-stack.js";
 import { deliveryReadiness } from "./delivery/readiness.js";
+import { redactDiagnosticDetail } from "./diagnostics.js";
 import { attachedFault, attachFault, decision, transient } from "./fault.js";
 import {
   classifiedGitHubCall,
@@ -54,6 +55,7 @@ import {
 } from "./github-project-queue.js";
 import { availableIssueType } from "./issue-type.js";
 import { childMarker } from "./objective-split.js";
+import { currentProcessSignal } from "./process.js";
 import {
   CheckpointProducerInventoryChanged,
   isCheckpointAdmissionFailure,
@@ -180,6 +182,9 @@ const PROBE_GAP = 3;
 const EXCERPTED_CHECKS = 3;
 const LOG_TAIL_LINES = 40;
 const LOG_TAIL_CHARS = 3000;
+/** Bytes of job log asked for, and the most read if the range is ignored. */
+const LOG_TAIL_BYTES = 64 * 1024;
+const LOG_READ_CAP_BYTES = 1024 * 1024;
 
 /**
  * A list that has not caught up yet, where the caller bounds the repeat
@@ -2336,8 +2341,13 @@ export class RealGitHubGateway implements GitHubGateway {
     actions: boolean,
   ): Promise<string | undefined> {
     const parts: string[] = [];
+    // Evidence is best effort: only cancellation stops the observation.
     const tolerated = (error: unknown) => {
-      if (!(error instanceof GitHubRequestError)) throw error;
+      if (
+        currentProcessSignal()?.aborted ||
+        attachedFault(error)?.kind === "cancelled"
+      )
+        throw error;
     };
     try {
       const annotations = await this.api<
@@ -2359,11 +2369,20 @@ export class RealGitHubGateway implements GitHubGateway {
     }
     if (actions)
       try {
-        const log = await this.api<unknown>(
-          "GET",
-          `actions/jobs/${checkRun}/logs`,
+        // An Actions check run's id is its job's id.
+        const log = await classifiedGitHubCall(
+          this.client,
+          this.repository,
+          { method: "GET", path: `actions/jobs/${checkRun}/logs` },
+          () =>
+            this.client.jobLogTail(
+              this.repository,
+              checkRun,
+              LOG_TAIL_BYTES,
+              LOG_READ_CAP_BYTES,
+            ),
         );
-        if (typeof log === "string" && log)
+        if (log)
           parts.push(
             log
               .trimEnd()
@@ -2376,7 +2395,7 @@ export class RealGitHubGateway implements GitHubGateway {
       } catch (error) {
         tolerated(error);
       }
-    return parts.length ? parts.join("\n") : undefined;
+    return parts.length ? redactDiagnosticDetail(parts.join("\n")) : undefined;
   }
 
   async observe(
@@ -2440,6 +2459,8 @@ export class RealGitHubGateway implements GitHubGateway {
       typeof a.app?.id === "number" &&
       a.app.id === b.app?.id;
     const failedChecks: FailedCheck[] = [];
+    /** The check run behind each failed check, by its id for evidence. */
+    const failedRuns = new Map<FailedCheck, (typeof runs)[number]>();
     for (const run of runs) {
       const conclusion = run.conclusion ?? "";
       if (
@@ -2467,11 +2488,13 @@ export class RealGitHubGateway implements GitHubGateway {
         )
       )
         continue;
-      failedChecks.push({
+      const failure: FailedCheck = {
         name: run.name,
         conclusion,
         ...(run.html_url ? { url: run.html_url } : {}),
-      });
+      };
+      failedChecks.push(failure);
+      failedRuns.set(failure, run);
     }
     // Commit statuses: the latest state of each context on the head.
     for (const status of contexts)
@@ -2498,17 +2521,11 @@ export class RealGitHubGateway implements GitHubGateway {
     for (const check of failedChecks
       .filter((check) => !["cancelled", "stale"].includes(check.conclusion))
       .slice(0, EXCERPTED_CHECKS)) {
-      const run = runs.find(
-        (run) =>
-          run.head_sha === identity.headSha &&
-          run.name === check.name &&
-          (run.conclusion ?? "") === check.conclusion,
-      );
+      const run = failedRuns.get(check);
       const excerpt =
         run &&
         (await this.failureExcerpt(
           run.id,
-          // An Actions check run's id is its job's id.
           (run.app as { slug?: unknown } | null | undefined)?.slug ===
             "github-actions",
         ));

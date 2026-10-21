@@ -781,6 +781,51 @@ export class GitHubClient {
     return response.data;
   }
 
+  /**
+   * The tail of an Actions job's log, in bytes read, never more than
+   * `cap`: it asks for the last `tail` bytes, which the log storage may
+   * honour after GitHub's redirect. A log longer than `cap` without the
+   * range gives undefined, since its first bytes are not its tail.
+   */
+  async jobLogTail(
+    repository: string,
+    job: number,
+    tail: number,
+    cap: number,
+  ): Promise<string | undefined> {
+    if (
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+      !Number.isSafeInteger(job) ||
+      job <= 0
+    )
+      throw new Error("GitHub job log route is invalid");
+    const body = await this.dispatch<unknown>(
+      "GET",
+      `repos/${repository}/actions/jobs/${job}/logs`,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      `bytes=-${tail}`,
+    );
+    if (!(body instanceof ReadableStream)) return undefined;
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > cap) return undefined;
+        chunks.push(value);
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  }
+
   /** Fixed repository-scoped observation; callers cannot submit arbitrary GraphQL. */
   async pullRequestReadiness(
     repository: string,
@@ -872,6 +917,8 @@ export class GitHubClient {
     observation: { etag?: string } | undefined,
     readOnly: boolean,
     queueResponse?: { original?: unknown },
+    /** A byte range to ask for; the response body is then left unread. */
+    range?: string,
   ): Promise<T> {
     const signal = currentProcessSignal();
     const preparedAt = performance.now();
@@ -968,8 +1015,12 @@ export class GitHubClient {
           headers: {
             "x-github-api-version": "2026-03-10",
             ...(observation?.etag ? { "if-none-match": observation.etag } : {}),
+            ...(range ? { range } : {}),
           },
-          request: { signal: requestSignal },
+          request: {
+            signal: requestSignal,
+            ...(range ? { parseSuccessResponseBody: false } : {}),
+          },
         });
         transport = {
           ...transport,

@@ -96,7 +96,7 @@ import {
 import {
   assertCompletedCoverage,
   environmentValidationIndices,
-  finalPreparationCommands,
+  finalValidationSequence,
   objectivePreparationCommands,
   reusableEnvironmentValidationIndices,
 } from "../dist/qa.js";
@@ -4208,8 +4208,8 @@ test("source readiness prepares each real fresh checkout before its phase checks
     );
     assert.deepEqual(environmentValidationIndices(graph, item.id), [0, 1]);
     assert.deepEqual(objectivePreparationCommands(graph), [setup]);
-    // Final validation installs first with the graph's declared bootstrap,
-    // even when no final command lists it, and never runs it twice.
+    // Final validation installs first, exactly once: a listed bootstrap
+    // moves to the front, else the graph's declared one leads.
     const install = "pnpm install --frozen-lockfile --ignore-scripts";
     const bootstrapped = structuredClone(graph);
     bootstrapped.items[0].validation.unshift({
@@ -4217,19 +4217,28 @@ test("source readiness prepares each real fresh checkout before its phase checks
       provenance: "source-declared",
       source: "README.md",
     });
-    assert.deepEqual(finalPreparationCommands(bootstrapped, [acceptance]), [
-      install,
-      setup,
-    ]);
-    assert.deepEqual(
-      finalPreparationCommands(bootstrapped, [setup, acceptance]),
-      [install],
-    );
-    assert.deepEqual(
-      finalPreparationCommands(bootstrapped, [acceptance, install]),
-      [setup],
-    );
-    assert.deepEqual(finalPreparationCommands(graph, [acceptance]), [setup]);
+    const sequence = (commands, target = bootstrapped) =>
+      finalValidationSequence(target, commands);
+    assert.deepEqual(sequence([acceptance]), {
+      preparation: [install, setup],
+      commands: [acceptance],
+    });
+    assert.deepEqual(sequence([setup, acceptance]), {
+      preparation: [install],
+      commands: [setup, acceptance],
+    });
+    assert.deepEqual(sequence([setup, acceptance, install]), {
+      preparation: [],
+      commands: [install, setup, acceptance],
+    });
+    assert.deepEqual(sequence([install, acceptance, install], graph), {
+      preparation: [install, setup],
+      commands: [acceptance],
+    });
+    assert.deepEqual(sequence([acceptance], graph), {
+      preparation: [setup],
+      commands: [acceptance],
+    });
     const diagnosticRepository = "integration/fresh-readiness";
     const diagnostics = new DiagnosticEmitter(diagnosticRepository, 1);
     const observerConfigDigest = createHash("sha256")

@@ -76,8 +76,8 @@ import {
   assertCoverageShape,
   environmentValidationIndices,
   reusableEnvironmentValidationIndices,
+  finalValidationSequence,
   objectiveCandidate,
-  finalPreparationCommands,
 } from "./qa.js";
 import {
   type Autonomy,
@@ -2303,17 +2303,15 @@ export function parseFactoryState(
   if (state.finalValidation !== undefined) {
     const final = record(state.finalValidation, "finalValidation");
     const receiptCommands = validationEvidence(final, "finalValidation");
-    if (
-      JSON.stringify(receiptCommands) !==
-      JSON.stringify(state.objectiveCommands)
-    )
+    const expected = finalValidationSequence(
+      graph as unknown as WorkGraph,
+      strings(state.objectiveCommands, "objectiveCommands"),
+    );
+    if (JSON.stringify(receiptCommands) !== JSON.stringify(expected.commands))
       throw new Error(
         "Final validation receipts differ from declared Objective commands",
       );
-    const expectedPreparation = finalPreparationCommands(
-      graph as unknown as WorkGraph,
-      state.objectiveCommands as string[],
-    );
+    const expectedPreparation = expected.preparation;
     if (
       JSON.stringify(
         (final.preparation as { command: string }[] | undefined)?.map(

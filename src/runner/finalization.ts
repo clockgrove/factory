@@ -29,8 +29,8 @@ import { fetchHead, git } from "../process.js";
 import {
   assertCompletedCoverage,
   finalReviewCriteria,
+  finalValidationSequence,
   objectiveCandidate,
-  finalPreparationCommands,
 } from "../qa.js";
 import type { FactoryState } from "../state.js";
 import { awaitsOperator } from "../step.js";
@@ -209,10 +209,10 @@ export async function finalizeObjective(args: {
         treeSha: finalTree,
       },
     });
-    const finalCommands = state.objectiveCommands;
     // Only an exact current-phase prefix executes the full declared sequence
     // before later acceptance. Historical/other-checkout success never dedupes.
-    const preparationCommands = finalPreparationCommands(graph, finalCommands);
+    const { preparation: preparationCommands, commands: finalCommands } =
+      finalValidationSequence(graph, state.objectiveCommands);
     // Guard the same complete sequence validation will execute. Separate
     // guards would miss cross-phase ordering and package-manager mixing.
     assertPinnedNpmScripts(
@@ -227,7 +227,7 @@ export async function finalizeObjective(args: {
               .filter((check) => check.provenance === "source-declared")
               .map((check) => check.command),
           ),
-          ...finalCommands,
+          ...state.objectiveCommands,
         ],
         workspacePackageAdditions: workspacePackageAdditions(issue.body),
         packageManagerUpdate: packageManagerUpdate(issue.body),

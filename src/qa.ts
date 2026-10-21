@@ -876,36 +876,53 @@ export function reusableEnvironmentValidationIndices(
 }
 
 /**
- * What final validation runs on its fresh checkout before the final commands:
- * the graph's declared prerequisites, unless the final commands already start
- * with them, led by the graph's source-declared package bootstrap when no
- * final command installs. Only a bootstrap that runs first installs, so the
- * final commands get dependencies even when none of them lists one.
+ * The sequence final validation runs on its fresh checkout: preparation, then
+ * the final commands. Only a bootstrap that runs first installs, so the
+ * sequence starts with one exactly once: a bootstrap the final commands list
+ * moves to the front, and otherwise the graph's source-declared bootstrap leads.
+ * The graph's declared prerequisites run first unless the final commands
+ * already start with them; when they do run first, the bootstrap leads them.
  */
-export function finalPreparationCommands(
+export function finalValidationSequence(
   graph: WorkGraph,
-  finalCommands: readonly string[],
-): string[] {
+  objectiveCommands: readonly string[],
+): { preparation: string[]; commands: string[] } {
+  const isBootstrap = (command: string) =>
+    packageBootstrap(command) !== undefined;
+  let commands = [
+    ...new Set(objectiveCommands.filter(isBootstrap)),
+    ...objectiveCommands.filter((command) => !isBootstrap(command)),
+  ];
+  // The bootstrap's position never decides whether the final commands
+  // already start with the declared prerequisites.
   const declared = objectivePreparationCommands(graph);
-  const preparation = declared.every(
-    (command, index) => finalCommands[index] === command,
-  )
+  const rest = commands.filter((command) => !isBootstrap(command));
+  let preparation = declared
+    .filter((command) => !isBootstrap(command))
+    .every((command, index) => rest[index] === command)
     ? []
     : declared;
-  const bootstrap = graph.items
-    .flatMap((item) => item.validation)
-    .find(
-      (check) =>
-        check.provenance === "source-declared" &&
-        packageBootstrap(check.command) !== undefined,
-    )?.command;
-  const sequence = [...preparation, ...finalCommands];
-  return bootstrap === undefined ||
-    !sequence.length ||
-    packageBootstrap(sequence[0]!) !== undefined ||
-    finalCommands.some((command) => packageBootstrap(command) !== undefined)
-    ? preparation
-    : [bootstrap, ...preparation.filter((command) => command !== bootstrap)];
+  const bootstrap =
+    commands.find(isBootstrap) ??
+    graph.items
+      .flatMap((item) => item.validation)
+      .find(
+        (check) =>
+          check.provenance === "source-declared" && isBootstrap(check.command),
+      )?.command;
+  if (bootstrap === undefined || !(preparation.length || commands.length))
+    return { preparation, commands };
+  if (!preparation.length)
+    return isBootstrap(commands[0]!)
+      ? { preparation, commands }
+      : { preparation: [bootstrap], commands };
+  // Preparation runs ahead of the final commands, so the bootstrap leads it.
+  commands = commands.filter((command) => command !== bootstrap);
+  preparation = [
+    bootstrap,
+    ...preparation.filter((command) => command !== bootstrap),
+  ];
+  return { preparation, commands };
 }
 
 /** Preparation authority only; no readiness or acceptance inferred from success. */

@@ -426,6 +426,20 @@ async function watcherWorkflow(
       };
       await request.beforeWrite(intent);
       writes++;
+      if (intent.action === "remove-card") {
+        card.metadata = card.order = null;
+        const deleted = {
+          clientMutationId: intent.requestId,
+          deletedItemId: card.itemId,
+        };
+        return {
+          intent,
+          itemId: card.itemId,
+          observedAt: new Date().toISOString(),
+          kind: "response",
+          original: { deleteProjectV2Item: deleted },
+        };
+      }
       const control = resolved.action.itemId === binding.controlItemId;
       if (control) controlMetadata = resolved.action.metadata;
       else {
@@ -1841,6 +1855,11 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
         historical.entries[0].authorityDigest,
         factoryAuthorityDigest(config),
       );
+      // No current admission binds that card: the listing marks it inert (#1697).
+      assert.deepEqual(
+        (await intakeControl(reauthorized, "sync", undefined, github)).inert,
+        [1],
+      );
       await intakeControl(config, "drain", undefined, github);
       // A foreground removal returns its Project effect, then another
       // publisher holds the archive acknowledgment past the command deadline.
@@ -1884,6 +1903,17 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
             record.id === incomplete.returned.operations[0].id &&
             record.completed,
         ),
+      );
+      // A withdrawn card is inert: removal deletes it from the Project, once.
+      const removed = await intakeControl(config, "dequeue", [1], github);
+      assert.deepEqual(
+        removed.targets.map((target) => [target.objective, target.state]),
+        [[1, "removed"]],
+      );
+      assert.equal(writes, writesBefore + 2);
+      await assert.rejects(
+        intakeControl(config, "dequeue", [1], github),
+        /Objective #1 is not admitted/,
       );
     }
   } finally {

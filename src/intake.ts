@@ -138,6 +138,8 @@ export interface IntakeAuthorization {
   watch?: true;
   bodyDigests: Record<string, string>;
   dequeued: number[];
+  /** Cards no current admission binds: nothing dispatches them, and `queue remove` deletes them. */
+  inert?: number[];
   mode: QueueMode;
   remoteObservation?: {
     availability: "last-observed" | "unavailable";
@@ -149,7 +151,6 @@ export interface IntakeAuthorization {
     error?: string;
     needsDecision?: number;
     idleReason?: "awaiting-approved-work" | "waiting-for-eligible-work";
-    unapproved?: number[];
   };
 }
 const DEFAULT_QUEUE_POLL_SECONDS = 30;
@@ -310,6 +311,21 @@ function view(
     dequeued: entries
       .filter((entry) => entry.state === "withdrawn")
       .map((entry) => entry.objective),
+    ...(observed
+      ? {
+          inert: observed.snapshot.cards
+            .filter((card) => {
+              if (card.archived) return false;
+              const entry = entries.find((e) => e.itemId === card.itemId);
+              return (
+                !entry ||
+                (entry.state === "queued" &&
+                  entry.authorityDigest !== factoryAuthorityDigest(config))
+              );
+            })
+            .map((card) => card.objective),
+        }
+      : {}),
     mode: observed?.control.mode ?? "paused",
     remoteObservation: {
       availability: observed ? "last-observed" : "unavailable",
@@ -320,13 +336,6 @@ function view(
       at: observed?.snapshot.observedAt ?? new Date().toISOString(),
       reasons: {},
       ...(error ? { error: String(error) } : {}),
-      ...(observed
-        ? {
-            unapproved: observed.snapshot.cards
-              .filter((card) => card.metadata === null)
-              .map((card) => card.objective),
-          }
-        : {}),
     },
   };
 }
@@ -752,7 +761,7 @@ export interface QueueCommandAcknowledgment {
   targets: {
     objective: number;
     itemId: string;
-    state: "queued" | "withdrawn" | "roadmap";
+    state: "queued" | "withdrawn" | "removed" | "roadmap";
     observedAt: string;
   }[];
   globalObservation: {
@@ -1198,34 +1207,78 @@ async function applyControlMutation(
 ): Promise<QueueCommandAcknowledgment> {
   if (action === "dequeue") {
     const objectives = Array.isArray(objective) ? objective : [objective!];
-    const observed = await commandTargets(config, github, objectives, false),
+    // Issue membership finds a card that no current admission binds (#1697).
+    const observed = await commandTargets(config, github, objectives, true),
       first = observed[0]!;
     const plan = preparedCommand(),
-      completions: { objective: number; requestId: string }[] = [];
+      completions: {
+        objective: number;
+        requestId: string;
+        state: "withdrawn" | "removed";
+      }[] = [];
     for (const [index, current] of observed.entries()) {
-      const entry = current.entry;
+      const id = objectives[index]!,
+        entry = current.entry,
+        card = current.inspection.target,
+        issue = current.inspection.issue;
+      if (entry && entry.objective !== id)
+        throw new Error(`Objective #${id} is not admitted`);
+      const admitted =
+        entry?.state === "queued" &&
+        entry.authorityDigest === factoryAuthorityDigest(config);
+      // An inert card: withdrawn, admitted under an earlier authority, or
+      // without admission metadata. Removal deletes it from the Project.
       if (
-        !entry ||
-        entry.objective !== objectives[index] ||
-        entry.state !== "queued"
+        !admitted &&
+        (!card ||
+          card.archived ||
+          card.objective !== id ||
+          !issue ||
+          (!entry && retainedQueueEntry(config, current.history, id)))
       )
-        throw new Error(`Objective #${objectives[index]} is not admitted`);
+        throw new Error(`Objective #${id} is not admitted`);
       // Retired terminal history is settled and never acted on (#1457).
-      const read = readScannedContinuation(config.repository, entry.objective);
+      const read = readScannedContinuation(config.repository, id);
       const state = read === "history" ? undefined : read;
       if (
         (state && !terminal(state)) ||
         (current.history.some(
           (record) =>
             record.kind === "project-queue-owner" &&
-            record.objective === entry.objective &&
+            record.objective === id &&
             !record.settled,
         ) &&
-          !cancelledRunQuiescent(config, entry.objective))
+          !cancelledRunQuiescent(config, id))
       )
         throw new Error(
-          `Objective #${entry.objective} has unfinished owned work; use supported cancellation before removal`,
+          `Objective #${id} has unfinished owned work; use supported cancellation before removal`,
         );
+      if (!admitted) {
+        const operation = createQueueOperation(config, {
+          action: "remove",
+          scope: card!.issueNodeId,
+          previousReceiptId: entry?.receiptId ?? null,
+          approval: { kind: "queue-command" },
+          objective: id,
+          issueNodeId: card!.issueNodeId,
+          bodyDigest: queueDigest(issue!.body),
+        });
+        const removed = planEffect(
+          config,
+          plan,
+          operation,
+          current,
+          { action: "remove-card", target: { itemId: card!.itemId } },
+          { target: targetProof(current.inspection) ?? null },
+          { metadata: first.inspection.control.metadata },
+        );
+        completions.push({
+          objective: id,
+          requestId: removed.requestId,
+          state: "removed",
+        });
+        continue;
+      }
       const operation = createQueueOperation(config, {
         action: "withdraw",
         scope: entry.issueNodeId,
@@ -1260,6 +1313,7 @@ async function applyControlMutation(
       completions.push({
         objective: entry.objective,
         requestId: withdrawn.requestId,
+        state: "withdrawn",
       });
     }
     const receipts = await executePreparedCommand(config, github, plan);
@@ -1274,7 +1328,7 @@ async function applyControlMutation(
       return {
         objective: completion.objective,
         itemId: receipt.itemId,
-        state: "withdrawn" as const,
+        state: completion.state,
         observedAt: receipt.observedAt,
       };
     });

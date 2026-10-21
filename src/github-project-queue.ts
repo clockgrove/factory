@@ -23,6 +23,7 @@ import { currentProcessSignal, assertProcessActive } from "./process.js";
 import {
   ADD,
   INSPECT,
+  REMOVE,
   UPDATE,
   SET_ADMISSION_FIELDS,
   ITEMS,
@@ -89,6 +90,17 @@ function mutationRequest(
   intent: ProjectQueueAction &
     Pick<ProjectQueueIntent, "binding" | "requestId" | "fieldId">,
 ) {
+  if (intent.action === "remove-card")
+    return {
+      query: REMOVE,
+      variables: {
+        input: {
+          clientMutationId: intent.requestId,
+          projectId: intent.binding.projectId,
+          itemId: intent.itemId,
+        },
+      },
+    };
   if (intent.action === "set-admission-fields")
     return {
       query: SET_ADMISSION_FIELDS,
@@ -137,6 +149,17 @@ function plannedMutationRequest(
   binding: ProjectQueueBinding,
   effect: ProjectQueuePlannedEffectInput,
 ) {
+  if (effect.action === "remove-card")
+    return {
+      query: REMOVE,
+      variables: {
+        input: {
+          clientMutationId: effect.requestId,
+          projectId: binding.projectId,
+          itemId: effect.target.itemId,
+        },
+      },
+    };
   if (effect.action === "set-admission-fields") {
     const itemId =
       "itemId" in effect.target
@@ -223,7 +246,9 @@ export function assertProjectQueuePlannedEffect(
         ? ["target", "fieldId", "metadata"]
         : effect.action === "set-admission-fields"
           ? ["target", "orderFieldId", "metadataFieldId", "order", "metadata"]
-          : []),
+          : effect.action === "remove-card"
+            ? ["target"]
+            : []),
   ]);
   if (
     !requestId(effect.operationId) ||
@@ -269,6 +294,19 @@ export function assertProjectQueuePlannedEffect(
       !Object.hasOwn(prior, "target")
     )
       throw new Error("Invalid declared Project queue Issue admission");
+  } else if (effect.action === "remove-card") {
+    // Removal deletes only the exact current card its own inspection proved.
+    const target = object(effect.target);
+    only(target, ["itemId"]);
+    if (
+      !nodeId(target.itemId) ||
+      target.itemId === binding.controlItemId ||
+      !Object.hasOwn(prior, "target") ||
+      prior.target === null ||
+      object(prior.target).itemId !== target.itemId ||
+      object(prior.target).issueNodeId === undefined
+    )
+      throw new Error("Invalid declared Project queue card removal");
   } else if (
     effect.action === "set-metadata" ||
     effect.action === "set-admission-fields"
@@ -405,7 +443,11 @@ export function resolveProjectQueuePlannedEffect(
   let action: ProjectQueueAction;
   if (effect.action === "ensure-card")
     action = { action: effect.action, issueNodeId: effect.issueNodeId };
-  else {
+  else if (effect.action === "remove-card") {
+    if (!prior || prior.itemId !== effect.target.itemId)
+      throw new Error("Declared card removal lacks its exact previous target");
+    action = { action: effect.action, itemId: effect.target.itemId };
+  } else {
     const itemId =
       "itemId" in effect.target
         ? effect.target.itemId
@@ -433,10 +475,7 @@ export function resolveProjectQueuePlannedEffect(
     ...action,
     binding,
     requestId: effect.requestId,
-    ...(effect.action === "ensure-card" ||
-    effect.action === "set-admission-fields"
-      ? {}
-      : { fieldId: effect.fieldId }),
+    ...(effect.action === "set-metadata" ? { fieldId: effect.fieldId } : {}),
   });
   return {
     action,
@@ -467,7 +506,9 @@ export function assertProjectQueueIntent(
         ? ["itemId", "metadata"]
         : action === "set-admission-fields"
           ? ["itemId", "order", "metadata"]
-          : []),
+          : action === "remove-card"
+            ? ["itemId"]
+            : []),
   ]);
   assertProjectQueueBinding(intent.binding);
   if (
@@ -499,6 +540,13 @@ export function assertProjectQueueIntent(
       intent.fieldId !== undefined
     )
       throw new Error("Invalid Project queue compound admission target");
+  } else if (action === "remove-card") {
+    if (
+      !nodeId(intent.itemId) ||
+      intent.itemId === intent.binding.controlItemId ||
+      intent.fieldId !== undefined
+    )
+      throw new Error("Invalid Project queue card removal target");
   } else throw new Error("Unsupported Project queue action");
   const typed = value as ProjectQueueIntent;
   if (!same(typed.request, mutationRequest(typed)))
@@ -646,6 +694,17 @@ export function assertProjectQueueWriteReceipt(
   if (receipt.kind !== "response")
     throw new Error("Project queue mutation lacks an original response");
   const original = object(receipt.original);
+  if (intent.action === "remove-card") {
+    only(original, ["deleteProjectV2Item"]);
+    const response = object(original.deleteProjectV2Item);
+    if (
+      response.clientMutationId !== intent.requestId ||
+      response.deletedItemId !== intent.itemId ||
+      receipt.itemId !== intent.itemId
+    )
+      throw new Error("Project card removal response has another identity");
+    return;
+  }
   if (intent.action === "set-admission-fields") {
     only(original, ["order", "admission"]);
     let contentIdentity: ObjectValue | undefined;
@@ -1383,6 +1442,8 @@ export function projectQueueReceiptTarget(
 ): ProjectQueueExpectedTarget {
   assertProjectQueueWriteReceipt(receipt);
   const intent = receipt.intent;
+  if (intent.action === "remove-card")
+    throw new Error("A removed Project card has no current target");
   const card =
     receipt.kind === "existing-read"
       ? object(receipt.original)
@@ -1813,18 +1874,20 @@ export async function projectQueueWriteOnGitHub(
   const action =
     request.action === "ensure-card"
       ? { action: request.action, issueNodeId: request.issueNodeId }
-      : request.action === "set-admission-fields"
-        ? {
-            action: request.action,
-            itemId: request.itemId,
-            order: request.order,
-            metadata: request.metadata,
-          }
-        : {
-            action: request.action,
-            itemId: request.itemId,
-            metadata: request.metadata,
-          };
+      : request.action === "remove-card"
+        ? { action: request.action, itemId: request.itemId }
+        : request.action === "set-admission-fields"
+          ? {
+              action: request.action,
+              itemId: request.itemId,
+              order: request.order,
+              metadata: request.metadata,
+            }
+          : {
+              action: request.action,
+              itemId: request.itemId,
+              metadata: request.metadata,
+            };
   if (
     declared &&
     (!same(action, declared.action) ||
@@ -1839,10 +1902,9 @@ export async function projectQueueWriteOnGitHub(
     actorId: access.actorId,
     observedAt: new Date(time.now()).toISOString(),
     ...action,
-    ...(request.action === "ensure-card" ||
-    request.action === "set-admission-fields"
-      ? {}
-      : { fieldId: request.binding.metadataFieldId }),
+    ...(request.action === "set-metadata"
+      ? { fieldId: request.binding.metadataFieldId }
+      : {}),
   } as IntentBase;
   const intent = {
     ...base,
@@ -2012,6 +2074,18 @@ export async function projectQueueWriteOnGitHub(
     throw error;
   }
   try {
+    if (admitted.action === "remove-card") {
+      const receipt: ProjectQueueWriteReceipt = {
+        intent: admitted,
+        itemId: admitted.itemId,
+        observedAt: new Date(time.now()).toISOString(),
+        kind: "response",
+        original,
+      };
+      assertProjectQueueWriteReceipt(receipt);
+      // The scope's observation stays cleared: the next read observes the Project.
+      return receipt;
+    }
     const key =
       admitted.action === "ensure-card"
         ? "addProjectV2ItemById"

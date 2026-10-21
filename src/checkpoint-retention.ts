@@ -40,6 +40,11 @@ export interface RetirementRecord {
    * this version does not read, so none is identified and it stays in place.
    */
   reclaimed?: "complete" | "unreadable";
+  /**
+   * Its local content bodies that the evidence commit holds were deleted;
+   * reads restore them from the local publisher repository (#1657).
+   */
+  bodies?: "complete";
 }
 
 /** The gap availability that marks a retired Objective's archived evidence. */
@@ -107,7 +112,8 @@ function readRetirement(
       typeof value.at !== "string" ||
       (value.reclaimed !== undefined &&
         value.reclaimed !== "complete" &&
-        value.reclaimed !== "unreadable")
+        value.reclaimed !== "unreadable") ||
+      (value.bodies !== undefined && value.bodies !== "complete")
     )
       return undefined;
     return value;
@@ -236,13 +242,19 @@ const ATTEMPT_ID =
  * by design. A cancelled run that still holds resources, or an Objective
  * whose lock another owner holds, is left for a later pass. Attempts are read from
  * the parsed snapshot; a snapshot in a shape this version does not read
- * identifies nothing, and its material stays. Content bodies are not
- * reclaimed: the store deduplicates by digest across Objectives, so a body
- * cannot be shown to be unreferenced without a write barrier.
+ * identifies nothing, and its material stays.
+ *
+ * Its content bodies (the snapshot's reference closure and the snapshot
+ * itself) that the evidence commit's `blobs` tree holds are deleted locally.
+ * Bodies are shared by digest, but nothing needs to know who else uses one:
+ * the store reads a deleted body back from the local publisher repository,
+ * which holds every object it published.
  */
 export async function reclaimRetiredMaterial(
   config: FactoryConfig,
   acknowledged: (commit: string) => boolean,
+  /** The body digests an acknowledged archive commit holds. */
+  archived?: (commit: string) => ReadonlySet<string>,
 ): Promise<number> {
   const root = directory(config.repository);
   if (!existsSync(root)) return 0;
@@ -258,6 +270,10 @@ export async function reclaimRetiredMaterial(
   const { isExecutionState } = await import("./state.js");
   const { removeWorktree } = await import("./process.js");
   const { sweepValidationWorktrees } = await import("./validation.js");
+  const { LocalContentStore } = await import("./content/local.js");
+  const { verifyLocalContinuationReferenceClosure } = await import(
+    "./recovery-checkpoint-closure.js"
+  );
   const state = stateRoot(config.repository);
   // Under the Objective's own lock, so no retry or run can resume it and use
   // this material meanwhile; the snapshot is checked again under it.
@@ -329,6 +345,27 @@ export async function reclaimRetiredMaterial(
     writeRetirement(config.repository, { ...record, reclaimed: "complete" });
     return true;
   };
+  // Under the same lock, and only while the snapshot is still exactly the
+  // retired terminal history its evidence commit holds.
+  const reclaimBodies = async (objective: number, record: RetirementRecord) => {
+    const bytes = readFileSync(statePath(config.repository, objective));
+    if (stateDigest(bytes) !== record.stateDigest) return;
+    const value = JSON.parse(bytes.toString("utf8"));
+    if (!terminalHistory(value)) return;
+    const holds = archived!(record.evidenceCommit);
+    const store = new LocalContentStore(join(state, "content"));
+    const { contentRefs } = await verifyLocalContinuationReferenceClosure(
+      value,
+      store,
+    );
+    store.reclaimArchived(
+      record.evidenceCommit,
+      [record.stateDigest, ...contentRefs.map((ref) => ref.digest)].filter(
+        (digest) => holds.has(digest),
+      ),
+    );
+    writeRetirement(config.repository, { ...record, bodies: "complete" });
+  };
   let reclaimed = 0;
   for (const name of readdirSync(root).sort()) {
     const match = /^([1-9][0-9]*)\.json$/.exec(name);
@@ -337,7 +374,12 @@ export async function reclaimRetiredMaterial(
     // One Objective's failure leaves its material for a later pass only.
     try {
       const record = readRetirement(config.repository, objective);
-      if (!record || record.reclaimed) continue;
+      if (
+        !record ||
+        record.reclaimed === "unreadable" ||
+        (record.reclaimed && (record.bodies || !archived))
+      )
+        continue;
       const snapshot = statePath(config.repository, objective);
       if (
         !existsSync(snapshot) ||
@@ -353,7 +395,11 @@ export async function reclaimRetiredMaterial(
         continue;
       }
       try {
-        if (await reclaimOne(objective, record)) reclaimed++;
+        if (!record.reclaimed && (await reclaimOne(objective, record)))
+          reclaimed++;
+        const current = readRetirement(config.repository, objective);
+        if (archived && current?.reclaimed === "complete" && !current.bodies)
+          await reclaimBodies(objective, current);
       } finally {
         releaseControllerLock(
           objectiveLockPath(config.repository, objective),

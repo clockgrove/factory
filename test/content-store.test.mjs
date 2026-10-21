@@ -1013,6 +1013,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       ...structuredClone(cancelled),
       objective: 6,
       runId: "retired-exclusive-orchard-documentation",
+      cancelRequested: true,
       planningRecovery: {
         phase: "stopped",
         invocations: [
@@ -1233,6 +1234,27 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     },
   );
   assert.equal(firstCheckpoint.status, "acknowledged");
+  // Retired Objective 6's bodies that its evidence commit holds are deleted
+  // locally (#1657), including digests live Objective 5 shares; the store
+  // reads each one back from the local publisher repository.
+  const bodyPath = (ref) =>
+    join(state, "content", ref.digest.slice(0, 2), ref.digest);
+  assert.equal(
+    JSON.parse(readFileSync(join(state, "recovery", "retired", "6.json")))
+      .bodies,
+    "complete",
+  );
+  const reclaimedBodies = closure.contentRefs.filter(
+    (ref) => !existsSync(bodyPath(ref)),
+  );
+  assert(reclaimedBodies.some((ref) => ref.digest === exclusiveRef.digest));
+  assert(reclaimedBodies.length > 1);
+  // The rest stay missing: later closures of live Objective 5 and their
+  // publication read them through the store.
+  for (const ref of [exclusiveRef, reclaimedBodies.at(-1)]) {
+    await store.verify(ref);
+    assert.equal(existsSync(bodyPath(ref)), true);
+  }
   const firstInspection = await inspectRecoveryCheckpoint(config);
   const uniqueBodies = new Map(
     closure.contentRefs.map((ref) => [ref.digest, ref.bytes]),

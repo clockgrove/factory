@@ -7527,7 +7527,8 @@ async function publishCheckpoint(
   const options = settings(config);
   if (options && packed.acknowledged) {
     await packPublisher(config, options);
-    if (options.scope === "private-history") await reclaimRetired(config);
+    if (options.scope === "private-history")
+      await reclaimRetired(config, options);
   }
   return result;
 }
@@ -7536,8 +7537,12 @@ async function publishCheckpoint(
  * Objectives (see reclaimRetiredMaterial). It only saves space: a failure
  * leaves the material, and the next acknowledged publication tries again.
  */
-async function reclaimRetired(config: FactoryConfig): Promise<void> {
+async function reclaimRetired(
+  config: FactoryConfig,
+  options: GitPersistenceConfig,
+): Promise<void> {
   let reclaimed = 0;
+  const archived = new Map<string, ReadonlySet<string>>();
   const observed = checkpointObservation(
     config,
     "recovery-checkpoint-reclaim",
@@ -7545,8 +7550,29 @@ async function reclaimRetired(config: FactoryConfig): Promise<void> {
   );
   try {
     observed.start("reclaim");
-    reclaimed = await reclaimRetiredMaterial(config, (commit) =>
-      acknowledgedArchiveCommit(config, commit),
+    reclaimed = await reclaimRetiredMaterial(
+      config,
+      (commit) => acknowledgedArchiveCommit(config, commit),
+      (commit) => {
+        // The publisher holds every object it wrote (packPublisher drops
+        // none): an acknowledged commit's `blobs` tree names its bodies.
+        let digests = archived.get(commit);
+        if (!digests) {
+          digests = new Set(
+            git(paths(config.repository).git, options, [
+              "ls-tree",
+              "-z",
+              "--name-only",
+              `${commit}:blobs`,
+            ])
+              .toString("utf8")
+              .split("\0")
+              .filter((name) => /^[a-f0-9]{64}$/.test(name)),
+          );
+          archived.set(commit, digests);
+        }
+        return digests;
+      },
     );
     observed.complete();
   } catch (error) {

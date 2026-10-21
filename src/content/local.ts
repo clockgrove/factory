@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -13,7 +14,9 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -23,6 +26,7 @@ import type {
   ContentRef,
   ContentStore,
 } from "../contracts.js";
+import { pinnedGitEnvironment } from "../process.js";
 import {
   cachedRecoveryCheckpointReferences,
   checkpointClosureBytes,
@@ -41,6 +45,10 @@ function assertRef(ref: ContentRef): void {
     ref.bytes < 0
   )
     throw new Error("Invalid content reference");
+}
+
+function missing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 async function verifyFile(path: string, ref: ContentRef): Promise<void> {
@@ -64,6 +72,114 @@ export class LocalContentStore implements ContentStore {
   private path(ref: ContentRef): string {
     assertRef(ref);
     return join(this.root, ref.digest.slice(0, 2), ref.digest);
+  }
+
+  /**
+   * Where a reclaimed body is archived (#1657): `archived/<xx>/<digest>`
+   * names an acknowledged evidence commit whose `blobs` tree holds it in the
+   * installation's local publisher repository, which drops no object.
+   */
+  private archivedPath(digest: string): string {
+    return join(this.root, "archived", digest.slice(0, 2), digest);
+  }
+
+  /**
+   * Delete local copies of bodies the acknowledged `commit` holds. Each one is
+   * indexed first, so a reader (or a writer that reused it a moment before)
+   * reads it back through the archive.
+   */
+  reclaimArchived(commit: string, digests: Iterable<string>): number {
+    if (!/^[a-f0-9]{40,64}$/.test(commit))
+      throw new Error("Invalid archive commit");
+    let deleted = 0;
+    for (const digest of digests) {
+      if (!/^[a-f0-9]{64}$/.test(digest)) continue;
+      const body = join(this.root, digest.slice(0, 2), digest);
+      if (!existsSync(body)) continue;
+      const index = this.archivedPath(digest);
+      mkdirSync(dirname(index), { recursive: true, mode: 0o700 });
+      const temporary = `${index}.${randomUUID()}.tmp`;
+      writeFileSync(temporary, commit, { mode: 0o600 });
+      renameSync(temporary, index);
+      rmSync(body, { force: true });
+      deleted++;
+    }
+    return deleted;
+  }
+
+  /**
+   * Read-through for a reclaimed body: copy it back from the local publisher
+   * repository, exact to its digest. False when it is not archived there,
+   * which leaves the body missing as before.
+   */
+  private restoreArchived(ref: ContentRef): boolean {
+    let commit: string;
+    try {
+      commit = readFileSync(this.archivedPath(ref.digest), "utf8");
+    } catch (error) {
+      if (missing(error)) return false;
+      throw error;
+    }
+    if (!/^[a-f0-9]{40,64}$/.test(commit)) return false;
+    let bytes: Buffer;
+    try {
+      bytes = execFileSync(
+        "git",
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          `--git-dir=${join(dirname(this.root), "recovery", "git.git")}`,
+          "cat-file",
+          "blob",
+          `${commit}:blobs/${ref.digest}`,
+        ],
+        {
+          env: pinnedGitEnvironment(),
+          maxBuffer: ref.bytes + 1,
+          timeout: 120_000,
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      );
+    } catch {
+      return false;
+    }
+    if (
+      bytes.length !== ref.bytes ||
+      createHash("sha256").update(bytes).digest("hex") !== ref.digest
+    )
+      throw new Error(
+        `Archived content object ${ref.digest} failed digest verification`,
+      );
+    const path = this.path(ref);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const temporary = join(this.root, `${randomUUID()}.tmp`);
+    const fd = openSync(temporary, "wx", 0o600);
+    try {
+      let offset = 0;
+      while (offset < bytes.length)
+        offset += writeSync(fd, bytes, offset, bytes.length - offset);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      linkSync(temporary, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+    return true;
+  }
+
+  /** Run a read once more after restoring a body reclaimed under it. */
+  private readThrough<T>(ref: ContentRef, read: () => T): T {
+    try {
+      return read();
+    } catch (error) {
+      if (!missing(error) || !this.restoreArchived(ref)) throw error;
+      return read();
+    }
   }
 
   /** Retain complete controller bytes before publishing the atomic snapshot. */
@@ -96,8 +212,12 @@ export class LocalContentStore implements ContentStore {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
-      if (!this.retainExisting(ref))
-        throw new Error(`Content object ${ref.digest} is missing`);
+      if (!this.retainExisting(ref)) {
+        // Reclaimed between the link and its check: link these bytes.
+        linkSync(temporary, path);
+        if (!this.retainExisting(ref))
+          throw new Error(`Content object ${ref.digest} is missing`);
+      }
       return ref;
     } finally {
       rmSync(temporary, { force: true });
@@ -184,13 +304,17 @@ export class LocalContentStore implements ContentStore {
     try {
       fd = this.openObject(ref);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if (missing(error)) return false;
       throw error;
     }
     try {
       this.verifyDescriptor(fd, ref);
       this.synchronizeObject(fd, ref);
       return true;
+    } catch (error) {
+      // Reclaimed under this writer: it writes the body again.
+      if (missing(error)) return false;
+      throw error;
     } finally {
       closeSync(fd);
     }
@@ -215,12 +339,14 @@ export class LocalContentStore implements ContentStore {
       deferCheckpointClosureVerification(this.root, ref)
     )
       return;
-    const fd = this.openObject(ref);
-    try {
-      this.verifyDescriptor(fd, ref);
-    } finally {
-      closeSync(fd);
-    }
+    this.readThrough(ref, () => {
+      const fd = this.openObject(ref);
+      try {
+        this.verifyDescriptor(fd, ref);
+      } finally {
+        closeSync(fd);
+      }
+    });
   }
 
   private synchronizeObject(
@@ -253,15 +379,17 @@ export class LocalContentStore implements ContentStore {
       this.readBytes === LocalContentStore.prototype.readBytes;
     const cached = concrete && checkpointClosureBytes(this.root, ref);
     if (cached) return cached;
-    const fd = this.openObject(ref);
-    try {
-      const { bytes, identity } = this.readDescriptor(fd, ref);
-      if (concrete)
-        retainCheckpointClosureBytes(this.root, ref, bytes, identity);
-      return bytes;
-    } finally {
-      closeSync(fd);
-    }
+    return this.readThrough(ref, () => {
+      const fd = this.openObject(ref);
+      try {
+        const { bytes, identity } = this.readDescriptor(fd, ref);
+        if (concrete)
+          retainCheckpointClosureBytes(this.root, ref, bytes, identity);
+        return bytes;
+      } finally {
+        closeSync(fd);
+      }
+    });
   }
 
   checkpointReferences(
@@ -333,7 +461,15 @@ export class LocalContentStore implements ContentStore {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
-      const retained = this.openObject(ref);
+      let retained: number;
+      try {
+        retained = this.openObject(ref);
+      } catch (error) {
+        // Reclaimed between the link and its open: link these bytes.
+        if (!missing(error)) throw error;
+        linkSync(temporary, path);
+        retained = this.openObject(ref);
+      }
       try {
         const identity = this.descriptorIdentity(retained, ref, false);
         // One streamed digest read authenticates the final linked object. Bind
@@ -387,6 +523,7 @@ export class LocalContentStore implements ContentStore {
   }
 
   async verify(ref: ContentRef): Promise<void> {
+    if (!existsSync(this.path(ref))) this.restoreArchived(ref);
     await verifyFile(this.path(ref), ref);
   }
 

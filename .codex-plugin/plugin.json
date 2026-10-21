@@ -16,10 +16,7 @@
     "longDescription": "Compile repository Objectives into Work Items, execute with an installed harness, validate exact results, and deliver through GitHub.",
     "developerName": "Clockgrove",
     "category": "Developer Tools",
-    "capabilities": [
-      "Read",
-      "Write"
-    ],
+    "capabilities": ["Read", "Write"],
     "defaultPrompt": [
       "Use Factory to inspect a development Objective in my repository"
     ]

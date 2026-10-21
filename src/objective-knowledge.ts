@@ -71,7 +71,10 @@ const filePath = (value: unknown): value is string =>
 const LEARNING_LIMIT = { notes: 16, summary: 1024, paths: 8 };
 /** One verification note per acceptance criterion; the manifest size bounds the rest. */
 const VERIFICATION_LIMIT = { summary: 4096, paths: 16 };
-/** One design note per design risk: an answer and the file:line locations it rests on. */
+/**
+ * One design note per design risk: an answer and the file:line locations it rests on. Decision:
+ * half the verification-note limits, because a note answers one question, not a whole criterion.
+ */
 const DESIGN_LIMIT = { summary: 2048, paths: 8 };
 /** Every design risk a note may answer: the generic questions, then the repository's own. */
 const designRisks: readonly string[] = [

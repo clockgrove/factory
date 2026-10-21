@@ -138,7 +138,7 @@ export interface IntakeAuthorization {
   watch?: true;
   bodyDigests: Record<string, string>;
   dequeued: number[];
-  /** Cards no current admission binds: nothing dispatches them, and `queue remove` archives them. */
+  /** Cards no current admission binds: nothing dispatches them. `queue remove` withdraws an earlier authority's admission and archives a card without one. */
   inert?: number[];
   mode: QueueMode;
   remoteObservation?: {
@@ -1223,11 +1223,10 @@ async function applyControlMutation(
         issue = current.inspection.issue;
       if (entry && entry.objective !== id)
         throw new Error(`Objective #${id} is not admitted`);
-      const admitted =
-        entry?.state === "queued" &&
-        entry.authorityDigest === factoryAuthorityDigest(config);
-      // An inert card: withdrawn, admitted under an earlier authority, or
-      // without admission metadata. Removal archives its Project card.
+      // A queued admission, under any authority, is withdrawn so that
+      // `queue add` can re-admit it. A withdrawn card, or one without
+      // admission metadata, binds nothing: removal archives it.
+      const admitted = entry?.state === "queued";
       if (
         !admitted &&
         (!card ||

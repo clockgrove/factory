@@ -657,6 +657,13 @@ export function submitAmendment(
       delete state.error;
       delete state.errorItem;
     }
+    // The rejection held the coordinator paused (`rejectionHoldsPause`);
+    // its replacement lifts that hold, so the next pass compiles it (#1645).
+    if (state.coordinator?.mode === "paused") {
+      state.coordinator.mode = "running";
+      if (state.coordinator.waitReason === rejected.error)
+        delete state.coordinator.waitReason;
+    }
   }
   state.pendingAmendment = {
     id: randomUUID(),

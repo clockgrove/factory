@@ -1820,6 +1820,13 @@ function renderPrerequisiteGuidance(
 interface ServiceStatusDocument {
   /** Every Objective a live controller runs, with its phase. */
   activeObjectives?: { objective: number; phase: string; summary: string }[];
+  /** Objectives the live service holds for a person while it runs the others. */
+  waitingObjectives?: {
+    objective: number;
+    phase: string;
+    summary: string;
+    command?: string;
+  }[];
   currentObjective?: StatusView & StatusSummary;
   currentObjectiveError?: string;
   service: {
@@ -1841,6 +1848,7 @@ interface ServiceStatusDocument {
     activeObjective?: number | null;
     /** Every Objective a live controller runs; foreground runs side by side. */
     activeObjectives?: number[];
+    waitingObjectives?: number[];
     /** Upgrade drain: no new dispatch while the active runs finish. */
     finishing?: boolean;
     observation?: { error?: string; needsDecision?: number };
@@ -1851,7 +1859,11 @@ interface ServiceStatusDocument {
 /** The service and queue as text lines, each problem followed by the command that answers it. */
 export function renderServiceStatus(document: ServiceStatusDocument): string[] {
   const { service, queue } = document;
-  const lines: string[] = [];
+  // An Objective waiting for a person comes first: nothing else moves it.
+  const lines: string[] = (document.waitingObjectives ?? []).map(
+    (entry) =>
+      `Objective #${entry.objective} waits for you: ${short(entry.summary, 120)}; ${entry.command ? `next \`${entry.command}\`` : `\`factory status --objective ${entry.objective}\` names the command`}`,
+  );
   if (service.supported === false)
     lines.push(
       "Service: unavailable on this host (no running systemd user manager); `factory run --objective N` runs an Objective in the foreground",

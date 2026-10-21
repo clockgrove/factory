@@ -37,6 +37,7 @@ import {
 import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { attachedFault } from "./fault.js";
 import { RealGitHubGateway } from "./github.js";
+import { stopRetryCommand } from "./run-outcome.js";
 import { gitHubTransportOf } from "./github-client.js";
 import {
   createProjectQueuePlannedEffect,
@@ -1604,9 +1605,17 @@ async function runIntakeOwned(
     [...active].flatMap(([objective, entry]) =>
       entry.control ? [[objective, entry.control] as const] : [],
     );
-  // A run that needs a person or failed holds new dispatch; the service then
-  // ends with this record once its other active runs settle.
+  // A run that failed, or an installation-wide limit that needs a person,
+  // holds new dispatch; the service then ends with this record once its other
+  // active runs settle.
   let stopping: IntakeAuthorization["observation"];
+  // Objectives whose run stopped for a person: the run's wait reason and a
+  // digest of the state it left. Each holds only itself: the service stays up
+  // and dispatches the others (#1714). Any change to that state, such as a
+  // decision or cancellation, releases it to the next pass.
+  const waiting = new Map<number, { reason: string; state: string }>();
+  const stateDigest = (state: ContinuationState | undefined) =>
+    queueDigest(JSON.stringify(state ?? null));
   // Upgrade drain (`factory supervisor upgrade` with several Objectives): no
   // new dispatch while the active runs finish; `queue resume` lifts it.
   let finishing = false;
@@ -1746,6 +1755,7 @@ async function runIntakeOwned(
         : {}),
     activeObjective: [...active.keys()][0] ?? null,
     activeObjectives: [...active.keys()],
+    ...(waiting.size ? { waitingObjectives: [...waiting.keys()] } : {}),
     maxActiveObjectives: slots,
     ...(finishing ? { finishing: true } : {}),
     // A run's stop holds new dispatch locally without pausing the other runs.
@@ -2112,14 +2122,14 @@ async function runIntakeOwned(
               },
             }),
           );
+          // Stopped for a person: its slot frees in `finally` and the
+          // service keeps dispatching the others (#1714).
           if (!terminal(result))
-            stop({
-              at: new Date().toISOString(),
-              reasons,
-              needsDecision: selected,
-              error:
+            waiting.set(selected, {
+              reason:
                 result.coordinator?.waitReason ??
                 "Inspect retained Objective status",
+              state: stateDigest(readContinuation(config.repository, selected)),
             });
         } catch (error) {
           if (error instanceof CoordinatorHandoff) {
@@ -2264,13 +2274,6 @@ async function runIntakeOwned(
           )) {
             if (active.size + selected.length >= slots) break;
             if (active.has(entry.objective)) continue;
-            const held = new Set([...active.keys(), ...selected, ...claimed]);
-            held.delete(entry.objective);
-            if (held.size >= slots) {
-              reasons[entry.objective] =
-                `All ${slots} dispatch slots are held (${[...held].map((id) => `#${id}`).join(", ")})`;
-              continue;
-            }
             // Retired terminal history needs nothing and is never acted on (#1457).
             const read = readScannedContinuation(
               config.repository,
@@ -2278,6 +2281,20 @@ async function runIntakeOwned(
             );
             if (read === "history") continue;
             const state = read;
+            const wait = waiting.get(entry.objective);
+            if (wait && wait.state === stateDigest(state)) {
+              reasons[entry.objective] =
+                `Waits for a decision: ${wait.reason}; \`factory status --objective ${entry.objective}\` names the command`;
+              continue;
+            }
+            waiting.delete(entry.objective);
+            const held = new Set([...active.keys(), ...selected, ...claimed]);
+            held.delete(entry.objective);
+            if (held.size >= slots) {
+              reasons[entry.objective] =
+                `All ${slots} dispatch slots are held (${[...held].map((id) => `#${id}`).join(", ")})`;
+              continue;
+            }
             if (terminal(state)) {
               // A split parent whose last child settle failed closes here; it
               // needs only local state and the parent's own provider.
@@ -2311,10 +2328,16 @@ async function runIntakeOwned(
                 "Issue is closed or its approved contents changed";
               continue;
             }
-            if (state?.error || state?.cancelRequested) {
+            // A stopped Objective holds only itself; the next card runs.
+            if (state?.cancelRequested) {
               reasons[entry.objective] =
-                "Retained failure/cancellation requires supported recovery";
-              break;
+                `Cancellation requested; \`factory cancel --objective ${entry.objective}\` finishes it`;
+              continue;
+            }
+            if (state?.error) {
+              reasons[entry.objective] =
+                `Stopped: ${state.error}; \`${stopRetryCommand(state)}\` recovers it, or \`factory cancel --objective ${entry.objective}\``;
+              continue;
             }
             // The operator's pause or drain holds until resume: running it
             // would only idle in a slot. The service's own drain resumes (#1701).
@@ -2353,8 +2376,9 @@ async function runIntakeOwned(
                   );
                 });
                 if (missing) {
-                  reasons[entry.objective] =
-                    `Predecessor #${missing} has no accepted evidence`;
+                  reasons[entry.objective] = waiting.has(missing)
+                    ? `Predecessor #${missing} waits for a decision`
+                    : `Predecessor #${missing} has no accepted evidence`;
                   continue;
                 }
                 await resolveIntakeBase(

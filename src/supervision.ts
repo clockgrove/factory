@@ -642,7 +642,12 @@ async function drainForUpgrade(config: FactoryConfig): Promise<number[]> {
     (left, right) => left - right,
   );
 }
-/** A stopped service whose run exited 2 is waiting for a human decision, not failed. */
+/**
+ * A stopped service that exited 2 waits for an installation-wide decision (an
+ * archive limit, a changed queue authority), not failed. One Objective's
+ * decision never stops it: the live service holds that Objective and keeps
+ * dispatching the others (#1714), and its status names the waiting Objective.
+ */
 function awaitsDecision(name: string): boolean {
   return (
     !["active", "activating"].includes(inspect("is-active", name) ?? "") &&

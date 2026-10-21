@@ -401,13 +401,20 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
     Pick<IntakeAuthorization, "remoteObservation"> & {
       localMode?: string;
     };
+  const secrets = () =>
+    config.policy.allowedSecretNames
+      .map((name) => process.env[name])
+      .filter((value): value is string => Boolean(value));
   // Every Objective a live controller runs: the service's, else the
   // foreground runs side by side.
   const running =
     queue.activeObjectives ??
     (queue.activeObjective ? [queue.activeObjective] : []);
-  const objective = running[0] ?? queue.observation?.needsDecision;
-  const activeObjectives = running.map((id) => {
+  // Objectives the live service holds for a person while it runs the others.
+  const waitingIds = queue.waitingObjectives ?? [];
+  const objective =
+    running[0] ?? waitingIds[0] ?? queue.observation?.needsDecision;
+  const summaryOf = (id: number) => {
     try {
       const { document } = statusDocument(
         config,
@@ -419,6 +426,9 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
         objective: id,
         phase: document.phase,
         summary: document.summary,
+        ...(document.nextAction
+          ? { command: document.nextAction.command }
+          : {}),
       };
     } catch (error) {
       return {
@@ -426,13 +436,20 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
         phase: "unknown",
         summary: redactDiagnosticDetail(
           error instanceof Error ? error.message : String(error),
-          config.policy.allowedSecretNames
-            .map((name) => process.env[name])
-            .filter((value): value is string => Boolean(value)),
+          secrets(),
         ),
       };
     }
+  };
+  const activeObjectives = running.map((id) => {
+    const entry = summaryOf(id);
+    return {
+      objective: entry.objective,
+      phase: entry.phase,
+      summary: entry.summary,
+    };
   });
+  const waitingObjectives = waitingIds.map(summaryOf);
   let current: Pick<
     ServiceStatus,
     "currentObjective" | "currentObjectiveError"
@@ -451,9 +468,7 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
       current = {
         currentObjectiveError: redactDiagnosticDetail(
           error instanceof Error ? error.message : String(error),
-          config.policy.allowedSecretNames
-            .map((name) => process.env[name])
-            .filter((value): value is string => Boolean(value)),
+          secrets(),
         ),
       };
     }
@@ -462,6 +477,7 @@ async function serviceStatus(path: string, json: boolean): Promise<void> {
     service,
     queue,
     activeObjectives,
+    ...(waitingObjectives.length ? { waitingObjectives } : {}),
     ...current,
     durability: gitPersistenceStatus(config),
     commandSandbox: commandSandboxStatus(commandSandboxPolicy(config)),
@@ -553,14 +569,14 @@ async function decideCommand(
     question: option(args, "question"),
     reason,
   });
-  // A live service recorded the decision itself; queue resume continues it.
+  // A live service recorded the decision itself and dispatches it again.
   const run = liveControllerOwner(installationLockPath(config.repository))
     ?.intake
-    ? "`factory queue resume`"
+    ? "the service's next dispatch pass"
     : `\`factory run --objective ${objective}\``;
   console.log(
     decided === "plan-accepted"
-      ? `Accepted the plan for Objective #${objective}; run ${run} to continue`
+      ? `Accepted the plan for Objective #${objective}; ${run} continues it`
       : decided === "plan-answered"
         ? `Recorded your answer for Objective #${objective}; ${run} revises the plan with your answer and reviews it again`
         : decided === "plan-revisions-granted"

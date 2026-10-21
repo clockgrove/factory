@@ -191,7 +191,7 @@ export function runOutcome(
   return { code: EXIT_NEEDS_DECISION, message: statusLines().join("\n") };
 }
 
-/** Intake exits 2 when an Objective stopped the queue for a decision, 1 when a failure paused it. */
+/** Intake exits 2 when an installation-wide limit stopped the queue for a decision, 1 when a failure paused it. One Objective's decision keeps the service running (#1714). */
 export function intakeExitCode(record: IntakeAuthorization): number {
   if (record.observation?.needsDecision) return EXIT_NEEDS_DECISION;
   return record.mode === "paused" && record.observation?.error

@@ -663,6 +663,14 @@ export function recoveryCheckpointGitPackObservation(
   );
 }
 class CheckpointConflict extends Error {}
+/** The first read of an adopted verifier failed; it and the sealed copy are discarded. */
+class AdoptedVerifierFailure extends Error {
+  constructor(readonly original: unknown) {
+    super("Adopted checkpoint verifier failed its first read", {
+      cause: original,
+    });
+  }
+}
 class CheckpointRestoreRequired extends Error {}
 /** An exactly fetched remote archive whose history does not contain a commit. */
 class CheckpointCommitAbsent extends Error {
@@ -3961,6 +3969,60 @@ export function recoveryCheckpointClosureDigest(
 ): string {
   return hash(closureIdentity(closure));
 }
+/**
+ * Read Git objects and re-hash each one from its content against its ID. Git
+ * does not re-hash objects on ordinary reads, and a verifier may start from a
+ * sealed local copy whose objects this process did not fetch, so every
+ * commit, tree and manifest an archive read resolves paths through is checked
+ * here before use; bodies are checked against their digests when read. A
+ * missing selector returns undefined.
+ */
+function authenticatedObjects(
+  directory: string,
+  options: GitPersistenceConfig,
+  selectors: string[],
+): ({ oid: string; type: string; bytes: Buffer } | undefined)[] {
+  if (!selectors.length) return [];
+  const packet = git(
+    directory,
+    options,
+    ["cat-file", "--batch"],
+    selectors.map((selector) => `${selector}\n`).join(""),
+  );
+  let cursor = 0;
+  const objects = selectors.map(() => {
+    const end = packet.indexOf(10, cursor);
+    if (end === -1) throw new Error("Archive Git object packet is incomplete");
+    const header = packet.subarray(cursor, end).toString("utf8");
+    cursor = end + 1;
+    if (header.endsWith(" missing")) return undefined;
+    const [oid, type, rawSize] = header.split(" ");
+    const size = Number(rawSize);
+    if (
+      !oid ||
+      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(oid) ||
+      !type ||
+      !Number.isSafeInteger(size) ||
+      size < 0
+    )
+      throw new Error("Archive Git object header is invalid");
+    const bytes = packet.subarray(cursor, cursor + size);
+    cursor += size;
+    if (
+      bytes.length !== size ||
+      packet[cursor++] !== 10 ||
+      createHash(oid.length === 40 ? "sha1" : "sha256")
+        .update(`${type} ${size}\0`)
+        .update(bytes)
+        .digest("hex") !== oid
+    )
+      throw new Error("Archive Git object differs from its ID");
+    return { oid, type, bytes };
+  });
+  if (cursor !== packet.length)
+    throw new Error("Archive Git object packet has extra bytes");
+  return objects;
+}
 function readArchive(
   directory: string,
   commitSha: string,
@@ -3977,10 +4039,27 @@ function readArchive(
   originalManifestBytes: Buffer;
   payloadDigest: string;
 } {
-  const manifestBytes = git(directory, options, [
-    "show",
-    `${commitSha}:checkpoint.json`,
-  ]);
+  // The commit, both trees and the manifest every path below resolves
+  // through, each checked against its ID.
+  const [commit, tree, blobs, manifestObject] = authenticatedObjects(
+    directory,
+    options,
+    [
+      commitSha,
+      `${commitSha}^{tree}`,
+      `${commitSha}:blobs`,
+      `${commitSha}:checkpoint.json`,
+    ],
+  );
+  if (
+    commit?.type !== "commit" ||
+    commit.oid !== commitSha ||
+    tree?.type !== "tree" ||
+    (blobs && blobs.type !== "tree") ||
+    manifestObject?.type !== "blob"
+  )
+    throw new Error("Archive commit objects are missing or of another type");
+  const manifestBytes = manifestObject.bytes;
   const manifest = JSON.parse(
     new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes),
   );
@@ -4336,6 +4415,20 @@ function observeQueueAncestry(
       "Cached queue witness is absent from exact first-parent ancestry",
     );
   const commits = completeCommits.slice(prefixIndex + 1);
+  // Each manifest below is found through its commit and root tree.
+  const linked = authenticatedObjects(
+    directory,
+    options,
+    commits.flatMap((sha) => [sha, `${sha}^{tree}`]),
+  );
+  if (
+    linked.some(
+      (object, index) =>
+        object?.type !== (index % 2 ? "tree" : "commit") ||
+        (index % 2 === 0 && object.oid !== commits[index / 2]),
+    )
+  )
+    throw new Error("Queue lineage commit objects are missing or differ");
   const inventory = `${commits.map((sha) => `${sha}:checkpoint.json`).join("\n")}\n`;
   const metadata = git(
     directory,
@@ -5593,7 +5686,7 @@ async function freshArchiveOwned(
     }),
   );
   observed.start("archive-and-final-validation");
-  const read = () =>
+  const strict = () =>
     freshArchiveOwnedStrict(
       config,
       options,
@@ -5604,6 +5697,13 @@ async function freshArchiveOwned(
       context,
       candidateAck,
     );
+  // A failed first read of an adopted verifier has already discarded it and
+  // the sealed copy; the read is repeated once from an empty verifier.
+  const read = () =>
+    strict().catch((error: unknown) => {
+      if (error instanceof AdoptedVerifierFailure) return strict();
+      throw error;
+    });
   const result = await (async () => {
     try {
       const result =
@@ -5679,11 +5779,14 @@ function verifierDirectory(repository: string): string {
 /**
  * One installation keeps a sealed copy of the remote-only verifier of its
  * last closed controller, so a new process fetches only what is new instead
- * of the whole archive. Trust comes from the remote: a controller re-hashes
- * every adopted object with a full strict fsck before reading it, then either
- * matches the remote's exact tip hash or strictly fetches what is new. The
- * seal, which sits beside the objects, is only a cheap change detector that
- * skips copying a store that changed since it was sealed. No process
+ * of the whole archive. Processes running as the installation's user are
+ * trusted: they can already rewrite Factory's code, configuration and
+ * credentials. What the copy must survive is accidental change and
+ * corruption. The seal detects change cheaply; every commit, tree and
+ * manifest a read uses is re-hashed against its ID (authenticatedObjects) and
+ * every body against its digest, so the remote's exact tip hash still fixes
+ * what is read. Objects fetched in this process are strictly checked as
+ * before. No process
  * writes the sealed copy: each controller copies its object files into its
  * own verifier, so concurrent processes each start from it, and a closing
  * controller replaces it by atomic renames. A replaced copy takes a
@@ -5767,9 +5870,9 @@ async function retainVerifier(
  * copied only when its seal names this exact binding and every object file is
  * the one sealed (type, device, inode, mode, size and times), before and after
  * copying; only object files are copied, and the Git metadata is this
- * verifier's own. The copy is still unauthenticated: the first read re-hashes
- * it (see freshArchiveOwnedStrict). Any difference discards the sealed copy,
- * and the read starts from an empty verifier with a full strict fetch.
+ * verifier's own. Any difference discards the sealed copy, and the read
+ * starts from an empty verifier with a full strict fetch; so does a failed
+ * first read of the copy, once (see AdoptedVerifierFailure).
  */
 function adoptRetainedVerifier(
   config: FactoryConfig,
@@ -5871,7 +5974,6 @@ async function freshArchiveOwnedStrict(
   let hintUsed = false;
   let verifierAdopted = false;
   let fetchSkipped = false;
-  let adoptedMaterial: "none" | "verified" | "rejected" = "none";
   let observedTip: string | undefined;
   let semanticBodyReads:
     | { refs: number; bytes: number; fallback: boolean }
@@ -5889,7 +5991,6 @@ async function freshArchiveOwnedStrict(
       negotiationHintArgument: hintUsed,
       verifierAdopted,
       fetchSkipped,
-      adoptedMaterial,
       lineageEntries: context?.lineages.size ?? 0,
       referenceEntries: context?.content.size ?? 0,
       metadataBytes: context ? verificationMetadataBytes(context) : 0,
@@ -5913,34 +6014,6 @@ async function freshArchiveOwnedStrict(
     const adoptedTip = context?.adoptedTip;
     verifierAdopted = Boolean(adoptedTip);
     if (context) delete context.adoptedTip;
-    if (adoptedTip && context) {
-      // The seal sits beside the objects it describes, so it only detects
-      // change cheaply and proves nothing. Git does not re-hash objects on
-      // ordinary reads, so the adopted store is fully re-hashed once, before
-      // anything reads it. Corrupt material discards the sealed copy and
-      // this read starts from an empty verifier with a full strict fetch.
-      observed.start("adopted-material");
-      try {
-        await gitRemote(directory, options, [
-          "fsck",
-          "--full",
-          "--strict",
-          "--no-reflogs",
-          "--no-dangling",
-          adoptedTip,
-        ]);
-        adoptedMaterial = "verified";
-      } catch (error) {
-        if (error instanceof UnsettledSubprocessError) throw error;
-        adoptedMaterial = "rejected";
-        verifierAdopted = false;
-        delete context.objects;
-        context.objectBytes = 0;
-        delete context.negotiationTip;
-        rmSync(directory, { recursive: true, force: true });
-        discardSharedVerifier(config.repository);
-      }
-    }
     initializeGit(directory, options);
     if (context) chmodSync(directory, 0o700);
     if (context) assertRemoteOnlyVerifier(directory, options);
@@ -5972,9 +6045,10 @@ async function freshArchiveOwnedStrict(
     // A cold start on an adopted verifier whose sealed tip is still the
     // remote's exact ref needs no fetch: the fresh exact ref observation
     // names that commit ID, which fixes every reachable object by hash, and
-    // fsck above re-hashed every adopted object and checked its links. The
-    // ref observation is then this read's remote observation boundary. Any
-    // other tip, an absent ref or an absent commit fetches as usual.
+    // every object this read uses is re-hashed against its ID before use
+    // (see authenticatedObjects). The ref observation is then this read's
+    // remote observation boundary. Any other tip, an absent ref or an
+    // absent commit fetches as usual.
     const holdsCommit = (commit: string) => {
       try {
         return (
@@ -6436,6 +6510,8 @@ async function freshArchiveOwnedStrict(
         // Keep the failed verifier quarantined and preserve the original error.
       }
     }
+    if (verifierAdopted && settled && context && !context.quarantined)
+      throw new AdoptedVerifierFailure(error);
     throw error;
   } finally {
     if (settled && !context)

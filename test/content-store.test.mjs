@@ -3285,7 +3285,6 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.deepEqual(verifierDirectories(), []);
   let [fetchObserved] = fetchObservations(observationOffset);
   assert.equal(fetchObserved.metadata.verifierAdopted, true);
-  assert.equal(fetchObserved.metadata.adoptedMaterial, "verified");
   assert.equal(fetchObserved.metadata.negotiationHintArgument, true);
   assert.equal(fetchObserved.metadata.fetchSkipped, false);
   // An unchanged archive tip is read from the sealed verifier without a fetch.
@@ -3333,7 +3332,7 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(fetchObserved.metadata.negotiationHintArgument, false);
   assert.deepEqual(verifierDirectories(), []);
   // The seal only detects change: a forged object under a rewritten seal is
-  // caught by re-hashing the adopted store, and the read fetches in full.
+  // caught when the read re-hashes it, and the read is repeated in full.
   const tipCommit = execFileSync("git", [
     "--git-dir",
     retainedVerifier,
@@ -3341,6 +3340,23 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     "commit",
     advancedTip,
   ]);
+  // Serve every object loose, so the forged copy is the one Git reads.
+  const sealedPackDirectory = join(retainedVerifier, "objects", "pack");
+  for (const name of readdirSync(sealedPackDirectory)) {
+    if (!name.endsWith(".pack")) continue;
+    const pack = readFileSync(join(sealedPackDirectory, name));
+    for (const extension of [".pack", ".idx", ".rev", ".bitmap"])
+      rmSync(join(sealedPackDirectory, name.replace(/\.pack$/, extension)), {
+        force: true,
+      });
+    execFileSync(
+      "git",
+      ["--git-dir", retainedVerifier, "unpack-objects", "-q"],
+      {
+        input: pack,
+      },
+    );
+  }
   const forgedCommit = Buffer.from(tipCommit);
   forgedCommit[forgedCommit.length - 2] ^= 1;
   const forgedDirectory = join(
@@ -3409,9 +3425,10 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     },
     { queueControlVerification: true },
   );
-  [fetchObserved] = fetchObservations(observationOffset);
-  assert.equal(fetchObserved.metadata.adoptedMaterial, "rejected");
-  assert.equal(fetchObserved.metadata.negotiationHintArgument, false);
+  const [adoptedRead, fullRead] = fetchObservations(observationOffset);
+  assert.equal(adoptedRead.metadata.verifierAdopted, true);
+  assert.equal(fullRead.metadata.verifierAdopted, false);
+  assert.equal(fullRead.metadata.negotiationHintArgument, false);
   // A sealed copy whose first read fails is not offered again.
   assert(existsSync(retainedVerifier));
   await withRecoveryCheckpointOperation(

@@ -10,6 +10,7 @@ import fs, {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -3333,76 +3334,77 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.deepEqual(verifierDirectories(), []);
   // The seal only detects change: a forged object under a rewritten seal is
   // caught when the read re-hashes it, and the read is repeated in full.
-  const tipCommit = execFileSync("git", [
-    "--git-dir",
-    retainedVerifier,
-    "cat-file",
-    "commit",
-    advancedTip,
-  ]);
-  // Serve every object loose, so the forged copy is the one Git reads.
-  const sealedPackDirectory = join(retainedVerifier, "objects", "pack");
-  for (const name of readdirSync(sealedPackDirectory)) {
-    if (!name.endsWith(".pack")) continue;
-    const pack = readFileSync(join(sealedPackDirectory, name));
-    for (const extension of [".pack", ".idx", ".rev", ".bitmap"])
-      rmSync(join(sealedPackDirectory, name.replace(/\.pack$/, extension)), {
-        force: true,
-      });
-    execFileSync(
+  // Every sealed object is unpacked loose, so the forged copy of `oid` is the
+  // one Git reads, and the seal is rewritten to match.
+  const forgeSealedObject = (oid) => {
+    const type = execFileSync(
       "git",
-      ["--git-dir", retainedVerifier, "unpack-objects", "-q"],
-      {
-        input: pack,
-      },
-    );
-  }
-  const forgedCommit = Buffer.from(tipCommit);
-  forgedCommit[forgedCommit.length - 2] ^= 1;
-  const forgedDirectory = join(
-    retainedVerifier,
-    "objects",
-    advancedTip.slice(0, 2),
-  );
-  mkdirSync(forgedDirectory, { recursive: true });
-  rmSync(join(forgedDirectory, advancedTip.slice(2)), { force: true });
-  writeFileSync(
-    join(forgedDirectory, advancedTip.slice(2)),
-    deflateSync(
-      Buffer.concat([
-        Buffer.from(`commit ${forgedCommit.length}\0`),
-        forgedCommit,
-      ]),
-    ),
-  );
-  const resealed = [];
-  const reseal = (path, name) => {
-    const stat = fs.lstatSync(path, { bigint: true });
-    resealed.push([
-      name,
-      [
-        stat.isDirectory() ? "d" : "f",
-        stat.dev,
-        stat.ino,
-        stat.mode,
-        stat.size,
-        stat.mtimeNs,
-        stat.ctimeNs,
-      ].join(":"),
+      ["--git-dir", retainedVerifier, "cat-file", "-t", oid],
+      { encoding: "utf8" },
+    ).trim();
+    const original = execFileSync("git", [
+      "--git-dir",
+      retainedVerifier,
+      "cat-file",
+      type,
+      oid,
     ]);
-    if (stat.isDirectory())
-      for (const child of readdirSync(path).sort())
-        reseal(join(path, child), `${name}/${child}`);
+    const packDirectory = join(retainedVerifier, "objects", "pack");
+    for (const name of readdirSync(packDirectory)) {
+      if (!name.endsWith(".pack")) continue;
+      const pack = readFileSync(join(packDirectory, name));
+      for (const extension of [".pack", ".idx", ".rev", ".bitmap"])
+        rmSync(join(packDirectory, name.replace(/\.pack$/, extension)), {
+          force: true,
+        });
+      execFileSync(
+        "git",
+        ["--git-dir", retainedVerifier, "unpack-objects", "-q"],
+        { input: pack },
+      );
+    }
+    const forged = Buffer.from(original);
+    forged[forged.length - 2] ^= 1;
+    const directory = join(retainedVerifier, "objects", oid.slice(0, 2));
+    mkdirSync(directory, { recursive: true });
+    rmSync(join(directory, oid.slice(2)), { force: true });
+    writeFileSync(
+      join(directory, oid.slice(2)),
+      deflateSync(
+        Buffer.concat([Buffer.from(`${type} ${forged.length}\0`), forged]),
+      ),
+    );
+    const resealed = [];
+    const reseal = (path, name) => {
+      const stat = fs.lstatSync(path, { bigint: true });
+      resealed.push([
+        name,
+        [
+          stat.isDirectory() ? "d" : "f",
+          stat.dev,
+          stat.ino,
+          stat.mode,
+          stat.size,
+          stat.mtimeNs,
+          stat.ctimeNs,
+        ].join(":"),
+      ]);
+      if (stat.isDirectory())
+        for (const child of readdirSync(path).sort())
+          reseal(join(path, child), `${name}/${child}`);
+    };
+    reseal(join(retainedVerifier, "objects"), "objects");
+    const sealPath = join(retainedVerifier, "factory-verifier.json");
+    writeFileSync(
+      sealPath,
+      JSON.stringify({
+        ...JSON.parse(readFileSync(sealPath)),
+        objects: resealed,
+      }),
+    );
+    return original;
   };
-  reseal(join(retainedVerifier, "objects"), "objects");
-  const sealPath = join(retainedVerifier, "factory-verifier.json");
-  writeFileSync(
-    sealPath,
-    JSON.stringify({
-      ...JSON.parse(readFileSync(sealPath)),
-      objects: resealed,
-    }),
-  );
+  const tipCommit = forgeSealedObject(advancedTip);
   observationOffset = statSync(diagnosticPath(repository, 0)).size;
   await withRecoveryCheckpointOperation(
     operationInput,
@@ -3429,13 +3431,58 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(adoptedRead.metadata.verifierAdopted, true);
   assert.equal(fullRead.metadata.verifierAdopted, false);
   assert.equal(fullRead.metadata.negotiationHintArgument, false);
-  // A sealed copy whose first read fails is not offered again.
+  // A transport failure on the first adopted read keeps the sealed copy.
   assert(existsSync(retainedVerifier));
+  const sealedBefore = readFileSync(
+    join(retainedVerifier, "factory-verifier.json"),
+  );
+  const unreachable = `${remote}.unreachable`;
   await withRecoveryCheckpointOperation(
     operationInput,
     async () => {
-      await assert.rejects(
-        readVerifiedRecoveryCheckpoint(config, "0".repeat(40)),
+      renameSync(remote, unreachable);
+      try {
+        await assert.rejects(readVerifiedRecoveryCheckpoint(config));
+      } finally {
+        renameSync(unreachable, remote);
+      }
+      assert.deepEqual(
+        readFileSync(join(retainedVerifier, "factory-verifier.json")),
+        sealedBefore,
+      );
+    },
+    { queueControlVerification: true },
+  );
+  // Corruption that only a later read reaches still discards the sealed copy;
+  // that read is repeated in full and returns the genuine archive.
+  const blobsTree = (commit) =>
+    execFileSync("git", ["--git-dir", remote, "rev-parse", `${commit}:blobs`], {
+      encoding: "utf8",
+    }).trim();
+  const tipNow = sealedTip();
+  let older = execFileSync(
+    "git",
+    ["--git-dir", remote, "rev-parse", `${tipNow}^`],
+    { encoding: "utf8" },
+  ).trim();
+  while (blobsTree(older) === blobsTree(tipNow))
+    older = execFileSync(
+      "git",
+      ["--git-dir", remote, "rev-parse", `${older}^`],
+      { encoding: "utf8" },
+    ).trim();
+  forgeSealedObject(blobsTree(older));
+  await withRecoveryCheckpointOperation(
+    operationInput,
+    async () => {
+      assert.equal(
+        (await readVerifiedRecoveryCheckpoint(config)).commitSha,
+        tipNow,
+      );
+      assert(existsSync(retainedVerifier));
+      assert.equal(
+        (await readVerifiedRecoveryCheckpoint(config, older)).commitSha,
+        older,
       );
       assert(!existsSync(retainedVerifier));
     },

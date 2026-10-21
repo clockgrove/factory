@@ -1622,11 +1622,13 @@ export function retainStateMemory(
       ];
       retain(answer);
     }
-    // Verification maps index one result's review, not lasting memory: keep
-    // only the learnings, their own cited sources and a body without the map.
+    // Verification maps and design notes index one result's review, not
+    // lasting memory: keep only the learnings, their own cited sources and a
+    // body without them.
     const learnings =
-      work.knowledge?.notes.filter((note) => note.kind !== "verification") ??
-      [];
+      work.knowledge?.notes.filter(
+        (note) => note.kind !== "verification" && note.kind !== "design",
+      ) ?? [];
     if (work.knowledge && learnings.length) {
       const knowledge = work.knowledge;
       const learningPaths = new Set(learnings.flatMap((note) => note.paths));

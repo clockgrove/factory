@@ -13,6 +13,7 @@ import {
   pinnedGitIndexAsync,
   UnsettledSubprocessError,
 } from "../process.js";
+import { DESIGN_QUESTIONS } from "../compiler/work-item-rubric.js";
 import { workHandoffSchema } from "../objective-knowledge.js";
 import {
   assertPinnedNpmScripts,
@@ -408,9 +409,15 @@ export function checkWorkHandoff(
     const verified = notes.filter(
       (note) => note.kind === "verification",
     ).length;
+    const answered = new Set<string>(
+      notes.flatMap((note) => (note.designRisk ? [note.designRisk] : [])),
+    );
+    const unanswered = Object.keys(DESIGN_QUESTIONS).filter(
+      (risk) => !answered.has(risk),
+    );
     return {
       passed: true,
-      text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${count} acceptance criteria.`,
+      text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${count} acceptance criteria.${unanswered.length ? ` No design note yet for ${unanswered.join(", ")}.` : ""}`,
       ...(count && { criteria: criterionMap(handoff.acceptance, notes) }),
     };
   } catch (error) {

@@ -33,6 +33,7 @@ import {
   workerFilesTree,
   workerValidationCommands,
 } from "../dist/execution/claude-validation.js";
+import { readWorkHandoff } from "../dist/execution/harness-support.js";
 import {
   installNetworkRefusal,
   satisfiesRange,
@@ -203,6 +204,51 @@ test("declared validation runs on a snapshot and leaves the worktree unchanged",
   );
   const decoded = checkWorkHandoff(worktree, handoff);
   assert.equal(decoded.passed, true);
+  assert.equal(
+    decoded.text,
+    ".factory-handoff.json decodes: 1 notes, verification notes for 1 of 1 acceptance criteria. No design note yet for authority, state-growth, attribution, hot-path, test-independence, sourced-numbers.",
+  );
+  // A design note names one design risk, once; the decoder keeps it.
+  const design = (designRisk) => ({
+    kind: "design",
+    designRisk,
+    summary: "new state is pruned by age: a.txt:1",
+    paths: ["a.txt"],
+    consumerIndices: [],
+  });
+  const verification = {
+    kind: "verification",
+    criterionIndex: 0,
+    summary: "changed: a.txt:1",
+    paths: ["a.txt"],
+    consumerIndices: [],
+  };
+  writeFileSync(
+    join(worktree, ".factory-handoff.json"),
+    JSON.stringify({
+      notes: [
+        verification,
+        design("state-growth"),
+        design("state-growth"),
+        { ...design("authority"), designRisk: "taste" },
+        { ...design("authority"), kind: "pitfall" },
+      ],
+    }),
+  );
+  assert.equal(
+    checkWorkHandoff(worktree, handoff).text.split("\n").slice(0, 4).join("\n"),
+    ".factory-handoff.json would be rejected at collection, and your whole result with it. Handoff manifest is invalid:\n- note 3: a design note needs a designRisk, one of authority, state-growth, attribution, hot-path, test-independence, sourced-numbers, repository\n- note 4: designRisk is allowed only on design notes\n- more than one design note for designRisk state-growth; write exactly one per risk",
+  );
+  writeFileSync(
+    join(worktree, ".factory-handoff.json"),
+    JSON.stringify({
+      notes: [verification, design("state-growth"), design("repository")],
+    }),
+  );
+  assert.deepEqual(
+    readWorkHandoff(worktree, [], 1).map((note) => note.designRisk),
+    [undefined, "state-growth", "repository"],
+  );
   // Self-review sees the exact criterion beside the note for its index.
   assert.match(
     decoded.criteria,

@@ -746,7 +746,7 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     assert.equal(
       workHandoffSchema(3, producer.acceptance.length).properties.notes
         .maxItems,
-      16 + producer.acceptance.length,
+      16 + producer.acceptance.length + 7,
     );
     assert(emitted.prompt.includes('"peerIndex":0,"title":"api"'));
     const withoutPeers = renderWorkItemPrompt({
@@ -1306,9 +1306,9 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     state.work.schema.changeRef = result.changeRef;
     state.work.schema.treeSha = result.treeSha;
     {
-      // A handoff at its schema limits (every learning note and the one
-      // verification map at their path limits) cites more than 128 files; it
-      // publishes and the state still saves and loads.
+      // A handoff at its schema limits (every learning note, the one
+      // verification map and every design note at their path limits) cites
+      // more than 128 files; it publishes and the state still saves and loads.
       const paths = Array.from(
         { length: maxHandoffSources(producer.acceptance.length) },
         (_, index) => `cited/file-${index}.json`,
@@ -1327,10 +1327,25 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
             {
               kind: "verification",
               summary: "Every sub-clause mapped",
-              paths: paths.slice(128),
+              paths: paths.slice(128, 144),
               consumers: [],
               criterionIndex: 0,
             },
+            ...[
+              "authority",
+              "state-growth",
+              "attribution",
+              "hot-path",
+              "test-independence",
+              "sourced-numbers",
+              "repository",
+            ].map((designRisk, note) => ({
+              kind: "design",
+              designRisk,
+              summary: `Design answer ${note}`,
+              paths: paths.slice(144 + note * 8, 152 + note * 8),
+              consumers: [],
+            })),
           ],
           sources: paths.map((path) => ({
             path,

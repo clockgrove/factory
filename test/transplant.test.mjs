@@ -34,6 +34,10 @@ import {
 } from "../dist/compiler/planning.js";
 import { structuredRequestDigest } from "../dist/compiler/transport.js";
 import {
+  ACCEPTANCE_CONSISTENCY,
+  SOURCED_NUMBERS,
+} from "../dist/compiler/work-item-rubric.js";
+import {
   deliveredPlanningSources,
   materializePlanningSources,
   planningSourceDirectory,
@@ -1059,6 +1063,12 @@ test("retained graph amendments render exact pinned inputs once and keep canonic
       controllerCapabilities: installedControllerCapabilities(),
       controllerCapabilitiesDigest: CONTROLLER_CAPABILITIES_DIGEST,
     });
+    // The planner and the graph reviewer both check acceptance for
+    // contradictions and numbers without an origin.
+    for (const duty of [ACCEPTANCE_CONSISTENCY, SOURCED_NUMBERS]) {
+      assert.ok(review.prompt.includes(duty));
+      assert.ok(expandedCall.call.prompt.includes(duty));
+    }
     for (const request of [call, review]) {
       assert.ok(
         Buffer.byteLength(request.prompt) +

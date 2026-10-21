@@ -530,6 +530,14 @@ factory run --objective N [--deadline ISO_TIMESTAMP]
 
 Final validation records when its controller creates a new detached checkout of the exact candidate before running commands. A final review receives that preparation fact alongside command/tree receipts and, for a recorded graph integration, the integration commit that preceded validation. Read-only baseline checks make no integration claim. Generic existing-checkout validation and older receipts without preparation provenance remain unknown on checkout freshness; clean status or identical trees cannot supply it.
 
+To make every Objective's final validation run commands its plan would not select, such as a long-running qualification suite that per-change checks skip, list them in the private installation configuration:
+
+```json
+"finalValidation": { "requiredCommands": ["npm run qualify"] }
+```
+
+Final validation runs the Objective's Acceptance commands first, then each required command the Objective does not already list, in order, on the same fresh checkout and before final review. A failing required command is handled exactly like a failing Acceptance command. Each entry is a non-empty, single-line, unique command, and the section, when present, lists at least one. The commands are command authority, so they are inside the configuration and queue authority digests: adding, changing or removing them re-keys queue authority, so started Objectives and queued receipts no longer match the installation. Change them between Objectives, and re-add queued Objectives after a change. Omitting the section leaves both digests exactly as before.
+
 There is no plan-only CLI command. To inspect an Objective before authorizing execution, ask your agent to read the issue and committed Sources without running Factory. A planning review that needs a human stops; a clean review proceeds to execution without another approval step.
 
 Running is the consent to execute that Objective. `run` plans if needed, saves the plan and its independent review, executes a clean plan, and exits:

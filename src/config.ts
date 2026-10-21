@@ -284,6 +284,11 @@ export interface FactoryConfig {
   /** Explicit validation image/text proof selection; omission retains no artifacts. */
   reviewArtifacts?: ReviewArtifactSelector[];
   /**
+   * Commands every Objective's final validation runs after its own Acceptance
+   * commands, before final review. Bound by both digests: they are command authority.
+   */
+  finalValidation?: { requiredCommands: string[] };
+  /**
    * GitHub presentation. Progress comments and Project status are on by default (see
    * `githubProgressSettings` and `githubProjectStatusSettings`); `{ enabled: false }` opts out.
    */
@@ -712,6 +717,7 @@ export function validateConfig(value: unknown): FactoryConfig {
       "queue",
       "githubManagement",
       "reviewArtifacts",
+      "finalValidation",
       "planningContext",
       "gitPersistence",
       "queueProvider",
@@ -719,6 +725,27 @@ export function validateConfig(value: unknown): FactoryConfig {
     ],
     "configuration",
   );
+  if (value.finalValidation !== undefined) {
+    assertObject(value.finalValidation, "finalValidation");
+    assertOnlyKeys(
+      value.finalValidation,
+      ["requiredCommands"],
+      "finalValidation",
+    );
+    const commands = assertUniqueStrings(
+      value.finalValidation.requiredCommands,
+      "finalValidation.requiredCommands",
+    );
+    if (
+      !commands.length ||
+      commands.some(
+        (command) => command !== command.trim() || /[\r\n]/.test(command),
+      )
+    )
+      throw new Error(
+        "finalValidation.requiredCommands must list at least one single-line command without surrounding whitespace; omit the section to require none",
+      );
+  }
   if (value.sandbox !== undefined) assertCommandSandboxConfig(value.sandbox);
   if (value.queueProvider !== undefined) {
     assertObject(value.queueProvider, "queueProvider");
@@ -1438,6 +1465,22 @@ export function queueConfiguration(config: FactoryConfig): FactoryConfig {
           ],
     ),
   ) as FactoryConfig;
+}
+
+/**
+ * An Objective's final validation commands: its own Acceptance commands, then
+ * each installation-required command it does not already run.
+ */
+export function finalValidationCommands(
+  objectiveCommands: readonly string[],
+  config: FactoryConfig,
+): string[] {
+  return [
+    ...objectiveCommands,
+    ...(config.finalValidation?.requiredCommands ?? []).filter(
+      (command) => !objectiveCommands.includes(command),
+    ),
+  ];
 }
 
 /** The configuration digest of the installation's Project queue (see queueConfiguration). */

@@ -40,6 +40,8 @@ All three happen in the planner's one session. Self-checking is a filter; the in
 ## How review holds the standard
 
 - **Graph review:** an acceptance entry that prescribes a mechanism, a line or a file edit instead of behaviour is a fix finding. Review never asks for more detail than the standard requires.
+- **Consistent acceptance.** Graph review reads each item's acceptance entries against each other, its brief and the Objective's constraints, non-goals and operator decisions. A contradiction, such as one entry capping what another requires to hold independently of that cap, or an entry no implementation can meet together with the others, is a fix finding. Why: such a plan passes review and then fails every worker attempt.
+- **Sourced numbers.** Every numeric limit, budget, retry count or timeout in a plan comes from a pinned source, the repository or an operator decision. Otherwise the item states the property the value protects and leaves the value to the worker; a value users would observe is an operator decision. Why: an invented number reads as a requirement and binds the worker and reviewer to it.
 - **Result review** judges behaviour. It does not refuse a criterion because the code reaches the stated behaviour another way than a plan happened to describe. It refuses an unannounced change to an existing test.
 - **Lint before review.** Before any paid review, Factory refuses an item with more than 15 acceptance entries and no `oneOutcomeReason`, and an acceptance entry that cites a line number next to a source file name. The planner gets both as one correction. Amendments skip this lint; graph review judges them.
 - **Obligations are proved at owner level.** A covered Objective criterion or source exit item names its owner and proof kind. For item or QA review, the owner's review judges the obligation itself, with the owner's acceptance as a whole as its proof. No proof points at a single acceptance entry. Code still checks that each obligation has exactly one owner, the owner exists and the proof kind fits the owner. In an amendment, an already-reviewed item keeps only the semantic proofs it had; a newly assigned obligation needs final review or new work.
@@ -51,6 +53,12 @@ Workers and Work Item result review share one short code-quality bar, `ENGINEERI
 Why: these are the failures a senior reviewer flags first, and acceptance criteria rarely name them, so a result could pass every criterion and still need cleanup.
 
 The worker gets the standard before its self-review. Result review refuses a violation in code the result adds or changes, filed under the criterion whose code contains it, even when every criterion passes. Unchanged existing code is not a finding. Where the target's AGENTS.md or documented conventions differ, the target wins. Final Objective review does not re-apply it.
+
+## Design checklist
+
+Workers and result review also share `DESIGN_CHECKLIST`: six questions about design risks that criteria rarely name and passing tests do not reveal. Authority: each new action has the narrowest grant that fits it. Growth: new stored state has an enforced bound or retention. Attribution: a recorded actor is the principal that acted. Hot path: per-request paths gain no avoidable work. Test independence: a reference test's expected side does not run the code under test. Sourced numbers: each new limit names its origin.
+
+The worker answers each question in a `design` note in `.factory-handoff.json` before writing code, with `designRisk` naming the question, and updates the answer with file:line evidence before finishing. Where the target's AGENTS.md, or a document it maps, declares its own design checklist, the worker answers it in one more note with `designRisk: "repository"`; it adds to the generic questions. Result review verifies each answer against the code and refuses the criterion whose implementation contains a design defect, with or without a note. Design notes, like verification notes, index one result's review: other workers and repository memory do not receive them.
 
 ## Example
 

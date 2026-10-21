@@ -121,6 +121,14 @@ const CONTRACT_ONCE =
 const CROSS_ITEM =
   "One item's change must not break what another item relies on or protects (its contract, invariants or protected tests): flag such a conflict, naming both items.";
 
+/** Check 8: an item's acceptance can be met as a whole. */
+export const ACCEPTANCE_CONSISTENCY =
+  "Read each item's acceptance entries against each other, its brief and the Objective's constraints, non-goals and operator decisions. Flag a contradiction, such as one entry capping what another entry or the brief requires to hold independently of that cap, and an entry no implementation can satisfy together with the others, naming the conflicting entries and stating which one must change.";
+
+/** Check 8: every number in a plan has an origin. */
+export const SOURCED_NUMBERS =
+  "Every numeric limit, budget, retry count, timeout or threshold in a plan comes from a pinned source, the repository's code or documentation, or an operator decision. Flag one with no such origin: the item either cites where the value comes from, or states the property the value protects (for example, retries are bounded) and leaves the value to the worker; a value users would observe is an open choice (check 10).";
+
 /** Check 8: claims about existing code. */
 const CODE_CLAIMS =
   "Claims about existing code (names, types, behaviour, conventions) rest on what was read: flag one the repository contradicts; where the code was not read, the item states the outcome and leaves the how to the worker.";
@@ -138,7 +146,7 @@ export const GRAPH_REVIEW_CHECKS = `Check:
 5. Commands. Validation commands appear in the command authority receipts (observed in the repository or declared in a pinned source). They must terminate deterministically with exit zero on success and cleanup of owned resources. Flag a bare persistent service launch used as validation even when its brief promises managed startup/shutdown; executable lifecycle proof needs a finite authorized harness. Judge semantics, not command names. Preserve source-required launch documentation and actual startup/request/shutdown proof; missing finite-check authority or a required nonterminating acceptance command needs a source decision, not an invented command or dropped requirement. Environment prerequisites select only exact authorized preimplementation setup explicitly needed by the readiness probe, before that probe in the owner's validation order; a null probe has no selected setup. Check the selected setup/probe sequence can run in preflight and the actual worker checkout before provider dispatch, preserving prerequisite dependencies and authority; each fresh result/final validation checkout needs authorized setup before its own phase checks. Ignored installations or historical receipts do not prove fresh readiness. Commands needing the new implementation belong to semantic acceptance, and setup receipts cannot replace it. Missing or unsupported setup remains an unresolved source decision. Required CI checks that must pass before merging are listed as pre-integration checks. A source-required check missing from the known CI check names is an unresolved source decision: ask the operator. ${QA_EVIDENCE_GUIDANCE}
 6. Briefs. Graph evidenceSpan references select complete worker inputs from this review packet by evidenceIndex and evidenceId, with the resolved path and JavaScript string start/length. The controller has authenticated that exact evidence row, full sourceDigest and selected contentDigest. Judge whether the selected source content supplies the necessary information; these packet-local references are not compiler pinned-source catalog indices and require no rebasing. A worker receives its item fields and pinned inputSources, and works in a full checkout of the repository, so it can read AGENTS.md, documentation and code itself. A brief carries settled decisions and cross-item contracts the worker cannot get from the repository. Flag a brief only when it depends on information that exists solely in this packet (for example an exact interface given only in the Objective) and is not in its fields or inputSources; never ask for reading lists, file lists or implementation steps.
 7. Proof modes. ${PROOF_MODES} Check architecture-derived proof responsibilities against the stated flows; for selection-dependent asynchronous work, a proposed happy-path check alone does not address material stale-completion risks. Keep verification within the Objective's and pinned sources' required scope and proof modes; flag unrequested stronger obligations, including mandatory browser causal interleavings where meaningful real journeys with production component/source proof are permitted. Preserve explicitly required execution layers, orderings and negative controls. Do not require a particular API/framework, extra Work Item or checklist. Component-authored combined tests may execute only after integration, provided their full required runtime evidence is supplied to final review and the component's own acceptance makes no premature passing claim.
-8. Work Item contracts. Each item meets the Work Item standard above. Fix findings: ${BEHAVIOUR_FINDINGS}; acceptance that only enumerates cases where the sources or conventions imply invariants, real-producer input or shared helpers to reuse; semantics that contradict a stated invariant or the real producer's actual type (a budget or state rule that breaks when inputs or steps are split, a restated input schema, a total criterion a catch-all would meet); an existing assertion, golden or baseline changed without stating the behaviour change and why. ${CONTRACT_ONCE} ${CROSS_ITEM} ${CODE_CLAIMS} ${GENERATED_VALUES} The plan stays within the repository's documented budgets and conventions in the packet (size bounds, layout rules), planning the structural change where an addition could exceed one. Flag a contract only where the gap would let a worker deliver the wrong result or leave the result reviewer unable to check it, and state the exact entries to change. Never ask for more detail than the standard requires: no entry per field or error path, no prose that existing tests stay unchanged.
+8. Work Item contracts. Each item meets the Work Item standard above. Fix findings: ${BEHAVIOUR_FINDINGS}; acceptance that only enumerates cases where the sources or conventions imply invariants, real-producer input or shared helpers to reuse; semantics that contradict a stated invariant or the real producer's actual type (a budget or state rule that breaks when inputs or steps are split, a restated input schema, a total criterion a catch-all would meet); an existing assertion, golden or baseline changed without stating the behaviour change and why. ${CONTRACT_ONCE} ${CROSS_ITEM} ${ACCEPTANCE_CONSISTENCY} ${SOURCED_NUMBERS} ${CODE_CLAIMS} ${GENERATED_VALUES} The plan stays within the repository's documented budgets and conventions in the packet (size bounds, layout rules), planning the structural change where an addition could exceed one. Flag a contract only where the gap would let a worker deliver the wrong result or leave the result reviewer unable to check it, and state the exact entries to change. Never ask for more detail than the standard requires: no entry per field or error path, no prose that existing tests stay unchanged.
 9. Repository-checkable criteria. Item criteria state facts checkable in the target repository's result. Flag a criterion that restates a Factory controller guarantee (review, publication, integration, LFS upload, hydration), because the result reviewer cannot check it there, and a plan that grants deployment, service or retry authority or weakens the Objective's acceptance.
 10. Open product decisions. When the plan silently decides ${OPEN_CHOICE}, report it as an operator-decision finding whose question states the specific choice, recommends the plan's choice when it is sound and gives the consequences of each option. Fixture or test values the sources call policy, internal names and file layout are the planner's choice: never an operator question.
 11. Child Objectives. When the plan has a split, flag it unless the children are distinct capabilities worth accepting and merging separately or later children need earlier children's code to be planned well; otherwise one graph is better. Each child depends on exactly the siblings whose code it needs, owns at least one Objective outcome (enabling work without one belongs in a child that needs it), the children together deliver the whole Objective, and each stub's goal and sources are enough to plan it later. Review each ready child's graph with checks 1-9 as its own plan against its own outcomes. Factory has checked the structure: every Objective criterion goes to one child, every item to one ready child, and dependencies point to earlier children.
@@ -154,7 +162,8 @@ export const PLANNER_CHECKLIST = `Checklist: the graph reviewer applies these ju
 - One outcome. ${ONE_OUTCOME}
 - Contracts. ${CONTRACT_ONCE}
 - Acceptance is behaviour. Fix findings: ${BEHAVIOUR_FINDINGS}.
-- Consistency. ${CROSS_ITEM}
+- Consistency. ${CROSS_ITEM} ${ACCEPTANCE_CONSISTENCY}
+- Sourced numbers. ${SOURCED_NUMBERS}
 - Existing code. ${CODE_CLAIMS}
 - Generated values. ${GENERATED_VALUES}
 - Decisions. Never silently decide ${OPEN_CHOICE}: raise it as decisionRequired (rule 2).
@@ -189,3 +198,34 @@ export const ENGINEERING_STANDARD = `Engineering standard. Each rule names a def
 - Validate input once at the boundary, with the repository's parsers and validators; do not re-check what a callee validates or hand-roll a parser.
 - Scope configuration changes (timeouts, lint rules) to what needs them, never globally for one case.
 Where the repository's AGENTS.md or documented conventions differ, the repository wins.`;
+
+/**
+ * Design risks every worker answers and every Work Item result review checks:
+ * defects acceptance criteria rarely name and passing tests do not reveal.
+ * Each key is a design note's `designRisk`; the target's own design checklist
+ * adds to these under `repository`.
+ */
+export const DESIGN_QUESTIONS = {
+  authority:
+    "Authority: each new action, command, endpoint or permission is gated by the narrowest grant that fits it, not by an existing broad grant that happens to cover it.",
+  "state-growth":
+    "Growth and retention: new stored state (tables, logs, caches, queues, files) has a bound or a retention rule, and code enforces it.",
+  attribution:
+    "Identity and attribution: every recorded actor, owner or author is the principal that actually acted, never an arbitrary, default or first-found one.",
+  "hot-path":
+    "Hot-path cost: per-request or per-item paths gain no avoidable work, such as an extra transaction, round trip, full scan or unbounded loop.",
+  "test-independence":
+    "Test independence: a parity, reference or golden test computes its expected side without running the code under test.",
+  "sourced-numbers":
+    "Sourced numbers: each numeric limit, budget, retry count or timeout the change adds comes from the item, a pinned source, the repository or an operator decision, and its origin is named.",
+} as const;
+
+/** A design note's risk: a generic question, or the repository's own checklist. */
+export type DesignRisk = keyof typeof DESIGN_QUESTIONS | "repository";
+
+/** Shared by the worker's design notes and the result reviewer's check of them. */
+export const DESIGN_CHECKLIST = `Design checklist. One design note per question, its designRisk the key in brackets; "not applicable" with the reason is an answer:
+${Object.entries(DESIGN_QUESTIONS)
+  .map(([risk, question]) => `- [${risk}] ${question}`)
+  .join("\n")}
+Where the repository's AGENTS.md, or a document it maps, declares its own design checklist, answer its questions too in one note with designRisk "repository": it adds to these questions and never removes one.`;

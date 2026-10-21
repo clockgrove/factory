@@ -12,7 +12,7 @@ import {
   type PlanCandidate,
   verifyPlanCandidate,
 } from "../compiler.js";
-import type { FactoryConfig } from "../config.js";
+import { finalValidationCommands, type FactoryConfig } from "../config.js";
 import type {
   ApprovedPlaybookAdmission,
   ContentStore,
@@ -122,7 +122,7 @@ export async function projectPreparedObjective(args: {
         checkout: config.checkout,
         baseSha,
         graph,
-        finalCommands: plan.finalCommands,
+        finalCommands: finalValidationCommands(plan.finalCommands, config),
         objectiveBody: issue.body,
         privateRoot: root,
         credentialDirectory: join(root, "empty-gh-config"),
@@ -355,7 +355,10 @@ export function activateProjectedObjective(args: {
     configDigest: installationConfigDigest,
     baseSha,
     graph,
-    objectiveCommands: finalObjectiveCommands(issue.body),
+    objectiveCommands: finalValidationCommands(
+      finalObjectiveCommands(issue.body),
+      config,
+    ),
     objectiveBodyDigest: createHash("sha256").update(issue.body).digest("hex"),
     issueByItemId: projected.issueByItemId,
     ...(preparation.issueAuthor

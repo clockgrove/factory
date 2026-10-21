@@ -8,6 +8,7 @@ import { assertKnownFlags } from "../dist/cli-flags.js";
 import {
   factoryAuthorityDigest,
   factoryConfigDigest,
+  finalValidationCommands,
   readConfig,
   resolveProvider,
   validateConfigFile,
@@ -109,6 +110,32 @@ test("a provider resolves to the flat configuration its Objectives froze", () =>
     () => validateConfigFile({ ...file, defaultProvider: "copilot" }),
     /defaultProvider must name a configured provider/,
   );
+});
+
+test("required final-validation commands follow the Objective's and bind authority", () => {
+  const required = {
+    ...file,
+    finalValidation: { requiredCommands: ["npm run qualify", "npm test"] },
+  };
+  const config = resolveProvider(validateConfigFile(required), "codex");
+  assert.deepEqual(
+    finalValidationCommands(["npm test", "npm run lint"], config),
+    ["npm test", "npm run lint", "npm run qualify"],
+  );
+  assert.deepEqual(finalValidationCommands(["npm test"], flat), ["npm test"]);
+  assert.notEqual(factoryConfigDigest(config), factoryConfigDigest(flat));
+  assert.notEqual(factoryAuthorityDigest(config), factoryAuthorityDigest(flat));
+  for (const finalValidation of [
+    { requiredCommands: [] },
+    { requiredCommands: [" npm test"] },
+    { requiredCommands: ["npm test\nrm -rf ."] },
+    { requiredCommands: ["npm test", "npm test"] },
+    { commands: ["npm test"] },
+  ])
+    assert.throws(
+      () => validateConfigFile({ ...file, finalValidation }),
+      /^Error: finalValidation/,
+    );
 });
 
 test("queue authority binds the default provider whichever provider runs", () => {

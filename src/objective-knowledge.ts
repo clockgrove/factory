@@ -11,6 +11,7 @@ import type {
   WorkHandoffNote,
   WorkItem,
 } from "./contracts.js";
+import { DESIGN_QUESTIONS } from "./compiler/work-item-rubric.js";
 import { graphDigest } from "./graph-amendments.js";
 import { workFault } from "./fault.js";
 import { ownsPath, validOwnershipPath } from "./ownership.js";
@@ -45,6 +46,7 @@ interface KnowledgeViewEntry {
   authority: string;
   kind: WorkHandoffNote["kind"];
   criterionIndex?: number;
+  designRisk?: WorkHandoffNote["designRisk"];
   summary: string;
   sources: { path: string; ref?: ContentRef; availability: string }[];
 }
@@ -69,6 +71,13 @@ const filePath = (value: unknown): value is string =>
 const LEARNING_LIMIT = { notes: 16, summary: 1024, paths: 8 };
 /** One verification note per acceptance criterion; the manifest size bounds the rest. */
 const VERIFICATION_LIMIT = { summary: 4096, paths: 16 };
+/** One design note per design risk: an answer and the file:line locations it rests on. */
+const DESIGN_LIMIT = { summary: 2048, paths: 8 };
+/** Every design risk a note may answer: the generic questions, then the repository's own. */
+const designRisks: readonly string[] = [
+  ...Object.keys(DESIGN_QUESTIONS),
+  "repository",
+];
 
 /**
  * The most distinct files one item's handoff can cite: every learning note and
@@ -78,11 +87,21 @@ const VERIFICATION_LIMIT = { summary: 4096, paths: 16 };
 export function maxHandoffSources(criterionCount: number): number {
   return (
     LEARNING_LIMIT.notes * LEARNING_LIMIT.paths +
-    criterionCount * VERIFICATION_LIMIT.paths
+    criterionCount * VERIFICATION_LIMIT.paths +
+    designRisks.length * DESIGN_LIMIT.paths
   );
 }
 
-const noteKinds = ["interface", "pitfall", "hypothesis", "verification"];
+const noteKinds = [
+  "interface",
+  "pitfall",
+  "hypothesis",
+  "verification",
+  "design",
+];
+/** Verification and design notes describe one result for its own review. */
+const reviewNote = (kind: unknown) =>
+  kind === "verification" || kind === "design";
 /** Name a key in an error without echoing more than a short bound of model text. */
 const keyName = (key: string) =>
   JSON.stringify(key.length > 64 ? `${key.slice(0, 64)}…` : key);
@@ -111,7 +130,12 @@ function keyProblems(
 function noteFieldProblems(note: Record<string, unknown>): string[] {
   const problems: string[] = [];
   const verification = note.kind === "verification";
-  const limit = verification ? VERIFICATION_LIMIT : LEARNING_LIMIT;
+  const design = note.kind === "design";
+  const limit = verification
+    ? VERIFICATION_LIMIT
+    : design
+      ? DESIGN_LIMIT
+      : LEARNING_LIMIT;
   if (Object.hasOwn(note, "kind") && !noteKinds.includes(note.kind as string))
     problems.push(`kind must be one of ${noteKinds.join(", ")}`);
   if (verification) {
@@ -122,6 +146,13 @@ function noteFieldProblems(note: Record<string, unknown>): string[] {
       problems.push("a verification note needs an integer criterionIndex >= 0");
   } else if (note.criterionIndex !== undefined)
     problems.push("criterionIndex is allowed only on verification notes");
+  if (design) {
+    if (!designRisks.includes(note.designRisk as string))
+      problems.push(
+        `a design note needs a designRisk, one of ${designRisks.join(", ")}`,
+      );
+  } else if (note.designRisk !== undefined)
+    problems.push("designRisk is allowed only on design notes");
   if (Object.hasOwn(note, "summary")) {
     if (typeof note.summary !== "string" || !note.summary.trim())
       problems.push("summary must be a non-empty string");
@@ -154,7 +185,7 @@ function noteFieldProblems(note: Record<string, unknown>): string[] {
 function countProblems(notes: readonly Record<string, unknown>[]): string[] {
   const problems: string[] = [];
   const verifications = notes.filter((note) => note.kind === "verification");
-  const learning = notes.length - verifications.length;
+  const learning = notes.filter((note) => !reviewNote(note.kind)).length;
   if (learning > LEARNING_LIMIT.notes)
     problems.push(
       `${learning} learning notes; at most ${LEARNING_LIMIT.notes} are allowed`,
@@ -166,6 +197,16 @@ function countProblems(notes: readonly Record<string, unknown>[]): string[] {
   if (repeated.length)
     problems.push(
       `more than one verification note for criterionIndex ${[...new Set(repeated)].map(String).join(", ")}; write exactly one per criterion`,
+    );
+  const risks = notes
+    .filter((note) => note.kind === "design")
+    .map((note) => note.designRisk);
+  const repeatedRisks = risks.filter(
+    (risk, index) => risks.indexOf(risk) !== index,
+  );
+  if (repeatedRisks.length)
+    problems.push(
+      `more than one design note for designRisk ${[...new Set(repeatedRisks)].map(String).join(", ")}; write exactly one per risk`,
     );
   return problems;
 }
@@ -197,7 +238,7 @@ function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
       ...keyProblems(
         raw,
         ["kind", "summary", "paths", "consumers"],
-        ["criterionIndex"],
+        ["criterionIndex", "designRisk"],
       ),
       ...noteFieldProblems(raw),
     ];
@@ -217,8 +258,8 @@ function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
         noteProblems.push(
           "consumers must be at most 16 distinct Work Item identities",
         );
-      else if (raw.kind === "verification" && consumers.length !== 0)
-        noteProblems.push("a verification note must have no consumers");
+      else if (reviewNote(raw.kind) && consumers.length !== 0)
+        noteProblems.push(`a ${String(raw.kind)} note must have no consumers`);
     if (noteProblems.length)
       problems.push(`note ${index}: ${noteProblems.join("; ")}`);
   });
@@ -232,6 +273,7 @@ function parseWorkHandoffNotes(value: unknown): WorkHandoffNote[] {
     ...(note.kind === "verification"
       ? { criterionIndex: note.criterionIndex }
       : {}),
+    ...(note.kind === "design" ? { designRisk: note.designRisk } : {}),
   }));
   const verifications = notes.filter((note) => note.kind === "verification");
   if (citedPaths(notes) > maxHandoffSources(verifications.length))
@@ -300,6 +342,22 @@ export function workHandoffSchema(
       consumerIndices: { type: "array", maxItems: 0 },
     },
   };
+  const design = {
+    type: "object",
+    additionalProperties: false,
+    required: ["kind", "designRisk", "summary", "paths", "consumerIndices"],
+    properties: {
+      kind: { type: "string", const: "design" },
+      designRisk: { type: "string", enum: designRisks },
+      summary: {
+        type: "string",
+        minLength: 1,
+        maxLength: DESIGN_LIMIT.summary,
+      },
+      paths: paths(DESIGN_LIMIT.paths),
+      consumerIndices: { type: "array", maxItems: 0 },
+    },
+  };
   return {
     type: "object",
     additionalProperties: false,
@@ -307,9 +365,13 @@ export function workHandoffSchema(
     properties: {
       notes: {
         type: "array",
-        maxItems: LEARNING_LIMIT.notes + criterionCount,
-        items:
-          criterionCount > 0 ? { oneOf: [learning, verification] } : learning,
+        maxItems: LEARNING_LIMIT.notes + criterionCount + designRisks.length,
+        items: {
+          oneOf:
+            criterionCount > 0
+              ? [learning, verification, design]
+              : [learning, design],
+        },
       },
     },
   };
@@ -347,10 +409,11 @@ export function decodeWorkHandoffNotes(
     throw handoffError([...problems, "notes must be an array of note objects"]);
   if (
     criterionCount !== undefined &&
-    value.notes.length > LEARNING_LIMIT.notes + criterionCount
+    value.notes.length >
+      LEARNING_LIMIT.notes + criterionCount + designRisks.length
   )
     problems.push(
-      `${value.notes.length} notes; at most ${LEARNING_LIMIT.notes} learning notes plus one verification note for each of the ${criterionCount} criteria`,
+      `${value.notes.length} notes; at most ${LEARNING_LIMIT.notes} learning notes, one verification note for each of the ${criterionCount} criteria and one design note for each of the ${designRisks.length} design risks`,
     );
   const objects: Record<string, unknown>[] = [];
   value.notes.forEach((raw: unknown, index) => {
@@ -363,7 +426,7 @@ export function decodeWorkHandoffNotes(
       ...keyProblems(
         raw,
         ["kind", "summary", "paths", "consumerIndices"],
-        ["criterionIndex"],
+        ["criterionIndex", "designRisk"],
       ),
       ...noteFieldProblems(raw),
     ];
@@ -412,6 +475,7 @@ export function decodeWorkHandoffNotes(
     ...(note.criterionIndex === undefined
       ? {}
       : { criterionIndex: note.criterionIndex }),
+    ...(note.designRisk === undefined ? {} : { designRisk: note.designRisk }),
   }));
   const parsed = parseWorkHandoffNotes({ notes });
   if (
@@ -671,12 +735,9 @@ export function objectiveKnowledgeView(
     assertObjectiveKnowledge(state, peer.id);
     const record = work.knowledge;
     for (const note of record.notes) {
-      // A verification map indexes its own item's review, not other workers.
-      if (
-        note.kind === "verification" &&
-        !ownClaim &&
-        !options?.objectiveReview
-      )
+      // Verification maps and design notes index their own item's review,
+      // not other workers.
+      if (reviewNote(note.kind) && !ownClaim && !options?.objectiveReview)
         continue;
       if (
         !options?.objectiveReview &&
@@ -735,6 +796,9 @@ export function objectiveKnowledgeView(
         ...(note.criterionIndex === undefined
           ? {}
           : { criterionIndex: note.criterionIndex }),
+        ...(note.designRisk === undefined
+          ? {}
+          : { designRisk: note.designRisk }),
         summary: note.summary,
         sources,
       };

@@ -109,6 +109,7 @@ import {
 } from "../dist/workflow-reflection.js";
 import {
   archiveAttempt,
+  archiveUncorrectedAttempt,
   consumption,
   resolveAutonomy,
   retainedFailedResultFor,
@@ -3004,6 +3005,34 @@ test("private handoffs retain exact source bytes and scoped DAG knowledge across
     assert.equal(
       archived({ semanticRefusal: {} }, correction).revalidate,
       undefined,
+    );
+    // A diagnosis the controller stopped before admitting it leaves its
+    // correction on the failed attempt; a plain retry is not that repair.
+    const retried = retainedFailedResultFor(
+      archiveUncorrectedAttempt({
+        status: "failed",
+        step: "validate",
+        attempt: refusedCandidate.attemptId,
+        changeRef: refusedCandidate.commitSha,
+        treeSha: refusedCandidate.treeSha,
+        recovery: {
+          failure: { classification: "implementation", ...commandFailure },
+          correction,
+          phase: "stopped",
+        },
+      }),
+    );
+    assert.equal(retried.commitSha, refusedCandidate.commitSha);
+    assert.equal(retried.revalidate, undefined);
+    await assert.rejects(
+      collectWorktreeResult(
+        checkout,
+        continued.worktree,
+        { ...continued.request, retainedFailedResult: retried },
+        store,
+        { evidence: { finalResponse: "Nothing left to change." } },
+      ),
+      /Worker produced no repository change/,
     );
     const resubmitted = await collectWorktreeResult(
       checkout,

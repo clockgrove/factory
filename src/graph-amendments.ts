@@ -17,7 +17,7 @@ import {
 import {
   amendmentAllowed,
   amendmentsUsedUp,
-  archiveAttempt,
+  archiveUncorrectedAttempt,
   charge,
   chargeRepair,
   consumption,
@@ -1744,7 +1744,7 @@ async function advanceAmendment(args: {
       clearRepeats(state, { item: reattempt });
       state.work[reattempt] = {
         status: "pending",
-        recovery: { ...archiveAttempt(work), phase: "stopped" },
+        recovery: { ...archiveUncorrectedAttempt(work), phase: "stopped" },
       };
     }
     delete state.pendingAmendment;

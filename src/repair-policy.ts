@@ -590,6 +590,22 @@ export function archiveAttempt(work: WorkState): WorkRecovery {
     ],
   };
 }
+/**
+ * Archive an attempt for a retry or a replanned attempt, which admit no
+ * correction. A correction still on a failed attempt was never admitted
+ * (admission archives the attempt and leaves the item pending), so it is
+ * not archived as the repair of that failure.
+ */
+export function archiveUncorrectedAttempt(work: WorkState): WorkRecovery {
+  if (work.status !== "failed" || !work.recovery?.correction)
+    return archiveAttempt(work);
+  const { correction: _unadmitted, ...recovery } = work.recovery;
+  return {
+    ...archiveAttempt({ ...work, recovery }),
+    ...(recovery.phase === "ready" && { phase: "stopped" }),
+  };
+}
+
 /** An archived failed result, and whether it may be resubmitted unchanged. */
 export interface RetainedFailedResult {
   attemptId: string;

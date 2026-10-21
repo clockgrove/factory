@@ -612,6 +612,7 @@ async function compilePlanAdmitted(
   executionBounds?: PlanningExecutionBounds,
   workflowRecipe?: WorkflowRecipeInput,
   requiredFinalCommands: readonly string[] = [],
+  ciOnlyCommands: readonly string[] = [],
 ): Promise<PlanCandidate> {
   const { state, save } = context;
   if (workflowRecipe) assertWorkflowRecipeInput(workflowRecipe);
@@ -1040,6 +1041,7 @@ async function compilePlanAdmitted(
           },
         },
         requiredFinalCommands,
+        ciOnlyCommands,
       );
       packet = planReviewPacket(
         body,

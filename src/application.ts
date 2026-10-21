@@ -162,7 +162,7 @@ export interface FactoryApplication {
   retryWorkItem(
     objective: number,
     itemId?: string,
-    options?: { fresh?: boolean },
+    options?: Parameters<typeof retryWorkItem>[3],
   ): "step" | "attempt";
   repairWorkItem(
     objective: number,

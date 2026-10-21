@@ -5,8 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { assertKnownFlags } from "../dist/cli-flags.js";
-import { assertRequiredFinalCommands, fixedScripts } from "../dist/compiler.js";
 import {
+  assertNoCiOnlyValidation,
+  assertRequiredFinalCommands,
+  fixedScripts,
+} from "../dist/compiler.js";
+import { prepareCompilationRequest } from "../dist/compiler/planning.js";
+import {
+  ciOnlyCommands,
   factoryAuthorityDigest,
   factoryConfigDigest,
   finalValidationCommands,
@@ -180,6 +186,86 @@ test("required final-validation commands follow the Objective's and bind authori
       () => validateConfigFile({ ...file, finalValidation }),
       /^Error: finalValidation/,
     );
+});
+
+test("CI-only commands are never validation commands (#1667)", () => {
+  const audit = "npm run audit";
+  const config = resolveProvider(
+    validateConfigFile({
+      ...file,
+      finalValidation: { ciOnlyCommands: [audit] },
+    }),
+    "codex",
+  );
+  assert.deepEqual(ciOnlyCommands(config), [audit]);
+  assert.deepEqual(requiredFinalCommands(config), []);
+  assert.notEqual(factoryConfigDigest(config), factoryConfigDigest(flat));
+  for (const finalValidation of [
+    {},
+    { ciOnlyCommands: [] },
+    { requiredCommands: [audit], ciOnlyCommands: [audit] },
+  ])
+    assert.throws(
+      () => validateConfigFile({ ...file, finalValidation }),
+      /^Error: finalValidation/,
+    );
+  // Final validation: an Objective whose Acceptance runs it is refused
+  // before planning.
+  const target = checkout("example/ci-only");
+  execFileSync("git", [
+    "-C",
+    target,
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.test",
+    "commit",
+    "-qm",
+    "base",
+    "--allow-empty",
+  ]);
+  const baseSha = execFileSync("git", ["-C", target, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).trim();
+  assert.throws(
+    () =>
+      assertRequiredFinalCommands(
+        [],
+        `## Acceptance\n- \`${audit}\`\n`,
+        baseSha,
+        target,
+        [audit],
+      ),
+    /^Error: Acceptance command npm run audit is CI-only/,
+  );
+  // The planner is told, and graph validation refuses a Work Item that runs it.
+  const request = prepareCompilationRequest({
+    objective: 1,
+    body: "## Acceptance\n- Dependencies stay licensed.\n",
+    baseSha,
+    checkout: target,
+    ciOnlyCommands: [audit],
+  });
+  assert.deepEqual(request.compileContext.ciOnlyCommands, [audit]);
+  assert.match(request.objective, /never use one as a validation command/);
+  assert.match(request.objective, /decisionRequired/);
+  const graph = {
+    items: [
+      {
+        id: "deps",
+        validation: [
+          { command: "npm test", provenance: "base-observed" },
+          { command: audit, provenance: "base-observed" },
+        ],
+      },
+    ],
+  };
+  assert.throws(
+    () => assertNoCiOnlyValidation(graph, [audit]),
+    /^Error: Work Item deps validation runs npm run audit, which the installation marks CI-only/,
+  );
+  graph.items[0].validation.pop();
+  assertNoCiOnlyValidation(graph, [audit]);
 });
 
 test("queue authority binds the default provider whichever provider runs", () => {

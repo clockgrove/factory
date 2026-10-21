@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   assertRequiredFinalCommands,
+  assertNoCiOnlyValidation,
   finalObjectiveCommands,
   type PlanCandidate,
   verifyPlanCandidate,
@@ -16,6 +17,7 @@ import {
 import {
   finalValidationCommands,
   requiredFinalCommands,
+  ciOnlyCommands,
   type FactoryConfig,
 } from "../config.js";
 import type {
@@ -117,7 +119,9 @@ export async function projectPreparedObjective(args: {
     issue.body,
     baseSha,
     config.checkout,
+    ciOnlyCommands(config),
   );
+  assertNoCiOnlyValidation(plan.graph, ciOnlyCommands(config));
   if (
     JSON.stringify(plan.requiredFinalCommands ?? []) !==
     JSON.stringify(requiredFinalCommands(config))

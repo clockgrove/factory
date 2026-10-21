@@ -1254,7 +1254,15 @@ export function assertRequiredFinalCommands(
   body: string,
   baseSha: string,
   checkout: string,
+  ciOnlyCommands: readonly string[] = [],
 ): void {
+  const ciOnly = finalObjectiveCommands(body).find((command) =>
+    ciOnlyCommands.includes(command),
+  );
+  if (ciOnly !== undefined)
+    throw new Error(
+      `Acceptance command ${ciOnly} is CI-only in the installation's finalValidation.ciOnlyCommands: it needs network, and final validation runs offline. Leave it to CI and remove it from the Objective's Acceptance commands, or remove it from ciOnlyCommands if it runs offline.`,
+    );
   const sources = [
     { path: "OBJECTIVE", content: body },
     { path: REQUIRED_COMMANDS_SOURCE, content: requiredCommands.join("\n") },
@@ -1305,6 +1313,30 @@ function boundedAllowedHeadings(sources: PlanningSource[]): string {
     .map(boundedDiagnosticValue);
   const omitted = headings.length - shown.length;
   return `[${shown.join(", ")}${omitted > 0 ? `, ... ${omitted} more` : ""}]`;
+}
+
+/**
+ * Refuse a Work Item validation command the installation marks CI-only: it
+ * needs network, validation runs offline, so it could never pass.
+ */
+export function assertNoCiOnlyValidation(
+  graph: WorkGraph,
+  ciOnlyCommands: readonly string[],
+): void {
+  for (const item of workShapes(graph))
+    for (const { command } of item.validation)
+      if (ciOnlyCommands.includes(command))
+        throw new GraphValidationError(
+          item.id,
+          `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI; when a criterion needs it, ask through decisionRequired`,
+        );
+}
+
+/** The planner's note on the installation's CI-only commands; empty when none. */
+export function ciOnlyInstructions(ciOnlyCommands: readonly string[]): string {
+  return ciOnlyCommands.length
+    ? `\n\nThese commands need network and run only in CI; validation runs offline, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
+    : "";
 }
 
 export function validateCitations(

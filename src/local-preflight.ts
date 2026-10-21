@@ -19,6 +19,7 @@ import {
 import {
   finalValidationCommands,
   requiredFinalCommands,
+  ciOnlyCommands,
   type FactoryConfig,
 } from "./config.js";
 import type { PlanningLocalExecutables, WorkGraph } from "./contracts.js";
@@ -393,7 +394,13 @@ export function preflightObjective(
       `Objective names ${named.map((command) => `\`${command}\``).join(", ")} but declares no final command. Final commands are only Acceptance bullets that are exactly one backticked command; planning cannot add them. Add each command the integrated result must pass under Acceptance as its own bullet, for example:\n${named.map((command) => `- \`${command}\``).join("\n")}\nIf the Objective needs no final command, remove the backticks from those mentions.`,
     );
   const required = requiredFinalCommands(config);
-  assertRequiredFinalCommands(required, body, baseSha, config.checkout);
+  assertRequiredFinalCommands(
+    required,
+    body,
+    baseSha,
+    config.checkout,
+    ciOnlyCommands(config),
+  );
   const finalCommands = finalValidationCommands(
     finalObjectiveCommands(body),
     required,

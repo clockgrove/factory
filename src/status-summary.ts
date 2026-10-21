@@ -359,6 +359,14 @@ interface ExecutionStatusView extends WaitView {
   state: "active" | "waiting" | "complete" | "failed" | "cancelled";
   runActive: boolean | null;
   coordinator: CoordinatorView | null;
+  /** Validation commands the operator retired, with why (#1667). */
+  retiredValidation?: {
+    itemId: string;
+    command: string;
+    reason: string;
+    actor: string;
+    at: string;
+  }[];
   pendingAmendment: {
     phase: string;
     error: string | null;
@@ -1685,6 +1693,10 @@ export function renderStatusText(
           .trimEnd()}`,
       );
   }
+  for (const entry of view.retiredValidation ?? [])
+    lines.push(
+      `  ${entry.itemId}: validation command ${entry.command} retired by ${entry.actor} at ${displayDateTime(entry.at)}: ${entry.reason}`,
+    );
   if (view.capacity) lines.push("", capacityLine(view.capacity));
   const question = (
     label: string,

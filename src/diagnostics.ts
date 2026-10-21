@@ -36,7 +36,7 @@ import { linearDeliveryUnits } from "./delivery/plan.js";
 import { faultDetail, faultOf, type Wait } from "./fault.js";
 import type { GitHubTransportObservation } from "./github-client.js";
 import type { GitHubProgressProjection } from "./github-progress-state.js";
-import { graphDigest } from "./graph-amendments.js";
+import { graphDigest, retiredValidation } from "./graph-amendments.js";
 import { workerIdentity } from "./item-steps.js";
 import { FACTORY_VERSION } from "./package-metadata.js";
 import {
@@ -2375,6 +2375,11 @@ export function statusDocument(
       redactCoordinatorDisposition(state.coordinator, secrets) ?? null,
     graphDigest: graphDigest(state.graph),
     graphRevisionCount: state.graphRevisions?.length ?? 1,
+    retiredValidation: retiredValidation(state).map((entry) => ({
+      ...entry,
+      command: redactDiagnosticDetail(entry.command, secrets),
+      reason: redactDiagnosticDetail(entry.reason, secrets),
+    })),
     pendingAmendment: state.pendingAmendment
       ? {
           id: state.pendingAmendment.id,

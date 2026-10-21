@@ -87,7 +87,15 @@ const commandFlags: Record<string, string[]> = {
   resume: ["objective"],
   cancel: ["objective", "provider"],
   repair: ["objective", "proposal"],
-  retry: ["objective", "item", "rereview", "review-artifacts", "fresh"],
+  retry: [
+    "objective",
+    "item",
+    "rereview",
+    "review-artifacts",
+    "fresh",
+    "retire-command",
+    "reason",
+  ],
 };
 /** Flags that take no value; everything else reads the next argument. */
 const booleanFlags = new Set([

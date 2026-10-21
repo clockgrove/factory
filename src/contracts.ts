@@ -525,6 +525,8 @@ export interface PlanningRequest<T> {
     instructions: string;
     /** The Objective is a split's child (its issue carries the child marker): it never splits again. */
     splitChild?: boolean;
+    /** The installation's CI-only commands, refused as validation commands. */
+    ciOnlyCommands?: string[];
     previousGraph?: WorkGraph;
     immutableItemIds?: string[];
     /** The retained item whose failed attempt proposed the amendment; its ownership may widen. */

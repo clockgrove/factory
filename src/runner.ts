@@ -72,6 +72,7 @@ import {
   decideAmendment,
   graphDigest,
   submitAmendment,
+  retireValidationCommand,
 } from "./graph-amendments.js";
 import { approvedPlaybook, observeRetrospective } from "./learning.js";
 import { assetSelectionDigest } from "./media.js";
@@ -1191,7 +1192,16 @@ async function runObjectiveOwned(
             config,
             objective,
             input.item === undefined ? undefined : String(input.item),
-            { fresh: input.fresh === true },
+            {
+              fresh: input.fresh === true,
+              ...(input.retire !== undefined && {
+                retire: input.retire as {
+                  command: string;
+                  reason: string;
+                  actor: string;
+                },
+              }),
+            },
           );
           wake();
           return retried;
@@ -1980,9 +1990,16 @@ export function retryWorkItem(
   config: FactoryConfig,
   objective: number,
   itemId?: string,
-  options: { fresh?: boolean } = {},
+  options: {
+    fresh?: boolean;
+    /** Retire this validation command first (#1667): an operator correction. */
+    retire?: { command: string; reason: string; actor: string };
+  } = {},
 ): "step" | "attempt" {
-  if (!options.fresh && retryStep(config, objective, itemId)) return "step";
+  if (options.retire && itemId === undefined)
+    throw new Error("retry --retire-command needs --item");
+  if (!options.fresh && !options.retire && retryStep(config, objective, itemId))
+    return "step";
   if (options.fresh && itemId === undefined)
     throw new Error("retry --fresh needs --item");
   if (itemId === undefined)
@@ -2033,6 +2050,10 @@ export function retryWorkItem(
     const resumed = (
       nativeUnit?.items.map((item) => item.id) ?? [itemId]
     ).filter((id) => delivering(state.work[id]));
+    if (resumed.includes(itemId) && options.retire)
+      throw new Error(
+        `Work Item ${itemId} passed validation and resumes delivery; there is no validation command to retire`,
+      );
     if (resumed.includes(itemId)) {
       for (const id of resumed) {
         const entry = state.work[id]!;
@@ -2081,6 +2102,9 @@ export function retryWorkItem(
       throw new Error(
         `Work Item ${itemId} is part of a delivery that cannot start again; retry the published item of its unit, or factory cancel --objective ${objective}`,
       );
+    // The operator's retirement is a graph revision the new attempt binds.
+    if (options.retire)
+      retireValidationCommand(state, { itemId, ...options.retire });
     // The new attempt starts without the old one's records or bound.
     clearRepeats(state, { item: itemId });
     // The new attempt continues from the refused candidate unless the
@@ -2098,6 +2122,9 @@ export function retryWorkItem(
       itemId,
       operation: "work-retry",
       outcome: "completed",
+      ...(options.retire && {
+        detail: `retired validation command: ${options.retire.command}`,
+      }),
     });
     return "attempt";
   } finally {

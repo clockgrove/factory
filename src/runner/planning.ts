@@ -33,6 +33,7 @@ import { createPlanningContextResolver } from "../compiler/context-runtime.js";
 import {
   factoryConfigDigest,
   requiredFinalCommands,
+  ciOnlyCommands,
   resolveCapacity,
   validateTarget,
 } from "../config.js";
@@ -437,6 +438,7 @@ async function planObjectiveObserved(
       { configuredConcurrency: resolveCapacity(config).concurrency },
       workflowRecipe,
       requiredFinalCommands(config),
+      ciOnlyCommands(config),
     );
     diagnostics.emit({
       operation: "planning-preview",
@@ -941,6 +943,7 @@ export async function prepareObjective(args: {
                 { configuredConcurrency: capacity.concurrency },
                 workflowRecipe,
                 requiredFinalCommands(config),
+                ciOnlyCommands(config),
               ),
             true,
           );

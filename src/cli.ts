@@ -154,8 +154,8 @@ function help(): void {
       "      With --objective: the phase and the exact next command. --issue finds the Objective, or Work Item, an issue names in local state. Without: the service and the queue",
       "  decide --objective N [--item ITEM] [--criterion TEXT] --outcome accept|refuse [--answer TEXT [--question DIGEST]] --reason TEXT",
       "      Decide a plan or a pending amendment's question (--answer is required to accept either; --question names the question status shows, and decide refuses another) or a result criterion (--item names the Work Item; without it, the final acceptance)",
-      "  retry --objective N [--item ITEM [--fresh]] [--rereview] [--review-artifacts FILE]",
-      "      Answer a step's decision or configuration fix, end a provider usage-limit wait, start a failed Work Item's new attempt (continuing from its refused result; --fresh starts from the base), or (--item --rereview) validate and review the same pending or settled command-failure result within resultRereviews limits",
+      "  retry --objective N [--item ITEM [--fresh] [--retire-command COMMAND --reason TEXT]] [--rereview] [--review-artifacts FILE]",
+      "      Answer a step's decision or configuration fix, end a provider usage-limit wait, start a failed Work Item's new attempt (continuing from its refused result; --fresh starts from the base; --retire-command first drops one validation command that cannot pass offline, such as a network check CI covers, recording --reason), or (--item --rereview) validate and review the same pending or settled command-failure result within resultRereviews limits",
       "  repair --objective N --proposal FILE",
       "      Record a diagnosed correction for a failed Work Item",
       "  decline-discovery --objective N --decision FILE",
@@ -883,14 +883,30 @@ async function dispatchMain(
       throw new Error("--review-artifacts requires --rereview");
     const fresh = args.includes("--fresh");
     if (fresh && !item) throw new Error("retry --fresh requires --item");
+    const command = option(args, "retire-command");
+    const reason = option(args, "reason");
+    if ((command === undefined) !== (reason === undefined))
+      throw new Error("retry --retire-command and --reason go together");
+    if (command !== undefined && !item)
+      throw new Error("retry --retire-command requires --item");
+    const retire =
+      command === undefined
+        ? undefined
+        : { command, reason: reason!, actor: operatorName() };
     const reply = await requestControl(config.repository, {
       objective,
       action: "retry",
-      input: item === undefined ? {} : { item, ...(fresh && { fresh: true }) },
+      input:
+        item === undefined
+          ? {}
+          : { item, ...(fresh && { fresh: true }), ...(retire && { retire }) },
     });
     const retried = reply.handled
       ? reply.result
-      : requireApplication().retryWorkItem(objective, item, { fresh });
+      : requireApplication().retryWorkItem(objective, item, {
+          fresh,
+          ...(retire && { retire }),
+        });
     console.log(
       retried === "step"
         ? `The ${item === undefined ? "Objective" : `Work Item ${item}`} step will run again; ${reply.handled ? "the active run continues it" : `factory run --objective ${objective} continues it`}`

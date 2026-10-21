@@ -59,7 +59,11 @@ import {
   validateGraph,
   validateGraphSources,
 } from "./compiler.js";
-import { requiredFinalCommands, type FactoryConfig } from "./config.js";
+import {
+  ciOnlyCommands,
+  requiredFinalCommands,
+  type FactoryConfig,
+} from "./config.js";
 import type {
   GitHubGateway,
   PlanningModel,
@@ -171,7 +175,103 @@ export interface GraphRevision {
   planningInvocation?: PendingAmendment["planningInvocation"];
   reviewInvocation?: PendingAmendment["reviewInvocation"];
   reviewRejectedNativeReturns?: ContentRef[];
+  /** The operator retired one validation command of a Work Item (#1667). */
+  retirement?: ValidationRetirement;
   acceptedAt?: string;
+}
+
+/**
+ * An operator correction: one Work Item validation command no longer runs,
+ * for a recorded reason such as "covered by CI". Acceptance is unchanged; a
+ * criterion that command proved is judged by the item's review instead.
+ */
+export interface ValidationRetirement {
+  itemId: string;
+  command: string;
+  reason: string;
+  actor: string;
+}
+
+/**
+ * The graph without the retired command. Coverage proofs keep pointing at the
+ * same commands; one the retired command gave becomes its review's judgment.
+ * Refuses an unknown item or command, and a readiness probe or preparation.
+ */
+export function retiredValidationGraph(
+  graph: WorkGraph,
+  retirement: ValidationRetirement,
+): WorkGraph {
+  const { itemId, command, reason, actor } = retirement;
+  if (![reason, actor].every((text) => typeof text === "string" && text.trim()))
+    throw new Error("Retiring a validation command needs a reason and actor");
+  // Controller, review and worker actors are all factory-*; only a person retires.
+  if (actor.startsWith("factory-"))
+    throw new Error("Only the operator can retire a validation command");
+  const next = structuredClone(graph);
+  const item = next.items.find((entry) => entry.id === itemId);
+  if (!item) throw new Error(`Unknown Work Item ${itemId}`);
+  const index = item.validation.findIndex((entry) => entry.command === command);
+  if (index < 0)
+    throw new Error(
+      `Work Item ${itemId} has no validation command ${JSON.stringify(command)}; its commands are ${JSON.stringify(item.validation.map((entry) => entry.command))}`,
+    );
+  item.validation.splice(index, 1);
+  for (const entry of next.coverage ?? []) {
+    if (entry.itemId !== itemId) continue;
+    if (
+      entry.environment.probe === command ||
+      entry.environment.prerequisites?.includes(command)
+    )
+      throw new Error(
+        `${command} is Work Item ${itemId}'s readiness probe or preparation; it cannot be retired`,
+      );
+    const proof = entry.proof;
+    if (proof.kind !== "result-command" && proof.kind !== "integrated-command")
+      continue;
+    if (proof.validationIndex > index) proof.validationIndex--;
+    else if (proof.validationIndex === index)
+      entry.proof = {
+        kind:
+          proof.kind === "result-command"
+            ? "result-semantic"
+            : "integrated-semantic",
+      };
+  }
+  return next;
+}
+
+/** Record an operator retirement as a graph revision; the caller restarts the item. */
+export function retireValidationCommand(
+  state: FactoryState,
+  retirement: ValidationRetirement,
+): void {
+  if (state.pendingAmendment || state.pendingExpansion)
+    throw new Error(
+      "Settle the pending graph amendment or expansion before retiring a validation command",
+    );
+  const graph = retiredValidationGraph(state.graph, retirement);
+  state.graphRevisions ??= [
+    { graph: structuredClone(state.graph), digest: graphDigest(state.graph) },
+  ];
+  state.graphRevisions.push({
+    graph,
+    digest: graphDigest(graph),
+    parentDigest: graphDigest(state.graph),
+    retirement: structuredClone(retirement),
+    acceptedAt: new Date().toISOString(),
+  });
+  state.graph = graph;
+}
+
+/** Every retired validation command, in order, for status and receipts. */
+export function retiredValidation(
+  state: Pick<FactoryState, "graphRevisions">,
+): (ValidationRetirement & { at: string })[] {
+  return (state.graphRevisions ?? []).flatMap((revision) =>
+    revision.retirement
+      ? [{ ...revision.retirement, at: revision.acceptedAt! }]
+      : [],
+  );
 }
 export type AllowanceConsumption = {
   planningRevisions: number;
@@ -219,6 +319,21 @@ export function assertDiscovery(value: WorkDiscovery): void {
 }
 
 /** Validate the immutable succession, never rewrite the initial graph digest. */
+/** A retirement revision is exactly its parent without the retired command. */
+function retirementDerives(
+  parent: WorkGraph,
+  revision: GraphRevision,
+): boolean {
+  try {
+    return (
+      graphDigest(retiredValidationGraph(parent, revision.retirement!)) ===
+      revision.digest
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function assertGraphRevisions(state: FactoryState): void {
   for (const rejected of state.rejectedAmendments ?? []) {
     assertDiscovery(rejected.proposal);
@@ -295,15 +410,22 @@ export function assertGraphRevisions(state: FactoryState): void {
       if (
         index &&
         (revision.parentDigest !== revisions[index - 1]!.digest ||
-          (revision.expansion
+          (revision.retirement
             ? revision.proposal !== undefined ||
+              revision.expansion !== undefined ||
               revision.reviewDigest !== undefined ||
-              revision.expansion.parentGraphDigest !== revision.parentDigest ||
-              revision.expansion.graphDigest !== revision.digest ||
-              revision.expansion.acceptedAt !== revision.acceptedAt
-            : !revision.proposal ||
-              revision.proposal.expectedGraphDigest !== revision.parentDigest ||
-              !/^[a-f0-9]{64}$/.test(revision.reviewDigest ?? "")) ||
+              !retirementDerives(revisions[index - 1]!.graph, revision)
+            : revision.expansion
+              ? revision.proposal !== undefined ||
+                revision.reviewDigest !== undefined ||
+                revision.expansion.parentGraphDigest !==
+                  revision.parentDigest ||
+                revision.expansion.graphDigest !== revision.digest ||
+                revision.expansion.acceptedAt !== revision.acceptedAt
+              : !revision.proposal ||
+                revision.proposal.expectedGraphDigest !==
+                  revision.parentDigest ||
+                !/^[a-f0-9]{64}$/.test(revision.reviewDigest ?? "")) ||
           !Number.isFinite(Date.parse(revision.acceptedAt ?? "")))
       )
         throw new Error(
@@ -1462,6 +1584,7 @@ async function advanceAmendment(args: {
           args.workflowRecipe,
           undefined,
           requiredFinalCommands(config),
+          ciOnlyCommands(config),
         );
       }
       admitAdvancedAmendmentFormat(state, pending.graph!);

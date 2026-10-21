@@ -285,9 +285,12 @@ export interface FactoryConfig {
   reviewArtifacts?: ReviewArtifactSelector[];
   /**
    * Commands every Objective's final validation runs after its own Acceptance
-   * commands, before final review. Bound by both digests: they are command authority.
+   * commands, before final review. `ciOnlyCommands` names commands that need
+   * network (registry or advisory checks) and so run only in CI: the planner
+   * never selects them and no Work Item or final validation runs them. Bound
+   * by both digests: they are command authority.
    */
-  finalValidation?: { requiredCommands: string[] };
+  finalValidation?: { requiredCommands?: string[]; ciOnlyCommands?: string[] };
   /**
    * GitHub presentation. Progress comments and Project status are on by default (see
    * `githubProgressSettings` and `githubProjectStatusSettings`); `{ enabled: false }` opts out.
@@ -727,23 +730,40 @@ export function validateConfig(value: unknown): FactoryConfig {
   );
   if (value.finalValidation !== undefined) {
     assertObject(value.finalValidation, "finalValidation");
+    const section = value.finalValidation as Record<string, unknown>;
     assertOnlyKeys(
       value.finalValidation,
-      ["requiredCommands"],
+      ["requiredCommands", "ciOnlyCommands"],
       "finalValidation",
     );
-    const commands = assertUniqueStrings(
-      value.finalValidation.requiredCommands,
-      "finalValidation.requiredCommands",
+    const lists = (["requiredCommands", "ciOnlyCommands"] as const).flatMap(
+      (key) => {
+        const listed = section[key];
+        if (listed === undefined) return [];
+        const commands = assertUniqueStrings(listed, `finalValidation.${key}`);
+        if (
+          !commands.length ||
+          commands.some(
+            (command) => command !== command.trim() || /[\r\n]/.test(command),
+          )
+        )
+          throw new Error(
+            `finalValidation.${key} must list at least one single-line command without surrounding whitespace; omit it to list none`,
+          );
+        return [[key, commands] as const];
+      },
     );
-    if (
-      !commands.length ||
-      commands.some(
-        (command) => command !== command.trim() || /[\r\n]/.test(command),
-      )
-    )
+    if (!lists.length)
       throw new Error(
-        "finalValidation.requiredCommands must list at least one single-line command without surrounding whitespace; omit the section to require none",
+        "finalValidation must list requiredCommands or ciOnlyCommands; omit the section to require none",
+      );
+    const listed = Object.fromEntries(lists);
+    const both = (listed.requiredCommands ?? []).find((command) =>
+      listed.ciOnlyCommands?.includes(command),
+    );
+    if (both !== undefined)
+      throw new Error(
+        `finalValidation lists ${both} as both required and CI-only; final validation runs offline, so keep it in one list`,
       );
   }
   if (value.sandbox !== undefined) assertCommandSandboxConfig(value.sandbox);
@@ -1470,6 +1490,11 @@ export function queueConfiguration(config: FactoryConfig): FactoryConfig {
 /** The commands this installation requires in every Objective's final validation. */
 export function requiredFinalCommands(config: FactoryConfig): string[] {
   return config.finalValidation?.requiredCommands ?? [];
+}
+
+/** The commands that need network and run only in CI: never selected for validation. */
+export function ciOnlyCommands(config: FactoryConfig): string[] {
+  return config.finalValidation?.ciOnlyCommands ?? [];
 }
 
 /**

@@ -92,6 +92,8 @@ import {
   planningSources,
   revisionCitedSections,
   validateGraphSources,
+  assertNoCiOnlyValidation,
+  ciOnlyInstructions,
 } from "./sources.js";
 
 /** The Objective mutation lock owns the snapshot; this queue owns its planner. */
@@ -484,6 +486,7 @@ export async function compileObjective(
   workflowRecipe?: WorkflowRecipeInput,
   revise?: PlanRevisionInput,
   requiredFinalCommands: readonly string[] = [],
+  ciOnlyCommands: readonly string[] = [],
 ): Promise<WorkGraph> {
   const request = prepareCompilationRequest({
     objective,
@@ -504,6 +507,7 @@ export async function compileObjective(
     workflowRecipe,
     revise,
     requiredFinalCommands,
+    ciOnlyCommands,
   });
   const result = await model
     .generateStructured<WorkGraph | PlanningTurnResponse>(request)
@@ -566,6 +570,8 @@ export function prepareCompilationRequest(args: {
   revise?: PlanRevisionInput;
   /** The installation's required final-validation commands; their scripts stay fixed. */
   requiredFinalCommands?: readonly string[];
+  /** The installation's CI-only commands: never a validation command. */
+  ciOnlyCommands?: readonly string[];
 }): PlanningRequest<WorkGraph> {
   const {
     objective,
@@ -600,14 +606,15 @@ export function prepareCompilationRequest(args: {
   if (args.contextLookup)
     assertPlanningContextPacket(args.contextLookup, sources);
   const revising = args.revise?.answer !== undefined && !amendment;
-  const instructions = renderPlanningInstructions(
-    body,
-    sources,
-    corrections,
-    amendment,
-    checkout,
-    revising,
-  );
+  const instructions =
+    renderPlanningInstructions(
+      body,
+      sources,
+      corrections,
+      amendment,
+      checkout,
+      revising,
+    ) + ciOnlyInstructions(args.ciOnlyCommands ?? []);
   const prompt = `Objective #${objective}\n${body}${instructions}`;
   const scripts = fixedScripts(
     body,
@@ -629,6 +636,9 @@ export function prepareCompilationRequest(args: {
     compileContext: {
       objectiveNumber: objective,
       instructions,
+      ...(args.ciOnlyCommands?.length && {
+        ciOnlyCommands: [...args.ciOnlyCommands],
+      }),
       ...(childIdentity(body) && { splitChild: true }),
       ...(amendment && {
         previousGraph: amendment.currentGraph,
@@ -743,6 +753,10 @@ export function validateCompiledGraph(args: {
       commandAuthority(body),
     );
     validateGraphSources(graph, sources, checkout, body, baseSha);
+    assertNoCiOnlyValidation(
+      graph,
+      request.compileContext?.ciOnlyCommands ?? [],
+    );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     observeModelInvocation(invocation, {

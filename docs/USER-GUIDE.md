@@ -538,6 +538,14 @@ To make every Objective's final validation run commands its plan would not selec
 
 Final validation runs the Objective's Acceptance commands first, then each required command the Objective does not already list, in order, on the same fresh checkout and before final review. A failing required command is handled exactly like a failing Acceptance command. Planning treats required commands like Acceptance commands: the planner keeps the package scripts they run fixed, and graph review sees them among the Final commands. Each must be a command the accepted base can run with fixed script bodies, the same check Acceptance commands get; an unsupported one, such as an npm invocation with extra options, is refused before planning and again at projection, before any Work Item starts. Each entry is a non-empty, single-line, unique command, and the section, when present, lists at least one. The commands are command authority, so they are inside the configuration and queue authority digests: adding, changing or removing them re-keys queue authority, so started Objectives and queued receipts no longer match the installation. Change them between Objectives, and re-add queued Objectives after a change. Omitting the section leaves both digests exactly as before.
 
+Validation runs offline: the sandbox reaches the network only for Factory's verified install. A command that needs network, such as a registry, license or advisory check, can never pass there, so leave it to CI and list it as CI-only:
+
+```json
+"finalValidation": { "ciOnlyCommands": ["npm run audit"] }
+```
+
+The planner is told these commands run only in CI and never selects one as a Work Item validation command; when a criterion can only be proved by one, it asks through its planning question instead. Graph validation refuses a Work Item that runs one, and an Objective whose Acceptance commands include one is refused before planning. A command cannot be both required and CI-only. `ciOnlyCommands` and `requiredCommands` are each optional, but the section lists at least one of them. Like required commands, CI-only commands are inside both digests.
+
 There is no plan-only CLI command. To inspect an Objective before authorizing execution, ask your agent to read the issue and committed Sources without running Factory. A planning review that needs a human stops; a clean review proceeds to execution without another approval step.
 
 Running is the consent to execute that Objective. `run` plans if needed, saves the plan and its independent review, executes a clean plan, and exits:
@@ -688,6 +696,9 @@ factory retry --objective N --item ITEM --rereview
 # or end a provider usage-limit wait once the limit is lifted
 factory retry --objective N [--item ITEM]
 
+# Retire one validation command a failed Work Item cannot pass offline, then start its new attempt
+factory retry --objective N --item ITEM --retire-command "npm run audit" --reason "covered by CI"
+
 # Record a diagnosed correction for a failed Work Item
 factory repair --objective N --proposal /abs/repair.json
 
@@ -697,6 +708,8 @@ factory decline-discovery --objective N --decision /abs/discovery-decision.json
 # Submit a graph amendment, or a replacement for a rejected one
 factory propose-amendment --objective N --proposal /abs/proposal.json
 ```
+
+A Work Item can stop on a validation command that never passes in the sandbox, for example a network check planned before it was listed in `ciOnlyCommands`. A repair cannot change validation, so `factory retry --objective N --item ITEM --retire-command COMMAND --reason TEXT` retires that one command, then starts the item's new attempt without it. Only the operator can do this, on a failed or cancelled item, naming a command the item runs exactly; a readiness probe or preparation command cannot be retired. Acceptance is unchanged: a criterion the command proved is judged by the item's review instead. The retirement is a recorded graph revision with the command, reason, operator and time; `factory status` shows it (`retiredValidation` in `--json`). It uses no allowance. Also list the command in `ciOnlyCommands` so later plans leave it out.
 
 When a worker stops on a provider usage limit, its step waits for the provider's reset time and `factory status` shows the outage with its next try. If the limit is lifted sooner, for example after switching the provider login or raising the plan, `factory retry --objective N --item ITEM` ends that wait, and the step tries again on the next pass. A running controller picks this up at once; otherwise `factory run` does. It ends only waits for a provider reset time; other backoff and decisions are unchanged.
 

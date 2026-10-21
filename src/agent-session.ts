@@ -812,6 +812,8 @@ export async function settleAbandonedPlanningTurn(
         ref.scope.role === "planning" && ref.currentTurn?.invocationId === id,
     );
   let invocationId: string;
+  // Whether an owner step still runs to recover a completed result.
+  let recoverable = true;
   let abandon: () => void;
   let restore: () => void;
   if (isPreparationState(state)) {
@@ -868,6 +870,14 @@ export async function settleAbandonedPlanningTurn(
     )
       return;
     invocationId = invocation.id;
+    // Only a failed item is diagnosed; one an amendment reattempted is not.
+    recoverable = diagnosed!.status === "failed";
+    // Its archived copies settle with it (#1674).
+    const copies = (recovery.history ?? []).filter(
+      (entry) =>
+        entry.diagnosisInvocation?.id === invocation.id &&
+        entry.diagnosisInvocation.response === undefined,
+    );
     let undoMarker: (() => void) | undefined;
     abandon = () => {
       undoMarker = settleInterruptedPaidCall(
@@ -876,17 +886,30 @@ export async function settleAbandonedPlanningTurn(
         "diagnose",
       );
       recovery.diagnosisInvocation = abandonedDiagnosis(invocation);
+      for (const entry of copies)
+        entry.diagnosisInvocation = abandonedDiagnosis(
+          entry.diagnosisInvocation!,
+        );
     };
+    const archived = copies.map((entry) => entry.diagnosisInvocation);
     restore = () => {
       undoMarker?.();
       recovery.diagnosisInvocation = invocation;
+      copies.forEach((entry, index) => {
+        entry.diagnosisInvocation = archived[index];
+      });
     };
   }
   const turn = owner(invocationId);
   if (!turn) return;
   if (turn.status !== "in-flight") {
-    // A completed turn its adapter still holds is recovered by its owner.
-    if (turn.status === "ready" && turn.currentTurn!.terminal === "completed")
+    // A completed turn its adapter still holds is recovered by its owner,
+    // unless no owner step runs to recover it.
+    if (
+      recoverable &&
+      turn.status === "ready" &&
+      turn.currentTurn!.terminal === "completed"
+    )
       return;
     abandon();
     save();

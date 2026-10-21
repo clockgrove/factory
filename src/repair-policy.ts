@@ -566,8 +566,14 @@ export function archiveAttempt(work: WorkState): WorkRecovery {
   // A fresh-base request applies to the one attempt it was made for.
   const { freshBase: _fresh, ...recovery } = work.recovery ?? {};
   const { recovery: _old, ...attempt } = work;
+  // A retained native return no later attempt validates stays in history
+  // only: carried forward, it would hold the handoff after a success.
+  const { diagnosisInvocation: _returned, ...next } = recovery;
+  const unvalidated =
+    recovery.diagnosisInvocation?.response === undefined &&
+    !!recovery.diagnosisInvocation?.nativeReturns?.length;
   return {
-    ...recovery,
+    ...(unvalidated ? next : recovery),
     history: [
       ...(recovery.history ?? []),
       {

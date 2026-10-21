@@ -2112,7 +2112,7 @@ export function retryWorkItem(
     // The new attempt continues from the refused candidate unless the
     // operator asks for a fresh base (#1313).
     const recovery = archiveUncorrectedAttempt(work);
-    abandonRetriedDiagnoses(recovery);
+    abandonRetriedDiagnoses(state, recovery);
     if (options.fresh) recovery.freshBase = true;
     state.work[itemId] = { status: "pending", recovery };
     state.cancelRequested = false;

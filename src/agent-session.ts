@@ -738,18 +738,37 @@ function abandonedDiagnosis(
  * diagnoses that has no response (current or archived) as abandoned: the
  * retry decision ends them, their outcome stays unknown, and a late response
  * no longer matches its invocation (#1661). One that holds native returns
- * awaiting validation stays as it is.
+ * awaiting validation stays as it is. A diagnosis whose planning turn is
+ * still live or holds a completed result is not the retry's to end: the
+ * retry is refused until a run settles that turn through its owner.
  */
-export function abandonRetriedDiagnoses(recovery: WorkRecovery): void {
-  for (const holder of [recovery, ...(recovery.history ?? [])]) {
-    const invocation = holder.diagnosisInvocation;
-    if (
-      invocation?.submitted &&
-      invocation.response === undefined &&
-      !invocation.nativeReturns?.length
-    )
-      holder.diagnosisInvocation = abandonedDiagnosis(invocation);
-  }
+export function abandonRetriedDiagnoses(
+  state: ContinuationState,
+  recovery: WorkRecovery,
+): void {
+  const unanswered = [recovery, ...(recovery.history ?? [])].filter(
+    (holder) =>
+      holder.diagnosisInvocation?.submitted &&
+      holder.diagnosisInvocation.response === undefined &&
+      !holder.diagnosisInvocation.nativeReturns?.length,
+  );
+  const held = (id: string) =>
+    Object.values(state.agentSessions ?? {}).some(
+      (ref) =>
+        ref.scope.role === "planning" &&
+        ref.currentTurn?.invocationId === id &&
+        (ref.status === "in-flight" ||
+          ref.currentTurn.resources !== "settled" ||
+          (ref.status === "ready" && ref.currentTurn.terminal === "completed")),
+    );
+  if (unanswered.some((holder) => held(holder.diagnosisInvocation!.id)))
+    throw new Error(
+      "A diagnosis of this Work Item is still held by its planning session; run the Objective to settle it, then retry",
+    );
+  for (const holder of unanswered)
+    holder.diagnosisInvocation = abandonedDiagnosis(
+      holder.diagnosisInvocation!,
+    );
 }
 
 /**

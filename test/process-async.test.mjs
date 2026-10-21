@@ -3658,6 +3658,45 @@ console.log(JSON.stringify({receipt: process.argv[2] === "escape" ? "../receipt.
       submitted: true,
       requestDigest: "a".repeat(64),
     };
+    // While its planning turn is still in flight, the retry is refused and
+    // nothing changes; the turn is settled through its owner first.
+    const held = structuredClone(unbound);
+    held.objectiveBodyDigest = createHash("sha256")
+      .update("retry diagnosis fence")
+      .digest("hex");
+    held.sourcePacketDigest = createHash("sha256")
+      .update(JSON.stringify(pinnedSources))
+      .digest("hex");
+    const planning = agentSessionContinuation(
+      held,
+      "planning",
+      undefined,
+      () => undefined,
+    );
+    planning.checkpoint({
+      scope: planning.scope,
+      adapter: "in-flight-diagnosis",
+      identity: planning.identity,
+      turn: 1,
+      status: "in-flight",
+      data: {},
+      currentTurn: {
+        invocationId: lostDiagnosis,
+        requestDigest: "a".repeat(64),
+        graphDigest: graphDigest(held.graph),
+        dispatch: "submitted",
+        resources: "active",
+      },
+    });
+    saveState(statePath(config.repository, 3), held);
+    assert.throws(
+      () => retryWorkItem(retryConfig, 3, "local"),
+      /still held by its planning session/,
+    );
+    assert.deepEqual(
+      readState(config.repository, 3).work.local,
+      held.work.local,
+    );
     saveState(statePath(config.repository, 3), unbound);
     assert.equal(retryWorkItem(retryConfig, 3, "local"), "attempt");
     const settledRetry = readState(config.repository, 3);

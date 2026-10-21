@@ -1123,7 +1123,7 @@ test("a fast non-Actions check waits for Actions to register (#1687)", async () 
   const id = { number: 7, branch: "fix", headSha: sha };
   const cla = { id: 1, name: "cla", head_sha: sha, status: "completed" };
   Object.assign(cla, { conclusion: "success", html_url: "https://x/1" });
-  const observe = async (runs, minutesAgo) => {
+  const observe = async (runs, minutesAgo, workflow_runs = []) => {
     const pushed = new Date(Date.now() - minutesAgo * 60_000).toISOString();
     const responses = {
       "pulls/7": { state: "open", merged: false, head: { sha, ref: "fix" } },
@@ -1134,9 +1134,7 @@ test("a fast non-Actions check waits for Actions to register (#1687)", async () 
       "activity?ref=refs%2Fheads%2Ffix&per_page=100": minutesAgo
         ? [{ after: sha, timestamp: pushed }]
         : [],
-      "actions/workflows?per_page=100&page=1": {
-        workflows: [{ state: "active" }],
-      },
+      [`actions/runs?head_sha=${sha}&per_page=100&page=1`]: { workflow_runs },
     };
     Object.assign(responses["pulls/7"], { base: { ref: "main" } });
     const client = {
@@ -1157,6 +1155,11 @@ test("a fast non-Actions check waits for Actions to register (#1687)", async () 
   assert.equal(await observe([cla], 30), undefined);
   const ci = { ...cla, id: 2, name: "ci", app: { slug: "github-actions" } };
   assert.equal(await observe([cla, ci], 1), undefined);
+  // A run with no jobs yet (held by a concurrency group) keeps it waiting.
+  const queued = [{ status: "queued", conclusion: null }];
+  assert.match(await observe([cla], 30, queued), /Awaiting Actions workflow/);
+  const broken = [{ status: "completed", conclusion: "startup_failure" }];
+  await assert.rejects(observe([cla], 30, broken), /ended without jobs/);
   // An unknown push time never merges.
   await assert.rejects(observe([cla], 0), /not show when its head/);
 });

@@ -864,6 +864,8 @@ function commandAcknowledgment(
 }
 interface EnqueueOptions {
   expectedBodyDigests?: Record<string, string>;
+  /** Children of a reviewed split, already preflighted with their parent. */
+  childAdmission?: boolean;
 }
 interface ProjectPublicationProvenance {
   kind: "proposal";
@@ -966,7 +968,7 @@ async function enqueueMutation(
     }
     // Fail fast: dispatch runs this same preflight and would hold the
     // Objective silently. Child admissions were checked with their parent.
-    if (!options.expectedBodyDigests)
+    if (!options.childAdmission)
       admissionPreflight(config, objective, issue.body);
     const existing = readContinuation(config.repository, objective);
     if (existing && !terminal(existing) && prior?.bodyDigest !== bodyDigest)
@@ -1104,7 +1106,10 @@ export async function admitChildObjectives(
   // admissions take turns under the queue mutation lock (projectMutation).
   await queueOperation(config, () =>
     scoped(config, () =>
-      enqueueOwned(config, github, objectives, { expectedBodyDigests }),
+      enqueueOwned(config, github, objectives, {
+        expectedBodyDigests,
+        childAdmission: true,
+      }),
     ),
   );
 }
@@ -1572,6 +1577,7 @@ function ownedQueueCommand(
             expectedBodyDigests: request.input?.expectedBodyDigests as
               | Record<string, string>
               | undefined,
+            childAdmission: request.input?.childAdmission === true,
           },
           cached,
         );
@@ -2367,6 +2373,7 @@ async function runIntakeOwned(
               admitChildObjectives: (objectives, expectedBodyDigests) =>
                 enqueueIntake(config, services.github, objectives, {
                   expectedBodyDigests,
+                  childAdmission: true,
                 }).then(() => undefined),
               // Held behind an overlapping Objective after planning: the run
               // hands its slot back and selection passes over it until the

@@ -114,7 +114,10 @@ function checkpointOperations(config: FactoryConfig) {
 export interface FactoryApplication {
   enqueueIntake(
     objectives: number[],
-    options?: { expectedBodyDigests?: Record<string, string> },
+    options?: {
+      expectedBodyDigests?: Record<string, string>;
+      childAdmission?: boolean;
+    },
   ): Promise<QueueCommandAcknowledgment>;
   intakeControl(
     action: Parameters<typeof intakeControl>[1],

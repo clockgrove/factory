@@ -98,7 +98,7 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 **Bounded time.**
 
 - An operator command ends within its bound beside a real maintenance pass.
-- A publication lock that another live process holds past 3 s refuses it with `publication_lock_held`, naming the holder. A lock whose holder is gone is taken; a live holder's lock is never broken. Maintenance pauses between pack batches, so the command waits at most one batch behind it.
+- A publication lock that another live process holds past 3 s refuses an operator command (every mutating command but `run`, queue commands included) with `publication_lock_held`, naming the holder. The 3 s covers all of the command's publications. A lock whose holder is gone is taken; a live holder's lock is never broken. Maintenance pauses between pack batches, so the command waits at most one batch behind it.
 
 These rows need the service to be actively running the Objective. The suite lists them as `todo` until it has a live-run owner:
 

@@ -53,6 +53,7 @@ import {
   queueDigest,
   refuseUnadmittedRun,
 } from "../dist/project-queue-state.js";
+import { withOperatorCommand } from "../dist/recovery-checkpoint.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
 import {
   cancelObjective,
@@ -1531,24 +1532,31 @@ else {
         );
       },
     );
-    // A publication lock held past the bound (a stuck publisher) refuses
-    // the operator command; once its holder is gone (killed), the lock is
-    // stale and the same command takes it.
-    const stuck = await timed(
-      fixture,
-      "resume",
-      objective,
-      await publicationHolder(fixture.config.repository),
-    );
-    const retried = await dispatch(fixture, "resume", objective);
-    await t.test(
-      "an operator command ends within its bound beside a stuck publisher",
-      () => {
-        assert.equal(stuck.outcome, "publication_lock_held");
-        assert(stuck.elapsed < OPERATOR_BOUND_MS, `${stuck.elapsed} ms`);
-        assert.equal(retried, "ok");
-      },
-    );
+    // A publication lock held past the bound (a stuck publisher) refuses an
+    // operator command, as the CLI runs it; once its holder is gone (killed),
+    // the lock is stale and the same command takes it.
+    const queued = fixture.next++;
+    for (const [command, target] of [
+      ["resume", objective],
+      ["queue-add", queued],
+      ["cancel", objective],
+    ]) {
+      const holder = await publicationHolder(fixture.config.repository);
+      const stuck = await withOperatorCommand(() =>
+        timed(fixture, command, target, holder),
+      );
+      const retried = await withOperatorCommand(() =>
+        dispatch(fixture, command, target),
+      );
+      await t.test(
+        `${command} ends within its bound beside a stuck publisher`,
+        () => {
+          assert.equal(stuck.outcome, "publication_lock_held");
+          assert(stuck.elapsed < OPERATOR_BOUND_MS, `${stuck.elapsed} ms`);
+          assert.equal(retried, "ok");
+        },
+      );
+    }
     // A live service that runs none of them: its queue stays paused.
     await intakeControl(
       fixture.config,

@@ -69,6 +69,7 @@ import {
   maintainRecoveryCheckpoint,
   stopRecoveryCheckpointMaintenance,
   synchronizeRecoveryCheckpoint,
+  withOperatorCommand,
   withRecoveryCheckpointOperation,
 } from "./recovery-checkpoint.js";
 import { buildRecoveryCheckpointClosure } from "./recovery-checkpoint-closure.js";
@@ -1258,7 +1259,7 @@ async function main(): Promise<void> {
     // CLI prints that exact outcome without a second terminal publication.
     return withIntakeCommandDeadline(
       enteredAt + (localStatus ? 1000 : QUEUE_COMMAND_TIMEOUT_MS),
-      () => dispatchMain(),
+      () => (localStatus ? dispatchMain() : withOperatorCommand(dispatchMain)),
       (acknowledgment) => {
         const ack = acknowledgment as {
           kind?: string;
@@ -1306,20 +1307,27 @@ async function main(): Promise<void> {
   // verifier copy (an incremental fetch and re-hashed reads), never a cold
   // full verification while that copy exists. Housekeeping a foreground run
   // started at an idle point stops before its terminal publication (#1714).
-  await withRecoveryCheckpointOperation(
-    {
-      config,
-      buildClosure: () =>
-        buildRecoveryCheckpointClosure({
-          config,
-          scope: config.gitPersistence?.scope ?? "private-history",
-        }),
-    },
-    () =>
-      dispatchMain().finally(() =>
-        stopRecoveryCheckpointMaintenance(config.repository),
-      ),
-    { queueControlVerification: true },
+  // Every mutating command but `run` is a one-shot operator command.
+  const operator =
+    command === "run"
+      ? (task: () => Promise<void>) => task()
+      : withOperatorCommand;
+  await operator(() =>
+    withRecoveryCheckpointOperation(
+      {
+        config,
+        buildClosure: () =>
+          buildRecoveryCheckpointClosure({
+            config,
+            scope: config.gitPersistence?.scope ?? "private-history",
+          }),
+      },
+      () =>
+        dispatchMain().finally(() =>
+          stopRecoveryCheckpointMaintenance(config.repository),
+        ),
+      { queueControlVerification: true },
+    ),
   );
 }
 

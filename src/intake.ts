@@ -126,6 +126,7 @@ import {
   retargetControllerLock,
   withObjectiveDelegation,
 } from "./state-store.js";
+import { LifecycleRefusal } from "./lifecycle-refusal.js";
 
 /** A fresh in-memory Project view; never persisted or restored as a queue. */
 export interface IntakeAuthorization {
@@ -830,7 +831,8 @@ async function enqueueMutation(
   const observed = await commandTargets(config, github, objectives, true),
     first = observed[0]!;
   if (first.control?.mode === "draining")
-    throw new Error(
+    throw new LifecycleRefusal(
+      "queue_draining",
       "The queue is draining; use `factory queue resume` before adding work",
     );
   const plan = preparedCommand();
@@ -877,7 +879,8 @@ async function enqueueMutation(
     }
     const existing = readContinuation(config.repository, objective);
     if (existing && !terminal(existing) && previous?.bodyDigest !== bodyDigest)
-      throw new Error(
+      throw new LifecycleRefusal(
+        "unfinished_owned_work",
         "Unfinished approved contents cannot be replaced by requeueing; use supported recovery",
       );
     if (
@@ -1223,7 +1226,10 @@ async function applyControlMutation(
         card = current.inspection.target,
         issue = current.inspection.issue;
       if (entry && entry.objective !== id)
-        throw new Error(`Objective #${id} is not admitted`);
+        throw new LifecycleRefusal(
+          "objective_not_admitted",
+          `Objective #${id} is not admitted`,
+        );
       // A queued admission, under any authority, is withdrawn so that
       // `queue add` can re-admit it. A withdrawn card, or one without
       // admission metadata, binds nothing: removal archives it.
@@ -1236,7 +1242,10 @@ async function applyControlMutation(
           !issue ||
           (!entry && retainedQueueEntry(config, current.history, id)))
       )
-        throw new Error(`Objective #${id} is not admitted`);
+        throw new LifecycleRefusal(
+          "objective_not_admitted",
+          `Objective #${id} is not admitted`,
+        );
       // Retired terminal history is settled and never acted on (#1457).
       const read = readScannedContinuation(config.repository, id);
       const state = read === "history" ? undefined : read;
@@ -1250,7 +1259,8 @@ async function applyControlMutation(
         ) &&
           !cancelledRunQuiescent(config, id))
       )
-        throw new Error(
+        throw new LifecycleRefusal(
+          "unfinished_owned_work",
           `Objective #${id} has unfinished owned work; use supported cancellation before removal`,
         );
       if (!admitted) {
@@ -1762,7 +1772,8 @@ async function runIntakeOwned(
         // The Objective's run registers its control late and clears it early;
         // in those windows it may be writing state it has not saved yet.
         if (active.has(request.objective))
-          throw new Error(
+          throw new LifecycleRefusal(
+            "owner_settling",
             `Objective #${request.objective} is starting or settling under the service; retry the ${request.action === "decide" ? "decision" : "cancellation"}`,
           );
         // A queued Objective no run owns, such as one stopped for a person:
@@ -1802,7 +1813,8 @@ async function runIntakeOwned(
         record.objectives.includes(request.objective)
       )
         return state.coordinator;
-      throw new Error(
+      throw new LifecycleRefusal(
+        "objective_not_owned",
         "Only the current owned Objective supports lifecycle control; inspect retained state",
       );
     }
@@ -1818,7 +1830,10 @@ async function runIntakeOwned(
         request.action === "enqueue" &&
         (handingOff || localMode === "draining")
       )
-        throw new Error("The local service is draining");
+        throw new LifecycleRefusal(
+          "queue_draining",
+          "The local service is draining",
+        );
       acknowledgment = await ownedQueueCommand(
         config,
         services.github,

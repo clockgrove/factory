@@ -30,16 +30,19 @@ interface WaitView {
   prerequisiteGuidance?: PrerequisiteGuidance;
 }
 
-type StatusPhase =
-  | "not-started"
-  | "planning"
-  | "needs-plan-decision"
-  | "running"
-  | "waiting"
-  | "needs-decision"
-  | "failed"
-  | "cancelled"
-  | "complete";
+/** Every status phase; the lifecycle conformance suite gives each a row. */
+export const STATUS_PHASES = [
+  "not-started",
+  "planning",
+  "needs-plan-decision",
+  "running",
+  "waiting",
+  "needs-decision",
+  "failed",
+  "cancelled",
+  "complete",
+] as const;
+type StatusPhase = (typeof STATUS_PHASES)[number];
 
 interface StatusNextAction {
   command: string;

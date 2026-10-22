@@ -89,6 +89,7 @@ import {
   ownIdentity,
   processGroupExists,
 } from "./process.js";
+import { LifecycleRefusal } from "./lifecycle-refusal.js";
 
 export const queueDigest = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
@@ -2017,7 +2018,10 @@ export function refuseUnadmittedRun(
     return;
   }
   if (entry?.state !== "queued")
-    throw new Error(unadmittedRunMessage(objective));
+    throw new LifecycleRefusal(
+      "objective_not_admitted",
+      unadmittedRunMessage(objective),
+    );
 }
 /**
  * Whether the local receipts show `objective` admitted to the queue under the
@@ -3086,7 +3090,10 @@ async function claimProjectQueueRunOwned(
       card?.state !== "open" ||
       queueDigest(card.body) !== entry.bodyDigest
     )
-      throw new Error(unadmittedRunMessage(objective));
+      throw new LifecycleRefusal(
+        "objective_not_admitted",
+        unadmittedRunMessage(objective),
+      );
     // Historical admissions of settled terminal Objectives never dispatch.
     if (entry.authorityDigest !== factoryAuthorityDigest(config))
       throw new Error(
@@ -3136,7 +3143,8 @@ async function claimProjectQueueRunOwned(
       ),
     ];
     if (active.length < slots) return;
-    throw new Error(
+    throw new LifecycleRefusal(
+      slots === 1 ? "unfinished_owned_work" : "active_limit",
       slots === 1
         ? "This Project admission has an unfinished or foreign owner; supported resource reconciliation is required before dispatch"
         : `queue.maxActiveObjectives (${slots}) Objectives are already active (${active.map((id) => `#${id}`).join(", ")}); this one starts when one of them settles`,

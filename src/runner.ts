@@ -184,6 +184,7 @@ import {
   waitOf,
 } from "./step.js";
 import { applyWorkCorrection, recordWorkFailure } from "./work-repair.js";
+import { LifecycleRefusal } from "./lifecycle-refusal.js";
 
 export type { ApplicationServices } from "./runner/ownership.js";
 export { CoordinatorHandoff } from "./runner/ownership.js";
@@ -293,7 +294,8 @@ async function decideObjectiveUnscoped(
 > {
   const state = readContinuation(config.repository, objective);
   if (!state)
-    throw new Error(
+    throw new LifecycleRefusal(
+      "no_factory_state",
       `Objective #${objective} has no Factory state; run \`factory run --objective ${objective}\` first`,
     );
   assertRestoredContinuationReady(state, config);
@@ -368,7 +370,11 @@ async function decideObjectiveUnscoped(
     const lock = mutationLock(config, objective);
     try {
       const current = mutationState(config, objective);
-      if (!current) throw new Error("Objective has no Factory state");
+      if (!current)
+        throw new LifecycleRefusal(
+          "no_factory_state",
+          "Objective has no Factory state",
+        );
       decideAmendment(current, input);
       saveState(statePath(config.repository, objective), current);
     } finally {
@@ -468,7 +474,8 @@ function assertRejectionAllows(
   const reason =
     (isExecutionState(state) && state.pendingAmendment?.error) ||
     "the amendment was rejected";
-  throw new Error(
+  throw new LifecycleRefusal(
+    "rejection_hold",
     `Objective #${state.objective} is held by a rejected graph amendment (${reason.length > 200 ? `${reason.slice(0, 199)}…` : reason}); ${next ? `run ${next}` : "submit a replacement or cancel"}`,
   );
 }
@@ -493,12 +500,19 @@ async function controlObjectiveUnscoped(
       "handoff",
     ].includes(request.action)
   )
-    throw new Error("No active coordinator owns this Objective");
+    throw new LifecycleRefusal(
+      "no_active_owner",
+      "No active coordinator owns this Objective",
+    );
   const lockPath = objectiveLockPath(config.repository, request.objective);
   const lock = acquireObjectiveLock(config.repository, request.objective);
   try {
     const state = readContinuation(config.repository, request.objective);
-    if (!state) throw new Error("Objective has no Factory state");
+    if (!state)
+      throw new LifecycleRefusal(
+        "no_factory_state",
+        "Objective has no Factory state",
+      );
     if (request.action === "status") return state.coordinator;
     assertRestoredContinuationReady(state, config);
     if (request.action === "decline-discovery") {
@@ -528,7 +542,10 @@ async function controlObjectiveUnscoped(
           "Only an in-scope amendment can be proposed while the Objective is stopped; a backlog discovery needs a running owner",
         );
       if (!continuationConfigurationMatches(state, config))
-        throw new Error("Objective differs from this Factory installation");
+        throw new LifecycleRefusal(
+          "config_frozen",
+          "Objective differs from this Factory installation",
+        );
       const result = submitAmendment(
         state,
         request.input as unknown as AmendmentProposal,
@@ -711,7 +728,8 @@ async function runObjectiveOwned(
     // purpose: a foreground run does not lift it, and would only idle (#1645).
     // The service resumes the Objectives it handed back itself.
     if (!options.observeControl && snapshot?.coordinator?.mode === "draining")
-      throw new Error(
+      throw new LifecycleRefusal(
+        "coordinator_draining",
         `Objective #${objective} is draining: its coordinator was drained or handed off. Run \`factory resume --objective ${objective}\`, then \`factory run --objective ${objective}\``,
       );
     // A completed return left by the stopped controller refuses every
@@ -1047,7 +1065,8 @@ async function runObjectiveOwned(
       }
       if (request.action === "cancel") {
         if (isExecutionState(state) && state.finalAcceptance)
-          throw new Error(
+          throw new LifecycleRefusal(
+            "acceptance_sealed",
             "Acceptance is sealed; resume to reconcile Objective closure",
           );
         cancel();
@@ -1097,7 +1116,8 @@ async function runObjectiveOwned(
           // A refusal discards the preparation, which a live owner would
           // write back; it needs the owner stopped first.
           if (decision.outcome === "refuse")
-            throw new Error(
+            throw new LifecycleRefusal(
+              "planning_owner_live",
               "Refusing a plan needs its owner stopped: hand off the owner, then decide",
             );
           // Planning stopped at its revision allowance: accepting grants more.
@@ -1796,7 +1816,11 @@ async function cancelUnownedObjective(
   const lockHandle = mutationLock(config, objective);
   try {
     const continuation = readContinuation(config.repository, objective);
-    if (!continuation) throw new Error("Objective has no Factory state");
+    if (!continuation)
+      throw new LifecycleRefusal(
+        "no_factory_state",
+        "Objective has no Factory state",
+      );
     assertRestoredContinuationReady(continuation, config);
     if (isExecutionState(continuation) && objectiveComplete(continuation)) {
       await releaseAgentSessions(continuation, driver, planningModel, () =>
@@ -1805,7 +1829,8 @@ async function cancelUnownedObjective(
       return "cancelled";
     }
     if (isExecutionState(continuation) && continuation.finalAcceptance)
-      throw new Error(
+      throw new LifecycleRefusal(
+        "acceptance_sealed",
         "Acceptance is sealed; resume to reconcile Objective closure",
       );
     if (continuation.cancelledAt) {
@@ -1967,7 +1992,11 @@ function retryStep(
     const state =
       owners.get(ownerKey(config, objective))?.snapshot ??
       readContinuation(config.repository, objective);
-    if (!state) throw new Error("Objective has no Factory state");
+    if (!state)
+      throw new LifecycleRefusal(
+        "no_factory_state",
+        "Objective has no Factory state",
+      );
     assertRestoredContinuationReady(state, config);
     assertRejectionAllows(
       config,
@@ -2066,11 +2095,19 @@ export function retryWorkItem(
   const lockHandle = mutationLock(config, objective);
   try {
     const state = mutationState(config, objective);
-    if (!state) throw new Error("Objective has no Factory state");
+    if (!state)
+      throw new LifecycleRefusal(
+        "no_factory_state",
+        "Objective has no Factory state",
+      );
     if (state.finalValidation?.passed)
-      throw new Error("Objective is already complete");
+      throw new LifecycleRefusal(
+        "objective_complete",
+        "Objective is already complete",
+      );
     if (state.coordinator?.cancelError || state.coordinator?.processes?.length)
-      throw new Error(
+      throw new LifecycleRefusal(
+        "cancel_unresolved",
         "Owned work cessation is unresolved; operator direction required before retry",
       );
     // An item waiting in place for the operator is not active work.
@@ -2079,7 +2116,10 @@ export function retryWorkItem(
         (work) => work.status === "running" && !awaitsOperator(work.wait),
       )
     )
-      throw new Error("Finish or cancel active work before retry");
+      throw new LifecycleRefusal(
+        "finish_or_cancel_active",
+        "Finish or cancel active work before retry",
+      );
     const work = state.work[itemId];
     if (!work || (work.status !== "failed" && work.status !== "cancelled"))
       throw new Error("Only a failed or cancelled Work Item can be retried");
@@ -2204,7 +2244,14 @@ export function repairWorkItem(
       state.finalValidation?.passed ||
       !continuationConfigurationMatches(state, config)
     )
-      throw new Error("Objective is not available for diagnosed repair");
+      throw new LifecycleRefusal(
+        !state
+          ? "no_factory_state"
+          : state.finalValidation?.passed
+            ? "objective_complete"
+            : "config_frozen",
+        "Objective is not available for diagnosed repair",
+      );
     assertRejectionAllows(
       config,
       state,
@@ -2510,7 +2557,11 @@ export function declineWorkerDiscovery(
   const lock = mutationLock(config, objective);
   try {
     const state = mutationState(config, objective);
-    if (!state) throw new Error("Objective has no Factory state");
+    if (!state)
+      throw new LifecycleRefusal(
+        "no_factory_state",
+        "Objective has no Factory state",
+      );
     applyWorkerDiscoveryDecline(config, state, input);
     saveState(statePath(config.repository, objective), state);
   } finally {
@@ -2619,7 +2670,11 @@ export function rereviewWorkItem(
   const handle = mutationLock(config, objective);
   try {
     const state = mutationState(config, objective);
-    if (!state) throw new Error("Objective has no Factory state");
+    if (!state)
+      throw new LifecycleRefusal(
+        "no_factory_state",
+        "Objective has no Factory state",
+      );
     if (
       state.cancelRequested ||
       state.cancelledAt ||
@@ -2629,7 +2684,8 @@ export function rereviewWorkItem(
     )
       throw new Error("Objective is not awaiting result re-review");
     if (!continuationConfigurationMatches(state, config))
-      throw new Error(
+      throw new LifecycleRefusal(
+        "config_frozen",
         "Installation configuration changed before result re-review",
       );
     const work = state.work[input.item];

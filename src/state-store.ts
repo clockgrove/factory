@@ -92,6 +92,7 @@ import {
   assertContinuationRestoration,
   type ContinuationRestoration,
 } from "./state.js";
+import { LifecycleRefusal } from "./lifecycle-refusal.js";
 
 /** An Objective's private directory: its snapshot, owner and validation trees. */
 export function objectiveRoot(repository: string, objective: number): string {
@@ -823,7 +824,11 @@ export function acquireControllerLock(
     const owned = liveControllerOwner(path)
       ? (scope.owned ?? "this installation")
       : scope.conflict?.();
-    if (owned) throw new Error(`A Factory controller already owns ${owned}`);
+    if (owned)
+      throw new LifecycleRefusal(
+        "controller_owned",
+        `A Factory controller already owns ${owned}`,
+      );
     rmSync(path, { force: true });
     const identity = linuxProcessIdentity(process.pid);
     if (!identity)
@@ -930,7 +935,10 @@ export function assertRestoredContinuationReady(
     state.restoration.status !== "reconciled" ||
     !continuationConfigurationMatches(state, config)
   )
-    throw new Error(
+    throw new LifecycleRefusal(
+      state.restoration.status !== "reconciled"
+        ? "restoration_held"
+        : "config_frozen",
       "Restored continuation requires supported inspection and ownership reconciliation; foreign process absence does not establish cessation",
     );
 }
@@ -1756,7 +1764,11 @@ export async function reconcileRestoredContinuation(args: {
         "Restored original identity or archive changed before reconciliation",
       );
     const hold = restoredContinuationOwnershipHold(state);
-    if (hold) throw new Error(`Restored continuation remains held: ${hold}`);
+    if (hold)
+      throw new LifecycleRefusal(
+        "restoration_held",
+        `Restored continuation remains held: ${hold}`,
+      );
     const closure = await verifyContinuationReferenceClosure(
       state,
       store,
@@ -1806,7 +1818,8 @@ export function assertRestoredInstallationDispatchReady(
     if (!state.restoration || state.restoration.status !== "held") continue;
     const hold = restoredContinuationOwnershipHold(state);
     if (hold)
-      throw new Error(
+      throw new LifecycleRefusal(
+        "restoration_held",
         `Restored installation retains unsettled foreign ownership: ${hold}`,
       );
   }

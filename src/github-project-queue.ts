@@ -32,6 +32,7 @@ import {
   ISSUE_IDENTITY,
   issueBatchQuery,
 } from "./github-project-queue-wire.js";
+import { LifecycleRefusal } from "./lifecycle-refusal.js";
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): ObjectValue => {
@@ -1964,7 +1965,8 @@ export async function projectQueueWriteOnGitHub(
         "Project card prior admission target changed after owned inspection",
       );
     if (current.membership?.some((item) => item.archived) && !current.target)
-      throw new Error(
+      throw new LifecycleRefusal(
+        "queue_card_archived",
         "An archived Objective card requires current unarchived membership",
       );
   };

@@ -16,30 +16,40 @@ import {
   objectiveLockPath,
   objectiveRoot,
 } from "./state-store.js";
+import {
+  type LifecycleCode,
+  LifecycleRefusal,
+  isLifecycleCode,
+  lifecycleCode,
+} from "./lifecycle-refusal.js";
+
+/** Every control action; the lifecycle conformance suite gives each a column or an exemption. */
+export const CONTROL_ACTIONS = [
+  "status",
+  "readiness",
+  "pause",
+  "drain",
+  "handoff",
+  "resume",
+  "cancel",
+  "repair",
+  "retry",
+  "rereview",
+  "decide",
+  "select",
+  "propose-amendment",
+  "decline-discovery",
+  "dequeue",
+  "enqueue",
+  "watch",
+  "project-queue",
+  /** Upgrade drain: the service dispatches nothing new; active runs finish. */
+  "finish",
+] as const;
 
 export interface ControlRequest {
   objective: number;
-  action:
-    | "status"
-    | "readiness"
-    | "pause"
-    | "drain"
-    | "handoff"
-    | "resume"
-    | "cancel"
-    | "repair"
-    | "retry"
-    | "rereview"
-    | "decide"
-    | "select"
-    | "propose-amendment"
-    | "decline-discovery"
-    | "dequeue"
-    | "enqueue"
-    | "watch"
-    | "project-queue"
-    /** Upgrade drain: the service dispatches nothing new; active runs finish. */
-    | "finish";
+  action: (typeof CONTROL_ACTIONS)[number];
   input?: Record<string, unknown>;
   /** One finite caller operation; loss of its reply never authorizes replay. */
   command?: { id: string; deadlineAt: number };
@@ -256,7 +266,7 @@ export async function serveControl(
           );
         } catch (error) {
           socket.end(
-            `${JSON.stringify({ error: error instanceof Error ? error.message : String(error), ...(admittedRequest?.command && (signal.aborted || Date.now() >= admittedRequest.command.deadlineAt) ? { incomplete: { requestId: admittedRequest.command.id, deadlineAt: admittedRequest.command.deadlineAt, submission: "unknown" } } : {}) })}\n`,
+            `${JSON.stringify({ error: error instanceof Error ? error.message : String(error), ...(lifecycleCode(error) ? { code: lifecycleCode(error) } : {}), ...(admittedRequest?.command && (signal.aborted || Date.now() >= admittedRequest.command.deadlineAt) ? { incomplete: { requestId: admittedRequest.command.id, deadlineAt: admittedRequest.command.deadlineAt, submission: "unknown" } } : {}) })}\n`,
           );
         } finally {
           if (timer) clearTimeout(timer);
@@ -302,6 +312,7 @@ export async function serveControl(
  * (see requestForegroundQueueControl); other installation commands wait for it.
  */
 export class ForegroundControllerError extends Error {
+  readonly code: LifecycleCode = "foreground_owner_live";
   constructor(readonly objective: number) {
     super(
       // Objective 0 is a queue command holding the installation for a moment.
@@ -456,7 +467,8 @@ export async function requestControl(
         options.deadlineAt,
       );
     if (Date.now() >= waitUntil) {
-      const error = new Error(
+      const error = new LifecycleRefusal(
+        "owner_endpoint_unavailable",
         `Controller pid ${owner.pid} still owns ${owner.intake || !owner.objective ? "this installation" : `Objective #${owner.objective}`} without a control endpoint; run this again once it exits`,
       );
       throw request.command
@@ -567,6 +579,7 @@ function sendControl(
       | {
           result?: unknown;
           error?: string;
+          code?: LifecycleCode;
           incomplete?: {
             requestId: string;
             deadlineAt: number;
@@ -621,7 +634,11 @@ function sendControl(
             );
           throw incomplete();
         }
-        if (reply.error) throw new Error(reply.error);
+        // The owner's stable lifecycle code crosses the endpoint (#1714).
+        if (reply.error)
+          throw isLifecycleCode(reply.code)
+            ? new LifecycleRefusal(reply.code, reply.error)
+            : new Error(reply.error);
         authenticateReply(reply);
         if (request.action === "readiness") {
           const current = liveControllerOwner(ownerPath);

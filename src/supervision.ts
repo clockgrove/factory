@@ -59,6 +59,7 @@ import {
   liveObjectiveOwners,
   installationLockPath,
 } from "./state-store.js";
+import { type LifecycleCode, LifecycleRefusal } from "./lifecycle-refusal.js";
 
 interface ServiceBinding {
   /** One systemd LoadCredential per credential the configured providers need. */
@@ -488,7 +489,8 @@ function checkObjectiveServiceState(
     )
       return;
     const setup = setupCommand(configPath, requiredProviderCredentials(config));
-    throw new Error(
+    throw new LifecycleRefusal(
+      "config_frozen",
       `Objective ${objective} continuation has a different configuration binding. Preserve its records and restore the original configuration at ${resolve(configPath)}, then run \`${setup}\`; a moved checkout requires supported Git restoration and ownership reconciliation`,
     );
   }
@@ -620,7 +622,9 @@ async function handoffService(config: FactoryConfig): Promise<void> {
  * active runs finish; foreground runs finish on their own. Returns every
  * Objective still running; the upgrade proceeds once none remains.
  */
-async function drainForUpgrade(config: FactoryConfig): Promise<number[]> {
+export async function drainForUpgrade(
+  config: FactoryConfig,
+): Promise<number[]> {
   if (maxActiveObjectives(config) <= 1) return [];
   const service = liveControllerOwner(installationLockPath(config.repository));
   let running: number[] = [];
@@ -896,6 +900,7 @@ export async function supervise(
       const running = await drainForUpgrade(config);
       if (running.length)
         return {
+          code: "upgrade_draining" satisfies LifecycleCode,
           artifact: candidate.cli,
           upgraded: false,
           draining: running,

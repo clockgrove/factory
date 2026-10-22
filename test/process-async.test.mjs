@@ -1221,6 +1221,19 @@ test("a blocked or unanswered merge is sent again at the exact open head (#1749)
   assert.equal(puts.length, 2);
   assert.equal(intent.effects.length, 1);
   assert.equal(intent.effects[0].disposition, "observed");
+  // An unanswered request at an earlier head cannot merge the updated one.
+  const next = "e".repeat(40);
+  intent.effects[0] = { ...intent.effects[0], disposition: "intent" };
+  delete intent.effects[0].observedAt;
+  delete intent.effects[0].integratedSha;
+  Object.assign(work, { deliveredHead: next });
+  pull.head = { sha: next, ref: "fix" };
+  const moved = { ...id, headSha: next };
+  const control = mergeControl(state, "x", () => {});
+  await github.merge(moved, next, control);
+  assert.equal(puts.length, 3);
+  assert.equal(intent.effects[0].request.headSha, next);
+  assert.equal(intent.effects[0].disposition, "observed");
 });
 
 test("cancellation stops an owned shell and its process group", async () => {

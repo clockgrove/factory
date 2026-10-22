@@ -90,7 +90,7 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 | Configuration changed       | none       | run, rereview, repair and start `config_frozen`; cancel ok                                 |
 | Cancelled                   | none       | run, cancel, queue remove and queue add ok                                                 |
 | Complete                    | none       | run, cancel and queue remove ok; retry `objective_complete`                                |
-| Complete, card archived     | none       | queue add ok against the Project fixture                                                   |
+| Complete, card archived     | none       | queue add ✗(a): ok against the Project fixture, but needs a live GitHub check              |
 
 **Dispatch isolation.** A failed or cancel-requested queued Objective is skipped with a reason. The service stays up and dispatches the Objectives behind it.
 

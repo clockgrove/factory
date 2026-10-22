@@ -32,7 +32,7 @@ Use the existing atomic continuation snapshot. Diagnostics observe; they never d
 
 ## Coverage and model contracts
 
-Keep the small real integration suite: actual Git repositories, processes, files, scanner and offline packed CLI. Reuse an existing workflow for a demonstrated regression. Do not add unit tests, mocks, fake services/providers, scripted responses, fault matrices or fixture frameworks. Real provider/GitHub acceptance occurs at the approved milestone when its substantive exits require it; CI does not claim that acceptance.
+Keep the small real integration suite: actual Git repositories, processes, files, scanner and offline packed CLI. Reuse an existing workflow for a demonstrated regression. Do not add unit tests, mocks, fake services/providers, scripted responses, fault matrices or fixture frameworks. The lifecycle conformance suite (`test/lifecycle-conformance.test.mjs`, [the lifecycle](docs/LIFECYCLE.md)) is the sanctioned exception: keep it whole, and add rows for every new lifecycle state or control command. Real provider/GitHub acceptance occurs at the approved milestone when its substantive exits require it; CI does not claim that acceptance.
 
 Qualification serves the product outcome. Broad provider/profile matrices, benchmarks and deliberate fault drills are not automatic feature-closure or release gates. A new live provider capability still needs real SDK evidence for the named claim; use the smallest bounded check that proves it. Preserve security, ownership, unknown outcomes, accounting and recorded limits without expanding qualification beyond the required behavior.
 

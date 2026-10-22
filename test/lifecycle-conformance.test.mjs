@@ -477,11 +477,11 @@ const ROWS = [
     build: with_(completedState, (state) => {
       state.objectiveClosure = "complete";
     }),
-    // Removal archived the card; adding it again re-admits it against this
-    // Project fixture. Gap 7 (an archived card refused) needs the real
-    // Project's archived-item response to reproduce.
+    // Removal archived the card; `queue add` should reopen it (gap 7). This
+    // Project fixture re-admits it, so the cell passes here; whether the real
+    // Project refuses an archived card needs a live GitHub check.
     archive: true,
-    none: { "queue-add": "ok" },
+    none: { "queue-add": gap("ok", A) },
   },
 ];
 

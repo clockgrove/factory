@@ -143,6 +143,8 @@ import {
   owners,
   releaseMutationLock,
   releaseCancelledSessions,
+  SETTLE_DEADLINE_MS,
+  SettleDeadline,
   synchronizeWorkItemPause,
 } from "./runner/ownership.js";
 import { decidePlan, resumePlanning } from "./runner/planning.js";
@@ -190,7 +192,10 @@ import { applyWorkCorrection, recordWorkFailure } from "./work-repair.js";
 import { LifecycleRefusal, lifecycleCode } from "./lifecycle-refusal.js";
 
 export type { ApplicationServices } from "./runner/ownership.js";
-export { CoordinatorHandoff } from "./runner/ownership.js";
+export {
+  CoordinatorHandoff,
+  SETTLE_DEADLINE_MS,
+} from "./runner/ownership.js";
 export { decidePlan, planObjective } from "./runner/planning.js";
 
 /** Local observations share the controller's async scope, never its mutation authority. */
@@ -663,6 +668,8 @@ async function runObjectiveUnscoped(
       request: ControlRequest,
       context: ControlContext,
     ) => Promise<unknown>;
+    /** The deadline of this run's settlement (see runObjective). */
+    settle?: SettleDeadline;
   } = {},
 ): Promise<ContinuationState> {
   if (
@@ -711,6 +718,7 @@ async function runObjectiveOwned(
   services: ApplicationServices,
   options: NonNullable<Parameters<typeof runObjective>[3]>,
 ): Promise<ContinuationState> {
+  const settle = options.settle ?? new SettleDeadline();
   // The service routes control through its own endpoint (observeControl);
   // it owns each Objective it runs with that Objective's own lock.
   if (options.ownerLock && !options.observeControl)
@@ -1135,7 +1143,11 @@ async function runObjectiveOwned(
           );
         persist();
         wake();
-        return modeChangeResult(config, state, request.action, true);
+        const result = modeChangeResult(config, state, request.action, true);
+        // A run executing a step hands off once the step ends (#1714).
+        return request.action === "handoff"
+          ? { ...result, executing: !canHandoff(state, owner.activeItems) }
+          : result;
       }
       const apply = async () => {
         if (owner.abort.signal.aborted)
@@ -1409,6 +1421,8 @@ async function runObjectiveOwned(
         // final projection shows that outcome, so the abort does not stop it (#1429).
         ...(owner.snapshot?.cancelledAt ? [] : [owner.abort.signal]),
         ...(parentSignal ? [parentSignal] : []),
+        // A tick still in flight when settling starts ends at its deadline.
+        settle.signal,
       ]),
       () =>
         withGitHubRequestBudget(30_000, async () => {
@@ -1655,78 +1669,89 @@ async function runObjectiveOwned(
       } catch (error) {
         finalizationErrors.push(error);
       }
-      // Await original work even after one promise fails; never replay a failed projection.
-      for (const task of [controlTail, queueTail, progressTask]) {
-        try {
-          await task;
-        } catch (error) {
-          finalizationErrors.push(error);
+      // Settling has a deadline (#1714). A step it cuts off fails, and its
+      // error is the deadline's: the saved state stands for the next owner.
+      const failed = (error: unknown) => {
+        if (!settle.elapsed) finalizationErrors.push(error);
+      };
+      await settle.run(async () => {
+        // Await original work even after one promise fails; never replay a failed projection.
+        for (const task of [controlTail, queueTail, progressTask]) {
+          try {
+            await task;
+          } catch (error) {
+            failed(error);
+          }
         }
-      }
-      if (!finalizationErrors.length) {
-        try {
-          await projectProgress();
-          observeRetrospective(config, objective);
-        } catch (error) {
-          finalizationErrors.push(error);
+        if (!finalizationErrors.length) {
+          try {
+            await projectProgress();
+            observeRetrospective(config, objective);
+          } catch (error) {
+            failed(error);
+          }
         }
-      }
-      try {
-        if (
-          controlReleased &&
-          !finalizationErrors.length &&
-          queueClaim &&
-          runFailed &&
-          !owner.snapshot
-        ) {
-          // Fresh source preparation can refuse before its first canonical
-          // snapshot. The creating owner still holds its lease here; the
-          // existing reservation seam independently refuses started work or
-          // uncertain subprocesses and acknowledges the original failure.
-          await settleFailedProjectQueueReservation(
-            config,
-            queueClaim,
-            lock.token,
-            runFailure,
-          );
-        } else if (
-          controlReleased &&
-          queueClaim &&
-          owner.snapshot &&
-          (owner.snapshot.cancelledAt
-            ? !cancelledContinuationResourceHold(owner.snapshot)
-            : canHandoff(
-                owner.snapshot,
-                owner.handoff ? owner.activeItems : undefined,
-              ))
-        ) {
-          if (owner.snapshot.cancelledAt) {
-            await cancelKnownWork(
-              owner.snapshot,
-              services.driver,
-              persist,
-              true,
-            );
-            await releaseCancelledSessions(
-              config,
-              owner.snapshot,
-              services.driver,
-              services.planningModel,
-              persist,
-              lock,
-            );
-            await settleCancelledProjectQueueRun(config, owner.snapshot, lock);
-          } else
-            await settleProjectQueueRun(
+        try {
+          if (
+            controlReleased &&
+            !finalizationErrors.length &&
+            queueClaim &&
+            runFailed &&
+            !owner.snapshot
+          ) {
+            // Fresh source preparation can refuse before its first canonical
+            // snapshot. The creating owner still holds its lease here; the
+            // existing reservation seam independently refuses started work or
+            // uncertain subprocesses and acknowledges the original failure.
+            await settleFailedProjectQueueReservation(
               config,
               queueClaim,
               lock.token,
-              owner.snapshot.runId,
+              runFailure,
             );
+          } else if (
+            controlReleased &&
+            queueClaim &&
+            owner.snapshot &&
+            (owner.snapshot.cancelledAt
+              ? !cancelledContinuationResourceHold(owner.snapshot)
+              : canHandoff(
+                  owner.snapshot,
+                  owner.handoff ? owner.activeItems : undefined,
+                ))
+          ) {
+            if (owner.snapshot.cancelledAt) {
+              await cancelKnownWork(
+                owner.snapshot,
+                services.driver,
+                persist,
+                true,
+              );
+              await releaseCancelledSessions(
+                config,
+                owner.snapshot,
+                services.driver,
+                services.planningModel,
+                persist,
+                lock,
+              );
+              await settleCancelledProjectQueueRun(
+                config,
+                owner.snapshot,
+                lock,
+              );
+            } else
+              await settleProjectQueueRun(
+                config,
+                queueClaim,
+                lock.token,
+                owner.snapshot.runId,
+              );
+          }
+        } catch (error) {
+          failed(error);
         }
-      } catch (error) {
-        finalizationErrors.push(error);
-      }
+      });
     } finally {
       owners.delete(ownerKey(config, objective));
       if (!options.ownerLock) releaseControllerLock(lockPath, lock);
@@ -1741,10 +1766,12 @@ async function runObjectiveOwned(
       { cause: errors[0] },
     );
   if (isExecutionState(runResult!) && objectiveComplete(runResult!))
-    await settleParentOfChild(config, services.github, objective, {
-      // The service's runs take the parent's lock through its delegation.
-      lockParent: !options.ownerLock,
-    });
+    await settle.run(() =>
+      settleParentOfChild(config, services.github, objective, {
+        // The service's runs take the parent's lock through its delegation.
+        lockParent: !options.ownerLock,
+      }),
+    );
   return runResult!;
 }
 
@@ -3229,7 +3256,16 @@ async function checkpointController<T>(
   task: () => Promise<T>,
   store?: ContentStore,
   final = false,
+  /** A run's settlement deadline, which its final admission is part of. */
+  settle?: SettleDeadline,
 ): Promise<T> {
+  const admit = (
+    reason: Parameters<typeof awaitCheckpointAdmission>[1],
+  ): Promise<void> => {
+    const admission = () =>
+      awaitCheckpointAdmission(config.repository, reason, { final });
+    return settle ? settle.run(admission) : admission();
+  };
   return withRecoveryCheckpointScope(
     {
       config,
@@ -3250,10 +3286,11 @@ async function checkpointController<T>(
         )
           throw error;
         try {
-          await awaitCheckpointAdmission(config.repository, "settled", {
-            final,
-          });
+          await admit("settled");
         } catch (settlement) {
+          // Past the settle deadline the journal keeps the pending change
+          // for the next owner's admission (#1714).
+          if (settle?.elapsed) throw error;
           // Name the stop itself: the pending checkpoint only follows it.
           throw new AggregateError(
             [error, settlement],
@@ -3263,11 +3300,11 @@ async function checkpointController<T>(
         }
         throw error;
       }
-      await awaitCheckpointAdmission(
-        config.repository,
-        final ? "explicit" : "settled",
-        { final },
-      );
+      try {
+        await admit(final ? "explicit" : "settled");
+      } catch (error) {
+        if (!settle?.elapsed) throw error;
+      }
       return result;
     },
   );
@@ -3386,7 +3423,9 @@ export function controlObjective(
 export function runObjective(
   ...args: Parameters<typeof runObjectiveUnscoped>
 ): ReturnType<typeof runObjectiveUnscoped> {
-  const [config, , services] = args;
+  const [config, objective, services, options] = args;
+  const settle = new SettleDeadline();
+  const settled = { ...options, settle };
   // The controller owns one bounded remote-only verifier for its lifetime (a
   // queue service lends its own), so each independently verified ACK can be
   // the next publication's base instead of being fetched and verified again.
@@ -3402,11 +3441,18 @@ export function runObjective(
     () =>
       checkpointController(
         config,
-        () => runObjectiveUnscoped(...args),
+        () => runObjectiveUnscoped(config, objective, services, settled),
         services.contentStore,
         true,
+        settle,
       ),
-  );
+  ).finally(() => {
+    settle.dispose();
+    if (settle.elapsed)
+      process.stderr.write(
+        `Factory stopped settling Objective #${objective} at its ${SETTLE_DEADLINE_MS / 1000} s deadline; its saved state stands, and its next owner settles the rest.\n`,
+      );
+  });
 }
 
 export function cancelObjective(

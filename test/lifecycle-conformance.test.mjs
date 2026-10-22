@@ -65,12 +65,14 @@ import {
   runObjective,
 } from "../dist/runner.js";
 import {
+  liveObjectiveOwners,
   objectiveRoot,
   readContinuation,
   saveState,
   statePath,
 } from "../dist/state-store.js";
 import { STATUS_PHASES } from "../dist/status-summary.js";
+import { currentProcessSignal } from "../dist/process.js";
 import { checkServiceState, drainForUpgrade } from "../dist/supervision.js";
 import { validateWorkItem } from "../dist/validation.js";
 
@@ -214,7 +216,7 @@ const ROWS = [
       state.coordinator.mode = "paused";
     }),
     // The paused owner hands the Objective off to take the refusal.
-    foreground: { decide: "ok", cancel: "ok", upgrade: gap("ok", B) },
+    foreground: { decide: "ok", cancel: "ok", upgrade: "ok" },
   },
   {
     name: "items running, owner gone",
@@ -336,7 +338,7 @@ const ROWS = [
       pause: "ok",
       resume: "ok",
       "queue-remove": "unfinished_owned_work",
-      upgrade: gap("ok", B),
+      upgrade: "ok",
     },
     service: { pause: "ok", resume: "ok", cancel: "ok" },
   },
@@ -492,40 +494,84 @@ const ROWS = [
 ];
 
 /**
- * Rows that need the service actively running the Objective: planning,
- * executing, waiting on CI or settling. Their cells are not built yet; each
- * names the outcome it pins once a live-run owner exists.
+ * Rows the service actively runs (owner "live"): the run reaches the row's
+ * state under a live service, whose model, worker and delivery calls never
+ * answer. `reach` waits for that state. A command's outcome must come within
+ * `bound` ms: an upgrade hands off every run not executing a step (#1714).
  */
+const LIVE = { upgrade: 10_000, settle: 10_000 };
+/** The live service's settle deadline (FACTORY_SETTLE_DEADLINE_MS). */
+const LIVE_SETTLE_DEADLINE_MS = 1_000;
+/** A step that waits in place until `nextAt`, as between tries or CI polls. */
+const waitsInPlace = (key) => (state) => {
+  const at = new Date().toISOString();
+  state.repeats = {
+    [key]: {
+      nextAt: new Date(Date.now() + 3_600_000).toISOString(),
+      scheduledAt: at,
+      faults: {
+        since: at,
+        count: 1,
+        last: { kind: "transient", detail: "fixture", outcomeUnknown: false },
+        activeMs: 0,
+      },
+    },
+  };
+};
+// Executing rows come last: their stalled runs keep their dispatch slots.
 const LIVE_RUN_ROWS = [
-  {
-    name: "planning under a live service run",
-    phase: "planning",
-    pins: "upgrade hands the run off instead of waiting for it",
-    todo: B,
-  },
-  {
-    name: "items running under a live service run",
-    phase: "running",
-    pins: "retry refuses with finish_or_cancel_active; upgrade hands off",
-    todo: B,
-  },
   {
     name: "waiting on CI under a live service run",
     phase: "waiting",
-    pins: "upgrade hands the run off (a CI wait is safe to hand off)",
-    todo: B,
-  },
-  {
-    name: "settling under a live service",
-    phase: "running",
-    pins: "decide and cancel end within a deadline instead of owner_settling",
-    todo: A,
+    build: with_(executionState, (state, fixture) => {
+      state.work.local = {
+        status: "running",
+        step: "validate",
+        baseSha: fixture.baseSha,
+        wait: { kind: "ci", detail: "Awaiting exact named CI" },
+      };
+      waitsInPlace("item/local/validate")(state);
+    }),
+    reach: "live",
+    live: { upgrade: "ok" },
   },
   {
     name: "operator-paused under a live service run",
     phase: "waiting",
-    pins: "upgrade hands the paused run off instead of waiting forever",
-    todo: B,
+    build: with_(executionState, (state, fixture) => {
+      state.work.local = {
+        status: "running",
+        step: "execute",
+        baseSha: fixture.baseSha,
+      };
+      waitsInPlace("item/local/execute")(state);
+    }),
+    reach: "paused",
+    live: { upgrade: "ok" },
+  },
+  {
+    name: "settling under a live service",
+    phase: "running",
+    // Final acceptance sealed: the run closes the Objective, then settles.
+    build: completedState,
+    reach: "settling",
+    live: { cancel: "ok" },
+    bound: LIVE.settle,
+  },
+  {
+    name: "planning under a live service run",
+    phase: "planning",
+    build: () => undefined,
+    reach: "stalled",
+    // A planning call in flight is a step executing.
+    live: { upgrade: "waits" },
+  },
+  {
+    name: "items running under a live service run",
+    phase: "running",
+    build: executionState,
+    reach: "stalled",
+    live: { upgrade: "waits" },
   },
 ];
 
@@ -1144,7 +1190,7 @@ async function dispatch(fixture, command, objective) {
         await intakeControl(config, "dequeue", [objective], services.github);
         return "ok";
       case "upgrade":
-        return (await drainForUpgrade(config)).includes(objective)
+        return (await drainForUpgrade(config)).running.includes(objective)
           ? "waits"
           : "ok";
       case "start":
@@ -1170,6 +1216,9 @@ function owner(fixture, mode, objective) {
   const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
     env: {
       ...process.env,
+      ...(mode === "live"
+        ? { FACTORY_SETTLE_DEADLINE_MS: String(LIVE_SETTLE_DEADLINE_MS) }
+        : {}),
       FACTORY_LIFECYCLE_OWNER: JSON.stringify({
         mode,
         objective,
@@ -1254,6 +1303,8 @@ async function serveOwner({ mode, objective, config, directory, environment }) {
   let outcome = "ok";
   try {
     if (mode === "service") await runIntake(config, composed);
+    else if (mode === "live")
+      await runIntake(config, liveServices(composed, config, directory));
     else {
       // Any provider or delivery call means the run passed every lifecycle
       // check; it ends here, before work.
@@ -1304,6 +1355,83 @@ async function serveOwner({ mode, objective, config, directory, environment }) {
   }
   console.log(JSON.stringify({ outcome }));
   process.exit(0);
+}
+
+/**
+ * A live service's adapters. A model, worker or delivery call never answers
+ * (it marks `stalled`), and in a run's settlement the split-parent read of a
+ * closed Objective never answers (it marks `settling-N`) until the process
+ * signal aborts it, as the real GitHub client's requests do.
+ */
+function liveServices(composed, config, directory) {
+  const stall = (adapter) =>
+    new Proxy(adapter, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        // A model bound to an approved playbook stalls too.
+        if (property === "withApprovedPlaybook")
+          return (...args) => stall(value.apply(target, args));
+        return typeof value === "function" &&
+          /^(generate|review|plan|execute|start|deliver|publish|worker)/i.test(
+            String(property),
+          )
+          ? async (request) => {
+              // A paid call is dispatched once its admissions complete.
+              await request?.invocation?.beforeProviderAttempt?.();
+              await request?.invocation?.beforeProviderDispatch?.();
+              writeFileSync(join(directory, "stalled"), "");
+              return new Promise(() => {});
+            }
+          : value;
+      },
+    });
+  const github = new Proxy(composed.github, {
+    get(target, property) {
+      if (property !== "objective")
+        return Reflect.get(target, property, target);
+      return async (number) => {
+        const state = readContinuation(config.repository, number);
+        if (state?.objectiveClosure !== "complete")
+          return target.objective(number);
+        writeFileSync(join(directory, `settling-${number}`), "");
+        const signal = currentProcessSignal();
+        return new Promise((_, reject) =>
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          }),
+        );
+      };
+    },
+  });
+  return {
+    ...composed,
+    github,
+    planningModel: stall(composed.planningModel),
+    driver: stall(composed.driver),
+    delivery: stall(composed.delivery),
+  };
+}
+
+/** Until the live run reaches its row's state. */
+async function reach(fixture, row, objective) {
+  const marker = (name) => existsSync(join(fixture.directory, name));
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    if (Date.now() > deadline) throw new Error(`${row.name} never reached`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (row.reach === "stalled" && marker("stalled")) return;
+    if (row.reach === "settling" && marker(`settling-${objective}`)) return;
+    // Its own control answers once the run serves it; a pause is applied there.
+    if (row.reach === "paused") {
+      if ((await dispatch(fixture, "pause", objective)) === "ok") return;
+    } else if (row.reach === "live") {
+      const status = await requestControl(fixture.config.repository, {
+        objective: 0,
+        action: "status",
+      }).catch(() => undefined);
+      if (status?.result?.activeObjectives?.includes(objective)) return;
+    }
+  }
 }
 
 /** The bound for one operator command with a held publication lock. */
@@ -1486,6 +1614,14 @@ else {
         [...ROWS, ...LIVE_RUN_ROWS].some((row) => row.phase === phase),
         `status phase ${phase} has no lifecycle row`,
       );
+    for (const row of LIVE_RUN_ROWS)
+      for (const [command, want] of Object.entries(row.live)) {
+        assert(COMMANDS.includes(command), `${row.name}: ${command}`);
+        assert(
+          ["ok", "waits"].includes(want) || LIFECYCLE_CODES.includes(want),
+          `${row.name}/live/${command}: ${want}`,
+        );
+      }
     for (const row of ROWS) {
       assert(row.none || row.foreground || row.service, row.name);
       for (const owner of ["none", "foreground", "service"])
@@ -1501,10 +1637,48 @@ else {
     }
   });
 
-  for (const row of LIVE_RUN_ROWS)
-    test(`${row.name}: ${row.pins}`, {
-      todo: `${row.todo}; needs a live service run in the suite`,
-    });
+  // Restart means handoff (#1714): a live service run at a safe point hands
+  // off on upgrade, and settling ends within its deadline.
+  test("live service runs", { timeout: 600_000 }, async (t) => {
+    const fixture = await installation(t, false);
+    fixture.next = 100;
+    for (const row of LIVE_RUN_ROWS) {
+      const objective = fixture.next++;
+      await enqueueIntake(fixture.config, fixture.services.github, [objective]);
+      const state = row.build(fixture, objective);
+      if (state)
+        saveState(statePath(fixture.config.repository, objective), state);
+      rmSync(join(fixture.directory, "stalled"), { force: true });
+      const service = owner(fixture, "live", 0);
+      try {
+        assert.equal(await service.ready(), "live");
+        await reach(fixture, row, objective);
+        for (const [command, want] of Object.entries(row.live)) {
+          const startedAt = Date.now();
+          const got = await dispatch(fixture, command, objective);
+          const elapsed = Date.now() - startedAt;
+          await t.test(`${row.name} / live / ${command}`, () => {
+            assert.equal(got, want);
+            assert(elapsed < (row.bound ?? LIVE.upgrade), `${elapsed} ms`);
+          });
+        }
+      } finally {
+        await service.stop();
+      }
+      // A run that hands off releases its Objective; cancelling it keeps the
+      // next row's service from resuming it.
+      if (row.reach !== "stalled") {
+        await t.test(`${row.name} / live / released`, () =>
+          assert(
+            !liveObjectiveOwners(fixture.config.repository).some(
+              (owner) => owner.objective === objective,
+            ),
+          ),
+        );
+        assert.equal(await dispatch(fixture, "cancel", objective), "ok");
+      }
+    }
+  });
 
   test("lifecycle conformance matrix", { timeout: 900_000 }, async (t) => {
     const fixture = await installation(t);

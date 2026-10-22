@@ -38,7 +38,7 @@ import {
 } from "./config.js";
 import { selectProvider } from "./provider-selection.js";
 import { objectiveComplete } from "./completion.js";
-import { canHandoff } from "./runner/ownership.js";
+import { canHandoff, SETTLE_DEADLINE_MS } from "./runner/ownership.js";
 import { splitReadyToClose } from "./runner/split.js";
 import {
   type ControllerReadiness,
@@ -608,7 +608,8 @@ async function handoffService(config: FactoryConfig): Promise<void> {
     action: "handoff",
   });
   if (!reply.handled) return;
-  const deadline = Date.now() + 30_000;
+  // Its runs hand off, each settling within its own deadline.
+  const deadline = Date.now() + SETTLE_DEADLINE_MS + 10_000;
   while (hasOwner(config)) {
     if (Date.now() >= deadline)
       throw new Error(
@@ -618,16 +619,18 @@ async function handoffService(config: FactoryConfig): Promise<void> {
   }
 }
 /**
- * Upgrade drain with several Objectives (queue.maxActiveObjectives above 1):
- * digests and prompts change with a release, so Objectives finish on the
- * release that started them. The service stops dispatching new work and its
- * active runs finish; foreground runs finish on their own. Returns every
- * Objective still running; the upgrade proceeds once none remains.
+ * Upgrade drain with several Objectives (queue.maxActiveObjectives above 1).
+ * Restart means handoff (#1714): the service stops dispatching and every run
+ * hands off at its safe point, a paused or CI-waiting one included, and
+ * resumes after the restart. A foreground run is asked to hand off through
+ * its control too; it then waits for `factory resume`. Returns the
+ * Objectives still executing a step (each hands off when its step ends),
+ * and the foreground runs handed off.
  */
 export async function drainForUpgrade(
   config: FactoryConfig,
-): Promise<number[]> {
-  if (maxActiveObjectives(config) <= 1) return [];
+): Promise<{ running: number[]; handedOff: number[] }> {
+  if (maxActiveObjectives(config) <= 1) return { running: [], handedOff: [] };
   const service = liveControllerOwner(installationLockPath(config.repository));
   let running: number[] = [];
   if (service?.intake) {
@@ -641,12 +644,35 @@ export async function drainForUpgrade(
       : [];
   }
   // Objective locks the service holds are its own runs, counted above.
-  const foreground = liveObjectiveOwners(config.repository)
-    .filter((owner) => owner.pid !== service?.pid)
-    .map((owner) => owner.objective);
-  return [...new Set([...running, ...foreground])].sort(
-    (left, right) => left - right,
+  const handedOff: number[] = [];
+  const foreground = liveObjectiveOwners(config.repository).filter(
+    (owner) => owner.pid !== service?.pid,
   );
+  const asked = await Promise.all(
+    foreground.map(({ objective }) =>
+      requestControl(config.repository, { objective, action: "handoff" })
+        .then(
+          (reply) =>
+            reply.handled &&
+            (reply.result as { executing?: boolean }).executing !== true,
+        )
+        .catch(() => false),
+    ),
+  );
+  const deadline = Date.now() + SETTLE_DEADLINE_MS + 5_000;
+  for (const [index, { objective }] of foreground.entries()) {
+    const live = () =>
+      liveObjectiveOwners(config.repository).some(
+        (owner) => owner.objective === objective,
+      );
+    while (asked[index] && live() && Date.now() < deadline) await pause(100);
+    if (live()) running.push(objective);
+    else if (asked[index]) handedOff.push(objective);
+  }
+  return {
+    running: [...new Set(running)].sort((left, right) => left - right),
+    handedOff,
+  };
 }
 /**
  * A stopped service that exited 2 waits for an installation-wide decision (an
@@ -903,16 +929,26 @@ export async function supervise(
     // A failed unit is one that should be running: upgrading it, as when returning from a
     // package that refused the retained state, starts it again.
     const wasActive = ["active", "failed"].includes(inspect("is-active", name));
+    let upgradeResumes = {};
     if (candidate) {
-      const running = await drainForUpgrade(config);
+      const { running, handedOff } = await drainForUpgrade(config);
+      // A foreground run handed off waits for its operator to resume it.
+      const resumes = handedOff.length
+        ? {
+            handedOff,
+            resume: handedOff.map((id) => `factory resume --objective ${id}`),
+          }
+        : {};
       if (running.length)
         return {
           code: "upgrade_draining" satisfies LifecycleCode,
           artifact: candidate.cli,
           upgraded: false,
           draining: running,
-          next: `New dispatch is held while ${running.map((id) => `Objective #${id}`).join(", ")} finish${running.length === 1 ? "es" : ""}; \`factory status\` shows them. One stopped for a person finishes with \`factory decide\` or \`factory cancel\`. Run this upgrade again once none is running; \`factory queue resume\` cancels the drain`,
+          ...resumes,
+          next: `New dispatch is held while ${running.map((id) => `Objective #${id}`).join(", ")} finish${running.length === 1 ? "es its step" : " their steps"} and hand off; \`factory status\` shows them. Run this upgrade again once none is running; \`factory queue resume\` cancels the drain`,
         };
+      upgradeResumes = resumes;
     }
     const beforeIntake =
       candidate && wasActive ? await readIntake(config) : undefined;
@@ -939,6 +975,7 @@ export async function supervise(
             restarted: true,
             readiness,
             startRequested: true,
+            ...upgradeResumes,
           };
         } catch (error) {
           throw new Error(
@@ -950,6 +987,7 @@ export async function supervise(
         artifact: candidate.cli,
         restarted: restart,
         ...(wasActive && !restart ? { resumeRequired: true } : {}),
+        ...upgradeResumes,
       };
     }
     if (action !== "stop" || input.disable) systemctl("disable", name);

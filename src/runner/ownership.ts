@@ -19,7 +19,13 @@ import type {
 import { isReadinessWait } from "../delivery/readiness.js";
 import { executionContext } from "../execution/checkpoint.js";
 import { workerIdentity } from "../item-steps.js";
-import { linuxProcessIdentity, processGroupExists } from "../process.js";
+import {
+  currentProcessDeadlineAt,
+  currentProcessSignal,
+  linuxProcessIdentity,
+  processGroupExists,
+  withProcessCancellation,
+} from "../process.js";
 import { serviceLoginSecrets } from "../provider-credentials.js";
 import type { ContinuationState, FactoryState } from "../state.js";
 import { isExecutionState, isPreparationState } from "../state.js";
@@ -58,6 +64,60 @@ export function configuredDiagnosticSecrets(config: FactoryConfig): string[] {
 export class CoordinatorHandoff extends Error {
   constructor() {
     super("Coordinator drained and released ownership");
+  }
+}
+
+/**
+ * How long a run may settle after its last step (#1714): the final progress
+ * projection, its queue claim settlement, its split parent's update and its
+ * final checkpoint admission. Those normally take a few GitHub requests and
+ * two publications, about 10 s; the projection's own per-request budget is
+ * 30 s. Past this, durable state is the authority: the run stops at its last
+ * saved state and releases its slot, and the next owner settles the rest.
+ * FACTORY_SETTLE_DEADLINE_MS overrides it, as tests do.
+ */
+export const SETTLE_DEADLINE_MS = ((configured) =>
+  Number.isSafeInteger(configured) && configured > 0 ? configured : 30_000)(
+  Number(process.env.FACTORY_SETTLE_DEADLINE_MS ?? 30_000),
+);
+
+/** The deadline of one run's settlement, armed when settling starts. */
+export class SettleDeadline {
+  readonly #controller = new AbortController();
+  #timer: ReturnType<typeof setTimeout> | undefined;
+  #deadlineAt: string | undefined;
+  /** Whether the deadline passed; errors after it are its consequence. */
+  elapsed = false;
+  get signal(): AbortSignal {
+    return this.#controller.signal;
+  }
+  /** Run one settle step under the deadline, which the first step arms. */
+  run<T>(step: () => Promise<T>): Promise<T> {
+    if (!this.#deadlineAt) {
+      this.#deadlineAt = new Date(
+        Date.now() + SETTLE_DEADLINE_MS,
+      ).toISOString();
+      this.#timer = setTimeout(() => {
+        this.elapsed = true;
+        this.#controller.abort(
+          new Error(`Settling passed its ${SETTLE_DEADLINE_MS} ms deadline`),
+        );
+      }, SETTLE_DEADLINE_MS);
+      this.#timer.unref();
+    }
+    const parent = currentProcessSignal();
+    const deadlines = [this.#deadlineAt, currentProcessDeadlineAt()].filter(
+      (value): value is string => value !== undefined,
+    );
+    return withProcessCancellation(
+      parent ? AbortSignal.any([parent, this.signal]) : this.signal,
+      step,
+      undefined,
+      deadlines.sort((a, b) => Date.parse(a) - Date.parse(b))[0],
+    );
+  }
+  dispose(): void {
+    if (this.#timer) clearTimeout(this.#timer);
   }
 }
 

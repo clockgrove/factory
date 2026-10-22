@@ -144,7 +144,7 @@ const NON_LOCAL_PROOFS = new Set([
 
 /** Criteria about privacy, authority or accessibility: claims review judgement cannot prove. */
 const SAFETY_CLAIM =
-  /\b(?:privacy|private data|personal data|PII|redact\w*|(?:un)?authori[sz]\w*|authority|access control|accessib\w*|a11y|WCAG|screen[- ]reader)\b/i;
+  /\b(?:privacy|private data|personal data|PII|redact\w*|unauthori[sz]ed|access control|accessibility|a11y|WCAG|screen[- ]reader)\b/i;
 
 /**
  * The plan standard's graph-level lint, on the same terms as planStandardLint:
@@ -227,12 +227,13 @@ export function planGraphLint(
     if (
       claim &&
       !/^\s*`[^`]+`\s*$/.test(coverageCriterion(entry)) &&
-      !/-command$/.test(entry.proof.kind)
+      !/-command$/.test(entry.proof.kind) &&
+      entry.proof.kind !== "final-controller"
     ) {
       const criterion = coverageCriterion(entry).replace(/\s+/g, " ").trim();
       linted.add(entry.itemId);
       findings.push(
-        `Coverage of "${criterion.length > 120 ? `${criterion.slice(0, 117)}...` : criterion}" is a ${claim.toLowerCase()} claim proved only by ${entry.proof.kind}, which no command checks: have ${entry.itemId} deliver a test that names the claim, select a validation command that runs it, and prove the criterion with that command (result-command or integrated-command)`,
+        `Coverage of "${criterion.length > 120 ? `${criterion.slice(0, 117)}...` : criterion}" is a ${claim.toLowerCase()} claim proved only by ${entry.proof.kind}, which no command checks: have ${entry.itemId} deliver a test that names the claim, select a validation command that runs it, and prove the criterion with that command (result-command or integrated-command), or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
       );
       continue;
     }

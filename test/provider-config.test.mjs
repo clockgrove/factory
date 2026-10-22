@@ -824,6 +824,17 @@ test("every plan check gives the planner its facts and refuses with what would p
     lint([safety("result-semantic", "It sorts the list.")]).length,
     0,
   );
+  for (const text of [
+    "Settings are accessible from the CLI.",
+    "Requests send the Authorization header.",
+    "The source of authority is the base tree.",
+  ])
+    assert.equal(lint([safety("result-semantic", text)]).length, 0);
+  assert.equal(
+    lint([safety("final-controller", "Unauthorized users are refused.")])
+      .length,
+    0,
+  );
   // An exact source line that is not command-shaped is never authority.
   const shapeless = "FOO=1 node --test";
   const declared = (text) =>

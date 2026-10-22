@@ -926,6 +926,16 @@ export function finalReviewStep(deps: BuildDeps): Step {
           checkout: deps.config.checkout,
           base: plan.base,
           commit: final.commit,
+          merges: plan.items
+            .map(
+              (item) =>
+                state.done[stepKey(item.id, "merge")] as
+                  | MergeResult
+                  | undefined,
+            )
+            .filter((merged): merged is MergeResult => !!merged?.mergeSha)
+            .sort((a, b) => a.at.localeCompare(b.at))
+            .map((merged) => merged.mergeSha),
           validation: { tree: final.tree, commands: final.commands },
           sources: await pinnedSources(state, deps, signal),
           dir: join(deps.workDir(state.issue), "final-review"),

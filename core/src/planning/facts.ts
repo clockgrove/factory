@@ -268,7 +268,17 @@ export async function planningSources(
       );
       continue;
     }
-    sources.push({ ...ref, content });
+    // A default is context unless the Objective also pins it.
+    const isDefault =
+      defaults.some((d) => d.path === ref.path && !ref.heading) &&
+      !parseObjective(body).objective.sources.some(
+        (pin) => pin.path === ref.path && !pin.heading,
+      );
+    sources.push({
+      ...ref,
+      content,
+      ...(isDefault ? { context: true as const } : {}),
+    });
   }
   return { sources, problems };
 }

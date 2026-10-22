@@ -522,6 +522,8 @@ export interface ChangeEntry {
   newMode: string;
   oldObject: string;
   newObject: string;
+  /** Where the path's change starts, when the change is a set of merges. */
+  baseCommitSha?: string;
   oldBytes?: number;
   newBytes?: number;
   baseFile: string | null;
@@ -550,7 +552,15 @@ export async function evidenceRoot(dir: string, tree: string): Promise<string> {
  * and each changed path's patch excerpt within the inline text budget.
  */
 export async function materialize(
-  input: Pick<ResultReviewInput, "checkout" | "base" | "commit" | "signal">,
+  input: Pick<ResultReviewInput, "checkout" | "base" | "commit" | "signal"> & {
+    /**
+     * Merge commits, in merge order, whose first-parent diffs are the change
+     * under review instead of `base`..`commit`: a path several of them touch
+     * shows its combined change, from the first parent of the first merge
+     * that touched it to `commit`.
+     */
+    merges?: readonly string[];
+  },
   root: string,
 ): Promise<{ changes: ChangeEntry[]; rows: ResultEvidence[] }> {
   const { checkout, base, commit, signal } = input;
@@ -560,7 +570,12 @@ export async function materialize(
   await exportTree(checkout, commit, staging, signal);
   await rename(join(staging, REPOSITORY_DIRECTORY), join(root, "candidate"));
   await rm(staging, { recursive: true, force: true });
-  const raw = await rawChanges(checkout, base, commit, signal);
+  const raw = input.merges
+    ? await mergedChanges(checkout, input.merges, commit, signal)
+    : (await rawChanges(checkout, base, commit, signal)).map((entry) => ({
+        ...entry,
+        from: base,
+      }));
   const objects = raw.flatMap((entry) => [entry.oldObject, entry.newObject]);
   const sizes = await objectSizes(checkout, objects, signal);
   // base/: the base copy of each changed regular file, within the export bounds.
@@ -604,7 +619,7 @@ export async function materialize(
     const patch = await git([
       ...diff,
       "--binary",
-      base,
+      entry.from,
       commit,
       "--",
       entry.path,
@@ -619,7 +634,14 @@ export async function materialize(
     );
     excerpts.push({
       path: entry.path,
-      text: await git([...diff, "--unified=2", base, commit, "--", entry.path]),
+      text: await git([
+        ...diff,
+        "--unified=2",
+        entry.from,
+        commit,
+        "--",
+        entry.path,
+      ]),
     });
     const candidateFile = `candidate/${entry.path}`;
     const exported = await lstat(join(root, candidateFile)).then(
@@ -628,8 +650,10 @@ export async function materialize(
     );
     const oldBytes = sizes.get(entry.oldObject);
     const newBytes = sizes.get(entry.newObject);
+    const { from, ...change } = entry;
     changes.push({
-      ...entry,
+      ...change,
+      ...(input.merges ? { baseCommitSha: from } : {}),
       ...(oldBytes === undefined ? {} : { oldBytes }),
       ...(newBytes === undefined ? {} : { newBytes }),
       baseFile: written.has(entry.path) ? `base/${entry.path}` : null,
@@ -643,6 +667,7 @@ export async function materialize(
     JSON.stringify({
       baseCommitSha: base,
       resultCommitSha: commit,
+      ...(input.merges ? { mergeCommitShas: input.merges } : {}),
       changes,
     }),
     { mode: 0o444 },
@@ -773,6 +798,7 @@ export function changeIndexRow(
   commit: string,
   tree: string,
   changes: readonly ChangeEntry[],
+  merges?: readonly string[],
 ): ResultEvidence {
   return {
     origin: "controller",
@@ -781,6 +807,7 @@ export function changeIndexRow(
       baseCommitSha: base,
       resultCommitSha: commit,
       resultTreeSha: tree,
+      ...(merges ? { mergeCommitShas: merges } : {}),
       changes,
     }),
     complete: true,
@@ -861,6 +888,42 @@ async function rawChanges(
     });
   }
   return changes;
+}
+
+/**
+ * The paths these merges changed, each merge's first-parent diff, in merge
+ * order: a path several touch is its combined change, from the first parent
+ * of the first merge that touched it to `commit`. A path whose combined
+ * change is empty drops out.
+ */
+async function mergedChanges(
+  checkout: string,
+  merges: readonly string[],
+  commit: string,
+  signal: AbortSignal,
+): Promise<(RawChange & { from: string })[]> {
+  const first = new Map<string, string>();
+  for (const merge of merges) {
+    const parent = (
+      await hostGit(
+        checkout,
+        ["rev-parse", "--verify", "--end-of-options", `${merge}^1^{commit}`],
+        { signal },
+      )
+    )
+      .toString("utf8")
+      .trim();
+    for (const entry of await rawChanges(checkout, parent, merge, signal))
+      if (!first.has(entry.path)) first.set(entry.path, parent);
+  }
+  const combined = new Map<string, RawChange>();
+  for (const from of new Set(first.values()))
+    for (const entry of await rawChanges(checkout, from, commit, signal))
+      if (first.get(entry.path) === from) combined.set(entry.path, entry);
+  return [...first].flatMap(([path, from]) => {
+    const entry = combined.get(path);
+    return entry ? [{ ...entry, from }] : [];
+  });
 }
 
 /** Blob sizes by object id, from one `cat-file --batch-check`. */

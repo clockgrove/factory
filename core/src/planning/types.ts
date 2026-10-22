@@ -248,6 +248,8 @@ export interface PinnedSource extends Citation {
   content: string;
   /** Set only on the operator-written Objective body. */
   operatorAuthored?: true;
+  /** AGENTS.md or README.md read as context: never a source of obligations. */
+  context?: true;
 }
 
 /** Everything the planner is given, computed once from the base. */

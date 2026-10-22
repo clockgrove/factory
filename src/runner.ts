@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   assertReviewArtifactSelection,
   assertReviewArtifactSelectionSources,
@@ -1700,6 +1701,9 @@ async function runObjectiveOwned(
         if (settle.cut(error)) settle.unfinished.push(step);
         else finalizationErrors.push(error);
       };
+      // A claim's settlement is a local save and its checkpoint admission: like
+      // the final admission, it runs outside the settle deadline (#1743).
+      const unbounded = AsyncLocalStorage.snapshot();
       await settle.run(async () => {
         // Await original work even after one promise fails; never replay a failed projection.
         for (const task of [controlTail, queueTail, progressTask]) {
@@ -1729,11 +1733,13 @@ async function runObjectiveOwned(
             // snapshot. The creating owner still holds its lease here; the
             // existing reservation seam independently refuses started work or
             // uncertain subprocesses and acknowledges the original failure.
-            await settleFailedProjectQueueReservation(
-              config,
-              queueClaim,
-              lock.token,
-              runFailure,
+            await unbounded(() =>
+              settleFailedProjectQueueReservation(
+                config,
+                queueClaim,
+                lock.token,
+                runFailure,
+              ),
             );
           } else if (
             controlReleased &&
@@ -1767,11 +1773,13 @@ async function runObjectiveOwned(
                 lock,
               );
             } else
-              await settleProjectQueueRun(
-                config,
-                queueClaim,
-                lock.token,
-                owner.snapshot.runId,
+              await unbounded(() =>
+                settleProjectQueueRun(
+                  config,
+                  queueClaim,
+                  lock.token,
+                  owner.snapshot!.runId,
+                ),
               );
           }
         } catch (error) {
@@ -3313,16 +3321,14 @@ async function checkpointController<T>(
   task: () => Promise<T>,
   store?: ContentStore,
   final = false,
-  /** A run's settlement deadline, which its final admission is part of. */
-  settle?: SettleDeadline,
 ): Promise<T> {
+  // The final admission and its publication are outside a run's settle
+  // deadline: the Git transport timeout and the publication lock bound them,
+  // and a large archive's publication can outlast the deadline (#1743).
   const admit = (
     reason: Parameters<typeof awaitCheckpointAdmission>[1],
-  ): Promise<void> => {
-    const admission = () =>
-      awaitCheckpointAdmission(config.repository, reason, { final });
-    return settle ? settle.run(admission) : admission();
-  };
+  ): Promise<void> =>
+    awaitCheckpointAdmission(config.repository, reason, { final });
   return withRecoveryCheckpointScope(
     {
       config,
@@ -3345,15 +3351,6 @@ async function checkpointController<T>(
         try {
           await admit("settled");
         } catch (settlement) {
-          // Cut off by the settle deadline (#1714): the journal keeps the
-          // pending change, and the Objective is held as unfinished.
-          if (settle?.cut(settlement)) {
-            if (!(error instanceof SettleDeadlineElapsed)) throw error;
-            throw new SettleDeadlineElapsed(
-              [...error.unfinished, "final checkpoint admission"],
-              error.cause,
-            );
-          }
           // Name the stop itself: the pending checkpoint only follows it.
           throw new AggregateError(
             [error, settlement],
@@ -3363,15 +3360,7 @@ async function checkpointController<T>(
         }
         throw error;
       }
-      try {
-        await admit(final ? "explicit" : "settled");
-      } catch (error) {
-        if (!settle?.cut(error)) throw error;
-        throw new SettleDeadlineElapsed([
-          ...settle.unfinished,
-          "final checkpoint admission",
-        ]);
-      }
+      await admit(final ? "explicit" : "settled");
       return result;
     },
   );
@@ -3511,7 +3500,6 @@ export function runObjective(
         () => runObjectiveUnscoped(config, objective, services, settled),
         services.contentStore,
         true,
-        settle,
       ),
   ).finally(() => settle.dispose());
 }

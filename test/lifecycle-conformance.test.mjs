@@ -658,13 +658,14 @@ const LIVE_RUN_ROWS = [
     bound: LIVE.settle,
   },
   {
-    // Synchronous work holds the loop past the deadline's timer (#1743).
+    // An auxiliary step holds the loop past the deadline's timer; the final
+    // admission, outside the deadline, still settles the run (#1743).
     name: "settling past its deadline under a live service",
     phase: "running",
     build: completedState,
     reach: "settling",
     live: {},
-    held: true,
+    settles: true,
   },
   {
     name: "planning under a live service run",
@@ -1810,7 +1811,7 @@ else {
       if (state)
         saveState(statePath(fixture.config.repository, objective), state);
       rmSync(join(fixture.directory, "stalled"), { force: true });
-      if (row.held) writeFileSync(join(fixture.directory, "held"), "");
+      if (row.settles) writeFileSync(join(fixture.directory, "held"), "");
       const service = owner(fixture, "live", 0);
       try {
         assert.equal(await service.ready(), "live");
@@ -1824,13 +1825,19 @@ else {
             assert(elapsed < (row.bound ?? LIVE.upgrade), `${elapsed} ms`);
           });
         }
-        // The settlement cut off holds only its Objective.
-        if (row.held)
-          await t.test(`${row.name} / live / service stays up`, async () => {
+        if (row.settles)
+          await t.test(`${row.name} / live / settled`, async () => {
             const up = new Promise((resolve) =>
               setTimeout(resolve, 3_000, "up"),
             );
             assert.equal(await Promise.race([service.exited, up]), "up");
+            const { result } = await requestControl(fixture.config.repository, {
+              objective: 0,
+              action: "status",
+            });
+            assert(
+              !result.waitingObjectives?.some((w) => w.objective === objective),
+            );
           });
       } finally {
         await service.stop();

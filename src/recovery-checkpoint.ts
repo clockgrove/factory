@@ -40,6 +40,7 @@ import {
 import { LocalContentStore } from "./content/local.js";
 import {
   ARCHIVED_EVIDENCE,
+  reclaimCancelledSessions,
   reclaimRetiredMaterial,
   recordRetirement,
   terminalContinuation,
@@ -7679,6 +7680,10 @@ export async function maintainRecoveryCheckpoint(
       persistence,
       () => Date.now() >= deadline,
       stopped,
+    );
+  if (!stopped())
+    await reclaimCancelledSessions(config, { expired, stopped }).catch(
+      () => undefined,
     );
   if (expired()) complete = false;
   return { complete, reclaimedObjectives };

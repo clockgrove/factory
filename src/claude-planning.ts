@@ -63,6 +63,7 @@ import {
   settleClaudeProcess,
   type ClaudeOwnedSession,
 } from "./execution/claude-session.js";
+import { stopProvenNativeProcess } from "./execution/worker-process.js";
 import { redact } from "./execution/harness-support.js";
 import { claudeCaptureEvents } from "./execution/interaction-capture.js";
 import {
@@ -773,6 +774,17 @@ class ClaudePlanningTransport implements PlanningTransport {
           ] as const,
         }
       : undefined;
+  }
+
+  async stopSession(ref: AgentSessionRef): Promise<void> {
+    if (!this.sessionRoot)
+      throw new Error("Claude retained storage is unavailable");
+    assertAgentSessionRef(ref);
+    // The authenticated session binding is proven before any signal.
+    const session = requireClaudeSession(this.sessionRoot, ref, this.adapter);
+    if (runningTurns.has(session.data.root))
+      throw new Error("Claude turn is still running in this controller");
+    await stopProvenNativeProcess(session.data.process, "Claude planning");
   }
 
   async releaseSession(ref: AgentSessionRef): Promise<void> {

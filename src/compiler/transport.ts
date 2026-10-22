@@ -123,6 +123,8 @@ export interface PlanningTransport {
     session: AgentSessionRef,
   ): Promise<AgentSessionReconciliation>;
   releaseSession?(session: AgentSessionRef): Promise<void>;
+  /** Cancellation only: stop a held turn's proven process; see PlanningModel. */
+  stopSession?(session: AgentSessionRef): Promise<void>;
   /** Authenticated immutable source reads; absence retains full inline context. */
   sourceDelivery?(
     request: PlanningRequest<unknown>,

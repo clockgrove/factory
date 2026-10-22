@@ -792,6 +792,12 @@ export class StructuredPlanningModel implements PlanningModel {
     );
   }
 
+  async stopSession(session: AgentSessionRef): Promise<void> {
+    if (!this.transport.stopSession)
+      throw new Error("Planning transport cannot stop a held turn");
+    await this.transport.stopSession(session);
+  }
+
   async releaseSession(session: AgentSessionRef): Promise<void> {
     if (!this.transport.releaseSession)
       throw new Error("Planning transport does not support session disposal");

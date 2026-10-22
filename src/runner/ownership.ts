@@ -19,6 +19,7 @@ import type {
 import { isReadinessWait } from "../delivery/readiness.js";
 import { executionContext } from "../execution/checkpoint.js";
 import { workerIdentity } from "../item-steps.js";
+import { LifecycleRefusal } from "../lifecycle-refusal.js";
 import {
   currentProcessDeadlineAt,
   currentProcessSignal,
@@ -597,6 +598,21 @@ export async function releaseCancelledSessions(
   const planningTurn = Object.values(state.agentSessions ?? {}).find(
     (ref) => ref.scope.role === "planning" && ref.status === "in-flight",
   );
+  // A turn its adapter cannot yet prove ceased is stopped here, only when its
+  // recorded process is fully proven; any error leaves the turn held.
+  if (
+    planningTurn?.currentTurn?.resources === "active" &&
+    planningTurn.currentTurn.terminal === undefined &&
+    model?.stopSession
+  )
+    try {
+      await model.stopSession(structuredClone(planningTurn));
+    } catch (error) {
+      throw new LifecycleRefusal(
+        "session_unsettled",
+        `Cancellation could not prove the held planning turn stopped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   const stopped =
     planningTurn &&
     (await stoppedTurnReceipt(planningTurn, model, true).catch(

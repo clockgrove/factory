@@ -457,3 +457,94 @@ export async function reclaimRetiredMaterial(
   }
   return reclaimed;
 }
+
+const sessionSweepCursor = new Map<string, number>();
+/** Objectives one maintenance pass parses, so a large installation is swept over several passes. */
+const SESSION_SWEEP_LIMIT = 16;
+
+/**
+ * Bounded background reclamation of storage a cancellation left behind: a
+ * cancelled Objective whose settled planning or review turns were abandoned
+ * but whose retained session storage is not yet disposed. Cancel disposes it
+ * itself; this covers a disposal that did not finish. Under the Objective's
+ * own lock; a retired snapshot, a restored record and any turn that may still
+ * run are never touched. Each pass starts after the last Objective it parsed.
+ */
+export async function reclaimCancelledSessions(
+  config: FactoryConfig,
+  limits: { expired: () => boolean; stopped?: () => boolean },
+): Promise<number> {
+  const root = join(stateRoot(config.repository), "objectives");
+  if (!existsSync(root)) return 0;
+  const {
+    acquireObjectiveLock,
+    objectiveLockPath,
+    readContinuation,
+    releaseControllerLock,
+    saveState,
+    statePath,
+  } = await import("./state-store.js");
+  const { releaseAgentSessions } = await import("./agent-session.js");
+  const objectives = readdirSync(root)
+    .map(Number)
+    .filter((value) => Number.isSafeInteger(value) && value > 0)
+    .sort((a, b) => a - b);
+  const last = sessionSweepCursor.get(config.repository) ?? 0;
+  const start = objectives.findIndex((objective) => objective > last);
+  let released = 0;
+  let scanned = 0;
+  for (const objective of start < 0
+    ? objectives
+    : [...objectives.slice(start), ...objectives.slice(0, start)]) {
+    if (
+      scanned >= SESSION_SWEEP_LIMIT ||
+      limits.stopped?.() ||
+      (scanned > 0 && limits.expired())
+    )
+      break;
+    scanned++;
+    sessionSweepCursor.set(config.repository, objective);
+    try {
+      const file = statePath(config.repository, objective);
+      if (
+        !readFileSync(file, "utf8").includes('"cancelledAt"') ||
+        readRetirement(config.repository, objective)
+      )
+        continue;
+      const lock = acquireObjectiveLock(config.repository, objective);
+      try {
+        const state = readContinuation(config.repository, objective);
+        if (!state?.cancelledAt || state.restoration) continue;
+        const left = [
+          ...Object.values(state.agentSessions ?? {}),
+          ...(state.agentSessionHistory ?? []),
+        ].filter((ref) => ref.status !== "released");
+        if (
+          !left.length ||
+          left.some(
+            (ref) =>
+              ref.scope.role === "implementation" ||
+              (ref.currentTurn && ref.currentTurn.resources !== "settled"),
+          )
+        )
+          continue;
+        const { composePlanningModel } = await import("./application.js");
+        await releaseAgentSessions(
+          state,
+          undefined,
+          composePlanningModel(config),
+          () => saveState(file, state),
+        );
+        released++;
+      } finally {
+        releaseControllerLock(
+          objectiveLockPath(config.repository, objective),
+          lock,
+        );
+      }
+    } catch {
+      // Left in place; the next pass tries again.
+    }
+  }
+  return released;
+}

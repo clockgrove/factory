@@ -1573,6 +1573,16 @@ export function stateRoot(repository: string): string {
   return resolve(root, "clockgrove-factory", "repositories", owner!, repo!);
 }
 
+/** Where the configured planning provider keeps its retained session storage. */
+export function planningSessionRoot(config: FactoryConfig): string {
+  return join(
+    stateRoot(config.repository),
+    config.planning.kind === "claude-agent-sdk"
+      ? "claude-planning-sessions"
+      : "review-sessions",
+  );
+}
+
 /** One named model provider: the planning and execution choices an Objective runs with. */
 export interface ProviderConfig {
   planning: PlanningConfig;

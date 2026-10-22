@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { assertAgentSessionCapabilities } from "./agent-session.js";
 import { ClaudePlanningModel } from "./claude-planning.js";
 import { CodexPlanningModel, type PlanCandidate } from "./compiler.js";
-import type { FactoryConfig, JsonValue, LocalHarnessConfig } from "./config.js";
+import {
+  type FactoryConfig,
+  type JsonValue,
+  type LocalHarnessConfig,
+  planningSessionRoot,
+} from "./config.js";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   factoryConfigDigest,
@@ -420,10 +425,7 @@ export function composePlanningModel(
         workerCommandAccess: workerCommandAccess(config),
         ...(retainedSessions
           ? {
-              sessionRoot: join(
-                stateRoot(config.repository),
-                "claude-planning-sessions",
-              ),
+              sessionRoot: planningSessionRoot(config),
             }
           : {}),
       }),
@@ -444,10 +446,7 @@ export function composePlanningModel(
         sandboxRequired: commandSandboxPolicy(config).required,
         ...(retainedSessions
           ? {
-              sessionRoot: join(
-                stateRoot(config.repository),
-                "review-sessions",
-              ),
+              sessionRoot: planningSessionRoot(config),
             }
           : {}),
       },

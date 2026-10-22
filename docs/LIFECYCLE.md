@@ -63,42 +63,44 @@ A plain entry is the expected outcome:
 
 An entry marked ✗ is a known gap. The marker names the invariant it breaks and is followed by today's outcome. The suite records the gap as a `todo` test that asserts the target outcome. A fix that closes a gap makes the test pass, and the fix then removes the `todo` marker.
 
-| State                       | Owner      | Behaviour                                                                                  |
-| --------------------------- | ---------- | ------------------------------------------------------------------------------------------ |
-| Queued, no state            | none       | run ok; retry, decide, cancel and pause `no_factory_state`; queue add and remove ok        |
-| Queued, no state            | service    | run `controller_owned`; retry and cancel `no_factory_state`                                |
-| Planning, owner gone        | none       | run, decide, cancel, pause and resume ok; queue remove `unfinished_owned_work`             |
-| Planning, owner gone        | service    | decide, cancel, pause and resume ok                                                        |
-| Plan decision               | none       | run, decide, cancel and resume ok                                                          |
-| Plan decision               | service    | decide, cancel and resume ok                                                               |
-| Plan decision, paused owner | foreground | cancel and upgrade ok; refusing the plan ok (the owner hands off)                          |
-| Items running, owner gone   | none       | run, cancel and pause ok; retry `finish_or_cancel_active`                                  |
-| Items running, owner gone   | service    | cancel ok; retry `finish_or_cancel_active`                                                 |
-| Failed                      | none       | run, retry and cancel ok                                                                   |
-| Failed                      | service    | retry, cancel and resume ok                                                                |
-| Failed, not admitted        | service    | cancel ok; retry `objective_not_admitted`                                                  |
-| Cancel unresolved           | none       | run and cancel ok; retry `cancel_unresolved`                                               |
-| Cancel unresolved           | service    | cancel ok; retry `cancel_unresolved`                                                       |
-| Diagnosis held              | none       | retry `diagnosis_held`; cancel ✗(a) `session_unsettled`                                    |
-| Diagnosis held              | service    | cancel ✗(a) `session_unsettled`                                                            |
-| Operator-paused             | none       | run, cancel, pause, drain, resume and upgrade ok                                           |
-| Operator-paused             | foreground | run `controller_owned`; cancel, pause, resume and upgrade ok                               |
-| Operator-paused             | service    | cancel, pause and resume ok                                                                |
-| Drained                     | none       | run `coordinator_draining`; resume and cancel ok                                           |
-| Drained                     | service    | resume and cancel ok                                                                       |
-| Rejection hold              | none       | run and cancel ok; retry, repair, drain and resume `rejection_hold`                        |
-| Rejection hold              | service    | cancel ok; resume `rejection_hold`                                                         |
-| Acceptance sealed           | none       | run ok (it reconciles); retry `objective_complete`; cancel `acceptance_sealed`             |
-| Restored, held              | none       | run and retry `restoration_held`; start `restoration_held`; cancel ✗(a) `restoration_held` |
-| Configuration changed       | none       | run, rereview, repair and start `config_frozen`; cancel ok, without `--provider`           |
-| Configuration changed       | service    | cancel and resume ok                                                                       |
-| Cancelled                   | none       | run, cancel, queue remove and queue add ok                                                 |
-| Complete                    | none       | run, cancel and queue remove ok; retry `objective_complete`                                |
-| Complete, card archived     | none       | queue add ok (it restores the card)                                                        |
+| State                       | Owner      | Behaviour                                                                                          |
+| --------------------------- | ---------- | -------------------------------------------------------------------------------------------------- |
+| Queued, no state            | none       | run ok; retry, decide, cancel and pause `no_factory_state`; queue add and remove ok                |
+| Queued, no state            | service    | run `controller_owned`; retry and cancel `no_factory_state`                                        |
+| Planning, owner gone        | none       | run, decide, cancel, pause and resume ok; queue remove `unfinished_owned_work`                     |
+| Planning, owner gone        | service    | decide, cancel, pause and resume ok                                                                |
+| Plan decision               | none       | run, decide, cancel and resume ok                                                                  |
+| Plan decision               | service    | decide, cancel and resume ok                                                                       |
+| Plan decision, paused owner | foreground | cancel and upgrade ok; refusing the plan ok (the owner hands off)                                  |
+| Items running, owner gone   | none       | run, cancel and pause ok; retry `finish_or_cancel_active`                                          |
+| Items running, owner gone   | service    | cancel ok; retry `finish_or_cancel_active`                                                         |
+| Failed                      | none       | run, retry and cancel ok                                                                           |
+| Failed                      | service    | retry, cancel and resume ok                                                                        |
+| Failed, not admitted        | service    | cancel ok; retry `objective_not_admitted`                                                          |
+| Cancel unresolved           | none       | run and cancel ok; retry `cancel_unresolved`                                                       |
+| Cancel unresolved           | service    | cancel ok; retry `cancel_unresolved`                                                               |
+| Diagnosis held              | none       | retry `diagnosis_held`; cancel ok when its process is proven and stopped; else `session_unsettled` |
+| Diagnosis held              | service    | cancel ok when its process is proven and stopped; else `session_unsettled`                         |
+| Operator-paused             | none       | run, cancel, pause, drain, resume and upgrade ok                                                   |
+| Operator-paused             | foreground | run `controller_owned`; cancel, pause, resume and upgrade ok                                       |
+| Operator-paused             | service    | cancel, pause and resume ok                                                                        |
+| Drained                     | none       | run `coordinator_draining`; resume and cancel ok                                                   |
+| Drained                     | service    | resume and cancel ok                                                                               |
+| Rejection hold              | none       | run and cancel ok; retry, repair, drain and resume `rejection_hold`                                |
+| Rejection hold              | service    | cancel ok; resume `rejection_hold`                                                                 |
+| Acceptance sealed           | none       | run ok (it reconciles); retry `objective_complete`; cancel `acceptance_sealed`                     |
+| Restored, held              | none       | run and retry `restoration_held`; start `restoration_held`; cancel ok (recorded locally)           |
+| Configuration changed       | none       | run, rereview, repair and start `config_frozen`; cancel ok, without `--provider`                   |
+| Configuration changed       | service    | cancel and resume ok                                                                               |
+| Cancelled                   | none       | run, cancel, queue remove and queue add ok                                                         |
+| Complete                    | none       | run, cancel and queue remove ok; retry `objective_complete`                                        |
+| Complete, card archived     | none       | queue add ok (it restores the card)                                                                |
 
 **Cancel exits.**
 
-- **Configuration changed.** Without `--provider`, cancel picks the one configured provider whose adapters cover every adapter the Objective recorded. If none or several fit, it asks for `--provider`.
+- **Configuration changed.** Without `--provider`, cancel picks the one configured provider whose adapters cover every adapter the Objective recorded and whose session root holds its recorded sessions. An execution does not record its account, so providers that cover the same adapters under different accounts are ambiguous. If none or several fit, it asks for `--provider`.
+- **Diagnosis held.** A planning turn a stopped controller left active is stopped only when its recorded process is fully proven: a boot identity that matches this boot, the leader's start time, its own process group, this user and PID namespace, and Factory's ownership check on the turn's home. All of it is checked before any signal. A receipt without a boot identity is never signalled. A turn this controller still runs, a failed proof or a failed stop refuses with `session_unsettled`; cancel never abandons a turn it could not prove ceased. A turn proved ceased is settled and its storage disposed like any other. Only cancellation stops a turn.
+- **Restored, held.** Cancel records the cancellation in the local record and nothing else. It does not adopt, stop or settle foreign work, and the restoration stays held, so reconciliation refuses the cancelled record as terminal inspection history. The recovery checkpoint keeps it with the restored original it points to.
 - **Archived card.** `queue add` plans an `unarchive-card` effect ahead of the admission's field writes, so it restores the archived card and re-admits it through the same approved wire bytes. A card archived after `queue add` inspected the Project is refused with `queue_card_archived` before any write. That refusal settles the command's operations as refused, so later queue mutations run, and the next `queue add` restores the card.
 
 **One control plane.** A live service runs every lifecycle command on an Objective it isn't running: decide, cancel, retry, repair, rereview, select, amendments, pause, drain and resume. Commands that let work start (retry, resume, select, repair, rereview, propose-amendment) need a current queue admission, else `objective_not_admitted`; decide, cancel, pause, drain and decline-discovery work for any Objective. It runs the foreground implementation as the installation owner, under the Objective's lock and on the configuration the Objective froze. While it starts or settles the Objective's run, it refuses with `owner_settling`. A live paused planning owner hands its Objective off to take a plan refusal, which then lands where the Objective stopped.
@@ -110,6 +112,7 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 **Bounded time.**
 
 - An operator command ends within its bound beside a real maintenance pass.
+- Bounded background maintenance disposes settled planning and review turns a cancellation abandoned and did not finish disposing, a few Objectives per pass; it never touches a retired snapshot, a restored record or a turn that may still run.
 - A publication lock that another live process holds past 3 s refuses an operator command (every mutating command but `run`, queue commands included) with `publication_lock_held`, naming the holder. The 3 s covers all of the command's publications. A lock whose holder is gone is taken; a live holder's lock is never broken. Maintenance pauses between pack batches, so the command waits at most one batch behind it.
 
 **Restart means handoff.** An upgrade (`finish`) stops new dispatch and asks every run to hand off at its safe point. A service run's handoff is the service's own drain, which resumes after the restart. A foreground run is asked through its control; it ends, and `factory resume` continues it (the upgrade result lists it under `handedOff`). Only a run executing a step is waited for: the upgrade returns `upgrade_draining` naming it at once, and the run hands off when the step ends.

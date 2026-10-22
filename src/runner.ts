@@ -1877,7 +1877,9 @@ async function cancelObjectiveOwned(
   planningModel?: PlanningModel,
 ): Promise<"requested" | "cancelled"> {
   const retained = readContinuation(config.repository, objective);
-  if (retained) assertRestoredContinuationReady(retained, config);
+  // A held restoration is cancelled locally below, whatever its owner.
+  if (retained && retained.restoration?.status !== "held")
+    assertRestoredContinuationReady(retained, config);
   const control = await requestControl(config.repository, {
     objective,
     action: "cancel",
@@ -1939,11 +1941,14 @@ async function cancelUnownedObjective(
         "no_factory_state",
         "Objective has no Factory state",
       );
-    assertRestoredContinuationReady(continuation, config);
+    const held = continuation.restoration?.status === "held";
+    if (!held) assertRestoredContinuationReady(continuation, config);
     if (isExecutionState(continuation) && objectiveComplete(continuation)) {
-      await releaseAgentSessions(continuation, driver, planningModel, () =>
-        saveState(statePath(config.repository, objective), continuation),
-      );
+      // A held record's foreign sessions are not this installation's to release.
+      if (!held)
+        await releaseAgentSessions(continuation, driver, planningModel, () =>
+          saveState(statePath(config.repository, objective), continuation),
+        );
       return "cancelled";
     }
     if (isExecutionState(continuation) && continuation.finalAcceptance)
@@ -1951,6 +1956,17 @@ async function cancelUnownedObjective(
         "acceptance_sealed",
         "Acceptance is sealed; resume to reconcile Objective closure",
       );
+    if (held) {
+      // Only the local decision is recorded. Foreign work is neither adopted,
+      // stopped nor settled, and the restoration stays held, so reconciliation
+      // refuses a cancelled record.
+      if (!continuation.cancelledAt) {
+        continuation.cancelRequested = true;
+        continuation.cancelledAt = new Date().toISOString();
+        saveState(statePath(config.repository, objective), continuation);
+      }
+      return "cancelled";
+    }
     if (continuation.cancelledAt) {
       if (config.queue?.project)
         await cancelKnownWork(

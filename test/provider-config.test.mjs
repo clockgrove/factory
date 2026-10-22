@@ -2,10 +2,12 @@
 import "./isolate-env.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { planningSessionInputDigest } from "../dist/agent-session.js";
 import { assertKnownFlags } from "../dist/cli-flags.js";
 import {
   assertNoCiOnlyValidation,
@@ -18,11 +20,13 @@ import { PLAN_CHECKS, PLAN_CHECK_EXEMPT } from "../dist/compiler/sources.js";
 import { planGraphLint, planStandardLint } from "../dist/compiler-wire.js";
 import { prepareCompilationRequest } from "../dist/compiler/planning.js";
 import {
+  CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   ciOnlyCommands,
   factoryAuthorityDigest,
   factoryConfigDigest,
   finalValidationCommands,
   requiredFinalCommands,
+  planningSessionRoot,
   readConfig,
   resolveProvider,
   validateConfigFile,
@@ -445,6 +449,55 @@ test("the service continues a started Objective on the provider it froze", () =>
     `${cancelling.provider}/${cancelling.source}`,
     "codex/recorded-adapters",
   );
+  // A recorded session root the claude provider does not use leaves it
+  // unresolved: the operator names the provider.
+  const recordedClaude = (objective, root) => {
+    const state = JSON.parse(
+      readFileSync(statePath(file.repository, 8), "utf8"),
+    );
+    const scope = {
+      repository: file.repository,
+      objective,
+      runId: `run-${objective}`,
+      configDigest: "d".repeat(64),
+      role: "planning",
+      planningInputDigest: planningSessionInputDigest({
+        ...state,
+        sourcePacketDigest: "e".repeat(64),
+      }),
+    };
+    saveState(statePath(file.repository, objective), {
+      ...state,
+      objective,
+      runId: scope.runId,
+      sourcePacketDigest: "e".repeat(64),
+      agentSessions: {
+        [JSON.stringify(["planning", null, scope.planningInputDigest])]: {
+          scope,
+          adapter: CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
+          identity: randomUUID(),
+          turn: 1,
+          currentTurn: {
+            invocationId: randomUUID(),
+            requestDigest: "a".repeat(64),
+            dispatch: "submitted",
+            resources: "settled",
+          },
+          data: { root },
+          status: "unavailable",
+        },
+      },
+    });
+    return selectProvider(file, { objective, cancel: true }).source;
+  };
+  assert.equal(
+    recordedClaude(
+      90,
+      join(planningSessionRoot(resolveProvider(file, "claude")), "x"),
+    ),
+    "recorded-adapters",
+  );
+  assert.equal(recordedClaude(91, "/elsewhere/x"), "unmatched");
   // The remedy status prints must parse (#1426).
   assertKnownFlags("cancel", ["--objective", "8", "--provider", "claude"]);
 

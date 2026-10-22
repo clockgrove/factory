@@ -21,7 +21,10 @@ import {
 import { join, resolve } from "node:path";
 import type { HarnessObservation } from "../contracts.js";
 import {
+  isNativeProcessOwner,
   linuxProcessIdentity,
+  type NativeProcessOwner,
+  nativeProcessDisposition,
   processGroupExists,
   stopRecordedSandboxes,
 } from "../process.js";
@@ -162,6 +165,34 @@ export async function stopUnrecordedWorker(
   rmSync(`${paths.requestPath}.codex-home`, { recursive: true, force: true });
   for (const path of [paths.requestPath, paths.resultPath, paths.pidPath])
     rmSync(path, { force: true });
+}
+
+/**
+ * Stop a held native turn's process group, only when its recorded identity is
+ * proven: a boot identity that matches this boot (a receipt without one is
+ * never signalled), the leader's pid start time, its own group, this user and
+ * PID namespace. A group a later boot or an emptied group already ended needs
+ * no signal. Anything unproven throws before any signal, and so does a group
+ * that outlives it.
+ */
+export async function stopProvenNativeProcess(
+  owner: NativeProcessOwner | undefined,
+  label: string,
+): Promise<void> {
+  if (!isNativeProcessOwner(owner) || owner.boot === undefined)
+    throw new Error(`${label} process has no proven boot identity`);
+  const disposition = nativeProcessDisposition(owner);
+  if (disposition === "settled") return;
+  const leader = linuxProcessIdentity(owner.pid);
+  if (
+    disposition !== "active" ||
+    leader?.startTime !== owner.startTime ||
+    leader.group !== owner.group
+  )
+    throw new Error(`${label} process identity is not proven`);
+  await killGroup(owner.group, label);
+  if (nativeProcessDisposition(owner) !== "settled")
+    throw new Error(`${label} process cessation remains unresolved`);
 }
 
 /** SIGTERM, then SIGKILL after two seconds; resolves once the group is gone. */

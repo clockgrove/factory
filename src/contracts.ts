@@ -869,6 +869,11 @@ export interface PlanningModel {
   /** Decode authenticated recovered bytes with the ordinary request decoder; no provider call. */
   decodeSessionResponse?<T>(request: PlanningRequest<T>, response: string): T;
   releaseSession?(session: AgentSessionRef): Promise<void>;
+  /**
+   * Cancellation only: stop a held turn's process after proving its owner,
+   * or throw without signalling. The caller reconciles the result.
+   */
+  stopSession?(session: AgentSessionRef): Promise<void>;
   approvedPlaybook?: ApprovedPlaybook;
   approvedPlaybookPin?: ApprovedPlaybookPin;
   generateStructured<T>(request: PlanningRequest<T>): Promise<T>;

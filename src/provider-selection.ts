@@ -1,9 +1,11 @@
+import { dirname } from "node:path";
 import {
   CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   type FactoryConfig,
   type FactoryConfigFile,
   harnessAdapterIdentity,
   type LocalHarnessConfig,
+  planningSessionRoot,
   readConfigFile,
   resolveProvider,
 } from "./config.js";
@@ -12,6 +14,7 @@ import {
   CODEX_PLANNING_ADAPTER,
 } from "./compiler/transport.js";
 import { isExecutionState, type ContinuationState } from "./state.js";
+import { executionCredential } from "./provider-credentials.js";
 import { recordedSplitParent } from "./objective-split.js";
 import {
   continuationConfigurationMatches,
@@ -72,7 +75,11 @@ export function selectProvider(
         options.flag === undefined &&
         options.cancel
       ) {
-        const recorded = recordedAdapterProvider(file, state);
+        // A held restoration releases nothing: cancel only records itself.
+        const recorded =
+          state.restoration?.status === "held"
+            ? file.defaultProvider
+            : recordedAdapterProvider(file, state);
         if (recorded !== undefined)
           return {
             config: resolveProvider(file, recorded),
@@ -169,21 +176,30 @@ function providerFamilies(config: FactoryConfig): Set<string> {
 
 /**
  * The one configured provider whose adapters cover every adapter the
- * Objective recorded (its sessions, Work Item bindings and executions), so
- * cancel can release them after the configuration changed. With nothing
- * recorded, the default releases nothing and cancels. Undefined when no
- * provider or several fit: the operator names it with --provider.
+ * Objective recorded (its sessions, Work Item bindings and executions) and
+ * whose session root holds the recorded sessions, so cancel can release them
+ * after the configuration changed. An execution does not record its account,
+ * so providers covering the same adapters under different accounts are
+ * ambiguous. With nothing recorded, the default releases nothing and cancels.
+ * Undefined when no provider or several fit: the operator names it with
+ * --provider.
  */
 function recordedAdapterProvider(
   file: FactoryConfigFile,
   state: ContinuationState,
 ): string | undefined {
   const recorded = new Set<string>();
+  const roots = new Set<string>();
   for (const ref of [
     ...Object.values(state.agentSessions ?? {}),
     ...(state.agentSessionHistory ?? []),
-  ])
+  ]) {
     recorded.add(family(ref.adapter));
+    const data = ref.data as { sessionRoot?: unknown; root?: unknown };
+    const root = data?.sessionRoot ?? data?.root;
+    if (ref.scope.role !== "implementation" && typeof root === "string")
+      roots.add(dirname(root));
+  }
   if (isExecutionState(state)) {
     for (const item of state.graph.items)
       if (item.executionBinding)
@@ -192,9 +208,17 @@ function recordedAdapterProvider(
       if (work.execution) recorded.add(work.execution.provider);
   }
   if (!recorded.size) return file.defaultProvider;
-  const fits = Object.keys(file.providers).filter((name) => {
+  const covering = Object.keys(file.providers).filter((name) => {
     const families = providerFamilies(resolveProvider(file, name));
     return [...recorded].every((value) => families.has(value));
+  });
+  const accounts = new Set(
+    covering.map((name) => executionCredential(resolveProvider(file, name))),
+  );
+  if (accounts.size > 1) return undefined;
+  const fits = covering.filter((name) => {
+    const root = planningSessionRoot(resolveProvider(file, name));
+    return [...roots].every((value) => value === root);
   });
   return fits.length === 1 ? fits[0] : undefined;
 }

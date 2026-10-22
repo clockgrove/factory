@@ -30,6 +30,7 @@ import type {
   ReviewImageInput,
 } from "../contracts.js";
 import { codexCaptureEvent } from "../execution/interaction-capture.js";
+import { stopProvenNativeProcess } from "../execution/worker-process.js";
 import {
   currentProcessSignal,
   isNativeProcessOwner,
@@ -733,6 +734,16 @@ export class CodexPlanningTransport implements PlanningTransport {
         : {}),
       ...(data.usage ? { usage: structuredClone(data.usage) } : {}),
     };
+  }
+
+  async stopSession(session: AgentSessionRef): Promise<void> {
+    const data = this.sessionData(session);
+    // This controller's own running turn ends through its abort, not a signal.
+    if (runningTurns.has(data.sessionRoot))
+      throw new Error("Codex turn is still running in this controller");
+    // Ownership is proven before the process is signalled.
+    assertOwnedCodexHome(data.sessionRoot, this.sessionOwner(session));
+    await stopProvenNativeProcess(data.process, "Codex planning");
   }
 
   async releaseSession(session: AgentSessionRef): Promise<void> {

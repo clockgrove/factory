@@ -9,17 +9,28 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { planningSessionInputDigest } from "../dist/agent-session.js";
+import {
+  CODEX_PLANNING_CONFIG,
+  createCodexHome,
+} from "../dist/codex-planning-isolation.js";
 import { sealFinalAcceptance } from "../dist/completion.js";
 import { CodexPlanningModel } from "../dist/compiler/model.js";
 import {
   factoryConfigDigest,
+  planningSessionRoot,
   stateRoot,
   validateConfig,
 } from "../dist/config.js";
@@ -57,7 +68,13 @@ import {
   queueDigest,
   refuseUnadmittedRun,
 } from "../dist/project-queue-state.js";
-import { withOperatorCommand } from "../dist/recovery-checkpoint.js";
+import {
+  maintainRecoveryCheckpoint,
+  readVerifiedRecoveryCheckpoint,
+  synchronizeRecoveryCheckpoint,
+  withOperatorCommand,
+} from "../dist/recovery-checkpoint.js";
+import { buildRecoveryCheckpointClosure } from "../dist/recovery-checkpoint-closure.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
 import {
   cancelObjective,
@@ -76,7 +93,7 @@ import {
   statePath,
 } from "../dist/state-store.js";
 import { STATUS_PHASES } from "../dist/status-summary.js";
-import { currentProcessSignal } from "../dist/process.js";
+import { currentProcessSignal, nativeProcessOwner } from "../dist/process.js";
 import { checkServiceState, drainForUpgrade } from "../dist/supervision.js";
 import { validateWorkItem } from "../dist/validation.js";
 
@@ -158,6 +175,84 @@ const failedState = with_(executionState, (state, fixture) => {
   state.error = "fixture failure";
   state.errorItem = "local";
 });
+const HELD = new Map();
+const strays = [];
+const running = (pid) => {
+  try {
+    return !/^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+  } catch {
+    return false;
+  }
+};
+function heldDiagnosis(variant) {
+  return with_(executionState, (state, fixture, objective) => {
+    const id = randomUUID();
+    state.work.local = {
+      status: "failed",
+      step: "execute",
+      baseSha: fixture.baseSha,
+      error: "fixture failure",
+      recovery: {
+        diagnosisInvocation: {
+          id,
+          submitted: true,
+          requestDigest: "a".repeat(64),
+        },
+      },
+    };
+    const scope = {
+      repository: state.repository,
+      objective: state.objective,
+      runId: state.runId,
+      configDigest: state.configDigest,
+      role: "planning",
+    };
+    state.sourcePacketDigest =
+      state.approvedPlaybookAdmission.sourcePacketDigest;
+    scope.planningInputDigest = planningSessionInputDigest(state);
+    const transport = fixture.services.planningModel.transport;
+    const child = spawn("sleep", ["600"], { detached: true, stdio: "ignore" });
+    child.unref();
+    strays.push(child.pid);
+    HELD.set(objective, child.pid);
+    const native = nativeProcessOwner(child.pid);
+    if (variant === "boot unproven") delete native.boot;
+    if (variant === "identity differs") native.startTime += "1";
+    const identity = randomUUID();
+    const sessionRoot = join(planningSessionRoot(fixture.config), identity);
+    const ref = {
+      scope,
+      adapter: transport.adapter,
+      identity,
+      turn: 1,
+      currentTurn: {
+        invocationId: id,
+        requestDigest: "a".repeat(64),
+        dispatch: "submitted",
+        resources: "active",
+      },
+      data: {
+        sessionRoot,
+        selectionDigest: transport.selectionDigest("planner", false),
+        transport: "exec",
+        process: native,
+      },
+      status: "in-flight",
+    };
+    mkdirSync(dirname(sessionRoot), { recursive: true, mode: 0o700 });
+    createCodexHome({
+      root: sessionRoot,
+      owner:
+        variant === "home not owned"
+          ? "e".repeat(64)
+          : transport.sessionOwner(ref),
+      config: CODEX_PLANNING_CONFIG,
+    });
+    state.agentSessions = {
+      [JSON.stringify(["planning", null, scope.planningInputDigest])]: ref,
+    };
+  });
+}
 const ROWS = [
   {
     name: "queued, no state",
@@ -275,53 +370,27 @@ const ROWS = [
     none: { run: "ok", retry: "cancel_unresolved", cancel: "ok" },
     service: { retry: "cancel_unresolved", cancel: "ok" },
   },
-  {
-    name: "diagnosis held by planning",
+  ...[
+    // A stopped controller left a planning turn active: a real process and
+    // its owned home. Only a fully proven process is stopped.
+    ["proven", { cancel: "ok" }, true],
+    ["boot unproven", { cancel: "session_unsettled" }, false],
+    ["identity differs", { cancel: "session_unsettled" }, false],
+    ["home not owned", { cancel: "session_unsettled" }, false],
+  ].map(([variant, cancel, stopped]) => ({
+    name:
+      variant === "proven"
+        ? "diagnosis held by planning"
+        : `diagnosis held, ${variant}`,
     phase: "failed",
-    build: with_(executionState, (state, fixture) => {
-      const id = randomUUID();
-      state.work.local = {
-        status: "failed",
-        step: "execute",
-        baseSha: fixture.baseSha,
-        error: "fixture failure",
-        recovery: {
-          diagnosisInvocation: {
-            id,
-            submitted: true,
-            requestDigest: "a".repeat(64),
-          },
-        },
-      };
-      const scope = {
-        repository: state.repository,
-        objective: state.objective,
-        runId: state.runId,
-        configDigest: state.configDigest,
-        role: "planning",
-      };
-      state.sourcePacketDigest =
-        state.approvedPlaybookAdmission.sourcePacketDigest;
-      scope.planningInputDigest = planningSessionInputDigest(state);
-      state.agentSessions = {
-        [JSON.stringify(["planning", null, scope.planningInputDigest])]: {
-          scope,
-          adapter: "codex",
-          identity: randomUUID(),
-          turn: 1,
-          currentTurn: {
-            invocationId: id,
-            requestDigest: "a".repeat(64),
-            dispatch: "submitted",
-            resources: "active",
-          },
-          status: "in-flight",
-        },
-      };
-    }),
-    none: { retry: "diagnosis_held", cancel: gap("ok", A), pause: "ok" },
-    service: { cancel: gap("ok", A) },
-  },
+    stopped,
+    build: heldDiagnosis(variant),
+    none:
+      variant === "proven"
+        ? { retry: "diagnosis_held", ...cancel, pause: "ok" }
+        : cancel,
+    service: cancel,
+  })),
   {
     name: "operator-paused",
     phase: "waiting",
@@ -402,29 +471,49 @@ const ROWS = [
     service: { cancel: "acceptance_sealed" },
   },
   {
+    // A checkpoint of this installation's own archive, restored as held: its
+    // original snapshot and archive are in the content store, as restoration
+    // leaves them, so the recovery checkpoint admits the cancelled record.
     name: "restored, held",
     phase: "running",
-    build: with_(executionState, (state, fixture) => {
-      const bytes = Buffer.from(JSON.stringify(state));
-      const snapshot = {
-        digest: createHash("sha256").update(bytes).digest("hex"),
-        bytes: bytes.length,
-        mediaType: "application/json",
-      };
+    build: async (fixture, objective) => {
+      const { config } = fixture;
+      const state = executionState(fixture, objective);
+      saveState(statePath(config.repository, objective), state);
+      const published = await synchronizeRecoveryCheckpoint(config, {
+        reason: "explicit",
+        buildClosure: () => buildRecoveryCheckpointClosure({ config }),
+      });
+      const archive = await readVerifiedRecoveryCheckpoint(
+        config,
+        published.lastAcknowledged.commitSha,
+      );
+      const store = new LocalContentStore(
+        join(stateRoot(config.repository), "content"),
+      );
+      const original = archive.manifest.files.find(
+        (file) => file.path === `objectives/${objective}/state.json`,
+      );
+      const media = { mediaType: "application/json" };
+      const snapshot = store.putBytes(
+        Buffer.from(await archive.readVerifiedBlob(original.ref)),
+        media,
+      );
+      const stored = store.putBytes(archive.manifestBytes, media);
       const layout = {
         configDigest: state.configDigest,
         authorityDigest: "f".repeat(64),
-        checkout: fixture.config.checkout,
-        stateRoot: stateRoot(fixture.config.repository),
+        checkout: config.checkout,
+        stateRoot: stateRoot(config.repository),
       };
       state.schemaVersion = 19;
       state.restoration = {
         schemaVersion: 1,
         checkpoint: {
-          commitSha: fixture.baseSha,
-          payloadDigest: snapshot.digest,
+          commitSha: published.lastAcknowledged.commitSha,
+          payloadDigest: stored.digest,
         },
-        archive: snapshot,
+        archive: stored,
         original: {
           snapshot,
           configDigest: state.configDigest,
@@ -435,14 +524,15 @@ const ROWS = [
         status: "held",
         reason: "Foreign source ownership remains unresolved",
       };
-    }),
+      return state;
+    },
     none: {
       run: "restoration_held",
       retry: "restoration_held",
-      cancel: gap("ok", A),
+      cancel: "ok",
       start: "restoration_held",
     },
-    service: { cancel: gap("ok", A) },
+    service: { cancel: "ok" },
   },
   {
     name: "configuration changed",
@@ -714,6 +804,8 @@ function services(config, directory) {
       config.checkout,
       selection,
       selection,
+      undefined,
+      { sessionRoot: planningSessionRoot(config) },
     ),
     driver: new LocalExecutionDriver(
       config.checkout,
@@ -1155,7 +1247,7 @@ function preparationState(fixture, objective) {
 function with_(base, change) {
   return (fixture, objective) => {
     const state = base(fixture, objective);
-    change(state, fixture);
+    change(state, fixture, objective);
     return state;
   };
 }
@@ -1535,6 +1627,11 @@ async function cell(t, fixture, row, owner, command, value, objective) {
     typeof value === "string" ? {} : { todo: value.todo },
     () => assert.equal(got, want),
   );
+  // Only a proven process is stopped; a refusal signals nothing.
+  if (command === "cancel" && HELD.has(objective))
+    await t.test(`${row.name} / ${owner} / process`, () =>
+      assert.equal(running(HELD.get(objective)), !row.stopped),
+    );
 }
 
 /**
@@ -1594,7 +1691,7 @@ async function admit(fixture, owner) {
 /** Run each planned cell on its Objective with the row's state. */
 async function cells(t, fixture, owner, planned, around = (_, body) => body()) {
   for (const { row, command, value, objective, returns } of planned) {
-    const state = row.build(fixture, objective);
+    const state = await row.build(fixture, objective);
     if (state) {
       saveState(statePath(fixture.config.repository, objective), state);
       assert.equal(
@@ -1725,6 +1822,12 @@ else {
   });
 
   test("lifecycle conformance matrix", { timeout: 900_000 }, async (t) => {
+    t.after(() => {
+      for (const pid of strays)
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {}
+    });
     const fixture = await installation(t);
     fixture.next = 100;
     fixture.pool = [];
@@ -1938,5 +2041,23 @@ else {
     } finally {
       await service.stop();
     }
+  });
+  // Cancel disposes its abandoned turns itself; maintenance covers a disposal
+  // that did not finish.
+  test("maintenance disposes a cancelled Objective's abandoned turn storage", async (t) => {
+    const fixture = await installation(t, false);
+    const objective = 5;
+    const state = heldDiagnosis("proven")(fixture, objective);
+    process.kill(-HELD.get(objective), "SIGKILL");
+    const [ref] = Object.values(state.agentSessions);
+    ref.status = "unavailable";
+    ref.currentTurn.resources = "settled";
+    state.cancelRequested = true;
+    state.cancelledAt = new Date().toISOString();
+    saveState(statePath(fixture.config.repository, objective), state);
+    await maintainRecoveryCheckpoint(fixture.config);
+    const after = readContinuation(fixture.config.repository, objective);
+    assert.equal(Object.values(after.agentSessions)[0].status, "released");
+    assert.equal(existsSync(ref.data.sessionRoot), false);
   });
 }

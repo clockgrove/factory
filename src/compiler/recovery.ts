@@ -82,6 +82,7 @@ import {
   invalidOutput,
   MalformedPlannerOutput,
   PlanValidationError,
+  ProviderResponseTimeoutFailure,
 } from "./faults.js";
 import {
   assertAnsweredQuestion,
@@ -602,6 +603,13 @@ export async function compilePlan(
         () => compilePlanAdmitted(...args),
       )
     : compilePlanAdmitted(...args);
+}
+
+/** Whether a model call ended in a response timeout whose process provably stopped. */
+function timedOutAfterStop(error: unknown): boolean {
+  for (let cause = error; cause instanceof Error; cause = cause.cause)
+    if (cause instanceof ProviderResponseTimeoutFailure) return cause.stopped;
+  return false;
 }
 
 async function compilePlanAdmitted(
@@ -1199,6 +1207,26 @@ async function compilePlanAdmitted(
       // checkedPlanReview turns every answered review into a finding or a
       // failure, so whatever escapes it (even invalid output) is the step's.
       const fault = attachedFault(error);
+      // A graph review holds no session that could settle it later. Once its
+      // timed-out process is proven stopped, abandon it here so a retry asks
+      // afresh instead of leaving a submitted call nothing owns.
+      const invoked = record.invocation;
+      if (
+        reviewing &&
+        String(record.phase) === "submitted" &&
+        invoked?.phase === "graph-review" &&
+        timedOutAfterStop(error)
+      ) {
+        const receipt = record.invocations?.find(
+          (entry) => entry.id === invoked.id && entry.phase === invoked.phase,
+        );
+        if (receipt && !receipt.resultDigest) {
+          receipt.abandoned = true;
+          delete record.invocation;
+          record.phase = "ready";
+          save();
+        }
+      }
       const answered =
         !reviewing &&
         (error instanceof MalformedPlannerOutput ||

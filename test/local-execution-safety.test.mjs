@@ -10,7 +10,11 @@ import {
   hydrateWorkerInputSources,
   resolveWorkItemSources,
 } from "../dist/compiler/sources.js";
-import { step, repeatKey } from "../dist/step.js";
+import { step, repeatKey, clearWait, clearRepeats } from "../dist/step.js";
+import { ProviderResponseTimeoutFailure } from "../dist/compiler/faults.js";
+import { coverageObligations } from "../dist/qa.js";
+import { CompletedModelInvocationError } from "../dist/contracts.js";
+import { attachFault, decision } from "../dist/fault.js";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -5122,4 +5126,118 @@ test("proposal provider fences keep dispatched submissions unknown", async () =>
     /remains unknown/,
   );
   assert.equal(dispatchedJournal().pending.kind, "provider");
+});
+
+test("a graph review timed out after its process stopped is settled so a retry re-runs it", async (t) => {
+  const checkout = mkdtempSync(join(tmpdir(), "factory-review-timeout-"));
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  git(checkout, "init", "-b", "main");
+  writeFileSync(join(checkout, "README.md"), "# Fixture\n");
+  git(checkout, "add", ".");
+  git(
+    checkout,
+    "-c",
+    "user.name=F",
+    "-c",
+    "user.email=f@e.test",
+    "commit",
+    "-m",
+    "b",
+  );
+  const baseSha = git(checkout, "rev-parse", "HEAD");
+  const body =
+    "## Outcome\nUpdate the README.\n\n## Acceptance\n- The README records the change.\n\n## Sources\n- README.md\n";
+  const sha = (value) => createHash("sha256").update(value).digest("hex");
+  const state = {
+    schemaVersion: 18,
+    kind: "preparing",
+    repository: "fixture/review-timeout",
+    objective: 1,
+    runId: "run",
+    configDigest: sha("config"),
+    baseSha,
+    objectiveBodyDigest: sha(body),
+    approvedPlaybookPin: null,
+    sourcePacketDigest: sha(
+      JSON.stringify(planningSources(body, baseSha, checkout)),
+    ),
+    autonomy: resolveAutonomy(),
+    coordinator: { mode: "running", phase: "planning", processes: [] },
+  };
+  const item = {
+    id: "readme",
+    kind: "work",
+    title: "Update",
+    goal: "Update",
+    brief: "Edit README.",
+    acceptance: ["The README records the change."],
+    nonGoals: ["Other files"],
+    citations: [{ path: "README.md", heading: "" }],
+    dependencies: [],
+    ownedPaths: ["README.md"],
+    validation: [],
+    minimumAssetSets: 0,
+  };
+  const coverage = coverageObligations(body, item.acceptance).map((entry) => ({
+    ...entry,
+    itemId: "readme",
+    proof: { kind: "result-semantic" },
+    environment: {
+      kind: "local",
+      readiness: "available",
+      probe: "",
+      preparedBy: "",
+    },
+  }));
+  const timeout = new ProviderResponseTimeoutFailure(
+    new ProviderTurnTimeoutError(1000, "model-response"),
+    true,
+  );
+  const reviewed = [];
+  const model = {
+    approvedPlaybookPin: null,
+    generateStructured: async () => ({
+      objective: 1,
+      baseSha,
+      items: [item],
+      coverage,
+    }),
+    reviewGraph: async (request) => {
+      reviewed.push(request.invocation.invocationId);
+      throw attachFault(
+        new CompletedModelInvocationError(timeout),
+        decision("Model response timed out"),
+      );
+    },
+  };
+  const plan = () =>
+    step(
+      state,
+      { scope: "objective", name: "plan", paid: true },
+      (context) =>
+        compilePlan(
+          1,
+          body,
+          baseSha,
+          checkout,
+          paidPlanningModel(model, context),
+          state.configDigest,
+          undefined,
+          undefined,
+          { state, sessionState: state, save() {} },
+        ),
+      { save() {} },
+    );
+  await assert.rejects(plan(), /No provider events/);
+  assert.equal(state.planningRecovery.phase, "ready");
+  assert.equal(
+    state.planningRecovery.invocations.find((entry) => entry.id === reviewed[0])
+      .abandoned,
+    true,
+  );
+  // The operator's retry clears the step's decision; the review asks afresh.
+  clearWait(state, "objective");
+  clearRepeats(state, "objective");
+  await assert.rejects(plan(), /No provider events/);
+  assert.notEqual(reviewed[0], reviewed[1]);
 });

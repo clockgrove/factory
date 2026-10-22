@@ -1,7 +1,6 @@
-import { spawn } from "node:child_process";
 import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix, resolve, sep } from "node:path";
-import { gitEnvironment } from "../git.js";
+import { batchObjects, pinnedGitExit } from "../git.js";
 import { markdownLines } from "../markdown.js";
 
 /**
@@ -42,36 +41,16 @@ export async function repositoryView(
 // ---------------------------------------------------------------------------
 // Git
 
-/** Run git and collect its raw standard output. */
-function git(
+/** Run pinned Git and collect its raw standard output. */
+async function git(
   checkout: string,
   args: string[],
   input?: string,
   signal?: AbortSignal,
 ): Promise<Buffer> {
-  return new Promise((done, failed) => {
-    const child = spawn("git", ["-C", checkout, ...args], {
-      env: gitEnvironment(),
-      stdio: ["pipe", "pipe", "pipe"],
-      ...(signal ? { signal } : {}),
-    });
-    const out: Buffer[] = [];
-    let err = "";
-    child.stdout.on("data", (chunk: Buffer) => out.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (err.length < 4096) err += chunk.toString("utf8");
-    });
-    child.on("error", failed);
-    child.on("close", (code) =>
-      code === 0
-        ? done(Buffer.concat(out))
-        : failed(new Error(`git ${args[0]} exited ${code}: ${err.trim()}`)),
-    );
-    child.stdin.on("error", () => {
-      // git may exit before reading stdin; its exit code reports the failure.
-    });
-    child.stdin.end(input ?? "");
-  });
+  const result = await pinnedGitExit(checkout, args, { input, signal });
+  if (result.code === 0) return result.stdout;
+  throw new Error(`git ${args[0]} exited ${result.code}: ${result.stderr}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -155,16 +134,13 @@ async function readBlobs(
     files.map((entry) => `${entry.sha}\n`).join(""),
     signal,
   );
-  let offset = 0;
-  return files.map((entry) => {
-    const newline = output.indexOf(10, offset);
-    const header = output.subarray(offset, newline).toString("utf8");
+  const objects = batchObjects(output, files.length);
+  return files.map((entry, index) => {
+    const { header, body } = objects[index]!;
     if (header !== `${entry.sha} blob ${entry.size}`)
       throw new Error(
         `git cat-file returned "${header}" for ${entry.path}; expected ${entry.sha} blob ${entry.size}`,
       );
-    const body = output.subarray(newline + 1, newline + 1 + entry.size);
-    offset = newline + 1 + entry.size + 1;
     return body;
   });
 }

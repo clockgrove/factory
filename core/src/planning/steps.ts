@@ -1,12 +1,13 @@
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { CoreConfig } from "../config.js";
-import type { Outcome, Step, StepContext } from "../engine.js";
+import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
 import { defaultHead } from "../git.js";
 import { type GitHub, GitHubError, TransientError } from "../github.js";
 import { parseObjective } from "../objective.js";
 import { type Planner, PlannerError } from "../providers/planner.js";
 import type { ObjectiveState } from "../state.js";
+import { declarationProblems } from "../validate.js";
 import { checkPlan } from "./checks.js";
 import { observeLocalExecutables } from "./executables.js";
 import {
@@ -579,12 +580,11 @@ function decideStep(
             case "answer":
             case "allow": {
               if (!answer.text?.trim())
-                return {
-                  kind: "hold",
-                  question: `${question?.text ?? "Planning needs your answer."}\n\n\`${answer.answer}\` needs text after it, for example \`/factory ${answer.answer === "allow" ? "allow pnpm run test:e2e" : "answer use the existing parser"}\`.`,
-                  answers: question?.answers ?? ASK,
-                  recommended: answer.answer,
-                };
+                return hold(
+                  `${question?.text ?? "Planning needs your answer."}\n\n\`${answer.answer}\` needs text after it, for example \`/factory ${answer.answer === "allow" ? "allow pnpm run test:e2e" : "answer use the existing parser"}\`.`,
+                  question?.answers ?? ASK,
+                  answer.answer,
+                );
               const decision = record(answer.text.trim());
               return done({
                 decision,
@@ -594,12 +594,7 @@ function decideStep(
           }
         }
         if (question)
-          return {
-            kind: "hold",
-            question: question.text,
-            answers: question.answers,
-            recommended: question.recommended,
-          };
+          return hold(question.text, question.answers, question.recommended);
         if (findings.length === 0) {
           // Before accepting, the Objective must still read as planning read it.
           if (answer?.answer !== "continue") {
@@ -614,13 +609,15 @@ function decideStep(
 }
 
 function changedHold(state: ObjectiveState): Outcome {
-  return {
-    kind: "hold",
-    question: `Objective #${state.issue} was edited after planning read it. \`replan\` plans again from the new text; \`continue\` keeps this plan.`,
-    answers: ["replan", "continue", "cancel"],
-    recommended: "replan",
-  };
+  return hold(
+    `Objective #${state.issue} was edited after planning read it. \`replan\` plans again from the new text; \`continue\` keeps this plan.`,
+    ["replan", "continue", "cancel"],
+  );
 }
+
+/** An issue body as compared for edits: GitHub may send CRLF line ends. */
+export const normalizedBody = (text: string | null): string =>
+  (text ?? "").replace(/\r\n/g, "\n").trim();
 
 /** Whether the issue body differs from the one this generation planned from. */
 async function objectiveChanged(
@@ -629,10 +626,10 @@ async function objectiveChanged(
   deps: PlanningDeps,
   signal: AbortSignal,
 ): Promise<boolean> {
-  const issue = await readIssue(state.issue, deps, signal);
-  const normalize = (text: string) => text.replace(/\r\n/g, "\n").trim();
+  const issue = await deps.github.issue(state.issue, signal);
   return (
-    normalize(issue.body ?? "") !== normalize(generationInputs(state, g).body)
+    normalizedBody(issue.body) !==
+    normalizedBody(generationInputs(state, g).body)
   );
 }
 
@@ -786,30 +783,11 @@ async function postPlan(
       { body },
       signal,
     );
-  else
-    await deps.github.rest(
-      "POST",
-      `/repos/${repository}/issues/${issue}/comments`,
-      { body },
-      signal,
-    );
+  else await deps.github.postComment(issue, body, signal);
 }
 
 // ---------------------------------------------------------------------------
 // Shared
-
-export function readIssue(
-  issue: number,
-  deps: PlanningDeps,
-  signal: AbortSignal,
-): Promise<{ title: string; body: string | null; state: string }> {
-  return deps.github.rest(
-    "GET",
-    `/repos/${deps.config.repository}/issues/${issue}`,
-    undefined,
-    signal,
-  );
-}
 
 /**
  * Read the issue and the default branch head, and run the Objective checks.
@@ -822,15 +800,14 @@ export async function readObjective(
   signal: AbortSignal,
 ): Promise<{ inputs: ObjectiveInputs } | { hold: Outcome }> {
   const { config } = deps;
-  const found = await readIssue(issue, deps, signal);
+  const found = await deps.github.issue(issue, signal);
   if (found.state !== "open")
     return {
-      hold: {
-        kind: "hold",
-        question: `Issue #${issue} is closed. Reopen it and answer \`${again}\`, or cancel.`,
-        answers: [again, "cancel"],
-        recommended: "cancel",
-      },
+      hold: hold(
+        `Issue #${issue} is closed. Reopen it and answer \`${again}\`, or cancel.`,
+        [again, "cancel"],
+        "cancel",
+      ),
     };
   const body = found.body ?? "";
   const inputs = {
@@ -839,6 +816,9 @@ export async function readObjective(
     title: found.title,
   };
   const { problems } = parseObjective(body);
+  // The optional declarations (Package manager update, Quality checkpoint,
+  // Workspace package additions): checked here once, trusted afterwards.
+  problems.push(...declarationProblems(body));
   if (!problems.length)
     problems.push(
       ...(await objectiveCommandProblems(body, inputs.base, config.checkout, {
@@ -854,12 +834,10 @@ export async function readObjective(
 }
 
 function objectiveProblemsHold(problems: string[], again: string): Outcome {
-  return {
-    kind: "hold",
-    question: `This Objective needs fixing before Factory can plan it:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nEdit the issue, then answer \`${again}\`.`,
-    answers: [again, "cancel"],
-    recommended: again,
-  };
+  return hold(
+    `This Objective needs fixing before Factory can plan it:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nEdit the issue, then answer \`${again}\`.`,
+    [again, "cancel"],
+  );
 }
 
 /** The planner's facts at the generation's base, with the operator's allowed commands. */
@@ -957,20 +935,12 @@ export async function guarded(work: () => Promise<Outcome>): Promise<Outcome> {
           reason: error.message,
           afterMs: error.afterMs ?? -1,
         };
-      if (error.outcome === "hold")
-        return {
-          kind: "hold",
-          question: error.message,
-          answers: ["retry", "cancel"],
-          recommended: "retry",
-        };
+      if (error.outcome === "hold") return hold(error.message);
       // Too large for the model, or refused: the Objective has to change.
-      return {
-        kind: "hold",
-        question: `${error.message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`,
-        answers: ["replan", "retry", "cancel"],
-        recommended: "replan",
-      };
+      return hold(
+        `${error.message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`,
+        ["replan", "retry", "cancel"],
+      );
     }
     if (error instanceof TransientError)
       return {
@@ -981,20 +951,15 @@ export async function guarded(work: () => Promise<Outcome>): Promise<Outcome> {
           : {}),
       };
     if (error instanceof GitHubError && error.status === 401)
-      return {
-        kind: "hold",
-        question:
-          "GitHub refused Factory's login. Run `gh auth login` (or replace FACTORY_GITHUB_TOKEN), then answer `retry`.",
-        answers: ["retry", "cancel"],
-        recommended: "retry",
-      };
+      return hold(
+        "GitHub refused Factory's login. Run `gh auth login` (or replace FACTORY_GITHUB_TOKEN), then answer `retry`.",
+      );
     if (error instanceof GitHubError && error.status === 404)
-      return {
-        kind: "hold",
-        question: `GitHub says the issue doesn't exist or Factory can't see it (${error.message}).`,
-        answers: ["retry", "cancel"],
-        recommended: "cancel",
-      };
+      return hold(
+        `GitHub says the issue doesn't exist or Factory can't see it (${error.message}).`,
+        ["retry", "cancel"],
+        "cancel",
+      );
     throw error;
   }
 }

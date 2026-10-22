@@ -8,21 +8,16 @@
  */
 import {
   existsSync,
-  mkdirSync,
-  mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { SandboxConfig } from "../config.js";
 import { hold } from "../engine.js";
 import { redact } from "../log.js";
-import { within } from "../paths.js";
 import {
   gitMetadata,
   killGroup,
@@ -32,15 +27,15 @@ import {
   runsAsRoot,
   toolchainDirectories,
 } from "../sandbox.js";
+import { errorMessage } from "../text.js";
 import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
 import { workerToolchainPath } from "../worktree.js";
 import {
   type CodexEffort,
   codexFailure,
   codexRuntimeDirectory,
-  ENVIRONMENT,
+  privateCodexHome,
   saveModelsCache,
-  seedModelsCache,
 } from "./codex.js";
 import {
   detail,
@@ -49,7 +44,7 @@ import {
   PlannerError,
 } from "./planner.js";
 
-export const DEFAULT_CODEX_WORKER_MODEL: ModelChoice<CodexEffort> = {
+const DEFAULT_CODEX_WORKER_MODEL: ModelChoice<CodexEffort> = {
   model: "gpt-6.1-sol",
   effort: "medium",
 };
@@ -121,36 +116,34 @@ function workerHome(
       "setsid (util-linux) is not installed, so Factory can't stop a Codex worker's commands; install util-linux",
     );
   const workspace = real(worktree);
-  const root = mkdtempSync(join(tmpdir(), "factory-codex-"));
-  try {
-    if (within(real(root), workspace))
-      throw new Error("Codex homes must stay outside the worktree");
-    const home = join(root, "home");
-    const codexDir = join(root, "codex-home");
-    const temporary = join(root, "tmp");
-    for (const directory of [home, codexDir, temporary])
-      mkdirSync(directory, { mode: 0o700 });
-    const source: NodeJS.ProcessEnv = {
-      ...process.env,
-      PATH: workerToolchainPath(process.env.PATH),
-    };
-    const path = (value: string) => JSON.stringify(value);
-    const runtime = codexRuntimeDirectory();
-    const grants = [
-      `":minimal" = "read"`,
-      `${path(runtime)} = "read"`,
-      ...[
-        ...toolchainDirectories(source, workspace, "Codex workers"),
-        ...gitMetadata(workspace),
-      ].map((directory) => `${path(directory)} = "read"`),
-      `${path(home)} = "write"`,
-      `${path(temporary)} = "write"`,
-    ];
-    // Name resolution: /etc/resolv.conf often links outside `:minimal`
-    // (systemd-resolved under /run, WSL under /mnt/wsl).
-    if (network && existsSync("/etc/resolv.conf"))
-      grants.push(`${path(realpathSync("/etc/resolv.conf"))} = "read"`);
-    const profile = `[permissions.factory.filesystem]
+  const source: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: workerToolchainPath(process.env.PATH),
+  };
+  const runtime = codexRuntimeDirectory();
+  return privateCodexHome({
+    outside: { directory: workspace, name: "worktree" },
+    source,
+    keep,
+    config: ({ home, temporary }) => {
+      const path = (value: string) => JSON.stringify(value);
+      const grants = [
+        `":minimal" = "read"`,
+        `${path(runtime)} = "read"`,
+        ...[
+          ...toolchainDirectories(source, workspace, "Codex workers"),
+          ...gitMetadata(workspace),
+        ].map((directory) => `${path(directory)} = "read"`),
+        `${path(home)} = "write"`,
+        `${path(temporary)} = "write"`,
+      ];
+      // Name resolution: /etc/resolv.conf often links outside `:minimal`
+      // (systemd-resolved under /run, WSL under /mnt/wsl).
+      if (network && existsSync("/etc/resolv.conf"))
+        grants.push(`${path(realpathSync("/etc/resolv.conf"))} = "read"`);
+      return `default_permissions = "factory"
+
+[permissions.factory.filesystem]
 ${grants.join("\n")}
 
 [permissions.factory.filesystem.":workspace_roots"]
@@ -160,53 +153,32 @@ ${grants.join("\n")}
 [permissions.factory.network]
 enabled = ${network}
 `;
-    writeFileSync(
-      join(codexDir, "config.toml"),
-      `default_permissions = "factory"\n\n${profile}`,
-      { mode: 0o600, flag: "wx" },
-    );
-    const login = join(
-      process.env.CODEX_HOME || join(process.env.HOME || homedir(), ".codex"),
-      "auth.json",
-    );
-    if (existsSync(login)) symlinkSync(login, join(codexDir, "auth.json"));
-    seedModelsCache(codexDir);
-    const env: Record<string, string> = {};
-    for (const [name, value] of Object.entries(source))
-      if (
-        value !== undefined &&
-        (ENVIRONMENT.some((pattern) => pattern.test(name)) ||
-          keep.includes(name))
-      )
-        env[name] = value;
-    env.HOME = home;
-    env.CODEX_HOME = codexDir;
-    env.TMPDIR = temporary;
-    // Package caches stay in the private HOME, never in the worktree.
-    Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
-    env.GIT_OPTIONAL_LOCKS = "0";
-    // The SDK adds the runtime's helper directory (rg) only for its own binary.
-    const target = join(
-      runtime,
-      process.arch === "arm64"
-        ? "aarch64-unknown-linux-musl"
-        : "x86_64-unknown-linux-musl",
-    );
-    env.PATH = [join(target, "codex-path"), env.PATH].filter(Boolean).join(":");
-    // setsid makes codex the leader of a new process group, so an abort
-    // kills it and every command it started, not just codex.
-    const pidFile = join(root, "codex.pid");
-    const launcher = join(root, "codex");
-    writeFileSync(
-      launcher,
-      `#!/bin/sh\necho $$ > ${quote(pidFile)}\nexec ${setsid} ${quote(join(target, "bin", "codex"))} "$@"\n`,
-      { mode: 0o700, flag: "wx" },
-    );
-    return { root, launcher, pidFile, env };
-  } catch (error) {
-    rmSync(root, { recursive: true, force: true });
-    throw error;
-  }
+    },
+    finish: ({ root, home, env }) => {
+      // Package caches stay in the private HOME, never in the worktree.
+      Object.assign(env, packageCacheEnvironment(join(home, ".cache")));
+      // The SDK adds the runtime's helper directory (rg) only for its own binary.
+      const target = join(
+        runtime,
+        process.arch === "arm64"
+          ? "aarch64-unknown-linux-musl"
+          : "x86_64-unknown-linux-musl",
+      );
+      env.PATH = [join(target, "codex-path"), env.PATH]
+        .filter(Boolean)
+        .join(":");
+      // setsid makes codex the leader of a new process group, so an abort
+      // kills it and every command it started, not just codex.
+      const pidFile = join(root, "codex.pid");
+      const launcher = join(root, "codex");
+      writeFileSync(
+        launcher,
+        `#!/bin/sh\necho $$ > ${quote(pidFile)}\nexec ${setsid} ${quote(join(target, "bin", "codex"))} "$@"\n`,
+        { mode: 0o700, flag: "wx" },
+      );
+      return { root, launcher, pidFile, env };
+    },
+  });
 }
 
 /** The process group a launcher recorded, once codex has started. */
@@ -285,7 +257,7 @@ export class CodexWorker implements Worker {
       home = workerHome(input.worktree, this.options.network === "host", keep);
     } catch (error) {
       return hold(
-        `Factory could not set up the Codex worker home: ${detail(error instanceof Error ? error.message : String(error))}. Fix the host or installation, then answer retry.`,
+        `Factory could not set up the Codex worker home: ${detail(errorMessage(error))}. Fix the host or installation, then answer retry.`,
       );
     }
     const watchdog = new IdleWatchdog(
@@ -404,14 +376,7 @@ export class CodexWorker implements Worker {
       // Cancelled or past the step deadline: the engine decides.
       if (input.signal.aborted) throw input.signal.reason ?? error;
       // A failed codex process: its stderr is in the message.
-      return outcome(
-        codexFailure(
-          redact(
-            error instanceof Error ? error.message : String(error),
-            secrets,
-          ),
-        ),
-      );
+      return outcome(codexFailure(redact(errorMessage(error), secrets)));
     } finally {
       clearInterval(polling);
       watchdog.stop();

@@ -42,7 +42,7 @@ import { ownsPath } from "../planning/graph.js";
 import { DESIGN_QUESTIONS } from "../planning/rubric.js";
 import type { Plan } from "../planning/types.js";
 import { runSandboxed, sandboxAvailable } from "../sandbox.js";
-import { BoundedText, headAndTail } from "../text.js";
+import { BoundedText, errorMessage, headAndTail } from "../text.js";
 import { validateTree } from "../validate.js";
 import {
   type HandoffNote,
@@ -58,11 +58,10 @@ import { GitRefusal, hasGitlink, validationEnvironment } from "../worktree.js";
 import {
   ACTIVE_TOOL_IDLE_MS,
   apiErrorStatus,
-  authenticationFailure,
   type ClaudeEffort,
   claudeEnvironment,
   DEFAULT_MAX_OUTPUT_TOKENS,
-  LIMIT_WAIT_MS,
+  failedResult,
   type SessionFacts,
   SYNTHETIC_MODEL,
   serviceLoginEnvironment,
@@ -93,7 +92,7 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"];
 /** Factory's own tool in `tools`, served over MCP, not an SDK built-in. */
 const VALIDATE = "Validate";
 
-export const DEFAULT_CLAUDE_WORKER: ClaudeWorkerConfig = {
+const DEFAULT_CLAUDE_WORKER: ClaudeWorkerConfig = {
   model: "claude-opus-5-5",
   effort: "medium",
   permissionMode: "acceptEdits",
@@ -112,6 +111,8 @@ export interface ClaudeWorkerOptions {
   plan: Plan;
   /** The Objective body as planned: its package-manager and workspace pins. */
   body: string;
+  /** Operator variables the worker's commands may see, by name. */
+  allowedSecretNames?: readonly string[];
 }
 
 // Prompts
@@ -269,9 +270,6 @@ const text = (value: string, isError = false): ToolText => ({
   ...(isError && { isError }),
 });
 
-const errorText = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
-
 /** Plain text, cut to its start and end. */
 function returned(output: string): string {
   return headAndTail(
@@ -399,7 +397,7 @@ class Attempt {
             try {
               return text(await result);
             } catch (error) {
-              return text(`Command not run: ${errorText(error)}`, true);
+              return text(`Command not run: ${errorMessage(error)}`, true);
             }
           },
           {
@@ -432,7 +430,10 @@ class Attempt {
         cwd: this.input.worktree,
         home: join(this.root, "home"),
         temporary: join(this.root, "tmp"),
-        env: validationEnvironment(join(this.root, "gh")),
+        env: {
+          ...validationEnvironment(join(this.root, "gh")),
+          ...secretEnvironment(this.options.allowedSecretNames),
+        },
         config: { ...this.options.sandbox, required: true },
         network: false,
         packageInstall: false,
@@ -481,7 +482,7 @@ class Attempt {
             try {
               return text(`Deleted ${this.deleteOwnedFile(path)}`);
             } catch (error) {
-              return text(`File not deleted: ${errorText(error)}`, true);
+              return text(`File not deleted: ${errorMessage(error)}`, true);
             }
           },
           {
@@ -505,7 +506,7 @@ class Attempt {
                 `Copied ${copied.from} to ${copied.to}: ${copied.bytes} bytes, sha256 ${copied.sha256}`,
               );
             } catch (error) {
-              return text(`File not copied: ${errorText(error)}`, true);
+              return text(`File not copied: ${errorMessage(error)}`, true);
             }
           },
           {
@@ -687,7 +688,7 @@ class Attempt {
               return text(await result);
             } catch (error) {
               return text(
-                `Factory validation unavailable: ${errorText(error)}`,
+                `Factory validation unavailable: ${errorMessage(error)}`,
                 true,
               );
             }
@@ -962,9 +963,9 @@ const LOGIN_HOLD =
   "Worker login expired: run `claude auth login` on the service host, then answer retry";
 
 /**
- * A failed result's outcome, from structured fields only, in the planner's
- * order (claude.ts settle): refusal, billing, login, context, limits, then
- * anything else retries in a fresh attempt.
+ * A failed result's outcome, from structured fields only: a refusal holds,
+ * then claude.ts failedResult classifies the rest as the planner does;
+ * anything unclassified retries in a fresh attempt.
  */
 function failure(
   result: SDKResultMessage,
@@ -977,42 +978,21 @@ function failure(
       `Claude refused to continue this Work Item (${ended}). Answer retry to run it again.`,
     );
   if (succeeded) return undefined;
-  if (
-    facts.assistantError === "billing_error" ||
-    facts.limit?.errorCode === "credits_required"
-  )
-    return hold(
-      `Restore the Claude plan, credits or billing for the service's Claude login, then answer retry (${ended})`,
-    );
-  if (authenticationFailure(result, facts.assistantError))
-    return hold(`${LOGIN_HOLD} (${ended})`);
-  if (result.terminal_reason === "prompt_too_long")
-    return hold(
-      `The Work Item's prompt is larger than the worker model's context window; choose a model with a larger window or replan the item smaller, then answer retry (${ended})`,
-    );
-  const status = apiErrorStatus(result);
-  const resetsAt = facts.limit?.resetsAt;
-  if (
-    resetsAt !== undefined &&
-    Number.isFinite(resetsAt) &&
-    (status === 429 || facts.assistantError === "rate_limit")
-  )
-    return {
-      kind: "retry",
-      reason: `Claude usage limit until ${new Date(resetsAt * 1000).toISOString()}: ${ended}`,
-      afterMs: Math.max(0, resetsAt * 1000 - Date.now()),
-    };
-  if (
-    status === 429 ||
-    facts.assistantError === "rate_limit" ||
-    facts.limit !== undefined
-  )
-    return {
-      kind: "retry",
-      reason: `Claude rate or usage limit: ${ended}`,
-      afterMs: LIMIT_WAIT_MS,
-    };
-  return { kind: "retry", reason: ended };
+  const failed = failedResult(result, facts, ended);
+  switch (failed.kind) {
+    case "billing":
+      return hold(failed.message);
+    case "login":
+      return hold(`${LOGIN_HOLD} (${ended})`);
+    case "too-long":
+      return hold(
+        `The Work Item's prompt is larger than the worker model's context window; choose a model with a larger window or replan the item smaller, then answer retry (${ended})`,
+      );
+    case "limit":
+      return { kind: "retry", reason: failed.message, afterMs: failed.afterMs };
+    case "other":
+      return { kind: "retry", reason: ended };
+  }
 }
 
 /** Which tool a call used and the worktree file or program it targeted, never its content. */
@@ -1390,7 +1370,7 @@ export class ClaudeWorker implements Worker {
       if (input.signal.aborted) throw input.signal.reason ?? error;
       return {
         kind: "retry",
-        reason: `The Claude worker's turn was lost: ${detail(errorText(error))}`,
+        reason: `The Claude worker's turn was lost: ${detail(errorMessage(error))}`,
       };
     } finally {
       watchdog.signal.removeEventListener("abort", abort);
@@ -1422,4 +1402,18 @@ export class ClaudeWorker implements Worker {
       ...(tree && { validated: { tree, commands: [...input.commands] } }),
     };
   }
+}
+
+/** The named operator variables a worker's commands may see; never Git, GitHub or SSH ones. */
+function secretEnvironment(
+  names: readonly string[] = [],
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of names)
+    if (
+      process.env[name] !== undefined &&
+      !/^(GH_|GITHUB_|GIT_|SSH_)/.test(name)
+    )
+      env[name] = process.env[name]!;
+  return env;
 }

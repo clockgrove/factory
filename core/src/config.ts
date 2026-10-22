@@ -37,6 +37,18 @@ export interface CoreConfig {
     workers: number;
     /** CPU-heavy steps (validation) at once across the host. */
     validations: number;
+    /** Repairs of one Work Item before Factory asks. */
+    repairs: number;
+    /** The worker provider; defaults to the planning provider. */
+    workerProvider: "codex" | "claude";
+    /** The Codex worker shell's network. */
+    codexNetwork: "off" | "host";
+    /** Claude worker settings (model, effort, maxTurns, tools, allowedTools, permissionMode). */
+    claudeWorker: Record<string, unknown>;
+  };
+  policy: {
+    /** Operator variables a worker's shell may see, by name. */
+    allowedSecretNames: string[];
   };
   finalValidation: {
     /** Commands every Objective's result must pass. */
@@ -97,7 +109,7 @@ export interface SandboxLimits {
   processes: number;
 }
 
-export const DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
+const DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
   tmpMiB: 1024,
   homeMiB: 4096,
   checkoutMiB: 8192,
@@ -364,6 +376,24 @@ export function loadConfig(repository: string): CoreConfig {
       execution.validations,
       "execution.validations",
       Math.max(2, Math.floor(cpus / 4)),
+    ),
+    repairs: count(execution.repairs, "execution.repairs", 6),
+    workerProvider:
+      execution.workerProvider === "claude" ||
+      execution.workerProvider === "codex"
+        ? execution.workerProvider
+        : config.planning.provider,
+    codexNetwork: execution.codexNetwork === "host" ? "host" : "off",
+    claudeWorker:
+      execution.claudeWorker && typeof execution.claudeWorker === "object"
+        ? (execution.claudeWorker as Record<string, unknown>)
+        : {},
+  };
+  const policy = (raw.policy ?? {}) as Record<string, unknown>;
+  config.policy = {
+    allowedSecretNames: list(
+      policy.allowedSecretNames,
+      "policy.allowedSecretNames",
     ),
   };
   config.finalValidation = {

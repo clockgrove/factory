@@ -84,9 +84,19 @@ async function main(argv: string[]): Promise<number> {
           planner,
           workDir: (issue) => join(paths.root, "work", String(issue)),
           worker: (plan, body) =>
-            config.planning.provider === "claude"
-              ? new ClaudeWorker({ sandbox: config.sandbox, plan, body })
-              : new CodexWorker({ sandbox: config.sandbox }),
+            config.execution.workerProvider === "claude"
+              ? new ClaudeWorker({
+                  sandbox: config.sandbox,
+                  plan,
+                  body,
+                  config: config.execution.claudeWorker,
+                  allowedSecretNames: config.policy.allowedSecretNames,
+                })
+              : new CodexWorker({
+                  sandbox: config.sandbox,
+                  network: config.execution.codexNetwork,
+                  allowedSecretNames: config.policy.allowedSecretNames,
+                }),
         });
       }
       if (loaded)
@@ -104,7 +114,12 @@ async function main(argv: string[]): Promise<number> {
           : {}),
         limits: {
           ...DEFAULT_LIMITS,
-          ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),
+          ...(loaded
+            ? {
+                concurrency: loaded.execution.concurrency,
+                maxRepairs: loaded.execution.repairs,
+              }
+            : {}),
           ...(process.env.FACTORY_BACKOFF_MS
             ? { baseBackoffMs: Number(process.env.FACTORY_BACKOFF_MS) }
             : {}),

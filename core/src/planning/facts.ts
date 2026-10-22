@@ -5,6 +5,7 @@ import { gitEnvironment } from "../git.js";
 import { TransientError } from "../github.js";
 import { markdownLines } from "../markdown.js";
 import { parseObjective, type SourceRef, validPath } from "../objective.js";
+import { errorMessage } from "../text.js";
 import type {
   CoverageObligation,
   PinnedSource,
@@ -139,7 +140,7 @@ export class BaseFiles {
     } catch (error) {
       if (this.signal?.aborted) throw this.signal.reason;
       throw new TransientError(
-        `git ${args[0]} at base ${this.base.slice(0, 12)} in ${this.checkout}: ${error instanceof Error ? error.message : String(error)}`,
+        `git ${args[0]} at base ${this.base.slice(0, 12)} in ${this.checkout}: ${errorMessage(error)}`,
       );
     }
   }

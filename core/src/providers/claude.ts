@@ -66,7 +66,7 @@ function modelResponseTimeoutMs(reasoningEffort?: string): number {
 /** The quiet bound while a read tool runs. */
 export const ACTIVE_TOOL_IDLE_MS = 45 * 60 * 1_000;
 /** How long a rate or usage limit with no reset time waits before a retry. */
-export const LIMIT_WAIT_MS = 15 * 60 * 1_000;
+const LIMIT_WAIT_MS = 15 * 60 * 1_000;
 
 /** The Agent SDK's internal tool that carries `outputFormat` results. */
 const STRUCTURED_OUTPUT_TOOL = "StructuredOutput";
@@ -584,7 +584,7 @@ export function apiErrorStatus(result: SDKResultMessage): number | undefined {
  * Whether a failed result is an authentication failure, from its structured
  * fields: API status 401, a login assistant error or a sign-in startup failure.
  */
-export function authenticationFailure(
+function authenticationFailure(
   result: SDKResultMessage,
   assistantError: SDKAssistantMessageError | undefined,
 ): boolean {
@@ -595,6 +595,60 @@ export function authenticationFailure(
       : result.startup_failure_reason === "gateway_signin_required") ||
     (assistantError !== undefined && AUTHENTICATION_ERRORS.has(assistantError))
   );
+}
+
+/** A failed result's class, in the order planner and worker check it. */
+export type FailedResult =
+  | { kind: "billing"; message: string }
+  | { kind: "login" }
+  | { kind: "too-long" }
+  | { kind: "limit"; message: string; afterMs: number }
+  | { kind: "other" };
+
+/**
+ * Classify a failed result from its structured fields only: billing, login,
+ * context, limits, then anything else. `ended` describes the result.
+ */
+export function failedResult(
+  result: SDKResultMessage,
+  facts: SessionFacts,
+  ended: string,
+): FailedResult {
+  if (
+    facts.assistantError === "billing_error" ||
+    facts.limit?.errorCode === "credits_required"
+  )
+    return {
+      kind: "billing",
+      message: `Restore the Claude plan, credits or billing for the service's Claude login, then answer retry (${ended})`,
+    };
+  if (authenticationFailure(result, facts.assistantError))
+    return { kind: "login" };
+  if (result.terminal_reason === "prompt_too_long") return { kind: "too-long" };
+  const status = apiErrorStatus(result);
+  const resetsAt = facts.limit?.resetsAt;
+  if (
+    resetsAt !== undefined &&
+    Number.isFinite(resetsAt) &&
+    (status === 429 || facts.assistantError === "rate_limit")
+  )
+    return {
+      kind: "limit",
+      message: `Claude usage limit until ${new Date(resetsAt * 1000).toISOString()}: ${ended}`,
+      afterMs: Math.max(0, resetsAt * 1000 - Date.now()),
+    };
+  // A limit with no reset time waits instead of spending the error count.
+  if (
+    status === 429 ||
+    facts.assistantError === "rate_limit" ||
+    facts.limit !== undefined
+  )
+    return {
+      kind: "limit",
+      message: `Claude rate or usage limit: ${ended}`,
+      afterMs: LIMIT_WAIT_MS,
+    };
+  return { kind: "other" };
 }
 
 /**
@@ -621,51 +675,27 @@ function settle(
       "fail",
       "Claude response ended with stop_reason refusal",
     );
-  if (
-    !succeeded &&
-    (facts.assistantError === "billing_error" ||
-      facts.limit?.errorCode === "credits_required")
-  )
-    throw new PlannerError(
-      "hold",
-      `Restore the Claude plan, credits or billing for the service's Claude login, then answer retry (${ended})`,
-    );
-  if (authenticationFailure(result, facts.assistantError)) {
-    if (!facts.modelResponded && status === 401)
-      throw new CredentialRejected("retry", `${LOGIN_HOLD} (${ended})`);
-    throw new PlannerError("hold", `${LOGIN_HOLD} (${ended})`);
-  }
   if (!succeeded) {
-    if (result.terminal_reason === "prompt_too_long")
-      throw new PlannerError(
-        "fail",
-        `The request is larger than the model's context window: ${ended}`,
-      );
-    const resetsAt = facts.limit?.resetsAt;
-    if (
-      resetsAt !== undefined &&
-      Number.isFinite(resetsAt) &&
-      (status === 429 || facts.assistantError === "rate_limit")
-    )
-      throw new PlannerError(
-        "retry",
-        `Claude usage limit until ${new Date(resetsAt * 1000).toISOString()}: ${ended}`,
-        Math.max(0, resetsAt * 1000 - Date.now()),
-      );
-    // A limit with no reset time waits instead of spending the error count.
-    if (
-      status === 429 ||
-      facts.assistantError === "rate_limit" ||
-      facts.limit !== undefined
-    )
-      throw new PlannerError(
-        "retry",
-        `Claude rate or usage limit: ${ended}`,
-        LIMIT_WAIT_MS,
-      );
-    // Overload, connection, turn or output limits, structured output
-    // retries and anything unknown: a fresh call may succeed.
-    throw new PlannerError("retry", ended);
+    const failed = failedResult(result, facts, ended);
+    switch (failed.kind) {
+      case "billing":
+        throw new PlannerError("hold", failed.message);
+      case "login":
+        if (!facts.modelResponded && status === 401)
+          throw new CredentialRejected("retry", `${LOGIN_HOLD} (${ended})`);
+        throw new PlannerError("hold", `${LOGIN_HOLD} (${ended})`);
+      case "too-long":
+        throw new PlannerError(
+          "fail",
+          `The request is larger than the model's context window: ${ended}`,
+        );
+      case "limit":
+        throw new PlannerError("retry", failed.message, failed.afterMs);
+      // Overload, connection, turn or output limits, structured output
+      // retries and anything unknown: a fresh call may succeed.
+      case "other":
+        throw new PlannerError("retry", ended);
+    }
   }
   if (!facts.initialized)
     throw new PlannerError(

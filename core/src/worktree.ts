@@ -10,7 +10,7 @@
  * command, origin must still name the configured repository: a worker can
  * edit the checkout's `.git/config`.
  */
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -22,7 +22,12 @@ import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { gitEnvironment, operatorGit } from "./git.js";
+import {
+  type GitExit,
+  gitEnvironment,
+  operatorGit,
+  pinnedGitExit,
+} from "./git.js";
 import { forceRemove } from "./paths.js";
 
 const run = promisify(execFile);
@@ -299,14 +304,6 @@ export interface HostGitOptions {
   stdout?: number | "ignore";
 }
 
-export interface GitExit {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  stdout: Buffer;
-  /** At most the first 4 KiB, trimmed. */
-  stderr: string;
-}
-
 /**
  * Run pinned host Git in `directory` and report how it exited. A
  * registered worktree must still name its admin directory, and no
@@ -323,28 +320,12 @@ export async function hostGitExit(
   await assertNoRepositoryPrograms(directory, env, options.signal);
   if (options.magic) delete env.GIT_LITERAL_PATHSPECS;
   if (options.index) env.GIT_INDEX_FILE = options.index;
-  return new Promise((done, failed) => {
-    const child = spawn("git", ["-C", directory, ...args], {
-      env,
-      stdio: ["pipe", options.stdout ?? "pipe", "pipe"],
-      timeout: options.timeoutMs ?? 5 * MINUTE,
-      killSignal: "SIGKILL",
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
-    const out: Buffer[] = [];
-    let err = "";
-    child.stdout?.on("data", (chunk: Buffer) => out.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (err.length < 4096) err += chunk.toString("utf8");
-    });
-    child.on("error", failed);
-    child.on("close", (code, signal) =>
-      done({ code, signal, stdout: Buffer.concat(out), stderr: err.trim() }),
-    );
-    child.stdin?.on("error", () => {
-      // git may exit before reading stdin; its exit code reports the failure.
-    });
-    child.stdin?.end(options.input ?? "");
+  return pinnedGitExit(directory, args, {
+    env,
+    timeoutMs: options.timeoutMs ?? 5 * MINUTE,
+    input: options.input,
+    signal: options.signal,
+    stdout: options.stdout,
   });
 }
 
@@ -633,7 +614,7 @@ export function validationEnvironment(
 }
 
 /** `owner/name` of a supported GitHub clone URL; never credentials or raw URLs. */
-export function remoteRepository(remote: string): string | undefined {
+function remoteRepository(remote: string): string | undefined {
   const scp =
     /^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/i.exec(
       remote,

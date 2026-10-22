@@ -1003,7 +1003,7 @@ export const REVIEW_GUIDANCE = {
  * and evidence that don't depend on the candidate come first, so reviews of
  * one item's candidates share a provider-cache prefix.
  */
-export function renderResultReview(
+function renderResultReview(
   input: ResultReviewInput,
   criteria: readonly string[],
   evidence: readonly ResultEvidence[],

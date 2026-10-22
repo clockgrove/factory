@@ -240,7 +240,7 @@ export interface HedgePolicy {
   wallMs: number;
 }
 
-export const DEFAULT_HEDGE: HedgePolicy = {
+const DEFAULT_HEDGE: HedgePolicy = {
   silenceMs: { reviewer: 45_000, planner: 120_000 },
   wallMs: 180_000,
 };

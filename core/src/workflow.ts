@@ -1,4 +1,10 @@
-import type { Outcome, Step, StepContext, Workflow } from "./engine.js";
+import {
+  hold,
+  type Outcome,
+  type Step,
+  type StepContext,
+  type Workflow,
+} from "./engine.js";
 import {
   guarded,
   type PlanningDeps,
@@ -77,13 +83,9 @@ function unavailable(key: string): Step {
     key,
     deadlineMs: MINUTE,
     async run(): Promise<Outcome> {
-      return {
-        kind: "hold",
-        question:
-          "Factory has no configuration for this repository, so it can't reach GitHub. Run setup and restart the service; then answer `retry`.",
-        answers: ["retry", "cancel"],
-        recommended: "retry",
-      };
+      return hold(
+        "Factory has no configuration for this repository, so it can't reach GitHub. Run setup and restart the service; then answer `retry`.",
+      );
     },
   };
 }

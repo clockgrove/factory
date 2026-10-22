@@ -1,6 +1,7 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { TransientError } from "./github.js";
+import { errorMessage } from "./text.js";
 
 const run = promisify(execFile);
 const MINUTE = 60_000;
@@ -67,6 +68,80 @@ export function gitEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
+export interface GitExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: Buffer;
+  /** At most the first 4 KiB, trimmed. */
+  stderr: string;
+}
+
+/**
+ * Run Git in `directory` with `env` (gitEnvironment by default) and report
+ * how it exited. No timeout unless `timeoutMs` is given.
+ */
+export function pinnedGitExit(
+  directory: string,
+  args: string[],
+  options: {
+    input?: string;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+    /** Standard output to this file descriptor, or dropped, instead of returned. */
+    stdout?: number | "ignore";
+  } = {},
+): Promise<GitExit> {
+  return new Promise((done, failed) => {
+    const child = spawn("git", ["-C", directory, ...args], {
+      env: options.env ?? gitEnvironment(),
+      stdio: ["pipe", options.stdout ?? "pipe", "pipe"],
+      ...(options.timeoutMs !== undefined && {
+        timeout: options.timeoutMs,
+        killSignal: "SIGKILL" as const,
+      }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    const out: Buffer[] = [];
+    let err = "";
+    child.stdout?.on("data", (chunk: Buffer) => out.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (err.length < 4096) err += chunk.toString("utf8");
+    });
+    child.on("error", failed);
+    child.on("close", (code, signal) =>
+      done({ code, signal, stdout: Buffer.concat(out), stderr: err.trim() }),
+    );
+    child.stdin?.on("error", () => {
+      // git may exit before reading stdin; its exit code reports the failure.
+    });
+    child.stdin?.end(options.input ?? "");
+  });
+}
+
+/**
+ * The bodies `git cat-file --batch` printed for `count` requested objects,
+ * each with its header line (`<oid> <type> <size>`).
+ */
+export function batchObjects(
+  output: Buffer,
+  count: number,
+): { header: string; body: Buffer }[] {
+  const objects: { header: string; body: Buffer }[] = [];
+  let offset = 0;
+  for (let index = 0; index < count; index++) {
+    const newline = output.indexOf(10, offset);
+    const header = output.subarray(offset, newline).toString("utf8");
+    const size = Number(header.split(" ")[2]);
+    objects.push({
+      header,
+      body: output.subarray(newline + 1, newline + 1 + size),
+    });
+    offset = newline + 1 + size + 1;
+  }
+  return objects;
+}
+
 /**
  * Git with the operator's configuration, which holds credentials and
  * insteadOf rewrites: never prompting, with C messages. Returns standard
@@ -114,7 +189,7 @@ export async function defaultHead(
   } catch (error) {
     if (signal.aborted) throw error;
     throw new TransientError(
-      `git fetch in ${checkout}: ${error instanceof Error ? error.message : String(error)}`,
+      `git fetch in ${checkout}: ${errorMessage(error)}`,
     );
   }
 }

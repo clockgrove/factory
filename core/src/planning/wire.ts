@@ -1,3 +1,4 @@
+import { errorMessage } from "../text.js";
 import {
   coverageCriterion,
   ownsPath,
@@ -67,7 +68,7 @@ const shapeError = (error: unknown): boolean =>
   error instanceof Shape || !(error instanceof Refusal);
 
 const finding = (error: unknown, itemId?: string): Finding => {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const id = error instanceof Refusal ? (error.itemId ?? itemId) : itemId;
   return { source: "check", message, ...(id ? { itemId: id } : {}) };
 };

@@ -56,3 +56,7 @@ export class BoundedText {
     this.end = this.end.slice(this.end.length - this.tail);
   }
 }
+
+/** A thrown value's message. */
+export const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);

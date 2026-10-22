@@ -6,7 +6,7 @@ import {
   publish,
   REPUBLISH,
 } from "../delivery.js";
-import type { Outcome, Step, StepContext } from "../engine.js";
+import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
 import { defaultHead } from "../git.js";
 import {
   BaseFiles,
@@ -16,7 +16,11 @@ import {
 } from "../planning/facts.js";
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
-import { guarded, type PlanningDeps, readIssue } from "../planning/steps.js";
+import {
+  guarded,
+  normalizedBody,
+  type PlanningDeps,
+} from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { correction, type RepairFinding } from "../repair.js";
 import { reviewObjective } from "../review/final.js";
@@ -239,12 +243,7 @@ async function workStep(
   });
   if ("problem" in prepared)
     return withKeep(
-      {
-        kind: "hold",
-        question: prepared.problem,
-        answers: ["retry", "replan", "cancel"],
-        recommended: "retry",
-      },
+      hold(prepared.problem, ["retry", "replan", "cancel"]),
       keepAll,
     );
 
@@ -381,12 +380,10 @@ async function repairContext(
   });
   if (result.kind === "question")
     return {
-      hold: {
-        kind: "hold",
-        question: `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer with \`answer <decision>\`.`,
-        answers: ["answer", "retry", "cancel"],
-        recommended: "answer",
-      },
+      hold: hold(
+        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer with \`answer <decision>\`.`,
+        ["answer", "retry", "cancel"],
+      ),
     };
   const repairContextValue: RepairContext = {
     finding: result.correction.failure,
@@ -550,10 +547,10 @@ function reviewOutcome(
       `${i + 1}. ${q.criterion}\n   ${q.question}${q.detail ? `\n   ${q.detail}` : ""}`,
   );
   return {
-    kind: "hold",
-    question: `The reviewer needs your judgment on this result:\n\n${lines.join("\n")}\n\n\`accept\` accepts ${review.questions.length === 1 ? "it" : "them all"}; \`refuse <reason>\` sends the result back for repair.`,
-    answers: ["accept", "refuse", "cancel"],
-    recommended: "accept",
+    ...hold(
+      `The reviewer needs your judgment on this result:\n\n${lines.join("\n")}\n\n\`accept\` accepts ${review.questions.length === 1 ? "it" : "them all"}; \`refuse <reason>\` sends the result back for repair.`,
+      ["accept", "refuse", "cancel"],
+    ),
     keep: { [pendingKey]: review.questions.map((q) => q.criterion) },
   };
 }
@@ -821,12 +818,11 @@ function notYet(item: WorkItem, what: string): Step {
     key: stepKey(item.id, "work"),
     deadlineMs: MINUTE,
     async run(): Promise<Outcome> {
-      return {
-        kind: "hold",
-        question: `Work Item ${item.id} is one of the ${what}, which this Factory build can't run yet.`,
-        answers: ["retry", "replan", "cancel"],
-        recommended: "cancel",
-      };
+      return hold(
+        `Work Item ${item.id} is one of the ${what}, which this Factory build can't run yet.`,
+        ["retry", "replan", "cancel"],
+        "cancel",
+      );
     },
   };
 }
@@ -864,12 +860,10 @@ export function finalStep(deps: BuildDeps): Step {
             { signal },
           );
           if (on.code !== 0)
-            return {
-              kind: "hold",
-              question: `Work Item ${item.id}'s merge \`${merged.mergeSha.slice(0, 12)}\` is not on the default branch (${head.slice(0, 12)}); someone may have reverted or force-pushed it. Restore it and answer \`retry\`, or \`replan\`.`,
-              answers: ["retry", "replan", "cancel"],
-              recommended: "retry",
-            };
+            return hold(
+              `Work Item ${item.id}'s merge \`${merged.mergeSha.slice(0, 12)}\` is not on the default branch (${head.slice(0, 12)}); someone may have reverted or force-pushed it. Restore it and answer \`retry\`, or \`replan\`.`,
+              ["retry", "replan", "cancel"],
+            );
         }
         const result = await validateTree({
           checkout: config.checkout,
@@ -890,12 +884,9 @@ export function finalStep(deps: BuildDeps): Step {
           return { kind: "done", result: done };
         }
         if (result.kind === "failed")
-          return {
-            kind: "hold",
-            question: `Final validation failed on the default branch (${head.slice(0, 12)}):\n\n${result.detail}\n\nFix it on the default branch and answer \`retry\`, or cancel.`,
-            answers: ["retry", "cancel"],
-            recommended: "retry",
-          };
+          return hold(
+            `Final validation failed on the default branch (${head.slice(0, 12)}):\n\n${result.detail}\n\nFix it on the default branch and answer \`retry\`, or cancel.`,
+          );
         return result;
       }),
   };
@@ -955,12 +946,12 @@ export function finalReviewStep(deps: BuildDeps): Step {
           signal,
           log: context.log,
         });
-        return reviewOutcome(review, "final:questions", () => ({
-          kind: "hold",
-          question: `Final review refused the integrated result:\n\n${review.kind === "refused" ? review.refused.map((r) => `- ${r.criterion}: ${r.detail}`).join("\n") : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.`,
-          answers: ["retry", "replan", "cancel"],
-          recommended: "retry",
-        }));
+        return reviewOutcome(review, "final:questions", () =>
+          hold(
+            `Final review refused the integrated result:\n\n${review.kind === "refused" ? review.refused.map((r) => `- ${r.criterion}: ${r.detail}`).join("\n") : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.`,
+            ["retry", "replan", "cancel"],
+          ),
+        );
       }),
   };
 }
@@ -977,14 +968,12 @@ async function objectiveEdited(
   deps: BuildDeps,
 ): Promise<Outcome | undefined> {
   const { state, signal } = context;
-  const issue = await readIssue(state.issue, deps, signal);
-  const body = (issue.body ?? "").replace(/\r\n/g, "\n").trim();
-  const accepted = (
+  const issue = await deps.github.issue(state.issue, signal);
+  const body = normalizedBody(issue.body);
+  const accepted = normalizedBody(
     ((state.kept ?? {})["objective:accepted"] as string | undefined) ??
-    objectiveBody(state)
-  )
-    .replace(/\r\n/g, "\n")
-    .trim();
+      objectiveBody(state),
+  );
   if (context.answer?.answer === "continue")
     return body === accepted
       ? undefined
@@ -995,19 +984,17 @@ async function objectiveEdited(
           keep: { "objective:accepted": body },
         };
   if (issue.state !== "open")
-    return {
-      kind: "hold",
-      question: `Issue #${state.issue} was closed while Factory was building it. Reopen it and answer \`continue\`, or cancel.`,
-      answers: ["continue", "cancel"],
-      recommended: "cancel",
-    };
+    return hold(
+      `Issue #${state.issue} was closed while Factory was building it. Reopen it and answer \`continue\`, or cancel.`,
+      ["continue", "cancel"],
+      "cancel",
+    );
   if (body !== accepted)
-    return {
-      kind: "hold",
-      question: `Objective #${state.issue} was edited after its plan was accepted. \`continue\` keeps building this plan; \`replan\` plans again from the new text.`,
-      answers: ["continue", "replan", "cancel"],
-      recommended: "replan",
-    };
+    return hold(
+      `Objective #${state.issue} was edited after its plan was accepted. \`continue\` keeps building this plan; \`replan\` plans again from the new text.`,
+      ["continue", "replan", "cancel"],
+      "replan",
+    );
   return undefined;
 }
 
@@ -1052,13 +1039,7 @@ async function guardedItem(work: () => Promise<Outcome>): Promise<Outcome> {
     try {
       return await work();
     } catch (error) {
-      if (error instanceof GitRefusal)
-        return {
-          kind: "hold",
-          question: error.message,
-          answers: ["retry", "cancel"],
-          recommended: "retry",
-        };
+      if (error instanceof GitRefusal) return hold(error.message);
       throw error;
     }
   });
@@ -1106,19 +1087,8 @@ export function reportStep(deps: BuildDeps): Step {
           0,
         );
         const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}`;
-        if (!reported)
-          await github.rest(
-            "POST",
-            `/repos/${config.repository}/issues/${state.issue}/comments`,
-            { body },
-            signal,
-          );
-        const issue = await github.rest<{ state: string }>(
-          "GET",
-          `/repos/${config.repository}/issues/${state.issue}`,
-          undefined,
-          signal,
-        );
+        if (!reported) await github.postComment(state.issue, body, signal);
+        const issue = await github.issue(state.issue, signal);
         if (issue.state === "open")
           await github.rest(
             "PATCH",
@@ -1153,12 +1123,9 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
           if (
             !(await github.findComment(pull.number, marker, undefined, signal))
           )
-            await github.rest(
-              "POST",
-              `/repos/${config.repository}/issues/${pull.number}/comments`,
-              {
-                body: `${marker}\nFactory cancelled Objective #${state.issue}; closing this PR.`,
-              },
+            await github.postComment(
+              pull.number,
+              `${marker}\nFactory cancelled Objective #${state.issue}; closing this PR.`,
               signal,
             );
           await github.rest(
@@ -1169,6 +1136,16 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
           );
         }
       }
+      // The Objective's issue closes as not planned, so the queue and the
+      // issue agree; the operator can reopen and queue it again.
+      const issue = await github.issue(state.issue, signal);
+      if (issue.state === "open")
+        await github.rest(
+          "PATCH",
+          `/repos/${config.repository}/issues/${state.issue}`,
+          { state: "closed", state_reason: "not_planned" },
+          signal,
+        );
       await removeWorktrees(state, deps, signal);
       return { kind: "done" };
     },

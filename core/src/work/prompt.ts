@@ -54,7 +54,7 @@ export interface WorkPromptInput {
 }
 
 /** Where a worker's pinned sources are: private staging, never committed. */
-export function pinnedSourceRoot(worktree: string): string {
+function pinnedSourceRoot(worktree: string): string {
   return join(worktree, ".factory-inputs", "pinned-sources");
 }
 

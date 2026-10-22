@@ -40,7 +40,7 @@ import { ownsPath } from "./planning/graph.js";
 import { packageManagerUpdate } from "./planning/prompts.js";
 import type { Plan, WorkItem } from "./planning/types.js";
 import { runSandboxed } from "./sandbox.js";
-import { headAndTail } from "./text.js";
+import { errorMessage, headAndTail } from "./text.js";
 import { privateStagingPath } from "./work/collect.js";
 import {
   addWorktree,
@@ -178,7 +178,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
     if (error instanceof GitRefusal) throw error;
     return {
       kind: "retry",
-      reason: `The validation checkout could not be made at ${worktree}: ${message(error)}. Free disk space and keep the target checkout writable.`,
+      reason: `The validation checkout could not be made at ${worktree}: ${errorMessage(error)}. Free disk space and keep the target checkout writable.`,
     };
   }
   const scratch: string[] = [];
@@ -203,7 +203,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
     } catch (error) {
       return {
         kind: "retry",
-        reason: `The validation environment could not be made: ${message(error)}. Free space in ${tmpdir()}.`,
+        reason: `The validation environment could not be made: ${errorMessage(error)}. Free space in ${tmpdir()}.`,
       };
     }
     // Commands run only in the exact commit's fresh checkout: HEAD at the
@@ -392,9 +392,6 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
   }
 }
 
-const message = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
-
 const sourceDeclared = (items: readonly WorkItem[]) =>
   items.flatMap((item) =>
     item.validation
@@ -506,7 +503,7 @@ async function dependencyInputsChanged(
  * commands already start with them; when they do run first, the bootstrap
  * leads them.
  */
-export function finalSequence(plan: Plan): {
+function finalSequence(plan: Plan): {
   preparation: string[];
   commands: string[];
 } {
@@ -1080,7 +1077,7 @@ function parseWorkspace(
     });
     value = document.toJS({ maxAliasCount: 0 });
   } catch (error) {
-    throw refuse(`Invalid workspace YAML: ${message(error)}`);
+    throw refuse(`Invalid workspace YAML: ${errorMessage(error)}`);
   }
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw refuse("Workspace YAML must be a mapping");
@@ -1336,7 +1333,7 @@ async function returnProduced(
   } catch (error) {
     if (error instanceof GitRefusal) throw error;
     signal.throwIfAborted();
-    return `Files the commands produced under your owned paths could not be returned: ${message(error)}`;
+    return `Files the commands produced under your owned paths could not be returned: ${errorMessage(error)}`;
   }
 }
 

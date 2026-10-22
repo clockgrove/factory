@@ -11,13 +11,15 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   Input,
   ModelReasoningEffort,
   ThreadEvent,
   ThreadOptions,
 } from "@openai/codex-sdk";
+import { within } from "../paths.js";
+import { errorMessage } from "../text.js";
 import {
   callImages,
   detail,
@@ -113,7 +115,7 @@ experimental_use_profile = false
 `;
 
 /** Ambient variables a Factory Codex process keeps; everything else is dropped. */
-export const ENVIRONMENT = [
+const ENVIRONMENT = [
   /^PATH$/,
   /^LANG$/,
   /^LC_[A-Z_]+$/,
@@ -167,7 +169,7 @@ function sharedModelsCache(): string {
 }
 
 /** Seed a private Codex home with the shared model list, when there is one. */
-export function seedModelsCache(codexDir: string): void {
+function seedModelsCache(codexDir: string): void {
   try {
     copyFileSync(sharedModelsCache(), join(codexDir, "models_cache.json"));
   } catch {
@@ -188,34 +190,44 @@ export function saveModelsCache(codexDir: string): void {
   }
 }
 
-/**
- * A private CODEX_HOME, HOME and TMPDIR for one call, with Factory's config
- * and a link to the operator's subscription login. Operator config is never
- * read. `readDir` turns on the read-only shell over that directory alone.
- */
-function codexHome(readDir: string | undefined): {
+/** A private Codex home's directories and environment. */
+export interface CodexHome {
   root: string;
-  workdir: string;
+  home: string;
+  codexDir: string;
+  temporary: string;
   env: Record<string, string>;
-} {
+}
+
+/**
+ * A private CODEX_HOME, HOME and TMPDIR under a new temporary root, with
+ * `config` as Factory's config and a link to the operator's subscription
+ * login. Operator config is never read. `outside` is the tree Codex works
+ * in: the root must stay out of it, and Git there takes no optional locks.
+ * `finish` completes the home; on any failure the root is removed.
+ */
+export function privateCodexHome<T>(options: {
+  outside?: { directory: string; name: string };
+  config: (home: CodexHome) => string;
+  /** The environment the ambient variables come from; process.env by default. */
+  source?: NodeJS.ProcessEnv;
+  /** More variables to keep beside ENVIRONMENT. */
+  keep?: readonly string[];
+  finish: (home: CodexHome) => T;
+}): T {
   const root = mkdtempSync(join(tmpdir(), "factory-codex-"));
   try {
-    if (readDir) {
-      const tree = realpathSync(readDir);
-      const inside = relative(tree, realpathSync(root));
-      if (!inside.startsWith(`..${sep}`) && inside !== "..")
-        throw new Error("Codex homes must stay outside the read directory");
-    }
+    const { outside, keep = [] } = options;
+    if (outside && within(realpathSync(root), realpathSync(outside.directory)))
+      throw new Error(`Codex homes must stay outside the ${outside.name}`);
     const home = join(root, "home");
     const codexDir = join(root, "codex-home");
     const temporary = join(root, "tmp");
-    const workdir = join(root, "work");
-    for (const directory of [home, codexDir, temporary, workdir])
+    for (const directory of [home, codexDir, temporary])
       mkdirSync(directory, { mode: 0o700 });
-    const config = readDir
-      ? `default_permissions = "factory"\n${CODEX_TREE_REVIEW_CONFIG}\n${permissionProfile()}`
-      : CODEX_PLANNING_CONFIG;
-    writeFileSync(join(codexDir, "config.toml"), config, {
+    const env: Record<string, string> = {};
+    const created: CodexHome = { root, home, codexDir, temporary, env };
+    writeFileSync(join(codexDir, "config.toml"), options.config(created), {
       mode: 0o600,
       flag: "wx",
     });
@@ -225,22 +237,45 @@ function codexHome(readDir: string | undefined): {
     );
     if (existsSync(login)) symlinkSync(login, join(codexDir, "auth.json"));
     seedModelsCache(codexDir);
-    const env: Record<string, string> = {};
-    for (const [name, value] of Object.entries(process.env))
+    for (const [name, value] of Object.entries(options.source ?? process.env))
       if (
         value !== undefined &&
-        ENVIRONMENT.some((pattern) => pattern.test(name))
+        (ENVIRONMENT.some((pattern) => pattern.test(name)) ||
+          keep.includes(name))
       )
         env[name] = value;
     env.HOME = home;
     env.CODEX_HOME = codexDir;
     env.TMPDIR = temporary;
-    if (readDir) env.GIT_OPTIONAL_LOCKS = "0";
-    return { root, workdir, env };
+    if (outside) env.GIT_OPTIONAL_LOCKS = "0";
+    return options.finish(created);
   } catch (error) {
     rmSync(root, { recursive: true, force: true });
     throw error;
   }
+}
+
+/**
+ * A planning call's home with a working directory. `readDir` turns on the
+ * read-only shell over that directory alone.
+ */
+function codexHome(readDir: string | undefined): {
+  root: string;
+  workdir: string;
+  env: Record<string, string>;
+} {
+  return privateCodexHome({
+    ...(readDir && { outside: { directory: readDir, name: "read directory" } }),
+    config: () =>
+      readDir
+        ? `default_permissions = "factory"\n${CODEX_TREE_REVIEW_CONFIG}\n${permissionProfile()}`
+        : CODEX_PLANNING_CONFIG,
+    finish: ({ root, env }) => {
+      const workdir = join(root, "work");
+      mkdirSync(workdir, { mode: 0o700 });
+      return { root, workdir, env };
+    },
+  });
 }
 
 /**
@@ -506,9 +541,7 @@ export class CodexPlanner implements Planner {
       // The step was cancelled or hit its deadline: the engine decides.
       if (call.signal.aborted) throw call.signal.reason ?? error;
       // A failed codex process: its stderr is in the message.
-      throw codexFailure(
-        error instanceof Error ? error.message : String(error),
-      );
+      throw codexFailure(errorMessage(error));
     } finally {
       watchdog.stop();
       // Closing the stream makes the SDK kill a codex process still running.

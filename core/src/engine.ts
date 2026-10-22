@@ -7,6 +7,7 @@ import {
   saveState,
   TERMINAL,
 } from "./state.js";
+import { errorMessage } from "./text.js";
 
 /** What a step reports. Every step ends in exactly one of these. */
 export type Outcome =
@@ -45,12 +46,13 @@ export type Outcome =
       keep?: Record<string, unknown>;
     };
 
-/** A question for the operator; the first answer is the recommended one. */
+/** A question for the operator; the first answer is recommended unless another is named. */
 export function hold(
   question: string,
   answers = ["retry", "cancel"],
+  recommended = answers[0]!,
 ): Extract<Outcome, { kind: "hold" }> {
-  return { kind: "hold", question, answers, recommended: answers[0]! };
+  return { kind: "hold", question, answers, recommended };
 }
 
 export interface StepContext {
@@ -244,7 +246,7 @@ export class ObjectiveRunner {
     const run = (async () => step.run(context))().catch(
       (error: unknown): Outcome => ({
         kind: "retry",
-        reason: `error: ${error instanceof Error ? error.message : String(error)}`,
+        reason: `error: ${errorMessage(error)}`,
         afterMs: -1,
       }),
     );

@@ -20,24 +20,25 @@ import {
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config.js";
 import { hold } from "../engine.js";
+import type { GitExit } from "../git.js";
 import { validPath } from "../objective.js";
 import { forceRemove, within } from "../paths.js";
 import { isRecord, ownsPath } from "../planning/graph.js";
 import { DESIGN_QUESTIONS, type DesignRisk } from "../planning/rubric.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { candidateBounds } from "../sandbox.js";
+import { errorMessage } from "../text.js";
 import {
-  type GitExit,
   hasGitlink,
   hostGit,
   hostGitExit,
   workerEnvironment,
 } from "../worktree.js";
 
-export const FACTORY_EMAIL = "factory@users.noreply.github.com";
+const FACTORY_EMAIL = "factory@users.noreply.github.com";
 
 /** The commit message of a collected result. */
-export function collectionMessage(item: Pick<WorkItem, "title">): string {
+function collectionMessage(item: Pick<WorkItem, "title">): string {
   return `Factory: ${item.title}`;
 }
 
@@ -411,7 +412,7 @@ async function readHandoff(
     value = JSON.parse(await readFile(path, "utf8"));
   } catch (error) {
     throw new WorkFinding(
-      `Handoff manifest is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+      `Handoff manifest is not JSON: ${errorMessage(error)}`,
     );
   }
   const decoded = decodeHandoff(value, peers, criterionCount);
@@ -432,7 +433,7 @@ async function readDiscovery(path: string): Promise<WorkDiscovery | undefined> {
     value = JSON.parse(await readFile(path, "utf8")) as WorkDiscovery;
   } catch (error) {
     throw new WorkFinding(
-      `Discovery manifest is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+      `Discovery manifest is not JSON: ${errorMessage(error)}`,
     );
   }
   if (

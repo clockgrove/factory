@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { errorMessage } from "./text.js";
 
 const run = promisify(execFile);
 
@@ -120,6 +121,31 @@ export class GitHub {
       if (batch.length < 100) break;
     }
     return all;
+  }
+
+  async issue(
+    issue: number,
+    signal?: AbortSignal,
+  ): Promise<{ title: string; body: string | null; state: string }> {
+    return this.rest(
+      "GET",
+      `/repos/${this.repository}/issues/${issue}`,
+      undefined,
+      signal,
+    );
+  }
+
+  async postComment(
+    issue: number,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.rest(
+      "POST",
+      `/repos/${this.repository}/issues/${issue}/comments`,
+      { body },
+      signal,
+    );
   }
 
   /** The id of the issue comment Factory marked with `marker`, if it exists. */
@@ -613,7 +639,7 @@ export class GitHub {
     } catch (error) {
       if (signal?.aborted) throw error;
       throw new TransientError(
-        `GitHub ${method} ${path}: ${error instanceof Error ? error.message : String(error)}`,
+        `GitHub ${method} ${path}: ${errorMessage(error)}`,
       );
     }
     if (response.ok) return response;
@@ -657,7 +683,7 @@ export class GitHub {
       this.token = stdout.trim();
     } catch (error) {
       throw new TransientError(
-        `GitHub login unavailable (run \`gh auth login\`): ${error instanceof Error ? error.message : String(error)}`,
+        `GitHub login unavailable (run \`gh auth login\`): ${errorMessage(error)}`,
       );
     }
     if (!this.token)

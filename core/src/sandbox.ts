@@ -49,7 +49,7 @@ import { StringDecoder } from "node:string_decoder";
 import { Worker } from "node:worker_threads";
 import type { SandboxConfig } from "./config.js";
 import { within } from "./paths.js";
-import { BoundedText } from "./text.js";
+import { BoundedText, errorMessage } from "./text.js";
 import { workerToolchainPath } from "./worktree.js";
 
 const real = (path: string) =>
@@ -835,7 +835,7 @@ async function diskOverflow(
     skip?: string,
   ): Promise<DiskUse | undefined> =>
     diskUse(root, limit, skip).catch((error) => {
-      over.push(error instanceof Error ? error.message : String(error));
+      over.push(errorMessage(error));
       return undefined;
     });
   const files = limits.files;
@@ -896,7 +896,7 @@ export function killGroup(group: number): void {
  * Codex workers with their commands. The service calls it on shutdown;
  * process exit does too.
  */
-export function killWorkerProcesses(): void {
+function killWorkerProcesses(): void {
   for (const group of processGroups) killGroup(group);
 }
 
@@ -1087,7 +1087,7 @@ function launch(
     );
   } catch (error) {
     throw new Refusal(
-      error instanceof Error ? error.message : String(error),
+      errorMessage(error),
       "Run Factory with a PATH whose directories hold only tools",
     );
   }
@@ -1456,7 +1456,7 @@ export async function runSandboxed(
   } catch (error) {
     if (error instanceof Refusal) return fault(error.detail, error.fix);
     return fault(
-      `The command sandbox could not be prepared: ${error instanceof Error ? error.message : String(error)}`,
+      `The command sandbox could not be prepared: ${errorMessage(error)}`,
       "Keep the checkout, its private HOME and TMPDIR, sandbox.packageStore and sandbox.readOnlyPaths in place while Factory runs",
     );
   }
@@ -1465,7 +1465,7 @@ export async function runSandboxed(
   } catch (error) {
     if (options.signal.aborted) throw options.signal.reason;
     return fault(
-      `The checkout's disk use could not be measured: ${error instanceof Error ? error.message : String(error)}`,
+      `The checkout's disk use could not be measured: ${errorMessage(error)}`,
       "Make every directory in the checkout readable by Factory's user",
     );
   }
@@ -1558,9 +1558,7 @@ export async function runSandboxed(
             refused =
               error instanceof Refusal
                 ? error
-                : networkRefusal(
-                    error instanceof Error ? error.message : String(error),
-                  );
+                : networkRefusal(errorMessage(error));
             if (group) killGroup(group);
           })
       : undefined;

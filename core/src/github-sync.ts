@@ -6,6 +6,7 @@ import { QueueDisplay, type QueueItem, queued, readQueue } from "./queue.js";
 import { writeRequest } from "./requests.js";
 import type { ObjectiveStatus } from "./state.js";
 import { TERMINAL } from "./state.js";
+import { errorMessage } from "./text.js";
 
 /** What the sync keeps in an Objective's state (`modules.github`). */
 export interface GitHubModule {
@@ -132,7 +133,7 @@ export class GitHubSync {
               `\`/factory ${a}\`${a === hold.recommended ? " (recommended)" : ""}`,
           )
           .join(", ");
-        await this.comment(
+        await this.github.postComment(
           issue,
           `${marker}\n**Factory needs you.** ${hold.question}\n\nReply with one of: ${answers}. Add text after the answer to explain it.`,
         );
@@ -210,7 +211,7 @@ export class GitHubSync {
         const marker = MARK(issue, "reply", request.id);
         const message = sync.result(request.id) ?? request.message;
         if (!(await this.posted(issue, marker, module.commentsSince))) {
-          await this.comment(
+          await this.github.postComment(
             issue,
             `${marker}\n${message === "ok" ? "Factory: done." : `Factory: ${message}`}`,
           );
@@ -231,14 +232,6 @@ export class GitHubSync {
   ): Promise<boolean> {
     const from = new Date(Date.parse(since) - 10 * 60_000).toISOString();
     return (await this.github.findComment(issue, marker, from)) !== undefined;
-  }
-
-  private async comment(issue: number, body: string): Promise<void> {
-    await this.github.rest(
-      "POST",
-      `/repos/${this.config.repository}/issues/${issue}/comments`,
-      { body },
-    );
   }
 
   private async canWrite(login: string): Promise<boolean> {
@@ -263,7 +256,7 @@ export class GitHubSync {
           event: "github-sync",
           job: key,
           transient: error instanceof TransientError,
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage(error),
         }),
       )
       .finally(() => this.busy.delete(key));

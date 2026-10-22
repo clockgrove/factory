@@ -9,7 +9,7 @@
  */
 import { crashPoint } from "./crash.js";
 import { hold, type Outcome } from "./engine.js";
-import { defaultHead, operatorGit } from "./git.js";
+import { defaultHead, type GitExit, operatorGit } from "./git.js";
 import {
   type CheckRun,
   type GitHub,
@@ -20,13 +20,8 @@ import {
 import { redact } from "./log.js";
 import { BaseFiles, workflowCheckNames } from "./planning/facts.js";
 import type { WorkItem } from "./planning/types.js";
-import {
-  type GitExit,
-  GitRefusal,
-  hostGit,
-  hostGitExit,
-  originProblem,
-} from "./worktree.js";
+import { errorMessage } from "./text.js";
+import { GitRefusal, hostGit, hostGitExit, originProblem } from "./worktree.js";
 
 const MINUTE = 60_000;
 /** How long GitHub may not yet show what Factory just did. */
@@ -108,7 +103,7 @@ export interface DeliveryContext {
 }
 
 /** The fixed branch of a Work Item; the only key that finds its PR again. */
-export function itemBranch(issue: number, item: string): string {
+function itemBranch(issue: number, item: string): string {
   return `factory/${issue}/${item}`;
 }
 
@@ -370,7 +365,7 @@ async function originHold(context: DeliveryContext): Promise<Hold | undefined> {
 // ── PR body ─────────────────────────────────────────────────────────────
 
 /** Factory's PR text: the goal, links, changed paths, passing commands and the candidate. No model call. */
-export async function pullRequestBody(
+async function pullRequestBody(
   context: Pick<DeliveryContext, "github" | "checkout" | "signal" | "secrets">,
   input: PublishInput,
 ): Promise<string> {
@@ -943,7 +938,7 @@ async function unregisteredChecks(
  * makes the merge asynchronously, so this always ends in a retry; the next
  * observation accepts the new head by its shape (see deliveredHead).
  */
-export function updateBranch(
+function updateBranch(
   context: DeliveryContext,
   input: { pr: number; head: string },
 ): Promise<Retry | Hold> {
@@ -1304,6 +1299,6 @@ function message(error: unknown): string {
   const stderr = (error as { stderr?: unknown }).stderr;
   return (
     (typeof stderr === "string" && stderr.trim()) ||
-    (error instanceof Error ? error.message : String(error))
+    errorMessage(error)
   ).slice(0, 2000);
 }

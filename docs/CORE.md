@@ -149,7 +149,7 @@ The GitHub Project is the source of truth for what is queued.
 - **Read-only, and retried.** The service reads the Project every 30 s. If a read fails or comes back partial, it keeps the last good view and tries again. A read failure never fails a run.
 - **Status is a display.** The service sets Status as the run moves: Planning, Building, Needs you, Done, Failed, Cancelled. A failed write is logged and written again on the next transition.
 - **Operator controls:** set an item's Status to the queued option to queue it, move it out of the queued option to dequeue it if it hasn't started, and set the order number to reorder. There is no control card and no managed metadata field.
-- **One at a time (v1).** The core runs one Objective at a time. `queue.maxActiveObjectives` raises the limit in slice 6 of [the scope ledger](CORE-SCOPE.md).
+- **Several at once.** Up to `queue.maxActiveObjectives` Objectives run at once (default 3). An Objective builds only when no earlier unfinished one owns an overlapping path, and planning never waits. Host-wide caps limit worker runs and validations (`execution.workers` and `execution.validations`, sized from the host).
 - **No approval step.** A clean, reviewed plan runs straight away. Factory asks only when review finds a decision for the operator.
 
 ## Check at queue time

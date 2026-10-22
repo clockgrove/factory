@@ -9,6 +9,8 @@
  * refused. The step returns the correction as its `repair` finding; the
  * engine keeps the repair budget.
  */
+
+import { batchObjects } from "./git.js";
 import { validPath } from "./objective.js";
 import { isRecord, ownsPath } from "./planning/graph.js";
 import type { PinnedSource, Plan, WorkItem } from "./planning/types.js";
@@ -94,7 +96,7 @@ export async function correction(
 }
 
 /** The repair finding a correction renders as, for the worker's brief. */
-export function correctionFinding(correction: Correction): string {
+function correctionFinding(correction: Correction): string {
   return `The previous attempt failed: ${correction.failure}\nDiagnosed repair: ${correction.diagnosis}${correction.path ? ` (${correction.path})` : ""}\nRequired correction: ${correction.correction}`;
 }
 
@@ -551,16 +553,7 @@ async function readBlobs(
     input: objects.map((oid) => `${oid}\n`).join(""),
     signal: input.signal,
   });
-  let offset = 0;
-  return objects.map(() => {
-    const newline = output.indexOf(10, offset);
-    const size = Number(
-      output.subarray(offset, newline).toString("utf8").split(" ")[2],
-    );
-    const body = output.subarray(newline + 1, newline + 1 + size);
-    offset = newline + 1 + size + 1;
-    return body;
-  });
+  return batchObjects(output, objects.length).map((object) => object.body);
 }
 
 function renderDiagnosis(

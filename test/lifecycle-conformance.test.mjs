@@ -658,6 +658,15 @@ const LIVE_RUN_ROWS = [
     bound: LIVE.settle,
   },
   {
+    // Synchronous work holds the loop past the deadline's timer (#1743).
+    name: "settling past its deadline under a live service",
+    phase: "running",
+    build: completedState,
+    reach: "settling",
+    live: {},
+    held: true,
+  },
+  {
     name: "planning under a live service run",
     phase: "planning",
     build: () => undefined,
@@ -1530,6 +1539,11 @@ function liveServices(composed, config, directory) {
         if (state?.objectiveClosure !== "complete")
           return target.objective(number);
         writeFileSync(join(directory, `settling-${number}`), "");
+        if (existsSync(join(directory, "held"))) {
+          rmSync(join(directory, "held"));
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_500);
+          throw new Error("fixture");
+        }
         const signal = currentProcessSignal();
         return new Promise((_, reject) =>
           signal?.addEventListener("abort", () => reject(signal.reason), {
@@ -1796,6 +1810,7 @@ else {
       if (state)
         saveState(statePath(fixture.config.repository, objective), state);
       rmSync(join(fixture.directory, "stalled"), { force: true });
+      if (row.held) writeFileSync(join(fixture.directory, "held"), "");
       const service = owner(fixture, "live", 0);
       try {
         assert.equal(await service.ready(), "live");
@@ -1809,6 +1824,14 @@ else {
             assert(elapsed < (row.bound ?? LIVE.upgrade), `${elapsed} ms`);
           });
         }
+        // The settlement cut off holds only its Objective.
+        if (row.held)
+          await t.test(`${row.name} / live / service stays up`, async () => {
+            const up = new Promise((resolve) =>
+              setTimeout(resolve, 3_000, "up"),
+            );
+            assert.equal(await Promise.race([service.exited, up]), "up");
+          });
       } finally {
         await service.stop();
       }

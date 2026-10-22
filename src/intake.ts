@@ -2308,17 +2308,24 @@ async function runIntakeOwned(
         CheckpointAdmissionFailure,
         CheckpointProducerInventoryChanged,
       ];
+      // A run's or command's own abort or deadline is that scope's: an
+      // admission it cut off holds no archive, and the next one retries
+      // (#1743). The service itself runs under no such scope.
+      const aborted = (current: unknown, depth: number): boolean =>
+        depth < 8 &&
+        ((current instanceof DOMException &&
+          ["AbortError", "TimeoutError"].includes(current.name)) ||
+          (current instanceof Error && aborted(current.cause, depth + 1)));
       const visit = (current: unknown, depth: number): boolean =>
         current instanceof Error &&
         depth < 8 &&
-        (classes.some((type) => current instanceof type) ||
+        ((classes.some((type) => current instanceof type) &&
+          !aborted(current.cause, 0)) ||
           (current instanceof AggregateError &&
             current.errors.some((entry) => visit(entry, depth + 1))) ||
           visit(current.cause, depth + 1));
       return (
-        visit(error, 0) ||
-        onlyCheckpointBoundsExceeded(error) !== undefined ||
-        (error instanceof DOMException && error.name === "AbortError")
+        visit(error, 0) || onlyCheckpointBoundsExceeded(error) !== undefined
       );
     };
     const launch = (selected: number, reasons: Record<string, string>) => {

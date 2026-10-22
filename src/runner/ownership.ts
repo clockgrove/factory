@@ -110,7 +110,13 @@ export class SettleDeadline {
    * deadline, from its abort (its reason or an abort in its cause chain).
    */
   cut(error: unknown): boolean {
-    if (!this.elapsed) return false;
+    // assertProcessActive refuses at the deadline's time, before the timer
+    // has run when synchronous work held the event loop past it (#1743).
+    if (
+      !this.elapsed &&
+      !(this.#deadlineAt && Date.now() >= Date.parse(this.#deadlineAt))
+    )
+      return false;
     const visit = (current: unknown, depth: number): boolean =>
       depth < 8 &&
       (current === this.signal.reason ||

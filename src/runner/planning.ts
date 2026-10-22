@@ -817,7 +817,7 @@ export async function prepareObjective(args: {
       capacity: resolveCapacity(config),
       issueByItemId: {},
       coordinator: {
-        mode: owner.handoff ? "draining" : (owner.initialMode ?? "running"),
+        mode: owner.initialMode ?? (owner.handoff ? "draining" : "running"),
         ...(owner.handoff && owner.handoffBy
           ? { drainedBy: owner.handoffBy }
           : {}),

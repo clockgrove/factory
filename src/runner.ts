@@ -157,6 +157,8 @@ import {
   pendingQuestions,
   planningRevisionGrantable,
   rejectionHoldsPause,
+  handOffCoordinator,
+  operatorMode,
   setCoordinatorMode,
 } from "./state.js";
 import {
@@ -882,7 +884,7 @@ async function runObjectiveOwned(
       !owner.handoff &&
       options.observeControl &&
       (owner.snapshot
-        ? owner.snapshot.coordinator?.mode === "running"
+        ? operatorMode(owner.snapshot) === "running"
         : !owner.initialMode)
     )
       owner.handoffBy = "service";
@@ -895,7 +897,7 @@ async function runObjectiveOwned(
         owner.handoffStopped = true;
         owner.workPause.abort(new Error("Coordinator handoff requested"));
       }
-    } else owner.initialMode = "draining";
+    } else owner.initialMode ??= "draining";
   };
   owner.executionHeld = (conflict) => {
     if (owner.handoff) return true;
@@ -1060,9 +1062,11 @@ async function runObjectiveOwned(
       if (["pause", "drain"].includes(request.action)) delete owner.handoffBy;
       const state = owner.snapshot;
       if (!state && ["pause", "drain", "handoff"].includes(request.action)) {
+        // The operator's pause holds through a handoff (#1714).
         if (request.action === "handoff") releaseOwnership();
-        owner.initialMode =
-          owner.handoff || request.action !== "pause" ? "draining" : "paused";
+        else
+          owner.initialMode =
+            request.action === "pause" ? "paused" : "draining";
         wake();
         return "requested";
       }
@@ -1090,8 +1094,7 @@ async function runObjectiveOwned(
         );
         // A replacement lifts the rejection's pause: when the restored mode
         // is running, this owner continues at once, as after resume (#1645).
-        if (held && owner.handoff)
-          setCoordinatorMode(state, "draining", owner.handoffBy);
+        if (held && owner.handoff) handOffCoordinator(state, owner.handoffBy);
         else if (held && state.coordinator?.mode === "running")
           owner.pause = new AbortController();
         persist();
@@ -1119,15 +1122,17 @@ async function runObjectiveOwned(
           )
             owner.pause = new AbortController();
         } else owner.pause.abort(new Error(`Coordinator ${request.action}`));
-        setCoordinatorMode(
-          state,
-          request.action === "pause"
-            ? "paused"
-            : ["drain", "handoff"].includes(request.action)
-              ? "draining"
-              : "running",
-          request.action === "handoff" ? owner.handoffBy : undefined,
-        );
+        if (request.action === "handoff")
+          handOffCoordinator(state, owner.handoffBy);
+        else
+          setCoordinatorMode(
+            state,
+            request.action === "pause"
+              ? "paused"
+              : request.action === "drain"
+                ? "draining"
+                : "running",
+          );
         persist();
         wake();
         return modeChangeResult(config, state, request.action, true);
@@ -1160,7 +1165,7 @@ async function runObjectiveOwned(
                 "Refusing a plan needs its owner paused: pause the Objective, then decide",
               );
             releaseOwnership();
-            setCoordinatorMode(current, "draining", owner.handoffBy);
+            handOffCoordinator(current, owner.handoffBy);
             persist();
             wake();
             return "plan-handed-off";
@@ -1355,7 +1360,7 @@ async function runObjectiveOwned(
   const handoff = () => {
     releaseOwnership();
     if (owner.snapshot?.coordinator) {
-      setCoordinatorMode(owner.snapshot, "draining", owner.handoffBy);
+      handOffCoordinator(owner.snapshot, owner.handoffBy);
       persist();
     }
     wake();

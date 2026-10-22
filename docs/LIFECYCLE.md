@@ -97,6 +97,8 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 
 **One control plane.** A live service runs every lifecycle command on an Objective it isn't running: decide, cancel, retry, repair, rereview, select, amendments, pause, drain and resume. Commands that let work start (retry, resume, select, repair, rereview, propose-amendment) need a current queue admission, else `objective_not_admitted`; decide, cancel, pause, drain and decline-discovery work for any Objective. It runs the foreground implementation as the installation owner, under the Objective's lock and on the configuration the Objective froze. While it starts or settles the Objective's run, it refuses with `owner_settling`. A live paused planning owner hands its Objective off to take a plan refusal, which then lands where the Objective stopped.
 
+**Explicit holds.** An operator's pause, an operator's drain and the service's drain are distinct states. A handoff stops a live run at its safe point and turns only a running coordinator into a drain, which carries `drainedBy: "service"` when the service asked for it. An operator's pause or drain stays as it is, beneath a rejection hold too, where the mode the operator asked for (`requestedMode`) returns with the replacement. Only the service's own drain resumes automatically. The suite checks that a pause survives a handoff, and a handoff under a rejection hold.
+
 **Dispatch isolation.** A failed or cancel-requested queued Objective is skipped with a reason. The service stays up and dispatches the Objectives behind it.
 
 **Bounded time.**

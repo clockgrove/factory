@@ -1528,6 +1528,50 @@ else {
         }
       },
     );
+    // Explicit holds: a handoff stops a live run without rewriting the
+    // operator's pause into a drain, also beneath a rejection hold.
+    for (const [name, build] of [
+      [
+        "pause survives handoff",
+        ROWS.find((row) => row.name === "operator-paused").build,
+      ],
+      [
+        "pause survives rejection hold",
+        with_(
+          ROWS.find((row) => row.name === "rejection hold").build,
+          (state) => {
+            state.coordinator.requestedMode = "paused";
+          },
+        ),
+      ],
+    ]) {
+      const objective = fixture.next++;
+      await enqueueIntake(fixture.config, fixture.services.github, [objective]);
+      saveState(
+        statePath(fixture.config.repository, objective),
+        build(fixture, objective),
+      );
+      const run = owner(fixture, "foreground", objective);
+      try {
+        assert.equal(await run.ready(), "live", name);
+        await requestControl(fixture.config.repository, {
+          objective,
+          action: "handoff",
+        });
+        await run.exited;
+      } finally {
+        await run.stop();
+      }
+      const { coordinator } = readContinuation(
+        fixture.config.repository,
+        objective,
+      );
+      await t.test(`${name} / foreground / handoff`, () => {
+        assert.equal(coordinator.mode, "paused");
+        assert.equal(coordinator.requestedMode ?? "paused", "paused");
+        assert.equal(coordinator.drainedBy, undefined);
+      });
+    }
     // Bounded time (invariant c): housekeeping beside an operator command.
     const objective = fixture.next++;
     saveState(

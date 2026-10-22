@@ -477,13 +477,13 @@ export function planningRevisionGrantable(state: ContinuationState): boolean {
 }
 
 /**
- * Set the coordinator's mode, unless a rejected amendment holds it paused:
- * then the requested mode is kept for the replacement to restore.
+ * Set the coordinator's mode on an operator's command, unless a rejected
+ * amendment holds it paused: then the requested mode is kept for the
+ * replacement to restore. The operator's mode is never the service's drain.
  */
 export function setCoordinatorMode(
   state: ContinuationState,
   mode: CoordinatorDisposition["mode"],
-  drainedBy?: "service",
 ): void {
   if (!state.coordinator) return;
   delete state.coordinator.drainedBy;
@@ -493,9 +493,35 @@ export function setCoordinatorMode(
   } else {
     state.coordinator.mode = mode;
     delete state.coordinator.requestedMode;
-    if (mode === "draining" && drainedBy)
-      state.coordinator.drainedBy = drainedBy;
   }
+}
+
+/** The mode the operator set, beneath any rejection hold. */
+export function operatorMode(
+  state: ContinuationState,
+): CoordinatorDisposition["mode"] | undefined {
+  const coordinator = state.coordinator;
+  if (!coordinator) return undefined;
+  return rejectionHoldsPause(state)
+    ? (coordinator.requestedMode ?? "running")
+    : coordinator.mode;
+}
+
+/**
+ * A handoff stops the run at its safe point without rewriting a hold (#1714):
+ * only a running coordinator becomes a drain, marked as the service's when it
+ * asked. An operator's pause or drain, and a rejection hold, stay as they are.
+ */
+export function handOffCoordinator(
+  state: ContinuationState,
+  drainedBy?: "service",
+): void {
+  const coordinator = state.coordinator;
+  if (!coordinator || operatorMode(state) !== "running") return;
+  if (rejectionHoldsPause(state)) coordinator.requestedMode = "draining";
+  else coordinator.mode = "draining";
+  if (drainedBy) coordinator.drainedBy = drainedBy;
+  else delete coordinator.drainedBy;
 }
 
 /** Existing native-stack slot: exact creation request, never an inferred remote identity. */

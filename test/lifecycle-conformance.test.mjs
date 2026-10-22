@@ -6,7 +6,7 @@ import "./isolate-env.mjs";
 // behaviour and is marked `todo` with the invariant it breaks; the fix that
 // closes the gap makes it pass, and then drops the marker.
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
@@ -217,6 +217,11 @@ function heldDiagnosis(variant) {
     HELD.set(objective, child.pid);
     const native = nativeProcessOwner(child.pid);
     if (variant === "boot unproven") delete native.boot;
+    if (variant === "boot unproven, process gone") {
+      const gone = spawnSync("true");
+      Object.assign(native, { pid: gone.pid, group: gone.pid, startTime: "1" });
+      delete native.boot;
+    }
     if (variant === "identity differs") native.startTime += "1";
     const identity = randomUUID();
     const sessionRoot = join(planningSessionRoot(fixture.config), identity);
@@ -375,6 +380,7 @@ const ROWS = [
     // its owned home. Only a fully proven process is stopped.
     ["proven", { cancel: "ok" }, true],
     ["boot unproven", { cancel: "session_unsettled" }, false],
+    ["boot unproven, process gone", { cancel: "ok" }, false],
     ["identity differs", { cancel: "session_unsettled" }, false],
     ["home not owned", { cancel: "session_unsettled" }, false],
   ].map(([variant, cancel, stopped]) => ({

@@ -171,6 +171,7 @@ A hold is a question with named answers:
 
 - It is posted as one issue comment with a marker, and it lists the answers.
 - **Answering:** a comment `/factory <answer> [text]` from a user with write access to the repository, or `factory answer <issue> <answer> [--text ...]`. The service checks for comments every 30 s while it is holding. If someone without write access answers, that's ignored and logged.
+- **In an agent host.** The director skill shows each open hold with the host's question tool (Claude Code's AskUserQuestion, or its Codex equivalent): the question, each answer with the recommended one first, and a one-line consequence for each. That gives the operator an app notification. The chosen answer runs `factory answer`. `factory status --json` lists open holds in this shape so the skill needs no parsing.
 - An answer that doesn't match the open hold gets a reply naming the valid answers. Nothing else changes.
 - `cancel` is valid at every hold and at any time.
 

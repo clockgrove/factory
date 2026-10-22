@@ -1648,6 +1648,8 @@ export type ProjectQueueAction =
   | { action: "set-metadata"; itemId: string; metadata: string }
   /** Archives an Objective card that no current admission binds. */
   | { action: "archive-card"; itemId: string }
+  /** Restores an archived Objective card so a re-admission can bind it. */
+  | { action: "unarchive-card"; itemId: string }
   | {
       action: "set-admission-fields";
       itemId: string;
@@ -1670,6 +1672,7 @@ export type ProjectQueueItemSelector =
 export type ProjectQueuePlannedAction =
   | { action: "ensure-card"; issueNodeId: string }
   | { action: "archive-card"; target: { itemId: string } }
+  | { action: "unarchive-card"; target: { itemId: string } }
   | {
       action: "set-metadata";
       target: ProjectQueueItemSelector;

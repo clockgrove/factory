@@ -24,6 +24,7 @@ import {
   ADD,
   INSPECT,
   ARCHIVE,
+  UNARCHIVE,
   UPDATE,
   SET_ADMISSION_FIELDS,
   ITEMS,
@@ -91,9 +92,9 @@ function mutationRequest(
   intent: ProjectQueueAction &
     Pick<ProjectQueueIntent, "binding" | "requestId" | "fieldId">,
 ) {
-  if (intent.action === "archive-card")
+  if (intent.action === "archive-card" || intent.action === "unarchive-card")
     return {
-      query: ARCHIVE,
+      query: intent.action === "archive-card" ? ARCHIVE : UNARCHIVE,
       variables: {
         input: {
           clientMutationId: intent.requestId,
@@ -150,9 +151,9 @@ function plannedMutationRequest(
   binding: ProjectQueueBinding,
   effect: ProjectQueuePlannedEffectInput,
 ) {
-  if (effect.action === "archive-card")
+  if (effect.action === "archive-card" || effect.action === "unarchive-card")
     return {
-      query: ARCHIVE,
+      query: effect.action === "archive-card" ? ARCHIVE : UNARCHIVE,
       variables: {
         input: {
           clientMutationId: effect.requestId,
@@ -247,7 +248,8 @@ export function assertProjectQueuePlannedEffect(
         ? ["target", "fieldId", "metadata"]
         : effect.action === "set-admission-fields"
           ? ["target", "orderFieldId", "metadataFieldId", "order", "metadata"]
-          : effect.action === "archive-card"
+          : effect.action === "archive-card" ||
+              effect.action === "unarchive-card"
             ? ["target"]
             : []),
   ]);
@@ -308,6 +310,18 @@ export function assertProjectQueuePlannedEffect(
       object(prior.target).issueNodeId === undefined
     )
       throw new Error("Invalid declared Project queue card archive");
+  } else if (effect.action === "unarchive-card") {
+    // Restores the one archived card the admission's own Issue inspection found.
+    const target = object(effect.target);
+    only(target, ["itemId"]);
+    if (
+      !nodeId(target.itemId) ||
+      target.itemId === binding.controlItemId ||
+      !Object.hasOwn(prior, "target") ||
+      prior.target !== null ||
+      !effect.expectedIssue
+    )
+      throw new Error("Invalid declared Project queue card unarchive");
   } else if (
     effect.action === "set-metadata" ||
     effect.action === "set-admission-fields"
@@ -444,6 +458,8 @@ export function resolveProjectQueuePlannedEffect(
   let action: ProjectQueueAction;
   if (effect.action === "ensure-card")
     action = { action: effect.action, issueNodeId: effect.issueNodeId };
+  else if (effect.action === "unarchive-card")
+    action = { action: effect.action, itemId: effect.target.itemId };
   else if (effect.action === "archive-card") {
     if (!prior || prior.itemId !== effect.target.itemId)
       throw new Error("Declared card archive lacks its exact previous target");
@@ -454,9 +470,12 @@ export function resolveProjectQueuePlannedEffect(
         ? effect.target.itemId
         : (() => {
             const receipt = original(effect.target.resultOf);
-            if (receipt.intent.action !== "ensure-card")
+            if (
+              receipt.intent.action !== "ensure-card" &&
+              receipt.intent.action !== "unarchive-card"
+            )
               throw new Error(
-                "Generated card requires its original ensure response",
+                "Generated card requires its original ensure or unarchive response",
               );
             return receipt.itemId;
           })();
@@ -507,7 +526,7 @@ export function assertProjectQueueIntent(
         ? ["itemId", "metadata"]
         : action === "set-admission-fields"
           ? ["itemId", "order", "metadata"]
-          : action === "archive-card"
+          : action === "archive-card" || action === "unarchive-card"
             ? ["itemId"]
             : []),
   ]);
@@ -541,7 +560,7 @@ export function assertProjectQueueIntent(
       intent.fieldId !== undefined
     )
       throw new Error("Invalid Project queue compound admission target");
-  } else if (action === "archive-card") {
+  } else if (action === "archive-card" || action === "unarchive-card") {
     if (
       !nodeId(intent.itemId) ||
       intent.itemId === intent.binding.controlItemId ||
@@ -706,6 +725,18 @@ export function assertProjectQueueWriteReceipt(
       card.isArchived !== true
     )
       throw new Error("Project card archive response has another identity");
+    return;
+  }
+  if (intent.action === "unarchive-card") {
+    only(original, ["unarchiveProjectV2Item"]);
+    const response = object(original.unarchiveProjectV2Item);
+    const card = targetCard(response.item, intent);
+    if (
+      response.clientMutationId !== intent.requestId ||
+      receipt.itemId !== intent.itemId ||
+      connection(card.fieldValues).hasNextPage
+    )
+      throw new Error("Project card unarchive response has another identity");
     return;
   }
   if (intent.action === "set-admission-fields") {
@@ -1450,17 +1481,19 @@ export function projectQueueReceiptTarget(
   const card =
     receipt.kind === "existing-read"
       ? object(receipt.original)
-      : object(
-          object(
-            object(receipt.original)[
-              intent.action === "ensure-card"
-                ? "addProjectV2ItemById"
-                : intent.action === "set-admission-fields"
-                  ? "admission"
-                  : "updateProjectV2ItemFieldValue"
-            ],
-          )[intent.action === "ensure-card" ? "item" : "projectV2Item"],
-        );
+      : intent.action === "unarchive-card"
+        ? object(object(object(receipt.original).unarchiveProjectV2Item).item)
+        : object(
+            object(
+              object(receipt.original)[
+                intent.action === "ensure-card"
+                  ? "addProjectV2ItemById"
+                  : intent.action === "set-admission-fields"
+                    ? "admission"
+                    : "updateProjectV2ItemFieldValue"
+              ],
+            )[intent.action === "ensure-card" ? "item" : "projectV2Item"],
+          );
   const fields = inspectedFields(card, intent.binding);
   return receipt.itemId === intent.binding.controlItemId
     ? { itemId: receipt.itemId, ...fields }
@@ -1609,7 +1642,14 @@ export async function projectQueueInspectOnGitHub(
     const active = observed!.membership.filter((item) => !item.archived);
     if (active.length > 1)
       throw new Error("Project queue has duplicate Objective cards");
+    // An archived card is no admission target; membership alone names it.
     if (
+      observed!.membership.some(
+        (item) => item.archived && item.itemId === request.itemId,
+      )
+    )
+      observed!.target = undefined;
+    else if (
       request.itemId &&
       (!active.some((item) => item.itemId === request.itemId) ||
         observed!.target?.issueNodeId !== observed!.issue?.issueNodeId ||
@@ -1778,7 +1818,10 @@ export async function projectQueueWriteOnGitHub(
     request.binding,
     graphql,
   );
-  if (request.action === "ensure-card" && !request.expectedIssue)
+  // An admission step that finds its card by the Issue, not by a card id.
+  const scoped =
+    request.action === "ensure-card" || request.action === "unarchive-card";
+  if (scoped && !request.expectedIssue)
     throw new Error(
       "Project card admission requires its exact current Issue identity and contents",
     );
@@ -1802,7 +1845,7 @@ export async function projectQueueWriteOnGitHub(
       inspection = proof;
       access = { actorId: proof.actorId, owner: proof.owner };
       preparedTarget =
-        request.action === "ensure-card"
+        request.action === "ensure-card" || request.action === "unarchive-card"
           ? proof.target
           : request.itemId === request.binding.controlItemId
             ? proof.control
@@ -1814,10 +1857,7 @@ export async function projectQueueWriteOnGitHub(
         throw new Error("Project queue intent cannot use an archived target");
     } else {
       assertProjectQueueWriteReceipt(proof);
-      if (
-        request.action === "ensure-card" ||
-        !same(proof.intent.binding, request.binding)
-      )
+      if (scoped || !same(proof.intent.binding, request.binding))
         throw new Error(
           "Project card intent requires its current scoped Issue inspection",
         );
@@ -1829,6 +1869,7 @@ export async function projectQueueWriteOnGitHub(
     }
     if (
       request.action !== "ensure-card" &&
+      request.action !== "unarchive-card" &&
       (!preparedTarget || preparedTarget.itemId !== request.itemId)
     )
       throw new Error("Project queue intent lacks its exact observed target");
@@ -1850,7 +1891,7 @@ export async function projectQueueWriteOnGitHub(
       throw new Error(
         "Project queue prior target is missing from its current inspection",
       );
-  } else if (request.action === "ensure-card") {
+  } else if (scoped) {
     inspection = await projectQueueInspectOnGitHub(
       repository,
       request.binding,
@@ -1862,10 +1903,7 @@ export async function projectQueueWriteOnGitHub(
     initialTarget = await readTarget(repository, request, graphql);
     access = initialTarget.access;
   }
-  const observation =
-    request.action === "ensure-card"
-      ? undefined
-      : await operationScope?.observation;
+  const observation = scoped ? undefined : await operationScope?.observation;
   if (
     observation &&
     (observation.snapshot.actorId !== access.actorId ||
@@ -1877,7 +1915,7 @@ export async function projectQueueWriteOnGitHub(
   const action =
     request.action === "ensure-card"
       ? { action: request.action, issueNodeId: request.issueNodeId }
-      : request.action === "archive-card"
+      : request.action === "archive-card" || request.action === "unarchive-card"
         ? { action: request.action, itemId: request.itemId }
         : request.action === "set-admission-fields"
           ? {
@@ -1927,7 +1965,7 @@ export async function projectQueueWriteOnGitHub(
     const expected = request.expectedIssue!;
     if (
       (declared &&
-        request.action === "ensure-card" &&
+        scoped &&
         !declared.expectedTarget &&
         current.target !== undefined) ||
       (freshControl &&
@@ -1950,13 +1988,25 @@ export async function projectQueueWriteOnGitHub(
       throw new Error(
         "Project card admission Issue or access changed after exact approval",
       );
-    // An admission's approved writes include no unarchive, so an archived
-    // card stays archived until the operator restores it.
+    // The plan unarchives a card it saw archived. A card archived after that
+    // inspection is refused before any write, so the operator can run it again.
     const archived = () =>
       new LifecycleRefusal(
         "queue_card_archived",
-        `Objective #${expected.objective}'s Project card is archived; restore it from the Project's archive, then run queue add again`,
+        `Objective #${expected.objective}'s Project card was archived while it was being added; run queue add again`,
       );
+    if (request.action === "unarchive-card") {
+      if (
+        current.target ||
+        current.membership?.length !== 1 ||
+        current.membership[0]!.itemId !== request.itemId ||
+        !current.membership[0]!.archived
+      )
+        throw new Error(
+          "Project card to unarchive changed after exact approval",
+        );
+      return;
+    }
     const target = request.expectedTarget;
     if (target && current.target?.archived) throw archived();
     if (
@@ -1982,7 +2032,7 @@ export async function projectQueueWriteOnGitHub(
       target.access.owner.toLowerCase() !== access.owner.toLowerCase()
     )
       throw new Error("Project queue access changed before mutation dispatch");
-    if (request.action === "ensure-card")
+    if (request.action === "ensure-card" || request.action === "unarchive-card")
       throw new Error(
         "Project card membership requires its scoped Issue inspection",
       );
@@ -2014,8 +2064,7 @@ export async function projectQueueWriteOnGitHub(
         "Project queue content admission cannot target the control card",
       );
   };
-  if (inspection && request.action === "ensure-card")
-    refreshInspection(inspection);
+  if (inspection && scoped) refreshInspection(inspection);
   else if (initialTarget) refreshTarget(initialTarget);
   if (request.action === "ensure-card" && inspection?.target) {
     const target = await readTarget(
@@ -2051,7 +2100,7 @@ export async function projectQueueWriteOnGitHub(
   const admitted = structuredClone(intent);
   await request.beforeWrite(structuredClone(admitted));
   // Publication admission may await Git effects. Recheck this target and access afterward.
-  if (request.action === "ensure-card") {
+  if (scoped) {
     const current = await projectQueueInspectOnGitHub(
       repository,
       request.binding,
@@ -2097,12 +2146,19 @@ export async function projectQueueWriteOnGitHub(
     const key =
       admitted.action === "ensure-card"
         ? "addProjectV2ItemById"
-        : admitted.action === "set-admission-fields"
-          ? "admission"
-          : "updateProjectV2ItemFieldValue";
+        : admitted.action === "unarchive-card"
+          ? "unarchiveProjectV2Item"
+          : admitted.action === "set-admission-fields"
+            ? "admission"
+            : "updateProjectV2ItemFieldValue";
     const response = object(object(original)[key]);
     const card = object(
-      response[admitted.action === "ensure-card" ? "item" : "projectV2Item"],
+      response[
+        admitted.action === "ensure-card" ||
+        admitted.action === "unarchive-card"
+          ? "item"
+          : "projectV2Item"
+      ],
     );
     const receipt: ProjectQueueWriteReceipt = {
       intent: admitted,

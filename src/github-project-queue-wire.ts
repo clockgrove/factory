@@ -28,6 +28,11 @@ export const ARCHIVE = `mutation FactoryQueueArchiveCard($input:ArchiveProjectV2
     clientMutationId item { ${CARD} }
   }
 }`;
+export const UNARCHIVE = `mutation FactoryQueueUnarchiveCard($input:UnarchiveProjectV2ItemInput!) {
+  unarchiveProjectV2Item(input:$input) {
+    clientMutationId item { ${CARD} }
+  }
+}`;
 /** Fixed sequential field updates; partial responses never imply a transaction. */
 export const SET_ADMISSION_FIELDS = `mutation FactoryQueueSetAdmissionFields($orderInput:UpdateProjectV2ItemFieldValueInput!,$metadataInput:UpdateProjectV2ItemFieldValueInput!) {
   order: updateProjectV2ItemFieldValue(input:$orderInput) {
@@ -147,4 +152,5 @@ export const QUEUE_WRITE_QUERIES = Object.freeze([
   UPDATE,
   SET_ADMISSION_FIELDS,
   ARCHIVE,
+  UNARCHIVE,
 ]);

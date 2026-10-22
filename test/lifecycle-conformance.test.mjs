@@ -490,10 +490,9 @@ const ROWS = [
     build: with_(completedState, (state) => {
       state.objectiveClosure = "complete";
     }),
-    // An archived card: an admission's approved writes include no unarchive,
-    // so `queue add` refuses until the operator restores it.
+    // An archived card: `queue add` restores it and re-admits it.
     archive: true,
-    none: { "queue-add": "queue_card_archived" },
+    none: { "queue-add": "ok" },
   },
 ];
 
@@ -926,10 +925,12 @@ function projectFixture(repository, binding, file) {
           ? { fieldId: binding.metadataFieldId }
           : {}),
       };
-      // As the gateway does, an archived card refuses before any effect.
+      // As the gateway does, an archived card refuses before any effect,
+      // except the unarchive that restores it.
       const archived = Object.values(load().cards).find(
         (candidate) =>
           candidate.archived &&
+          resolved.action.action !== "unarchive-card" &&
           (candidate.itemId === resolved.action.itemId ||
             candidate.issueNodeId === resolved.action.issueNodeId),
       );
@@ -959,6 +960,15 @@ function projectFixture(repository, binding, file) {
           original,
         };
       };
+      if (intent.action === "unarchive-card") {
+        entry.archived = false;
+        return done({
+          unarchiveProjectV2Item: {
+            clientMutationId: intent.requestId,
+            item: wireCard(project, entry),
+          },
+        });
+      }
       if (intent.action === "archive-card") {
         entry.archived = true;
         return done({
@@ -1718,16 +1728,8 @@ else {
     const fixture = await installation(t);
     fixture.next = 100;
     fixture.pool = [];
-    // No live owner. A refused archived-card admission leaves its queue
-    // operation unsettled, which holds later queue mutations, so those
-    // cells run last.
-    const none = await admit(fixture, "none");
-    await cells(
-      t,
-      fixture,
-      "none",
-      none.filter(({ row }) => !row.archive),
-    );
+    // No live owner.
+    await cells(t, fixture, "none", await admit(fixture, "none"));
     // A live paused foreground run of the Objective.
     await cells(
       t,
@@ -1850,12 +1852,33 @@ else {
     } finally {
       await service.stop();
     }
-    await cells(
-      t,
-      fixture,
-      "none",
-      none.filter(({ row }) => row.archive),
+  });
+
+  // A refused admission settles its queue operation: later queue mutations
+  // still run, and the archived card is restored by the next add.
+  test("a refused archived-card admission does not block the queue", async (t) => {
+    const fixture = await installation(t);
+    const objective = 100;
+    const { github } = fixture.services;
+    await enqueueIntake(fixture.config, github, [objective]);
+    assert.equal(await dispatch(fixture, "queue-remove", objective), "ok");
+    const file = join(fixture.directory, "project.json");
+    const project = JSON.parse(readFileSync(file, "utf8"));
+    project.cards[objective].archived = true;
+    writeFileSync(file, JSON.stringify(project));
+    // The card is archived after the add inspected the Project.
+    const inspect = github.projectQueueInspect;
+    github.projectQueueInspect = async (...args) => ({
+      ...(await inspect(...args)),
+      membership: [],
+    });
+    assert.equal(
+      await dispatch(fixture, "queue-add", objective),
+      "queue_card_archived",
     );
+    github.projectQueueInspect = inspect;
+    assert.equal(await dispatch(fixture, "queue-add", objective), "ok");
+    assert.equal(await dispatch(fixture, "queue-remove", objective), "ok");
   });
 
   // Dispatch isolation (#1715): failed and cancel-requested queued

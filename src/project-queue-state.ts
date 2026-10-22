@@ -770,7 +770,7 @@ export function parseQueueRecord(
       ]);
       if (
         row.completed ||
-        !zeroIntentControl(row as unknown as QueueOperation) ||
+        !zeroIntentOperation(row as unknown as QueueOperation) ||
         proof.schemaVersion !== 1 ||
         !date(proof.at) ||
         Date.parse(proof.at) < Date.parse(String(row.at)) ||
@@ -1612,6 +1612,7 @@ function producer(
     !last ||
     last.intent.action === "ensure-card" ||
     last.intent.action === "archive-card" ||
+    last.intent.action === "unarchive-card" ||
     (record.action === "admit"
       ? last.intent.action !== "set-admission-fields" ||
         last.intent.order !== record.order
@@ -2299,10 +2300,12 @@ function assertCommandRecipe(
     if (
       step.action !== "ensure-card" &&
       "resultOf" in step.target &&
-      sameOperation(step.target.resultOf).action !== "ensure-card"
+      !["ensure-card", "unarchive-card"].includes(
+        sameOperation(step.target.resultOf).action,
+      )
     )
       throw new Error(
-        "Generated card identity requires its declared earlier ensure original",
+        "Generated card identity requires its declared earlier ensure or unarchive original",
       );
     if ("resultOf" in step.prior) {
       const dependency = sameOperation(step.prior.resultOf);
@@ -2343,6 +2346,7 @@ function assertCommandRecipe(
     if (
       (step.action === "ensure-card" &&
         step.issueNodeId !== operation.issueNodeId) ||
+      (step.action === "unarchive-card" && operation.action !== "admit") ||
       (step.action === "set-metadata" &&
         (step.metadata !== operation.metadata ||
           step.fieldId !== first.binding.metadataFieldId)) ||
@@ -2374,7 +2378,12 @@ function assertCommandRecipe(
     const actualActions = steps.map((step) => step.action);
     const actions =
       operation.action === "admit"
-        ? ["ensure-card", "set-admission-fields"]
+        ? [
+            actualActions[0] === "unarchive-card"
+              ? "unarchive-card"
+              : "ensure-card",
+            "set-admission-fields",
+          ]
         : operation.action === "roadmap"
           ? ["ensure-card"]
           : operation.action === "archive"
@@ -2550,13 +2559,26 @@ function zeroIntentControl(operation: QueueOperation): boolean {
     recipe.effects[0]!.target.itemId === operation.binding.controlItemId
   );
 }
-function retainUnadmittedControlFailure(
+/** A declared operation of a command that never reached its first effect. */
+function zeroIntentOperation(operation: QueueOperation): boolean {
+  const recipe = operation.commandRecipe;
+  return (
+    !operation.completed &&
+    operation.effects.length === 0 &&
+    operation.commandId !== undefined &&
+    (operation.commandId !== operation.id ||
+      (recipe?.operations.some((header) => header.id === operation.id) ===
+        true &&
+        recipe.effects.some((step) => step.operationId === operation.id)))
+  );
+}
+function retainUnadmittedFailure(
   operation: QueueOperation,
   error: Record<string, unknown>,
 ): void {
-  if (!zeroIntentControl(operation) || operation.beforeEffectFailure)
+  if (!zeroIntentOperation(operation) || operation.beforeEffectFailure)
     throw new Error(
-      "Only an unchanged singleton unadmitted control may fail permanently",
+      "Only an unchanged operation with no dispatched effect may fail permanently",
     );
   const store = new LocalContentStore(
     join(stateRoot(operation.repository), "content"),
@@ -2733,7 +2755,7 @@ export async function admitQueueCommand(
       zeroIntentControl(command.operations[0]!)
     )
       try {
-        retainUnadmittedControlFailure(command.operations[0]!, {
+        retainUnadmittedFailure(command.operations[0]!, {
           kind: "creating-owner-before-command-refusal",
           boundary: "before-effect",
           knownNotDispatched: true,
@@ -2834,6 +2856,31 @@ export async function performQueueCommandEffect(
     return receipt;
   } catch (error) {
     owner.stopped = true;
+    // A refusal before the command's first effect dispatched nothing: settle
+    // its operations as refused so they never block later queue mutations.
+    if (
+      error instanceof LifecycleRefusal &&
+      owner.index === 0 &&
+      command.operations.every(zeroIntentOperation)
+    )
+      try {
+        for (const member of command.operations)
+          retainUnadmittedFailure(member, {
+            kind: "creating-owner-before-command-refusal",
+            boundary: "before-effect",
+            knownNotDispatched: true,
+            name: error.name,
+            message: error.message,
+            code: error.code,
+            stack: error.stack ?? null,
+          });
+      } catch (retentionError) {
+        throw new AggregateError(
+          [error, retentionError],
+          "Refused command and its operation settlement remain unresolved",
+          { cause: error },
+        );
+      }
     throw error;
   }
 }

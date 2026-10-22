@@ -925,6 +925,14 @@ async function enqueueMutation(
         `Objective #${objective} changed after reviewed publication; exact approved contents are required`,
       );
     const previous = current.entry;
+    // An archived card is no admission target: the plan restores it, and the
+    // new admission continues from the receipts it already holds.
+    const archivedCard = current.inspection.target
+      ? undefined
+      : current.inspection.membership?.find((item) => item.archived);
+    const prior =
+      previous ??
+      (archivedCard && retainedQueueEntry(config, current.history, objective));
     if (
       previous?.state === "queued" &&
       previous.bodyDigest === bodyDigest &&
@@ -939,7 +947,7 @@ async function enqueueMutation(
       continue;
     }
     const existing = readContinuation(config.repository, objective);
-    if (existing && !terminal(existing) && previous?.bodyDigest !== bodyDigest)
+    if (existing && !terminal(existing) && prior?.bodyDigest !== bodyDigest)
       throw new LifecycleRefusal(
         "unfinished_owned_work",
         "Unfinished approved contents cannot be replaced by requeueing; use supported recovery",
@@ -956,14 +964,14 @@ async function enqueueMutation(
         "Objective has an unresolved or foreign owner; admission changes are held",
       );
     const order =
-      previous?.order ?? nextOrder ?? nextProjectQueueOrder(first.history);
-    if (!previous) nextOrder = order + 1;
+      prior?.order ?? nextOrder ?? nextProjectQueueOrder(first.history);
+    if (!prior) nextOrder = order + 1;
     if (!Number.isSafeInteger(order))
       throw new Error("Project order exhausted its exact integer range");
     const operation = createQueueOperation(config, {
       action: "admit",
       scope: issue.issueNodeId,
-      previousReceiptId: previous?.receiptId ?? null,
+      previousReceiptId: prior?.receiptId ?? null,
       approval: { kind: "queue-command" },
       objective,
       issueNodeId: issue.issueNodeId,
@@ -982,7 +990,9 @@ async function enqueueMutation(
       plan,
       operation,
       current,
-      { action: "ensure-card", issueNodeId: issue.issueNodeId },
+      archivedCard
+        ? { action: "unarchive-card", target: { itemId: archivedCard.itemId } }
+        : { action: "ensure-card", issueNodeId: issue.issueNodeId },
       { target: targetProof(current.inspection) ?? null },
       control,
     );

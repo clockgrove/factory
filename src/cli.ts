@@ -643,6 +643,7 @@ function selectedForCommand(
         ? Number(objective)
         : undefined,
     flag: option(args, "provider"),
+    cancel: command === "cancel",
   });
 }
 

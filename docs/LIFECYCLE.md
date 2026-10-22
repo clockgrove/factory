@@ -90,11 +90,16 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 | Rejection hold              | service    | cancel ok; resume `rejection_hold`                                                         |
 | Acceptance sealed           | none       | run ok (it reconciles); retry `objective_complete`; cancel `acceptance_sealed`             |
 | Restored, held              | none       | run and retry `restoration_held`; start `restoration_held`; cancel ✗(a) `restoration_held` |
-| Configuration changed       | none       | run, rereview, repair and start `config_frozen`; cancel ok                                 |
+| Configuration changed       | none       | run, rereview, repair and start `config_frozen`; cancel ok, without `--provider`           |
 | Configuration changed       | service    | cancel and resume ok                                                                       |
 | Cancelled                   | none       | run, cancel, queue remove and queue add ok                                                 |
 | Complete                    | none       | run, cancel and queue remove ok; retry `objective_complete`                                |
-| Complete, card archived     | none       | queue add ok against the Project fixture; real GitHub needs a live check (gap 7)           |
+| Complete, card archived     | none       | queue add `queue_card_archived` (restore the card first)                                   |
+
+**Cancel exits.**
+
+- **Configuration changed.** Without `--provider`, cancel picks the one configured provider whose adapters cover every adapter the Objective recorded. If none or several fit, it asks for `--provider`.
+- **Archived card.** An admission's approved writes include no unarchive, so `queue add` refuses with `queue_card_archived` and names the remedy: restore the card from the Project's archive, then add it again. The refused admission still leaves its queue operation unsettled, which holds later queue mutations: a known follow-up.
 
 **One control plane.** A live service runs every lifecycle command on an Objective it isn't running: decide, cancel, retry, repair, rereview, select, amendments, pause, drain and resume. Commands that let work start (retry, resume, select, repair, rereview, propose-amendment) need a current queue admission, else `objective_not_admitted`; decide, cancel, pause, drain and decline-discovery work for any Objective. It runs the foreground implementation as the installation owner, under the Objective's lock and on the configuration the Objective froze. While it starts or settles the Objective's run, it refuses with `owner_settling`. A live paused planning owner hands its Objective off to take a plan refusal, which then lands where the Objective stopped.
 

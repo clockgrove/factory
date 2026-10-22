@@ -1950,11 +1950,18 @@ export async function projectQueueWriteOnGitHub(
       throw new Error(
         "Project card admission Issue or access changed after exact approval",
       );
+    // An admission's approved writes include no unarchive, so an archived
+    // card stays archived until the operator restores it.
+    const archived = () =>
+      new LifecycleRefusal(
+        "queue_card_archived",
+        `Objective #${expected.objective}'s Project card is archived; restore it from the Project's archive, then run queue add again`,
+      );
     const target = request.expectedTarget;
+    if (target && current.target?.archived) throw archived();
     if (
       target &&
       (!current.target ||
-        current.target.archived ||
         current.target.itemId !== target.itemId ||
         current.target.metadata !== target.metadata ||
         (target.order !== undefined && current.target.order !== target.order) ||
@@ -1965,10 +1972,7 @@ export async function projectQueueWriteOnGitHub(
         "Project card prior admission target changed after owned inspection",
       );
     if (current.membership?.some((item) => item.archived) && !current.target)
-      throw new LifecycleRefusal(
-        "queue_card_archived",
-        "An archived Objective card requires current unarchived membership",
-      );
+      throw archived();
   };
   const refreshTarget = (target: Awaited<ReturnType<typeof readTarget>>) => {
     assertProcessActive();

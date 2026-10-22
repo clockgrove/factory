@@ -1,9 +1,17 @@
 import {
+  CLAUDE_AGENT_SDK_ADAPTER_IDENTITY,
   type FactoryConfig,
   type FactoryConfigFile,
+  harnessAdapterIdentity,
+  type LocalHarnessConfig,
   readConfigFile,
   resolveProvider,
 } from "./config.js";
+import {
+  CODEX_APP_SERVER_PLANNING_ADAPTER,
+  CODEX_PLANNING_ADAPTER,
+} from "./compiler/transport.js";
+import { isExecutionState, type ContinuationState } from "./state.js";
 import { recordedSplitParent } from "./objective-split.js";
 import {
   continuationConfigurationMatches,
@@ -15,7 +23,12 @@ import {
  * Objective's frozen configuration matches no configured provider and several
  * are configured, so the default may not be the provider it ran with.
  */
-type ProviderSource = "objective" | "flag" | "default" | "unmatched";
+type ProviderSource =
+  | "objective"
+  | "flag"
+  | "default"
+  | "unmatched"
+  | "recorded-adapters";
 
 export interface SelectedConfig {
   config: FactoryConfig;
@@ -34,6 +47,8 @@ export function selectProvider(
   options: {
     objective?: number;
     flag?: string;
+    /** Cancel: an unmatched Objective may resolve by its recorded adapters. */
+    cancel?: boolean;
   } = {},
 ): SelectedConfig {
   const names = Object.keys(file.providers);
@@ -52,6 +67,19 @@ export function selectProvider(
       // A configuration no provider matches stays inspectable, and continuation refuses
       // where it requires the frozen digest. Cancel needs the adapters the Objective ran
       // with, which only the operator's explicit --provider can name (#1398).
+      if (
+        provider === undefined &&
+        options.flag === undefined &&
+        options.cancel
+      ) {
+        const recorded = recordedAdapterProvider(file, state);
+        if (recorded !== undefined)
+          return {
+            config: resolveProvider(file, recorded),
+            provider: recorded,
+            source: "recorded-adapters",
+          };
+      }
       if (provider === undefined)
         return options.flag !== undefined
           ? {
@@ -93,4 +121,80 @@ export function readSelectedConfig(
   options: Parameters<typeof selectProvider>[1] = {},
 ): SelectedConfig {
   return selectProvider(readConfigFile(path), options);
+}
+
+/** An adapter identity without its version: a Factory upgrade keeps its family. */
+function family(identity: string): string {
+  return /^(@?[^@]+)@/.exec(identity)?.[1] ?? identity;
+}
+
+/** Every adapter family a provider's planning and execution can record. */
+function providerFamilies(config: FactoryConfig): Set<string> {
+  const families = new Set<string>();
+  if (config.planning.kind === "codex-sdk")
+    for (const id of [
+      CODEX_PLANNING_ADAPTER,
+      CODEX_APP_SERVER_PLANNING_ADAPTER,
+    ])
+      families.add(family(id));
+  else families.add(family(CLAUDE_AGENT_SDK_ADAPTER_IDENTITY));
+  const execution = config.execution;
+  if (execution.kind === "managed-agent") {
+    families.add(execution.provider);
+    return families;
+  }
+  families.add("local");
+  const harnesses = [
+    ...(execution.harness ? [execution.harness] : []),
+    ...Object.values(execution.profiles ?? {}).map(
+      (profile) => profile.harness,
+    ),
+  ];
+  // A default local harness is Codex.
+  if (!harnesses.length)
+    harnesses.push({ kind: "codex-sdk" } as LocalHarnessConfig);
+  for (const harness of harnesses) {
+    families.add(family(harnessAdapterIdentity(harness)));
+    // Worker session receipts name the harness kind.
+    families.add(
+      harness.kind === "codex-sdk"
+        ? "codex"
+        : harness.kind === "registered"
+          ? family(harness.adapter)
+          : harness.kind,
+    );
+  }
+  return families;
+}
+
+/**
+ * The one configured provider whose adapters cover every adapter the
+ * Objective recorded (its sessions, Work Item bindings and executions), so
+ * cancel can release them after the configuration changed. With nothing
+ * recorded, the default releases nothing and cancels. Undefined when no
+ * provider or several fit: the operator names it with --provider.
+ */
+function recordedAdapterProvider(
+  file: FactoryConfigFile,
+  state: ContinuationState,
+): string | undefined {
+  const recorded = new Set<string>();
+  for (const ref of [
+    ...Object.values(state.agentSessions ?? {}),
+    ...(state.agentSessionHistory ?? []),
+  ])
+    recorded.add(family(ref.adapter));
+  if (isExecutionState(state)) {
+    for (const item of state.graph.items)
+      if (item.executionBinding)
+        recorded.add(family(item.executionBinding.adapter));
+    for (const work of Object.values(state.work))
+      if (work.execution) recorded.add(work.execution.provider);
+  }
+  if (!recorded.size) return file.defaultProvider;
+  const fits = Object.keys(file.providers).filter((name) => {
+    const families = providerFamilies(resolveProvider(file, name));
+    return [...recorded].every((value) => families.has(value));
+  });
+  return fits.length === 1 ? fits[0] : undefined;
 }

@@ -413,8 +413,7 @@ test("the service continues a started Objective on the provider it froze", () =>
     () => checkServiceState(unmatched, 8, path),
     /different configuration binding/,
   );
-  // Only an explicit --provider names the one it ran with, so cancel can
-  // release its own sessions after its settings changed (#1398).
+  // Other commands keep the default; --provider names the one it ran with.
   const select = (flag) => {
     const { provider, source } = selectProvider(file, { objective: 8, flag });
     return `${provider}/${source}`;
@@ -435,6 +434,13 @@ test("the service continues a started Objective on the provider it froze", () =>
   checkPreparedIntakeServiceState(service, path, intake([8]));
   assert.equal(select(), "codex/unmatched");
   assert.equal(select("claude"), "claude/flag");
+  // Cancel resolves the provider from the adapters the Objective recorded
+  // (none here, so any provider releases nothing): no flag needed.
+  const cancelling = selectProvider(file, { objective: 8, cancel: true });
+  assert.equal(
+    `${cancelling.provider}/${cancelling.source}`,
+    "codex/recorded-adapters",
+  );
   // The remedy status prints must parse (#1426).
   assertKnownFlags("cancel", ["--objective", "8", "--provider", "claude"]);
 

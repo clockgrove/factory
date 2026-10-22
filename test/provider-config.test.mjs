@@ -16,7 +16,11 @@ import {
   fixedScripts,
   validateCommandProvenance,
 } from "../dist/compiler.js";
-import { PLAN_CHECKS, PLAN_CHECK_EXEMPT } from "../dist/compiler/sources.js";
+import {
+  PLAN_CHECKS,
+  PLAN_CHECK_EXEMPT,
+  objectiveSource,
+} from "../dist/compiler/sources.js";
 import { planGraphLint, planStandardLint } from "../dist/compiler-wire.js";
 import { prepareCompilationRequest } from "../dist/compiler/planning.js";
 import {
@@ -763,7 +767,7 @@ test("every plan check gives the planner its facts and refuses with what would p
   assert.throws(() => declared(shapeless), /no exact source-declared command/);
   // #1741: a backticked command in the Objective's prose is declared; the
   // same text in a repository doc is not.
-  const inSource = (path) =>
+  const inSource = (path, content, authored = path === "OBJECTIVE") =>
     validateCommandProvenance(
       graph(
         item("a", {
@@ -776,12 +780,37 @@ test("every plan check gives the planner its facts and refuses with what would p
           ],
         }),
       ),
-      [{ path, content: "The probe is `node --test`, run after install.\n" }],
+      [
+        {
+          path,
+          content,
+          ...(authored && { operatorAuthored: true }),
+        },
+      ],
       repo,
     );
-  inSource("OBJECTIVE");
+  const prose = "The probe is `node --test`, run after install.\n";
+  inSource("OBJECTIVE", prose);
   assert.throws(
-    () => inSource("AGENTS.md"),
+    () => inSource("AGENTS.md", prose),
+    /no exact source-declared command/,
+  );
+  // A repo file named OBJECTIVE and a split child's model-written goal
+  // are not operator-authored.
+  assert.throws(
+    () => inSource("OBJECTIVE", prose, false),
+    /no exact source-declared command/,
+  );
+  const childBody = "<!-- factory:parent=5;child=a-b -->\n" + prose;
+  assert.equal(objectiveSource(childBody).operatorAuthored, undefined);
+  assert.equal(objectiveSource(prose).operatorAuthored, true);
+  assert.throws(
+    () =>
+      inSource(
+        "OBJECTIVE",
+        childBody,
+        objectiveSource(childBody).operatorAuthored === true,
+      ),
     /no exact source-declared command/,
   );
   const fix = {

@@ -37,6 +37,7 @@ import { pinnedGit, pinnedGitRaw, pinnedGitRawInput } from "../process.js";
 import { assertPreIntegrationCheckSources } from "../delivery/readiness.js";
 import { assertKnownCheckNames, workflowCheckNames } from "../check-names.js";
 import { isAbsolute } from "node:path";
+import { childIdentity } from "../objective-split.js";
 import { recognizedObjectiveAttachment } from "../media.js";
 
 /** Reviewed templates share source and command authority without becoming executable nodes. */
@@ -425,6 +426,18 @@ interface SourceSpan {
   heading?: string;
 }
 
+/**
+ * The Objective body as a planning source. A split child's body carries the
+ * model-written goal, so it is not operator-authored.
+ */
+export function objectiveSource(body: string): PlanningSource {
+  return {
+    path: "OBJECTIVE",
+    content: body,
+    ...(!childIdentity(body) && { operatorAuthored: true as const }),
+  };
+}
+
 /** A source reference in a model view: a span of supplied bytes, its verified bytes, or identity alone. */
 type InputSourceView = WorkItemSourceRef & {
   sourceSpan?: SourceSpan;
@@ -657,6 +670,8 @@ export interface PlanningSource {
   path: string;
   content: string;
   heading?: string;
+  /** Set only on the operator-authored Objective body; never on a repository file. */
+  operatorAuthored?: true;
 }
 
 export function commandAuthorizations(
@@ -967,9 +982,10 @@ function authorizedCommand(
       (source) =>
         source.path === check.source &&
         (exactLine(source.content, check.command) ||
-          // The Objective is operator-authored: a backticked command in its
-          // prose is declared. Repository docs keep the own-line rule.
-          (source.path === "OBJECTIVE" &&
+          // An operator-authored Objective body may declare a backticked
+          // command in its prose. Repository docs and split-child bodies
+          // (which carry a model-written goal) keep the own-line rule.
+          (source.operatorAuthored === true &&
             inlineCommand(source.content, check.command))),
     );
   if (
@@ -1372,7 +1388,7 @@ export function planningSources(
       packageManagerUpdate: update,
       preview: true,
     });
-  const sources: PlanningSource[] = [{ path: "OBJECTIVE", content: body }];
+  const sources: PlanningSource[] = [objectiveSource(body)];
   const selected = selectedHeadings(body);
   const defaults = ["AGENTS.md", "README.md"].filter((path) => {
     try {
@@ -1443,7 +1459,7 @@ export function assertRequiredFinalCommands(
       `Acceptance command ${ciOnly} is CI-only in the installation's finalValidation.ciOnlyCommands: it needs network, and final validation runs offline. Leave it to CI and remove it from the Objective's Acceptance commands, or remove it from ciOnlyCommands if it runs offline.`,
     );
   const sources = [
-    { path: "OBJECTIVE", content: body },
+    objectiveSource(body),
     { path: REQUIRED_COMMANDS_SOURCE, content: requiredCommands.join("\n") },
   ];
   for (const command of requiredCommands)

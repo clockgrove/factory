@@ -2058,6 +2058,13 @@ else {
           error.message,
         ),
     );
+    // Digests alone are not a child admission: it still refuses.
+    await assert.rejects(
+      enqueueIntake(config, fixture.services.github, [7], {
+        expectedBodyDigests: { 7: queueDigest(project.cards[7].body) },
+      }),
+      (error) => lifecycleCode(error) === "objective_preflight_failed",
+    );
   });
 
   // Dispatch isolation (#1715): failed and cancel-requested queued

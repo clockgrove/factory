@@ -45,7 +45,11 @@ import {
   projectQueueReceiptTarget,
 } from "./github-project-queue.js";
 import { planningPrerequisites } from "./objective-prerequisites.js";
-import { expandSplitPredecessors, splitSettled } from "./objective-split.js";
+import {
+  childIdentity,
+  expandSplitPredecessors,
+  splitSettled,
+} from "./objective-split.js";
 import { settleSplitParent, splitReadyToClose } from "./runner/split.js";
 import {
   currentProcessSignal,
@@ -967,8 +971,9 @@ async function enqueueMutation(
       continue;
     }
     // Fail fast: dispatch runs this same preflight and would hold the
-    // Objective silently. Child admissions were checked with their parent.
-    if (!options.childAdmission)
+    // Objective silently. Child admissions were checked with their parent;
+    // the flag counts only for a genuine child body.
+    if (!(options.childAdmission && childIdentity(issue.body)))
       admissionPreflight(config, objective, issue.body);
     const existing = readContinuation(config.repository, objective);
     if (existing && !terminal(existing) && prior?.bodyDigest !== bodyDigest)
@@ -1577,7 +1582,6 @@ function ownedQueueCommand(
             expectedBodyDigests: request.input?.expectedBodyDigests as
               | Record<string, string>
               | undefined,
-            childAdmission: request.input?.childAdmission === true,
           },
           cached,
         );

@@ -20,7 +20,17 @@ export interface ParsedObjective {
   sources: SourceRef[];
 }
 
-const KNOWN = ["goal", "acceptance", "context", "sources", "constraints"];
+const KNOWN = [
+  "goal",
+  "acceptance",
+  "context",
+  "sources",
+  "constraints",
+  "non-goals",
+];
+
+/** Older names Objectives still use for a known section. */
+const ALIASES: Record<string, string> = { outcome: "goal" };
 
 const RETIRED: Record<string, string> = {
   "final validation":
@@ -40,7 +50,8 @@ function sections(body: string): Section[] {
   for (const line of markdownLines(body)) {
     const heading = line.heading;
     if (heading && (heading.level === 2 || heading.level === 3)) {
-      const name = heading.text.toLowerCase();
+      const text = heading.text.toLowerCase();
+      const name = ALIASES[text] ?? text;
       const last = result[result.length - 1];
       if (last && last.name === name && last.lines.every((l) => !l.text.trim()))
         continue;

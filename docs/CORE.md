@@ -42,7 +42,8 @@ There is one process, `factory serve`, per installation, run by systemd. It is t
 
 - **Lock.** `serve` takes an `flock` on `service.lock`. The kernel releases the lock when the process dies, so there are no owner records, PID proofs or handoffs. A second `serve` exits at once with "already running".
 - **CLI.** Commands that read (`status`, `log`) read the state files directly. Commands that change something (`answer`, `cancel`, `retry`, `queue`) write one request file to `requests/`. The service picks it up within a second and deletes it when the request is applied. If the service isn't running, the request waits there and the CLI says so.
-- **No foreground runs.** `factory run` starts the service in the foreground for development. It is the same code path.
+- **`factory run N`** queues one Objective and follows it to the end, with the old exit codes. The service does the work, so there is only one code path.
+- **One installation per repository.** Two machines serving one queue are not supported.
 - **Upgrade.** Stop the service, install, start. Restart is the normal recovery path, so an upgrade needs nothing more.
 
 ## State
@@ -148,7 +149,8 @@ The GitHub Project is the source of truth for what is queued.
 - **Read-only, and retried.** The service reads the Project every 30 s. If a read fails or comes back partial, it keeps the last good view and tries again. A read failure never fails a run.
 - **Status is a display.** The service sets Status as the run moves: Planning, Building, Needs you, Done, Failed, Cancelled. A failed write is logged and written again on the next transition.
 - **Operator controls:** set an item's Status to the queued option to queue it, move it out of the queued option to dequeue it if it hasn't started, and set the order number to reorder. There is no control card and no managed metadata field.
-- **One at a time (v1).** The core runs one Objective at a time; `queue.maxActiveObjectives` raises the limit later.
+- **One at a time (v1).** The core runs one Objective at a time. `queue.maxActiveObjectives` raises the limit in slice 6 of [the scope ledger](CORE-SCOPE.md).
+- **No approval step.** A clean, reviewed plan runs straight away. Factory asks only when review finds a decision for the operator.
 
 ## Check at queue time
 
@@ -164,8 +166,8 @@ A hold is a question with named answers:
 {
   "id": "plan-1",
   "question": "...",
-  "answers": ["approve", "revise", "cancel"],
-  "recommended": "approve",
+  "answers": ["answer", "replan", "cancel"],
+  "recommended": "answer",
 }
 ```
 

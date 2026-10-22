@@ -16,33 +16,34 @@ Every lifecycle refusal is a `LifecycleRefusal` with a stable `code` (`src/lifec
 - The CLI prints `{"kind":"lifecycle-refusal","code":"..."}` on stderr before the message.
 - An upgrade that waits returns `code: "upgrade_draining"` in its result.
 
-| Code                         | Meaning                                                                                     |
-| ---------------------------- | ------------------------------------------------------------------------------------------- |
-| `objective_not_owned`        | A live service refuses a non-lifecycle action on an Objective it is not running.            |
-| `owner_settling`             | The service is starting or settling the Objective's run.                                    |
-| `config_frozen`              | The Objective froze a different configuration than the current one.                         |
-| `acceptance_sealed`          | Final acceptance is sealed; a run reconciles it.                                            |
-| `restoration_held`           | A restored continuation awaits ownership reconciliation.                                    |
-| `queue_card_archived`        | The Objective's Project card is archived.                                                   |
-| `coordinator_draining`       | The coordinator was drained or handed off; resume it first.                                 |
-| `queue_draining`             | The service or queue is draining and admits no new work.                                    |
-| `unfinished_owned_work`      | The Objective still has owned work; cancel it first.                                        |
-| `no_factory_state`           | The Objective has no continuation state.                                                    |
-| `finish_or_cancel_active`    | Another Work Item is still running.                                                         |
-| `planning_owner_live`        | A live planning owner holds the plan that this command changes.                             |
-| `diagnosis_held`             | A planning session still holds the Work Item's diagnosis.                                   |
-| `rejection_hold`             | A rejected graph amendment holds the Objective paused.                                      |
-| `controller_owned`           | Another controller already owns the Objective or installation.                              |
-| `foreground_owner_live`      | A foreground run owns the installation or cannot take this command.                         |
-| `no_active_owner`            | No live coordinator owns the Objective to take this command.                                |
-| `cancel_unresolved`          | Cessation of owned work is unresolved after a cancellation.                                 |
-| `objective_complete`         | The Objective is already complete.                                                          |
-| `objective_not_admitted`     | The Objective has no current queue admission.                                               |
-| `owner_endpoint_unavailable` | A live owner holds its record without a control endpoint.                                   |
-| `active_limit`               | Every dispatch slot holds an unsettled run.                                                 |
-| `session_unsettled`          | A native agent session still holds resources that cancellation must settle.                 |
-| `publication_lock_held`      | Another process held the archive publication lock past the bound; run it again.             |
-| `upgrade_draining`           | An upgrade waits while runs finish their step and hand off. This is a result, not an error. |
+| Code                         | Meaning                                                                                                   |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `objective_not_owned`        | A live service refuses a non-lifecycle action on an Objective it is not running.                          |
+| `owner_settling`             | The service is starting or settling the Objective's run.                                                  |
+| `config_frozen`              | The Objective froze a different configuration than the current one.                                       |
+| `acceptance_sealed`          | Final acceptance is sealed; a run reconciles it.                                                          |
+| `restoration_held`           | A restored continuation awaits ownership reconciliation.                                                  |
+| `queue_card_archived`        | The Objective's Project card is archived.                                                                 |
+| `coordinator_draining`       | The coordinator was drained or handed off; resume it first.                                               |
+| `queue_draining`             | The service or queue is draining and admits no new work.                                                  |
+| `unfinished_owned_work`      | The Objective still has owned work; cancel it first.                                                      |
+| `no_factory_state`           | The Objective has no continuation state.                                                                  |
+| `finish_or_cancel_active`    | Another Work Item is still running.                                                                       |
+| `planning_owner_live`        | A live planning owner holds the plan that this command changes.                                           |
+| `diagnosis_held`             | A planning session still holds the Work Item's diagnosis.                                                 |
+| `rejection_hold`             | A rejected graph amendment holds the Objective paused.                                                    |
+| `controller_owned`           | Another controller already owns the Objective or installation.                                            |
+| `foreground_owner_live`      | A foreground run owns the installation or cannot take this command.                                       |
+| `no_active_owner`            | No live coordinator owns the Objective to take this command.                                              |
+| `cancel_unresolved`          | Cessation of owned work is unresolved after a cancellation.                                               |
+| `objective_complete`         | The Objective is already complete.                                                                        |
+| `objective_not_admitted`     | The Objective has no current queue admission.                                                             |
+| `owner_endpoint_unavailable` | A live owner holds its record without a control endpoint.                                                 |
+| `active_limit`               | Every dispatch slot holds an unsettled run.                                                               |
+| `session_unsettled`          | A native agent session still holds resources that cancellation must settle.                               |
+| `publication_lock_held`      | Another process held the archive publication lock past the bound; run it again.                           |
+| `objective_preflight_failed` | `queue add` refused an Objective whose text fails the preflight dispatch runs; the message names the fix. |
+| `upgrade_draining`           | An upgrade waits while runs finish their step and hand off. This is a result, not an error.               |
 
 Add a code here, and to `LIFECYCLE_CODES`, when you add a lifecycle refusal.
 

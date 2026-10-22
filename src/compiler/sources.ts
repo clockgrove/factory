@@ -850,6 +850,18 @@ function objectiveSection(body: string, names: string[]): string {
     .trim();
 }
 
+function inlineCommand(content: string, command: string): boolean {
+  if (!COMMAND_SHAPE.test(command) && !packageManagerVersionProbe(command))
+    return false;
+  return markdownLines(content).some(
+    ({ text, fenced }) =>
+      !fenced &&
+      [...text.matchAll(/`([^`]+)`/g)].some(
+        (match) => match[1]!.trim() === command,
+      ),
+  );
+}
+
 function exactLine(content: string, command: string): boolean {
   // Only a command-shaped line is authority; doc code never is.
   if (!COMMAND_SHAPE.test(command) && !packageManagerVersionProbe(command))
@@ -954,7 +966,11 @@ function authorizedCommand(
     return sources.some(
       (source) =>
         source.path === check.source &&
-        exactLine(source.content, check.command),
+        (exactLine(source.content, check.command) ||
+          // The Objective is operator-authored: a backticked command in its
+          // prose is declared. Repository docs keep the own-line rule.
+          (source.path === "OBJECTIVE" &&
+            inlineCommand(source.content, check.command))),
     );
   if (
     check.provenance !== "base-observed" ||

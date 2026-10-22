@@ -2020,6 +2020,46 @@ else {
     assert.equal(await dispatch(fixture, "queue-remove", objective), "ok");
   });
 
+  // Fail fast (#1741): queue add runs dispatch's Objective preflight.
+  test("queue add refuses an Objective naming an undeclared command and says the fix", async (t) => {
+    const fixture = await installation(t, false);
+    const { config, directory } = fixture;
+    const git = (...args) =>
+      execFileSync("git", ["-C", config.checkout, ...args], {
+        encoding: "utf8",
+      });
+    writeFileSync(
+      join(config.checkout, "package.json"),
+      '{"scripts":{"test":"node --test"}}\n',
+    );
+    git("add", ".");
+    git(
+      "-c",
+      "user.name=F",
+      "-c",
+      "user.email=f@example.test",
+      "commit",
+      "-m",
+      "s",
+    );
+    const { github } = fixture.services;
+    await enqueueIntake(config, github, [7]);
+    assert.equal(await dispatch(fixture, "queue-remove", 7), "ok");
+    const file = join(directory, "project.json");
+    const project = JSON.parse(readFileSync(file, "utf8"));
+    project.cards[7].body =
+      "## Outcome\nRun `npm test` after install.\n\n## Acceptance\n- It behaves.\n";
+    writeFileSync(file, JSON.stringify(project));
+    await assert.rejects(
+      enqueueIntake(config, fixture.services.github, [7]),
+      (error) =>
+        lifecycleCode(error) === "objective_preflight_failed" &&
+        /Acceptance bullet with exactly one backticked command/.test(
+          error.message,
+        ),
+    );
+  });
+
   // Dispatch isolation (#1715): failed and cancel-requested queued
   // Objectives ahead of another neither stop the service nor block the
   // Objective behind them.

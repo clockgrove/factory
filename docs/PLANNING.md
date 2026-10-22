@@ -77,6 +77,8 @@ The worker gets the standard before its self-review. Result review refuses a vio
 
 When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. The planner request lists the exact authorized validation commands (computed by the function the check uses), the CI-only commands and the validation environment; a refusal names the allowed alternatives or the exact fix, with long lists bounded. A new plan check ships with its facts in the request and an actionable refusal, and joins `PLAN_CHECKS` in `src/compiler/sources.ts`; the test in `test/provider-config.test.mjs` fails until both exist.
 
+**Command authority.** A backticked command in a sentence of the Objective is declared (the operator wrote it); in a repository source doc only a command on its own line is. `factory queue add` runs the dispatch-time Objective preflight and refuses with `objective_preflight_failed` and the fix, so a bad Objective never sits admitted and held.
+
 Why: a planner that must guess what Factory accepts spends revision rounds finding it.
 
 ## Design checklist

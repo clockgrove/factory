@@ -56,6 +56,7 @@ import {
   gitAsync,
   withProcessCancellation,
 } from "./process.js";
+import { preflightObjective } from "./local-preflight.js";
 import {
   QueueAuthorityChanged,
   admitQueueCommand,
@@ -881,6 +882,23 @@ async function enqueueOwned(
     enqueueMutation(config, github, objectives, options, cached),
   );
 }
+function admissionPreflight(
+  config: FactoryConfig,
+  objective: number,
+  body: string,
+): void {
+  try {
+    // The checkout's head, as the read-only preview uses: no network on
+    // queue add. Dispatch repeats the check at the fetched default head.
+    preflightObjective(config, body, git(config.checkout, "rev-parse", "HEAD"));
+  } catch (error) {
+    throw new LifecycleRefusal(
+      "objective_preflight_failed",
+      `Objective #${objective} was not added: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
 async function enqueueMutation(
   config: FactoryConfig,
   github: GitHubGateway,
@@ -946,6 +964,10 @@ async function enqueueMutation(
       });
       continue;
     }
+    // Fail fast: dispatch runs this same preflight and would hold the
+    // Objective silently. Child admissions were checked with their parent.
+    if (!options.expectedBodyDigests)
+      admissionPreflight(config, objective, issue.body);
     const existing = readContinuation(config.repository, objective);
     if (existing && !terminal(existing) && prior?.bodyDigest !== bodyDigest)
       throw new LifecycleRefusal(

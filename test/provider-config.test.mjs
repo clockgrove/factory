@@ -761,6 +761,29 @@ test("every plan check gives the planner its facts and refuses with what would p
     );
   declared("node --test");
   assert.throws(() => declared(shapeless), /no exact source-declared command/);
+  // #1741: a backticked command in the Objective's prose is declared; the
+  // same text in a repository doc is not.
+  const inSource = (path) =>
+    validateCommandProvenance(
+      graph(
+        item("a", {
+          validation: [
+            {
+              command: "node --test",
+              provenance: "source-declared",
+              source: path,
+            },
+          ],
+        }),
+      ),
+      [{ path, content: "The probe is `node --test`, run after install.\n" }],
+      repo,
+    );
+  inSource("OBJECTIVE");
+  assert.throws(
+    () => inSource("AGENTS.md"),
+    /no exact source-declared command/,
+  );
   const fix = {
     "command-authority": /Authorized commands: `npm test`, `npm run lint`/,
     "ci-only": /use an offline authorized command/,

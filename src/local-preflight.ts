@@ -391,7 +391,7 @@ export function preflightObjective(
     : undeclaredObjectiveCommands(body, sources, baseSha, config.checkout);
   if (named.length)
     throw new Error(
-      `Objective names ${named.map((command) => `\`${command}\``).join(", ")} but declares no final command. Final commands are only Acceptance bullets that are exactly one backticked command; planning cannot add them. Add each command the integrated result must pass under Acceptance as its own bullet, for example:\n${named.map((command) => `- \`${command}\``).join("\n")}\nIf the Objective needs no final command, remove the backticks from those mentions.`,
+      `Objective names ${named.map((command) => `\`${command}\``).join(", ")} but declares no final command. Final commands are only Acceptance bullets that are exactly one backticked command; planning cannot add them. Make each command the integrated result must pass an Acceptance bullet with exactly one backticked command, for example:\n${named.map((command) => `- \`${command}\``).join("\n")}\nIf the Objective needs no final command, remove the backticks from those mentions (a command named in prose stays usable by the plan, but is not a final command).`,
     );
   const required = requiredFinalCommands(config);
   assertRequiredFinalCommands(

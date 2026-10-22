@@ -53,6 +53,8 @@ export const LIFECYCLE_CODES = [
   "session_unsettled",
   /** Another process held the archive publication lock past the operator's bound. */
   "publication_lock_held",
+  /** The Objective's text fails the preflight dispatch runs; fix the Objective, then add it again. */
+  "objective_preflight_failed",
   /** An upgrade waits while running Objectives finish (a result, not an error). */
   "upgrade_draining",
 ] as const;

@@ -23,38 +23,6 @@ import type {
   WorkItem,
 } from "./types.js";
 
-/**
- * The deterministic plan checks. Each ships its facts in the planner request
- * and a refusal that says what would pass. They gather every problem in one
- * pass, so one planning round fixes them all. The plan standard's per-item
- * lint (entry signal, line references) runs where the answer is decoded,
- * because it needs the planner's oneOutcomeReason.
- */
-export const PLAN_CHECKS = [
-  { id: "command-authority", facts: "authorizedCommands" },
-  { id: "ci-only", facts: "ciOnlyCommands" },
-  { id: "network", facts: "authorizedCommands" },
-  {
-    id: "new-file-name",
-    facts: "request instructions: workers name new files",
-  },
-  { id: "path-overlap", facts: "graph schema: ownedPaths and dependencies" },
-  { id: "local-proof", facts: "authorizedCommands" },
-  {
-    id: "storage-ownership",
-    facts: "refusal names the base's migrations directories",
-  },
-  {
-    id: "validation-scope",
-    facts: "request instructions: scoped commands and their directories",
-  },
-  {
-    id: "safety-proof",
-    facts: "plan rules: privacy, authority and accessibility proof",
-  },
-  { id: "plan-standard", facts: "plan standard in the request instructions" },
-] as const;
-
 type Found = (message: string, itemId?: string) => void;
 
 /**

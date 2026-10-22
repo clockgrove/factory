@@ -1,3 +1,4 @@
+import { isRecord } from "./graph.js";
 import type { Finding, PinnedSource, PlannerDecision } from "./types.js";
 
 /**
@@ -149,10 +150,6 @@ export function graphReviewSchema(): Record<string, unknown> {
   };
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 /** A decoded review answer, or an invalid one the step retries with `reason`. */
 export type GraphReviewDecode =
   | { invalid: false; findings: ReviewFinding[]; decoded: GraphReviewFinding[] }
@@ -175,7 +172,7 @@ export function decodeGraphReview(
     reason,
   });
   if (
-    !isObject(value) ||
+    !isRecord(value) ||
     Object.keys(value).some((key) => key !== "findings") ||
     !Array.isArray(value.findings)
   )
@@ -185,7 +182,7 @@ export function decodeGraphReview(
   const decoded: GraphReviewFinding[] = [];
   for (const [at, raw] of value.findings.entries()) {
     const where = `Finding ${at}`;
-    if (!isObject(raw)) return invalid(`${where} must be an object.`);
+    if (!isRecord(raw)) return invalid(`${where} must be an object.`);
     const unknown = Object.keys(raw).filter(
       (key) =>
         !["kind", "itemIds", "evidenceIndices", "detail", "question"].includes(

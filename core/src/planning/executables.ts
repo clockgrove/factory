@@ -247,19 +247,6 @@ async function hostVersion(
 }
 
 /** The package.json packageManager at the base; undefined when absent or unreadable. */
-async function basePackageManager(files: BaseFiles): Promise<unknown> {
-  const text = await files.text("package.json");
-  if (text === undefined) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(text);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as { packageManager?: unknown }).packageManager
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * Observe the host executables the final commands need. Problems are data:
  * each names the fix. Throws only a TransientError when git can't read the
@@ -276,9 +263,8 @@ export async function observeLocalExecutables(args: {
   const problems: string[] = [];
 
   const update = packageManagerUpdate(body);
-  const baseline = await basePackageManager(
-    new BaseFiles(checkout, base, signal),
-  );
+  const baseline = (await new BaseFiles(checkout, base, signal).packageJson())
+    .packageManager;
   if (update !== undefined) {
     const from = exactPin(baseline);
     if (!from || from.manager !== exactPin(update)?.manager)

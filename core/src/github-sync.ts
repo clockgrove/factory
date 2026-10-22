@@ -4,7 +4,7 @@ import { type GitHub, TransientError } from "./github.js";
 import type { RunLog } from "./log.js";
 import { type QueueItem, QueueDisplay, queued, readQueue } from "./queue.js";
 import { writeRequest } from "./requests.js";
-import type { ObjectiveState, ObjectiveStatus } from "./state.js";
+import type { ObjectiveStatus } from "./state.js";
 import { TERMINAL } from "./state.js";
 
 /** What the sync keeps in an Objective's state (`modules.github`). */
@@ -44,13 +44,6 @@ const OPTION: Record<ObjectiveStatus, QueueOption> = {
   failed: "failed",
   cancelled: "cancelled",
 };
-
-interface Comment {
-  id: number;
-  body: string;
-  created_at: string;
-  user: { login: string } | null;
-}
 
 /**
  * GitHub is input and display, never a precondition: every call here runs in
@@ -132,7 +125,7 @@ export class GitHubSync {
     const issue = runner.state.issue;
     this.background(`ask:${issue}`, async () => {
       const marker = MARK(issue, "hold", hold.id);
-      if (!(await this.findComment(issue, marker, hold.askedAt))) {
+      if (!(await this.posted(issue, marker, hold.askedAt))) {
         const answers = hold.answers
           .map(
             (a) =>
@@ -158,7 +151,7 @@ export class GitHubSync {
   ): void {
     const issue = runner.state.issue;
     this.background(`comments:${issue}`, async () => {
-      const comments = await this.comments(issue, module.commentsSince);
+      const comments = await this.github.comments(issue, module.commentsSince);
       let latest = module.commentsSince;
       for (const comment of comments) {
         if (comment.created_at > latest) latest = comment.created_at;
@@ -216,7 +209,7 @@ export class GitHubSync {
       this.background(`reply:${request.id}`, async () => {
         const marker = MARK(issue, "reply", request.id);
         const message = sync.result(request.id) ?? request.message;
-        if (!(await this.findComment(issue, marker, module.commentsSince))) {
+        if (!(await this.posted(issue, marker, module.commentsSince))) {
           await this.comment(
             issue,
             `${marker}\n${message === "ok" ? "Factory: done." : `Factory: ${message}`}`,
@@ -230,29 +223,14 @@ export class GitHubSync {
     }
   }
 
-  private async comments(issue: number, since: string): Promise<Comment[]> {
-    const all: Comment[] = [];
-    for (let page = 1; page <= 10; page++) {
-      const batch = await this.github.rest<Comment[]>(
-        "GET",
-        `/repos/${this.config.repository}/issues/${issue}/comments?since=${encodeURIComponent(since)}&per_page=100&page=${page}`,
-      );
-      all.push(...batch);
-      if (batch.length < 100) break;
-    }
-    return all;
-  }
-
-  private async findComment(
+  /** Whether the marked comment exists; read from a little before `since`, for clock skew between this host and GitHub. */
+  private async posted(
     issue: number,
     marker: string,
     since: string,
   ): Promise<boolean> {
-    // A little before `since`, for clock skew between this host and GitHub.
     const from = new Date(Date.parse(since) - 10 * 60_000).toISOString();
-    return (await this.comments(issue, from)).some((c) =>
-      c.body.includes(marker),
-    );
+    return (await this.github.findComment(issue, marker, from)) !== undefined;
   }
 
   private async comment(issue: number, body: string): Promise<void> {
@@ -290,8 +268,4 @@ export class GitHubSync {
       )
       .finally(() => this.busy.delete(key));
   }
-}
-
-export function githubModule(state: ObjectiveState): GitHubModule | undefined {
-  return state.modules.github as GitHubModule | undefined;
 }

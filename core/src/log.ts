@@ -48,7 +48,7 @@ export interface Retention {
   totalBytes: number;
 }
 
-export const DEFAULT_RETENTION: Retention = {
+const DEFAULT_RETENTION: Retention = {
   runsPerObjective: 20,
   totalBytes: 2 * 1024 ** 3,
 };

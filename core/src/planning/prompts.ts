@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { markdownLines } from "../markdown.js";
+import { objectiveSection } from "../objective.js";
 import { REPOSITORY_DIRECTORY, type RepositoryView } from "./repository.js";
 import type { ReviewEvidence } from "./review.js";
 import {
@@ -43,7 +43,7 @@ import { COMPILER_READINESS_GUIDANCE } from "./wire.js";
  * calls, keeping a stable provider-cache prefix. Numbered lines show
  * zero-based line indices for line-index choices.
  */
-export function literalBodyBlocks(
+function literalBodyBlocks(
   bodies: readonly { label: string; content: string }[],
   numberedLines = false,
 ): { text: string; guidance: string } {
@@ -86,7 +86,7 @@ const HUMAN_PREREQUISITE_GUIDANCE = humanPrerequisiteGuidance(
 );
 
 /** How the planner and reviewers read a tree: fewer turns, only the docs they need. */
-export const TREE_READ_GUIDANCE =
+const TREE_READ_GUIDANCE =
   "Issue independent reads and searches together in one turn (parallel tool calls), such as every file you already know you need; serialize only a read that depends on an earlier result. Find documentation through the doc map in the repository's AGENTS.md, or its documented conventions, and read only the subsystem documents you need.";
 
 function compileRepositoryGuidance(
@@ -132,7 +132,7 @@ function configuredReviewArtifacts(
 }
 
 /** The approved playbook, appended to every planning and review prompt. Empty when there is none. */
-export function playbookAdvice(playbook: string): string {
+function playbookAdvice(playbook: string): string {
   return playbook.trim()
     ? `\nApproved historical planning advice (advisory only; never current source facts, acceptance evidence, permissions, commands or spending authority):\n${JSON.stringify(playbook)}`
     : "";
@@ -141,21 +141,11 @@ export function playbookAdvice(playbook: string): string {
 // ---------------------------------------------------------------------------
 // Per-round instructions
 
-/** The single entry of a level-two or level-three section, or undefined. */
+/** The single entry of an Objective section, or undefined. */
 function sectionEntry(body: string, name: string): string | undefined {
-  const lines = markdownLines(body);
-  const start = lines.findIndex(
-    (line) =>
-      line.heading?.text.toLowerCase() === name &&
-      [2, 3].includes(line.heading.level),
+  const entries = (objectiveSection(body, name) ?? []).filter((line) =>
+    line.text.trim(),
   );
-  if (start < 0) return undefined;
-  const level = lines[start]!.heading!.level;
-  const entries = [];
-  for (const line of lines.slice(start + 1)) {
-    if (line.heading && line.heading.level <= level) break;
-    if (line.text.trim()) entries.push(line);
-  }
   return entries.length === 1 && !entries[0]!.fenced
     ? entries[0]!.text.trim()
     : undefined;
@@ -399,7 +389,7 @@ export function revisionScope(
  * a revision round verifies the last findings and reviews what changed. It
  * follows the graph, so earlier rounds' cached prefix still holds.
  */
-export function graphReviewScope(scope?: RevisionScope): string {
+function graphReviewScope(scope?: RevisionScope): string {
   return scope
     ? `\nReview scope (round ${scope.round}):\n${GRAPH_REVIEW_REVISION_ROUND}\n${JSON.stringify(
         {

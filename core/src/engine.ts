@@ -64,7 +64,7 @@ export const DEFAULT_LIMITS: EngineLimits = {
   concurrency: 2,
 };
 
-export const ERROR_ANSWERS = ["retry", "cancel"];
+const ERROR_ANSWERS = ["retry", "cancel"];
 
 interface Running {
   token: number;

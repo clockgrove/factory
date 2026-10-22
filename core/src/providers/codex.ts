@@ -19,6 +19,7 @@ import type {
 import {
   callImages,
   detail,
+  loggedCall,
   IdleWatchdog,
   type ModelChoice,
   modelChoice,
@@ -37,9 +38,9 @@ export const DEFAULT_CODEX_MODELS: PlannerModels<CodexEffort> = {
 };
 
 /** Exec JSON emits no reasoning deltas: a healthy answer can be silent this long. */
-export const PLANNER_IDLE_MS = 15 * 60 * 1000;
+const PLANNER_IDLE_MS = 15 * 60 * 1000;
 /** How long a usage limit with no readable reset time waits before a retry. */
-export const USAGE_LIMIT_WAIT_MS = 15 * 60 * 1000;
+const USAGE_LIMIT_WAIT_MS = 15 * 60 * 1000;
 /** Lower-effort reviews get a finite five-minute outlier bound. */
 const LOWER_EFFORT_REVIEW_IDLE_MS = 5 * 60 * 1000;
 
@@ -288,28 +289,9 @@ export class CodexPlanner implements Planner {
 
   async answer(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.models, call);
-    const started = Date.now();
-    const record: Record<string, unknown> = {
-      event: "planner-call",
-      provider: "codex",
-      role: call.role,
-      phase: call.phase,
-      model: choice.model,
-      effort: choice.effort,
-      tools: Boolean(call.readDir),
-    };
-    try {
-      const answer = await this.run(call, choice, record);
-      record.outcome = "done";
-      return { ...answer, ms: Date.now() - started };
-    } catch (error) {
-      record.outcome = error instanceof PlannerError ? error.outcome : "error";
-      record.error = detail(String(error));
-      throw error;
-    } finally {
-      record.ms = Date.now() - started;
-      call.log(record);
-    }
+    return loggedCall("codex", call, choice, (record) =>
+      this.run(call, choice, record),
+    );
   }
 
   private async run(

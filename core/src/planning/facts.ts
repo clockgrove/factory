@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parse } from "yaml";
+import { gitEnvironment } from "../git.js";
 import { TransientError } from "../github.js";
 import { markdownLines } from "../markdown.js";
-import { parseObjective, type SourceRef } from "../objective.js";
+import { parseObjective, type SourceRef, validPath } from "../objective.js";
 import type {
   CoverageObligation,
   PinnedSource,
@@ -21,23 +22,6 @@ const run = promisify(execFile);
  */
 
 // ── Base reads ──────────────────────────────────────────────────────────
-
-/** Git without the operator's configuration, replacements or lazy fetches. */
-function gitEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of Object.keys(env))
-    if (key.startsWith("GIT_")) delete env[key];
-  return Object.assign(env, {
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_NO_REPLACE_OBJECTS: "1",
-    GIT_NO_LAZY_FETCH: "1",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_LFS_SKIP_SMUDGE: "1",
-    GIT_LITERAL_PATHSPECS: "1",
-  });
-}
 
 const GIT_TIMEOUT_MS = 60_000;
 
@@ -93,18 +77,26 @@ export class BaseFiles {
     return [...(await this.entries()).keys()];
   }
 
-  /** Root package.json scripts; empty when there is none or it isn't JSON. */
-  async scripts(): Promise<Record<string, unknown>> {
+  /** The root package.json object; empty when there is none or it isn't a JSON object. */
+  async packageJson(): Promise<Record<string, unknown>> {
     const text = await this.text("package.json");
     if (text === undefined) return {};
     try {
-      const parsed = JSON.parse(text) as { scripts?: unknown };
-      return parsed.scripts && typeof parsed.scripts === "object"
-        ? (parsed.scripts as Record<string, unknown>)
+      const parsed: unknown = JSON.parse(text);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
         : {};
     } catch {
       return {};
     }
+  }
+
+  /** Root package.json scripts; empty when there are none. */
+  async scripts(): Promise<Record<string, unknown>> {
+    const { scripts } = await this.packageJson();
+    return scripts && typeof scripts === "object"
+      ? (scripts as Record<string, unknown>)
+      : {};
   }
 
   /** The base tree, read once; a failed read is retried on the next call. */
@@ -153,16 +145,6 @@ export class BaseFiles {
   }
 }
 
-function validPath(path: string): boolean {
-  return !(
-    !path ||
-    path.startsWith("/") ||
-    path.includes("\\") ||
-    path.includes("\0") ||
-    path.split("/").some((part) => !part || part === "." || part === "..")
-  );
-}
-
 function utf8(bytes: Buffer): string | undefined {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -184,7 +166,7 @@ export function childIdentity(body: string): boolean {
  * The Objective body as a pinned source. A split child's body carries the
  * model-written goal, so it isn't operator-authored.
  */
-export function objectiveSource(body: string): PinnedSource {
+function objectiveSource(body: string): PinnedSource {
   return {
     path: "OBJECTIVE",
     content: body,
@@ -193,7 +175,7 @@ export function objectiveSource(body: string): PinnedSource {
 }
 
 /** The Objective's Acceptance criteria, in order. */
-export function objectiveCriteria(body: string): string[] {
+function objectiveCriteria(body: string): string[] {
   return parseObjective(body).objective.acceptance;
 }
 
@@ -201,7 +183,7 @@ export function objectiveCriteria(body: string): string[] {
  * Commands the integrated result must pass: the Acceptance bullets that are
  * exactly one backticked command. Any other bullet is a fact for review.
  */
-export function finalObjectiveCommands(body: string): string[] {
+function finalObjectiveCommands(body: string): string[] {
   return objectiveCriteria(body).flatMap((criterion) => {
     const command = criterion.match(/^`([^`]+)`$/)?.[1];
     return command?.trim() ? [command] : [];
@@ -222,7 +204,7 @@ export function finalCommands(
 }
 
 /** Every Objective Acceptance criterion is one obligation, keyed by its index. */
-export function coverageObligations(body: string): CoverageObligation[] {
+function coverageObligations(body: string): CoverageObligation[] {
   return objectiveCriteria(body).map((text) => ({
     source: { path: "OBJECTIVE", text },
   }));
@@ -253,7 +235,7 @@ export function sectionText(text: string, heading: string): string | undefined {
  * each pinned Source (whole file or one exact heading). A source that can't
  * be read is a problem that says how to fix the Sources entry.
  */
-export async function planningSources(
+async function planningSources(
   body: string,
   files: BaseFiles,
 ): Promise<{ sources: PinnedSource[]; problems: string[] }> {
@@ -293,8 +275,7 @@ export async function planningSources(
 
 // ── Command shapes ──────────────────────────────────────────────────────
 
-export const PINNED_PNPM_BOOTSTRAP =
-  "pnpm install --frozen-lockfile --ignore-scripts";
+const PINNED_PNPM_BOOTSTRAP = "pnpm install --frozen-lockfile --ignore-scripts";
 const PINNED_NPM_BOOTSTRAP = "npm ci --ignore-scripts";
 
 /** Exact script-disabled root installs; this classification grants no authority. */
@@ -308,7 +289,7 @@ export function packageBootstrap(command: string): "npm" | "pnpm" | undefined {
  * A version-only invocation may be followed by a source-declared shell
  * assertion. Every package-manager token must belong to that exact probe.
  */
-export function packageManagerVersionProbe(command: string): boolean {
+function packageManagerVersionProbe(command: string): boolean {
   if (!/\b(?:npm|pnpm)\b/.test(command)) return false;
   const withoutProbes = command.replace(
     /\b(?:npm|pnpm) --version(?=\s*(?:[;&|)\n]|$))/g,
@@ -318,11 +299,11 @@ export function packageManagerVersionProbe(command: string): boolean {
 }
 
 /** The script forms {@link packageScriptInvocation} accepts, for messages. */
-export const PACKAGE_SCRIPT_FORMS =
+const PACKAGE_SCRIPT_FORMS =
   "`npm test`, `pnpm test`, `pnpm check`, `npm run NAME` or `pnpm run NAME`, with no other arguments";
 
 /** Supported root script forms; shell wrappers and package-manager flags are ambiguous. */
-export function packageScriptInvocation(
+function packageScriptInvocation(
   check: string,
 ): { manager: "npm" | "pnpm"; name: string } | undefined {
   const match = check
@@ -349,7 +330,7 @@ export function ciOnlyKey(command: string): string {
 }
 
 /** A leading executable word, no assignment, braces or statement separators. */
-export const COMMAND_SHAPE = /^[a-z][\w.-]*(?: [^{}$;|&<>]*)?$/;
+const COMMAND_SHAPE = /^[a-z][\w.-]*(?: [^{}$;|&<>]*)?$/;
 
 /** Inline backticked spans outside fenced code. */
 function inlineSpans(content: string): string[] {
@@ -395,7 +376,7 @@ export function listCommands(commands: readonly string[]): string {
  * How Factory validation differs from a hosted CI run, in the compact form the
  * planner receives. Keep this under ~800 bytes.
  */
-export const VALIDATION_ENVIRONMENT = {
+const VALIDATION_ENVIRONMENT = {
   network:
     "none except the exact script-disabled package install, which runs first",
   refs: "remote-tracking branches may be stale; compare with $FACTORY_BASE_SHA",
@@ -432,7 +413,7 @@ const NETWORK_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
 };
 
 /** The network tool a script body invokes, from its command words; never prose. */
-export function networkToolIn(
+function networkToolIn(
   body: string,
   /** A segment known to run offline (the authorized bootstrap or a local bin). */
   skip?: (segment: string) => boolean,
@@ -492,7 +473,7 @@ export function networkToolOfCommand(
  * never changes directory again, or is one command naming DIR after --prefix,
  * --dir or -C. Any other shape is not derivable.
  */
-export function scriptScope(body: string): string | undefined {
+function scriptScope(body: string): string | undefined {
   const dir = "(?:\\.\\/)?(\\w[\\w.-]*(?:\\/\\w[\\w.-]*)*)\\/?";
   const cd = body.match(new RegExp(`^\\s*cd\\s+${dir}\\s*&&(.*)$`, "s"));
   if (cd) return /\bcd\b/.test(cd[2]!) ? undefined : `${cd[1]}/`;
@@ -514,7 +495,7 @@ export function commandScope(
 }
 
 /** Each command that checks only one directory, with that directory. */
-export function scopedCommands(
+function scopedCommands(
   commands: readonly string[],
   scripts: Record<string, unknown>,
 ): Map<string, string> {
@@ -536,7 +517,7 @@ export function scopedCommands(
  * backticked span also counts. Fenced code never counts. Commands an
  * operator answer authorized (`operator`) always pass.
  */
-export async function authorizedCommand(
+async function authorizedCommand(
   check: ValidationCommand,
   files: BaseFiles,
   sources: readonly PinnedSource[],
@@ -596,7 +577,7 @@ export async function authorizedCommand(
  * pinned sources. CI-only and network commands are left out because
  * validation refuses those.
  */
-export async function authorizedCommands(
+async function authorizedCommands(
   sources: readonly PinnedSource[],
   files: BaseFiles,
   ciOnlyCommands: readonly string[] = [],
@@ -677,12 +658,12 @@ export async function commandAuthorized(
 // ── Planner instructions ────────────────────────────────────────────────
 
 /** The planner's note on the validation environment; always present. */
-export function validationEnvironmentInstructions(): string {
+function validationEnvironmentInstructions(): string {
   return `\n\nValidation environment (differs from hosted CI): ${JSON.stringify(VALIDATION_ENVIRONMENT)}`;
 }
 
 /** The planner's note on the installation's CI-only commands, after the environment note. */
-export function ciOnlyInstructions(ciOnlyCommands: readonly string[]): string {
+function ciOnlyInstructions(ciOnlyCommands: readonly string[]): string {
   return (
     validationEnvironmentInstructions() +
     (ciOnlyCommands.length
@@ -692,7 +673,7 @@ export function ciOnlyInstructions(ciOnlyCommands: readonly string[]): string {
 }
 
 /** The planner's note of the exact validation commands Factory accepts. */
-export function authorizedCommandInstructions(
+function authorizedCommandInstructions(
   commands: readonly string[],
   scopes: ReadonlyMap<string, string> = new Map(),
 ): string {
@@ -721,7 +702,7 @@ export async function commandInstructions(
 // ── Fixed scripts ───────────────────────────────────────────────────────
 
 /** Names of the package scripts (and their pre/post hooks) validation keeps identical to the base. */
-export function fixedPackageScripts(commands: readonly string[]): string[] {
+function fixedPackageScripts(commands: readonly string[]): string[] {
   const names = new Set<string>();
   for (const command of commands) {
     if (
@@ -747,7 +728,7 @@ export function fixedPackageScripts(commands: readonly string[]): string[] {
  * package.json defines them. Validation keeps these bodies fixed, so the
  * planner needs them to own the files a new check has to extend (#819).
  */
-export async function fixedScripts(
+async function fixedScripts(
   commands: readonly string[],
   files: BaseFiles,
 ): Promise<{ name: string; body: string }[]> {
@@ -844,7 +825,7 @@ function jobsOf(workflow: unknown): [string, Job][] {
  * reusable workflow "caller / callee" per called job. A workflow that can't
  * be read or parsed reports nothing.
  */
-export async function workflowCheckNames(files: BaseFiles): Promise<string[]> {
+async function workflowCheckNames(files: BaseFiles): Promise<string[]> {
   const paths = (await files.paths()).filter((path) =>
     new RegExp(`^${WORKFLOWS}/[^/]+\\.ya?ml$`).test(path),
   );

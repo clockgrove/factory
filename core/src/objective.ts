@@ -1,8 +1,4 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { githubEmptyField, markdownLines } from "./markdown.js";
-
-const run = promisify(execFile);
 
 /**
  * The Objective checks. They run once when an Objective is first taken from
@@ -63,6 +59,14 @@ function sections(body: string): Section[] {
   return result;
 }
 
+/** The lines of the body's first section with this lower-case name. */
+export function objectiveSection(
+  body: string,
+  name: string,
+): Section["lines"] | undefined {
+  return sections(body).find((section) => section.name === name)?.lines;
+}
+
 function bullets(section: Section | undefined): string[] {
   if (!section) return [];
   const items: string[] = [];
@@ -121,12 +125,7 @@ export function parseObjective(body: string): {
     const split = value.indexOf("#");
     const path = split < 0 ? value : value.slice(0, split);
     const heading = split < 0 ? undefined : value.slice(split + 1).trim();
-    if (
-      !path ||
-      path.startsWith("/") ||
-      path.split("/").some((p) => !p || p === "." || p === "..") ||
-      heading === ""
-    ) {
+    if (!validPath(path) || heading === "") {
       problems.push(
         `Sources entry ${JSON.stringify(line)} isn't a valid repository path.`,
       );
@@ -137,42 +136,13 @@ export function parseObjective(body: string): {
   return { objective: { goal, acceptance, sources }, problems };
 }
 
-/** Check that each Source exists at `base`, and each pinned heading appears exactly once. */
-export async function checkSources(
-  checkout: string,
-  base: string,
-  sources: SourceRef[],
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const problems: string[] = [];
-  for (const source of sources) {
-    let text: string;
-    try {
-      const { stdout } = await run(
-        "git",
-        ["-C", checkout, "show", `${base}:${source.path}`],
-        { maxBuffer: 16 * 1024 * 1024, ...(signal ? { signal } : {}) },
-      );
-      text = stdout;
-    } catch {
-      if (signal?.aborted) throw signal.reason;
-      problems.push(
-        `Sources: \`${source.path}\` doesn't exist on the default branch (${base.slice(0, 12)}).`,
-      );
-      continue;
-    }
-    if (!source.heading) continue;
-    const matches = markdownLines(text).filter(
-      (l) => l.heading && l.heading.text === source.heading,
-    ).length;
-    if (matches === 0)
-      problems.push(
-        `Sources: \`${source.path}\` has no heading "${source.heading}" (headings must match exactly).`,
-      );
-    else if (matches > 1)
-      problems.push(
-        `Sources: \`${source.path}\` has ${matches} headings "${source.heading}"; pin a heading that appears once.`,
-      );
-  }
-  return problems;
+/** A repository-relative path with no empty, `.` or `..` part. */
+export function validPath(path: string): boolean {
+  return !(
+    !path ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path.includes("\0") ||
+    path.split("/").some((part) => !part || part === "." || part === "..")
+  );
 }

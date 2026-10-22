@@ -1,11 +1,10 @@
-import { execFile } from "node:child_process";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import type { CoreConfig } from "../config.js";
 import type { Outcome, Step, StepContext } from "../engine.js";
+import { defaultHead } from "../git.js";
 import { type GitHub, GitHubError, TransientError } from "../github.js";
-import { checkSources, parseObjective } from "../objective.js";
+import { parseObjective } from "../objective.js";
 import { type Planner, PlannerError } from "../providers/planner.js";
 import type { ObjectiveState } from "../state.js";
 import { checkPlan } from "./checks.js";
@@ -26,7 +25,11 @@ import {
   revisionScope,
 } from "./prompts.js";
 import { observeLocalExecutables } from "./executables.js";
-import { exportTree, repositoryView } from "./repository.js";
+import {
+  exportTree,
+  type RepositoryView,
+  repositoryView,
+} from "./repository.js";
 import {
   decodeGraphReview,
   graphReviewSchema,
@@ -49,7 +52,6 @@ import {
   revisionSchema,
 } from "./wire.js";
 
-const run = promisify(execFile);
 const MINUTE = 60_000;
 
 /** What planning needs from the installation. */
@@ -95,7 +97,8 @@ export function planningStep(
 // ---------------------------------------------------------------------------
 // Saved results
 
-interface Inputs {
+/** The issue and base a planning generation reads; the check step's result. */
+export interface ObjectiveInputs {
   body: string;
   base: string;
   title: string;
@@ -103,7 +106,7 @@ interface Inputs {
 
 interface PlanRound {
   /** Generation inputs, saved on round 1 of each generation. */
-  inputs?: Inputs;
+  inputs?: ObjectiveInputs;
   /** The planner's full answer: the base of the next revision. */
   answer?: unknown;
   draft?: Draft;
@@ -147,14 +150,18 @@ function cleanDraft(round: PlanRound): boolean {
   return Boolean(round.draft && !round.findings?.length && !round.question);
 }
 
-function generationInputs(state: ObjectiveState, g: number): Inputs {
+function generationInputs(state: ObjectiveState, g: number): ObjectiveInputs {
   if (g > 1) return (state.done[`plan:${g}:1`] as PlanRound).inputs!;
-  return state.done.check as Inputs;
+  return state.done.check as ObjectiveInputs;
 }
 
-function decisions(state: ObjectiveState): PlannerDecision[] {
+/** Saved operator decisions in round order, from the decide steps whose key passes `keep`. */
+function decisions(
+  state: ObjectiveState,
+  keep: (key: string) => boolean = () => true,
+): PlannerDecision[] {
   return Object.entries(state.done)
-    .filter(([key]) => key.startsWith("decide:"))
+    .filter(([key]) => key.startsWith("decide:") && keep(key))
     .sort(([a], [b]) => compareKeys(a, b))
     .flatMap(([, value]) => {
       const decision = (value as Decision).decision;
@@ -180,16 +187,9 @@ function generationDecisions(
   state: ObjectiveState,
   g: number,
 ): PlannerDecision[] {
-  return Object.entries(state.done)
-    .filter(([key]) => key.startsWith(`decide:${g}:`))
-    .sort(([a], [b]) => compareKeys(a, b))
-    .flatMap(([, value]) => {
-      const decision = (value as Decision).decision;
-      return decision &&
-        (decision.answer === "answer" || decision.answer === "allow")
-        ? [decision]
-        : [];
-    });
+  return decisions(state, (key) => key.startsWith(`decide:${g}:`)).filter(
+    (d) => d.answer === "answer" || d.answer === "allow",
+  );
 }
 
 /** The decisions saved before round `m` of generation `g`. */
@@ -198,16 +198,7 @@ function decisionsBefore(
   g: number,
   m: number,
 ): PlannerDecision[] {
-  return Object.entries(state.done)
-    .filter(
-      ([key]) =>
-        key.startsWith("decide:") && compareKeys(key, `decide:${g}:${m}`) < 0,
-    )
-    .sort(([a], [b]) => compareKeys(a, b))
-    .flatMap(([, value]) => {
-      const decision = (value as Decision).decision;
-      return decision ? [decision] : [];
-    });
+  return decisions(state, (key) => compareKeys(key, `decide:${g}:${m}`) < 0);
 }
 
 /** Workers get a sandboxed shell (docs/CORE.md). */
@@ -275,34 +266,27 @@ function planRoundStep(
         // `replan` after an Objective problem: start a new generation, which re-reads the issue.
         if (context.answer?.answer === "replan")
           return done({ replan: true } satisfies PlanRound);
-        const files = (base: string) =>
-          new BaseFiles(config.checkout, base, signal);
-        let inputs: Inputs;
+        let inputs: ObjectiveInputs;
         if (g > 1 && n === 1) {
           // A replan re-reads the issue and the default branch.
-          const fresh = await rereadObjective(state.issue, deps, signal);
+          const fresh = await readObjective(
+            state.issue,
+            deps,
+            "replan",
+            signal,
+          );
           if ("hold" in fresh) return fresh.hold;
           inputs = fresh.inputs;
         } else inputs = generationInputs(state, g);
-        const built = await buildFacts({
-          objective: state.issue,
-          body: inputs.body,
-          base: inputs.base,
-          checkout: config.checkout,
-          requiredCommands: config.finalValidation.requiredCommands,
-          ciOnlyCommands: config.finalValidation.ciOnlyCommands,
-          extraCommands: allowedCommands(state),
-          playbook: await readPlaybook(config, inputs.base, signal),
-          signal,
-        });
-        if ("problems" in built) return objectiveProblemsHold(built.problems);
+        const files = new BaseFiles(config.checkout, inputs.base, signal);
+        const built = await planningFacts(state, inputs, files, config);
+        if ("problems" in built)
+          return objectiveProblemsHold(built.problems, "replan");
         const { facts } = built;
-        const workDir = treeDir(deps, state.issue, inputs.base);
-        await exportTree(config.checkout, inputs.base, workDir, signal);
-        const repository = await repositoryView(
-          config.checkout,
+        const { workDir, repository } = await planningTree(
+          deps,
+          state.issue,
           inputs.base,
-          true,
           signal,
         );
         const previousKey = n > 1 ? `plan:${g}:${n - 1}` : undefined;
@@ -328,12 +312,7 @@ function planRoundStep(
         const revising = Boolean(previous?.answer);
         const wire = { child: childIdentity(inputs.body) };
         const cited = revising
-          ? await citedSections(
-              previous!.draft,
-              fixes,
-              facts,
-              files(inputs.base),
-            )
+          ? await citedSections(previous!.draft, fixes, facts, files)
           : [];
         const data = {
           ...planChoices(facts, wire),
@@ -353,16 +332,7 @@ function planRoundStep(
               }
             : {}),
         };
-        const local = await observeLocalExecutables({
-          checkout: config.checkout,
-          base: inputs.base,
-          body: inputs.body,
-          finalCommands: finalCommands(
-            inputs.body,
-            config.finalValidation.requiredCommands,
-          ),
-          signal,
-        });
+        const local = await localExecutables(inputs, config, signal);
         const prompt = renderCompilationCall({
           facts,
           data,
@@ -418,12 +388,7 @@ function planRoundStep(
           return done({ ...round, findings: decoded.findings });
         const findings = [
           ...decoded.findings,
-          ...(await checkPlan(
-            decoded.plan,
-            facts,
-            files(inputs.base),
-            previous?.draft,
-          )),
+          ...(await checkPlan(decoded.plan, facts, files, previous?.draft)),
         ];
         return done({
           ...round,
@@ -460,42 +425,27 @@ function reviewStep(
         if (context.answer?.answer === "replan")
           return done({ findings: [], replan: true } satisfies ReviewRound);
         const inputs = generationInputs(state, g);
-        const built = await buildFacts({
-          objective: state.issue,
-          body: inputs.body,
-          base: inputs.base,
-          checkout: config.checkout,
-          requiredCommands: config.finalValidation.requiredCommands,
-          ciOnlyCommands: config.finalValidation.ciOnlyCommands,
-          extraCommands: allowedCommands(state),
-          playbook: await readPlaybook(config, inputs.base, signal),
-          signal,
-        });
-        if ("problems" in built) return objectiveProblemsHold(built.problems);
+        const built = await planningFacts(
+          state,
+          inputs,
+          new BaseFiles(config.checkout, inputs.base, signal),
+          config,
+        );
+        if ("problems" in built)
+          return objectiveProblemsHold(built.problems, "replan");
         const { facts } = built;
         const draft = (state.done[`plan:${g}:${n}`] as PlanRound).draft!;
         const all = decisions(state);
-        const local = await observeLocalExecutables({
-          checkout: config.checkout,
-          base: inputs.base,
-          body: inputs.body,
-          finalCommands: finalCommands(
-            inputs.body,
-            config.finalValidation.requiredCommands,
-          ),
-          signal,
-        });
+        const local = await localExecutables(inputs, config, signal);
         const evidence = planningReviewEvidence({
           sources: facts.sources,
           decisions: all,
           localExecutables: local.observations,
         });
-        const workDir = treeDir(deps, state.issue, inputs.base);
-        await exportTree(config.checkout, inputs.base, workDir, signal);
-        const repository = await repositoryView(
-          config.checkout,
+        const { workDir, repository } = await planningTree(
+          deps,
+          state.issue,
           inputs.base,
-          true,
           signal,
         );
         const scope = lastReview(state, g, n);
@@ -679,12 +629,7 @@ async function objectiveChanged(
   deps: PlanningDeps,
   signal: AbortSignal,
 ): Promise<boolean> {
-  const issue = await deps.github.rest<{ body: string | null }>(
-    "GET",
-    `/repos/${deps.config.repository}/issues/${state.issue}`,
-    undefined,
-    signal,
-  );
+  const issue = await readIssue(state.issue, deps, signal);
   const normalize = (text: string) => text.replace(/\r\n/g, "\n").trim();
   return (
     normalize(issue.body ?? "") !== normalize(generationInputs(state, g).body)
@@ -828,11 +773,10 @@ async function postPlan(
   const body =
     summary.length + data.length <= COMMENT_LIMIT ? summary + data : summary;
   const { repository } = deps.config;
-  const existing = await findComment(
-    deps.github,
-    repository,
+  const existing = await deps.github.findComment(
     issue,
     marker,
+    undefined,
     signal,
   );
   if (existing)
@@ -851,132 +795,124 @@ async function postPlan(
     );
 }
 
-async function findComment(
-  github: GitHub,
-  repository: string,
-  issue: number,
-  marker: string,
-  signal: AbortSignal,
-): Promise<number | undefined> {
-  for (let page = 1; page <= 20; page++) {
-    const batch = await github.rest<{ id: number; body: string }[]>(
-      "GET",
-      `/repos/${repository}/issues/${issue}/comments?per_page=100&page=${page}`,
-      undefined,
-      signal,
-    );
-    const found = batch.find((c) => c.body.startsWith(marker));
-    if (found) return found.id;
-    if (batch.length < 100) return undefined;
-  }
-  return undefined;
-}
-
 // ---------------------------------------------------------------------------
 // Shared
 
-/** Re-read the issue and the default branch for a new generation, with the check step's checks. */
-async function rereadObjective(
+function readIssue(
   issue: number,
   deps: PlanningDeps,
   signal: AbortSignal,
-): Promise<{ inputs: Inputs } | { hold: Outcome }> {
-  const { config, github } = deps;
-  const found = await github.rest<{
-    title: string;
-    body: string | null;
-    state: string;
-  }>("GET", `/repos/${config.repository}/issues/${issue}`, undefined, signal);
+): Promise<{ title: string; body: string | null; state: string }> {
+  return deps.github.rest(
+    "GET",
+    `/repos/${deps.config.repository}/issues/${issue}`,
+    undefined,
+    signal,
+  );
+}
+
+/**
+ * Read the issue and the default branch head, and run the Objective checks.
+ * `again` is the answer that reads it again once the operator has edited it.
+ */
+export async function readObjective(
+  issue: number,
+  deps: PlanningDeps,
+  again: "recheck" | "replan",
+  signal: AbortSignal,
+): Promise<{ inputs: ObjectiveInputs } | { hold: Outcome }> {
+  const { config } = deps;
+  const found = await readIssue(issue, deps, signal);
   if (found.state !== "open")
     return {
       hold: {
         kind: "hold",
-        question: `Issue #${issue} is closed. Reopen it and answer \`replan\`, or cancel.`,
-        answers: ["replan", "cancel"],
+        question: `Issue #${issue} is closed. Reopen it and answer \`${again}\`, or cancel.`,
+        answers: [again, "cancel"],
         recommended: "cancel",
       },
     };
   const body = found.body ?? "";
-  const base = await defaultHead(config.checkout, signal);
-  const { objective, problems } = parseObjective(body);
-  problems.push(
-    ...(await checkSources(config.checkout, base, objective.sources, signal)),
-  );
-  problems.push(
-    ...(await objectiveCommandProblems(body, base, config.checkout, {
-      requiredCommands: config.finalValidation.requiredCommands,
-      ciOnlyCommands: config.finalValidation.ciOnlyCommands,
-      signal,
-    })),
-  );
-  if (problems.length) return { hold: objectiveProblemsHold(problems) };
-  return { inputs: { body, base, title: found.title } };
+  const inputs = {
+    body,
+    base: await defaultHead(config.checkout, signal),
+    title: found.title,
+  };
+  const { problems } = parseObjective(body);
+  if (!problems.length)
+    problems.push(
+      ...(await objectiveCommandProblems(body, inputs.base, config.checkout, {
+        requiredCommands: config.finalValidation.requiredCommands,
+        ciOnlyCommands: config.finalValidation.ciOnlyCommands,
+        signal,
+      })),
+    );
+  if (!problems.length)
+    problems.push(...(await localExecutables(inputs, config, signal)).problems);
+  if (problems.length) return { hold: objectiveProblemsHold(problems, again) };
+  return { inputs };
 }
 
-function objectiveProblemsHold(problems: string[]): Outcome {
+function objectiveProblemsHold(problems: string[], again: string): Outcome {
   return {
     kind: "hold",
-    question: `This Objective needs fixing before Factory can plan it:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nEdit the issue, then answer \`replan\`.`,
-    answers: ["replan", "cancel"],
-    recommended: "replan",
+    question: `This Objective needs fixing before Factory can plan it:\n${problems.map((p) => `- ${p}`).join("\n")}\n\nEdit the issue, then answer \`${again}\`.`,
+    answers: [again, "cancel"],
+    recommended: again,
   };
 }
 
-async function readPlaybook(
+/** The planner's facts at the generation's base, with the operator's allowed commands. */
+async function planningFacts(
+  state: ObjectiveState,
+  inputs: ObjectiveInputs,
+  files: BaseFiles,
   config: CoreConfig,
-  base: string,
-  signal: AbortSignal,
-): Promise<string> {
-  try {
-    const { stdout } = await run(
-      "git",
-      ["-C", config.checkout, "show", `${base}:${config.planning.playbook}`],
-      { signal, maxBuffer: 1024 * 1024 },
-    );
-    return stdout;
-  } catch (error) {
-    if (signal.aborted) throw error;
-    return ""; // No playbook in the target.
-  }
+): ReturnType<typeof buildFacts> {
+  return buildFacts({
+    objective: state.issue,
+    body: inputs.body,
+    base: inputs.base,
+    checkout: config.checkout,
+    requiredCommands: config.finalValidation.requiredCommands,
+    ciOnlyCommands: config.finalValidation.ciOnlyCommands,
+    extraCommands: allowedCommands(state),
+    // No playbook in the target reads as empty.
+    playbook: (await files.text(config.planning.playbook)) ?? "",
+    ...(files.signal ? { signal: files.signal } : {}),
+  });
 }
 
-async function defaultHead(
-  checkout: string,
+function localExecutables(
+  inputs: ObjectiveInputs,
+  config: CoreConfig,
   signal: AbortSignal,
-): Promise<string> {
-  try {
-    await run(
-      "git",
-      ["-C", checkout, "fetch", "--quiet", "--prune", "origin"],
-      {
-        timeout: 5 * MINUTE,
-        signal,
-      },
-    );
-    await run(
-      "git",
-      ["-C", checkout, "remote", "set-head", "origin", "--auto"],
-      {
-        timeout: MINUTE,
-        signal,
-      },
-    );
-    const { stdout } = await run(
-      "git",
-      [
-        "-C",
-        checkout,
-        "rev-parse",
-        "--verify",
-        "refs/remotes/origin/HEAD^{commit}",
-      ],
-      { timeout: MINUTE, signal },
-    );
-    return stdout.trim();
-  } catch (error) {
-    if (signal.aborted) throw error;
-    throw new TransientError(`git fetch in ${checkout}: ${String(error)}`);
-  }
+): ReturnType<typeof observeLocalExecutables> {
+  return observeLocalExecutables({
+    checkout: config.checkout,
+    base: inputs.base,
+    body: inputs.body,
+    finalCommands: finalCommands(
+      inputs.body,
+      config.finalValidation.requiredCommands,
+    ),
+    signal,
+  });
+}
+
+/** The base tree exported for reading, and its map and conventions. */
+async function planningTree(
+  deps: PlanningDeps,
+  issue: number,
+  base: string,
+  signal: AbortSignal,
+): Promise<{ workDir: string; repository: RepositoryView }> {
+  const workDir = treeDir(deps, issue, base);
+  await exportTree(deps.config.checkout, base, workDir, signal);
+  return {
+    workDir,
+    repository: await repositoryView(deps.config.checkout, base, true, signal),
+  };
 }
 
 /** The exported base tree for planning. Trees of other bases are removed. */
@@ -1008,7 +944,7 @@ function invalidAnswer(findings: Finding[]): Outcome {
 }
 
 /** Map provider and GitHub failures to outcomes; anything else escapes to the engine. */
-async function guarded(work: () => Promise<Outcome>): Promise<Outcome> {
+export async function guarded(work: () => Promise<Outcome>): Promise<Outcome> {
   try {
     return await work();
   } catch (error) {
@@ -1054,5 +990,3 @@ async function guarded(work: () => Promise<Outcome>): Promise<Outcome> {
     throw error;
   }
 }
-
-export type { PlanningFacts };

@@ -23,6 +23,7 @@ import type {
 import {
   callImages,
   detail,
+  loggedCall,
   IdleWatchdog,
   type ModelChoice,
   modelChoice,
@@ -833,28 +834,9 @@ export class ClaudePlanner implements Planner {
 
   private async attempt(call: PlannerCall): Promise<PlannerAnswer> {
     const choice = modelChoice(this.options, call);
-    const started = Date.now();
-    const record: Record<string, unknown> = {
-      event: "planner-call",
-      provider: "claude",
-      role: call.role,
-      phase: call.phase,
-      model: choice.model,
-      effort: choice.effort,
-      tools: Boolean(call.readDir),
-    };
-    try {
-      const answer = await this.run(call, choice, record);
-      record.outcome = "done";
-      return { ...answer, ms: Date.now() - started };
-    } catch (error) {
-      record.outcome = error instanceof PlannerError ? error.outcome : "error";
-      record.error = detail(String(error));
-      throw error;
-    } finally {
-      record.ms = Date.now() - started;
-      call.log(record);
-    }
+    return loggedCall("claude", call, choice, (record) =>
+      this.run(call, choice, record),
+    );
   }
 
   private async run(

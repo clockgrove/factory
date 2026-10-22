@@ -142,11 +142,11 @@ const CROSS_ITEM =
   "One item's change must not break what another item relies on or protects (its contract, invariants or protected tests): flag such a conflict, naming both items.";
 
 /** Check 8: an item's acceptance can be met as a whole. */
-export const ACCEPTANCE_CONSISTENCY =
+const ACCEPTANCE_CONSISTENCY =
   "Read each item's acceptance entries against each other, its brief and the Objective's constraints, non-goals and operator decisions. Flag a contradiction, such as one entry capping what another entry or the brief requires to hold independently of that cap, and an entry no implementation can satisfy together with the others, naming the conflicting entries and stating which one must change.";
 
 /** Check 8: every number in a plan has an origin. */
-export const SOURCED_NUMBERS =
+const SOURCED_NUMBERS =
   "Every numeric limit, budget, retry count, timeout or threshold in a plan comes from a pinned source, the repository's code or documentation, or an operator decision. Flag one with no such origin: the item either cites where the value comes from, or states the property the value protects (for example, retries are bounded) and leaves the value to the worker; a value users would observe is an open choice (check 10).";
 
 /** Check 8: claims about existing code. */

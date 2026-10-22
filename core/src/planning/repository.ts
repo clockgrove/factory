@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, posix, resolve, sep } from "node:path";
+import { gitEnvironment } from "../git.js";
+import { markdownLines } from "../markdown.js";
 
 /**
  * The planner and graph reviewer read the repository at the exact base
@@ -14,9 +16,9 @@ export const REPOSITORY_DIRECTORY = "repository";
 
 /** What the planner or graph reviewer can see of the repository at the base. */
 export interface RepositoryView {
-  /** Deterministic path map of the base tree (repositoryMap). */
+  /** Deterministic path map of the base tree. */
   map: string;
-  /** Exported symbols and duplicated helpers of the base tree (repositoryConventions). */
+  /** Exported symbols and duplicated helpers of the base tree. */
   conventions: string;
   /** `repository/` in the read directory holds the exported base files. */
   reads: boolean;
@@ -39,23 +41,6 @@ export async function repositoryView(
 
 // ---------------------------------------------------------------------------
 // Git
-
-/** Git without the operator's configuration, replacements or lazy fetches. */
-function gitEnvironment(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of Object.keys(env))
-    if (key.startsWith("GIT_")) delete env[key];
-  return Object.assign(env, {
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_NO_REPLACE_OBJECTS: "1",
-    GIT_NO_LAZY_FETCH: "1",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_LFS_SKIP_SMUDGE: "1",
-    GIT_LITERAL_PATHSPECS: "1",
-  });
-}
 
 /** Run git and collect its raw standard output. */
 function git(
@@ -185,19 +170,6 @@ async function readBlobs(
 }
 
 /** Deterministic orientation text: every tracked path with its byte size, bounded. */
-export async function repositoryMap(
-  checkout: string,
-  base: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  return renderMap(
-    checkout,
-    base,
-    await treeEntries(checkout, base, signal),
-    signal,
-  );
-}
-
 async function renderMap(
   checkout: string,
   base: string,
@@ -238,24 +210,17 @@ async function markdownOutline(
   );
   if (!large.length) return "";
   const files = (await readBlobs(checkout, large, signal)).map((body, at) => {
-    const headings: { level: number; line: string }[] = [];
-    let fence = "";
-    for (const [index, text] of body
-      .toString("utf8")
-      .split(/\r?\n/)
-      .entries()) {
-      const marker = text.match(/^ {0,3}(`{3,}|~{3,})/)?.[1];
-      if (marker && (!fence || marker.startsWith(fence))) {
-        fence = fence ? "" : marker;
-        continue;
-      }
-      const heading = !fence && text.match(/^(#{1,6})[ \t]+(.+?)[ \t#]*$/);
-      if (heading)
-        headings.push({
-          level: heading[1]!.length,
-          line: `${index + 1}\t${heading[1]} ${heading[2]!.slice(0, 160)}\n`,
-        });
-    }
+    const headings = markdownLines(body.toString("utf8")).flatMap(
+      ({ heading }, index) =>
+        heading?.text
+          ? [
+              {
+                level: heading.level,
+                line: `${index + 1}\t${"#".repeat(heading.level)} ${heading.text.slice(0, 160)}\n`,
+              },
+            ]
+          : [],
+    );
     return { path: large[at]!.path, headings };
   });
   const header = (level: number) =>
@@ -335,7 +300,7 @@ export async function exportTree(
  * the worker instructions, yet room for the most-imported modules of a
  * medium monorepo. Entries past it are counted, not listed.
  */
-export const MAX_CONVENTIONS_BYTES = 6144;
+const MAX_CONVENTIONS_BYTES = 6144;
 /** Duplicate helpers take at most this share, so exports always appear. */
 const MAX_DUPLICATE_BYTES = 1536;
 /** Larger sources are generated or bundled, not hand-written helpers. */
@@ -462,22 +427,6 @@ function workspacePackages(
 }
 
 /** Deterministic bounded text naming the base tree's shared helpers; "" when none. */
-export async function repositoryConventions(
-  checkout: string,
-  base: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  return renderConventions(
-    checkout,
-    base,
-    await treeEntries(checkout, base, signal),
-    signal,
-  );
-}
-
-/** Short name for repositoryConventions. */
-export const conventions = repositoryConventions;
-
 async function renderConventions(
   checkout: string,
   base: string,

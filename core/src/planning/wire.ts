@@ -118,7 +118,7 @@ const short = (criterion: string, max: number): string => {
 };
 
 /** An aggregate's acceptance: Factory derives it, the planner never writes it. */
-export const AGGREGATE_ACCEPTANCE =
+const AGGREGATE_ACCEPTANCE =
   "Every explicit child Work Item has completed acceptance. Implementation child results are integrated into this aggregate's exact candidate; read-only QA and aggregate children have accepted proof against that candidate without a worker or delivery.";
 
 /** What Factory itself guarantees; a final-controller proof names one by index. */
@@ -184,10 +184,7 @@ const LINE_REFERENCE =
  * item the planner defined: an item above the entry signal states why it is
  * one outcome, and no acceptance entry cites a line.
  */
-export function planStandardLint(
-  item: ObjectValue,
-  reason: string | null,
-): string[] {
+function planStandardLint(item: ObjectValue, reason: string | null): string[] {
   if (!Array.isArray(item.acceptance)) return [];
   const findings: string[] = [];
   if (item.acceptance.length > WORK_ITEM_ENTRY_SIGNAL && reason === null)

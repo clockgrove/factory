@@ -23,7 +23,7 @@ A change that needs a new kind of hold, lock, owner, archive, background loop or
 - Finish one phase at a time. Use concurrent agents within that phase with clear file ownership.
 - Batch related fixes into a complete outcome. Merge with green CI and the maintainer’s read; independently review the completed milestone once against the stability rules. Credentials, isolation and state changes also need one focused independent review.
 - **Stop rule.** When the same class of failure shows up a second time, stop patching: find the structural cause and fix it in the design, or raise it in an issue.
-- **Size budget.** Keep within the budgets in [the core spec](docs/CORE.md#size). Going over needs the maintainer’s approval.
+- **Lean code.** One implementation per job, no dead code, and tests that prove behavior ([the core spec](docs/CORE.md#lean-code)). Sweep for duplication at every milestone.
 - CI is the routine check. Run an affected local check only when it resolves an actual uncertainty; do not repeat full suites or add per-fix qualification.
 - Finish the product outcome with meaningful affected tests, independent review and green CI. A milestone also needs its crash drill (see Testing). Stop when the behavior works and the required checks pass.
 - Issues and pull requests record scope, decisions and results. Follow the issue metadata rules below, existing Project status and applicable relationships. Comment when a fix merges, an actual blocker appears or the plan changes. No separate status documents, per-PR changelog entries, mandatory issue-heading templates or new label taxonomy.
@@ -61,7 +61,7 @@ No mocks, fake services, fake providers or scripted responses.
 - Tests use real Git repositories, processes and files, and the real `factory serve`.
 - **Crash tests** kill the real service at named crash points (`FACTORY_CRASH_AT`) and restart it. Every new step or outside effect gets a crash point and is covered.
 - **Drill.** At each milestone, run a small real Objective on the scratch drill repository with real providers. Kill the service at every crash point, cut the network, and stop a model mid-turn. The milestone passes only if the Objective finishes with no duplicate effect and every hold had a working answer.
-- Tests stay within the source size. Don't add unit tests of private helpers or provider/profile matrices.
+- Don't add unit tests of private helpers or provider/profile matrices.
 
 ## Model contracts
 

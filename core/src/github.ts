@@ -26,6 +26,13 @@ export class GitHubError extends Error {
 
 const TIMEOUT_MS = 60_000;
 
+export interface IssueComment {
+  id: number;
+  body: string;
+  created_at: string;
+  user: { login: string } | null;
+}
+
 /**
  * A small GitHub client. The token comes from the GitHub CLI login and stays
  * in the service; workers never see it. Every request has a deadline, and
@@ -56,6 +63,39 @@ export class GitHub {
     const response = await this.send(method, path, body, signal);
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
+  }
+
+  /** An issue's comments, oldest first; from `since` on when given. */
+  async comments(
+    issue: number,
+    since?: string,
+    signal?: AbortSignal,
+  ): Promise<IssueComment[]> {
+    const all: IssueComment[] = [];
+    const from = since ? `since=${encodeURIComponent(since)}&` : "";
+    for (let page = 1; page <= 20; page++) {
+      const batch = await this.rest<IssueComment[]>(
+        "GET",
+        `/repos/${this.repository}/issues/${issue}/comments?${from}per_page=100&page=${page}`,
+        undefined,
+        signal,
+      );
+      all.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return all;
+  }
+
+  /** The id of the issue comment Factory marked with `marker`, if it exists. */
+  async findComment(
+    issue: number,
+    marker: string,
+    since?: string,
+    signal?: AbortSignal,
+  ): Promise<number | undefined> {
+    return (await this.comments(issue, since, signal)).find((c) =>
+      c.body.startsWith(marker),
+    )?.id;
   }
 
   async graphql<T>(

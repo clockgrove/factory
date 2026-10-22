@@ -227,15 +227,15 @@ These carry over unchanged:
 
 A same-user process is trusted, as decided for the archive: it can already change Factory's code and credentials.
 
-## Size
+## Lean code
 
-| Part                                                | Budget (source lines) |
-| --------------------------------------------------- | --------------------- |
-| Core: loop, state, steps, queue, holds, CLI, status | 20k                   |
-| Whole product with every capability                 | 60k                   |
-| Tests                                               | at most the source    |
+Code is judged by how well it does the job, not by its size.
 
-Going over a budget needs the maintainer's approval.
+- **One implementation per job.** No duplicated helpers, and no two ways of doing the same thing.
+- **No dead code.** Code that nothing calls is deleted.
+- **Tests prove behavior.** A test proves a stability rule or real behavior. There are no unit tests of private helpers.
+
+Every milestone ends with a sweep for duplication, dead code and unneeded tests.
 
 ## Testing
 

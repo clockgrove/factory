@@ -87,6 +87,37 @@ export function detail(text: string): string {
   return text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
 }
 
+/** Run one call and log it as a `planner-call` event with its outcome and duration. */
+export async function loggedCall<Effort extends string>(
+  provider: string,
+  call: PlannerCall,
+  choice: ModelChoice<Effort>,
+  run: (record: Record<string, unknown>) => Promise<Omit<PlannerAnswer, "ms">>,
+): Promise<PlannerAnswer> {
+  const started = Date.now();
+  const record: Record<string, unknown> = {
+    event: "planner-call",
+    provider,
+    role: call.role,
+    phase: call.phase,
+    model: choice.model,
+    effort: choice.effort,
+    tools: Boolean(call.readDir),
+  };
+  try {
+    const answer = await run(record);
+    record.outcome = "done";
+    return { ...answer, ms: Date.now() - started };
+  } catch (error) {
+    record.outcome = error instanceof PlannerError ? error.outcome : "error";
+    record.error = detail(String(error));
+    throw error;
+  } finally {
+    record.ms = Date.now() - started;
+    call.log(record);
+  }
+}
+
 /**
  * The call's images, each an absolute path to a readable PNG file. A
  * missing or unreadable image holds with its path: no provider call can

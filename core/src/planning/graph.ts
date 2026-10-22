@@ -15,7 +15,7 @@ import type {
  */
 
 /** Ownership is literal Git-relative files or trailing-slash directory prefixes. */
-export function validOwnershipPath(path: string): boolean {
+function validOwnershipPath(path: string): boolean {
   const normalized = path.endsWith("/") ? path.slice(0, -1) : path;
   return (
     normalized.length > 0 &&
@@ -37,18 +37,6 @@ export function ownsPath(path: string, scopes: string[]): boolean {
 
 export function pathsOverlap(left: string, right: string): boolean {
   return ownsPath(left, [right]) || ownsPath(right, [left]);
-}
-
-/** Two items the scheduler must not run at once. */
-export function itemsConflict(left: WorkItem, right: WorkItem): boolean {
-  return (
-    left.ownedPaths.some((a) =>
-      right.ownedPaths.some((b) => pathsOverlap(a, b)),
-    ) ||
-    (left.resources ?? []).some((name) =>
-      (right.resources ?? []).includes(name),
-    )
-  );
 }
 
 /** A command line is executable text, never a Markdown wrapper or list item. */
@@ -86,7 +74,7 @@ export function coverageCriterion(entry: CoverageObligation): string {
  * The pinned text a source obligation's line range indexes: the pin with
  * exactly its path and heading (no heading for a whole-file pin).
  */
-export function pinnedSourceText(
+function pinnedSourceText(
   sources: readonly PinnedSource[],
   path: string,
   heading?: string,
@@ -99,15 +87,15 @@ export function pinnedSourceText(
 }
 
 /** A pinned section's name in findings: path, then #heading when it has one. */
-export function pinnedSourceLabel(path: string, heading?: string): string {
+function pinnedSourceLabel(path: string, heading?: string): string {
   return heading ? `${path}#${heading}` : path;
 }
 
 /** New parents join implementation delivery and read-only proof, not fictional QA delivery. */
-export const AGGREGATE_JOIN_CRITERION =
+const AGGREGATE_JOIN_CRITERION =
   "Every explicit child Work Item has completed acceptance. Implementation child results are integrated into this aggregate's exact candidate; read-only QA and aggregate children have accepted proof against that candidate without a worker or delivery.";
 
-export function aggregateAcceptance(
+function aggregateAcceptance(
   item: Pick<WorkItem, "id">,
   previous?: Draft,
 ): string[] {
@@ -116,7 +104,7 @@ export function aggregateAcceptance(
 }
 
 /** Controller guarantees a final-controller proof may name. */
-export const CONTROLLER_GUARANTEE_IDS = [
+const CONTROLLER_GUARANTEE_IDS = [
   "independent-result-review",
   "reviewed-head-publication",
   "protected-exact-head-integration",
@@ -152,7 +140,7 @@ function collector(): { findings: Finding[]; found: Found } {
   };
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
 const strings = (value: unknown): value is string[] =>
@@ -311,7 +299,7 @@ function discoveryProblem(value: unknown): string | undefined {
  * Stable topological order of the items: ties follow plan order. Items in a
  * cycle, or with unknown dependencies, are left out and returned in `cycle`.
  */
-export function orderItems(items: readonly WorkItem[]): {
+function orderItems(items: readonly WorkItem[]): {
   order: WorkItem[];
   cycle: string[];
 } {
@@ -339,7 +327,7 @@ export function orderItems(items: readonly WorkItem[]): {
  * The graph's shape and its dependency order. `pinned` is the set of pinned
  * source paths (OBJECTIVE included): a source-declared command names one.
  */
-export function checkGraphShape(
+function checkGraphShape(
   draft: Draft,
   base: string,
   pinned: ReadonlySet<string>,
@@ -706,7 +694,7 @@ function sourceObligationProblem(entry: {
  * exclusions. A criterion whose environment is "missing" is returned as an
  * operator-decision finding (#1292): the planner can't fix it, a person must.
  */
-export function checkCoverageShape(draft: Draft): Finding[] {
+function checkCoverageShape(draft: Draft): Finding[] {
   const { findings, found } = collector();
   if (!Array.isArray(draft.coverage)) {
     found("The plan needs a coverage list with one entry per obligation");
@@ -998,7 +986,7 @@ function obligationCommands(obligations: readonly CoverageObligation[]) {
  * by exactly that command. Obligations are keyed by text (Objective) or by
  * path and lines (source exit items).
  */
-export function checkCoverageSources(
+function checkCoverageSources(
   draft: Draft,
   sources: readonly PinnedSource[],
   obligations: readonly CoverageObligation[],
@@ -1135,10 +1123,7 @@ export function checkCoverageSources(
 }
 
 /** Aggregate acceptance is the controller's child join, or what an earlier plan kept. */
-export function checkAggregateAcceptance(
-  draft: Draft,
-  previous?: Draft,
-): Finding[] {
+function checkAggregateAcceptance(draft: Draft, previous?: Draft): Finding[] {
   const { findings, found } = collector();
   for (const item of (draft.items ?? []).filter(
     (entry) => entry.kind === "aggregate",

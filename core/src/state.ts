@@ -11,7 +11,7 @@ import {
 import { join } from "node:path";
 import { crashPoint } from "./crash.js";
 
-export const STATE_VERSION = 1;
+const STATE_VERSION = 1;
 
 export type ObjectiveStatus =
   | "checking"
@@ -96,7 +96,7 @@ export function newObjective(issue: number, now: Date): ObjectiveState {
   };
 }
 
-export function statePath(dir: string, issue: number): string {
+function statePath(dir: string, issue: number): string {
   return join(dir, `${issue}.json`);
 }
 

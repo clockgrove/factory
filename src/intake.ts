@@ -1638,6 +1638,15 @@ const STOPPED_CONTROL: readonly ControlRequest["action"][] = [
   "propose-amendment",
   "decline-discovery",
 ];
+/** Of those, the commands that let work start: they need a queue admission. */
+const STARTS_WORK: readonly ControlRequest["action"][] = [
+  "retry",
+  "resume",
+  "select",
+  "repair",
+  "rereview",
+  "propose-amendment",
+];
 
 export function runIntake(
   config: FactoryConfig,
@@ -1878,6 +1887,10 @@ async function runIntakeOwned(
     // An operator command naming a held Objective releases its hold, so the
     // next pass dispatches it again; a run that still needs a person holds
     // it again. A queue resume releases every hold, the installation's too.
+    // Admitted under the current queue authority: work may start for it.
+    const admitted =
+      record.objectives.includes(request.objective) ||
+      waiting.has(request.objective);
     if (request.objective !== 0 && request.action !== "status")
       waiting.delete(request.objective);
     else if (request.action === "enqueue" || request.action === "dequeue")
@@ -1912,6 +1925,12 @@ async function runIntakeOwned(
           throw new LifecycleRefusal(
             "owner_settling",
             `Objective #${request.objective} is starting or settling under the service; retry the ${request.action}`,
+          );
+        // Paid work starts only under queue authority.
+        if (STARTS_WORK.includes(request.action) && !admitted)
+          throw new LifecycleRefusal(
+            "objective_not_admitted",
+            `Objective #${request.objective} has no current queue admission; run \`factory queue add ${request.objective}\` first`,
           );
         // An Objective no run owns, such as one stopped for a person or
         // paused: the service owns the installation, so it runs the command

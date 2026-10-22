@@ -74,6 +74,7 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 | Items running, owner gone   | service    | cancel ok; retry `finish_or_cancel_active`                                                 |
 | Failed                      | none       | run, retry and cancel ok                                                                   |
 | Failed                      | service    | retry, cancel and resume ok                                                                |
+| Failed, not admitted        | service    | cancel ok; retry `objective_not_admitted`                                                  |
 | Cancel unresolved           | none       | run and cancel ok; retry `cancel_unresolved`                                               |
 | Cancel unresolved           | service    | cancel ok; retry `cancel_unresolved`                                                       |
 | Diagnosis held              | none       | retry `diagnosis_held`; cancel ✗(a) `session_unsettled`                                    |
@@ -93,7 +94,7 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 | Complete                    | none       | run, cancel and queue remove ok; retry `objective_complete`                                |
 | Complete, card archived     | none       | queue add ok against the Project fixture; real GitHub needs a live check (gap 7)           |
 
-**One control plane.** A live service runs every lifecycle command on an Objective it isn't running: decide, cancel, retry, repair, rereview, select, amendments, pause, drain and resume. It runs the foreground implementation as the installation owner, under the Objective's lock and on the configuration the Objective froze. While it starts or settles the Objective's run, it refuses with `owner_settling`. A live paused planning owner hands its Objective off to take a plan refusal, which then lands where the Objective stopped.
+**One control plane.** A live service runs every lifecycle command on an Objective it isn't running: decide, cancel, retry, repair, rereview, select, amendments, pause, drain and resume. Commands that let work start (retry, resume, select, repair, rereview, propose-amendment) need a current queue admission, else `objective_not_admitted`; decide, cancel, pause, drain and decline-discovery work for any Objective. It runs the foreground implementation as the installation owner, under the Objective's lock and on the configuration the Objective froze. While it starts or settles the Objective's run, it refuses with `owner_settling`. A live paused planning owner hands its Objective off to take a plan refusal, which then lands where the Objective stopped.
 
 **Dispatch isolation.** A failed or cancel-requested queued Objective is skipped with a reason. The service stays up and dispatches the Objectives behind it.
 

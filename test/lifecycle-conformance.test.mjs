@@ -142,6 +142,16 @@ const B =
   "invariant (b): upgrade never blocks on an Objective that is not executing";
 const C = "invariant (c): no housekeeping on the operator path";
 const gap = (want, invariant) => ({ want, todo: invariant });
+const failedState = with_(executionState, (state, fixture) => {
+  state.work.local = {
+    status: "failed",
+    step: "execute",
+    baseSha: fixture.baseSha,
+    error: "fixture failure",
+  };
+  state.error = "fixture failure";
+  state.errorItem = "local";
+});
 const ROWS = [
   {
     name: "queued, no state",
@@ -232,16 +242,7 @@ const ROWS = [
   {
     name: "failed",
     phase: "failed",
-    build: with_(executionState, (state, fixture) => {
-      state.work.local = {
-        status: "failed",
-        step: "execute",
-        baseSha: fixture.baseSha,
-        error: "fixture failure",
-      };
-      state.error = "fixture failure";
-      state.errorItem = "local";
-    }),
+    build: failedState,
     none: {
       run: "ok",
       retry: "ok",
@@ -249,6 +250,14 @@ const ROWS = [
       "queue-remove": "unfinished_owned_work",
     },
     service: { retry: "ok", cancel: "ok", resume: "ok" },
+  },
+  {
+    // Work starts only under queue authority; the exits stay open.
+    name: "failed, not admitted",
+    phase: "failed",
+    build: failedState,
+    unadmitted: true,
+    service: { retry: "objective_not_admitted", cancel: "ok" },
   },
   {
     name: "cancel unresolved",
@@ -1370,7 +1379,17 @@ async function cell(t, fixture, row, owner, command, value, objective) {
 const ADMITTED = {
   none: ["run", "queue-add", "queue-remove"],
   foreground: COMMANDS,
-  service: ["run", "decide", "cancel", "queue-add", "queue-remove"],
+  service: [
+    "run",
+    "retry",
+    "rereview",
+    "repair",
+    "decide",
+    "cancel",
+    "resume",
+    "queue-add",
+    "queue-remove",
+  ],
 };
 const CONSUMES = ["decide", "cancel", "queue-add", "queue-remove"];
 
@@ -1384,7 +1403,8 @@ async function admit(fixture, owner) {
   for (const row of ROWS)
     for (const [command, value] of Object.entries(row[owner] ?? {})) {
       if (owner === "service" && command === "start") continue;
-      const admitted = row.archive || ADMITTED[owner].includes(command);
+      const admitted =
+        row.archive || (!row.unadmitted && ADMITTED[owner].includes(command));
       const reuse =
         admitted &&
         fixture.pool.length > 0 &&

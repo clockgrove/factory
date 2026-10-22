@@ -3129,7 +3129,8 @@ async function claimProjectQueueRunOwned(
       !record.settled?.refusal,
   );
   if (unsettledOf(observed.history, true).length)
-    throw new Error(
+    throw new LifecycleRefusal(
+      "unfinished_owned_work",
       "This Project admission has an unfinished or foreign owner; supported resource reconciliation is required before dispatch",
     );
   // Every other unsettled claim holds one dispatch slot until its run

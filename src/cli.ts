@@ -1363,8 +1363,8 @@ main().catch((error: unknown) => {
           "Inspect retained status; do not replay an unknown mutation",
       }),
     );
-  // A lifecycle refusal names its stable code for tools; the message stays
-  // for people (#1714).
+  // A lifecycle refusal names its stable code for tools, once: the outermost
+  // code of the cause chain. The message stays for people (#1714).
   const code = lifecycleCode(error);
   if (code) console.error(JSON.stringify({ kind: "lifecycle-refusal", code }));
   console.error(

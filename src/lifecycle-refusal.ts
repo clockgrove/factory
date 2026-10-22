@@ -65,7 +65,6 @@ export class LifecycleRefusal extends Error {
     options?: ErrorOptions,
   ) {
     super(message, options);
-    this.name = "LifecycleRefusal";
   }
 }
 

@@ -12,7 +12,7 @@ import { once } from "node:events";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { planningSessionInputDigest } from "../dist/agent-session.js";
@@ -477,11 +477,10 @@ const ROWS = [
     build: with_(completedState, (state) => {
       state.objectiveClosure = "complete";
     }),
-    // Removal archived the card; `queue add` should reopen it (gap 7). This
-    // Project fixture re-admits it, so the cell passes here; whether the real
-    // Project refuses an archived card needs a live GitHub check.
+    // Removal archived the card; `queue add` re-admits it against this
+    // Project fixture. The real Project needs a live check (gap 7).
     archive: true,
-    none: { "queue-add": gap("ok", A) },
+    none: { "queue-add": "ok" },
   },
 ];
 
@@ -1169,10 +1168,15 @@ function owner(fixture, mode, objective) {
         objective,
         config: fixture.config,
         directory: fixture.directory,
-        state: process.env.XDG_STATE_HOME,
+        environment: {
+          HOME: process.env.HOME,
+          XDG_STATE_HOME: process.env.XDG_STATE_HOME,
+          XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+        },
       }),
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    // stdin stays open while this process lives: the owner exits when it closes.
+    stdio: ["pipe", "pipe", "pipe"],
   });
   let output = "";
   child.stdout.on("data", (part) => {
@@ -1230,8 +1234,15 @@ async function foregroundRun(fixture, objective) {
   return owner(fixture, "run", objective).exited;
 }
 
-async function serveOwner({ mode, objective, config, directory, state }) {
-  process.env.XDG_STATE_HOME = state;
+async function serveOwner({ mode, objective, config, directory, environment }) {
+  // Share the test process's isolated directories and drop this process's
+  // own, so a killed owner leaves nothing behind.
+  const own = dirname(process.env.HOME);
+  Object.assign(process.env, environment);
+  rmSync(own, { recursive: true, force: true });
+  // The test process died: its stdin pipe closed.
+  process.stdin.on("close", () => process.exit(1));
+  process.stdin.resume();
   const composed = services(config, directory);
   let outcome = "ok";
   try {

@@ -773,6 +773,7 @@ export function validateCompiledGraph(args: {
         graph,
         checkout,
         request.compileContext?.ciOnlyCommands ?? [],
+        [body, ...sources.map((source) => source.content)],
       );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

@@ -1339,17 +1339,16 @@ export function assertNoCiOnlyValidation(
         );
 }
 
-/** Paths of infrastructure code: a directory segment or extension that names it. */
-function isInfraPath(path: string): boolean {
-  return (
-    path
-      .split("/")
-      .some((part) =>
-        /^(?:infra|infrastructure|iac|terraform|tofu|pulumi|ansible|helm|k8s)$/i.test(
-          part,
-        ),
-      ) || /\.(?:tf|tfvars|hcl)$/.test(path)
-  );
+/**
+ * Segments that run offline: the authorized package bootstrap (the one
+ * command granted a network) and npx/pnpx/bunx, which run a local bin.
+ */
+function offlineSegment(segment: string): boolean {
+  if (packageBootstrap(segment) !== undefined) return true;
+  const first = segment
+    .split(/\s+/)
+    .find((word) => word && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  return first !== undefined && /^(?:npx|pnpx|bunx)$/.test(first);
 }
 
 /** The network tool a validation command reaches, directly or through root package scripts (to a fixed depth). */
@@ -1358,12 +1357,12 @@ function networkToolOfCommand(
   scripts: Record<string, unknown>,
   depth = 0,
 ): string | undefined {
-  const direct = networkToolIn(command);
+  const direct = networkToolIn(command, offlineSegment);
   if (direct) return direct;
   const invocation = packageScriptInvocation(command);
   const body = invocation ? scripts[invocation.name] : undefined;
   if (typeof body !== "string" || depth > 3) return undefined;
-  const own = networkToolIn(body);
+  const own = networkToolIn(body, offlineSegment);
   if (own) return own;
   for (const segment of body.split(/&&|\|\||[;|\n&]/))
     if (packageScriptInvocation(segment.trim())) {
@@ -1373,16 +1372,18 @@ function networkToolOfCommand(
   return undefined;
 }
 
-/** A new migration number or test file named in acceptance text. */
-const NUMBERED_FILE =
-  /(?<![\w./-])((?:[\w.-]+\/)*\d{3,}[_-][\w.-]*\.(?:sql|[cm]?[jt]s|py|rb|exs?|kt|java|go|rs))(?![\w-])/g;
+/** A new migration number or test file named in acceptance text; a glob is never a file name. */
+const NUMBERED_SQL =
+  /(?<![\w./*?\]}-])((?:[\w.-]+\/)*\d{3,}[_-][\w.-]*\.sql)(?![\w*?-])/g;
+const NUMBERED_MIGRATION =
+  /(?<![\w./*?\]}-])((?:[\w.-]+\/)*migrat[\w.-]*\/(?:[\w.-]+\/)*\d{3,}[_-][\w.-]*\.(?:[cm]?[jt]s|py|rb|exs?|kt|java|go|rs))(?![\w*?-])/g;
 const TEST_FILE =
-  /(?<![\w./-])((?:[\w.-]+\/)*(?:[\w.-]*\.(?:test|spec)\.[cm]?[jt]sx?|test_[\w.-]+\.py|[\w.-]+_test\.(?:py|go|rs|rb)))(?![\w-])/g;
+  /(?<![\w./*?\]}-])((?:[\w.-]+\/)*(?:[\w.-]*\.(?:test|spec)\.[cm]?[jt]sx?|test_[\w.-]+\.py|[\w.-]+_test\.(?:py|go|rs|rb)))(?![\w*?-])/g;
 
 /**
  * The plan standard's checks that need the base: a validation command whose
- * script reaches a network (validation has none) on an item that owns no
- * infrastructure paths, and acceptance that names a migration number or test
+ * script reaches a network (validation has none; only the authorized
+ * bootstrap and local npx bins are offline), and acceptance that names a migration number or test
  * file absent from the base tree (the worker names new files). Structural
  * only: command words, script bodies and file-name shapes. One correction.
  */
@@ -1390,6 +1391,8 @@ export function assertPlanBoundaries(
   graph: WorkGraph,
   checkout: string,
   ciOnlyCommands: readonly string[] = [],
+  /** The Objective and pinned sources: a name they use is fixed, not the worker's choice. */
+  fixedTexts: readonly string[] = [],
 ): void {
   const ciOnly = new Set(ciOnlyCommands.map(normalizedCommand));
   let scripts: Record<string, unknown> | undefined;
@@ -1438,24 +1441,33 @@ export function assertPlanBoundaries(
     findings.push(finding);
   };
   for (const item of workShapes(graph)) {
-    const infra = item.ownedPaths.some(isInfraPath);
     for (const { command } of item.validation) {
-      if (infra || ciOnly.has(normalizedCommand(command))) continue;
+      if (packageBootstrap(command) || ciOnly.has(normalizedCommand(command)))
+        continue;
       const tool = networkToolOfCommand(command, rootScripts());
       if (tool)
         found(
           item.id,
-          `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have, and the item owns no infrastructure paths: select the item's offline commands instead, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
+          `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have: select the item's offline commands instead, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
         );
     }
     const named = new Set<string>();
     for (const entry of item.acceptance)
-      for (const pattern of [NUMBERED_FILE, TEST_FILE])
+      for (const pattern of [NUMBERED_SQL, NUMBERED_MIGRATION, TEST_FILE])
         for (const match of entry.matchAll(pattern)) named.add(match[1]!);
     for (const file of named) {
       const base = baseTree();
       if (!base) break;
       if (file.includes("/") ? base.paths.has(file) : base.names.has(file))
+        continue;
+      if (
+        fixedTexts.some((text) => text.includes(file)) ||
+        item.ownedPaths.some((owned) =>
+          file.includes("/")
+            ? owned === file || (owned.endsWith("/") && file.startsWith(owned))
+            : owned.replace(/^.*\//, "") === file,
+        )
+      )
         continue;
       found(
         item.id,

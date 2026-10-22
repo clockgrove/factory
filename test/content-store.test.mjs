@@ -7803,22 +7803,31 @@ test("plan boundaries refuse network validation off infra and new file names in 
     validation: [],
     ...fields,
   });
-  const check = (items, ciOnly = []) =>
-    assertPlanBoundaries({ baseSha, items }, repo, ciOnly);
+  const check = (items, fixedTexts = []) =>
+    assertPlanBoundaries({ baseSha, items }, repo, [], fixedTexts);
   const command = (text) => ({ command: text, provenance: "base-observed" });
-  // A network script, direct or through a wrapper, on an item without infra paths.
-  for (const text of ["npm run infra:validate", "npm run wrapped"])
-    assert.throws(
-      () => check([item("app", { validation: [command(text)] })]),
-      /Work Item app validation runs .* reaches a network \(tofu init\).*owns no infrastructure paths/,
-    );
-  // Allowed: the same command on an item owning infra paths, or an offline one.
+  // A network script, direct or through a wrapper, is refused for every item,
+  // including one that owns infrastructure files or has "infra" in a source path.
+  for (const owned of [["src/a.ts"], ["infra/main.tf"], ["src/infra/a.ts"]])
+    for (const text of ["npm run infra:validate", "npm run wrapped"])
+      assert.throws(
+        () =>
+          check([
+            item("app", { ownedPaths: owned, validation: [command(text)] }),
+          ]),
+        /Work Item app validation runs .* reaches a network \(tofu init\)/,
+      );
+  // Offline commands pass: the authorized bootstrap, local npx bins, plain tests.
   check([
-    item("infra", {
-      ownedPaths: ["infra/main.tf"],
-      validation: [command("npm run infra:validate")],
+    item("app", {
+      validation: [
+        command("npm ci --ignore-scripts"),
+        command("pnpm install --frozen-lockfile --ignore-scripts"),
+        command("npx eslint ."),
+        command("npx tsc --noEmit"),
+        command("npm test"),
+      ],
     }),
-    item("app", { validation: [command("npm test")] }),
   ]);
   // A new migration number and a new test file are the worker's choice.
   assert.throws(
@@ -7832,12 +7841,21 @@ test("plan boundaries refuse network validation off infra and new file names in 
       ]),
     /acceptance names db\/migrations\/0008_roles\.sql, which does not exist at the base.*acceptance names roles\.test\.mjs/,
   );
-  // Existing files may be named.
-  check([
-    item("app", {
-      acceptance: [
-        "db/migrations/0007_users.sql keeps its columns and users.test.mjs still passes.",
-      ],
-    }),
-  ]);
+  // Allowed: existing files, globs, names the Objective fixes, files the item
+  // owns, and a numbered name outside migrations.
+  check(
+    [
+      item("app", {
+        ownedPaths: ["src/a.ts", "test/mine.test.mjs"],
+        acceptance: [
+          "db/migrations/0007_users.sql keeps its columns and users.test.mjs still passes.",
+          "node --test test/*.test.mjs passes, as does test/user-*.test.mjs.",
+          "The suite in fixed.test.mjs passes.",
+          "test/mine.test.mjs covers the refusal.",
+          "The 2026-report.ts export lists users.",
+        ],
+      }),
+    ],
+    ["Objective: add fixed.test.mjs"],
+  );
 });

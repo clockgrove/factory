@@ -58,8 +58,8 @@ All three happen in the planner's one session. Self-checking is a filter; the in
   - an acceptance entry that cites a line number next to a source file name;
   - two items that own the same or overlapping paths when neither depends on the other, directly or transitively. Why: the scheduler would run them one after the other anyway, and wide shared ownership turns a plan into a serial chain;
   - when the plan selects any validation command (so the repository has one), a work item without a validation command, and a criterion proved only by final review or CI whose owner runs none. Why: final review and hosted CI run nothing inside Factory validation;
-  - a validation command whose script (from the base `package.json`) invokes a known network tool, on an item that owns no infrastructure paths. Why: validation has no network, so the command could never pass. Commands the installation lists as CI-only are refused for every item;
-  - acceptance that names a migration file number or test file name absent from the base tree. Why: the worker chooses new file names.
+  - a validation command whose script (from the base `package.json`) invokes a known network tool. The authorized package bootstrap and npx runs of local bins are not refused. Why: validation has no network, so the command could never pass, whatever the item owns;
+  - acceptance that names a migration file number or test file name absent from the base tree (globs, names the Objective or a pinned source uses, and files the item owns are exempt). Why: the worker chooses new file names.
 
   The planner gets all of these as one correction. Amendments skip this lint; graph review judges them.
 

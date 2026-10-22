@@ -49,14 +49,18 @@ const NETWORK_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
 };
 
 /** The network tool a script body invokes, from its command words; never prose. */
-export function networkToolIn(body: string): string | undefined {
+export function networkToolIn(
+  body: string,
+  /** A segment the caller knows runs offline (for example the authorized bootstrap or a local bin). */
+  skip?: (segment: string) => boolean,
+): string | undefined {
   for (const segment of body.split(/&&|\|\||[;|\n&(){}`]|\$\(/)) {
     const words = segment
       .trim()
       .split(/\s+/)
       .filter((word) => word && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
     const tool = words[0]?.replace(/^.*\//, "");
-    if (!tool) continue;
+    if (!tool || skip?.(segment.trim())) continue;
     if (NETWORK_TOOLS.has(tool)) return tool;
     const subcommand = words.slice(1).find((word) => !word.startsWith("-"));
     if (subcommand && NETWORK_SUBCOMMANDS[tool]?.has(subcommand))

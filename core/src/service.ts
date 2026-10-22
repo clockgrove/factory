@@ -16,12 +16,11 @@ import {
   type Workflow,
 } from "./engine.js";
 import type { GitHubModule, GitHubSync } from "./github-sync.js";
-import { pathsOverlap } from "./planning/graph.js";
-import type { Plan } from "./planning/types.js";
-import { built } from "./work/steps.js";
 import { takeServiceLock } from "./lock.js";
 import { RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
+import { pathsOverlap } from "./planning/graph.js";
+import type { Plan } from "./planning/types.js";
 import {
   pendingRequests,
   removeRequest,
@@ -31,10 +30,11 @@ import {
   listObjectives,
   loadState,
   newObjective,
+  type ObjectiveState,
   saveState,
   TERMINAL,
-  type ObjectiveState,
 } from "./state.js";
+import { built } from "./work/steps.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 export interface ServeOptions {

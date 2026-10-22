@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import type { Outcome, Step, StepContext } from "../engine.js";
 import {
   type DeliveryContext,
   merge,
@@ -7,6 +6,7 @@ import {
   publish,
   REPUBLISH,
 } from "../delivery.js";
+import type { Outcome, Step, StepContext } from "../engine.js";
 import { defaultHead } from "../git.js";
 import {
   BaseFiles,

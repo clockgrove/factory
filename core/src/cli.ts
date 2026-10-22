@@ -13,9 +13,10 @@ import {
   type ClaudePlannerOptions,
   DEFAULT_CLAUDE_MODELS,
 } from "./providers/claude.js";
-import { CodexPlanner, DEFAULT_CODEX_MODELS } from "./providers/codex.js";
 import { ClaudeWorker } from "./providers/claude-worker.js";
+import { CodexPlanner, DEFAULT_CODEX_MODELS } from "./providers/codex.js";
 import { CodexWorker } from "./providers/codex-worker.js";
+import { HedgedPlanner } from "./providers/planner.js";
 import { type Request, writeRequest } from "./requests.js";
 import { serve } from "./service.js";
 import {
@@ -66,7 +67,7 @@ async function main(argv: string[]): Promise<number> {
         loaded = config;
         const github = new GitHub(config.repository);
         sync = new GitHubSync(github, config, new RunLog(paths.logs, "sync"));
-        const planner =
+        const planner = new HedgedPlanner(
           config.planning.provider === "claude"
             ? new ClaudePlanner({
                 ...DEFAULT_CLAUDE_MODELS,
@@ -75,7 +76,8 @@ async function main(argv: string[]): Promise<number> {
             : new CodexPlanner({
                 ...DEFAULT_CODEX_MODELS,
                 ...(config.planning.models ?? {}),
-              } as typeof DEFAULT_CODEX_MODELS);
+              } as typeof DEFAULT_CODEX_MODELS),
+        );
         workflow = objectiveWorkflow({
           config,
           github,

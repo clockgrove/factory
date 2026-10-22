@@ -25,6 +25,8 @@ export interface PlannerCall {
   images?: string[];
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
+  /** Called on every provider event: the call is alive. */
+  activity?(): void;
 }
 
 export interface PlannerAnswer {
@@ -227,5 +229,101 @@ export class IdleWatchdog {
         this.controller.abort(new IdleTimeout(bound + quietMs, this.lastEvent)),
       bound + quietMs,
     );
+  }
+}
+
+/** When to hedge: after this much silence (any provider event resets it), or this long in all. */
+export interface HedgePolicy {
+  /** Silence before hedging, by role. Reviews answer with ~10 s between events. */
+  silenceMs: Record<PlannerCall["role"], number>;
+  /** For a provider that reports no events during a call: hedge after this long. */
+  wallMs: number;
+}
+
+export const DEFAULT_HEDGE: HedgePolicy = {
+  silenceMs: { reviewer: 45_000, planner: 120_000 },
+  wallMs: 180_000,
+};
+
+/**
+ * A planner whose stalled calls are hedged. Codex's Responses stream
+ * sometimes stops mid-answer (about 3% of review calls in a measured run):
+ * the model has started its final message, the terminal event never comes,
+ * and the call would wait out a 5-minute idle limit. When the first call
+ * goes silent past the policy, an identical second call starts; the first
+ * answer wins and the other is aborted. Healthy calls never trigger it.
+ */
+export class HedgedPlanner implements Planner {
+  constructor(
+    private readonly inner: Planner,
+    private readonly policy: HedgePolicy = DEFAULT_HEDGE,
+  ) {}
+
+  answer(call: PlannerCall): Promise<PlannerAnswer> {
+    const controllers = [new AbortController(), new AbortController()];
+    const started = Date.now();
+    let lastEvent = started;
+    let sawEvent = false;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let running = 0;
+      let hedged = false;
+      let failure: unknown;
+      const finish = (settle: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(timer);
+        for (const controller of controllers)
+          controller.abort(new Error("hedged"));
+        settle();
+      };
+      const start = (n: number) => {
+        running += 1;
+        this.inner
+          .answer({
+            ...call,
+            signal: AbortSignal.any([call.signal, controllers[n]!.signal]),
+            log: (event) => call.log({ ...event, ...(n ? { hedge: n } : {}) }),
+            activity: () => {
+              call.activity?.();
+              if (n === 0) {
+                lastEvent = Date.now();
+                sawEvent = true;
+              }
+            },
+          })
+          .then(
+            (answer) => finish(() => resolve(answer)),
+            (error: unknown) => {
+              running -= 1;
+              failure ??= error;
+              // A failure ends the call unless the other attempt is running.
+              if (running === 0) finish(() => reject(failure));
+            },
+          );
+      };
+      call.signal.addEventListener(
+        "abort",
+        () => finish(() => reject(call.signal.reason)),
+        { once: true },
+      );
+      start(0);
+      const timer = setInterval(() => {
+        if (settled || hedged) return;
+        const now = Date.now();
+        const silent = now - lastEvent;
+        const stalled = sawEvent
+          ? silent >= this.policy.silenceMs[call.role]
+          : now - started >= this.policy.wallMs;
+        if (!stalled) return;
+        hedged = true;
+        call.log({
+          event: "planner-hedge",
+          silentMs: silent,
+          afterMs: now - started,
+        });
+        start(1);
+      }, 5_000);
+    });
   }
 }

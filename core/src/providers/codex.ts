@@ -1,8 +1,10 @@
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -155,6 +157,37 @@ enabled = false
 `;
 }
 
+/** Codex's model list, shared between calls so each skips a fetch on start. */
+function sharedModelsCache(): string {
+  return join(
+    process.env.XDG_CACHE_HOME || join(homedir(), ".cache"),
+    "factory",
+    "codex-models_cache.json",
+  );
+}
+
+/** Seed a private Codex home with the shared model list, when there is one. */
+export function seedModelsCache(codexDir: string): void {
+  try {
+    copyFileSync(sharedModelsCache(), join(codexDir, "models_cache.json"));
+  } catch {
+    // No shared list yet: Codex fetches one.
+  }
+}
+
+/** Keep the model list a call fetched, for the next call. */
+export function saveModelsCache(codexDir: string): void {
+  try {
+    const target = sharedModelsCache();
+    mkdirSync(dirname(target), { recursive: true });
+    const temporary = `${target}.${process.pid}.tmp`;
+    copyFileSync(join(codexDir, "models_cache.json"), temporary);
+    renameSync(temporary, target);
+  } catch {
+    // Nothing fetched, or the cache directory is unwritable: not needed.
+  }
+}
+
 /**
  * A private CODEX_HOME, HOME and TMPDIR for one call, with Factory's config
  * and a link to the operator's subscription login. Operator config is never
@@ -191,6 +224,7 @@ function codexHome(readDir: string | undefined): {
       "auth.json",
     );
     if (existsSync(login)) symlinkSync(login, join(codexDir, "auth.json"));
+    seedModelsCache(codexDir);
     const env: Record<string, string> = {};
     for (const [name, value] of Object.entries(process.env))
       if (
@@ -344,8 +378,11 @@ export class CodexPlanner implements Planner {
           : choice.serviceTier === "standard"
             ? "default"
             : undefined;
+      const callStarted = Date.now();
+      const traced = traceWrapper(home.root, home.env);
       const codex = new Codex({
         env: home.env,
+        ...(traced ? { codexPathOverride: traced } : {}),
         ...(tier && { config: { service_tier: tier } }),
       });
       const options: ThreadOptions = {
@@ -382,6 +419,25 @@ export class CodexPlanner implements Planner {
         const next = await watchdog.race(events.next());
         if (next.done) break;
         const event = next.value;
+        call.activity?.();
+        // Every event's kind and timing, so a stall can be read afterwards.
+        call.log({
+          event: "codex-event",
+          type: event.type,
+          ...("item" in event && event.item
+            ? {
+                item: event.item.type,
+                id: event.item.id,
+                ...("status" in event.item
+                  ? { status: event.item.status }
+                  : {}),
+                ...(event.item.type === "command_execution"
+                  ? { command: event.item.command.slice(0, 200) }
+                  : {}),
+              }
+            : {}),
+          ms: Date.now() - callStarted,
+        });
         const item =
           event.type === "item.started" ||
           event.type === "item.updated" ||
@@ -467,7 +523,56 @@ export class CodexPlanner implements Planner {
         ]);
         clearTimeout(timer);
       }
-      rmSync(home.root, { recursive: true, force: true });
+      saveModelsCache(home.env.CODEX_HOME!);
+      keepOrRemove(home.root, record.thread as string | undefined);
     }
   }
+}
+
+/**
+ * With FACTORY_PROVIDER_TRACE set, run codex through a wrapper that appends
+ * its stderr to <home>/codex-stderr.log, with RUST_LOG from
+ * FACTORY_CODEX_RUST_LOG. Returns the wrapper's path, or undefined.
+ */
+function traceWrapper(
+  root: string,
+  env: Record<string, string>,
+): string | undefined {
+  if (!process.env.FACTORY_PROVIDER_TRACE) return undefined;
+  const require = createRequire(import.meta.url);
+  const vendor = join(
+    dirname(require.resolve("@openai/codex-linux-x64/package.json")),
+    "vendor",
+    "x86_64-unknown-linux-musl",
+    "bin",
+    "codex",
+  );
+  if (process.env.FACTORY_CODEX_RUST_LOG)
+    env.RUST_LOG = process.env.FACTORY_CODEX_RUST_LOG;
+  const wrapper = join(root, "codex-traced");
+  writeFileSync(
+    wrapper,
+    `#!/bin/sh\nexec '${vendor}' "$@" 2>>'${join(root, "codex-stderr.log")}'\n`,
+    { mode: 0o700 },
+  );
+  return wrapper;
+}
+
+/**
+ * FACTORY_PROVIDER_TRACE=<dir> keeps each call's private Codex home (its
+ * session record and logs) under <dir>/<thread>, for investigating a call
+ * afterwards. Without it the home is removed.
+ */
+function keepOrRemove(root: string, thread: string | undefined): void {
+  const trace = process.env.FACTORY_PROVIDER_TRACE;
+  if (trace) {
+    try {
+      mkdirSync(trace, { recursive: true });
+      renameSync(root, join(trace, thread ?? `call-${Date.now()}`));
+      return;
+    } catch {
+      // Fall through and remove it.
+    }
+  }
+  rmSync(root, { recursive: true, force: true });
 }

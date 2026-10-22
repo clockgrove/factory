@@ -35,7 +35,7 @@ const GITHUB_LAG_MS = 2 * MINUTE;
 const CHECK_SETTLE_MS = 20 * MINUTE;
 /** Checks pending with the same set this long become a question. */
 const ESCALATE_AFTER_MS = 24 * 60 * MINUTE;
-const CI_POLL_MS = MINUTE;
+const CI_POLL_MS = 20_000;
 /** How long a fetched default-branch head serves renamed-check lookups. */
 const DEFAULT_HEAD_REUSE_MS = 10 * MINUTE;
 const LAG_POLL_MS = 15_000;

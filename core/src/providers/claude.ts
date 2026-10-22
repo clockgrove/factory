@@ -837,12 +837,24 @@ export class ClaudePlanner implements Planner {
           tree,
         }),
       });
+      const callStarted = Date.now();
       const events = session[Symbol.asyncIterator]();
       let result: SDKResultMessage | undefined;
       for (;;) {
         const next = await watchdog.race(events.next());
         if (next.done) break;
         const message = next.value;
+        call.activity?.();
+        // Every message's kind and timing, so a stall can be read afterwards.
+        if (message.type !== "stream_event")
+          call.log({
+            event: "claude-event",
+            type:
+              message.type === "system"
+                ? `system.${message.subtype}`
+                : message.type,
+            ms: Date.now() - callStarted,
+          });
         // A retry announces its backoff; that silence is not inactivity.
         watchdog.progress(
           message.type === "system"

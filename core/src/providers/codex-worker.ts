@@ -39,6 +39,8 @@ import {
   codexFailure,
   codexRuntimeDirectory,
   ENVIRONMENT,
+  saveModelsCache,
+  seedModelsCache,
 } from "./codex.js";
 import {
   detail,
@@ -168,6 +170,7 @@ enabled = ${network}
       "auth.json",
     );
     if (existsSync(login)) symlinkSync(login, join(codexDir, "auth.json"));
+    seedModelsCache(codexDir);
     const env: Record<string, string> = {};
     for (const [name, value] of Object.entries(source))
       if (
@@ -427,6 +430,7 @@ export class CodexWorker implements Worker {
       // Commands the worker left running end with its turn.
       kill();
       if (group !== undefined) processGroups.delete(group);
+      saveModelsCache(join(home.root, "codex-home"));
       rmSync(home.root, { recursive: true, force: true });
     }
   }

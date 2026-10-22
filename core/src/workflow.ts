@@ -1,3 +1,11 @@
+import type { Outcome, Step, StepContext, Workflow } from "./engine.js";
+import {
+  guarded,
+  type PlanningDeps,
+  planningStep,
+  readObjective,
+} from "./planning/steps.js";
+import type { ObjectiveState, ObjectiveStatus } from "./state.js";
 import {
   type BuildDeps,
   buildSteps,
@@ -7,14 +15,6 @@ import {
   finalStep,
   reportStep,
 } from "./work/steps.js";
-import type { Outcome, Step, StepContext, Workflow } from "./engine.js";
-import {
-  guarded,
-  type PlanningDeps,
-  planningStep,
-  readObjective,
-} from "./planning/steps.js";
-import type { ObjectiveState, ObjectiveStatus } from "./state.js";
 
 const MINUTE = 60_000;
 

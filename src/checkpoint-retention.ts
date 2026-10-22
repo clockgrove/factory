@@ -227,16 +227,11 @@ function writeRetirement(repository: string, record: RetirementRecord): void {
   }
 }
 
-/**
- * Reclaim runs inline in the operator command that published (#1707). One
- * Objective is never cut short, so a pass starts no new Objective after this
- * budget; every acknowledged publication continues where the last one ended,
- * since finished Objectives are skipped by their record.
- */
-const RECLAIM_BUDGET_MS = 15_000;
-
 const ATTEMPT_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The last retired Objective each installation's previous pass reached. */
+const reclaimCursor = new Map<string, number>();
 
 /**
  * Reclaim the local material of retired Objectives (#1657): the worktrees of
@@ -263,6 +258,20 @@ export async function reclaimRetiredMaterial(
   acknowledged: (commit: string) => boolean,
   /** The body digests an acknowledged archive commit holds. */
   archived?: (commit: string) => ReadonlySet<string>,
+  /**
+   * The pass's budget (#1714): checked before each Objective and before each
+   * step inside one (a removal, the validation sweep, listing the bodies, a
+   * deletion), but only once this pass made progress, so every pass takes at
+   * least one step. `stopped` ends the pass before its next step regardless.
+   * An Objective stopped part way keeps its record unfinished, and a later
+   * pass repeats it: worktrees and harness files are found by listing, and
+   * bodies go leaves first (see reclaimBodies), so every remaining body is
+   * still listed. Each pass starts after the last Objective the previous one
+   * reached, so one large Objective cannot starve the ones after it.
+   */
+  limits: { expired: () => boolean; stopped?: () => boolean } = {
+    expired: () => false,
+  },
 ): Promise<number> {
   const root = directory(config.repository);
   if (!existsSync(root)) return 0;
@@ -283,6 +292,8 @@ export async function reclaimRetiredMaterial(
     "./recovery-checkpoint-closure.js"
   );
   const state = stateRoot(config.repository);
+  let progressed = false;
+  const due = () => !!limits.stopped?.() || (progressed && limits.expired());
   // Under the Objective's own lock, so no retry or run can resume it and use
   // this material meanwhile; the snapshot is checked again under it.
   const reclaimOne = async (
@@ -336,20 +347,27 @@ export async function reclaimRetiredMaterial(
     const worktrees = join(state, "worktrees");
     if (attempts.size && existsSync(worktrees))
       for (const entry of readdirSync(worktrees).filter(owned)) {
+        if (due()) return false;
         const path = join(worktrees, entry);
         if (lstatSync(path).isDirectory() && existsSync(join(path, ".git")))
           await removeWorktree(config.checkout, path);
         else rmSync(path, { recursive: true, force: true });
+        progressed = true;
       }
     const harness = join(state, "harness");
     if (attempts.size && existsSync(harness))
-      for (const entry of readdirSync(harness).filter(owned))
+      for (const entry of readdirSync(harness).filter(owned)) {
+        if (due()) return false;
         rmSync(join(harness, entry), { recursive: true, force: true });
+        progressed = true;
+      }
+    if (due()) return false;
     await sweepValidationWorktrees(
       config.checkout,
       objectiveRoot(config.repository, objective),
       state,
     );
+    progressed = true;
     writeRetirement(config.repository, { ...record, reclaimed: "complete" });
     return true;
   };
@@ -360,6 +378,7 @@ export async function reclaimRetiredMaterial(
     if (stateDigest(bytes) !== record.stateDigest) return;
     const value = JSON.parse(bytes.toString("utf8"));
     if (!terminalHistory(value)) return;
+    if (due()) return;
     const holds = archived!(record.evidenceCommit);
     const store = new LocalContentStore(join(state, "content"));
     // Listed, not verified: reclaimArchived deletes only local bodies whose
@@ -370,20 +389,30 @@ export async function reclaimRetiredMaterial(
     );
     // Leaves before the manifests that list them: an interrupted pass never
     // leaves a child no later listing can reach.
-    store.reclaimArchived(
+    // Deletes at least one body before it checks the budget.
+    const { complete } = store.reclaimArchived(
       record.evidenceCommit,
       [record.stateDigest, ...contentRefs.map((ref) => ref.digest)]
         .filter((digest) => holds.has(digest))
         .reverse(),
+      () => !!limits.stopped?.() || limits.expired(),
     );
+    progressed = true;
+    if (!complete) return;
     writeRetirement(config.repository, { ...record, bodies: "complete" });
   };
   let reclaimed = 0;
-  const deadline = Date.now() + RECLAIM_BUDGET_MS;
-  for (const name of readdirSync(root).sort()) {
-    const match = /^([1-9][0-9]*)\.json$/.exec(name);
-    if (!match) continue;
-    const objective = Number(match[1]);
+  const objectives = readdirSync(root)
+    .flatMap((name) => {
+      const match = /^([1-9][0-9]*)\.json$/.exec(name);
+      return match ? [Number(match[1])] : [];
+    })
+    .sort((a, b) => a - b);
+  const last = reclaimCursor.get(config.repository) ?? 0;
+  const start = objectives.findIndex((objective) => objective > last);
+  for (const objective of start < 0
+    ? objectives
+    : [...objectives.slice(start), ...objectives.slice(0, start)]) {
     // One Objective's failure leaves its material for a later pass only.
     try {
       const record = readRetirement(config.repository, objective);
@@ -393,8 +422,8 @@ export async function reclaimRetiredMaterial(
         (record.reclaimed && (record.bodies || !archived))
       )
         continue;
-      // The rest waits for the next acknowledged publication.
-      if (Date.now() >= deadline) break;
+      // The rest waits for the next pass.
+      if (due()) break;
       const snapshot = statePath(config.repository, objective);
       if (
         !existsSync(snapshot) ||
@@ -409,6 +438,7 @@ export async function reclaimRetiredMaterial(
         // A live owner of this Objective or of the installation.
         continue;
       }
+      reclaimCursor.set(config.repository, objective);
       try {
         if (!record.reclaimed && (await reclaimOne(objective, record)))
           reclaimed++;
@@ -422,7 +452,7 @@ export async function reclaimRetiredMaterial(
         );
       }
     } catch {
-      // Left in place; the next acknowledged publication tries again.
+      // Left in place; the next pass tries again.
     }
   }
   return reclaimed;

@@ -113,6 +113,7 @@ import {
   checkpointJournalSequence,
   gitPersistenceStatus,
   inspectRecoveryCheckpoint,
+  maintainRecoveryCheckpoint,
   readRecoveryCheckpointBodies,
   readVerifiedRecoveryCheckpoint,
   synchronizeRecoveryCheckpoint,
@@ -1238,9 +1239,26 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
   assert.equal(firstCheckpoint.status, "acknowledged");
   // Retired Objective 6's bodies that its evidence commit holds are deleted
   // locally (#1657), including digests live Objective 5 shares; the store
-  // reads each one back from the local publisher repository.
+  // reads each one back from the local publisher repository. A publication
+  // never reclaims; background maintenance does (#1714).
   const bodyPath = (ref) =>
     join(state, "content", ref.digest.slice(0, 2), ref.digest);
+  const retired6 = join(state, "recovery", "retired", "6.json");
+  assert.equal(JSON.parse(readFileSync(retired6)).bodies, undefined);
+  assert(closure.contentRefs.every((ref) => existsSync(bodyPath(ref))));
+  for (const path of reclaimable) assert.equal(existsSync(path), true, path);
+  // A pass with no budget left still takes one step, so passes finish (F1).
+  const finished = () =>
+    [6, 7].every((objective) => {
+      const record = JSON.parse(
+        readFileSync(join(state, "recovery", "retired", `${objective}.json`)),
+      );
+      return record.reclaimed && record.bodies;
+    });
+  for (let passes = 0; !finished(); passes++) {
+    assert(passes < 40, "every zero-budget pass makes progress");
+    await maintainRecoveryCheckpoint(config, { budgetMs: 0 });
+  }
   assert.equal(
     JSON.parse(readFileSync(join(state, "recovery", "retired", "6.json")))
       .bodies,
@@ -1454,8 +1472,9 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
     buildClosure,
   });
   assert.equal(retirementCheckpoint.status, "acknowledged");
-  // The retired run's local material is reclaimed after acknowledgment; that
-  // of other attempts stays (#1657).
+  // The retired run's local material is reclaimed by maintenance after
+  // acknowledgment, never by the publication; that of other attempts stays.
+  await maintainRecoveryCheckpoint(config);
   assert.equal(
     JSON.parse(
       readFileSync(join(state, "recovery", "retired", "7.json"), "utf8"),
@@ -3673,8 +3692,11 @@ test("repository memory verifies complete retained bodies and rebuilds scoped SQ
       rmSync(source, { recursive: true, force: true });
       const before = allObjects(publisher);
       assert(looseObjects(publisher) >= 2048);
-      // This acknowledgment caches the publisher material, then packs it.
+      // This acknowledgment caches the publisher material; maintenance, not
+      // the publication, packs it.
       const packedTip = (await publishChange()).lastAcknowledged.commitSha;
+      assert(looseObjects(publisher) >= 2048);
+      await maintainRecoveryCheckpoint(config);
       assert.equal(looseObjects(publisher), 0);
       const after = new Set(allObjects(publisher));
       assert(before.every((oid) => after.has(oid)));

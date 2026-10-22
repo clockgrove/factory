@@ -12,13 +12,14 @@ import {
   queueControlBinding,
   stateRoot,
 } from "./config.js";
-import type {
-  GitHubGateway,
-  ProjectQueueExpectedTarget,
-  ProjectQueueInspection,
-  ProjectQueuePlannedEffect,
-  ProjectQueuePlannedAction,
-  ProjectQueueWriteReceipt,
+import {
+  AuthenticationRequiredError,
+  type GitHubGateway,
+  type ProjectQueueExpectedTarget,
+  type ProjectQueueInspection,
+  type ProjectQueuePlannedEffect,
+  type ProjectQueuePlannedAction,
+  type ProjectQueueWriteReceipt,
 } from "./contracts.js";
 import {
   type ControlRequest,
@@ -37,6 +38,7 @@ import {
 import { NativeStackDelivery } from "./delivery/native-stack.js";
 import { attachedFault } from "./fault.js";
 import { RealGitHubGateway } from "./github.js";
+import { stopRetryCommand } from "./run-outcome.js";
 import { gitHubTransportOf } from "./github-client.js";
 import {
   createProjectQueuePlannedEffect,
@@ -55,6 +57,7 @@ import {
   withProcessCancellation,
 } from "./process.js";
 import {
+  QueueAuthorityChanged,
   admitQueueCommand,
   completeQueueCommand,
   createQueueCommand,
@@ -87,10 +90,13 @@ import {
   acceptForwardedCheckpointCompletion,
   bindRecoveryCheckpointControllerScope,
   checkpointRetentionGaps,
+  CheckpointAdmissionFailure,
   CheckpointProducerInventoryChanged,
   gitPersistenceStatus,
   isCheckpointAdmissionFailure,
   readVerifiedRecoveryCheckpoint,
+  scheduleRecoveryCheckpointMaintenance,
+  stopRecoveryCheckpointMaintenance,
   withRecoveryCheckpointCommandOperation,
   withRecoveryCheckpointOperation,
   withRecoveryCheckpointControllerVerification,
@@ -121,6 +127,7 @@ import {
   installationContinuations,
   liveObjectiveOwners,
   readContinuation,
+  readControllerOwner,
   releaseControllerLock,
   readScannedContinuation,
   retargetControllerLock,
@@ -358,6 +365,38 @@ export async function readIntake(
   } catch (error) {
     return view(config, undefined, error);
   }
+}
+/**
+ * A fault of the installation, not of one Objective: rejected credentials or
+ * authorization (a provider login, or HTTP 401/403 behind a `config` fault),
+ * or a full, read-only or failing disk under a state write. Other `config`
+ * faults, such as a frozen binding mismatch, stay the Objective's own.
+ * Returns what to show the operator, else undefined.
+ */
+function installationFault(error: unknown): string | undefined {
+  const fault = attachedFault(error);
+  for (
+    let current: unknown = error, depth = 0;
+    current instanceof Error && depth < 8;
+    current = current.cause, depth++
+  ) {
+    if (current instanceof AuthenticationRequiredError)
+      return `${current.message}; run \`${current.authentication.command}\``;
+    const { code, status, statusCode } = current as {
+      code?: unknown;
+      status?: unknown;
+      statusCode?: unknown;
+    };
+    const http = typeof status === "number" ? status : statusCode;
+    if (fault?.kind === "config" && (http === 401 || http === 403))
+      return `${fault.detail}. ${fault.fix}`;
+    if (
+      typeof code === "string" &&
+      ["ENOSPC", "EDQUOT", "EROFS", "EIO"].includes(code)
+    )
+      return String(current);
+  }
+  return undefined;
 }
 function terminal(state: ContinuationState | undefined): boolean {
   return (
@@ -1614,9 +1653,50 @@ async function runIntakeOwned(
     [...active].flatMap(([objective, entry]) =>
       entry.control ? [[objective, entry.control] as const] : [],
     );
-  // A run that needs a person or failed holds new dispatch; the service then
-  // ends with this record once its other active runs settle.
+  // A run that failed, or an installation-wide limit that needs a person,
+  // holds new dispatch; the service then ends with this record once its other
+  // active runs settle.
   let stopping: IntakeAuthorization["observation"];
+  // Objectives whose run stopped for a person: the run's wait reason and a
+  // digest of the state it left. Each holds only itself: the service stays up
+  // and dispatches the others (#1714). Any change to that state, such as a
+  // decision or cancellation, releases it to the next pass.
+  const waiting = new Map<
+    number,
+    { reason: string; state: string; retryAt?: number }
+  >();
+  const stateDigest = (state: ContinuationState | undefined) =>
+    queueDigest(JSON.stringify(state ?? null));
+  // An installation-level fault (credentials, a full disk, a failed state
+  // write): no new dispatch, but the service stays up and active runs go on.
+  // `factory queue resume` clears it after the operator fixes the cause.
+  let installationHold: { at: string; error: string } | undefined;
+  const holdInstallation = (error: unknown) => {
+    installationHold ??= {
+      at: new Date().toISOString(),
+      error: installationFault(error) ?? String(error),
+    };
+    signalWake();
+  };
+  /** Hold one Objective until its state changes, an operator names it, or `retryAt`. */
+  const holdObjective = (
+    objective: number,
+    reason: string,
+    retryAt?: number,
+  ) => {
+    let state: string;
+    try {
+      state = stateDigest(readContinuation(config.repository, objective));
+    } catch (error) {
+      holdInstallation(error);
+      return;
+    }
+    waiting.set(objective, {
+      reason,
+      state,
+      ...(retryAt !== undefined && Number.isFinite(retryAt) ? { retryAt } : {}),
+    });
+  };
   // Upgrade drain (`factory supervisor upgrade` with several Objectives): no
   // new dispatch while the active runs finish; `queue resume` lifts it.
   let finishing = false;
@@ -1756,6 +1836,15 @@ async function runIntakeOwned(
         : {}),
     activeObjective: [...active.keys()][0] ?? null,
     activeObjectives: [...active.keys()],
+    ...(installationHold ? { installationHold } : {}),
+    ...(waiting.size
+      ? {
+          waitingObjectives: [...waiting].map(([objective, { reason }]) => ({
+            objective,
+            reason,
+          })),
+        }
+      : {}),
     maxActiveObjectives: slots,
     ...(finishing ? { finishing: true } : {}),
     // A run's stop holds new dispatch locally without pausing the other runs.
@@ -1765,6 +1854,18 @@ async function runIntakeOwned(
     pendingMutations,
   });
   const handleOwned = async (request: ControlRequest): Promise<unknown> => {
+    // An operator command naming a held Objective releases its hold, so the
+    // next pass dispatches it again; a run that still needs a person holds
+    // it again. A queue resume releases every hold, the installation's too.
+    if (request.objective !== 0 && request.action !== "status")
+      waiting.delete(request.objective);
+    else if (request.action === "enqueue" || request.action === "dequeue")
+      for (const id of (request.input?.objectives as number[]) ?? [])
+        waiting.delete(id);
+    else if (request.action === "resume") {
+      waiting.clear();
+      installationHold = undefined;
+    }
     if (request.objective !== 0) {
       const control = active.get(request.objective)?.control;
       if (control) return control(request);
@@ -2059,12 +2160,20 @@ async function runIntakeOwned(
     // Selected Objectives whose drain the service left itself (its own
     // handoff, before or after a restart): their run here resumes them.
     const requeued = new Set<number>();
-    const idle = () =>
-      pauseObservation(
+    const idle = () => {
+      // Housekeeping runs bounded in the background between dispatch passes,
+      // never on an operator command or a run's settlement (#1714). A held
+      // owner serves control only.
+      if (!completedCheckpointFailure)
+        scheduleRecoveryCheckpointMaintenance(config, (task) =>
+          withObjectiveDelegation(lock, task),
+        );
+      return pauseObservation(
         queuePollSeconds(config) * 1000,
         heldUntil,
         registerWake,
       );
+    };
     /**
      * Hold new dispatch; the service stops once its other runs settle. Those
      * runs continue: this is not an operator pause.
@@ -2074,6 +2183,39 @@ async function runIntakeOwned(
     ) => {
       stopping ??= observation;
       signalWake();
+    };
+    /**
+     * A run failure that holds the whole installation, so the service stops:
+     * an archive limit, a held checkpoint or publication, a changed queue
+     * authority, or a lost installation lease. Anything else is the
+     * Objective's own and holds only it.
+     */
+    const installationWide = (error: unknown): boolean => {
+      let owned: boolean;
+      try {
+        owned = readControllerOwner(lockPath)?.token === lock.token;
+      } catch {
+        owned = false;
+      }
+      if (!owned || currentProcessSignal()?.aborted) return true;
+      const classes = [
+        ColdPublicationHeld,
+        QueueAuthorityChanged,
+        CheckpointAdmissionFailure,
+        CheckpointProducerInventoryChanged,
+      ];
+      const visit = (current: unknown, depth: number): boolean =>
+        current instanceof Error &&
+        depth < 8 &&
+        (classes.some((type) => current instanceof type) ||
+          (current instanceof AggregateError &&
+            current.errors.some((entry) => visit(entry, depth + 1))) ||
+          visit(current.cause, depth + 1));
+      return (
+        visit(error, 0) ||
+        onlyCheckpointBoundsExceeded(error) !== undefined ||
+        (error instanceof DOMException && error.name === "AbortError")
+      );
     };
     const launch = (selected: number, reasons: Record<string, string>) => {
       const entry: { control?: (request: ControlRequest) => Promise<unknown> } =
@@ -2127,15 +2269,14 @@ async function runIntakeOwned(
               },
             }),
           );
+          // Stopped for a person: its slot frees in `finally` and the
+          // service keeps dispatching the others (#1714).
           if (!terminal(result))
-            stop({
-              at: new Date().toISOString(),
-              reasons,
-              needsDecision: selected,
-              error:
-                result.coordinator?.waitReason ??
+            holdObjective(
+              selected,
+              result.coordinator?.waitReason ??
                 "Inspect retained Objective status",
-            });
+            );
         } catch (error) {
           if (error instanceof CoordinatorHandoff) {
             if (!yielded.delete(selected)) handingOff = true;
@@ -2146,6 +2287,27 @@ async function runIntakeOwned(
             reasons,
             error: String(error),
           };
+          // A failure of this Objective alone holds only it, like a decision
+          // (#1714): its slot frees and the others keep dispatching. A change
+          // to its state, or a transient fault's retry time, releases it.
+          // An installation-level fault is not this Objective's: it holds
+          // dispatch for every Objective once, and this one runs again after.
+          const wide = installationWide(error);
+          if (!wide && installationFault(error) !== undefined) {
+            holdInstallation(error);
+            return;
+          }
+          if (!wide) {
+            const fault = attachedFault(error);
+            holdObjective(
+              selected,
+              `Run failed: ${String(error)}`,
+              fault?.kind === "transient" && fault.retryAt
+                ? Date.parse(fault.retryAt)
+                : undefined,
+            );
+            return;
+          }
           // A configured archive limit stops for the operator, who raises it
           // and continues (#1306): it needs a person, not a failure.
           const bounds = onlyCheckpointBoundsExceeded(error);
@@ -2174,7 +2336,7 @@ async function runIntakeOwned(
           active.delete(selected);
           signalWake();
         }
-      })();
+      })().catch(holdInstallation);
       runs.add(run);
       void run.finally(() => runs.delete(run));
     };
@@ -2223,7 +2385,12 @@ async function runIntakeOwned(
           }
           return { ...record, observation: stopping, mode: "paused" };
         }
-        if (completedCheckpointFailure || finishing || active.size >= slots) {
+        if (
+          completedCheckpointFailure ||
+          installationHold ||
+          finishing ||
+          active.size >= slots
+        ) {
           // A held owner serves authenticated control only: background polling
           // must not repeat the failed publication or create dispatch
           // authority. Full slots need no Project observation either.
@@ -2244,6 +2411,29 @@ async function runIntakeOwned(
           }
           holdFor(error);
           record = view(config, undefined, error);
+        }
+        // A hold lasts only while its Objective is a queued, unfinished card.
+        if (observed) {
+          const queued = new Set(
+            observed.entries
+              .filter((entry) => entry.state === "queued")
+              .map((entry) => entry.objective),
+          );
+          for (const id of [...waiting.keys()]) {
+            let state: ReturnType<typeof readScannedContinuation>;
+            try {
+              state = readScannedContinuation(config.repository, id);
+            } catch {
+              continue;
+            }
+            if (
+              !queued.has(id) ||
+              state === "history" ||
+              terminal(state) ||
+              state?.cancelRequested
+            )
+              waiting.delete(id);
+          }
         }
         // A verified background owner remains available for explicit queue
         // control after restart; the actual draining mode never admits dispatch.
@@ -2279,13 +2469,6 @@ async function runIntakeOwned(
           )) {
             if (active.size + selected.length >= slots) break;
             if (active.has(entry.objective)) continue;
-            const held = new Set([...active.keys(), ...selected, ...claimed]);
-            held.delete(entry.objective);
-            if (held.size >= slots) {
-              reasons[entry.objective] =
-                `All ${slots} dispatch slots are held (${[...held].map((id) => `#${id}`).join(", ")})`;
-              continue;
-            }
             // Retired terminal history needs nothing and is never acted on (#1457).
             const read = readScannedContinuation(
               config.repository,
@@ -2293,6 +2476,24 @@ async function runIntakeOwned(
             );
             if (read === "history") continue;
             const state = read;
+            const wait = waiting.get(entry.objective);
+            if (
+              wait &&
+              wait.state === stateDigest(state) &&
+              !(wait.retryAt && Date.now() >= wait.retryAt)
+            ) {
+              reasons[entry.objective] =
+                `Waits for you: ${wait.reason}; \`factory status --objective ${entry.objective}\` names the command, or \`factory cancel --objective ${entry.objective}\``;
+              continue;
+            }
+            waiting.delete(entry.objective);
+            const held = new Set([...active.keys(), ...selected, ...claimed]);
+            held.delete(entry.objective);
+            if (held.size >= slots) {
+              reasons[entry.objective] =
+                `All ${slots} dispatch slots are held (${[...held].map((id) => `#${id}`).join(", ")})`;
+              continue;
+            }
             if (terminal(state)) {
               // A split parent whose last child settle failed closes here; it
               // needs only local state and the parent's own provider.
@@ -2326,10 +2527,16 @@ async function runIntakeOwned(
                 "Issue is closed or its approved contents changed";
               continue;
             }
-            if (state?.error || state?.cancelRequested) {
+            // A stopped Objective holds only itself; the next card runs.
+            if (state?.cancelRequested) {
               reasons[entry.objective] =
-                "Retained failure/cancellation requires supported recovery";
-              break;
+                `Cancellation requested; \`factory cancel --objective ${entry.objective}\` finishes it`;
+              continue;
+            }
+            if (state?.error) {
+              reasons[entry.objective] =
+                `Stopped: ${state.error}; \`${stopRetryCommand(state)}\` recovers it, or \`factory cancel --objective ${entry.objective}\``;
+              continue;
             }
             // The operator's pause or drain holds until resume: running it
             // would only idle in a slot. The service's own drain resumes (#1701).
@@ -2368,8 +2575,9 @@ async function runIntakeOwned(
                   );
                 });
                 if (missing) {
-                  reasons[entry.objective] =
-                    `Predecessor #${missing} has no accepted evidence`;
+                  reasons[entry.objective] = waiting.has(missing)
+                    ? `Predecessor #${missing} waits for a decision`
+                    : `Predecessor #${missing} has no accepted evidence`;
                   continue;
                 }
                 await resolveIntakeBase(
@@ -2431,8 +2639,10 @@ async function runIntakeOwned(
         await idle();
       }
     } finally {
-      // The installation lease outlives every run it lent ownership to.
+      // The installation lease outlives every run it lent ownership to, and
+      // its background housekeeping.
       while (runs.size) await Promise.allSettled([...runs]);
+      await stopRecoveryCheckpointMaintenance(config.repository);
     }
   } finally {
     process.off("SIGTERM", onHandoff);

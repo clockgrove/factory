@@ -108,6 +108,7 @@ import {
   privateCheckpointBounds,
   trackCollection,
   withRecoveryCheckpointControllerVerification,
+  scheduleRecoveryCheckpointMaintenance,
   withRecoveryCheckpointScope,
 } from "./recovery-checkpoint.js";
 import {
@@ -882,6 +883,9 @@ async function runObjectiveOwned(
       owner.changed = false;
       return;
     }
+    // A foreground run's idle point runs bounded housekeeping in the
+    // background; the service runs its own between dispatch passes (#1714).
+    if (!options.ownerLock) scheduleRecoveryCheckpointMaintenance(config);
     await new Promise<void>((resolve) => {
       const finish = () => {
         clearTimeout(timer);

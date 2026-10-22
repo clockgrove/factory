@@ -71,9 +71,13 @@ interface Running {
   controller: AbortController;
 }
 
+const INTERRUPTED = "the service stopped during this step";
+
 /**
  * Runs one Objective's steps. All state changes happen here, synchronously,
- * one at a time, and each is saved before the next begins.
+ * one at a time, and each is saved before the next begins. A step's start is
+ * saved too, so a step that never finishes (because the process died) counts
+ * as an error after a restart and holds after `maxErrors`.
  */
 export class ObjectiveRunner {
   private readonly running = new Map<string, Running>();
@@ -92,16 +96,35 @@ export class ObjectiveRunner {
     return this.running.size > 0;
   }
 
-  /** True while the Objective takes a slot: not holding and not terminal, or still cleaning up. */
-  get active(): boolean {
-    if (this.state.status === "holding") return false;
-    if (TERMINAL.includes(this.state.status))
-      return this.busy || this.workflow.steps(this.state).length > 0;
-    return true;
+  /** Whether this Objective has steps to run: cleanup after cancel counts. */
+  get hasWork(): boolean {
+    return this.busy || this.workflow.steps(this.state).length > 0;
+  }
+
+  /**
+   * Run `change` against the state and save it. If anything throws, the
+   * in-memory state goes back to what is on disk, so memory never claims
+   * what a save didn't keep.
+   */
+  transact<T>(change: () => T): T {
+    const before = structuredClone(this.state);
+    try {
+      const result = change();
+      this.save();
+      return result;
+    } catch (error) {
+      this.state = before;
+      throw error;
+    }
   }
 
   /** Start every runnable step that isn't running or waiting to retry. */
   tick(): void {
+    // An attempt saved as started but not running here was interrupted:
+    // by a restart, or by a save that failed after the step finished.
+    for (const key of Object.keys(this.state.attempts))
+      if (!this.running.has(key))
+        this.apply(key, { kind: "retry", reason: INTERRUPTED, afterMs: -1 });
     if (this.state.status === "holding") return;
     const now = this.now().getTime();
     for (const step of this.workflow.steps(this.state)) {
@@ -114,6 +137,10 @@ export class ObjectiveRunner {
   }
 
   private start(step: Step): void {
+    this.transact(() => {
+      this.state.attempts[step.key] = { startedAt: this.now().toISOString() };
+    });
+    crashPoint(`engine:${step.key}:started`);
     const token = this.nextToken++;
     const controller = new AbortController();
     this.running.set(step.key, { token, controller });
@@ -144,40 +171,76 @@ export class ObjectiveRunner {
       clearTimeout(timer);
       if (this.running.get(step.key)?.token !== token) return;
       this.running.delete(step.key);
-      if (controller.signal.aborted && outcome.kind !== "retry") return;
-      this.apply(step.key, outcome);
+      try {
+        this.apply(step.key, outcome);
+      } catch (error) {
+        // The save failed and the state went back to disk, where the
+        // attempt is still open: the next tick retries it as interrupted.
+        this.log.write(this.state.issue, {
+          step: step.key,
+          event: "apply-failed",
+          error: String(error),
+        });
+      }
     });
   }
 
   /**
-   * Apply one outcome. `afterMs: -1` marks an escaped error or missed
-   * deadline, which counts toward `maxErrors`; other retries count toward
-   * `maxRetryMs`.
+   * Apply one outcome and save. `afterMs: -1` marks an escaped error, missed
+   * deadline or interrupted attempt, which counts toward `maxErrors`; other
+   * retries count toward `maxRetryMs`. Throws only if the save fails, after
+   * putting the state back as it is on disk.
    */
   apply(key: string, outcome: Outcome): void {
-    if (TERMINAL.includes(this.state.status) && outcome.kind !== "done") {
+    const terminal = TERMINAL.includes(this.state.status);
+    if (
+      terminal &&
+      !this.workflow.steps(this.state).some((s) => s.key === key)
+    ) {
+      // A step from before cancel: drop its outcome and its open attempt.
       this.log.write(this.state.issue, {
         step: key,
         event: "ignored",
         outcome: outcome.kind,
       });
+      if (this.state.attempts[key])
+        this.transact(() => {
+          delete this.state.attempts[key];
+        });
       return;
     }
+    crashPoint(`engine:${key}:before-apply`);
+    this.transact(() => this.applyChange(key, outcome));
+    this.log.write(this.state.issue, {
+      step: key,
+      event: "outcome",
+      outcome: outcome.kind,
+      ...("reason" in outcome ? { reason: outcome.reason } : {}),
+    });
+    crashPoint(`engine:${key}:applied`);
+  }
+
+  private applyChange(key: string, outcome: Outcome): void {
     const state = this.state;
     const now = this.now();
-    crashPoint(`engine:${key}:before-apply`);
+    delete state.attempts[key];
     switch (outcome.kind) {
       case "done":
         state.done[key] = outcome.result ?? true;
         delete state.retries[key];
         delete state.answers[key];
-        if (!TERMINAL.includes(state.status))
-          state.status = this.workflow.status(state);
+        if (TERMINAL.includes(state.status)) break;
+        // Another step's question may be open: keep holding, and resume
+        // to the status this step's progress gives.
+        if (state.status === "holding")
+          state.resumeStatus = this.workflow.status(state);
+        else state.status = this.workflow.status(state);
         break;
       case "retry": {
         const previous = state.retries[key];
         const isError = outcome.afterMs === -1;
         const count = (previous?.count ?? 0) + (isError ? 1 : 0);
+        const attempts = (previous?.attempts ?? 0) + 1;
         const since = previous?.since ?? now.toISOString();
         const exhausted = isError
           ? count >= this.limits.maxErrors
@@ -193,13 +256,14 @@ export class ObjectiveRunner {
         }
         const backoff =
           outcome.afterMs !== undefined && outcome.afterMs >= 0
-            ? outcome.afterMs
+            ? Math.min(outcome.afterMs, this.limits.maxRetryMs)
             : Math.min(
-                this.limits.baseBackoffMs * 2 ** Math.max(0, count - 1),
+                this.limits.baseBackoffMs * 2 ** (attempts - 1),
                 this.limits.maxBackoffMs,
               );
         state.retries[key] = {
           count,
+          attempts,
           since,
           nextAt: new Date(now.getTime() + backoff).toISOString(),
           lastError: outcome.reason,
@@ -218,16 +282,13 @@ export class ObjectiveRunner {
         );
         break;
     }
-    this.save();
-    this.log.write(state.issue, {
-      step: key,
-      event: "outcome",
-      outcome: outcome.kind,
-      ...("reason" in outcome ? { reason: outcome.reason } : {}),
-    });
-    crashPoint(`engine:${key}:applied`);
   }
 
+  /**
+   * Open a question. One question is open at a time: a second step that
+   * asks while another question is open runs again after the answer, and
+   * asks then.
+   */
   private hold(
     key: string,
     question: string,
@@ -235,26 +296,37 @@ export class ObjectiveRunner {
     recommended: string,
   ): void {
     const state = this.state;
+    const now = this.now().toISOString();
+    if (state.hold && state.hold.step !== key) {
+      state.retries[key] = {
+        count: state.retries[key]?.count ?? 0,
+        attempts: state.retries[key]?.attempts ?? 0,
+        since: state.retries[key]?.since ?? now,
+        nextAt: now,
+        lastError: "waiting for the open question",
+      };
+      return;
+    }
     const all = answers.includes("cancel") ? answers : [...answers, "cancel"];
     state.hold = {
-      id: `${key}@${this.now().toISOString()}`,
+      id: `${key}@${now}`,
       step: key,
       question,
       answers: all,
       recommended: all.includes(recommended) ? recommended : all[0]!,
-      askedAt: this.now().toISOString(),
+      askedAt: now,
     };
     if (state.status !== "holding") state.resumeStatus = state.status;
     state.status = "holding";
   }
 
-  /** Answer the open hold. Returns an error message when the answer doesn't fit. */
+  /**
+   * Answer the open question. Returns null when applied, or the reason it
+   * doesn't fit. The caller saves (see `transact`).
+   */
   answer(answer: string, text: string | undefined, by: string): string | null {
+    if (answer === "cancel") return this.cancel(by);
     const hold = this.state.hold;
-    if (answer === "cancel") {
-      this.cancel(by);
-      return null;
-    }
     if (!hold) return `#${this.state.issue} has no open question.`;
     if (!hold.answers.includes(answer))
       return `"${answer}" isn't an answer to this question. Answers: ${hold.answers.join(", ")}.`;
@@ -270,43 +342,46 @@ export class ObjectiveRunner {
     this.state.status =
       this.state.resumeStatus ?? this.workflow.status(this.state);
     delete this.state.resumeStatus;
-    this.save();
     return null;
   }
 
-  /** Cancel at once: stop running steps and mark the Objective cancelled. Cleanup steps follow. */
-  cancel(by: string): void {
+  /**
+   * Cancel at once: stop running steps and mark the Objective cancelled.
+   * Cleanup steps follow. A finished Objective stays as it is.
+   */
+  cancel(by: string): string | null {
+    const status = this.state.status;
+    if (status === "done" || status === "failed")
+      return `#${this.state.issue} has already finished (${status}).`;
     for (const { controller } of this.running.values())
       controller.abort(new Error("cancelled"));
     this.running.clear();
-    if (this.state.status !== "cancelled") {
-      this.state.status = "cancelled";
-      this.state.hold = null;
-      delete this.state.resumeStatus;
-      this.state.answers.cancel = {
-        holdId: "",
-        answer: "cancel",
-        by,
-        at: this.now().toISOString(),
-      };
-      this.save();
-      this.log.write(this.state.issue, { event: "cancelled", by });
-    }
+    if (status === "cancelled") return null;
+    this.state.status = "cancelled";
+    this.state.hold = null;
+    this.state.attempts = {};
+    delete this.state.resumeStatus;
+    this.state.answers.cancel = {
+      holdId: "",
+      answer: "cancel",
+      by,
+      at: this.now().toISOString(),
+    };
+    this.log.write(this.state.issue, { event: "cancelled", by });
+    return null;
   }
 
-  /** Clear retry waits so every step runs again now. */
-  retryNow(): void {
-    this.state.retries = {};
-    if (this.state.hold && this.state.hold.answers.includes("retry")) {
-      this.answer("retry", undefined, "operator");
-      return;
+  /** Run waiting steps now, or answer `retry` to an open question that offers it. */
+  retryNow(by: string): string | null {
+    const hold = this.state.hold;
+    if (hold) {
+      if (!hold.answers.includes("retry"))
+        return `#${this.state.issue}'s open question has no retry answer. Answers: ${hold.answers.join(", ")}.`;
+      return this.answer("retry", undefined, by);
     }
-    this.save();
-  }
-
-  /** Save the state as it is now. */
-  persist(): void {
-    this.save();
+    for (const retry of Object.values(this.state.retries))
+      retry.nextAt = this.now().toISOString();
+    return null;
   }
 
   private save(): void {

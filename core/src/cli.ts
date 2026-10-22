@@ -2,6 +2,7 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
+import { DEFAULT_LIMITS } from "./engine.js";
 import { installationPaths, type Paths } from "./paths.js";
 import { type Request, writeRequest } from "./requests.js";
 import { serve } from "./service.js";
@@ -48,6 +49,14 @@ async function main(argv: string[]): Promise<number> {
         paths,
         ...(process.env.FACTORY_TICK_MS
           ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
+          : {}),
+        ...(process.env.FACTORY_BACKOFF_MS
+          ? {
+              limits: {
+                ...DEFAULT_LIMITS,
+                baseBackoffMs: Number(process.env.FACTORY_BACKOFF_MS),
+              },
+            }
           : {}),
       });
     case "status":
@@ -168,7 +177,7 @@ async function request(
       const message = readFileSync(result, "utf8").trim();
       rmSync(result, { force: true });
       process.stdout.write(`${message === "ok" ? "Done." : message}\n`);
-      return message === "ok" || message === "already applied" ? 0 : 1;
+      return message === "ok" ? 0 : 1;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }

@@ -49,8 +49,10 @@ export interface Answer {
 }
 
 export interface Retry {
-  /** Consecutive escaped errors or deadline misses for this step. */
+  /** Consecutive escaped errors, missed deadlines and interrupted attempts. */
   count: number;
+  /** Retries of any kind in this run of retries; sets the backoff. */
+  attempts: number;
   /** When this run of retries began. */
   since: string;
   nextAt: string;
@@ -69,8 +71,10 @@ export interface ObjectiveState {
   retries: Record<string, Retry>;
   /** Steps that finished, with their saved results. */
   done: Record<string, unknown>;
-  /** Ids of the latest applied requests, so a request is never applied twice. */
-  appliedRequests: string[];
+  /** Steps started and not yet finished. One found after a restart was interrupted. */
+  attempts: Record<string, { startedAt: string }>;
+  /** The latest applied requests and their results, so a request is never applied twice. */
+  appliedRequests: { id: string; message: string }[];
   /** Per-capability data. Modules own their key. */
   modules: Record<string, unknown>;
   updatedAt: string;
@@ -85,6 +89,7 @@ export function newObjective(issue: number, now: Date): ObjectiveState {
     answers: {},
     retries: {},
     done: {},
+    attempts: {},
     appliedRequests: [],
     modules: {},
     updatedAt: now.toISOString(),

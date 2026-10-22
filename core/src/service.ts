@@ -1,4 +1,5 @@
 import {
+  linkSync,
   mkdirSync,
   readdirSync,
   rmSync,
@@ -92,7 +93,18 @@ export async function serve(options: ServeOptions): Promise<number> {
         removeRequest(file);
         continue;
       }
-      const message = applyRequest(stored);
+      let message: string;
+      try {
+        message = applyRequest(stored);
+      } catch (error) {
+        // Not saved: the request file stays and is tried again next tick.
+        log.write(stored.request.issue, {
+          event: "request-failed",
+          id: stored.id,
+          error: String(error),
+        });
+        continue;
+      }
       writeResult(paths.requests, stored.id, message);
       crashPoint("requests:applied");
       removeRequest(file);
@@ -101,47 +113,50 @@ export async function serve(options: ServeOptions): Promise<number> {
 
   const applyRequest = (stored: StoredRequest): string => {
     const { request } = stored;
-    let runner = runners.get(request.issue);
+    const runner = runners.get(request.issue);
     if (!runner && unreadable.has(request.issue)) {
       if (
         request.kind !== "cancel" &&
         !(request.kind === "answer" && request.answer === "cancel")
       )
         return `#${request.issue} has unreadable state (${unreadable.get(request.issue)}). Answers: cancel.`;
-      // Start over from a fresh cancelled record; the unreadable file is replaced.
+      // Start over from a fresh cancelled record that replaces the unreadable file.
       const state = newObjective(request.issue, new Date());
       state.status = "cancelled";
+      state.appliedRequests = [{ id: stored.id, message: "ok" }];
       saveState(paths.objectives, state);
       unreadable.delete(request.issue);
-      runner = new ObjectiveRunner(
-        state,
-        workflow,
-        paths.objectives,
-        log,
-        limits,
+      runners.set(
+        request.issue,
+        new ObjectiveRunner(state, workflow, paths.objectives, log, limits),
       );
-      runners.set(request.issue, runner);
+      return "ok";
     }
     if (!runner) return `Factory has no Objective #${request.issue}.`;
-    const state = runner.state;
-    if (state.appliedRequests.includes(stored.id)) return "already applied";
-    state.appliedRequests = [...state.appliedRequests, stored.id].slice(
-      -KEEP_REQUEST_IDS,
-    );
-    let message = "ok";
-    switch (request.kind) {
-      case "cancel":
-        runner.cancel(stored.by);
-        break;
-      case "retry":
-        runner.retryNow();
-        break;
-      case "answer":
-        message =
-          runner.answer(request.answer, request.text, stored.by) ?? "ok";
-        break;
-    }
-    runner.persist();
+    const seen = runner.state.appliedRequests.find((r) => r.id === stored.id);
+    if (seen) return seen.message;
+    // The change and the record that it was applied are saved together.
+    const message = runner.transact(() => {
+      const state = runner.state;
+      let result: string | null = null;
+      switch (request.kind) {
+        case "cancel":
+          result = runner.cancel(stored.by);
+          break;
+        case "retry":
+          result = runner.retryNow(stored.by);
+          break;
+        case "answer":
+          result = runner.answer(request.answer, request.text, stored.by);
+          break;
+      }
+      const text = result ?? "ok";
+      state.appliedRequests = [
+        ...state.appliedRequests,
+        { id: stored.id, message: text },
+      ].slice(-KEEP_REQUEST_IDS);
+      return text;
+    });
     log.write(request.issue, {
       event: "request",
       request,
@@ -153,21 +168,33 @@ export async function serve(options: ServeOptions): Promise<number> {
 
   const tick = (): void => {
     applyRequests();
+    // Objectives with running steps keep their slot; then started ones; then issue order.
     const ordered = [...runners.values()].sort(
       (a, b) =>
+        Number(b.busy) - Number(a.busy) ||
         Number(started(b)) - Number(started(a)) ||
         a.state.issue - b.state.issue,
     );
     let slots = maxActive;
     for (const runner of ordered) {
-      if (TERMINAL.includes(runner.state.status)) {
-        if (runner.active) runner.tick();
-        continue;
+      const status = runner.state.status;
+      let run = false;
+      if (TERMINAL.includes(status)) run = runner.hasWork;
+      else if (status !== "holding" && slots > 0) {
+        slots -= 1;
+        run = true;
+      } else if (Object.keys(runner.state.attempts).length > 0 && !runner.busy)
+        run = true; // settle an interrupted attempt, which may open a hold
+      if (!run) continue;
+      try {
+        runner.tick();
+      } catch (error) {
+        // A failed save: that Objective's state stays as on disk and is tried again next tick.
+        log.write(runner.state.issue, {
+          event: "tick-failed",
+          error: String(error),
+        });
       }
-      if (runner.state.status === "holding") continue;
-      if (slots <= 0) continue;
-      slots -= 1;
-      runner.tick();
     }
     writeHeartbeat(paths.root, runId, unreadable);
   };
@@ -178,8 +205,19 @@ export async function serve(options: ServeOptions): Promise<number> {
   };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
-  rotateLogs(paths.logs);
-  sweepResults(paths.requests);
+  // A stray rejection must not end the service: log it and keep serving.
+  process.on("unhandledRejection", (reason) =>
+    log.write(0, { event: "unhandled-rejection", error: String(reason) }),
+  );
+  const housekeeping = (): void => {
+    try {
+      rotateLogs(paths.logs);
+      sweepResults(paths.requests);
+    } catch (error) {
+      log.write(0, { event: "housekeeping-failed", error: String(error) });
+    }
+  };
+  housekeeping();
   let lastHousekeeping = Date.now();
   while (!stopping) {
     try {
@@ -189,8 +227,7 @@ export async function serve(options: ServeOptions): Promise<number> {
       log.write(0, { event: "loop-error", error: String(error) });
     }
     if (Date.now() - lastHousekeeping > RESULT_TTL_MS) {
-      rotateLogs(paths.logs);
-      sweepResults(paths.requests);
+      housekeeping();
       lastHousekeeping = Date.now();
     }
     await new Promise((resolve) => setTimeout(resolve, options.tickMs ?? 1000));
@@ -203,12 +240,16 @@ function started(runner: ObjectiveRunner): boolean {
   return runner.busy || Object.keys(runner.state.done).length > 0;
 }
 
+/** Write the result whole, and only once: a request re-read after a crash keeps its first result. */
 function writeResult(dir: string, id: string, message: string): void {
+  const temporary = join(dir, `.${id}.result.tmp`);
   try {
-    // A request re-read after a crash keeps its first result.
-    writeFileSync(join(dir, `${id}.result`), `${message}\n`, { flag: "wx" });
+    writeFileSync(temporary, `${message}\n`);
+    linkSync(temporary, join(dir, `${id}.result`));
   } catch {
     // Already written.
+  } finally {
+    rmSync(temporary, { force: true });
   }
 }
 

@@ -1,6 +1,6 @@
 # Factory contributor rules
 
-These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout. Read the relevant issue and code; use [the architecture](docs/ARCHITECTURE.md) as a reference. Lifecycle refusals carry the stable codes in [the lifecycle](docs/LIFECYCLE.md); a new state or command needs a conformance row.
+These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout. Read the relevant issue and code; use [the architecture](docs/ARCHITECTURE.md) as a reference. Lifecycle refusals carry the stable codes in [the lifecycle](docs/LIFECYCLE.md); a new state or command needs a conformance row. Validation differs from hosted CI in declared ways: see [the validation environment](docs/VALIDATION-ENVIRONMENT.md).
 
 ## Delivery
 

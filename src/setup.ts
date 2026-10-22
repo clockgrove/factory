@@ -32,6 +32,7 @@ import { requiredProviderCredentials } from "./provider-credentials.js";
 import { checkReadiness } from "./readiness.js";
 import { configurationCommand } from "./status-summary.js";
 import { supervise, supervisorHost } from "./supervision.js";
+import { validationEnvironmentReport } from "./validation-environment.js";
 
 const cli = () =>
   realpathSync(fileURLToPath(new URL("./cli.js", import.meta.url)));
@@ -141,6 +142,7 @@ export async function setupTarget(
       guidance:
         "Keep credential values in the configured private files or controller environment, never in chat. Presence does not verify account access, billing, environment readiness or deployment approval.",
     };
+    result.validationEnvironment = validationEnvironmentReport(config);
     const progress = githubProgressSettings(config);
     const projectStatus = githubProjectStatusSettings(config);
     result.githubPresentation = {

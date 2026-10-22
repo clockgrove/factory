@@ -23,6 +23,7 @@ import {
   resolveProvider,
   validateConfigFile,
 } from "../dist/config.js";
+import { validationEnvironmentReport } from "../dist/validation-environment.js";
 import { addProvider, writeConfiguration } from "../dist/install.js";
 import { selectProvider } from "../dist/provider-selection.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
@@ -274,6 +275,38 @@ test("CI-only commands are never validation commands (#1667)", () => {
   assert.deepEqual(request.compileContext.ciOnlyCommands, [audit]);
   assert.match(request.objective, /never use one as a validation command/);
   assert.match(request.objective, /decisionRequired/);
+  // The planner always gets the compact validation environment (#1714).
+  const environment = request.objective.match(
+    /Validation environment[^\n]*/,
+  )?.[0];
+  assert.ok(environment && Buffer.byteLength(environment) < 800);
+  assert.match(environment, /FACTORY_BASE_SHA/);
+  // Setup reports it and warns on a network script not listed as CI-only.
+  writeFileSync(
+    join(target, "package.json"),
+    JSON.stringify({
+      scripts: {
+        test: "node --test",
+        audit: "npm audit --omit=dev",
+        plan: "tofu init && tofu plan",
+        note: "echo curl and terraform init are prose here",
+      },
+    }),
+  );
+  const withTarget = { ...config, checkout: target };
+  const report = validationEnvironmentReport(withTarget);
+  assert.equal(report.ciOnlyCommands.set, true);
+  assert.deepEqual(
+    report.warnings.map((w) => w.match(/script (\w+)/)[1]).sort(),
+    ["plan"],
+  );
+  assert.equal(
+    validationEnvironmentReport({
+      ...withTarget,
+      finalValidation: { ciOnlyCommands: [audit, "pnpm run plan"] },
+    }).warnings.length,
+    0,
+  );
   const graph = {
     items: [
       {

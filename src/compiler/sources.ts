@@ -17,6 +17,7 @@ import {
 } from "../workspace-membership.js";
 import type { PlanCandidate } from "./candidate.js";
 import { normalizedCommand } from "../qa.js";
+import { validationEnvironmentInstructions } from "../validation-environment.js";
 import { finalValidationCommands } from "../config.js";
 import { GraphValidationError } from "../scheduler.js";
 import {
@@ -1337,9 +1338,12 @@ export function assertNoCiOnlyValidation(
 
 /** The planner's note on the installation's CI-only commands; empty when none. */
 export function ciOnlyInstructions(ciOnlyCommands: readonly string[]): string {
-  return ciOnlyCommands.length
-    ? `\n\nThese commands need network and run only in CI; validation runs offline, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
-    : "";
+  return (
+    validationEnvironmentInstructions() +
+    (ciOnlyCommands.length
+      ? `\n\nThese commands need network and run only in CI; validation runs offline, so never use one as a validation command: ${JSON.stringify(ciOnlyCommands)}. When a criterion can only be proved by one of them, leave it out and ask through decisionRequired.`
+      : "")
+  );
 }
 
 export function validateCitations(

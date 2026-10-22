@@ -585,7 +585,12 @@ async function installation(t, seeded = true) {
   const directory = await mkdtemp(join(tmpdir(), "factory-lifecycle-"));
   const repository = `fixture/lifecycle-${randomUUID()}`;
   // A killed owner's Git child can still be finishing a write.
-  const removal = { recursive: true, force: true, maxRetries: 10, retryDelay: 200 };
+  const removal = {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 200,
+  };
   t.after(() => rm(directory, removal));
   t.after(() => rm(stateRoot(repository), removal));
   const checkout = join(directory, "target"),

@@ -33,6 +33,7 @@ jobs:
       - uses: ./.github/actions/bubblewrap
       - run: git lfs version
       - run: npm test
+      - run: npm run test:core
 
   # The single required check for main; it passes only when every job above
   # passes, including offline installation in the integration suite.

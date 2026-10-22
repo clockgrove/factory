@@ -56,7 +56,9 @@
     "format": "biome format --write . && prettier --write \"**/*.{md,yml,yaml}\"",
     "test": "npm run build && node --import ./test/isolate-env.mjs --test --test-timeout=300000 test/*.test.mjs",
     "notices": "node scripts/generate-notices.mjs",
-    "notices:check": "node scripts/generate-notices.mjs --check"
+    "notices:check": "node scripts/generate-notices.mjs --check",
+    "build:core": "tsc -p core/tsconfig.json",
+    "test:core": "npm run build:core && node --test --test-timeout=120000 core/test/*.test.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",

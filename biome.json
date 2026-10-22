@@ -1,14 +1,26 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
-  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
-  "files": { "ignoreUnknown": true },
-  "formatter": { "indentStyle": "space" },
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true
+  },
+  "formatter": {
+    "indentStyle": "space"
+  },
   "linter": {
-    "includes": ["src/**/*.ts"],
+    "includes": ["src/**/*.ts", "core/src/**/*.ts"],
     "rules": {
       "preset": "recommended",
-      "complexity": { "useOptionalChain": "off" },
-      "correctness": { "noUnusedImports": "error" },
+      "complexity": {
+        "useOptionalChain": "off"
+      },
+      "correctness": {
+        "noUnusedImports": "error"
+      },
       "style": {
         "noCommonJs": "error",
         "noNamespace": "error",

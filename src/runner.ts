@@ -143,8 +143,8 @@ import {
   owners,
   releaseMutationLock,
   releaseCancelledSessions,
-  SETTLE_DEADLINE_MS,
   SettleDeadline,
+  SettleDeadlineElapsed,
   synchronizeWorkItemPause,
 } from "./runner/ownership.js";
 import { decidePlan, resumePlanning } from "./runner/planning.js";
@@ -195,6 +195,7 @@ export type { ApplicationServices } from "./runner/ownership.js";
 export {
   CoordinatorHandoff,
   SETTLE_DEADLINE_MS,
+  SettleDeadlineElapsed,
 } from "./runner/ownership.js";
 export { decidePlan, planObjective } from "./runner/planning.js";
 
@@ -1669,10 +1670,11 @@ async function runObjectiveOwned(
       } catch (error) {
         finalizationErrors.push(error);
       }
-      // Settling has a deadline (#1714). A step it cuts off fails, and its
-      // error is the deadline's: the saved state stands for the next owner.
-      const failed = (error: unknown) => {
-        if (!settle.elapsed) finalizationErrors.push(error);
+      // Settling has a deadline (#1714). A step it cuts off is recorded as
+      // unfinished; any other error is the step's own, as before.
+      const failed = (step: string) => (error: unknown) => {
+        if (settle.cut(error)) settle.unfinished.push(step);
+        else finalizationErrors.push(error);
       };
       await settle.run(async () => {
         // Await original work even after one promise fails; never replay a failed projection.
@@ -1680,7 +1682,7 @@ async function runObjectiveOwned(
           try {
             await task;
           } catch (error) {
-            failed(error);
+            failed("in-flight work")(error);
           }
         }
         if (!finalizationErrors.length) {
@@ -1688,7 +1690,7 @@ async function runObjectiveOwned(
             await projectProgress();
             observeRetrospective(config, objective);
           } catch (error) {
-            failed(error);
+            failed("progress projection")(error);
           }
         }
         try {
@@ -1749,7 +1751,11 @@ async function runObjectiveOwned(
               );
           }
         } catch (error) {
-          failed(error);
+          failed(
+            owner.snapshot?.cancelledAt
+              ? "cancellation settlement"
+              : "queue claim settlement",
+          )(error);
         }
       });
     } finally {
@@ -1757,6 +1763,17 @@ async function runObjectiveOwned(
       if (!options.ownerLock) releaseControllerLock(lockPath, lock);
     }
   }
+  // A settlement the deadline cut off is not a success: the Objective is
+  // held for the operator. A handoff's next owner settles its claim itself.
+  if (
+    settle.unfinished.length &&
+    !finalizationErrors.length &&
+    !(runFailure instanceof CoordinatorHandoff)
+  )
+    throw new SettleDeadlineElapsed(
+      settle.unfinished,
+      runFailed ? runFailure : undefined,
+    );
   const errors = [...(runFailed ? [runFailure] : []), ...finalizationErrors];
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1)
@@ -3288,9 +3305,15 @@ async function checkpointController<T>(
         try {
           await admit("settled");
         } catch (settlement) {
-          // Past the settle deadline the journal keeps the pending change
-          // for the next owner's admission (#1714).
-          if (settle?.elapsed) throw error;
+          // Cut off by the settle deadline (#1714): the journal keeps the
+          // pending change, and the Objective is held as unfinished.
+          if (settle?.cut(settlement)) {
+            if (!(error instanceof SettleDeadlineElapsed)) throw error;
+            throw new SettleDeadlineElapsed(
+              [...error.unfinished, "final checkpoint admission"],
+              error.cause,
+            );
+          }
           // Name the stop itself: the pending checkpoint only follows it.
           throw new AggregateError(
             [error, settlement],
@@ -3303,7 +3326,11 @@ async function checkpointController<T>(
       try {
         await admit(final ? "explicit" : "settled");
       } catch (error) {
-        if (!settle?.elapsed) throw error;
+        if (!settle?.cut(error)) throw error;
+        throw new SettleDeadlineElapsed([
+          ...settle.unfinished,
+          "final checkpoint admission",
+        ]);
       }
       return result;
     },
@@ -3446,13 +3473,7 @@ export function runObjective(
         true,
         settle,
       ),
-  ).finally(() => {
-    settle.dispose();
-    if (settle.elapsed)
-      process.stderr.write(
-        `Factory stopped settling Objective #${objective} at its ${SETTLE_DEADLINE_MS / 1000} s deadline; its saved state stands, and its next owner settles the rest.\n`,
-      );
-  });
+  ).finally(() => settle.dispose());
 }
 
 export function cancelObjective(

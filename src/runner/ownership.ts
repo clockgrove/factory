@@ -73,7 +73,7 @@ export class CoordinatorHandoff extends Error {
  * final checkpoint admission. Those normally take a few GitHub requests and
  * two publications, about 10 s; the projection's own per-request budget is
  * 30 s. Past this, durable state is the authority: the run stops at its last
- * saved state and releases its slot, and the next owner settles the rest.
+ * saved state and releases its slot (see SettleDeadlineElapsed).
  * FACTORY_SETTLE_DEADLINE_MS overrides it, as tests do.
  */
 export const SETTLE_DEADLINE_MS = ((configured) =>
@@ -81,8 +81,45 @@ export const SETTLE_DEADLINE_MS = ((configured) =>
   Number(process.env.FACTORY_SETTLE_DEADLINE_MS ?? 30_000),
 );
 
+/**
+ * A run's settlement stopped at its deadline before these steps finished.
+ * The run's saved state stands; the Objective needs an operator route
+ * (`factory resume` or `factory cancel`) to finish settling.
+ */
+export class SettleDeadlineElapsed extends Error {
+  override readonly name = "SettleDeadlineElapsed";
+  constructor(
+    readonly unfinished: string[],
+    /** The run's own failure, if it failed before settling. */
+    cause?: unknown,
+  ) {
+    super(
+      `Settling stopped at its ${SETTLE_DEADLINE_MS / 1000} s deadline before: ${unfinished.join(", ")}`,
+      cause === undefined ? undefined : { cause },
+    );
+  }
+}
+
 /** The deadline of one run's settlement, armed when settling starts. */
 export class SettleDeadline {
+  /** Steps the deadline cut off. */
+  readonly unfinished: string[] = [];
+  /**
+   * Whether `error` is this deadline cutting a step off: it came after the
+   * deadline, from its abort (its reason or an abort in its cause chain).
+   */
+  cut(error: unknown): boolean {
+    if (!this.elapsed) return false;
+    const visit = (current: unknown, depth: number): boolean =>
+      depth < 8 &&
+      (current === this.signal.reason ||
+        (current instanceof DOMException &&
+          ["AbortError", "TimeoutError"].includes(current.name)) ||
+        (current instanceof AggregateError &&
+          current.errors.some((entry) => visit(entry, depth + 1))) ||
+        (current instanceof Error && visit(current.cause, depth + 1)));
+    return visit(error, 0);
+  }
   readonly #controller = new AbortController();
   #timer: ReturnType<typeof setTimeout> | undefined;
   #deadlineAt: string | undefined;

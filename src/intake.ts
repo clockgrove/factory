@@ -112,6 +112,7 @@ import {
   controlStoppedObjective,
   runObjective,
   SETTLE_DEADLINE_MS,
+  SettleDeadlineElapsed,
 } from "./runner.js";
 import { type ContinuationState, isExecutionState } from "./state.js";
 import {
@@ -1709,7 +1710,13 @@ async function runIntakeOwned(
   // decision or cancellation, releases it to the next pass.
   const waiting = new Map<
     number,
-    { reason: string; state: string; retryAt?: number }
+    {
+      reason: string;
+      state: string;
+      retryAt?: number;
+      /** Settling stopped at its deadline: held even once terminal (#1714). */
+      unsettled?: true;
+    }
   >();
   const stateDigest = (state: ContinuationState | undefined) =>
     queueDigest(JSON.stringify(state ?? null));
@@ -1729,6 +1736,7 @@ async function runIntakeOwned(
     objective: number,
     reason: string,
     retryAt?: number,
+    unsettled?: true,
   ) => {
     let state: string;
     try {
@@ -1741,6 +1749,7 @@ async function runIntakeOwned(
       reason,
       state,
       ...(retryAt !== undefined && Number.isFinite(retryAt) ? { retryAt } : {}),
+      ...(unsettled ? { unsettled } : {}),
     });
   };
   // Upgrade drain (`factory supervisor upgrade` with several Objectives): no
@@ -2361,10 +2370,26 @@ async function runIntakeOwned(
               result.coordinator?.waitReason ??
                 "Inspect retained Objective status",
             );
-        } catch (error) {
+        } catch (caught) {
+          let error = caught;
           if (error instanceof CoordinatorHandoff) {
             if (!yielded.delete(selected)) handingOff = true;
             return;
+          }
+          // Settling stopped at its deadline (#1714): the run's saved state
+          // stands, and the Objective waits for the operator to finish it,
+          // unless the run's own failure holds the whole installation.
+          if (error instanceof SettleDeadlineElapsed) {
+            if (error.cause === undefined || !installationWide(error.cause)) {
+              holdObjective(
+                selected,
+                `${error.message}; \`factory resume --objective ${selected}\` finishes settling it, or \`factory cancel --objective ${selected}\``,
+                undefined,
+                true,
+              );
+              return;
+            }
+            error = error.cause;
           }
           const observation = {
             at: new Date().toISOString(),
@@ -2514,8 +2539,8 @@ async function runIntakeOwned(
             if (
               !queued.has(id) ||
               state === "history" ||
-              terminal(state) ||
-              state?.cancelRequested
+              (!waiting.get(id)?.unsettled &&
+                (terminal(state) || state?.cancelRequested))
             )
               waiting.delete(id);
           }

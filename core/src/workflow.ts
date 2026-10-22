@@ -4,6 +4,9 @@ import type { CoreConfig } from "./config.js";
 import type { Outcome, Step, StepContext, Workflow } from "./engine.js";
 import { type GitHub, GitHubError, TransientError } from "./github.js";
 import { checkSources, parseObjective } from "./objective.js";
+import { objectiveCommandProblems } from "./planning/facts.js";
+import { planningStep } from "./planning/steps.js";
+import type { Planner } from "./providers/planner.js";
 import type { ObjectiveState, ObjectiveStatus } from "./state.js";
 
 const run = promisify(execFile);
@@ -13,6 +16,8 @@ const MINUTE = 60_000;
 export interface WorkflowDeps {
   config: CoreConfig;
   github: GitHub;
+  planner: Planner;
+  workDir(issue: number): string;
 }
 
 /**
@@ -29,7 +34,11 @@ export function objectiveWorkflow(deps?: WorkflowDeps): Workflow {
         return state.done[cleanup.key] ? [] : [cleanup];
       if (state.status === "done" || state.status === "failed") return [];
       if (!state.done.check) return [check];
-      for (const key of ["plan", "build", "final", "report"])
+      if (!state.done.plan) {
+        const step = deps ? planningStep(state, deps) : unavailable("plan");
+        return step ? [step] : [];
+      }
+      for (const key of ["build", "final", "report"])
         if (!state.done[key]) return [notBuilt(key)];
       return [];
     },
@@ -85,6 +94,14 @@ function checkStep({ config, github }: WorkflowDeps): Step {
             signal,
           )),
         );
+        if (!problems.length)
+          problems.push(
+            ...(await objectiveCommandProblems(body, base, config.checkout, {
+              requiredCommands: config.finalValidation.requiredCommands,
+              ciOnlyCommands: config.finalValidation.ciOnlyCommands,
+              signal,
+            })),
+          );
         if (problems.length)
           return {
             kind: "hold",

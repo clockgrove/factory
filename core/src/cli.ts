@@ -7,6 +7,12 @@ import { DEFAULT_LIMITS } from "./engine.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
 import { RunLog } from "./log.js";
+import {
+  ClaudePlanner,
+  type ClaudePlannerOptions,
+  DEFAULT_CLAUDE_MODELS,
+} from "./providers/claude.js";
+import { CodexPlanner, DEFAULT_CODEX_MODELS } from "./providers/codex.js";
 import { objectiveWorkflow } from "./workflow.js";
 import { installationPaths, type Paths } from "./paths.js";
 import { type Request, writeRequest } from "./requests.js";
@@ -56,7 +62,22 @@ async function main(argv: string[]): Promise<number> {
         const config = loadConfig(repository);
         const github = new GitHub(config.repository);
         sync = new GitHubSync(github, config, new RunLog(paths.logs, "sync"));
-        workflow = objectiveWorkflow({ config, github });
+        const planner =
+          config.planning.provider === "claude"
+            ? new ClaudePlanner({
+                ...DEFAULT_CLAUDE_MODELS,
+                ...(config.planning.models ?? {}),
+              } as ClaudePlannerOptions)
+            : new CodexPlanner({
+                ...DEFAULT_CODEX_MODELS,
+                ...(config.planning.models ?? {}),
+              } as typeof DEFAULT_CODEX_MODELS);
+        workflow = objectiveWorkflow({
+          config,
+          github,
+          planner,
+          workDir: (issue) => join(paths.root, "work", String(issue)),
+        });
       }
       return await serve({
         paths,

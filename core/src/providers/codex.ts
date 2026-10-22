@@ -19,8 +19,8 @@ import type {
 import {
   callImages,
   detail,
-  loggedCall,
   IdleWatchdog,
+  loggedCall,
   type ModelChoice,
   modelChoice,
   type Planner,
@@ -111,7 +111,7 @@ experimental_use_profile = false
 `;
 
 /** Ambient variables a Factory Codex process keeps; everything else is dropped. */
-const ENVIRONMENT = [
+export const ENVIRONMENT = [
   /^PATH$/,
   /^LANG$/,
   /^LC_[A-Z_]+$/,
@@ -124,7 +124,7 @@ const ENVIRONMENT = [
 ];
 
 /** The installed Codex runtime; its Linux sandbox helper re-executes it. */
-function codexRuntimeDirectory(): string {
+export function codexRuntimeDirectory(): string {
   const cli = createRequire(
     createRequire(import.meta.url).resolve("@openai/codex/package.json"),
   );
@@ -232,7 +232,7 @@ function jsonStatus(message: string): unknown {
  * texts (exec reports no structured kind). Anything unmatched is a retry, so
  * a miss costs only time.
  */
-function codexFailure(message: string): PlannerError {
+export function codexFailure(message: string): PlannerError {
   const text = message.toLowerCase();
   const has = (...phrases: string[]) =>
     phrases.some((phrase) => text.includes(phrase));

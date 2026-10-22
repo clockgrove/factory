@@ -69,6 +69,10 @@ export interface ObjectiveState {
   /** The latest answer per step, read by the step when it runs again. */
   answers: Record<string, Answer>;
   retries: Record<string, Retry>;
+  /** Facts steps keep across repairs (Outcome `keep`), by key. */
+  kept: Record<string, unknown>;
+  /** Repairs per target step, with the latest findings (newest last). */
+  repairs: Record<string, { count: number; findings: string[] }>;
   /** Steps that finished, with their saved results. */
   done: Record<string, unknown>;
   /** Steps started and not yet finished. One found after a restart was interrupted. */
@@ -88,6 +92,8 @@ export function newObjective(issue: number, now: Date): ObjectiveState {
     hold: null,
     answers: {},
     retries: {},
+    repairs: {},
+    kept: {},
     done: {},
     attempts: {},
     appliedRequests: [],

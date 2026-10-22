@@ -86,7 +86,7 @@ const HUMAN_PREREQUISITE_GUIDANCE = humanPrerequisiteGuidance(
 );
 
 /** How the planner and reviewers read a tree: fewer turns, only the docs they need. */
-const TREE_READ_GUIDANCE =
+export const TREE_READ_GUIDANCE =
   "Issue independent reads and searches together in one turn (parallel tool calls), such as every file you already know you need; serialize only a read that depends on an earlier result. Find documentation through the doc map in the repository's AGENTS.md, or its documented conventions, and read only the subsystem documents you need.";
 
 function compileRepositoryGuidance(
@@ -165,7 +165,7 @@ export function packageManagerUpdate(body: string): string | undefined {
     : undefined;
 }
 
-function packageManagerInstructions(update?: string): string {
+export function packageManagerInstructions(update?: string): string {
   return `Root package-manager metadata (fixed): preserve package.json config and pnpm settings, .npmrc, workspace security settings, package.yaml and package-manager hook files. ${
     update
       ? `The pinned Objective's Package manager update section permits only package.json packageManager ${update}; no manager switch or other configuration change is authorized. Keep the base pin until this update is implemented, then preserve the declared pin in successors.`

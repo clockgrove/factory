@@ -7,14 +7,15 @@ import { DEFAULT_LIMITS } from "./engine.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
 import { RunLog } from "./log.js";
+import { installationPaths, type Paths } from "./paths.js";
 import {
   ClaudePlanner,
   type ClaudePlannerOptions,
   DEFAULT_CLAUDE_MODELS,
 } from "./providers/claude.js";
 import { CodexPlanner, DEFAULT_CODEX_MODELS } from "./providers/codex.js";
-import { objectiveWorkflow } from "./workflow.js";
-import { installationPaths, type Paths } from "./paths.js";
+import { ClaudeWorker } from "./providers/claude-worker.js";
+import { CodexWorker } from "./providers/codex-worker.js";
 import { type Request, writeRequest } from "./requests.js";
 import { serve } from "./service.js";
 import {
@@ -23,6 +24,7 @@ import {
   loadState,
   type ObjectiveStatus,
 } from "./state.js";
+import { objectiveWorkflow } from "./workflow.js";
 
 const USAGE = `Usage: factory <command> --repo OWNER/NAME
 
@@ -77,6 +79,10 @@ async function main(argv: string[]): Promise<number> {
           github,
           planner,
           workDir: (issue) => join(paths.root, "work", String(issue)),
+          worker: (plan, body) =>
+            config.planning.provider === "claude"
+              ? new ClaudeWorker({ sandbox: config.sandbox, plan, body })
+              : new CodexWorker({ sandbox: config.sandbox }),
         });
       }
       return await serve({

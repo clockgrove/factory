@@ -8,6 +8,7 @@ import { parseObjective } from "../objective.js";
 import { type Planner, PlannerError } from "../providers/planner.js";
 import type { ObjectiveState } from "../state.js";
 import { checkPlan } from "./checks.js";
+import { observeLocalExecutables } from "./executables.js";
 import {
   BaseFiles,
   buildFacts,
@@ -24,7 +25,6 @@ import {
   renderPlanningInstructions,
   revisionScope,
 } from "./prompts.js";
-import { observeLocalExecutables } from "./executables.js";
 import {
   exportTree,
   type RepositoryView,
@@ -979,6 +979,14 @@ export async function guarded(work: () => Promise<Outcome>): Promise<Outcome> {
         ...(error.retryAfterMs !== undefined
           ? { afterMs: error.retryAfterMs }
           : {}),
+      };
+    if (error instanceof GitHubError && error.status === 401)
+      return {
+        kind: "hold",
+        question:
+          "GitHub refused Factory's login. Run `gh auth login` (or replace FACTORY_GITHUB_TOKEN), then answer `retry`.",
+        answers: ["retry", "cancel"],
+        recommended: "retry",
       };
     if (error instanceof GitHubError && error.status === 404)
       return {

@@ -1,3 +1,12 @@
+import {
+  type BuildDeps,
+  buildSteps,
+  built,
+  cancelCleanupStep,
+  finalReviewStep,
+  finalStep,
+  reportStep,
+} from "./work/steps.js";
 import type { Outcome, Step, StepContext, Workflow } from "./engine.js";
 import {
   guarded,
@@ -16,27 +25,32 @@ const MINUTE = 60_000;
  * on this build always has an answer that works. `deps` is absent when
  * Factory has no configuration.
  */
-export function objectiveWorkflow(deps?: PlanningDeps): Workflow {
+export function objectiveWorkflow(deps?: BuildDeps): Workflow {
   const check = deps ? checkStep(deps) : unavailable("check");
   return {
     steps(state: ObjectiveState): Step[] {
-      if (state.status === "cancelled")
-        return state.done[cleanup.key] ? [] : [cleanup];
+      if (state.status === "cancelled") {
+        const step = deps ? cancelCleanupStep(deps) : cleanup;
+        return state.done[step.key] ? [] : [step];
+      }
       if (state.status === "done" || state.status === "failed") return [];
       if (!state.done.check) return [check];
       if (!state.done.plan) {
         const step = deps ? planningStep(state, deps) : unavailable("plan");
         return step ? [step] : [];
       }
-      for (const key of ["build", "final", "report"])
-        if (!state.done[key]) return [notBuilt(key)];
+      if (!deps) return [unavailable("build")];
+      if (!built(state)) return buildSteps(state, deps);
+      if (!state.done.final) return [finalStep(deps)];
+      if (!state.done["final-review"]) return [finalReviewStep(deps)];
+      if (!state.done.report) return [reportStep(deps)];
       return [];
     },
 
     status(state: ObjectiveState): ObjectiveStatus {
       if (!state.done.check) return "checking";
       if (!state.done.plan) return "planning";
-      if (!state.done.build) return "building";
+      if (!built(state)) return "building";
       if (!state.done.report) return "finishing";
       return "done";
     },
@@ -69,21 +83,6 @@ function unavailable(key: string): Step {
           "Factory has no configuration for this repository, so it can't reach GitHub. Run setup and restart the service; then answer `retry`.",
         answers: ["retry", "cancel"],
         recommended: "retry",
-      };
-    },
-  };
-}
-
-function notBuilt(key: string): Step {
-  return {
-    key,
-    deadlineMs: MINUTE,
-    async run(): Promise<Outcome> {
-      return {
-        kind: "hold",
-        question: `This Factory build can't run the \`${key}\` step yet.`,
-        answers: ["retry", "cancel"],
-        recommended: "cancel",
       };
     },
   };

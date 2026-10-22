@@ -2,7 +2,7 @@ import type { CoreConfig, QueueOption } from "./config.js";
 import type { ObjectiveRunner } from "./engine.js";
 import { type GitHub, TransientError } from "./github.js";
 import type { RunLog } from "./log.js";
-import { type QueueItem, QueueDisplay, queued, readQueue } from "./queue.js";
+import { QueueDisplay, type QueueItem, queued, readQueue } from "./queue.js";
 import { writeRequest } from "./requests.js";
 import type { ObjectiveStatus } from "./state.js";
 import { TERMINAL } from "./state.js";

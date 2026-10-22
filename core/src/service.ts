@@ -15,6 +15,7 @@ import {
   ObjectiveRunner,
   type Workflow,
 } from "./engine.js";
+import type { GitHubModule, GitHubSync } from "./github-sync.js";
 import { takeServiceLock } from "./lock.js";
 import { RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
@@ -30,7 +31,6 @@ import {
   saveState,
   TERMINAL,
 } from "./state.js";
-import type { GitHubModule, GitHubSync } from "./github-sync.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 export interface ServeOptions {

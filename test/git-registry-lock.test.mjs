@@ -1665,17 +1665,18 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
     { mediaType: "text/plain" },
   );
   const originalReferences = LocalContentStore.prototype.checkpointReferences;
-  let injected = false;
+  // A late original on every rebuild outlasts the bounded rebuild (#1750).
+  let injections = 0;
   let lateMemory;
   let previousAck;
   LocalContentStore.prototype.checkpointReferences = function (description) {
     if (
-      !injected &&
+      injections < 3 &&
       card.state === "closed" &&
       JSON.parse(description)[0] === "memory-learning-producer"
     ) {
-      injected = true;
-      previousAck = gitPersistenceStatus(config).lastAcknowledged;
+      if (!injections++)
+        previousAck = gitPersistenceStatus(config).lastAcknowledged;
       lateMemory = memory.retain({
         schemaVersion: 1,
         repository,
@@ -1684,7 +1685,7 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
         producer: { objective: 1, runId: state.runId, status: "observed" },
         createdAt: new Date().toISOString(),
         authority: "observation",
-        summary: "A real late source original",
+        summary: `A real late source original ${injections}`,
         bodies: [{ role: "notes", ref: source, availability: "retained" }],
         sources: [
           { identity: "fixture:late-source", complete: true, ref: source },
@@ -1756,7 +1757,7 @@ bindProjectQueueRun(config,claim,lock.token,state);await awaitCheckpointAdmissio
         .result,
       "cancelled",
     );
-    assert.equal(injected, true);
+    assert.equal(injections, 3);
     assert.equal(readState(repository, 1).objectiveClosure, "complete");
     assert.equal(
       JSON.stringify(readState(repository, 1).finalAcceptance),

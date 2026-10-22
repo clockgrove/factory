@@ -38,6 +38,7 @@ import { assertPreIntegrationCheckSources } from "../delivery/readiness.js";
 import { assertKnownCheckNames, workflowCheckNames } from "../check-names.js";
 import { isAbsolute } from "node:path";
 import { childIdentity } from "../objective-split.js";
+import { pathsOverlap } from "../ownership.js";
 import { recognizedObjectiveAttachment } from "../media.js";
 
 /** Reviewed templates share source and command authority without becoming executable nodes. */
@@ -1009,6 +1010,66 @@ function authorizedCommand(
   return Boolean(invocation);
 }
 
+/** The root package.json scripts at the base; empty when there is none. */
+function rootScriptsAt(
+  checkout: string,
+  baseSha: string,
+): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(
+      pinnedGitRaw(checkout, "show", `${baseSha}:package.json`).toString(
+        "utf8",
+      ),
+    ) as { scripts?: unknown };
+    return parsed.scripts && typeof parsed.scripts === "object"
+      ? (parsed.scripts as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The directory a root script works in: its body starts with `cd DIR &&` and
+ * never changes directory again, or is one command naming DIR after --prefix,
+ * --dir or -C. Any other shape is not derivable.
+ */
+export function scriptScope(body: string): string | undefined {
+  const dir = "(?:\\.\\/)?(\\w[\\w.-]*(?:\\/\\w[\\w.-]*)*)\\/?";
+  const cd = body.match(new RegExp(`^\\s*cd\\s+${dir}\\s*&&(.*)$`, "s"));
+  if (cd) return /\bcd\b/.test(cd[2]!) ? undefined : `${cd[1]}/`;
+  if (/&&|\|\||[;|\n&]/.test(body)) return undefined;
+  const flag = body.match(
+    new RegExp(`\\s(?:--prefix|--dir|-C)[ =]${dir}(?:\\s|$)`),
+  );
+  return flag ? `${flag[1]}/` : undefined;
+}
+
+/** The directory a package-script command checks, when its script body names one. */
+function commandScope(
+  command: string,
+  scripts: Record<string, unknown>,
+): string | undefined {
+  const name = packageScriptInvocation(command)?.name;
+  const body = name ? scripts[name] : undefined;
+  return typeof body === "string" ? scriptScope(body) : undefined;
+}
+
+/** Each authorized command that checks only one directory, with that directory. */
+export function scopedCommands(
+  commands: readonly string[],
+  checkout: string,
+  baseSha: string,
+): Map<string, string> {
+  const scripts = rootScriptsAt(checkout, baseSha);
+  const scoped = new Map<string, string>();
+  for (const command of commands) {
+    const scope = commandScope(command, scripts);
+    if (scope) scoped.set(command, scope);
+  }
+  return scoped;
+}
+
 /** The deterministic plan checks; each ships its facts in the planner request and a refusal that says what would pass. */
 export const PLAN_CHECKS = [
   {
@@ -1040,6 +1101,21 @@ export const PLAN_CHECKS = [
     id: "local-proof",
     entry: "planGraphLint",
     facts: "compileContext.authorizedCommands",
+  },
+  {
+    id: "storage-ownership",
+    entry: "assertPlanBoundaries",
+    facts: "refusal names the base's migrations directories",
+  },
+  {
+    id: "validation-scope",
+    entry: "assertPlanBoundaries",
+    facts: "request instructions: scoped commands and their directories",
+  },
+  {
+    id: "safety-proof",
+    entry: "planGraphLint",
+    facts: "plan rules: privacy, authority and accessibility proof",
   },
   {
     id: "plan-standard",
@@ -1084,18 +1160,7 @@ export function authorizedCommands(
   ciOnlyCommands: readonly string[] = [],
 ): string[] {
   const ciOnly = new Set(ciOnlyCommands.map(ciOnlyKey));
-  let scripts: Record<string, unknown> = {};
-  try {
-    const parsed = JSON.parse(
-      pinnedGitRaw(checkout, "show", `${baseSha}:package.json`).toString(
-        "utf8",
-      ),
-    ) as { scripts?: unknown };
-    if (parsed.scripts && typeof parsed.scripts === "object")
-      scripts = parsed.scripts as Record<string, unknown>;
-  } catch {
-    // No root package.json: only source-declared commands.
-  }
+  const scripts = rootScriptsAt(checkout, baseSha);
   const accepted = new Set<string>();
   const usable = (command: string) =>
     !ciOnly.has(ciOnlyKey(command)) && !networkToolOfCommand(command, scripts);
@@ -1158,8 +1223,12 @@ export function authorizedCommands(
 /** The planner's note of the exact validation commands Factory accepts. */
 export function authorizedCommandInstructions(
   commands: readonly string[],
+  scopes: ReadonlyMap<string, string> = new Map(),
 ): string {
-  return `\n\nAuthorized validation commands (use one of these; other forms may be refused): ${listCommands(commands)}.`;
+  const scoped = commands.flatMap((command) =>
+    scopes.has(command) ? [`\`${command}\` (${scopes.get(command)})`] : [],
+  );
+  return `\n\nAuthorized validation commands (use one of these; other forms may be refused): ${listCommands(commands)}.${scoped.length ? `\nThese check only one directory; select one only for an item that owns a path in it: ${scoped.join(", ")}.` : ""}`;
 }
 
 function selectedHeadings(body: string): SourceSelector[] {
@@ -1569,8 +1638,64 @@ const NUMBERED_MIGRATION =
 const TEST_FILE =
   /(?<![\w./*?\]}-])((?:[\w.-]+\/)*(?:[\w.-]*\.(?:test|spec)\.[cm]?[jt]sx?|test_[\w.-]+\.py|[\w.-]+_test\.(?:py|go|rs|rb)))(?![\w*?-])/g;
 
+/** A new table named in acceptance, unless a negation just before it ("no new table"). */
+function namesNewTable(entry: string): boolean {
+  return [
+    ...entry.matchAll(
+      /\b(?:new|creates?|introduces?)\s+(?:[\w-]+\s+){0,2}tables?\b/gi,
+    ),
+  ].some(
+    (match) =>
+      !/\b(?:no|not|never|without)\b/i.test(
+        entry.slice(Math.max(0, match.index - 12), match.index),
+      ),
+  );
+}
+
+/** The base's migrations directories, as path prefixes. */
+function migrationDirs(paths: Iterable<string>): string[] {
+  const dirs = new Set<string>();
+  for (const path of paths) {
+    const parts = path.split("/").slice(0, -1);
+    const at = parts.findIndex((part) => /^migrations?$/i.test(part));
+    if (at >= 0) dirs.add(`${parts.slice(0, at + 1).join("/")}/`);
+  }
+  return [...dirs].sort();
+}
+
+/** Whether an item owns a migrations directory, or a path in one. */
+function ownsMigrations(
+  item: { ownedPaths: string[] } | undefined,
+  migrations: readonly string[],
+): boolean {
+  return Boolean(
+    item?.ownedPaths.some((owned) =>
+      migrations.some((dir) => pathsOverlap(owned, dir)),
+    ),
+  );
+}
+
+/** The ids an item depends on, directly or through other items. */
+function dependencyClosure(
+  byId: ReadonlyMap<string, { dependencies: string[] }>,
+  id: string,
+): Set<string> {
+  const found = new Set<string>();
+  const pending = [id];
+  while (pending.length) {
+    const item = byId.get(pending.pop()!);
+    for (const dependency of item?.dependencies ?? [])
+      if (!found.has(dependency)) {
+        found.add(dependency);
+        pending.push(dependency);
+      }
+  }
+  return found;
+}
+
 /**
- * The plan standard's checks that need the base: a validation command whose
+ * The plan standard's checks that need the base: a new table with no migrations owner, a validation command scoped to a
+ * directory the item does not own, a validation command whose
  * script reaches a network (validation has none; only the authorized
  * bootstrap and local npx bins are offline), and acceptance that names a migration number or test
  * file absent from the base tree (the worker names new files). Structural
@@ -1586,22 +1711,7 @@ export function assertPlanBoundaries(
   authorized: readonly string[] = [],
 ): void {
   const ciOnly = new Set(ciOnlyCommands.map(ciOnlyKey));
-  let scripts: Record<string, unknown> | undefined;
-  const rootScripts = (): Record<string, unknown> => {
-    if (scripts) return scripts;
-    try {
-      const parsed = JSON.parse(
-        pinnedText(checkout, graph.baseSha, "package.json"),
-      ) as { scripts?: unknown };
-      scripts =
-        parsed.scripts && typeof parsed.scripts === "object"
-          ? (parsed.scripts as Record<string, unknown>)
-          : {};
-    } catch {
-      scripts = {};
-    }
-    return scripts;
-  };
+  const scripts = rootScriptsAt(checkout, graph.baseSha);
   let tree: { paths: Set<string>; names: Set<string> } | null | undefined;
   const baseTree = () => {
     if (tree !== undefined) return tree;
@@ -1631,22 +1741,47 @@ export function assertPlanBoundaries(
     first ??= id;
     findings.push(finding);
   };
-  for (const item of workShapes(graph)) {
-    for (const { command } of item.validation) {
+  const shapes = new Map(workShapes(graph).map((item) => [item.id, item]));
+  for (const item of shapes.values()) {
+    for (const { command, provenance } of item.validation) {
       if (packageBootstrap(command) || ciOnly.has(ciOnlyKey(command))) continue;
-      const tool = networkToolOfCommand(command, rootScripts());
+      const tool = networkToolOfCommand(command, scripts);
       if (tool)
         found(
           item.id,
           `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have: select an offline authorized command instead${authorized.length ? ` (${listCommands(authorized)})` : ""}, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
         );
+      const scope = commandScope(command, scripts);
+      if (
+        scope &&
+        provenance === "base-observed" &&
+        (item.kind ?? "work") === "work" &&
+        !item.ownedPaths.some((owned) => pathsOverlap(owned, scope))
+      )
+        found(
+          item.id,
+          `Work Item ${item.id} validation runs ${command}, which checks only ${scope}, and the item owns no path there: select an authorized command that checks what the item owns${authorized.length ? ` (${listCommands(authorized.filter((c) => !commandScope(c, scripts)))})` : ""}, or own a path in ${scope}`,
+        );
     }
+    const base = baseTree();
+    const migrations = base ? migrationDirs(base.paths) : [];
+    if (
+      migrations.length &&
+      (item.kind ?? "work") === "work" &&
+      item.acceptance.some(namesNewTable) &&
+      ![item.id, ...dependencyClosure(shapes, item.id)].some((id) =>
+        ownsMigrations(shapes.get(id), migrations),
+      )
+    )
+      found(
+        item.id,
+        `Work Item ${item.id} acceptance names a new table, but neither it nor an item it depends on owns the base's migrations (${migrations.slice(0, 5).join(", ")}): add a migrations directory to its ownedPaths, with the module that writes the data, describing the migration by role (the worker names it), or depend on the item that owns it`,
+      );
     const named = new Set<string>();
     for (const entry of item.acceptance)
       for (const pattern of [NUMBERED_SQL, NUMBERED_MIGRATION, TEST_FILE])
         for (const match of entry.matchAll(pattern)) named.add(match[1]!);
     for (const file of named) {
-      const base = baseTree();
       if (!base) break;
       if (file.includes("/") ? base.paths.has(file) : base.names.has(file))
         continue;

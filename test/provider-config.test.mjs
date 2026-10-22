@@ -563,11 +563,14 @@ test("every plan check gives the planner its facts and refuses with what would p
       scripts: {
         test: "node --test",
         lint: "biome lint .",
+        "docs:lint": "cd docs && biome lint .",
         audit: "npm audit",
         "infra:validate": "tofu init && tofu validate",
       },
     }),
   );
+  mkdirSync(join(repo, "db", "migrations"), { recursive: true });
+  writeFileSync(join(repo, "db", "migrations", "001_init.sql"), "-- base\n");
   mkdirSync(join(repo, "docs"));
   writeFileSync(
     join(repo, "docs", "dev.md"),
@@ -600,11 +603,23 @@ test("every plan check gives the planner its facts and refuses with what would p
   const authorized = request.compileContext.authorizedCommands;
   // Scripts lead, then inline source commands; no CI-only script in any form,
   // no fenced code lines.
-  assert.deepEqual(authorized, ["npm test", "npm run lint", "node --test"]);
+  assert.deepEqual(authorized, [
+    "npm test",
+    "npm run lint",
+    "npm run docs:lint",
+    "node --test",
+  ]);
+  assert.match(
+    request.objective,
+    /These check only one directory[^\n]*`npm run docs:lint` \(docs\/\)/,
+  );
   const note = request.objective.match(
     /Authorized validation commands[^\n]*/,
   )[0];
-  assert.match(note, /`npm test`, `npm run lint`, `node --test`/);
+  assert.match(
+    note,
+    /`npm test`, `npm run lint`, `npm run docs:lint`, `node --test`/,
+  );
   assert.ok(Buffer.byteLength(note) < 200, `${Buffer.byteLength(note)} bytes`);
 
   const item = (id, fields) => ({
@@ -630,6 +645,23 @@ test("every plan check gives the planner its facts and refuses with what would p
     assert.fail("expected a refusal");
   };
   const graph = (...items) => ({ baseSha, items });
+  const safety = (
+    kind,
+    text = "Unauthorized users cannot read the record.",
+  ) => ({
+    itemId: "a",
+    source: { text },
+    proof: { kind },
+  });
+  const lint = (coverage) =>
+    planGraphLint(
+      { ...graph(item("a", { validation: [command("npm test")] })), coverage },
+      new Set(),
+      new Map(),
+      authorized,
+    );
+  const boundaries = (...items) =>
+    assertPlanBoundaries(graph(...items), repo, [], [], authorized);
   const refusals = {
     "command-authority": refusal(() =>
       validateCommandProvenance(
@@ -670,6 +702,32 @@ test("every plan check gives the planner its facts and refuses with what would p
         item("a", { validation: [command("npm test")] }),
         item("b", { ownedPaths: ["src/b.ts"] }),
       ),
+      new Set(),
+      new Map(),
+      authorized,
+    )[0],
+    "storage-ownership": refusal(() =>
+      assertPlanBoundaries(
+        graph(
+          item("a", { acceptance: ["Events persist in a new audit table."] }),
+        ),
+        repo,
+      ),
+    ),
+    "validation-scope": refusal(() =>
+      assertPlanBoundaries(
+        graph(item("a", { validation: [command("npm run docs:lint")] })),
+        repo,
+        [],
+        [],
+        authorized,
+      ),
+    ),
+    "safety-proof": planGraphLint(
+      {
+        ...graph(item("a", { validation: [command("npm test")] })),
+        coverage: [safety("final-review")],
+      },
       new Set(),
       new Map(),
       authorized,
@@ -745,6 +803,27 @@ test("every plan check gives the planner its facts and refuses with what would p
     [],
     "register new plan checks in PLAN_CHECKS",
   );
+  // Allowed cases stay unrefused: owners, dependents, negations, command proof.
+  const newTable = { acceptance: ["Events persist in a new audit table."] };
+  boundaries(item("a", { ...newTable, ownedPaths: ["db/migrations/"] }));
+  boundaries(
+    item("m", { ownedPaths: ["db/"] }),
+    item("a", { ...newTable, dependencies: ["m"] }),
+  );
+  boundaries(item("a", { acceptance: ["It adds no new table."] }));
+  boundaries(
+    item("a", {
+      validation: [command("npm run docs:lint")],
+      ownedPaths: ["docs/x.md"],
+    }),
+  );
+  boundaries(item("a", { validation: [command("npm run lint")] }));
+  assert.equal(lint([safety("result-command")]).length, 0);
+  assert.equal(lint([safety("final-review", "`npm test`")]).length, 0);
+  assert.equal(
+    lint([safety("result-semantic", "It sorts the list.")]).length,
+    0,
+  );
   // An exact source line that is not command-shaped is never authority.
   const shapeless = "FOO=1 node --test";
   const declared = (text) =>
@@ -817,12 +896,16 @@ test("every plan check gives the planner its facts and refuses with what would p
     "command-authority": /Authorized commands: `npm test`, `npm run lint`/,
     "ci-only": /use an offline authorized command/,
     network:
-      /select an offline authorized command instead \(`npm test`, `npm run lint`, `node --test`\)/,
+      /select an offline authorized command instead \(`npm test`, `npm run lint`, `npm run docs:lint`, `node --test`\)/,
     "new-file-name": /describe it by role and data/,
     "path-overlap": /narrow each item's ownedPaths/,
     "local-proof":
-      /select one of the authorized commands \(`npm test`, `npm run lint`, `node --test`\)/,
+      /select one of the authorized commands \(`npm test`, `npm run lint`, `npm run docs:lint`, `node --test`\)/,
     "plan-standard": /state the behaviour instead/,
+    "storage-ownership": /migrations \(db\/migrations\/\)/,
+    "validation-scope":
+      /checks only docs\/.*\(`npm test`, `npm run lint`, `node --test`\)/,
+    "safety-proof": /deliver a test that names the claim.*result-command/,
   };
   for (const { id, facts } of PLAN_CHECKS) {
     assert.ok(facts, `${id} names the facts it puts in the request`);

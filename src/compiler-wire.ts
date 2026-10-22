@@ -142,6 +142,10 @@ const NON_LOCAL_PROOFS = new Set([
   "published-ci",
 ]);
 
+/** Criteria about privacy, authority or accessibility: claims review judgement cannot prove. */
+const SAFETY_CLAIM =
+  /\b(?:privacy|private data|personal data|PII|redact\w*|(?:un)?authori[sz]\w*|authority|access control|accessib\w*|a11y|WCAG|screen[- ]reader)\b/i;
+
 /**
  * The plan standard's graph-level lint, on the same terms as planStandardLint:
  * items that may run concurrently own disjoint paths, and every acceptance has
@@ -217,7 +221,21 @@ export function planGraphLint(
         `Work Item ${item.id} has no validation command, so its acceptance has no local executable evidence: select one of the authorized commands (${listCommands(authorized)}) that runs the tests it owns, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
       );
     }
-  for (const entry of graph.coverage ?? [])
+  for (const entry of graph.coverage ?? []) {
+    const claim = coverageCriterion(entry).match(SAFETY_CLAIM)?.[0];
+    // A criterion that is exactly one backticked command is run by Factory.
+    if (
+      claim &&
+      !/^\s*`[^`]+`\s*$/.test(coverageCriterion(entry)) &&
+      !/-command$/.test(entry.proof.kind)
+    ) {
+      const criterion = coverageCriterion(entry).replace(/\s+/g, " ").trim();
+      linted.add(entry.itemId);
+      findings.push(
+        `Coverage of "${criterion.length > 120 ? `${criterion.slice(0, 117)}...` : criterion}" is a ${claim.toLowerCase()} claim proved only by ${entry.proof.kind}, which no command checks: have ${entry.itemId} deliver a test that names the claim, select a validation command that runs it, and prove the criterion with that command (result-command or integrated-command)`,
+      );
+      continue;
+    }
     if (
       NON_LOCAL_PROOFS.has(entry.proof.kind) &&
       !localEvidence(entry.itemId)
@@ -228,6 +246,7 @@ export function planGraphLint(
         `Coverage of "${criterion.length > 120 ? `${criterion.slice(0, 117)}...` : criterion}" is proved only by ${entry.proof.kind}, and its owner ${entry.itemId} runs no validation command: give the owner a local command that proves it, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
       );
     }
+  }
   return findings;
 }
 

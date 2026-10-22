@@ -95,6 +95,7 @@ import {
   assertNoCiOnlyValidation,
   assertPlanBoundaries,
   authorizedCommandInstructions,
+  scopedCommands,
   authorizedCommands,
   ciOnlyInstructions,
 } from "./sources.js";
@@ -634,7 +635,10 @@ export function prepareCompilationRequest(args: {
       revising,
     ) +
     ciOnlyInstructions(args.ciOnlyCommands ?? []) +
-    authorizedCommandInstructions(authorized);
+    authorizedCommandInstructions(
+      authorized,
+      scopedCommands(authorized, checkout, baseSha),
+    );
   const prompt = `Objective #${objective}\n${body}${instructions}`;
   const scripts = fixedScripts(
     body,

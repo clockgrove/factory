@@ -58,6 +58,7 @@ import { factoryConfigDigest, stateRoot } from "../dist/config.js";
 import { LocalContentStore } from "../dist/content/local.js";
 import { requestControl, serveControl } from "../dist/coordinator-control.js";
 import { deliveryDescription } from "../dist/delivery/description.js";
+import { mergeControl } from "../dist/delivery/publication.js";
 import { deliveryReadiness } from "../dist/delivery/readiness.js";
 import { NativeStackDelivery } from "../dist/delivery/native-stack.js";
 import { RegularDelivery } from "../dist/delivery/regular.js";
@@ -109,6 +110,7 @@ import {
   reusableEnvironmentValidationIndices,
 } from "../dist/qa.js";
 import { preflightItemEnvironment } from "../dist/qa-execution.js";
+import { withRecoveryCheckpointScope } from "../dist/recovery-checkpoint.js";
 import {
   archiveAttempt,
   charge,
@@ -1174,6 +1176,51 @@ test("a fast non-Actions check waits for Actions to register (#1687)", async () 
   await assert.rejects(observe([cla], 30, broken), /ended without jobs/);
   // An unknown push time never merges.
   await assert.rejects(observe([cla], 0), /not show when its head/);
+});
+
+test("a blocked or unanswered merge is sent again at the exact open head (#1749)", async () => {
+  const sha = "a".repeat(40);
+  const id = { number: 7, branch: "fix", headSha: sha };
+  const work = { status: "published", attempt: "a1", changeRef: sha };
+  const intent = { attemptId: "a1", branch: "fix", observation: { number: 7 } };
+  const state = { schemaVersion: 19, repository: "o/r", runId: "r", work };
+  Object.assign(state, {
+    work: { x: work },
+    publicationIntents: { x: [intent] },
+  });
+  const pull = { state: "open", merged: false, head: { sha, ref: "fix" } };
+  pull.base = { ref: "main", sha: "b".repeat(40) };
+  const puts = [];
+  const client = {
+    request: async (method, path) => {
+      if (method === "PUT" && puts.push(path) === 1) throw new Error("lost");
+      if (method === "PUT") return { merged: true, sha: "c".repeat(40) };
+      return path.endsWith("pulls/7")
+        ? pull
+        : { default_branch: "main", allow_merge_commit: true };
+    },
+    paginate: async () => [],
+  };
+  const github = new RealGitHubGateway("o/r", undefined, client);
+  const merge = () =>
+    github.merge(
+      id,
+      sha,
+      mergeControl(state, "x", () => {}),
+    );
+  // An admission bound to another repository fails before the request.
+  const other = { config: { repository: "o/other" }, buildClosure: () => {} };
+  await assert.rejects(withRecoveryCheckpointScope(other, merge), /differs/);
+  assert.equal(intent.effects[0].disposition, "blocked");
+  await assert.rejects(merge, /lost/);
+  assert.equal(intent.effects[0].disposition, "intent");
+  pull.head = { sha: "d".repeat(40), ref: "fix" };
+  await assert.rejects(merge, /head changed/);
+  pull.head = { sha, ref: "fix" };
+  assert.deepEqual(await merge(), { integratedSha: "c".repeat(40) });
+  assert.equal(puts.length, 2);
+  assert.equal(intent.effects.length, 1);
+  assert.equal(intent.effects[0].disposition, "observed");
 });
 
 test("cancellation stops an owned shell and its process group", async () => {

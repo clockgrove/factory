@@ -2966,7 +2966,11 @@ export class RealGitHubGateway implements GitHubGateway {
     await this.requireMergeCommits(current.base.ref);
     const refused = `merge-refused:${identity.number}:${identity.headSha}`;
     let result: { merged: boolean; sha: string };
-    await control?.beforeMerge(identity);
+    await control?.beforeMerge(identity, {
+      state: current.state,
+      merged: current.merged,
+      headSha: current.head.sha,
+    });
     try {
       result = await this.api<{ merged: boolean; sha: string }>(
         "PUT",

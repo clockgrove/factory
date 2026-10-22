@@ -1334,8 +1334,17 @@ export interface DeliveryObservation {
 export interface MergeResult {
   integratedSha: string;
 }
+/** The PR as the merging caller just read it, before any merge request. */
+export interface MergeObservation {
+  state: string;
+  merged: boolean;
+  headSha: string;
+}
 export interface MergeControl {
-  beforeMerge(identity: PullRequestIdentity): Promise<void>;
+  beforeMerge(
+    identity: PullRequestIdentity,
+    observed: MergeObservation,
+  ): Promise<void>;
   observedMerge(
     identity: PullRequestIdentity,
     result: MergeResult,

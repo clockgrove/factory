@@ -276,6 +276,7 @@ export async function projectLiveStatus(
         await editLiveStatus(args, retained, live, target, body);
         lastEdit.set(key(target), { digest: target.digest, at: now });
         failedEdit.delete(key(target));
+        recordLiveFailure(args, live, target, false);
         break;
       } catch (error) {
         if (
@@ -294,6 +295,8 @@ export async function projectLiveStatus(
           at: Date.now(),
           failures,
         });
+        // Status names the stale comment until a later edit catches up.
+        recordLiveFailure(args, live, target, true);
         // Presentation only: tried again on the next transition or after the backoff.
         if (failures === 1)
           process.stderr.write(
@@ -302,6 +305,33 @@ export async function projectLiveStatus(
         break;
       }
     }
+  }
+}
+
+/**
+ * Say in the Objective's status that its live comment is behind, and clear it
+ * once an edit succeeds. Only the Objective's own comment is recorded, and a
+ * notification failure already recorded there is left as it is.
+ */
+function recordLiveFailure(
+  args: Args,
+  live: () => ContinuationState,
+  target: LiveTarget,
+  failed: boolean,
+): void {
+  if (target.item) return;
+  try {
+    const state = live();
+    if (failed) {
+      state.githubProgress ??= { requests: [] };
+      if (state.githubProgress.failure) return;
+      state.githubProgress.failure = "live-status-unavailable";
+    } else if (state.githubProgress?.failure === "live-status-unavailable")
+      delete state.githubProgress.failure;
+    else return;
+    args.save();
+  } catch {
+    // Presentation only: the stderr line and the next projection still report it.
   }
 }
 

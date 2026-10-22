@@ -829,6 +829,7 @@ export async function prepareObjective(args: {
     owner.snapshot = preparation;
     saveState(path, preparation);
     owner.recordSnapshot?.(preparation);
+    owner.phaseChanged?.();
   }
   // The plan's own inputs. Status checks the configuration live, so
   // restoring it clears the stop without a run.
@@ -938,7 +939,10 @@ export async function prepareObjective(args: {
                   }),
                   state: preparation!,
                   sessionState: preparation!,
-                  save: () => saveState(path, preparation!),
+                  save: () => {
+                    saveState(path, preparation!);
+                    owner.phaseChanged?.();
+                  },
                   stopped: () =>
                     cancellationRequested() ||
                     preparation!.coordinator.mode !== "running",

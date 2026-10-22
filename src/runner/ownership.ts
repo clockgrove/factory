@@ -290,6 +290,8 @@ export interface LocalOwner {
   save?: (state: FactoryState) => void;
   /** Bind the literal first canonical snapshot to the admitted Project claim. */
   recordSnapshot?: (state: ContinuationState) => void;
+  /** Ask for a prompt progress projection after a phase change; coalesced, never awaited. */
+  phaseChanged?: () => void;
   /** Admit a reviewed split's child Objectives to the Project queue. */
   admitChildObjectives?: import("./split.js").AdmitChildObjectives;
 }

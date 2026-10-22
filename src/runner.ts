@@ -948,6 +948,7 @@ async function runObjectiveOwned(
     if (owner.snapshot) {
       saveState(statePath(config.repository, objective), owner.snapshot);
       owner.recordSnapshot?.(owner.snapshot);
+      owner.phaseChanged?.();
     }
   };
   owner.recordSnapshot = (state) => {
@@ -1492,6 +1493,27 @@ async function runObjectiveOwned(
   };
   // Coalesce state transitions. The helper ignores time-only changes and
   // publishes from complete validated snapshots under this same owner.
+  // A phase change (compile start, each plan revision, build start) asks for a
+  // projection now instead of at the next tick. Requests inside one second
+  // share a single projection; one arriving while a projection runs gets a
+  // second run after it. The projector's own digests skip unchanged pages.
+  let phaseTimer: NodeJS.Timeout | undefined;
+  const requestProjection = () => {
+    if (
+      !githubPresentation ||
+      phaseTimer ||
+      owner.phaseChanged !== requestProjection
+    )
+      return;
+    phaseTimer = setTimeout(() => {
+      phaseTimer = undefined;
+      const running = progressTask;
+      if (running) void running.then(requestProjection);
+      else void projectProgress();
+    }, 1_000);
+    phaseTimer.unref();
+  };
+  owner.phaseChanged = requestProjection;
   const progressTimer = githubPresentation
     ? setInterval(() => {
         void projectProgress();
@@ -1657,6 +1679,8 @@ async function runObjectiveOwned(
     runFailure = error;
   } finally {
     if (progressTimer) clearInterval(progressTimer);
+    if (phaseTimer) clearTimeout(phaseTimer);
+    owner.phaseChanged = undefined;
     if (deadlineTimer) clearTimeout(deadlineTimer);
     if (cancelSignal) process.off("SIGUSR1", cancel);
     process.off("SIGTERM", handoff);

@@ -23,6 +23,7 @@ export interface GitHubProgressProjection {
   failure?:
     | "publication-unknown"
     | "projection-unavailable"
+    | "live-status-unavailable"
     | "history-exhausted";
 }
 
@@ -149,6 +150,7 @@ export function assertGitHubProgressProjection(
     ![
       "publication-unknown",
       "projection-unavailable",
+      "live-status-unavailable",
       "history-exhausted",
     ].includes(String(entry.failure))
   )

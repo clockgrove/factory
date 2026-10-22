@@ -19,7 +19,7 @@ npm run build
 
 Keep optional dependencies enabled for source development: TypeScript and notice checks inspect the optional harness SDKs.
 
-Read [AGENTS.md](AGENTS.md) for contributor rules. Use the [architecture](docs/ARCHITECTURE.md) as a reference when needed. Factory must never execute an Objective against its own source repository.
+Read [AGENTS.md](AGENTS.md) for contributor rules. Use the [architecture](docs/ARCHITECTURE.md) as a reference when needed. The [Objective lifecycle](docs/LIFECYCLE.md) defines how operator commands behave in each state; its conformance suite must cover a new state or command. Factory must never execute an Objective against its own source repository.
 
 ## Run the CLI from a checkout
 

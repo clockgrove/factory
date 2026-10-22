@@ -3070,7 +3070,8 @@ async function claimProjectQueueRunOwned(
   requireProjectQueueEffects(config);
   if (snapshot) assertRestoredContinuationReady(snapshot, config);
   if (snapshot && !continuationConfigurationMatches(snapshot, config))
-    throw new Error(
+    throw new LifecycleRefusal(
+      "config_frozen",
       "Existing execution configuration differs; if this Objective started with another provider, continue it from that provider's host or with its foreground run; otherwise use supported reconciliation without renewing admission or allowances",
     );
   // Existing archive without this host's verified baseline cannot be overwritten.

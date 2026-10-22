@@ -490,7 +490,7 @@ function checkObjectiveServiceState(
       return;
     const setup = setupCommand(configPath, requiredProviderCredentials(config));
     throw new LifecycleRefusal(
-      "config_frozen",
+      state.restoration ? "restoration_held" : "config_frozen",
       `Objective ${objective} continuation has a different configuration binding. Preserve its records and restore the original configuration at ${resolve(configPath)}, then run \`${setup}\`; a moved checkout requires supported Git restoration and ownership reconciliation`,
     );
   }

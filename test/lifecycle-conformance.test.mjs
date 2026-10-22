@@ -43,6 +43,7 @@ import {
 } from "../dist/github-project-queue.js";
 import {
   enqueueIntake,
+  foregroundQueueControl,
   intakeControl,
   runIntake,
   watchIntake,
@@ -52,7 +53,6 @@ import {
   queueDigest,
   refuseUnadmittedRun,
 } from "../dist/project-queue-state.js";
-import { withCheckpointPublication } from "../dist/process.js";
 import { resolveAutonomy } from "../dist/repair-policy.js";
 import {
   cancelObjective,
@@ -142,20 +142,50 @@ const B =
   "invariant (b): upgrade never blocks on an Objective that is not executing";
 const C = "invariant (c): no housekeeping on the operator path";
 const gap = (want, invariant) => ({ want, todo: invariant });
-/** A live service refuses every command but decide and cancel (gap 1). */
-const serviceRefuses = (commands, want = "ok") =>
-  Object.fromEntries(commands.map((command) => [command, gap(want, A)]));
-
+/** A live service refuses control of an Objective it is not running (gap 1). */
+const notOwned = (want) => gap(want, A);
 const ROWS = [
   {
     name: "queued, no state",
     phase: "not-started",
     build: () => undefined,
+    none: {
+      run: "ok",
+      retry: "no_factory_state",
+      decide: "no_factory_state",
+      cancel: "no_factory_state",
+      pause: "no_factory_state",
+      "queue-add": "ok",
+      "queue-remove": "ok",
+      upgrade: "ok",
+      start: "ok",
+    },
+    service: {
+      run: "controller_owned",
+      retry: notOwned("no_factory_state"),
+      cancel: "no_factory_state",
+      upgrade: "ok",
+    },
   },
   {
     name: "planning, owner gone",
     phase: "planning",
     build: preparationState,
+    none: {
+      run: "ok",
+      decide: "ok",
+      cancel: "ok",
+      pause: "ok",
+      resume: "ok",
+      "queue-remove": "unfinished_owned_work",
+      upgrade: "ok",
+    },
+    service: {
+      decide: "ok",
+      cancel: "ok",
+      pause: notOwned("ok"),
+      resume: notOwned("ok"),
+    },
   },
   {
     name: "plan decision",
@@ -165,6 +195,18 @@ const ROWS = [
       state.coordinator.waitReason =
         "Planning stopped for a decision: answer the question";
     }),
+    none: { run: "ok", decide: "ok", cancel: "ok", resume: "ok" },
+    service: { decide: "ok", cancel: "ok", resume: notOwned("ok") },
+  },
+  {
+    name: "plan decision, paused owner",
+    phase: "waiting",
+    build: with_(preparationState, (state) => {
+      state.planningRecovery = { phase: "stopped", history: [] };
+      state.coordinator.mode = "paused";
+    }),
+    // Refusing the plan needs the live owner stopped first (gap 8).
+    foreground: { decide: gap("ok", A), cancel: "ok", upgrade: gap("ok", B) },
   },
   {
     name: "items running, owner gone",
@@ -177,6 +219,17 @@ const ROWS = [
         baseSha: fixture.baseSha,
       };
     }),
+    none: {
+      run: "ok",
+      retry: "finish_or_cancel_active",
+      cancel: "ok",
+      pause: "ok",
+      "queue-remove": "unfinished_owned_work",
+    },
+    service: {
+      retry: notOwned("finish_or_cancel_active"),
+      cancel: "ok",
+    },
   },
   {
     name: "failed",
@@ -191,6 +244,13 @@ const ROWS = [
       state.error = "fixture failure";
       state.errorItem = "local";
     }),
+    none: {
+      run: "ok",
+      retry: "ok",
+      cancel: "ok",
+      "queue-remove": "unfinished_owned_work",
+    },
+    service: { retry: notOwned("ok"), cancel: "ok", resume: notOwned("ok") },
   },
   {
     name: "cancel unresolved",
@@ -199,10 +259,12 @@ const ROWS = [
       state.cancelRequested = true;
       state.coordinator.cancelError = "fixture cessation unresolved";
     }),
+    none: { run: "ok", retry: "cancel_unresolved", cancel: "ok" },
+    service: { retry: notOwned("cancel_unresolved"), cancel: "ok" },
   },
   {
     name: "diagnosis held by planning",
-    phase: "waiting",
+    phase: "failed",
     build: with_(executionState, (state, fixture) => {
       const id = randomUUID();
       state.work.local = {
@@ -224,10 +286,10 @@ const ROWS = [
         runId: state.runId,
         configDigest: state.configDigest,
         role: "planning",
-        planningInputDigest: "a".repeat(64),
       };
       state.sourcePacketDigest =
         state.approvedPlaybookAdmission.sourcePacketDigest;
+      scope.planningInputDigest = planningSessionInputDigest(state);
       state.agentSessions = {
         [JSON.stringify(["planning", null, scope.planningInputDigest])]: {
           scope,
@@ -244,6 +306,8 @@ const ROWS = [
         },
       };
     }),
+    none: { retry: "diagnosis_held", cancel: gap("ok", A), pause: "ok" },
+    service: { cancel: gap("ok", A) },
   },
   {
     name: "operator-paused",
@@ -251,7 +315,23 @@ const ROWS = [
     build: with_(executionState, (state) => {
       state.coordinator.mode = "paused";
     }),
-    foreground: {},
+    none: {
+      run: "ok",
+      cancel: "ok",
+      pause: "ok",
+      drain: "ok",
+      resume: "ok",
+      upgrade: "ok",
+    },
+    foreground: {
+      run: "controller_owned",
+      cancel: "ok",
+      pause: "ok",
+      resume: "ok",
+      "queue-remove": "unfinished_owned_work",
+      upgrade: gap("ok", B),
+    },
+    service: { pause: notOwned("ok"), resume: notOwned("ok"), cancel: "ok" },
   },
   {
     name: "drained",
@@ -259,29 +339,54 @@ const ROWS = [
     build: with_(executionState, (state) => {
       state.coordinator.mode = "draining";
     }),
+    none: { run: "coordinator_draining", resume: "ok", cancel: "ok" },
+    service: { resume: notOwned("ok"), cancel: "ok" },
   },
   {
     name: "rejection hold",
     phase: "needs-decision",
     build: with_(executionState, (state) => {
       state.coordinator.mode = "paused";
+      const evidence = ["README.md"];
       state.pendingAmendment = {
         id: randomUUID(),
         proposal: {
           scope: "in-scope",
-          reason: "fixture",
-          items: [],
+          reason: "Restore",
+          evidence,
+          ownership: evidence,
+          acceptance: evidence,
+          dependencies: [],
+          actor: "operator",
+          expectedGraphDigest: state.planGraphDigest,
         },
         phase: "rejected",
-        issueByItemId: {},
-        error: "fixture rejection",
+        rejectionStage: "decision",
+        error: "Refused",
+        issueByItemId: { local: 2 },
       };
     }),
+    none: {
+      run: "ok",
+      retry: "rejection_hold",
+      repair: "rejection_hold",
+      drain: "rejection_hold",
+      resume: "rejection_hold",
+      cancel: "ok",
+    },
+    service: { resume: notOwned("rejection_hold"), cancel: "ok" },
   },
   {
     name: "acceptance sealed",
-    phase: "running",
+    phase: "waiting",
     build: completedState,
+    none: {
+      run: "ok",
+      retry: "objective_complete",
+      cancel: "acceptance_sealed",
+      pause: "ok",
+    },
+    service: { cancel: "acceptance_sealed" },
   },
   {
     name: "restored, held",
@@ -318,6 +423,13 @@ const ROWS = [
         reason: "Foreign source ownership remains unresolved",
       };
     }),
+    none: {
+      run: "restoration_held",
+      retry: "restoration_held",
+      cancel: gap("ok", A),
+      start: "restoration_held",
+    },
+    service: { cancel: gap("ok", A) },
   },
   {
     name: "configuration changed",
@@ -326,6 +438,14 @@ const ROWS = [
       state.configDigest = "f".repeat(64);
       state.approvedPlaybookAdmission.configDigest = state.configDigest;
     }),
+    none: {
+      run: "config_frozen",
+      rereview: "config_frozen",
+      repair: "config_frozen",
+      cancel: "ok",
+      start: "config_frozen",
+    },
+    service: { cancel: "ok", resume: notOwned("ok") },
   },
   {
     name: "cancelled",
@@ -334,6 +454,8 @@ const ROWS = [
       state.cancelRequested = true;
       state.cancelledAt = new Date().toISOString();
     }),
+    none: { run: "ok", cancel: "ok", "queue-remove": "ok", "queue-add": "ok" },
+    service: { cancel: "ok" },
   },
   {
     name: "complete",
@@ -341,6 +463,25 @@ const ROWS = [
     build: with_(completedState, (state) => {
       state.objectiveClosure = "complete";
     }),
+    none: {
+      run: "ok",
+      retry: "objective_complete",
+      cancel: "ok",
+      "queue-remove": "ok",
+    },
+    service: { cancel: "ok" },
+  },
+  {
+    name: "complete, card archived",
+    phase: "complete",
+    build: with_(completedState, (state) => {
+      state.objectiveClosure = "complete";
+    }),
+    // Removal archived the card; adding it again re-admits it against this
+    // Project fixture. Gap 7 (an archived card refused) needs the real
+    // Project's archived-item response to reproduce.
+    archive: true,
+    none: { "queue-add": "ok" },
   },
 ];
 
@@ -349,7 +490,38 @@ const ROWS = [
  * executing, waiting on CI or settling. Their cells are not built yet; each
  * names the outcome it pins once a live-run owner exists.
  */
-const LIVE_RUN_ROWS = [];
+const LIVE_RUN_ROWS = [
+  {
+    name: "planning under a live service run",
+    phase: "planning",
+    pins: "upgrade hands the run off instead of waiting for it",
+    todo: B,
+  },
+  {
+    name: "items running under a live service run",
+    phase: "running",
+    pins: "retry refuses with finish_or_cancel_active; upgrade hands off",
+    todo: B,
+  },
+  {
+    name: "waiting on CI under a live service run",
+    phase: "waiting",
+    pins: "upgrade hands the run off (a CI wait is safe to hand off)",
+    todo: B,
+  },
+  {
+    name: "settling under a live service",
+    phase: "running",
+    pins: "decide and cancel end within a deadline instead of owner_settling",
+    todo: A,
+  },
+  {
+    name: "operator-paused under a live service run",
+    phase: "waiting",
+    pins: "upgrade hands the paused run off instead of waiting forever",
+    todo: B,
+  },
+];
 
 // ---------------------------------------------------------------------------
 // Installation fixture: a real Git checkout and archive, and the real queue,
@@ -357,7 +529,7 @@ const LIVE_RUN_ROWS = [];
 // fixture (as in git-registry-lock.test.mjs's watcherWorkflow), kept in a
 // file so that owner processes share it.
 // ---------------------------------------------------------------------------
-async function installation(t) {
+async function installation(t, seeded = true) {
   const directory = await mkdtemp(join(tmpdir(), "factory-lifecycle-"));
   const repository = `fixture/lifecycle-${randomUUID()}`;
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -443,13 +615,15 @@ async function installation(t) {
   // A real first run up to its first planning call records the plan's
   // source packet digest, which every preparation row reuses. The seed keeps
   // its queue claim, one of the installation's dispatch slots.
-  await enqueueIntake(config, fixture.services.github, [1]);
-  const seed = owner(fixture, "foreground", 1);
-  assert.equal(await seed.exited, "ok");
-  fixture.sourcePacketDigest = readContinuation(
-    repository,
-    1,
-  ).sourcePacketDigest;
+  if (seeded) {
+    await enqueueIntake(config, fixture.services.github, [1]);
+    const seed = owner(fixture, "foreground", 1);
+    assert.equal(await seed.exited, "ok");
+    fixture.sourcePacketDigest = readContinuation(
+      repository,
+      1,
+    ).sourcePacketDigest;
+  }
   fixture.validation = await validateWorkItem(
     checkout,
     join(directory, "validation"),
@@ -718,7 +892,6 @@ function projectFixture(repository, binding, file) {
       }
       if (control) project.control = resolved.action.metadata;
       else {
-        if (intent.action === "ensure-card") entry.archived = false;
         if ("metadata" in resolved.action)
           entry.metadata = resolved.action.metadata;
         if ("order" in resolved.action) entry.order = resolved.action.order;
@@ -749,6 +922,9 @@ function projectFixture(repository, binding, file) {
       const entry = structuredClone(card(project, number));
       save(project);
       return entry;
+    },
+    async objectiveDependencies() {
+      return [];
     },
     async closeIssue() {},
     defaultBranch: () => "main",
@@ -1088,13 +1264,19 @@ async function serveOwner({ mode, objective, config, directory, state }) {
               : Reflect.get(target, property, target);
           },
         });
-      await runObjective(config, objective, {
-        ...composed,
-        ...(mode === "run" ? { github: claim(composed.github) } : {}),
-        planningModel: guard(composed.planningModel),
-        driver: guard(composed.driver),
-        delivery: guard(composed.delivery),
-      }).catch((error) => {
+      await runObjective(
+        config,
+        objective,
+        {
+          ...composed,
+          ...(mode === "run" ? { github: claim(composed.github) } : {}),
+          planningModel: guard(composed.planningModel),
+          driver: guard(composed.driver),
+          delivery: guard(composed.delivery),
+        },
+        // As `factory run` composes it: the run executes queue commands.
+        { queueControl: foregroundQueueControl(config, composed.github) },
+      ).catch((error) => {
         if (error !== admitted && error?.cause !== admitted) throw error;
       });
     }
@@ -1106,22 +1288,64 @@ async function serveOwner({ mode, objective, config, directory, state }) {
   process.exit(0);
 }
 
+/** The bound for one operator command with a held publication lock. */
+const OPERATOR_BOUND_MS = 5_000;
+
+/** Another process holding the archive publication lock until released. */
+async function publicationHolder(repository) {
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { withCheckpointPublication } from ${JSON.stringify(new URL("../dist/process.js", import.meta.url).href)};
+       await withCheckpointPublication(${JSON.stringify(join(stateRoot(repository), "recovery", ".publication.guard"))}, async () => {
+         process.stdout.write("held\\n");
+         await new Promise((resolve) => setTimeout(resolve, ${OPERATOR_BOUND_MS * 3}));
+       });`,
+    ],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  await new Promise((resolve, reject) => {
+    child.stdout.on(
+      "data",
+      (part) => String(part).includes("held") && resolve(),
+    );
+    child.once("exit", () => reject(new Error("publication holder exited")));
+  });
+  return {
+    async release() {
+      child.kill("SIGKILL");
+      await once(child, "exit").catch(() => undefined);
+    },
+  };
+}
+
+/** A real bounded maintenance pass (pack and reclaim) in another process. */
+function maintenance(fixture) {
+  const child = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { maintainRecoveryCheckpoint } from ${JSON.stringify(new URL("../dist/recovery-checkpoint.js", import.meta.url).href)};
+       await maintainRecoveryCheckpoint(${JSON.stringify(fixture.config)});`,
+    ],
+    { stdio: ["ignore", "ignore", "inherit"] },
+  );
+  const exited = once(child, "exit");
+  return {
+    async release() {
+      await exited;
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 
 async function cell(t, fixture, row, owner, command, value, objective) {
   const want = typeof value === "string" ? value : value.want;
-  const startedAt = Date.now();
   const got = await dispatch(fixture, command, objective);
-  if (process.env.FACTORY_LIFECYCLE_PROBE)
-    console.log(
-      JSON.stringify({
-        row: row.name,
-        owner,
-        command,
-        got,
-        ms: Date.now() - startedAt,
-      }),
-    );
   await t.test(
     `${row.name} / ${owner} / ${command}`,
     typeof value === "string" ? {} : { todo: value.todo },
@@ -1129,35 +1353,94 @@ async function cell(t, fixture, row, owner, command, value, objective) {
   );
 }
 
-/** Write the row's state for an admitted Objective. */
-function place(fixture, row, objective) {
-  const state = row.build(fixture, objective);
-  if (state) saveState(statePath(fixture.config.repository, objective), state);
-  return state;
-}
+/**
+ * Commands whose outcome depends on the queue admission every started
+ * Objective has; other cells skip admitting, which is the slow part.
+ * Admitted Objectives are reused unless the command changed their card.
+ */
+const ADMITTED = {
+  none: ["run", "queue-add", "queue-remove"],
+  foreground: COMMANDS,
+  service: ["run", "decide", "cancel", "queue-add", "queue-remove"],
+};
+const CONSUMES = ["decide", "cancel", "queue-add", "queue-remove"];
 
-/** Every cell of `owner`, each with its own Objective, admitted at once. */
-async function plan(fixture, owner, first) {
-  const cells = [];
+/**
+ * Every cell of `owner`, each with its own Objective, admitted up front as
+ * a started Objective would be (a live service learns admissions as it
+ * observes the queue).
+ */
+async function admit(fixture, owner) {
+  const planned = [];
   for (const row of ROWS)
-    for (const [command, value] of Object.entries(probing(row, owner)))
-      if (owner !== "service" || command !== "start")
-        cells.push({ row, command, value, objective: first + cells.length });
-  if (cells.length)
-    await enqueueIntake(
-      fixture.config,
-      fixture.services.github,
-      cells.map((cell) => cell.objective),
-    );
-  return cells;
+    for (const [command, value] of Object.entries(row[owner] ?? {})) {
+      if (owner === "service" && command === "start") continue;
+      const admitted = row.archive || ADMITTED[owner].includes(command);
+      const reuse =
+        admitted &&
+        fixture.pool.length > 0 &&
+        !row.archive &&
+        owner !== "foreground";
+      const objective = reuse ? fixture.pool.pop() : fixture.next++;
+      if (admitted && !reuse)
+        await enqueueIntake(fixture.config, fixture.services.github, [
+          objective,
+        ]);
+      const returns =
+        admitted &&
+        owner !== "foreground" &&
+        !row.archive &&
+        !CONSUMES.includes(command);
+      planned.push({ row, command, value, objective, returns });
+    }
+  return planned;
 }
 
-const probing = (row, owner) =>
-  process.env.FACTORY_LIFECYCLE_PROBE && (owner !== "foreground" || row[owner])
-    ? Object.fromEntries(
-        COMMANDS.map((command) => [command, row[owner]?.[command] ?? "?"]),
-      )
-    : (row[owner] ?? {});
+/** Run each planned cell on its Objective with the row's state. */
+async function cells(t, fixture, owner, planned, around = (_, body) => body()) {
+  for (const { row, command, value, objective, returns } of planned) {
+    const state = row.build(fixture, objective);
+    if (state) {
+      saveState(statePath(fixture.config.repository, objective), state);
+      assert.equal(
+        continuationStatusDocument(
+          state,
+          fixture.config.repository,
+          objective,
+          "regular",
+        ).phase,
+        row.phase,
+        row.name,
+      );
+    }
+    if (row.archive)
+      assert.equal(await dispatch(fixture, "queue-remove", objective), "ok");
+    await around({ row, objective }, () =>
+      cell(t, fixture, row, owner, command, value, objective),
+    );
+    rmSync(objectiveRoot(fixture.config.repository, objective), {
+      recursive: true,
+      force: true,
+    });
+    if (returns) fixture.pool.push(objective);
+  }
+}
+
+/** How long `command` takes while `slow` runs beside it; "unbounded" past twice the bound. */
+async function timed(fixture, command, objective, slow) {
+  const startedAt = Date.now();
+  const running = dispatch(fixture, command, objective);
+  const outcome = await Promise.race([
+    running,
+    new Promise((resolve) =>
+      setTimeout(resolve, OPERATOR_BOUND_MS * 2, "unbounded"),
+    ),
+  ]);
+  const elapsed = Date.now() - startedAt;
+  await slow.release();
+  await running;
+  return { outcome, elapsed };
+}
 
 if (OWNER) await serveOwner(JSON.parse(OWNER));
 else {
@@ -1174,7 +1457,8 @@ else {
         [...ROWS, ...LIVE_RUN_ROWS].some((row) => row.phase === phase),
         `status phase ${phase} has no lifecycle row`,
       );
-    for (const row of ROWS)
+    for (const row of ROWS) {
+      assert(row.none || row.foreground || row.service, row.name);
       for (const owner of ["none", "foreground", "service"])
         for (const [command, value] of Object.entries(row[owner] ?? {})) {
           assert(COMMANDS.includes(command), `${row.name}: ${command}`);
@@ -1185,67 +1469,145 @@ else {
             `${row.name}/${owner}/${command}: ${want}`,
           );
         }
+    }
   });
+
+  for (const row of LIVE_RUN_ROWS)
+    test(`${row.name}: ${row.pins}`, {
+      todo: `${row.todo}; needs a live service run in the suite`,
+    });
 
   test("lifecycle conformance matrix", { timeout: 900_000 }, async (t) => {
     const fixture = await installation(t);
-    const settle = (objective) =>
-      rmSync(objectiveRoot(fixture.config.repository, objective), {
-        recursive: true,
-        force: true,
-      });
+    fixture.next = 100;
+    fixture.pool = [];
     // No live owner.
-    for (const { row, command, value, objective } of await plan(
-      fixture,
-      "none",
-      100,
-    )) {
-      const state = place(fixture, row, objective);
-      if (state)
-        assert.equal(
-          continuationStatusDocument(
-            state,
-            fixture.config.repository,
-            objective,
-            "regular",
-          ).phase,
-          row.phase,
-          row.name,
-        );
-      await cell(t, fixture, row, "none", command, value, objective);
-      settle(objective);
-    }
+    await cells(t, fixture, "none", await admit(fixture, "none"));
     // A live paused foreground run of the Objective.
-    for (const { row, command, value, objective } of await plan(
+    await cells(
+      t,
       fixture,
       "foreground",
-      1000,
-    )) {
-      place(fixture, row, objective);
-      const run = owner(fixture, "foreground", objective);
-      try {
-        assert.equal(await run.ready(), "live", `${row.name} foreground`);
-        await cell(t, fixture, row, "foreground", command, value, objective);
-      } finally {
-        await run.stop();
-      }
-    }
+      await admit(fixture, "foreground"),
+      async ({ row, objective }, body) => {
+        const run = owner(fixture, "foreground", objective);
+        try {
+          assert.equal(await run.ready(), "live", `${row.name} foreground`);
+          await body();
+        } finally {
+          await run.stop();
+        }
+      },
+    );
+    // Bounded time (invariant c): housekeeping beside an operator command.
+    const objective = fixture.next++;
+    saveState(
+      statePath(fixture.config.repository, objective),
+      executionState(fixture, objective),
+    );
+    const maintained = await timed(
+      fixture,
+      "pause",
+      objective,
+      maintenance(fixture),
+    );
+    await t.test(
+      "an operator command ends within its bound beside a maintenance pass",
+      () => {
+        assert.equal(maintained.outcome, "ok");
+        assert(
+          maintained.elapsed < OPERATOR_BOUND_MS,
+          `${maintained.elapsed} ms`,
+        );
+      },
+    );
+    // A publication lock held past the bound (a stuck publisher) still
+    // holds the operator command: its own admission waits without a bound.
+    const stuck = await timed(
+      fixture,
+      "resume",
+      objective,
+      await publicationHolder(fixture.config.repository),
+    );
+    await t.test(
+      "an operator command ends within its bound beside a stuck publisher",
+      { todo: C },
+      () => {
+        assert.equal(stuck.outcome, "ok");
+        assert(stuck.elapsed < OPERATOR_BOUND_MS, `${stuck.elapsed} ms`);
+      },
+    );
     // A live service that runs none of them: its queue stays paused.
-    const cells = await plan(fixture, "service", 2000);
     await intakeControl(
       fixture.config,
       "pause",
       undefined,
       fixture.services.github,
     );
+    const planned = await admit(fixture, "service");
     const service = owner(fixture, "service", 0);
     try {
       assert.equal(await service.ready(), "live");
-      for (const { row, command, value, objective } of cells) {
-        place(fixture, row, objective);
-        await cell(t, fixture, row, "service", command, value, objective);
-        settle(objective);
-      }
+      await cells(t, fixture, "service", planned);
+    } finally {
+      await service.stop();
+    }
+  });
+
+  // Dispatch isolation (#1715): failed and cancel-requested queued
+  // Objectives ahead of another neither stop the service nor block the
+  // Objective behind them.
+  test("a failed or cancel-requested queued Objective does not stop dispatch", async (t) => {
+    const fixture = await installation(t, false);
+    const [failed, cancelling, next] = [2, 3, 4];
+    await enqueueIntake(fixture.config, fixture.services.github, [
+      failed,
+      cancelling,
+      next,
+    ]);
+    const requested = executionState(fixture, cancelling);
+    requested.cancelRequested = true;
+    saveState(statePath(fixture.config.repository, cancelling), requested);
+    const state = executionState(fixture, failed);
+    state.work.local = {
+      status: "failed",
+      step: "execute",
+      baseSha: fixture.baseSha,
+      error: "fixture failure",
+    };
+    state.error = "fixture failure";
+    state.errorItem = "local";
+    saveState(statePath(fixture.config.repository, failed), state);
+    const service = owner(fixture, "service", 0);
+    try {
+      assert.equal(await service.ready(), "live");
+      const deadline = Date.now() + 60_000;
+      let status;
+      do {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        status = await requestControl(fixture.config.repository, {
+          objective: 0,
+          action: "status",
+        });
+      } while (
+        status.handled &&
+        !readContinuation(fixture.config.repository, next) &&
+        Date.now() < deadline
+      );
+      if (process.env.FACTORY_LIFECYCLE_TRACE)
+        console.error(JSON.stringify(status.result));
+      assert.equal(status.handled, true, "the service stays up");
+      assert(
+        readContinuation(fixture.config.repository, next),
+        "the Objective behind the failed one is dispatched",
+      );
+      // Each skipped Objective is named with its reason.
+      for (const id of [failed, cancelling])
+        assert(id in (status.result.observation?.reasons ?? {}), `#${id}`);
+      assert.equal(
+        readContinuation(fixture.config.repository, failed).runId,
+        state.runId,
+      );
     } finally {
       await service.stop();
     }

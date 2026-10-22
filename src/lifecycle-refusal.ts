@@ -49,6 +49,8 @@ export const LIFECYCLE_CODES = [
   "owner_endpoint_unavailable",
   /** Every dispatch slot holds an unsettled run; this one starts later. */
   "active_limit",
+  /** A native agent session still holds resources that cancel must settle. */
+  "session_unsettled",
   /** An upgrade waits while running Objectives finish (a result, not an error). */
   "upgrade_draining",
 ] as const;

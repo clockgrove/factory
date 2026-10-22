@@ -376,7 +376,8 @@ export async function requestForegroundQueueControl(
         entries.map((entry) => `Objective #${entry.objective}`).join(", ");
       const unbound = owners.filter((entry) => !entry.queue);
       const other = owners.filter((entry) => entry.queue);
-      throw new Error(
+      throw new LifecycleRefusal(
+        "foreground_owner_live",
         [
           ...(other.length
             ? [

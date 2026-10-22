@@ -1025,7 +1025,10 @@ export async function releaseAgentSessions(
       ...(state.agentSessionHistory ?? []),
     ].some((ref) => ref.currentTurn && ref.currentTurn.resources !== "settled")
   )
-    throw new Error("Agent session disposal requires settled native resources");
+    throw new LifecycleRefusal(
+      "session_unsettled",
+      "Agent session disposal requires settled native resources",
+    );
   // Every session is settled, so one acknowledgment covers all their storage.
   await withCheckpointDisposals(async () => {
     for (const [entryKey, ref] of Object.entries(state.agentSessions ?? {})) {

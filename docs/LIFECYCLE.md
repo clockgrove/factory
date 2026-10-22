@@ -18,7 +18,7 @@ Every lifecycle refusal is a `LifecycleRefusal` with a stable `code` (`src/lifec
 
 | Code                         | Meaning                                                                           |
 | ---------------------------- | --------------------------------------------------------------------------------- |
-| `objective_not_owned`        | A live service refuses control of an Objective it is not running.                 |
+| `objective_not_owned`        | A live service refuses a non-lifecycle action on an Objective it is not running.  |
 | `owner_settling`             | The service is starting or settling the Objective's run.                          |
 | `config_frozen`              | The Objective froze a different configuration than the current one.               |
 | `acceptance_sealed`          | Final acceptance is sealed; a run reconciles it.                                  |
@@ -64,33 +64,36 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 | State                       | Owner      | Behaviour                                                                                  |
 | --------------------------- | ---------- | ------------------------------------------------------------------------------------------ |
 | Queued, no state            | none       | run ok; retry, decide, cancel and pause `no_factory_state`; queue add and remove ok        |
-| Queued, no state            | service    | run `controller_owned`; cancel `no_factory_state`; retry ✗(a) `objective_not_owned`        |
+| Queued, no state            | service    | run `controller_owned`; retry and cancel `no_factory_state`                                |
 | Planning, owner gone        | none       | run, decide, cancel, pause and resume ok; queue remove `unfinished_owned_work`             |
-| Planning, owner gone        | service    | decide and cancel ok; pause and resume ✗(a) `objective_not_owned`                          |
+| Planning, owner gone        | service    | decide, cancel, pause and resume ok                                                        |
 | Plan decision               | none       | run, decide, cancel and resume ok                                                          |
-| Plan decision               | service    | decide and cancel ok; resume ✗(a)                                                          |
-| Plan decision, paused owner | foreground | cancel ok; refusing the plan ✗(a) `planning_owner_live`; upgrade ✗(b) waits                |
+| Plan decision               | service    | decide, cancel and resume ok                                                               |
+| Plan decision, paused owner | foreground | cancel ok; refusing the plan ok (the owner hands off); upgrade ✗(b) waits                  |
 | Items running, owner gone   | none       | run, cancel and pause ok; retry `finish_or_cancel_active`                                  |
-| Items running, owner gone   | service    | cancel ok; retry ✗(a)                                                                      |
+| Items running, owner gone   | service    | cancel ok; retry `finish_or_cancel_active`                                                 |
 | Failed                      | none       | run, retry and cancel ok                                                                   |
-| Failed                      | service    | cancel ok; retry and resume ✗(a)                                                           |
+| Failed                      | service    | retry, cancel and resume ok                                                                |
 | Cancel unresolved           | none       | run and cancel ok; retry `cancel_unresolved`                                               |
-| Cancel unresolved           | service    | cancel ok; retry ✗(a)                                                                      |
+| Cancel unresolved           | service    | cancel ok; retry `cancel_unresolved`                                                       |
 | Diagnosis held              | none       | retry `diagnosis_held`; cancel ✗(a) `session_unsettled`                                    |
 | Diagnosis held              | service    | cancel ✗(a) `session_unsettled`                                                            |
 | Operator-paused             | none       | run, cancel, pause, drain, resume and upgrade ok                                           |
 | Operator-paused             | foreground | run `controller_owned`; cancel, pause and resume ok; upgrade ✗(b) waits                    |
-| Operator-paused             | service    | cancel ok; pause and resume ✗(a)                                                           |
+| Operator-paused             | service    | cancel, pause and resume ok                                                                |
 | Drained                     | none       | run `coordinator_draining`; resume and cancel ok                                           |
-| Drained                     | service    | cancel ok; resume ✗(a), so the only way out is to stop the service                         |
+| Drained                     | service    | resume and cancel ok                                                                       |
 | Rejection hold              | none       | run and cancel ok; retry, repair, drain and resume `rejection_hold`                        |
-| Rejection hold              | service    | cancel ok; resume ✗(a)                                                                     |
+| Rejection hold              | service    | cancel ok; resume `rejection_hold`                                                         |
 | Acceptance sealed           | none       | run ok (it reconciles); retry `objective_complete`; cancel `acceptance_sealed`             |
 | Restored, held              | none       | run and retry `restoration_held`; start `restoration_held`; cancel ✗(a) `restoration_held` |
 | Configuration changed       | none       | run, rereview, repair and start `config_frozen`; cancel ok                                 |
+| Configuration changed       | service    | cancel and resume ok                                                                       |
 | Cancelled                   | none       | run, cancel, queue remove and queue add ok                                                 |
 | Complete                    | none       | run, cancel and queue remove ok; retry `objective_complete`                                |
 | Complete, card archived     | none       | queue add ok against the Project fixture; real GitHub needs a live check (gap 7)           |
+
+**One control plane.** A live service runs every lifecycle command on an Objective it isn't running: decide, cancel, retry, repair, rereview, select, amendments, pause, drain and resume. It runs the foreground implementation as the installation owner, under the Objective's lock and on the configuration the Objective froze. While it starts or settles the Objective's run, it refuses with `owner_settling`. A live paused planning owner hands its Objective off to take a plan refusal, which then lands where the Objective stopped.
 
 **Dispatch isolation.** A failed or cancel-requested queued Objective is skipped with a reason. The service stays up and dispatches the Objectives behind it.
 

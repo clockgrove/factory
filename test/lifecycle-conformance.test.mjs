@@ -142,8 +142,6 @@ const B =
   "invariant (b): upgrade never blocks on an Objective that is not executing";
 const C = "invariant (c): no housekeeping on the operator path";
 const gap = (want, invariant) => ({ want, todo: invariant });
-/** A live service refuses control of an Objective it is not running (gap 1). */
-const notOwned = (want) => gap(want, A);
 const ROWS = [
   {
     name: "queued, no state",
@@ -162,7 +160,7 @@ const ROWS = [
     },
     service: {
       run: "controller_owned",
-      retry: notOwned("no_factory_state"),
+      retry: "no_factory_state",
       cancel: "no_factory_state",
       upgrade: "ok",
     },
@@ -183,8 +181,8 @@ const ROWS = [
     service: {
       decide: "ok",
       cancel: "ok",
-      pause: notOwned("ok"),
-      resume: notOwned("ok"),
+      pause: "ok",
+      resume: "ok",
     },
   },
   {
@@ -196,7 +194,7 @@ const ROWS = [
         "Planning stopped for a decision: answer the question";
     }),
     none: { run: "ok", decide: "ok", cancel: "ok", resume: "ok" },
-    service: { decide: "ok", cancel: "ok", resume: notOwned("ok") },
+    service: { decide: "ok", cancel: "ok", resume: "ok" },
   },
   {
     name: "plan decision, paused owner",
@@ -205,8 +203,8 @@ const ROWS = [
       state.planningRecovery = { phase: "stopped", history: [] };
       state.coordinator.mode = "paused";
     }),
-    // Refusing the plan needs the live owner stopped first (gap 8).
-    foreground: { decide: gap("ok", A), cancel: "ok", upgrade: gap("ok", B) },
+    // The paused owner hands the Objective off to take the refusal.
+    foreground: { decide: "ok", cancel: "ok", upgrade: gap("ok", B) },
   },
   {
     name: "items running, owner gone",
@@ -227,7 +225,7 @@ const ROWS = [
       "queue-remove": "unfinished_owned_work",
     },
     service: {
-      retry: notOwned("finish_or_cancel_active"),
+      retry: "finish_or_cancel_active",
       cancel: "ok",
     },
   },
@@ -250,7 +248,7 @@ const ROWS = [
       cancel: "ok",
       "queue-remove": "unfinished_owned_work",
     },
-    service: { retry: notOwned("ok"), cancel: "ok", resume: notOwned("ok") },
+    service: { retry: "ok", cancel: "ok", resume: "ok" },
   },
   {
     name: "cancel unresolved",
@@ -260,7 +258,7 @@ const ROWS = [
       state.coordinator.cancelError = "fixture cessation unresolved";
     }),
     none: { run: "ok", retry: "cancel_unresolved", cancel: "ok" },
-    service: { retry: notOwned("cancel_unresolved"), cancel: "ok" },
+    service: { retry: "cancel_unresolved", cancel: "ok" },
   },
   {
     name: "diagnosis held by planning",
@@ -331,7 +329,7 @@ const ROWS = [
       "queue-remove": "unfinished_owned_work",
       upgrade: gap("ok", B),
     },
-    service: { pause: notOwned("ok"), resume: notOwned("ok"), cancel: "ok" },
+    service: { pause: "ok", resume: "ok", cancel: "ok" },
   },
   {
     name: "drained",
@@ -340,7 +338,7 @@ const ROWS = [
       state.coordinator.mode = "draining";
     }),
     none: { run: "coordinator_draining", resume: "ok", cancel: "ok" },
-    service: { resume: notOwned("ok"), cancel: "ok" },
+    service: { resume: "ok", cancel: "ok" },
   },
   {
     name: "rejection hold",
@@ -374,7 +372,7 @@ const ROWS = [
       resume: "rejection_hold",
       cancel: "ok",
     },
-    service: { resume: notOwned("rejection_hold"), cancel: "ok" },
+    service: { resume: "rejection_hold", cancel: "ok" },
   },
   {
     name: "acceptance sealed",
@@ -445,7 +443,7 @@ const ROWS = [
       cancel: "ok",
       start: "config_frozen",
     },
-    service: { cancel: "ok", resume: notOwned("ok") },
+    service: { cancel: "ok", resume: "ok" },
   },
   {
     name: "cancelled",

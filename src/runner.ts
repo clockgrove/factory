@@ -185,7 +185,7 @@ import {
   waitOf,
 } from "./step.js";
 import { applyWorkCorrection, recordWorkFailure } from "./work-repair.js";
-import { LifecycleRefusal } from "./lifecycle-refusal.js";
+import { LifecycleRefusal, lifecycleCode } from "./lifecycle-refusal.js";
 
 export type { ApplicationServices } from "./runner/ownership.js";
 export { CoordinatorHandoff } from "./runner/ownership.js";
@@ -225,6 +225,9 @@ function withGitHubDiagnostics<T>(
     run,
   );
 }
+
+/** How long a refused plan waits for the live owner that handed it off to stop. */
+const OWNER_HANDOFF_MS = 60_000;
 
 /** What `factory decide` was asked, before the Objective's state says which decision it is. */
 export interface DecisionInput {
@@ -317,22 +320,42 @@ async function decideObjectiveUnscoped(
         "Granting planning revisions answers no question; omit --answer",
       );
     // A live service owns the installation: it applies the decision (#1290).
-    if (forward) {
+    // A live paused owner hands a refused plan off; the decision then lands
+    // where the Objective stopped, once its owner has (#1714).
+    let handedOff: number | undefined;
+    while (forward) {
       const reply = await requestControl(config.repository, {
         objective,
         action: "decide",
         input: { ...input },
-      });
-      if (reply.handled) {
+      }).catch((error: unknown) => {
+        // The service settles the handed-off run before it decides.
         if (
-          reply.result !== "plan-accepted" &&
-          reply.result !== "plan-answered" &&
-          reply.result !== "plan-revisions-granted" &&
-          reply.result !== "plan-refused"
+          handedOff === undefined ||
+          lifecycleCode(error) !== "owner_settling"
         )
-          throw new Error("The live owner returned no plan decision");
-        return reply.result;
+          throw error;
+        return { handled: true, result: "plan-handed-off" };
+      });
+      if (!reply.handled) break;
+      if (reply.result === "plan-handed-off") {
+        handedOff ??= Date.now();
+        if (Date.now() - handedOff > OWNER_HANDOFF_MS)
+          throw new LifecycleRefusal(
+            "planning_owner_live",
+            "The planning owner did not stop after handing off the plan; decide again once it has",
+          );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
       }
+      if (
+        reply.result !== "plan-accepted" &&
+        reply.result !== "plan-answered" &&
+        reply.result !== "plan-revisions-granted" &&
+        reply.result !== "plan-refused"
+      )
+        throw new Error("The live owner returned no plan decision");
+      return reply.result;
     }
     const decided = await decidePlan(config, objective, services, {
       actor: input.actor,
@@ -490,6 +513,14 @@ async function controlObjectiveUnscoped(
     assertRestoredContinuationReady(retained, config);
   const reply = await requestControl(config.repository, request);
   if (reply.handled) return reply.result;
+  return controlUnowned(config, request);
+}
+
+/** A mode change or amendment intake on an Objective no live controller runs. */
+async function controlUnowned(
+  config: FactoryConfig,
+  request: ControlRequest,
+): Promise<unknown> {
   if (
     ![
       "pause",
@@ -1118,12 +1149,22 @@ async function runObjectiveOwned(
               "--item names a Work Item's result; a plan decision takes none",
             );
           // A refusal discards the preparation, which a live owner would
-          // write back; it needs the owner stopped first.
-          if (decision.outcome === "refuse")
-            throw new LifecycleRefusal(
-              "planning_owner_live",
-              "Refusing a plan needs its owner stopped: hand off the owner, then decide",
-            );
+          // write back. A paused owner hands this Objective off, and the
+          // caller decides once it has stopped (#1714); a planning owner
+          // that is still working is paused first.
+          if (decision.outcome === "refuse") {
+            if (owner.handoff) return "plan-handed-off";
+            if (current.coordinator.mode === "running")
+              throw new LifecycleRefusal(
+                "planning_owner_live",
+                "Refusing a plan needs its owner paused: pause the Objective, then decide",
+              );
+            releaseOwnership();
+            setCoordinatorMode(current, "draining", owner.handoffBy);
+            persist();
+            wake();
+            return "plan-handed-off";
+          }
           // Planning stopped at its revision allowance: accepting grants more.
           if (planningRevisionGrantable(current)) {
             grantPlanningRevisions(current, decision);
@@ -3249,6 +3290,81 @@ export function decideStoppedObjective(
   input: DecisionInput,
 ): ReturnType<typeof decideObjectiveUnscoped> {
   return decideObjectiveUnscoped(config, objective, services, input, false);
+}
+
+/**
+ * The live installation owner running an operator command on one of its
+ * Objectives that no run owns (#1714): the command's foreground
+ * implementation, under the Objective's lock and without forwarding. As with
+ * decideStoppedObjective, its effects are admitted in the owner's own
+ * checkpoint scope.
+ */
+export async function controlStoppedObjective(
+  config: FactoryConfig,
+  services: Pick<
+    ApplicationServices,
+    "driver" | "github" | "planningModel" | "contentStore"
+  >,
+  request: ControlRequest,
+): Promise<unknown> {
+  const { objective } = request;
+  const input = request.input ?? {};
+  switch (request.action) {
+    case "decide":
+      return decideStoppedObjective(
+        config,
+        objective,
+        services,
+        parseDecisionInput(input),
+      );
+    case "cancel":
+      return cancelStoppedObjective(config, objective, services);
+    case "retry":
+      return retryWorkItem(
+        config,
+        objective,
+        input.item === undefined ? undefined : String(input.item),
+        {
+          fresh: input.fresh === true,
+          ...(input.retire !== undefined && {
+            retire: input.retire as {
+              command: string;
+              reason: string;
+              actor: string;
+            },
+          }),
+        },
+      );
+    case "repair":
+      repairWorkItem(
+        config,
+        objective,
+        input as Parameters<typeof repairWorkItem>[2],
+      );
+      return "applied";
+    case "rereview":
+      rereviewWorkItem(
+        config,
+        objective,
+        input as Parameters<typeof rereviewWorkItem>[2],
+      );
+      return "applied";
+    case "select":
+      await selectAssetSetFromCliUnscoped(
+        config,
+        objective,
+        String(input.item),
+        String(input.set),
+        services.contentStore,
+        input,
+      );
+      return "applied";
+    default: {
+      const retained = readContinuation(config.repository, objective);
+      if (retained) assertRestoredContinuationReady(retained, config);
+      return controlUnowned(config, request);
+    }
+  }
 }
 
 export function controlObjective(

@@ -472,7 +472,7 @@ export function assertCommandSandboxConfig(value: unknown): void {
 const ENVIRONMENT_NAME = /^[A-Z][A-Z0-9_]*$/;
 const MAX_ENVIRONMENT_VALUE_BYTES = 4096;
 const REFUSED_ENVIRONMENT_NAME =
-  /^(PATH|HOME|TMPDIR|TMP|TEMP|SHELL|USER|LOGNAME|NODE_OPTIONS|GIT_.*|GH_.*|GITHUB_.*|LD_.*)$|TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY/;
+  /^(PATH|HOME|TMPDIR|TMP|TEMP|SHELL|USER|LOGNAME|NODE_OPTIONS|GIT_.*|GH_.*|GITHUB_.*|LD_.*|NPM_CONFIG_.*|PNPM_.*|COREPACK_.*|YARN_.*|.*_PROXY|NODE_.*|BASH_ENV|ENV|DYLD_.*|PYTHON.*|PERL5.*|SSL_.*|CURL_.*)$|TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY/;
 
 /** Absolute-path environment values that no `sandbox.readOnlyPaths` entry covers. */
 export function uncoveredSandboxEnvironment(
@@ -1097,10 +1097,12 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
     return resolved;
   });
   const env: Record<string, string> = { ...input.env };
+  // Configured values come first, so Factory's own variables win; the
+  // networked install never receives them.
+  if (!input.packageInstall) Object.assign(env, input.policy.environment);
   for (const name of HOST_DIRECTORY_VARIABLES) delete env[name];
   env.HOME = home;
   if (path !== undefined) env.PATH = path;
-  Object.assign(env, input.policy.environment);
   // Without a packageStore, package caches live in the private HOME, never
   // in the checkout.
   Object.assign(env, packageCacheEnvironment(join(home, ".cache")));

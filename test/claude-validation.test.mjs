@@ -1839,6 +1839,23 @@ test("a sandbox that cannot be set up is a configuration fault, not the command'
   // sandbox.environment reaches the command; the digest ignores it.
   const seen = launchIn(root, "exit 0", [tools], { TOOL_DIR: tools });
   assert.equal(seen.env.TOOL_DIR, tools);
+  // Factory's own variables win, and a package install gets none of them.
+  const forced = launchIn(root, "exit 0", [tools], {
+    HOME: "/x",
+    TOOL_DIR: tools,
+  });
+  assert.equal(forced.env.HOME, join(root, "home"));
+  const install = sandboxedCommand({
+    command: "exit 0",
+    checkout: join(root, "worktree"),
+    temporary: join(root, "tmp"),
+    home: join(root, "home"),
+    env: { PATH: process.env.PATH },
+    network: false,
+    packageInstall: true,
+    policy: { ...STRICT_COMMAND_SANDBOX, environment: { TOOL_DIR: tools } },
+  });
+  assert.equal(install.env.TOOL_DIR, undefined);
   const digestConfig = { repository: "o/r", checkout: root };
   assert.equal(
     factoryConfigDigest({

@@ -41,6 +41,7 @@ Every lifecycle refusal is a `LifecycleRefusal` with a stable `code` (`src/lifec
 | `owner_endpoint_unavailable` | A live owner holds its record without a control endpoint.                         |
 | `active_limit`               | Every dispatch slot holds an unsettled run.                                       |
 | `session_unsettled`          | A native agent session still holds resources that cancellation must settle.       |
+| `publication_lock_held`      | Another process held the archive publication lock past the bound; run it again.   |
 | `upgrade_draining`           | An upgrade waits while running Objectives finish. This is a result, not an error. |
 
 Add a code here, and to `LIFECYCLE_CODES`, when you add a lifecycle refusal.
@@ -97,7 +98,7 @@ An entry marked ✗ is a known gap. The marker names the invariant it breaks and
 **Bounded time.**
 
 - An operator command ends within its bound beside a real maintenance pass.
-- A publication lock that another process holds past the bound still blocks it: ✗(c).
+- A publication lock that another live process holds past 3 s refuses it with `publication_lock_held`, naming the holder. A lock whose holder is gone is taken; a live holder's lock is never broken. Maintenance pauses between pack batches, so the command waits at most one batch behind it.
 
 These rows need the service to be actively running the Objective. The suite lists them as `todo` until it has a live-run owner:
 

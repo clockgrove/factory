@@ -592,10 +592,16 @@ async function withRepositoryLock<T>(
   key: string,
   mode: LockMode,
   run: () => Promise<T>,
+  /** Also ends the wait for the lock, never the run that holds it. */
+  waiting?: AbortSignal,
 ): Promise<T> {
   const lock = repositoryLocks.get(key) ?? new RepositoryLock();
   repositoryLocks.set(key, lock);
-  const signal = currentProcessSignal();
+  const cancelled = currentProcessSignal();
+  const signal =
+    waiting && cancelled
+      ? AbortSignal.any([cancelled, waiting])
+      : (waiting ?? cancelled);
   assertProcessActive();
   const turn = lock.acquire(mode, signal);
   let held = false;
@@ -806,21 +812,59 @@ export async function withRegistryFiles<T>(
  * Await one archive publisher across controllers, separately from Git's
  * registry lock.
  */
-export async function withCheckpointPublication<T>(
+export function withCheckpointPublication<T>(
   publicationGuard: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  return withBoundedPublication(publicationGuard, undefined, run);
+}
+
+/**
+ * withCheckpointPublication that, with `bound`, waits at most `waitMs` for
+ * the lock, then throws `refuse(pid)` naming the live holder's process. A
+ * holder whose process is gone is stale and is taken (see withRegistryFiles);
+ * a live one is never broken.
+ */
+export async function withBoundedPublication<T>(
+  publicationGuard: string,
+  bound: { waitMs: number; refuse: (holder?: number) => Error } | undefined,
   run: () => Promise<T>,
 ): Promise<T> {
   assertProcessActive();
   const directory = realpathSync(dirname(publicationGuard));
   const guard = join(directory, basename(publicationGuard));
-  return withRepositoryLock(
-    `checkpoint-publication:${guard}`,
-    "exclusive",
-    async () => {
-      assertProcessActive();
-      return await run();
-    },
-  );
+  const key = `checkpoint-publication:${guard}`;
+  const waiting = bound && new AbortController();
+  const timer =
+    bound && setTimeout(() => waiting?.abort(), bound.waitMs).unref();
+  let held = false;
+  try {
+    return await withRepositoryLock(
+      key,
+      "exclusive",
+      async () => {
+        held = true;
+        clearTimeout(timer);
+        assertProcessActive();
+        return await run();
+      },
+      waiting?.signal,
+    );
+  } catch (error) {
+    if (!bound || held || !waiting?.signal.aborted) throw error;
+    let holder: number | undefined;
+    try {
+      const writer = JSON.parse(
+        readFileSync(join(registryLockDirectory(key), "writer"), "utf8"),
+      );
+      if (processAlive(writer)) holder = writer.pid;
+    } catch {
+      // Released or partial since: the holder stays unknown.
+    }
+    throw bound.refuse(holder);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

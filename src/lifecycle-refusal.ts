@@ -51,6 +51,8 @@ export const LIFECYCLE_CODES = [
   "active_limit",
   /** A native agent session still holds resources that cancel must settle. */
   "session_unsettled",
+  /** Another process held the archive publication lock past the operator's bound. */
+  "publication_lock_held",
   /** An upgrade waits while running Objectives finish (a result, not an error). */
   "upgrade_draining",
 ] as const;

@@ -140,7 +140,6 @@ const NOT_LIFECYCLE = {
 const A = "invariant (a): every non-terminal state has an operator exit";
 const B =
   "invariant (b): upgrade never blocks on an Objective that is not executing";
-const C = "invariant (c): no housekeeping on the operator path";
 const gap = (want, invariant) => ({ want, todo: invariant });
 /** A live service refuses control of an Objective it is not running (gap 1). */
 const notOwned = (want) => gap(want, A);
@@ -1532,20 +1531,22 @@ else {
         );
       },
     );
-    // A publication lock held past the bound (a stuck publisher) still
-    // holds the operator command: its own admission waits without a bound.
+    // A publication lock held past the bound (a stuck publisher) refuses
+    // the operator command; once its holder is gone (killed), the lock is
+    // stale and the same command takes it.
     const stuck = await timed(
       fixture,
       "resume",
       objective,
       await publicationHolder(fixture.config.repository),
     );
+    const retried = await dispatch(fixture, "resume", objective);
     await t.test(
       "an operator command ends within its bound beside a stuck publisher",
-      { todo: C },
       () => {
-        assert.equal(stuck.outcome, "ok");
+        assert.equal(stuck.outcome, "publication_lock_held");
         assert(stuck.elapsed < OPERATOR_BOUND_MS, `${stuck.elapsed} ms`);
+        assert.equal(retried, "ok");
       },
     );
     // A live service that runs none of them: its queue stays paused.

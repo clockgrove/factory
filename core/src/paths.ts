@@ -19,7 +19,9 @@ export function installationPaths(
     join(homedir(), ".local", "state", "factory"),
 ): Paths {
   // Lock on the real directory, so two spellings of one path share one lock.
-  const named = resolve(join(stateRoot, repository.replace("/", "__")));
+  const named = resolve(
+    join(stateRoot, repository.toLowerCase().replace("/", "__")),
+  );
   mkdirSync(named, { recursive: true, mode: 0o700 });
   const root = realpathSync(named);
   const id = createHash("sha256").update(root).digest("hex").slice(0, 24);

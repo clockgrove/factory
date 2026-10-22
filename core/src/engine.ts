@@ -82,6 +82,8 @@ const INTERRUPTED = "the service stopped during this step";
 export class ObjectiveRunner {
   private readonly running = new Map<string, Running>();
   private nextToken = 1;
+  /** Effects outside the state, run only once the change is saved. */
+  private afterSave: (() => void)[] = [];
 
   constructor(
     public state: ObjectiveState,
@@ -108,12 +110,17 @@ export class ObjectiveRunner {
    */
   transact<T>(change: () => T): T {
     const before = structuredClone(this.state);
+    this.afterSave = [];
     try {
       const result = change();
       this.save();
+      const effects = this.afterSave;
+      this.afterSave = [];
+      for (const effect of effects) effect();
       return result;
     } catch (error) {
       this.state = before;
+      this.afterSave = [];
       throw error;
     }
   }
@@ -224,6 +231,24 @@ export class ObjectiveRunner {
     const state = this.state;
     const now = this.now();
     delete state.attempts[key];
+    if (TERMINAL.includes(state.status) && outcome.kind !== "done") {
+      // Cleanup after the end never asks and never blocks: it retries in
+      // the background with the usual backoff.
+      const previous = state.retries[key];
+      const attempts = (previous?.attempts ?? 0) + 1;
+      const backoff = Math.min(
+        this.limits.baseBackoffMs * 2 ** (attempts - 1),
+        this.limits.maxBackoffMs,
+      );
+      state.retries[key] = {
+        count: (previous?.count ?? 0) + 1,
+        attempts,
+        since: previous?.since ?? now.toISOString(),
+        nextAt: new Date(now.getTime() + backoff).toISOString(),
+        lastError: "reason" in outcome ? outcome.reason : outcome.question,
+      };
+      return;
+    }
     switch (outcome.kind) {
       case "done":
         state.done[key] = outcome.result ?? true;
@@ -353,13 +378,11 @@ export class ObjectiveRunner {
     const status = this.state.status;
     if (status === "done" || status === "failed")
       return `#${this.state.issue} has already finished (${status}).`;
-    for (const { controller } of this.running.values())
-      controller.abort(new Error("cancelled"));
-    this.running.clear();
     if (status === "cancelled") return null;
     this.state.status = "cancelled";
     this.state.hold = null;
     this.state.attempts = {};
+    this.state.retries = {};
     delete this.state.resumeStatus;
     this.state.answers.cancel = {
       holdId: "",
@@ -367,7 +390,13 @@ export class ObjectiveRunner {
       by,
       at: this.now().toISOString(),
     };
-    this.log.write(this.state.issue, { event: "cancelled", by });
+    // Stop running steps only once the cancel is saved.
+    this.afterSave.push(() => {
+      for (const { controller } of this.running.values())
+        controller.abort(new Error("cancelled"));
+      this.running.clear();
+      this.log.write(this.state.issue, { event: "cancelled", by });
+    });
     return null;
   }
 

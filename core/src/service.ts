@@ -2,6 +2,7 @@ import {
   linkSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -29,6 +30,7 @@ import {
   saveState,
   TERMINAL,
 } from "./state.js";
+import type { GitHubModule, GitHubSync } from "./github-sync.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 export interface ServeOptions {
@@ -38,6 +40,8 @@ export interface ServeOptions {
   /** Objectives that may make progress at once (v1: 1). */
   maxActive?: number;
   tickMs?: number;
+  /** GitHub queue, display and comments. Absent without configuration. */
+  sync?: GitHubSync;
 }
 
 const KEEP_REQUEST_IDS = 50;
@@ -50,7 +54,7 @@ const RESULT_TTL_MS = 60 * 60 * 1000;
  */
 export async function serve(options: ServeOptions): Promise<number> {
   const { paths } = options;
-  const workflow = options.workflow ?? objectiveWorkflow;
+  const workflow = options.workflow ?? objectiveWorkflow();
   const limits = options.limits ?? DEFAULT_LIMITS;
   const maxActive = options.maxActive ?? 1;
   const lock = await takeServiceLock(paths.lockName);
@@ -180,7 +184,11 @@ export async function serve(options: ServeOptions): Promise<number> {
       const status = runner.state.status;
       let run = false;
       if (TERMINAL.includes(status)) run = runner.hasWork;
-      else if (status !== "holding" && slots > 0) {
+      else if (runner.busy) {
+        // Running steps keep their slot, even while another step's question is open.
+        slots -= 1;
+        run = true;
+      } else if (status !== "holding" && slots > 0) {
         slots -= 1;
         run = true;
       } else if (Object.keys(runner.state.attempts).length > 0 && !runner.busy)
@@ -196,6 +204,28 @@ export async function serve(options: ServeOptions): Promise<number> {
         });
       }
     }
+    options.sync?.tick({
+      runners,
+      requestsDir: paths.requests,
+      slotFree: () =>
+        [...runners.values()].filter(
+          (r) =>
+            !TERMINAL.includes(r.state.status) && r.state.status !== "holding",
+        ).length < maxActive,
+      admit: (issue: number, github: GitHubModule) => {
+        // A new run, or a run again after the operator queued a finished one.
+        const state = newObjective(issue, new Date());
+        state.modules.github = github;
+        saveState(paths.objectives, state);
+        unreadable.delete(issue);
+        runners.set(
+          issue,
+          new ObjectiveRunner(state, workflow, paths.objectives, log, limits),
+        );
+        log.write(issue, { event: "admitted" });
+      },
+      result: (id: string) => readResult(paths.requests, id),
+    });
     writeHeartbeat(paths.root, runId, unreadable);
   };
 
@@ -238,6 +268,14 @@ export async function serve(options: ServeOptions): Promise<number> {
 
 function started(runner: ObjectiveRunner): boolean {
   return runner.busy || Object.keys(runner.state.done).length > 0;
+}
+
+function readResult(dir: string, id: string): string | undefined {
+  try {
+    return readFileSync(join(dir, `${id}.result`), "utf8").trim();
+  } catch {
+    return undefined;
+  }
 }
 
 /** Write the result whole, and only once: a request re-read after a crash keeps its first result. */

@@ -34,10 +34,13 @@ export function writeRequest(
   dir: string,
   request: Request,
   by: string,
+  /** A fixed id makes writing the same request twice harmless. */
+  fixedId?: string,
 ): string {
   mkdirSync(dir, { recursive: true });
   const at = new Date().toISOString();
-  const id = `${at.replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
+  const id =
+    fixedId ?? `${at.replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
   const stored: StoredRequest = { id, at, by, request };
   const temporary = join(dir, `.${id}.tmp`);
   const fd = openSync(temporary, "w", 0o600);

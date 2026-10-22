@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const CLI = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -38,6 +38,12 @@ function installation() {
   };
 }
 
+// Every service a test starts is killed at the end, even when a test fails.
+const children = new Set();
+after(() => {
+  for (const child of children) child.kill("SIGKILL");
+});
+
 /** Start `factory serve`. Resolves with its exit when it ends. */
 function serve(inst, crashAt) {
   const env = { ...inst.env };
@@ -46,6 +52,8 @@ function serve(inst, crashAt) {
     env,
     stdio: ["ignore", "ignore", "pipe"],
   });
+  children.add(child);
+  child.on("exit", () => children.delete(child));
   let stderr = "";
   child.stderr.on("data", (chunk) => {
     stderr += chunk;

@@ -94,6 +94,8 @@ import {
   validateGraphSources,
   assertNoCiOnlyValidation,
   assertPlanBoundaries,
+  authorizedCommandInstructions,
+  authorizedCommands,
   ciOnlyInstructions,
 } from "./sources.js";
 
@@ -616,6 +618,12 @@ export function prepareCompilationRequest(args: {
   if (args.contextLookup)
     assertPlanningContextPacket(args.contextLookup, sources);
   const revising = args.revise?.answer !== undefined && !amendment;
+  const authorized = authorizedCommands(
+    sources,
+    baseSha,
+    checkout,
+    args.ciOnlyCommands ?? [],
+  );
   const instructions =
     renderPlanningInstructions(
       body,
@@ -624,7 +632,9 @@ export function prepareCompilationRequest(args: {
       amendment,
       checkout,
       revising,
-    ) + ciOnlyInstructions(args.ciOnlyCommands ?? []);
+    ) +
+    ciOnlyInstructions(args.ciOnlyCommands ?? []) +
+    authorizedCommandInstructions(authorized);
   const prompt = `Objective #${objective}\n${body}${instructions}`;
   const scripts = fixedScripts(
     body,
@@ -649,6 +659,7 @@ export function prepareCompilationRequest(args: {
       ...(args.ciOnlyCommands?.length && {
         ciOnlyCommands: [...args.ciOnlyCommands],
       }),
+      authorizedCommands: authorized.slice(0, 20),
       ...(childIdentity(body) && { splitChild: true }),
       ...(amendment && {
         previousGraph: amendment.currentGraph,
@@ -774,6 +785,7 @@ export function validateCompiledGraph(args: {
         checkout,
         request.compileContext?.ciOnlyCommands ?? [],
         [body, ...sources.map((source) => source.content)],
+        request.compileContext?.authorizedCommands ?? [],
       );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

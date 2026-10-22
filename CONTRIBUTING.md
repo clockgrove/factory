@@ -131,6 +131,10 @@ Preserve these boundaries:
 - Preserve exact commit, tree, and GitHub head checks at publication and Objective completion.
 - Target repositories own their product requirements, validation commands, access controls, and acceptance.
 
+### Plan checks
+
+When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. A new plan check must put its facts in the planner request, refuse with the allowed alternatives or the exact fix, and be registered in `PLAN_CHECKS`; see [the plan checks](docs/PLANNING.md#plan-checks).
+
 ## Contributing versus using Factory
 
 Factory contributors work directly on this repository. To use Factory for work in another repository, follow the [README](README.md) and the installed `director` and `setup` skills. Target owners can copy the [Objective issue form](docs/templates/objective.yml) into their own repository's `.github/ISSUE_TEMPLATE/` directory; it is not a bug-report form for Factory.

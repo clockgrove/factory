@@ -19,6 +19,7 @@ import {
   type WorkGraph,
 } from "./contracts.js";
 import { PlannerDecision } from "./fault.js";
+import { listCommands } from "./validation-environment.js";
 import {
   assertChildObjectives,
   type ChildObjectiveSpec,
@@ -116,7 +117,10 @@ const LINE_REFERENCE =
  * amendment carries pending items over and has no correction channel for
  * these, so it is not linted; graph review checks 3 and 8 judge it there.
  */
-function planStandardLint(item: ObjectValue, reason: string | null): string[] {
+export function planStandardLint(
+  item: ObjectValue,
+  reason: string | null,
+): string[] {
   if (!Array.isArray(item.acceptance)) return [];
   const findings: string[] = [];
   if (item.acceptance.length > WORK_ITEM_ENTRY_SIGNAL && reason === null)
@@ -144,11 +148,13 @@ const NON_LOCAL_PROOFS = new Set([
  * local executable evidence. Local evidence is checked only when the plan
  * selects some validation command, which shows the repository has one.
  */
-function planGraphLint(
+export function planGraphLint(
   graph: WorkGraph,
   linted: Set<string>,
   /** In a split, each item's child Objective: children run as separate Objectives. */
   childOf: ReadonlyMap<string, string>,
+  /** The authorized validation commands the request listed. */
+  authorized: readonly string[] = [],
 ): string[] {
   const findings: string[] = [];
   const byId = new Map(graph.items.map((item) => [item.id, item]));
@@ -208,7 +214,7 @@ function planGraphLint(
     if ((item.kind ?? "work") === "work" && !item.validation.length) {
       linted.add(item.id);
       findings.push(
-        `Work Item ${item.id} has no validation command, so its acceptance has no local executable evidence: select the authorized commands that run the tests it owns, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
+        `Work Item ${item.id} has no validation command, so its acceptance has no local executable evidence: select one of the authorized commands (${listCommands(authorized)}) that runs the tests it owns, or, if its proof needs an environment local validation lacks, ask through decisionRequired`,
       );
     }
   for (const entry of graph.coverage ?? [])
@@ -1860,7 +1866,14 @@ export function compilerWire(
             if (Array.isArray(child?.itemIds))
               for (const id of child.itemIds)
                 childOf.set(id, String(child.key));
-        lint.push(...planGraphLint(graph, linted, childOf));
+        lint.push(
+          ...planGraphLint(
+            graph,
+            linted,
+            childOf,
+            context.authorizedCommands ?? [],
+          ),
+        );
       }
       // Last, so a plan that passes every other check gets these as one
       // batched correction instead of a paid review finding.

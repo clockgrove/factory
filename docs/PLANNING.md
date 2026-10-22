@@ -73,6 +73,12 @@ Why: these are the failures a senior reviewer flags first, and acceptance criter
 
 The worker gets the standard before its self-review. Result review refuses a violation in code the result adds or changes, filed under the criterion whose code contains it, even when every criterion passes. Unchanged existing code is not a finding. Where the target's AGENTS.md or documented conventions differ, the target wins. Final Objective review does not re-apply it.
 
+## Plan checks
+
+When Factory checks something deterministically, it gives the model the facts it checks against, and every refusal says what would pass. The planner request lists the exact authorized validation commands (computed by the function the check uses), the CI-only commands and the validation environment; a refusal names the allowed alternatives or the exact fix, with long lists bounded. A new plan check ships with its facts in the request and an actionable refusal, and joins `PLAN_CHECKS` in `src/compiler/sources.ts`; the test in `test/provider-config.test.mjs` fails until both exist.
+
+Why: a planner that must guess what Factory accepts spends revision rounds finding it.
+
 ## Design checklist
 
 Workers and result review also share `DESIGN_CHECKLIST`: six questions about design risks that criteria rarely name and passing tests do not reveal. Authority: each new action has the narrowest grant that fits it. Growth: new stored state has an enforced bound or retention. Attribution: a recorded actor is the principal that acted. Hot path: per-request paths gain no avoidable work. Test independence: a reference test's expected side does not run the code under test. Sourced numbers: each new limit names its origin.

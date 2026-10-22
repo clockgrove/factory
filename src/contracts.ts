@@ -528,6 +528,8 @@ export interface PlanningRequest<T> {
     splitChild?: boolean;
     /** The installation's CI-only commands, refused as validation commands. */
     ciOnlyCommands?: string[];
+    /** The exact validation commands the command-authority check accepts, as listed to the planner. */
+    authorizedCommands?: string[];
     previousGraph?: WorkGraph;
     immutableItemIds?: string[];
     /** Retained failed items attempted again; their ownership and dependencies may widen. */

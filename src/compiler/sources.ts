@@ -19,6 +19,7 @@ import type { PlanCandidate } from "./candidate.js";
 import { normalizedCommand } from "../qa.js";
 import {
   networkToolIn,
+  listCommands,
   validationEnvironmentInstructions,
 } from "../validation-environment.js";
 import { finalValidationCommands } from "../config.js";
@@ -640,7 +641,7 @@ export function validateCommandProvenance(
       if (!authorizedCommand(check, graph.baseSha, sources, checkout)) {
         throw new GraphValidationError(
           item.id,
-          `Work Item ${item.id} has no exact ${check.provenance} command authority in ${check.source ?? "unknown source"}: ${check.command}. Use one complete standalone command from the pinned source. For base-observed package.json, invoke an existing script by name, not its JSON body; commands this plan creates are not base-observed. Package scripts must use a supported root npm/pnpm invocation with fixed script bodies, hooks and configuration; a tool-version probe must use --version without extra package-manager options or script execution. Do not invent a replacement command or weaken acceptance.`,
+          `Work Item ${item.id} has no exact ${check.provenance} command authority in ${check.source ?? "unknown source"}: ${check.command}. Use one complete standalone command from the pinned source. For base-observed package.json, invoke an existing script by name, not its JSON body; commands this plan creates are not base-observed. Package scripts must use a supported root npm/pnpm invocation with fixed script bodies, hooks and configuration; a tool-version probe must use --version without extra package-manager options or script execution. Do not invent a replacement command or weaken acceptance. Authorized commands: ${listCommands(authorizedCommands(sources, graph.baseSha, checkout))}.`,
         );
       }
     }
@@ -973,6 +974,104 @@ function authorizedCommand(
   return Boolean(invocation);
 }
 
+/** The deterministic plan checks; each ships its facts in the planner request and a refusal that says what would pass. */
+export const PLAN_CHECKS = [
+  { id: "command-authority", facts: "compileContext.authorizedCommands" },
+  { id: "ci-only", facts: "compileContext.ciOnlyCommands" },
+  { id: "network", facts: "compileContext.authorizedCommands" },
+  {
+    id: "new-file-name",
+    facts: "request instructions: workers name new files",
+  },
+  { id: "path-overlap", facts: "graph schema: ownedPaths and dependencies" },
+  { id: "local-proof", facts: "compileContext.authorizedCommands" },
+  { id: "plan-standard", facts: "plan standard in the request instructions" },
+] as const;
+
+/**
+ * The validation commands the command-authority check accepts at the base:
+ * source-declared commands in the pinned sources, then root package scripts in
+ * the supported forms. Each candidate passes through {@link authorizedCommand},
+ * the function the check itself uses; CI-only and network commands are left out
+ * because validation refuses those.
+ */
+export function authorizedCommands(
+  sources: PlanningSource[],
+  baseSha: string,
+  checkout: string,
+  ciOnlyCommands: readonly string[] = [],
+): string[] {
+  const ciOnly = new Set(ciOnlyCommands.map(normalizedCommand));
+  let scripts: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(
+      pinnedGitRaw(checkout, "show", `${baseSha}:package.json`).toString(
+        "utf8",
+      ),
+    ) as { scripts?: unknown };
+    if (parsed.scripts && typeof parsed.scripts === "object")
+      scripts = parsed.scripts as Record<string, unknown>;
+  } catch {
+    // No root package.json: only source-declared commands.
+  }
+  const accepted = new Set<string>();
+  const usable = (command: string) =>
+    !ciOnly.has(normalizedCommand(command)) &&
+    !networkToolOfCommand(command, scripts);
+  for (const source of sources) {
+    const spans = markdownLines(source.content).flatMap(({ text, fenced }) =>
+      fenced
+        ? [text.trim()]
+        : [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1]!.trim()),
+    );
+    for (const command of new Set(spans))
+      if (
+        command &&
+        usable(command) &&
+        authorizedCommand(
+          { command, provenance: "source-declared", source: source.path },
+          baseSha,
+          sources,
+          checkout,
+        )
+      )
+        accepted.add(command);
+  }
+  for (const name of Object.keys(scripts)) {
+    const forms =
+      name === "test"
+        ? ["npm test", "pnpm test", "npm run test", "pnpm run test"]
+        : [
+            ...(name === "check" ? ["pnpm check"] : []),
+            `npm run ${name}`,
+            `pnpm run ${name}`,
+          ];
+    const command = forms.find(
+      (form) =>
+        usable(form) &&
+        authorizedCommand(
+          {
+            command: form,
+            provenance: "base-observed",
+            source: "package.json",
+          },
+          baseSha,
+          sources,
+          checkout,
+        ),
+    );
+    if (command) accepted.add(command);
+  }
+  return [...accepted];
+}
+
+/** The planner's note of the exact validation commands Factory accepts. */
+export function authorizedCommandInstructions(
+  commands: readonly string[],
+): string {
+  return `\n\nAuthorized validation commands (exact; any other command is refused): ${listCommands(commands)}.`;
+}
+
 function selectedHeadings(body: string): SourceSelector[] {
   const section = objectiveSection(body, ["Sources"]);
   if (!section) return [];
@@ -1240,7 +1339,7 @@ export function planningSources(
       )
     )
       throw new Error(
-        `Acceptance command has no executable authority at the accepted base: ${command}`,
+        `Acceptance command has no executable authority at the accepted base: ${command}. Use one of the authorized commands: ${listCommands(authorizedCommands(sources, baseSha, checkout))}, or remove it from Acceptance.`,
       );
   return sources;
 }
@@ -1287,7 +1386,7 @@ export function assertRequiredFinalCommands(
       )
     )
       throw new Error(
-        `Required final-validation command has no executable authority at the accepted base: ${command}. Package scripts must use ${PACKAGE_SCRIPT_FORMS}, with fixed script bodies, hooks and configuration; correct or remove it in the installation's finalValidation.requiredCommands.`,
+        `Required final-validation command has no executable authority at the accepted base: ${command}. Package scripts must use ${PACKAGE_SCRIPT_FORMS}, with fixed script bodies, hooks and configuration; correct or remove it in the installation's finalValidation.requiredCommands. Authorized commands: ${listCommands(authorizedCommands(sources, baseSha, checkout))}.`,
       );
 }
 
@@ -1335,7 +1434,7 @@ export function assertNoCiOnlyValidation(
       if (ciOnly.has(normalizedCommand(command)))
         throw new GraphValidationError(
           item.id,
-          `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI; when a criterion needs it, ask through decisionRequired`,
+          `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and use an offline authorized command from the request instead; when a criterion needs it, ask through decisionRequired`,
         );
 }
 
@@ -1393,6 +1492,8 @@ export function assertPlanBoundaries(
   ciOnlyCommands: readonly string[] = [],
   /** The Objective and pinned sources: a name they use is fixed, not the worker's choice. */
   fixedTexts: readonly string[] = [],
+  /** The authorized commands the request listed, named in the refusal. */
+  authorized: readonly string[] = [],
 ): void {
   const ciOnly = new Set(ciOnlyCommands.map(normalizedCommand));
   let scripts: Record<string, unknown> | undefined;
@@ -1448,7 +1549,7 @@ export function assertPlanBoundaries(
       if (tool)
         found(
           item.id,
-          `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have: select the item's offline commands instead, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
+          `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have: select an offline authorized command instead${authorized.length ? ` (${listCommands(authorized)})` : ""}, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
         );
     }
     const named = new Set<string>();

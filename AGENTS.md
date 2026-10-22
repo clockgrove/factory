@@ -41,3 +41,5 @@ For local process/resource observations, establish that the observer shares the 
 Models decide semantics; code supplies verified identities, hashes and derived facts. Inspect producers, actual schemas, decoders, validators and supplied evidence together. Preserve complete required source evidence and deterministic grounding. Never normalize an invalid answer into accepted evidence or invent command catalogs. Check official contracts when changing provider APIs.
 
 Prefer the smallest correction to a demonstrated defect. Prerelease contracts may change coherently; do not add compatibility formats, migrations or extra safeguards without a concrete requirement.
+
+A new deterministic plan check ships with its facts in the planner request and a refusal that names what would pass (the allowed alternatives or the exact fix); register it in `PLAN_CHECKS`. See [the plan checks](docs/PLANNING.md#plan-checks).

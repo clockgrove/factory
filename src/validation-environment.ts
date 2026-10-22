@@ -136,3 +136,15 @@ export function validationEnvironmentReport(
       "How validation differs from hosted CI: docs/VALIDATION-ENVIRONMENT.md",
   };
 }
+
+/** The most commands a request or refusal lists; the rest are a count. */
+const MAX_LISTED_COMMANDS = 20;
+
+/** A bounded, exact list of commands for a request or refusal. */
+export function listCommands(commands: readonly string[]): string {
+  const shown = commands.slice(0, MAX_LISTED_COMMANDS).map((c) => `\`${c}\``);
+  const more = commands.length - shown.length;
+  return shown.length
+    ? `${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`
+    : "none declared";
+}

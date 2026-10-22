@@ -798,7 +798,7 @@ async function postPlan(
 // ---------------------------------------------------------------------------
 // Shared
 
-function readIssue(
+export function readIssue(
   issue: number,
   deps: PlanningDeps,
   signal: AbortSignal,

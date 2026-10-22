@@ -2,8 +2,8 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
-import { configPath, loadConfig } from "./config.js";
-import { DEFAULT_LIMITS } from "./engine.js";
+import { type CoreConfig, configPath, loadConfig } from "./config.js";
+import { DEFAULT_LIMITS, hostLimits } from "./engine.js";
 import { GitHub } from "./github.js";
 import { GitHubSync } from "./github-sync.js";
 import { RunLog } from "./log.js";
@@ -59,9 +59,11 @@ async function main(argv: string[]): Promise<number> {
   switch (command) {
     case "serve": {
       let sync: GitHubSync | undefined;
+      let loaded: CoreConfig | undefined;
       let workflow = objectiveWorkflow();
       if (existsSync(configPath(repository))) {
         const config = loadConfig(repository);
+        loaded = config;
         const github = new GitHub(config.repository);
         sync = new GitHubSync(github, config, new RunLog(paths.logs, "sync"));
         const planner =
@@ -85,21 +87,26 @@ async function main(argv: string[]): Promise<number> {
               : new CodexWorker({ sandbox: config.sandbox }),
         });
       }
+      if (loaded)
+        hostLimits.configure({
+          worker: loaded.execution.workers,
+          cpu: loaded.execution.validations,
+        });
       return await serve({
         paths,
         workflow,
+        ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
         ...(sync ? { sync } : {}),
         ...(process.env.FACTORY_TICK_MS
           ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
           : {}),
-        ...(process.env.FACTORY_BACKOFF_MS
-          ? {
-              limits: {
-                ...DEFAULT_LIMITS,
-                baseBackoffMs: Number(process.env.FACTORY_BACKOFF_MS),
-              },
-            }
-          : {}),
+        limits: {
+          ...DEFAULT_LIMITS,
+          ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),
+          ...(process.env.FACTORY_BACKOFF_MS
+            ? { baseBackoffMs: Number(process.env.FACTORY_BACKOFF_MS) }
+            : {}),
+        },
       });
     }
     case "status":

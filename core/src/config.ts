@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { availableParallelism, homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 /** The installation's configuration, checked once when it's loaded. */
@@ -17,6 +17,8 @@ export interface CoreConfig {
     /** Option names for each status. "queued" is what the operator sets. */
     options: Record<QueueOption, string>;
     pollSeconds: number;
+    /** Objectives that may run at once; building waits on overlapping owned paths. */
+    maxActiveObjectives: number;
   };
   planning: {
     /** The provider that plans and reviews. */
@@ -27,6 +29,14 @@ export interface CoreConfig {
     revisions: number;
     /** A curated playbook file in the target, read at the base. */
     playbook: string;
+  };
+  execution: {
+    /** Steps of one Objective running at once (independent Work Items run in parallel). */
+    concurrency: number;
+    /** Worker runs at once across the host. */
+    workers: number;
+    /** CPU-heavy steps (validation) at once across the host. */
+    validations: number;
   };
   finalValidation: {
     /** Commands every Objective's result must pass. */
@@ -328,6 +338,33 @@ export function loadConfig(repository: string): CoreConfig {
       typeof planning.playbook === "string"
         ? planning.playbook
         : ".factory/playbook.md",
+  };
+  const execution = (raw.execution ?? {}) as Record<string, unknown>;
+  const count = (value: unknown, name: string, fallback: number): number => {
+    if (value === undefined) return fallback;
+    if (typeof value === "number" && Number.isInteger(value) && value >= 1)
+      return value;
+    problems.push(`${name} must be a whole number of at least 1`);
+    return fallback;
+  };
+  const cpus = availableParallelism();
+  config.queue.maxActiveObjectives = count(
+    queue.maxActiveObjectives,
+    "queue.maxActiveObjectives",
+    3,
+  );
+  config.execution = {
+    concurrency: count(execution.concurrency, "execution.concurrency", 8),
+    workers: count(
+      execution.workers,
+      "execution.workers",
+      Math.max(2, Math.floor(cpus / 2)),
+    ),
+    validations: count(
+      execution.validations,
+      "execution.validations",
+      Math.max(2, Math.floor(cpus / 4)),
+    ),
   };
   config.finalValidation = {
     requiredCommands: list(

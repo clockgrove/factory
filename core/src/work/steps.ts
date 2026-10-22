@@ -16,7 +16,7 @@ import {
 } from "../planning/facts.js";
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
-import { guarded, type PlanningDeps } from "../planning/steps.js";
+import { guarded, type PlanningDeps, readIssue } from "../planning/steps.js";
 import type { Plan, WorkItem } from "../planning/types.js";
 import { correction, type RepairFinding } from "../repair.js";
 import { reviewObjective } from "../review/final.js";
@@ -30,6 +30,8 @@ import { validateTree } from "../validate.js";
 import {
   addWorktree,
   GitRefusal,
+  hostGit,
+  hostGitExit,
   removeWorktree,
   worktreePath,
 } from "../worktree.js";
@@ -147,13 +149,21 @@ function itemStep(item: WorkItem, phase: Phase, deps: BuildDeps): Step {
   }[phase];
   return {
     key,
+    ...(phase === "work"
+      ? { resource: "worker" as const }
+      : phase === "validate"
+        ? { resource: "cpu" as const }
+        : {}),
     deadlineMs:
       phase === "work"
         ? 2 * 60 * MINUTE
         : phase === "ci"
           ? 10 * MINUTE
           : 45 * MINUTE,
-    run: (context) => guardedItem(() => run(item, context, deps)),
+    run: (context) =>
+      context.answer?.answer === "replan"
+        ? Promise.resolve(replanOutcome(context.state))
+        : guardedItem(() => run(item, context, deps)),
   };
 }
 
@@ -169,16 +179,42 @@ async function workStep(
   const { config } = deps;
   const plan = state.done.plan as Plan;
   const body = objectiveBody(state);
-  const base = kept<string>(state, item.id, "base") ?? integrated(state, plan);
   const worktree = worktreePath(
     deps.workDir(state.issue),
     state.issue,
     item.id,
   );
+  // An item builds on the default branch as it is when it starts, which
+  // holds every merged dependency; it keeps that base across repairs.
+  let base =
+    kept<string>(state, item.id, "base") ??
+    (await defaultHead(config.checkout, signal));
   await addWorktree(config.checkout, worktree, base, signal);
+  if (kept(state, item.id, "rebase")) {
+    // A conflict or failed delivery: move onto the current default branch and
+    // replay the refused change, so the worker can resolve it there.
+    const head = await defaultHead(config.checkout, signal);
+    const refused = kept<string>(state, item.id, "refusedCommit");
+    if (head !== base) {
+      await rebaseWorktree(
+        config.checkout,
+        worktree,
+        base,
+        head,
+        refused,
+        signal,
+      );
+      base = head;
+    }
+  }
+  const keepBase = {
+    [keptKey(item.id, "base")]: base,
+    [keptKey(item.id, "rebase")]: false,
+  };
 
   const repair = await repairContext(item, context, deps, base);
-  if (repair && "hold" in repair) return repair.hold;
+  if (repair && "hold" in repair) return withKeep(repair.hold, keepBase);
+  const keepAll = { ...keepBase, ...(repair?.keep ?? {}) };
 
   const files = new BaseFiles(config.checkout, base, signal);
   const scripts = await fixedScripts(
@@ -202,12 +238,15 @@ async function workStep(
     signal,
   });
   if ("problem" in prepared)
-    return {
-      kind: "hold",
-      question: prepared.problem,
-      answers: ["retry", "replan", "cancel"],
-      recommended: "retry",
-    };
+    return withKeep(
+      {
+        kind: "hold",
+        question: prepared.problem,
+        answers: ["retry", "replan", "cancel"],
+        recommended: "retry",
+      },
+      keepAll,
+    );
 
   const result = await deps.worker(plan, body).run({
     worktree,
@@ -218,7 +257,7 @@ async function workStep(
     signal,
     log: context.log,
   });
-  if (result.kind !== "finished") return result;
+  if (result.kind !== "finished") return withKeep(result, keepAll);
 
   const collected = await collect({
     checkout: config.checkout,
@@ -233,7 +272,6 @@ async function workStep(
       : {}),
     signal,
   });
-  const keepBase = { [keptKey(item.id, "base")]: base };
   switch (collected.kind) {
     case "collected": {
       const done: WorkResult = {
@@ -243,35 +281,82 @@ async function workStep(
         notes: collected.notes,
         ...(result.validated ? { validated: result.validated } : {}),
       };
-      return { kind: "done", result: done, keep: keepBase };
+      return { kind: "done", result: done, keep: keepAll };
     }
     case "repair":
       return repairOutcome(item, "work", collected.finding, {
-        ...keepBase,
+        ...keepAll,
         [keptKey(item.id, "finding")]: {
           kind: "failure",
           detail: collected.finding,
         } satisfies RepairFinding,
       });
     default:
-      return collected;
+      return withKeep(collected, keepAll);
   }
+}
+
+/** Add facts to keep to any outcome that can carry them. */
+function withKeep(outcome: Outcome, keep: Record<string, unknown>): Outcome {
+  if (outcome.kind === "fail") return outcome;
+  return { ...outcome, keep: { ...(outcome.keep ?? {}), ...keep } };
+}
+
+/**
+ * Move a kept worktree from `from` to `to` and replay the refused change on
+ * it. Conflicts stay in the files for the worker to resolve.
+ */
+async function rebaseWorktree(
+  checkout: string,
+  worktree: string,
+  from: string,
+  to: string,
+  refused: string | undefined,
+  signal: AbortSignal,
+): Promise<void> {
+  await hostGit(worktree, ["checkout", "--detach", "--force", to], { signal });
+  await hostGit(worktree, ["clean", "-ffdx", "--", "."], { signal });
+  if (!refused) return;
+  const diff = await hostGit(
+    checkout,
+    ["diff", "--no-ext-diff", "--no-textconv", from, refused],
+    { signal },
+  );
+  if (!diff.length) return;
+  // Applying may conflict; the worker resolves what remains.
+  await hostGitExit(worktree, ["apply", "--3way", "--whitespace=nowarn"], {
+    input: diff.toString("utf8"),
+    signal,
+  });
 }
 
 /**
  * What a repaired attempt is told: the latest finding and its correction.
- * The correction is diagnosed once per finding; an operator question holds.
+ * The correction is diagnosed once per repair and kept, so a rerun of the
+ * work step reuses it; an operator question holds.
  */
 async function repairContext(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
   base: string,
-): Promise<{ context: RepairContext } | { hold: Outcome } | undefined> {
+): Promise<
+  | { context: RepairContext; keep: Record<string, unknown> }
+  | { hold: Outcome }
+  | undefined
+> {
   const { state, signal } = context;
   const history = state.repairs?.[stepKey(item.id, "work")];
   const finding = kept<RepairFinding>(state, item.id, "finding");
   if (!history?.count || !finding) return undefined;
+  const saved = kept<{ repair: number; context: RepairContext }>(
+    state,
+    item.id,
+    "correction",
+  );
+  if (saved?.repair === history.count)
+    return { context: saved.context, keep: {} };
+  const applied = kept<string[]>(state, item.id, "corrections") ?? [];
   const plan = state.done.plan as Plan;
   const previous = state.done[stepKey(item.id, "work")] as
     | WorkResult
@@ -289,7 +374,7 @@ async function repairContext(
     commit:
       kept<string>(state, item.id, "refusedCommit") ?? previous?.commit ?? base,
     sources,
-    prior: history.findings.slice(0, -1),
+    prior: applied,
     ...(answer ? { operatorAnswer: answer } : {}),
     signal,
     log: context.log,
@@ -303,14 +388,22 @@ async function repairContext(
         recommended: "answer",
       },
     };
+  const repairContextValue: RepairContext = {
+    finding: result.correction.failure,
+    correction: {
+      diagnosis: result.correction.diagnosis,
+      correction: result.correction.correction,
+    },
+    ...(finding.kind === "review" ? { fromReview: true } : {}),
+  };
   return {
-    context: {
-      finding: result.finding,
-      correction: {
-        diagnosis: result.correction.diagnosis,
-        correction: result.correction.correction,
+    context: repairContextValue,
+    keep: {
+      [keptKey(item.id, "correction")]: {
+        repair: history.count,
+        context: repairContextValue,
       },
-      ...(finding.kind === "review" ? { fromReview: true } : {}),
+      [keptKey(item.id, "corrections")]: [...applied, result.finding],
     },
   };
 }
@@ -361,12 +454,15 @@ async function validateStep(
         work.validated?.tree === result.tree &&
         JSON.stringify(work.validated.commands) ===
           JSON.stringify(result.commands);
-      if (sameAsWorker && !kept(state, item.id, "flaky") && result.failed)
+      const rerun = kept<{ tree: string }>(state, item.id, "flaky");
+      if (sameAsWorker && rerun?.tree !== result.tree && result.failed)
         return {
           kind: "retry",
           reason: `\`${result.failed.command}\` failed on a tree the worker's own validation passed; running it once more.`,
           afterMs: 0,
-          keep: { [flakyKey]: { command: result.failed.command } },
+          keep: {
+            [flakyKey]: { tree: result.tree, command: result.failed.command },
+          },
         };
       return repairOutcome(item, "validate", result.detail, {
         [keptKey(item.id, "finding")]: {
@@ -509,13 +605,20 @@ async function publishStep(
   deps: BuildDeps,
 ): Promise<Outcome> {
   const { state } = context;
+  const changed = await objectiveEdited(context, deps);
+  if (changed) return changed;
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
   const validated = state.done[stepKey(item.id, "validate")] as ValidateResult;
   const pushed = kept<string[]>(state, item.id, "pushed") ?? [];
   const republish =
     context.answer?.answer === REPUBLISH ||
     Boolean(kept(state, item.id, "republish"));
-  const flaky = kept<{ command: string }>(state, item.id, "flaky");
+  const rerun = kept<{ tree: string; command: string }>(
+    state,
+    item.id,
+    "flaky",
+  );
+  const flaky = rerun?.tree === validated.tree ? rerun : undefined;
   const result = await publish(
     delivery(context, deps, stepKey(item.id, "publish")),
     {
@@ -650,6 +753,8 @@ function deliveryRepair(
       detail: finding,
     } satisfies RepairFinding,
     [keptKey(item.id, "refusedCommit")]: work.commit,
+    [keptKey(item.id, "refusedTree")]: work.tree,
+    [keptKey(item.id, "rebase")]: true,
   });
 }
 
@@ -678,6 +783,23 @@ function repairOutcome(
     target: stepKey(item.id, "work"),
     clear: PHASES.map((p) => stepKey(item.id, p)),
     keep,
+  };
+}
+
+/**
+ * `replan` after the plan was accepted: forget the plan and the build, and
+ * check the Objective again from the issue and the default branch. Merged
+ * work is on the default branch, so the new plan starts from it.
+ */
+function replanOutcome(state: ObjectiveState): Outcome {
+  return {
+    kind: "repair",
+    finding: "The operator asked to replan.",
+    target: "check",
+    clear: Object.keys(state.done),
+    keep: Object.fromEntries(
+      Object.keys(state.kept ?? {}).map((key) => [key, null]),
+    ),
   };
 }
 
@@ -722,13 +844,33 @@ interface FinalResult {
 export function finalStep(deps: BuildDeps): Step {
   return {
     key: "final",
+    resource: "cpu",
     deadlineMs: 60 * MINUTE,
     run: (context) =>
       guardedItem(async () => {
         const { state, signal } = context;
         const { config } = deps;
         const plan = state.done.plan as Plan;
+        if (context.answer?.answer === "replan") return replanOutcome(state);
         const head = await defaultHead(config.checkout, signal);
+        for (const item of plan.items) {
+          const merged = state.done[stepKey(item.id, "merge")] as
+            | MergeResult
+            | undefined;
+          if (!merged?.mergeSha) continue;
+          const on = await hostGitExit(
+            config.checkout,
+            ["merge-base", "--is-ancestor", merged.mergeSha, head],
+            { signal },
+          );
+          if (on.code !== 0)
+            return {
+              kind: "hold",
+              question: `Work Item ${item.id}'s merge \`${merged.mergeSha.slice(0, 12)}\` is not on the default branch (${head.slice(0, 12)}); someone may have reverted or force-pushed it. Restore it and answer \`retry\`, or \`replan\`.`,
+              answers: ["retry", "replan", "cancel"],
+              recommended: "retry",
+            };
+        }
         const result = await validateTree({
           checkout: config.checkout,
           directory: join(deps.workDir(state.issue), "final"),
@@ -767,6 +909,15 @@ export function finalReviewStep(deps: BuildDeps): Step {
     run: (context) =>
       guardedItem(async () => {
         const { state, signal } = context;
+        if (context.answer?.answer === "replan") return replanOutcome(state);
+        // A fix on the default branch: validate the new head before reviewing again.
+        if (context.answer?.answer === "retry")
+          return {
+            kind: "repair",
+            finding: "Final review runs again after the operator's fix.",
+            target: "final",
+            clear: ["final", "final-review"],
+          };
         const plan = state.done.plan as Plan;
         const final = state.done.final as FinalResult;
         const review = await reviewObjective({
@@ -806,6 +957,49 @@ export function finalReviewStep(deps: BuildDeps): Step {
 
 // ---------------------------------------------------------------------------
 // Shared
+
+/**
+ * The Objective was edited or closed after its plan was accepted: ask before
+ * the next effect. `continue` keeps the plan and accepts the new text.
+ */
+async function objectiveEdited(
+  context: StepContext,
+  deps: BuildDeps,
+): Promise<Outcome | undefined> {
+  const { state, signal } = context;
+  const issue = await readIssue(state.issue, deps, signal);
+  const body = (issue.body ?? "").replace(/\r\n/g, "\n").trim();
+  const accepted = (
+    ((state.kept ?? {})["objective:accepted"] as string | undefined) ??
+    objectiveBody(state)
+  )
+    .replace(/\r\n/g, "\n")
+    .trim();
+  if (context.answer?.answer === "continue")
+    return body === accepted
+      ? undefined
+      : {
+          kind: "retry",
+          reason: "Continuing with the edited Objective.",
+          afterMs: 0,
+          keep: { "objective:accepted": body },
+        };
+  if (issue.state !== "open")
+    return {
+      kind: "hold",
+      question: `Issue #${state.issue} was closed while Factory was building it. Reopen it and answer \`continue\`, or cancel.`,
+      answers: ["continue", "cancel"],
+      recommended: "cancel",
+    };
+  if (body !== accepted)
+    return {
+      kind: "hold",
+      question: `Objective #${state.issue} was edited after its plan was accepted. \`continue\` keeps building this plan; \`replan\` plans again from the new text.`,
+      answers: ["continue", "replan", "cancel"],
+      recommended: "replan",
+    };
+  return undefined;
+}
 
 /** The Objective body as planning read it. */
 function objectiveBody(state: ObjectiveState): string {
@@ -872,6 +1066,9 @@ export function reportStep(deps: BuildDeps): Step {
       guardedItem(async () => {
         const { state, signal } = context;
         const { config, github } = deps;
+        if (context.answer?.answer === "replan") return replanOutcome(state);
+        const changed = await objectiveEdited(context, deps);
+        if (changed) return changed;
         const plan = state.done.plan as Plan;
         const final = state.done.final as FinalResult;
         const marker = `<!-- factory:${state.issue}:report -->`;

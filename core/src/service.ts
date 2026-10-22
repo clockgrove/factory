@@ -16,6 +16,9 @@ import {
   type Workflow,
 } from "./engine.js";
 import type { GitHubModule, GitHubSync } from "./github-sync.js";
+import { pathsOverlap } from "./planning/graph.js";
+import type { Plan } from "./planning/types.js";
+import { built } from "./work/steps.js";
 import { takeServiceLock } from "./lock.js";
 import { RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
@@ -30,6 +33,7 @@ import {
   newObjective,
   saveState,
   TERMINAL,
+  type ObjectiveState,
 } from "./state.js";
 import { objectiveWorkflow } from "./workflow.js";
 
@@ -195,7 +199,7 @@ export async function serve(options: ServeOptions): Promise<number> {
         run = true;
       } else if (status !== "holding" && slots > 0) {
         slots -= 1;
-        run = true;
+        run = !waitsOnPaths(runner, ordered);
       } else if (Object.keys(runner.state.attempts).length > 0 && !runner.busy)
         run = true; // settle an interrupted attempt, which may open a hold
       if (!run) continue;
@@ -269,6 +273,31 @@ export async function serve(options: ServeOptions): Promise<number> {
   }
   lock.close();
   return 0;
+}
+
+/**
+ * An Objective builds only while no earlier unfinished Objective owns an
+ * overlapping path; planning never waits. Earlier means a lower issue number.
+ */
+function waitsOnPaths(
+  runner: ObjectiveRunner,
+  all: readonly ObjectiveRunner[],
+): boolean {
+  const mine = ownedPaths(runner.state);
+  if (!mine.length || built(runner.state)) return false;
+  return all.some((other) => {
+    if (other === runner || other.state.issue > runner.state.issue)
+      return false;
+    if (TERMINAL.includes(other.state.status) || built(other.state))
+      return false;
+    const theirs = ownedPaths(other.state);
+    return mine.some((a) => theirs.some((b) => pathsOverlap(a, b)));
+  });
+}
+
+function ownedPaths(state: ObjectiveState): string[] {
+  const plan = state.done.plan as Plan | undefined;
+  return plan ? plan.items.flatMap((item) => item.ownedPaths) : [];
 }
 
 function started(runner: ObjectiveRunner): boolean {

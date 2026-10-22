@@ -976,22 +976,60 @@ function authorizedCommand(
 
 /** The deterministic plan checks; each ships its facts in the planner request and a refusal that says what would pass. */
 export const PLAN_CHECKS = [
-  { id: "command-authority", facts: "compileContext.authorizedCommands" },
-  { id: "ci-only", facts: "compileContext.ciOnlyCommands" },
-  { id: "network", facts: "compileContext.authorizedCommands" },
+  {
+    id: "command-authority",
+    entry: "validateCommandProvenance",
+    facts: "compileContext.authorizedCommands",
+  },
+  {
+    id: "ci-only",
+    entry: "assertNoCiOnlyValidation",
+    facts: "compileContext.ciOnlyCommands",
+  },
+  {
+    id: "network",
+    entry: "assertPlanBoundaries",
+    facts: "compileContext.authorizedCommands",
+  },
   {
     id: "new-file-name",
+    entry: "assertPlanBoundaries",
     facts: "request instructions: workers name new files",
   },
-  { id: "path-overlap", facts: "graph schema: ownedPaths and dependencies" },
-  { id: "local-proof", facts: "compileContext.authorizedCommands" },
-  { id: "plan-standard", facts: "plan standard in the request instructions" },
+  {
+    id: "path-overlap",
+    entry: "planGraphLint",
+    facts: "graph schema: ownedPaths and dependencies",
+  },
+  {
+    id: "local-proof",
+    entry: "planGraphLint",
+    facts: "compileContext.authorizedCommands",
+  },
+  {
+    id: "plan-standard",
+    entry: "planStandardLint",
+    facts: "plan standard in the request instructions",
+  },
 ] as const;
 
 /**
+ * Functions that refuse a plan but are not registered above: citation and
+ * input-source checks already name the exact headings and shape that pass.
+ */
+export const PLAN_CHECK_EXEMPT = [
+  "validateCitations",
+  "assertWorkerInputSources",
+  "validateGraphSources",
+] as const;
+
+/** A leading executable word, no assignment, braces or statement separators. */
+const COMMAND_SHAPE = /^[a-z][\w.-]*(?: [^{}$;|&<>]*)?$/;
+
+/**
  * The validation commands the command-authority check accepts at the base:
- * source-declared commands in the pinned sources, then root package scripts in
- * the supported forms. Each candidate passes through {@link authorizedCommand},
+ * root package scripts in the supported forms (test and check first), then
+ * inline source-declared commands in the pinned sources. Each candidate passes through {@link authorizedCommand},
  * the function the check itself uses; CI-only and network commands are left out
  * because validation refuses those.
  */
@@ -1018,26 +1056,13 @@ export function authorizedCommands(
   const usable = (command: string) =>
     !ciOnly.has(normalizedCommand(command)) &&
     !networkToolOfCommand(command, scripts);
-  for (const source of sources) {
-    const spans = markdownLines(source.content).flatMap(({ text, fenced }) =>
-      fenced
-        ? [text.trim()]
-        : [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1]!.trim()),
-    );
-    for (const command of new Set(spans))
-      if (
-        command &&
-        usable(command) &&
-        authorizedCommand(
-          { command, provenance: "source-declared", source: source.path },
-          baseSha,
-          sources,
-          checkout,
-        )
-      )
-        accepted.add(command);
-  }
-  for (const name of Object.keys(scripts)) {
+  // Root scripts lead (test and check first), then source-declared commands.
+  const names = Object.keys(scripts).sort(
+    (a, b) =>
+      Number(b === "test" || b === "check") -
+      Number(a === "test" || a === "check"),
+  );
+  for (const name of names) {
     const forms =
       name === "test"
         ? ["npm test", "pnpm test", "npm run test", "pnpm run test"]
@@ -1046,6 +1071,8 @@ export function authorizedCommands(
             `npm run ${name}`,
             `pnpm run ${name}`,
           ];
+    // A CI-only script is CI-only in every form.
+    if (forms.some((form) => ciOnly.has(normalizedCommand(form)))) continue;
     const command = forms.find(
       (form) =>
         usable(form) &&
@@ -1062,6 +1089,26 @@ export function authorizedCommands(
     );
     if (command) accepted.add(command);
   }
+  // Only inline command spans: never fenced code, prose or code fragments.
+  for (const source of sources) {
+    const spans = markdownLines(source.content).flatMap(({ text, fenced }) =>
+      fenced
+        ? []
+        : [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1]!.trim()),
+    );
+    for (const command of new Set(spans))
+      if (
+        COMMAND_SHAPE.test(command) &&
+        usable(command) &&
+        authorizedCommand(
+          { command, provenance: "source-declared", source: source.path },
+          baseSha,
+          sources,
+          checkout,
+        )
+      )
+        accepted.add(command);
+  }
   return [...accepted];
 }
 
@@ -1069,7 +1116,7 @@ export function authorizedCommands(
 export function authorizedCommandInstructions(
   commands: readonly string[],
 ): string {
-  return `\n\nAuthorized validation commands (exact; any other command is refused): ${listCommands(commands)}.`;
+  return `\n\nAuthorized validation commands (use one of these; other forms may be refused): ${listCommands(commands)}.`;
 }
 
 function selectedHeadings(body: string): SourceSelector[] {

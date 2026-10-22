@@ -1,13 +1,31 @@
 # Factory contributor rules
 
-These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout. Read the relevant issue and code; use [the architecture](docs/ARCHITECTURE.md) as a reference. Lifecycle refusals carry the stable codes in [the lifecycle](docs/LIFECYCLE.md); a new state or command needs a conformance row. Validation differs from hosted CI in declared ways: see [the validation environment](docs/VALIDATION-ENVIRONMENT.md).
+These rules govern building Factory. The README and packaged skills govern using it on an approved target repository. Never run Factory Objectives against its own source checkout.
+
+Factory is being rebuilt on a new core: [the core spec](docs/CORE.md) is the design authority. Until cutover, the old tree under `src/` is frozen: no fixes or features there, only deletion as capabilities are ported. [The architecture](docs/ARCHITECTURE.md) and [the lifecycle](docs/LIFECYCLE.md) describe the old tree and are replaced at cutover.
+
+## Stability rules
+
+Every change must keep these. Review checks them, not just the diff.
+
+1. **Contained.** A failure affects only its own Objective; the service and queue keep running.
+2. **Deadlines.** Every wait has a deadline that ends in progress, an automatic retry or a hold.
+3. **Actionable holds.** Every hold is a question with named answers that work. Cancel always works.
+4. **Crash-only.** Killing the service at any point and restarting it continues the run with no duplicate GitHub effect.
+5. **GitHub is retried.** A GitHub error, timeout or partial read never fails a run.
+6. **Bounded.** Cost follows active work; nothing reads history to make progress.
+7. **Checked once.** Input is validated where it enters, and trusted after that.
+
+A change that needs a new kind of hold, lock, owner, archive, background loop or fence is a design change: raise it in an issue first.
 
 ## Delivery
 
 - Finish one phase at a time. Use concurrent agents within that phase with clear file ownership.
-- Batch related fixes into a complete outcome. Merge with green CI and the maintainer’s read; independently review the completed milestone once. Credentials, isolation and persisted-state changes also need one focused independent review.
+- Batch related fixes into a complete outcome. Merge with green CI and the maintainer’s read; independently review the completed milestone once against the stability rules. Credentials, isolation and state changes also need one focused independent review.
+- **Stop rule.** When the same class of failure shows up a second time, stop patching: find the structural cause and fix it in the design, or raise it in an issue.
+- **Size budget.** Keep within the budgets in [the core spec](docs/CORE.md#size). Going over needs the maintainer’s approval.
 - CI is the routine check. Run an affected local check only when it resolves an actual uncertainty; do not repeat full suites or add per-fix qualification.
-- Use meaningful affected tests, retained evidence, independent review and green CI to finish the product outcome. Add a live check only for a specific changed behavior that these facts do not prove. Reuse evidence where it still applies, and stop when the behavior works and the required checks pass.
+- Finish the product outcome with meaningful affected tests, independent review and green CI. A milestone also needs its crash drill (see Testing). Stop when the behavior works and the required checks pass.
 - Issues and pull requests record scope, decisions and results. Follow the issue metadata rules below, existing Project status and applicable relationships. Comment when a fix merges, an actual blocker appears or the plan changes. No separate status documents, per-PR changelog entries, mandatory issue-heading templates or new label taxonomy.
 - Follow [the release procedure](docs/RELEASING.md) and the release issue’s actual exits. Do not invent additional release gates. GitHub release notes record changes.
 
@@ -22,24 +40,33 @@ These rules govern building Factory. The README and packaged skills govern using
 
 ## Product boundaries
 
-Factory is a general-purpose plugin. Keep adopter-specific behavior out of its source. Preserve Objective → Work Item graph → execution → exact validation → GitHub delivery → final acceptance, including media/LFS and restart/cancel/status.
+Factory is a general-purpose plugin. Keep adopter-specific behavior out of its source. Keep every capability: Objective → plan → Work Items → execution → validation → GitHub delivery → final acceptance, including media/LFS, all providers, and restart/cancel/status. Simplify mechanisms, never scope.
 
-Keep credentials, configuration and continuation state outside targets. Preserve isolation, branch protection, ownership, source/command authority, exact commit/tree/head checks, substantive acceptance and recorded provider/resource limits. Contributor authority never transfers to workers or adopters.
+Keep credentials, configuration and state outside targets. Preserve the sandbox, branch protection, owned paths, source and command authority from pinned Sources, independent acceptance review, and provider/resource limits. Contributor authority never transfers to workers or adopters. Private adopter content and raw prompts/logs stay private.
 
-Continue external effects only from verified recorded outcomes. Unknown is unknown: do not replay ambiguous mutations, revive terminal runs, bypass fences, manually repair state or fabricate evidence. Preserve results, failures, artifacts, usage and spent allowances. Private adopter content and raw prompts/logs stay private.
+## State and effects
 
-Use the existing atomic continuation snapshot. Diagnostics observe; they never drive recovery. Keep provider-specific APIs in adapters. Use narrow contracts only at the existing PlanningModel, ExecutionDriver, AgentHarness, DeliveryStrategy, ContentStore and GitHubGateway seams; do not add a framework or duplicate lifecycle/state layer.
+- **One writer.** Only `factory serve` writes state. The CLI reads state and writes request files.
+- **One state file per Objective**, saved atomically after every step. It is trusted: no digests, seals or tamper checks on same-user files.
+- **Idempotent effects.** Every outside effect is found on GitHub before it is made: fixed branch names, PRs by head branch, comments by marker. A lost response is resolved by looking, then carrying on. It is never a permanent "unknown".
+- **Outcomes, not throws.** A step returns `done`, `retry`, `repair`, `hold` or `fail`. An escaped exception counts as `retry`, and repeated ones become a hold with `retry` and `cancel`. Never add an error path that leaves an Objective with no working answer.
+- **GitHub and the Project are displays and inputs, never preconditions.** Read failures keep the last good view; write failures retry later.
+- **Logs observe.** Diagnostics and analysis read the run log; they never drive progress.
+- Provider APIs stay in their adapters, behind the Planner, Worker, Reviewer and Delivery seams.
 
-## Coverage and model contracts
+## Testing
 
-Keep the small real integration suite: actual Git repositories, processes, files, scanner and offline packed CLI. Reuse an existing workflow for a demonstrated regression. Do not add unit tests, mocks, fake services/providers, scripted responses, fault matrices or fixture frameworks. The lifecycle conformance suite (`test/lifecycle-conformance.test.mjs`, [the lifecycle](docs/LIFECYCLE.md)) is the sanctioned exception: keep it whole, and add rows for every new lifecycle state or control command. Real provider/GitHub acceptance occurs at the approved milestone when its substantive exits require it; CI does not claim that acceptance.
+No mocks, fake services, fake providers or scripted responses.
 
-Qualification serves the product outcome. Broad provider/profile matrices, benchmarks and deliberate fault drills are not automatic feature-closure or release gates. A new live provider capability still needs real SDK evidence for the named claim; use the smallest bounded check that proves it. Preserve security, ownership, unknown outcomes, accounting and recorded limits without expanding qualification beyond the required behavior.
+- Tests use real Git repositories, processes and files, and the real `factory serve`.
+- **Crash tests** kill the real service at named crash points (`FACTORY_CRASH_AT`) and restart it. Every new step or outside effect gets a crash point and is covered.
+- **Drill.** At each milestone, run a small real Objective on the scratch drill repository with real providers. Kill the service at every crash point, cut the network, and stop a model mid-turn. The milestone passes only if the Objective finishes with no duplicate effect and every hold had a working answer.
+- Tests stay within the source size. Don't add unit tests of private helpers or provider/profile matrices.
 
-For local process/resource observations, establish that the observer shares the recorded owners' runtime and process namespace before claiming cessation; a sandbox-only `/proc` scan does not prove host closure. Keep unproved namespace or resource visibility unknown. Verify prerequisite setup and probes use the exact source-authorized commands and order in the actual fresh checkout for that phase. Distinguish transferred Git-tracked inputs from ignored installations and generated runtime artifacts, and verify the latter are prepared there.
+## Model contracts
 
-Models decide semantics; code supplies verified identities, hashes and derived facts. Inspect producers, actual schemas, decoders, validators and supplied evidence together. Preserve complete required source evidence and deterministic grounding. Never normalize an invalid answer into accepted evidence or invent command catalogs. Check official contracts when changing provider APIs.
+Models decide semantics; code supplies identities and derived facts. Validate a model answer where it enters. Give an invalid answer one retry with the error, then retry or hold; never turn it into accepted evidence, and never fail the run on it. Check official contracts when changing provider APIs.
 
-Prefer the smallest correction to a demonstrated defect. Prerelease contracts may change coherently; do not add compatibility formats, migrations or extra safeguards without a concrete requirement.
+A plan check ships with its facts in the planner request and a refusal that names what would pass. See [the plan checks](docs/PLANNING.md#plan-checks).
 
-A new deterministic plan check ships with its facts in the planner request and a refusal that names what would pass (the allowed alternatives or the exact fix); register it in `PLAN_CHECKS`. See [the plan checks](docs/PLANNING.md#plan-checks).
+Prerelease contracts may change coherently: no compatibility formats or migrations. A state version mismatch holds with `reset` and `cancel`.

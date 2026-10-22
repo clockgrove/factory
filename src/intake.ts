@@ -174,6 +174,10 @@ async function settledWithin(runs: Promise<void>[]): Promise<void> {
   ]);
   clearTimeout(timer);
 }
+/** The hold of an Objective whose settlement was cut off at its deadline. */
+function unsettledReason(objective: number, detail: string): string {
+  return `${detail}; \`factory cancel --objective ${objective}\` finishes settling it`;
+}
 /** One Objective the service runs: its control while it serves one, and its end. */
 interface ActiveRun {
   control?: (request: ControlRequest) => Promise<unknown>;
@@ -2383,7 +2387,7 @@ async function runIntakeOwned(
             if (error.cause === undefined || !installationWide(error.cause)) {
               holdObjective(
                 selected,
-                `${error.message}; \`factory resume --objective ${selected}\` finishes settling it, or \`factory cancel --objective ${selected}\``,
+                unsettledReason(selected, error.message),
                 undefined,
                 true,
               );
@@ -2605,6 +2609,17 @@ async function runIntakeOwned(
               continue;
             }
             if (terminal(state)) {
+              // A settlement cut off at its deadline leaves its claim
+              // unsettled; only `factory cancel` settles it (#1714).
+              if (locallyClaimedObjectives(config)?.includes(entry.objective)) {
+                const reason = unsettledReason(
+                  entry.objective,
+                  "Its queue claim is unsettled",
+                );
+                holdObjective(entry.objective, reason, undefined, true);
+                reasons[entry.objective] = reason;
+                continue;
+              }
               // A split parent whose last child settle failed closes here; it
               // needs only local state and the parent's own provider.
               if (splitReadyToClose(config.repository, state))

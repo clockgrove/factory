@@ -7506,18 +7506,24 @@ test("stopped collection freezes a completed owned local return before restart a
   const quiet = appendFromWorker("quiet-before-build");
   const malformed = join(accountingRoot, `${"a".repeat(64)}.json`);
   duringBuild = () => writeFileSync(malformed, "{}\n", { mode: 0o600 });
-  await assert.rejects(
-    publish("explicit"),
-    /source inventory changed during its build: accounting/,
-  );
+  // The rebuild's strict read refuses the malformed original (#1750).
+  await assert.rejects(publish("explicit"), /differs from its immutable/);
   rmSync(malformed);
-  const quietBytes = readFileSync(join(privateRoot, quiet));
-  duringBuild = () => rmSync(join(privateRoot, quiet));
+  // A change on every rebuild still refuses past the bound (#1750).
+  for (const extra of ["removable-1", "removable-2"]) appendFromWorker(extra);
+  const removed = new Map();
+  duringBuild = () => {
+    const path = join(accountingRoot, accountingNames()[0]);
+    removed.set(path, readFileSync(path));
+    rmSync(path);
+  };
   await assert.rejects(
     publish("explicit"),
     /source inventory changed during its build: accounting/,
   );
-  writeFileSync(join(privateRoot, quiet), quietBytes, { mode: 0o600 });
+  assert.equal(removed.size, 3);
+  for (const [path, bytes] of removed)
+    writeFileSync(path, bytes, { mode: 0o600 });
   // On a clean journal an append during the explicit build moves the journal:
   // the explicit admission starts over and acknowledges that append (#1456).
   const priorAck = gitPersistenceStatus(config).lastAcknowledged;
@@ -7591,6 +7597,50 @@ test("stopped collection freezes a completed owned local return before restart a
   assert.equal(complete.status, "acknowledged");
   assert.equal(complete.pendingChanges, false);
   assert((await archivedAccounting()).includes(later));
+  // The service retains a memory record from its own process mid-build: the
+  // admission rebuilds and acknowledges it (#1750).
+  const retainMemory = (summary) =>
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { LocalRepositoryMemory } from ${JSON.stringify(
+          new URL("../dist/repository-memory.js", import.meta.url).href,
+        )};new LocalRepositoryMemory(${JSON.stringify(privateRoot)},${JSON.stringify(
+          repository,
+        )}).retain(${JSON.stringify({
+          schemaVersion: 1,
+          repository,
+          visibility: "repository",
+          kind: "observation",
+          producer: { objective: 1, runId: state.runId, status: "observed" },
+          createdAt: new Date().toISOString(),
+          authority: "observation",
+          summary,
+          bodies: [],
+          sources: [],
+          bindings: {},
+          validity: { state: "current", conditions: [] },
+          supersedes: [],
+        })});`,
+      ],
+      { stdio: "pipe", timeout: 10000 },
+    );
+  const records = join(privateRoot, "memory", "records");
+  const before = existsSync(records) ? readdirSync(records) : [];
+  duringBuild = () => {
+    duringBuild = undefined;
+    retainMemory("written during the build");
+  };
+  await publish("explicit");
+  const written = readdirSync(records).filter((name) => !before.includes(name));
+  assert.equal(written.length, 1);
+  assert(
+    (await readVerifiedRecoveryCheckpoint(config)).manifest.files.some(
+      (file) => file.path === `memory/records/${written[0]}`,
+    ),
+  );
 });
 
 // A real finite process writes the failure result a provider stop produces.

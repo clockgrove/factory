@@ -584,6 +584,32 @@ export class CheckpointProducerInventoryChanged extends Error {
     );
   }
 }
+/**
+ * A local producer (memory, accounting, learning) may write between a build's
+ * inventory and its strict verification (#1750). Each attempt is a complete,
+ * fresh build and verification; a failed one publishes nothing. A change that
+ * persists past the bound still refuses with this class.
+ */
+const INVENTORY_BUILD_ATTEMPTS = 3;
+async function rebuildOnInventoryChange<T>(
+  build: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await build();
+    } catch (error) {
+      if (
+        !(error instanceof CheckpointProducerInventoryChanged) ||
+        attempt === INVENTORY_BUILD_ATTEMPTS
+      )
+        throw error;
+      assertProcessActive();
+      await new Promise<void>((done) =>
+        setTimeout(done, 20 + Math.floor(Math.random() * 60)),
+      );
+    }
+  }
+}
 export function markCheckpointEffectDispatched(
   error: CheckpointAdmissionFailure,
 ): void {
@@ -7857,7 +7883,7 @@ async function publishCheckpointLocked(
       const buildScoped = () =>
         withRecoveryCheckpointScope({ config, buildClosure: build }, build);
       if (record.retentionGaps?.length) {
-        await buildScoped();
+        await rebuildOnInventoryChange(buildScoped);
         record = journal(config, options);
         assertRetentionResolved(record);
       }
@@ -7965,44 +7991,47 @@ async function publishCheckpointLocked(
         () => ({ reason: input.reason, basis: full ? "full" : "incremental" }),
       );
       closureObservation.start("build-and-verify");
-      const local = await withFiniteCheckpointReads(
-        config,
-        async () => {
-          const closure = await buildScoped();
-          const currentRecord = journal(config, options);
-          assertRetentionResolved(currentRecord);
-          const manifest: RecoveryCheckpointManifest = {
-            ...closure,
-            schemaVersion: 1,
-            binding: binding(config, options),
-            createdAt: new Date().toISOString(),
-            sequence,
-            ...(options.scope === "private-history"
-              ? { authority: checkpointAuthority(config) }
-              : {}),
-          };
-          const uncollected = closure.gaps.filter(
-            (gap) => gap.required !== false && gap.availability === "transient",
-          );
-          if (uncollected.length)
-            throw new CheckpointCollectionPending(
-              uncollected.map((gap) => gap.path),
+      const local = await rebuildOnInventoryChange(() =>
+        withFiniteCheckpointReads(
+          config,
+          async () => {
+            const closure = await buildScoped();
+            const currentRecord = journal(config, options);
+            assertRetentionResolved(currentRecord);
+            const manifest: RecoveryCheckpointManifest = {
+              ...closure,
+              schemaVersion: 1,
+              binding: binding(config, options),
+              createdAt: new Date().toISOString(),
+              sequence,
+              ...(options.scope === "private-history"
+                ? { authority: checkpointAuthority(config) }
+                : {}),
+            };
+            const uncollected = closure.gaps.filter(
+              (gap) =>
+                gap.required !== false && gap.availability === "transient",
             );
-          assertManifest(manifest, manifest.binding, options);
-          const store = new LocalContentStore(
-            join(stateRoot(config.repository), "content"),
-          );
-          const refs = allRefs(manifest);
-          assertBodyBounds(refs, options);
-          // Producer originals and the complete publication collection share
-          // one fresh final union, before publisher transport can begin.
-          for (const ref of refs) store.verifyPrivateBytes(ref);
-          return { closure, manifest, refs, store, record: currentRecord };
-        },
-        true,
-        scopes.getStore() ?? { config, buildClosure: build },
-        true,
-        covered,
+            if (uncollected.length)
+              throw new CheckpointCollectionPending(
+                uncollected.map((gap) => gap.path),
+              );
+            assertManifest(manifest, manifest.binding, options);
+            const store = new LocalContentStore(
+              join(stateRoot(config.repository), "content"),
+            );
+            const refs = allRefs(manifest);
+            assertBodyBounds(refs, options);
+            // Producer originals and the complete publication collection share
+            // one fresh final union, before publisher transport can begin.
+            for (const ref of refs) store.verifyPrivateBytes(ref);
+            return { closure, manifest, refs, store, record: currentRecord };
+          },
+          true,
+          scopes.getStore() ?? { config, buildClosure: build },
+          true,
+          covered,
+        ),
       ).catch((error: unknown) => {
         closureObservation.fail(error);
         throw error;

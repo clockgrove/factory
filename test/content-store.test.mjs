@@ -7773,7 +7773,7 @@ test("a worker stopped by a provider usage limit is transient with its reset tim
   assert.equal(fault.outcomeUnknown, false);
 });
 
-test("plan boundaries refuse network validation off infra and new file names in acceptance", () => {
+test("plan boundaries refuse network validation for every item and new file names in acceptance", () => {
   const repo = mkdtempSync(join(tmpdir(), "plan-boundaries-"));
   const git = (...args) =>
     execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
@@ -7843,6 +7843,19 @@ test("plan boundaries refuse network validation off infra and new file names in 
   );
   // Allowed: existing files, globs, names the Objective fixes, files the item
   // owns, and a numbered name outside migrations.
+  check([
+    item("app", {
+      ownedPaths: ["src/a.ts", "test/"],
+      acceptance: ["mine.test.mjs and test/mine.test.mjs cover the refusal."],
+    }),
+  ]);
+  assert.throws(
+    () =>
+      check([
+        item("app", { acceptance: ["mine.test.mjs covers the refusal."] }),
+      ]),
+    /acceptance names mine\.test\.mjs/,
+  );
   check(
     [
       item("app", {

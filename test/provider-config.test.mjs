@@ -328,6 +328,9 @@ test("CI-only commands are never validation commands (#1667)", () => {
   );
   graph.items[0].validation[1].command = " npm run  audit";
   assert.throws(() => assertNoCiOnlyValidation(graph, [audit]), /CI-only/);
+  // Every form of a CI-only script is refused.
+  graph.items[0].validation[1].command = "pnpm run audit";
+  assert.throws(() => assertNoCiOnlyValidation(graph, [audit]), /CI-only/);
   graph.items[0].validation.pop();
   assertNoCiOnlyValidation(graph, [audit]);
 });
@@ -625,15 +628,17 @@ test("every plan check gives the planner its facts and refuses with what would p
     PLAN_CHECKS.map((c) => c.id).sort(),
   );
   // A plan-check function in the sources is registered or explicitly exempt.
-  const functions = ["src/compiler/sources.ts", "src/compiler-wire.ts"].flatMap(
+  // Exported ones that throw or are named *Lint must be listed; any function
+  // that throws (directly or through a helper) must be listed or called from
+  // a listed one, so a non-exported or helper-thrown check cannot slip past.
+  const chunks = ["src/compiler/sources.ts", "src/compiler-wire.ts"].flatMap(
     (file) =>
       readFileSync(new URL(`../${file}`, import.meta.url), "utf8")
         .split(/\n(?=(?:export )?(?:async )?function )/)
         .flatMap((chunk) => {
-          const name = chunk.match(/^export (?:async )?function (\w+)/)?.[1];
-          return name &&
-            (/new GraphValidationError\(/.test(chunk) || /Lint$/.test(name))
-            ? [name]
+          const match = chunk.match(/^(export )?(?:async )?function (\w+)/);
+          return match
+            ? [{ name: match[2], exported: !!match[1], body: chunk }]
             : [];
         }),
   );
@@ -641,11 +646,68 @@ test("every plan check gives the planner its facts and refuses with what would p
     ...PLAN_CHECKS.map((c) => c.entry),
     ...PLAN_CHECK_EXEMPT,
   ]);
+  const calls = (chunk) =>
+    chunks.filter(
+      (other) =>
+        other.name !== chunk.name &&
+        new RegExp(`\\b${other.name}\\(`).test(chunk.body),
+    );
+  const throwers = new Set(
+    chunks
+      .filter((c) => /new GraphValidationError\(/.test(c.body))
+      .map((c) => c.name),
+  );
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const chunk of chunks)
+      if (
+        !throwers.has(chunk.name) &&
+        calls(chunk).some((other) => throwers.has(other.name))
+      )
+        grew = throwers.add(chunk.name).has(chunk.name);
+  }
+  const reached = new Set(known);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const chunk of chunks)
+      if (reached.has(chunk.name))
+        for (const other of calls(chunk))
+          if (!reached.has(other.name)) grew = !!reached.add(other.name);
+  }
   assert.deepEqual(
-    functions.filter((name) => !known.has(name)),
+    chunks
+      .filter(
+        (c) =>
+          (c.exported &&
+            !known.has(c.name) &&
+            (/new GraphValidationError\(/.test(c.body) ||
+              /Lint$/.test(c.name))) ||
+          (throwers.has(c.name) && !reached.has(c.name)),
+      )
+      .map((c) => c.name),
     [],
     "register new plan checks in PLAN_CHECKS",
   );
+  // An exact source line that is not command-shaped is never authority.
+  const shapeless = "FOO=1 node --test";
+  const declared = (text) =>
+    validateCommandProvenance(
+      graph(
+        item("a", {
+          validation: [
+            {
+              command: text,
+              provenance: "source-declared",
+              source: "OBJECTIVE",
+            },
+          ],
+        }),
+      ),
+      [{ path: "OBJECTIVE", content: `## Acceptance\n- ${text}\n` }],
+      repo,
+    );
+  declared("node --test");
+  assert.throws(() => declared(shapeless), /no exact source-declared command/);
   const fix = {
     "command-authority": /Authorized commands: `npm test`, `npm run lint`/,
     "ci-only": /use an offline authorized command/,

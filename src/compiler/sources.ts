@@ -851,6 +851,9 @@ function objectiveSection(body: string, names: string[]): string {
 }
 
 function exactLine(content: string, command: string): boolean {
+  // Only a command-shaped line is authority; doc code never is.
+  if (!COMMAND_SHAPE.test(command) && !packageManagerVersionProbe(command))
+    return false;
   return content.split("\n").some((line) => {
     const text = line
       .trim()
@@ -1015,13 +1018,22 @@ export const PLAN_CHECKS = [
 
 /**
  * Functions that refuse a plan but are not registered above: citation and
- * input-source checks already name the exact headings and shape that pass.
+ * input-source checks (and the lookups that apply them) already name the exact headings and shape that pass.
  */
 export const PLAN_CHECK_EXEMPT = [
   "validateCitations",
   "assertWorkerInputSources",
   "validateGraphSources",
+  "revisionCitedSections",
+  "hydrateWorkerInputSources",
 ] as const;
+
+/** A command's identity for the CI-only list: every form of a root script is one command. */
+function ciOnlyKey(command: string): string {
+  const normalized = normalizedCommand(command);
+  const invocation = packageScriptInvocation(normalized);
+  return invocation ? `script:${invocation.name}` : normalized;
+}
 
 /** A leading executable word, no assignment, braces or statement separators. */
 const COMMAND_SHAPE = /^[a-z][\w.-]*(?: [^{}$;|&<>]*)?$/;
@@ -1039,7 +1051,7 @@ export function authorizedCommands(
   checkout: string,
   ciOnlyCommands: readonly string[] = [],
 ): string[] {
-  const ciOnly = new Set(ciOnlyCommands.map(normalizedCommand));
+  const ciOnly = new Set(ciOnlyCommands.map(ciOnlyKey));
   let scripts: Record<string, unknown> = {};
   try {
     const parsed = JSON.parse(
@@ -1054,8 +1066,7 @@ export function authorizedCommands(
   }
   const accepted = new Set<string>();
   const usable = (command: string) =>
-    !ciOnly.has(normalizedCommand(command)) &&
-    !networkToolOfCommand(command, scripts);
+    !ciOnly.has(ciOnlyKey(command)) && !networkToolOfCommand(command, scripts);
   // Root scripts lead (test and check first), then source-declared commands.
   const names = Object.keys(scripts).sort(
     (a, b) =>
@@ -1072,7 +1083,7 @@ export function authorizedCommands(
             `pnpm run ${name}`,
           ];
     // A CI-only script is CI-only in every form.
-    if (forms.some((form) => ciOnly.has(normalizedCommand(form)))) continue;
+    if (forms.some((form) => ciOnly.has(ciOnlyKey(form)))) continue;
     const command = forms.find(
       (form) =>
         usable(form) &&
@@ -1407,10 +1418,10 @@ export function assertRequiredFinalCommands(
   checkout: string,
   ciOnlyCommands: readonly string[] = [],
 ): void {
-  const ciOnlySet = new Set(ciOnlyCommands.map(normalizedCommand));
+  const ciOnlySet = new Set(ciOnlyCommands.map(ciOnlyKey));
   const ciOnly = finalObjectiveCommands(body)
     .map((command) => command.trim())
-    .find((command) => ciOnlySet.has(normalizedCommand(command)));
+    .find((command) => ciOnlySet.has(ciOnlyKey(command)));
   if (ciOnly !== undefined)
     throw new Error(
       `Acceptance command ${ciOnly} is CI-only in the installation's finalValidation.ciOnlyCommands: it needs network, and final validation runs offline. Leave it to CI and remove it from the Objective's Acceptance commands, or remove it from ciOnlyCommands if it runs offline.`,
@@ -1475,10 +1486,10 @@ export function assertNoCiOnlyValidation(
   graph: WorkGraph,
   ciOnlyCommands: readonly string[],
 ): void {
-  const ciOnly = new Set(ciOnlyCommands.map(normalizedCommand));
+  const ciOnly = new Set(ciOnlyCommands.map(ciOnlyKey));
   for (const item of workShapes(graph))
     for (const { command } of item.validation)
-      if (ciOnly.has(normalizedCommand(command)))
+      if (ciOnly.has(ciOnlyKey(command)))
         throw new GraphValidationError(
           item.id,
           `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI and use an offline authorized command from the request instead; when a criterion needs it, ask through decisionRequired`,
@@ -1542,7 +1553,7 @@ export function assertPlanBoundaries(
   /** The authorized commands the request listed, named in the refusal. */
   authorized: readonly string[] = [],
 ): void {
-  const ciOnly = new Set(ciOnlyCommands.map(normalizedCommand));
+  const ciOnly = new Set(ciOnlyCommands.map(ciOnlyKey));
   let scripts: Record<string, unknown> | undefined;
   const rootScripts = (): Record<string, unknown> => {
     if (scripts) return scripts;
@@ -1590,8 +1601,7 @@ export function assertPlanBoundaries(
   };
   for (const item of workShapes(graph)) {
     for (const { command } of item.validation) {
-      if (packageBootstrap(command) || ciOnly.has(normalizedCommand(command)))
-        continue;
+      if (packageBootstrap(command) || ciOnly.has(ciOnlyKey(command))) continue;
       const tool = networkToolOfCommand(command, rootScripts());
       if (tool)
         found(
@@ -1613,7 +1623,7 @@ export function assertPlanBoundaries(
         item.ownedPaths.some((owned) =>
           file.includes("/")
             ? owned === file || (owned.endsWith("/") && file.startsWith(owned))
-            : owned.replace(/^.*\//, "") === file,
+            : owned.endsWith("/") || owned.replace(/^.*\//, "") === file,
         )
       )
         continue;

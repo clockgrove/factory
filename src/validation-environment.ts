@@ -13,7 +13,7 @@ export const VALIDATION_ENVIRONMENT = {
   refs: "remote-tracking branches may be stale; compare with $FACTORY_BASE_SHA",
   ci: "no hosted CI jobs, logs or secrets",
   tests:
-    "run through the repository's isolated test entry; tmp is private and empty",
+    "HOME and TMPDIR are private and empty, with no host credentials or user config",
   sandbox: "read-only host, private HOME and /tmp, no host sockets",
   ifNeeded:
     "leave out any command needing more, and ask through decisionRequired",

@@ -311,6 +311,13 @@ export interface CommandSandboxConfig {
   packageStore?: string;
   /** Further host directories commands may read, such as a toolchain outside the PATH. */
   readOnlyPaths?: string[];
+  /**
+   * Fixed environment variables for every sandboxed command, such as the
+   * variable that locates a pre-provisioned tool directory. Names Factory
+   * controls or that could leak or redirect are refused. A value that is an
+   * absolute path should lie within `readOnlyPaths`.
+   */
+  environment?: Record<string, string>;
   /** Resource limits for each command; omitted fields use the defaults. */
   limits?: {
     /**
@@ -352,6 +359,7 @@ export interface CommandSandboxPolicy {
   network: "off" | "package-install";
   packageStore?: string;
   readOnlyPaths: string[];
+  environment: Record<string, string>;
   limits: typeof DEFAULT_SANDBOX_LIMITS;
   /**
    * Set only by a caller that checked these commands' package inputs
@@ -372,6 +380,7 @@ export const STRICT_COMMAND_SANDBOX: CommandSandboxPolicy = {
   required: true,
   network: "off",
   readOnlyPaths: [],
+  environment: {},
   limits: DEFAULT_SANDBOX_LIMITS,
 };
 
@@ -379,7 +388,14 @@ export function assertCommandSandboxConfig(value: unknown): void {
   const sandbox = record(value, "sandbox");
   refuseUnknownFields(
     sandbox,
-    ["required", "network", "packageStore", "readOnlyPaths", "limits"],
+    [
+      "required",
+      "network",
+      "packageStore",
+      "readOnlyPaths",
+      "environment",
+      "limits",
+    ],
     "sandbox",
   );
   if (sandbox.limits !== undefined) {
@@ -430,6 +446,46 @@ export function assertCommandSandboxConfig(value: unknown): void {
     throw new Error(
       "sandbox.readOnlyPaths must be absolute, normalized directory paths",
     );
+  if (sandbox.environment !== undefined) {
+    const environment = record(sandbox.environment, "sandbox.environment");
+    for (const [name, value] of Object.entries(environment)) {
+      if (!ENVIRONMENT_NAME.test(name))
+        throw new Error(
+          `sandbox.environment name ${name} must match ${ENVIRONMENT_NAME.source}`,
+        );
+      if (REFUSED_ENVIRONMENT_NAME.test(name))
+        throw new Error(
+          `sandbox.environment name ${name} is refused: Factory controls it or it could leak or redirect commands`,
+        );
+      if (
+        typeof value !== "string" ||
+        Buffer.byteLength(value) > MAX_ENVIRONMENT_VALUE_BYTES ||
+        value.includes("\0")
+      )
+        throw new Error(
+          `sandbox.environment.${name} must be a string of at most ${MAX_ENVIRONMENT_VALUE_BYTES} bytes`,
+        );
+    }
+  }
+}
+
+const ENVIRONMENT_NAME = /^[A-Z][A-Z0-9_]*$/;
+const MAX_ENVIRONMENT_VALUE_BYTES = 4096;
+const REFUSED_ENVIRONMENT_NAME =
+  /^(PATH|HOME|TMPDIR|TMP|TEMP|SHELL|USER|LOGNAME|NODE_OPTIONS|GIT_.*|GH_.*|GITHUB_.*|LD_.*)$|TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY/;
+
+/** Absolute-path environment values that no `sandbox.readOnlyPaths` entry covers. */
+export function uncoveredSandboxEnvironment(
+  sandbox: CommandSandboxConfig | undefined,
+): string[] {
+  const roots = sandbox?.readOnlyPaths ?? [];
+  return Object.entries(sandbox?.environment ?? {})
+    .filter(
+      ([, value]) =>
+        isAbsolute(value) &&
+        !roots.some((root) => value === root || value.startsWith(`${root}/`)),
+    )
+    .map(([name]) => name);
 }
 
 export function commandSandboxPolicy(config?: {
@@ -441,6 +497,7 @@ export function commandSandboxPolicy(config?: {
     network: sandbox.network ?? "off",
     ...(sandbox.packageStore && { packageStore: sandbox.packageStore }),
     readOnlyPaths: [...(sandbox.readOnlyPaths ?? [])],
+    environment: { ...sandbox.environment },
     limits: { ...DEFAULT_SANDBOX_LIMITS, ...sandbox.limits },
   };
 }
@@ -1043,6 +1100,7 @@ export function sandboxedCommand(input: SandboxedCommandInput): {
   for (const name of HOST_DIRECTORY_VARIABLES) delete env[name];
   env.HOME = home;
   if (path !== undefined) env.PATH = path;
+  Object.assign(env, input.policy.environment);
   // Without a packageStore, package caches live in the private HOME, never
   // in the checkout.
   Object.assign(env, packageCacheEnvironment(join(home, ".cache")));

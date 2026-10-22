@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ciOnlyCommands, type FactoryConfig } from "./config.js";
+import { uncoveredSandboxEnvironment } from "./execution/sandbox.js";
 
 /**
  * How Factory validation differs from a hosted CI run, in the compact form the
@@ -75,6 +76,7 @@ export interface ValidationEnvironmentReport {
   network: string;
   sandbox: string;
   bootstrap: string;
+  environment: string[];
   ciOnlyCommands: { set: boolean; commands: string[] };
   planner: typeof VALIDATION_ENVIRONMENT;
   warnings: string[];
@@ -115,6 +117,10 @@ export function validationEnvironmentReport(
         `package script ${name} runs ${tool}, which needs a network validation does not have; if CI runs it, list \`npm run ${name}\` (or \`pnpm run ${name}\`) in finalValidation.ciOnlyCommands`,
       );
   }
+  for (const name of uncoveredSandboxEnvironment(config.sandbox))
+    warnings.push(
+      `sandbox.environment.${name} is an absolute path that no sandbox.readOnlyPaths entry covers, so commands cannot read it`,
+    );
   const network = config.sandbox?.network ?? "off";
   const pnpm = existsSync(join(config.checkout, "pnpm-lock.yaml"));
   return {
@@ -129,6 +135,7 @@ export function validationEnvironmentReport(
     bootstrap: pnpm
       ? "pnpm install --frozen-lockfile --ignore-scripts"
       : "npm ci --ignore-scripts",
+    environment: Object.keys(config.sandbox?.environment ?? {}).sort(),
     ciOnlyCommands: { set: commands.length > 0, commands: [...commands] },
     planner: VALIDATION_ENVIRONMENT,
     warnings,

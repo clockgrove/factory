@@ -27,6 +27,7 @@ import {
   factoryShellAuthorized,
   runSandboxedCommand,
 } from "../dist/execution/claude-shell.js";
+import { factoryConfigDigest } from "../dist/config.js";
 import { CodexHarness } from "../dist/execution/local.js";
 import { copyOwnedFile } from "../dist/execution/claude-files.js";
 import {
@@ -1379,6 +1380,37 @@ test("a run's HOME, TMPDIR and checkout growth stay within the sandbox's disk bu
       () => assertCommandSandboxConfig({ limits }),
       /sandbox\.limits/,
     );
+  // sandbox.environment refuses names Factory controls or that could leak.
+  for (const name of [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "SHELL",
+    "GIT_DIR",
+    "GH_HOST",
+    "GITHUB_ENV",
+    "NODE_OPTIONS",
+    "LD_PRELOAD",
+    "API_TOKEN",
+    "MY_SECRET",
+    "DB_PASSWORD",
+    "AWS_CREDENTIALS",
+    "SSH_KEY",
+    "lower",
+    "1BAD",
+  ])
+    assert.throws(
+      () => assertCommandSandboxConfig({ environment: { [name]: "x" } }),
+      /sandbox\.environment name/,
+    );
+  for (const value of [1, "x".repeat(4097)])
+    assert.throws(
+      () => assertCommandSandboxConfig({ environment: { TOOL_DIR: value } }),
+      /at most 4096 bytes/,
+    );
+  assertCommandSandboxConfig({
+    environment: { PLAYWRIGHT_BROWSERS_PATH: "/opt/browsers" },
+  });
   assertCommandSandboxConfig({
     limits: {
       homeMiB: 16,
@@ -1765,7 +1797,7 @@ test("a killed worker's command sandbox is stopped and proved gone before the wo
 });
 
 // One command as validation launches it, and its run.
-const launchIn = (root, command, readOnlyPaths) =>
+const launchIn = (root, command, readOnlyPaths, environment = {}) =>
   sandboxedCommand({
     command,
     checkout: join(root, "worktree"),
@@ -1774,7 +1806,7 @@ const launchIn = (root, command, readOnlyPaths) =>
     env: { PATH: process.env.PATH },
     network: false,
     packageInstall: false,
-    policy: { ...STRICT_COMMAND_SANDBOX, readOnlyPaths },
+    policy: { ...STRICT_COMMAND_SANDBOX, readOnlyPaths, environment },
   });
 const runIn = (root, launch) =>
   subprocessAsync(launch.file, launch.args, {
@@ -1804,6 +1836,17 @@ test("a sandbox that cannot be set up is a configuration fault, not the command'
   assert.equal(failed.status, 1);
   // A mount source that vanishes after the arguments were built: bubblewrap
   // exits 1 before the command runs, which is the host's fault (#1573).
+  // sandbox.environment reaches the command; the digest ignores it.
+  const seen = launchIn(root, "exit 0", [tools], { TOOL_DIR: tools });
+  assert.equal(seen.env.TOOL_DIR, tools);
+  const digestConfig = { repository: "o/r", checkout: root };
+  assert.equal(
+    factoryConfigDigest({
+      ...digestConfig,
+      sandbox: { environment: { A: "1" } },
+    }),
+    factoryConfigDigest(digestConfig),
+  );
   const launch = launchIn(root, "exit 0", [tools]);
   rmSync(tools, { recursive: true });
   const error = await runIn(root, launch).then(

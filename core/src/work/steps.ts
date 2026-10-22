@@ -1077,11 +1077,21 @@ export function reportStep(deps: BuildDeps): Step {
         const { state, signal } = context;
         const { config, github } = deps;
         if (context.answer?.answer === "replan") return replanOutcome(state);
-        const changed = await objectiveEdited(context, deps);
-        if (changed) return changed;
+        const marker = `<!-- factory:${state.issue}:report -->`;
+        // Once the report is posted, the issue close that follows is Factory's
+        // own: a restart after it must not read it as the operator's.
+        const reported = await github.findComment(
+          state.issue,
+          marker,
+          undefined,
+          signal,
+        );
+        if (!reported) {
+          const changed = await objectiveEdited(context, deps);
+          if (changed) return changed;
+        }
         const plan = state.done.plan as Plan;
         const final = state.done.final as FinalResult;
-        const marker = `<!-- factory:${state.issue}:report -->`;
         const lines = plan.items.map((item) => {
           const published = state.done[stepKey(item.id, "publish")] as
             | PublishResult
@@ -1096,7 +1106,7 @@ export function reportStep(deps: BuildDeps): Step {
           0,
         );
         const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}`;
-        if (!(await github.findComment(state.issue, marker, undefined, signal)))
+        if (!reported)
           await github.rest(
             "POST",
             `/repos/${config.repository}/issues/${state.issue}/comments`,

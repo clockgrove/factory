@@ -151,7 +151,12 @@ export async function serve(options: ServeOptions): Promise<number> {
           result = runner.retryNow(stored.by);
           break;
         case "answer":
-          result = runner.answer(request.answer, request.text, stored.by);
+          result = runner.answer(
+            request.answer,
+            request.text,
+            stored.by,
+            request.writtenAt,
+          );
           break;
       }
       const text = result ?? "ok";

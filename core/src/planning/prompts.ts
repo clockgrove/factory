@@ -333,7 +333,7 @@ export interface RevisionScope {
 }
 
 /** Every item of a draft, including the graphs of split children. */
-function draftItems(draft: Draft): WorkItem[] {
+export function draftItems(draft: Draft): WorkItem[] {
   return [
     ...draft.items,
     ...(draft.split?.children ?? []).flatMap((child) =>

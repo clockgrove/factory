@@ -174,7 +174,7 @@ function utf8(bytes: Buffer): string | undefined {
 // ── Objective ───────────────────────────────────────────────────────────
 
 /** A Factory-created child Objective carries its parent's model-written goal. */
-function childIdentity(body: string): boolean {
+export function childIdentity(body: string): boolean {
   return /^<!-- factory:parent=[1-9][0-9]*;child=[a-z][a-z0-9-]{0,63} -->\n/.test(
     body,
   );

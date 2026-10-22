@@ -349,10 +349,17 @@ export class ObjectiveRunner {
    * Answer the open question. Returns null when applied, or the reason it
    * doesn't fit. The caller saves (see `transact`).
    */
-  answer(answer: string, text: string | undefined, by: string): string | null {
+  answer(
+    answer: string,
+    text: string | undefined,
+    by: string,
+    writtenAt?: string,
+  ): string | null {
     if (answer === "cancel") return this.cancel(by);
     const hold = this.state.hold;
     if (!hold) return `#${this.state.issue} has no open question.`;
+    if (writtenAt && Date.parse(writtenAt) < Date.parse(hold.askedAt) - 60_000)
+      return `That answer was written before the current question was asked, so it wasn't applied. The open question asks: ${hold.question.slice(0, 300)} Answers: ${hold.answers.join(", ")}.`;
     if (!hold.answers.includes(answer))
       return `"${answer}" isn't an answer to this question. Answers: ${hold.answers.join(", ")}.`;
     this.state.answers[hold.step] = {

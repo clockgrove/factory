@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { CoreConfig } from "../config.js";
@@ -12,15 +12,20 @@ import { checkPlan } from "./checks.js";
 import {
   BaseFiles,
   buildFacts,
+  childIdentity,
+  commandInstructions,
   finalCommands,
   objectiveCommandProblems,
+  sectionText,
 } from "./facts.js";
 import {
+  draftItems,
   renderCompilationCall,
   renderGraphReviewCall,
   renderPlanningInstructions,
   revisionScope,
 } from "./prompts.js";
+import { observeLocalExecutables } from "./executables.js";
 import { exportTree, repositoryView } from "./repository.js";
 import {
   decodeGraphReview,
@@ -110,6 +115,8 @@ interface PlanRound {
 
 interface ReviewRound {
   findings: ReviewFinding[];
+  /** The operator answered `replan` while the review was held. */
+  replan?: true;
 }
 
 interface Decision {
@@ -168,6 +175,87 @@ function allowedCommands(state: ObjectiveState): string[] {
     .map((d) => d.text!.replace(/^`|`$/g, "").trim());
 }
 
+/** This generation's answers that carry content for the planner. */
+function generationDecisions(
+  state: ObjectiveState,
+  g: number,
+): PlannerDecision[] {
+  return Object.entries(state.done)
+    .filter(([key]) => key.startsWith(`decide:${g}:`))
+    .sort(([a], [b]) => compareKeys(a, b))
+    .flatMap(([, value]) => {
+      const decision = (value as Decision).decision;
+      return decision &&
+        (decision.answer === "answer" || decision.answer === "allow")
+        ? [decision]
+        : [];
+    });
+}
+
+/** The decisions saved before round `m` of generation `g`. */
+function decisionsBefore(
+  state: ObjectiveState,
+  g: number,
+  m: number,
+): PlannerDecision[] {
+  return Object.entries(state.done)
+    .filter(
+      ([key]) =>
+        key.startsWith("decide:") && compareKeys(key, `decide:${g}:${m}`) < 0,
+    )
+    .sort(([a], [b]) => compareKeys(a, b))
+    .flatMap(([, value]) => {
+      const decision = (value as Decision).decision;
+      return decision ? [decision] : [];
+    });
+}
+
+/** Workers get a sandboxed shell (docs/CORE.md). */
+const WORKERS = { default: "shell" } as const;
+
+const INVALID_ANSWER = "The planner's answer didn't match the schema";
+
+/**
+ * The exact base text of the repository sections the items named in the
+ * findings cite, for a revision. Pinned sources are already in the prompt.
+ */
+async function citedSections(
+  draft: Draft | undefined,
+  fixes: (Finding & { itemIds?: string[] })[],
+  facts: PlanningFacts,
+  files: BaseFiles,
+): Promise<{ path: string; heading?: string; content: string }[]> {
+  if (!draft) return [];
+  const ids = new Set(
+    fixes.flatMap((f) => f.itemIds ?? (f.itemId ? [f.itemId] : [])),
+  );
+  const pinned = new Set(
+    facts.sources.map((source) => `${source.path}#${source.heading ?? ""}`),
+  );
+  const seen = new Set<string>();
+  const sections: { path: string; heading?: string; content: string }[] = [];
+  for (const item of draftItems(draft)) {
+    if (!ids.has(item.id)) continue;
+    for (const citation of item.citations) {
+      const id = `${citation.path}#${citation.heading ?? ""}`;
+      if (pinned.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      const text = await files.text(citation.path);
+      if (text === undefined) continue;
+      const content = citation.heading
+        ? sectionText(text, citation.heading)
+        : text;
+      if (content === undefined) continue;
+      sections.push({
+        path: citation.path,
+        ...(citation.heading ? { heading: citation.heading } : {}),
+        content,
+      });
+    }
+  }
+  return sections;
+}
+
 // ---------------------------------------------------------------------------
 // plan:g:n
 
@@ -187,6 +275,8 @@ function planRoundStep(
         // `replan` after an Objective problem: start a new generation, which re-reads the issue.
         if (context.answer?.answer === "replan")
           return done({ replan: true } satisfies PlanRound);
+        const files = (base: string) =>
+          new BaseFiles(config.checkout, base, signal);
         let inputs: Inputs;
         if (g > 1 && n === 1) {
           // A replan re-reads the issue and the default branch.
@@ -219,32 +309,76 @@ function planRoundStep(
         const previous = previousKey
           ? (state.done[previousKey] as PlanRound)
           : undefined;
-        const corrections =
+        const fixes =
           n > 1
-            ? ((state.done[`decide:${g}:${n - 1}`] as Decision).corrections ??
-              [])
-            : operatorCorrections(decisions(state));
+            ? (
+                (state.done[`decide:${g}:${n - 1}`] as Decision).corrections ??
+                []
+              ).filter((f) => f.source !== "operator")
+            : [];
+        // A broken answer last time: the planner sees why, once.
+        const lastError = state.retries[key]?.lastError;
+        const corrections = [
+          ...operatorCorrections(generationDecisions(state, g)),
+          ...fixes,
+          ...(lastError?.startsWith(INVALID_ANSWER)
+            ? [{ source: "check" as const, message: lastError }]
+            : []),
+        ];
         const revising = Boolean(previous?.answer);
+        const wire = { child: childIdentity(inputs.body) };
+        const cited = revising
+          ? await citedSections(
+              previous!.draft,
+              fixes,
+              facts,
+              files(inputs.base),
+            )
+          : [];
         const data = {
-          ...planChoices(facts),
-          instructions: renderPlanningInstructions(
+          ...planChoices(facts, wire),
+          instructions: `${renderPlanningInstructions(
             inputs.body,
             corrections,
             revising,
-          ),
-          ...(revising ? { currentPlan: previous!.answer } : {}),
+          )}${await commandInstructions(facts, config.checkout, signal)}`,
+          ...(revising
+            ? {
+                currentPlan: previous!.answer,
+                citedSections: cited.map((section, at) => ({
+                  path: section.path,
+                  heading: section.heading ?? "",
+                  content: { block: `section ${at}` },
+                })),
+              }
+            : {}),
         };
+        const local = await observeLocalExecutables({
+          checkout: config.checkout,
+          base: inputs.base,
+          body: inputs.body,
+          finalCommands: finalCommands(
+            inputs.body,
+            config.finalValidation.requiredCommands,
+          ),
+          signal,
+        });
         const prompt = renderCompilationCall({
           facts,
           data,
           revising,
           repository,
+          workers: WORKERS,
+          citedSections: cited,
+          localExecutables: local.observations,
         });
         const answer = await deps.planner.answer({
           role: "planner",
           phase: "plan",
           prompt,
-          schema: revising ? revisionSchema(facts) : planSchema(facts),
+          schema: revising
+            ? revisionSchema(facts, wire)
+            : planSchema(facts, wire),
           readDir: workDir,
           signal,
           log: context.log,
@@ -257,7 +391,12 @@ function planRoundStep(
         });
         let full: unknown = answer.value;
         if (revising) {
-          const revised = applyRevision(previous!.answer, answer.value, facts);
+          const revised = applyRevision(
+            previous!.answer,
+            answer.value,
+            facts,
+            wire,
+          );
           if (revised.invalidShape) return invalidAnswer(revised.findings);
           if (!revised.answer)
             return done({
@@ -267,7 +406,7 @@ function planRoundStep(
             });
           full = revised.answer;
         }
-        const decoded = decodePlan(full, facts);
+        const decoded = decodePlan(full, facts, wire);
         if (decoded.invalidShape) return invalidAnswer(decoded.findings);
         const round: PlanRound = {
           ...(g > 1 && n === 1 ? { inputs } : {}),
@@ -277,10 +416,14 @@ function planRoundStep(
           return done({ ...round, question: decoded.question });
         if (!decoded.plan)
           return done({ ...round, findings: decoded.findings });
-        const files = new BaseFiles(config.checkout, inputs.base, signal);
         const findings = [
           ...decoded.findings,
-          ...(await checkPlan(decoded.plan, facts, files, previous?.draft)),
+          ...(await checkPlan(
+            decoded.plan,
+            facts,
+            files(inputs.base),
+            previous?.draft,
+          )),
         ];
         return done({
           ...round,
@@ -314,6 +457,8 @@ function reviewStep(
       guarded(async () => {
         const { state, signal } = context;
         const { config } = deps;
+        if (context.answer?.answer === "replan")
+          return done({ findings: [], replan: true } satisfies ReviewRound);
         const inputs = generationInputs(state, g);
         const built = await buildFacts({
           objective: state.issue,
@@ -330,9 +475,20 @@ function reviewStep(
         const { facts } = built;
         const draft = (state.done[`plan:${g}:${n}`] as PlanRound).draft!;
         const all = decisions(state);
+        const local = await observeLocalExecutables({
+          checkout: config.checkout,
+          base: inputs.base,
+          body: inputs.body,
+          finalCommands: finalCommands(
+            inputs.body,
+            config.finalValidation.requiredCommands,
+          ),
+          signal,
+        });
         const evidence = planningReviewEvidence({
           sources: facts.sources,
           decisions: all,
+          localExecutables: local.observations,
         });
         const workDir = treeDir(deps, state.issue, inputs.base);
         await exportTree(config.checkout, inputs.base, workDir, signal);
@@ -354,11 +510,15 @@ function reviewStep(
           ),
           controllerCapabilities: CONTROLLER_GUARANTEES,
           repository,
+          workers: WORKERS,
           ...(scope
             ? {
                 scope: revisionScope(
                   n,
-                  { ...scope, decisions: all },
+                  {
+                    ...scope,
+                    decisions: decisionsBefore(state, g, scope.round),
+                  },
                   { draft, decisions: all },
                 ),
               }
@@ -376,7 +536,7 @@ function reviewStep(
         const decoded = decodeGraphReview(
           answer.value,
           evidence,
-          draft.items.map((item) => item.id),
+          draftItems(draft).map((item) => item.id),
         );
         if (decoded.invalid)
           return {
@@ -395,13 +555,14 @@ function lastReview(
   state: ObjectiveState,
   g: number,
   n: number,
-): { draft: Draft; findings: Finding[] } | undefined {
+): { draft: Draft; findings: Finding[]; round: number } | undefined {
   for (let m = n - 1; m >= 1; m--) {
     const review = state.done[`review:${g}:${m}`] as ReviewRound | undefined;
     if (review)
       return {
         draft: (state.done[`plan:${g}:${m}`] as PlanRound).draft!,
         findings: review.findings,
+        round: m,
       };
   }
   return undefined;
@@ -420,71 +581,114 @@ function decideStep(
 ): Step {
   return {
     key,
-    deadlineMs: MINUTE,
-    async run({ state, answer }: StepContext): Promise<Outcome> {
-      const planned = state.done[`plan:${g}:${n}`] as PlanRound;
-      const reviewed = state.done[`review:${g}:${n}`] as
-        | ReviewRound
-        | undefined;
-      const findings: (Finding & { itemIds?: string[] })[] = [
-        ...(planned.findings ?? []),
-        ...(reviewed?.findings ?? []),
-      ];
-      const fixes = findings.filter((f) => f.kind !== "operator-decision");
-      const asks = findings.filter((f) => f.kind === "operator-decision");
-      if (planned.replan) return done({ replan: true } satisfies Decision);
-      const question = questionFor(state, g, n, planned, fixes, asks, deps);
-      if (answer) {
-        const at = answer.at;
-        const record = (text?: string): PlannerDecision => ({
-          question: question?.text ?? "",
-          answer: answer.answer,
-          ...(text ? { text } : {}),
-          by: answer.by,
-          at,
-        });
-        switch (answer.answer) {
-          case "replan":
-            return done({
-              replan: true,
-              decision: record(),
-            } satisfies Decision);
-          case "more":
-            return done({ corrections: fixes, grant: 2 } satisfies Decision);
-          case "approve":
-            return done({
-              accept: true,
-              decision: record(),
-            } satisfies Decision);
-          case "answer":
-          case "allow": {
-            if (!answer.text?.trim())
-              return {
-                kind: "hold",
-                question: `${question?.text ?? "Planning needs your answer."}\n\n\`${answer.answer}\` needs text after it, for example \`/factory ${answer.answer === "allow" ? "allow pnpm run test:e2e" : "answer use the existing parser"}\`.`,
-                answers: question?.answers ?? ASK,
-                recommended: answer.answer,
-              };
-            const decision = record(answer.text.trim());
-            return done({
-              decision,
-              corrections: [...fixes, ...operatorCorrections([decision])],
-            } satisfies Decision);
+    deadlineMs: 5 * MINUTE,
+    run: ({ state, answer, signal }: StepContext) =>
+      guarded(async (): Promise<Outcome> => {
+        const planned = state.done[`plan:${g}:${n}`] as PlanRound;
+        const reviewed = state.done[`review:${g}:${n}`] as
+          | ReviewRound
+          | undefined;
+        const findings: (Finding & { itemIds?: string[] })[] = [
+          ...(planned.findings ?? []),
+          ...(reviewed?.findings ?? []),
+        ];
+        const fixes = findings.filter((f) => f.kind !== "operator-decision");
+        const asks = findings.filter((f) => f.kind === "operator-decision");
+        if (planned.replan || reviewed?.replan)
+          return done({ replan: true } satisfies Decision);
+        const question = questionFor(state, g, n, planned, fixes, asks, deps);
+        if (answer) {
+          const at = answer.at;
+          const record = (text?: string): PlannerDecision => ({
+            question: question?.text ?? "",
+            answer: answer.answer,
+            ...(text ? { text } : {}),
+            by: answer.by,
+            at,
+          });
+          switch (answer.answer) {
+            case "replan":
+              return done({
+                replan: true,
+                decision: record(),
+              } satisfies Decision);
+            case "more":
+              return done({ corrections: fixes, grant: 2 } satisfies Decision);
+            case "approve":
+              if (await objectiveChanged(state, g, deps, signal))
+                return changedHold(state);
+              return done({
+                accept: true,
+                decision: record(),
+              } satisfies Decision);
+            case "continue":
+              return done({
+                accept: true,
+                decision: record(),
+              } satisfies Decision);
+            case "answer":
+            case "allow": {
+              if (!answer.text?.trim())
+                return {
+                  kind: "hold",
+                  question: `${question?.text ?? "Planning needs your answer."}\n\n\`${answer.answer}\` needs text after it, for example \`/factory ${answer.answer === "allow" ? "allow pnpm run test:e2e" : "answer use the existing parser"}\`.`,
+                  answers: question?.answers ?? ASK,
+                  recommended: answer.answer,
+                };
+              const decision = record(answer.text.trim());
+              return done({
+                decision,
+                corrections: [...fixes, ...operatorCorrections([decision])],
+              } satisfies Decision);
+            }
           }
         }
-      }
-      if (question)
-        return {
-          kind: "hold",
-          question: question.text,
-          answers: question.answers,
-          recommended: question.recommended,
-        };
-      if (findings.length === 0)
-        return done({ accept: true } satisfies Decision);
-      return done({ corrections: fixes } satisfies Decision);
-    },
+        if (question)
+          return {
+            kind: "hold",
+            question: question.text,
+            answers: question.answers,
+            recommended: question.recommended,
+          };
+        if (findings.length === 0) {
+          // Before accepting, the Objective must still read as planning read it.
+          if (answer?.answer !== "continue") {
+            const changed = await objectiveChanged(state, g, deps, signal);
+            if (changed) return changedHold(state);
+          }
+          return done({ accept: true } satisfies Decision);
+        }
+        return done({ corrections: fixes } satisfies Decision);
+      }),
   };
+}
+
+function changedHold(state: ObjectiveState): Outcome {
+  return {
+    kind: "hold",
+    question: `Objective #${state.issue} was edited after planning read it. \`replan\` plans again from the new text; \`continue\` keeps this plan.`,
+    answers: ["replan", "continue", "cancel"],
+    recommended: "replan",
+  };
+}
+
+/** Whether the issue body differs from the one this generation planned from. */
+async function objectiveChanged(
+  state: ObjectiveState,
+  g: number,
+  deps: PlanningDeps,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const issue = await deps.github.rest<{ body: string | null }>(
+    "GET",
+    `/repos/${deps.config.repository}/issues/${state.issue}`,
+    undefined,
+    signal,
+  );
+  const normalize = (text: string) => text.replace(/\r\n/g, "\n").trim();
+  return (
+    normalize(issue.body ?? "") !== normalize(generationInputs(state, g).body)
+  );
 }
 
 /** The question this round needs answered, if any. Recomputed, so an answer re-derives the same text. */
@@ -505,6 +709,12 @@ function questionFor(
       answers: ASK,
       recommended: "answer",
     };
+  if (asks.length && !fixes.length && !state.done[`review:${g}:${n}`])
+    return {
+      text: `Factory's plan checks found ${asks.length === 1 ? "a question" : "questions"} only you can decide:\n\n${list(asks)}\n\n\`answer <decision>\` sends your decision back to the planner.`,
+      answers: ASK,
+      recommended: "answer",
+    };
   if (asks.length && !fixes.length)
     return {
       text: `The plan reviewer found ${asks.length === 1 ? "a question" : "questions"} only you can decide:\n\n${list(asks)}\n\n\`approve\` runs the plan as it is; \`answer <decision>\` sends your decision back to the planner.`,
@@ -521,13 +731,23 @@ function questionFor(
       recommended: "answer",
     };
   const allowance = deps.config.planning.revisions + granted(state, g, n);
-  if (n > allowance)
+  if (fixRounds(state, g, n) > allowance)
     return {
       text: `The plan still has ${fixes.length} problem${fixes.length === 1 ? "" : "s"} after ${n} rounds:\n\n${list(fixes)}\n\n\`more\` allows two more rounds.`,
       answers: ["more", ...ASK],
       recommended: "more",
     };
   return undefined;
+}
+
+/** Rounds of this generation spent on fixes (not on operator answers), this one included. */
+function fixRounds(state: ObjectiveState, g: number, n: number): number {
+  let rounds = 1;
+  for (let m = 1; m < n; m++) {
+    const decided = state.done[`decide:${g}:${m}`] as Decision | undefined;
+    if (decided && !decided.decision) rounds += 1;
+  }
+  return rounds;
 }
 
 function granted(state: ObjectiveState, g: number, n: number): number {
@@ -592,13 +812,18 @@ async function postPlan(
   signal: AbortSignal,
 ): Promise<void> {
   const marker = PLAN_MARK(issue);
+  const children = plan.split
+    ? plan.split.children
+        .map((child) => `- **${child.key}** ${child.title} (child Objective)`)
+        .join("\n")
+    : "";
   const items = plan.items
     .map(
       (item) =>
         `- **${item.id}** ${item.title}${item.dependencies.length ? ` (after ${item.dependencies.join(", ")})` : ""}`,
     )
     .join("\n");
-  const summary = `${marker}\n**Factory's plan** (${plan.items.length} Work Item${plan.items.length === 1 ? "" : "s"}, base \`${plan.base.slice(0, 12)}\`)\n\n${items}${plan.decisions.length ? `\n\nDecisions:\n${plan.decisions.map((d) => `- ${d.answer}${d.text ? `: ${d.text}` : ""} (${d.by})`).join("\n")}` : ""}`;
+  const summary = `${marker}\n**Factory's plan** (${plan.split ? `split into ${plan.split.children.length} child Objectives` : `${plan.items.length} Work Item${plan.items.length === 1 ? "" : "s"}`}, base \`${plan.base.slice(0, 12)}\`)\n\n${plan.split ? children : items}${plan.decisions.length ? `\n\nDecisions:\n${plan.decisions.map((d) => `- ${d.answer}${d.text ? `: ${d.text}` : ""} (${d.by})`).join("\n")}` : ""}`;
   const data = `\n\n<details><summary>Plan data</summary>\n\n\`\`\`json\n${JSON.stringify(plan)}\n\`\`\`\n</details>`;
   const body =
     summary.length + data.length <= COMMENT_LIMIT ? summary + data : summary;
@@ -662,6 +887,15 @@ async function rereadObjective(
     body: string | null;
     state: string;
   }>("GET", `/repos/${config.repository}/issues/${issue}`, undefined, signal);
+  if (found.state !== "open")
+    return {
+      hold: {
+        kind: "hold",
+        question: `Issue #${issue} is closed. Reopen it and answer \`replan\`, or cancel.`,
+        answers: ["replan", "cancel"],
+        recommended: "cancel",
+      },
+    };
   const body = found.body ?? "";
   const base = await defaultHead(config.checkout, signal);
   const { objective, problems } = parseObjective(body);
@@ -745,8 +979,15 @@ async function defaultHead(
   }
 }
 
+/** The exported base tree for planning. Trees of other bases are removed. */
 function treeDir(deps: PlanningDeps, issue: number, base: string): string {
-  const dir = join(deps.workDir(issue), `tree-${base.slice(0, 12)}`);
+  const root = deps.workDir(issue);
+  const name = `tree-${base.slice(0, 12)}`;
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  for (const entry of readdirSync(root))
+    if (entry.startsWith("tree-") && entry !== name)
+      rmSync(join(root, entry), { recursive: true, force: true });
+  const dir = join(root, name);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
@@ -758,7 +999,7 @@ function done(result: unknown): Outcome {
 function invalidAnswer(findings: Finding[]): Outcome {
   return {
     kind: "retry",
-    reason: `The planner's answer didn't match the schema: ${findings
+    reason: `${INVALID_ANSWER}: ${findings
       .map((f) => f.message)
       .join("; ")
       .slice(0, 500)}`,
@@ -772,11 +1013,13 @@ async function guarded(work: () => Promise<Outcome>): Promise<Outcome> {
     return await work();
   } catch (error) {
     if (error instanceof PlannerError) {
+      // A provider wait (usage or rate limit) doesn't count as an error; any
+      // other retry does, so a call that keeps failing holds after three.
       if (error.outcome === "retry")
         return {
           kind: "retry",
           reason: error.message,
-          ...(error.afterMs !== undefined ? { afterMs: error.afterMs } : {}),
+          afterMs: error.afterMs ?? -1,
         };
       if (error.outcome === "hold")
         return {
@@ -785,7 +1028,13 @@ async function guarded(work: () => Promise<Outcome>): Promise<Outcome> {
           answers: ["retry", "cancel"],
           recommended: "retry",
         };
-      return { kind: "fail", reason: error.message };
+      // Too large for the model, or refused: the Objective has to change.
+      return {
+        kind: "hold",
+        question: `${error.message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`,
+        answers: ["replan", "retry", "cancel"],
+        recommended: "replan",
+      };
     }
     if (error instanceof TransientError)
       return {

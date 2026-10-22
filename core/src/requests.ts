@@ -19,7 +19,14 @@ import { join } from "node:path";
  * only deleted.
  */
 export type Request =
-  | { kind: "answer"; issue: number; answer: string; text?: string }
+  | {
+      kind: "answer";
+      issue: number;
+      answer: string;
+      text?: string;
+      /** When the answer was written (a comment's time): it only answers a question already asked then. */
+      writtenAt?: string;
+    }
   | { kind: "cancel"; issue: number }
   | { kind: "retry"; issue: number };
 

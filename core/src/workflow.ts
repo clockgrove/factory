@@ -4,7 +4,8 @@ import type { CoreConfig } from "./config.js";
 import type { Outcome, Step, StepContext, Workflow } from "./engine.js";
 import { type GitHub, GitHubError, TransientError } from "./github.js";
 import { checkSources, parseObjective } from "./objective.js";
-import { objectiveCommandProblems } from "./planning/facts.js";
+import { observeLocalExecutables } from "./planning/executables.js";
+import { finalCommands, objectiveCommandProblems } from "./planning/facts.js";
 import { planningStep } from "./planning/steps.js";
 import type { Planner } from "./providers/planner.js";
 import type { ObjectiveState, ObjectiveStatus } from "./state.js";
@@ -102,6 +103,21 @@ function checkStep({ config, github }: WorkflowDeps): Step {
               signal,
             })),
           );
+        if (!problems.length)
+          problems.push(
+            ...(
+              await observeLocalExecutables({
+                checkout: config.checkout,
+                base,
+                body,
+                finalCommands: finalCommands(
+                  body,
+                  config.finalValidation.requiredCommands,
+                ),
+                signal,
+              })
+            ).problems,
+          );
         if (problems.length)
           return {
             kind: "hold",
@@ -188,7 +204,7 @@ function unavailable(key: string): Step {
       return {
         kind: "hold",
         question:
-          "Factory has no configuration for this repository, so it can't reach GitHub. Run setup, then answer `retry`.",
+          "Factory has no configuration for this repository, so it can't reach GitHub. Run setup and restart the service; then answer `retry`.",
         answers: ["retry", "cancel"],
         recommended: "retry",
       };

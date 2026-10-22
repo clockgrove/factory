@@ -183,7 +183,13 @@ export class GitHubSync {
             ? { kind: "cancel", issue }
             : answer === "retry" && !runner.state.hold
               ? { kind: "retry", issue }
-              : { kind: "answer", issue, answer, ...(text ? { text } : {}) },
+              : {
+                  kind: "answer",
+                  issue,
+                  answer,
+                  ...(text ? { text } : {}),
+                  writtenAt: comment.created_at,
+                },
           login,
           `comment-${comment.id}`,
         );

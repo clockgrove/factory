@@ -49,6 +49,7 @@ import { createPlanningContextResolver } from "../dist/compiler/context-runtime.
 import { admitNativeReturn } from "../dist/compiler/native-return.js";
 import { retainPlanningNativeReturn } from "../dist/compiler/recovery.js";
 import {
+  assertPlanBoundaries,
   hydrateWorkerInputSources,
   resolveWorkItemSources,
 } from "../dist/compiler/sources.js";
@@ -5864,6 +5865,9 @@ test("selector-bound discovery retains exact bytes, distinguishes incomplete out
     /Final review and hosted or post-publication CI run nothing in Factory validation/,
     /Never copy every declared script onto every item/,
     /declares a design checklist, the brief answers each of its questions/,
+    /name only identifiers that already exist at the base/,
+    /Dependency edges go to the item that owns the exact interface needed/,
+    /one item's single command proves more than half of the Objective's criteria/,
   ])
     assert.match(compilation.call.prompt, rule);
   const lintOf = (plan) => {
@@ -7767,4 +7771,73 @@ test("a worker stopped by a provider usage limit is transient with its reset tim
   assert.equal(fault?.kind, "transient");
   assert.equal(fault.retryAt, retryAt);
   assert.equal(fault.outcomeUnknown, false);
+});
+
+test("plan boundaries refuse network validation off infra and new file names in acceptance", () => {
+  const repo = mkdtempSync(join(tmpdir(), "plan-boundaries-"));
+  const git = (...args) =>
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  git("init", "-q");
+  mkdirSync(join(repo, "db", "migrations"), { recursive: true });
+  mkdirSync(join(repo, "test"));
+  writeFileSync(join(repo, "db", "migrations", "0007_users.sql"), "select 1;");
+  writeFileSync(join(repo, "test", "users.test.mjs"), "");
+  writeFileSync(
+    join(repo, "package.json"),
+    JSON.stringify({
+      scripts: {
+        test: "node --test",
+        "infra:validate": "tofu init && tofu validate",
+        wrapped: "npm run infra:validate",
+      },
+    }),
+  );
+  git("add", ".");
+  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base");
+  const baseSha = git("rev-parse", "HEAD");
+  const item = (id, fields) => ({
+    id,
+    kind: "work",
+    ownedPaths: ["src/a.ts"],
+    acceptance: ["It works."],
+    validation: [],
+    ...fields,
+  });
+  const check = (items, ciOnly = []) =>
+    assertPlanBoundaries({ baseSha, items }, repo, ciOnly);
+  const command = (text) => ({ command: text, provenance: "base-observed" });
+  // A network script, direct or through a wrapper, on an item without infra paths.
+  for (const text of ["npm run infra:validate", "npm run wrapped"])
+    assert.throws(
+      () => check([item("app", { validation: [command(text)] })]),
+      /Work Item app validation runs .* reaches a network \(tofu init\).*owns no infrastructure paths/,
+    );
+  // Allowed: the same command on an item owning infra paths, or an offline one.
+  check([
+    item("infra", {
+      ownedPaths: ["infra/main.tf"],
+      validation: [command("npm run infra:validate")],
+    }),
+    item("app", { validation: [command("npm test")] }),
+  ]);
+  // A new migration number and a new test file are the worker's choice.
+  assert.throws(
+    () =>
+      check([
+        item("app", {
+          acceptance: [
+            "Adds db/migrations/0008_roles.sql and covers it in roles.test.mjs.",
+          ],
+        }),
+      ]),
+    /acceptance names db\/migrations\/0008_roles\.sql, which does not exist at the base.*acceptance names roles\.test\.mjs/,
+  );
+  // Existing files may be named.
+  check([
+    item("app", {
+      acceptance: [
+        "db/migrations/0007_users.sql keeps its columns and users.test.mjs still passes.",
+      ],
+    }),
+  ]);
 });

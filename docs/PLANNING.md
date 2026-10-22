@@ -23,11 +23,15 @@ The rules live in `src/compiler/work-item-rubric.ts`. The planner and the graph 
 
 **Keep:** invariants across inputs or steps (step-size independence, determinism), the real upstream producer named by its type, and existing helpers and conventions named by name. These raise result quality.
 
+**New identifiers are the worker's.** Acceptance and briefs name only identifiers that exist at the base. A new type, endpoint path, migration number, file or test name is described by role and data, unless the Objective or a pinned source fixes it.
+
 **Size:** one outcome per item. About 15 acceptance entries is a signal, not a target: above it, split the item or say in its brief why it is one outcome.
 
 **Briefs** carry settled decisions and cross-item contracts the worker cannot get from the repository. Workers read the code themselves.
 
 **Ownership is narrow.** An item owns the files its change needs, not a whole source tree or shared folder. A shared file (index, contracts barrel, router, docs map) has one owner, and the items that need its change depend on that owner; consumers of a shared layer then run in parallel.
+
+**Edges follow interfaces.** A dependency points to the item that owns the exact interface needed; independent sub-surfaces of one upstream item run in parallel, so split the upstream item there. Coverage proofs are spread over the items that own each claim: graph review flags one item whose single command proves more than half of the Objective's criteria.
 
 **No silent deferral.** Where proof needs an environment local validation lacks, the planner asks through `decisionRequired` instead of leaving it to final review or hosted CI.
 
@@ -53,7 +57,9 @@ All three happen in the planner's one session. Self-checking is a filter; the in
   - an item with more than 15 acceptance entries and no `oneOutcomeReason`;
   - an acceptance entry that cites a line number next to a source file name;
   - two items that own the same or overlapping paths when neither depends on the other, directly or transitively. Why: the scheduler would run them one after the other anyway, and wide shared ownership turns a plan into a serial chain;
-  - when the plan selects any validation command (so the repository has one), a work item without a validation command, and a criterion proved only by final review or CI whose owner runs none. Why: final review and hosted CI run nothing inside Factory validation.
+  - when the plan selects any validation command (so the repository has one), a work item without a validation command, and a criterion proved only by final review or CI whose owner runs none. Why: final review and hosted CI run nothing inside Factory validation;
+  - a validation command whose script (from the base `package.json`) invokes a known network tool, on an item that owns no infrastructure paths. Why: validation has no network, so the command could never pass. Commands the installation lists as CI-only are refused for every item;
+  - acceptance that names a migration file number or test file name absent from the base tree. Why: the worker chooses new file names.
 
   The planner gets all of these as one correction. Amendments skip this lint; graph review judges them.
 

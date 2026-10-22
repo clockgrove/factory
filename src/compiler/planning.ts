@@ -93,6 +93,7 @@ import {
   revisionCitedSections,
   validateGraphSources,
   assertNoCiOnlyValidation,
+  assertPlanBoundaries,
   ciOnlyInstructions,
 } from "./sources.js";
 
@@ -766,6 +767,13 @@ export function validateCompiledGraph(args: {
       graph,
       request.compileContext?.ciOnlyCommands ?? [],
     );
+    // An amendment carries earlier items over, so only a new plan is checked.
+    if (!request.compileContext?.previousGraph)
+      assertPlanBoundaries(
+        graph,
+        checkout,
+        request.compileContext?.ciOnlyCommands ?? [],
+      );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     observeModelInvocation(invocation, {

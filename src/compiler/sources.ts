@@ -17,7 +17,10 @@ import {
 } from "../workspace-membership.js";
 import type { PlanCandidate } from "./candidate.js";
 import { normalizedCommand } from "../qa.js";
-import { validationEnvironmentInstructions } from "../validation-environment.js";
+import {
+  networkToolIn,
+  validationEnvironmentInstructions,
+} from "../validation-environment.js";
 import { finalValidationCommands } from "../config.js";
 import { GraphValidationError } from "../scheduler.js";
 import {
@@ -1334,6 +1337,133 @@ export function assertNoCiOnlyValidation(
           item.id,
           `Work Item ${item.id} validation runs ${command}, which the installation marks CI-only: it needs network and validation runs offline. Leave it to CI; when a criterion needs it, ask through decisionRequired`,
         );
+}
+
+/** Paths of infrastructure code: a directory segment or extension that names it. */
+function isInfraPath(path: string): boolean {
+  return (
+    path
+      .split("/")
+      .some((part) =>
+        /^(?:infra|infrastructure|iac|terraform|tofu|pulumi|ansible|helm|k8s)$/i.test(
+          part,
+        ),
+      ) || /\.(?:tf|tfvars|hcl)$/.test(path)
+  );
+}
+
+/** The network tool a validation command reaches, directly or through root package scripts (to a fixed depth). */
+function networkToolOfCommand(
+  command: string,
+  scripts: Record<string, unknown>,
+  depth = 0,
+): string | undefined {
+  const direct = networkToolIn(command);
+  if (direct) return direct;
+  const invocation = packageScriptInvocation(command);
+  const body = invocation ? scripts[invocation.name] : undefined;
+  if (typeof body !== "string" || depth > 3) return undefined;
+  const own = networkToolIn(body);
+  if (own) return own;
+  for (const segment of body.split(/&&|\|\||[;|\n&]/))
+    if (packageScriptInvocation(segment.trim())) {
+      const nested = networkToolOfCommand(segment.trim(), scripts, depth + 1);
+      if (nested) return nested;
+    }
+  return undefined;
+}
+
+/** A new migration number or test file named in acceptance text. */
+const NUMBERED_FILE =
+  /(?<![\w./-])((?:[\w.-]+\/)*\d{3,}[_-][\w.-]*\.(?:sql|[cm]?[jt]s|py|rb|exs?|kt|java|go|rs))(?![\w-])/g;
+const TEST_FILE =
+  /(?<![\w./-])((?:[\w.-]+\/)*(?:[\w.-]*\.(?:test|spec)\.[cm]?[jt]sx?|test_[\w.-]+\.py|[\w.-]+_test\.(?:py|go|rs|rb)))(?![\w-])/g;
+
+/**
+ * The plan standard's checks that need the base: a validation command whose
+ * script reaches a network (validation has none) on an item that owns no
+ * infrastructure paths, and acceptance that names a migration number or test
+ * file absent from the base tree (the worker names new files). Structural
+ * only: command words, script bodies and file-name shapes. One correction.
+ */
+export function assertPlanBoundaries(
+  graph: WorkGraph,
+  checkout: string,
+  ciOnlyCommands: readonly string[] = [],
+): void {
+  const ciOnly = new Set(ciOnlyCommands.map(normalizedCommand));
+  let scripts: Record<string, unknown> | undefined;
+  const rootScripts = (): Record<string, unknown> => {
+    if (scripts) return scripts;
+    try {
+      const parsed = JSON.parse(
+        pinnedText(checkout, graph.baseSha, "package.json"),
+      ) as { scripts?: unknown };
+      scripts =
+        parsed.scripts && typeof parsed.scripts === "object"
+          ? (parsed.scripts as Record<string, unknown>)
+          : {};
+    } catch {
+      scripts = {};
+    }
+    return scripts;
+  };
+  let tree: { paths: Set<string>; names: Set<string> } | null | undefined;
+  const baseTree = () => {
+    if (tree !== undefined) return tree;
+    try {
+      const paths = pinnedGitRaw(
+        checkout,
+        "ls-tree",
+        "-rz",
+        "--name-only",
+        graph.baseSha,
+      )
+        .toString("utf8")
+        .split("\0")
+        .filter(Boolean);
+      tree = {
+        paths: new Set(paths),
+        names: new Set(paths.map((path) => path.replace(/^.*\//, ""))),
+      };
+    } catch {
+      tree = null;
+    }
+    return tree;
+  };
+  const findings: string[] = [];
+  let first: string | undefined;
+  const found = (id: string, finding: string) => {
+    first ??= id;
+    findings.push(finding);
+  };
+  for (const item of workShapes(graph)) {
+    const infra = item.ownedPaths.some(isInfraPath);
+    for (const { command } of item.validation) {
+      if (infra || ciOnly.has(normalizedCommand(command))) continue;
+      const tool = networkToolOfCommand(command, rootScripts());
+      if (tool)
+        found(
+          item.id,
+          `Work Item ${item.id} validation runs ${command}, which reaches a network (${tool}) that validation does not have, and the item owns no infrastructure paths: select the item's offline commands instead, leave this one to CI, or, when a criterion needs it, ask through decisionRequired`,
+        );
+    }
+    const named = new Set<string>();
+    for (const entry of item.acceptance)
+      for (const pattern of [NUMBERED_FILE, TEST_FILE])
+        for (const match of entry.matchAll(pattern)) named.add(match[1]!);
+    for (const file of named) {
+      const base = baseTree();
+      if (!base) break;
+      if (file.includes("/") ? base.paths.has(file) : base.names.has(file))
+        continue;
+      found(
+        item.id,
+        `Work Item ${item.id} acceptance names ${file}, which does not exist at the base: a new migration number or test file is the worker's choice, so describe it by role and data and leave the name out`,
+      );
+    }
+  }
+  if (first) throw new GraphValidationError(first, findings.join("; "));
 }
 
 /** The planner's note on the installation's CI-only commands; empty when none. */

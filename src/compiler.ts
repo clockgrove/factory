@@ -55,6 +55,7 @@ export {
   assertObjectiveCriteria,
   assertRequiredFinalCommands,
   assertNoCiOnlyValidation,
+  assertPlanBoundaries,
   commandAuthority,
   fixedScripts,
   planningSources,

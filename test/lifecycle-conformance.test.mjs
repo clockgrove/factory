@@ -584,8 +584,10 @@ const LIVE_RUN_ROWS = [
 async function installation(t, seeded = true) {
   const directory = await mkdtemp(join(tmpdir(), "factory-lifecycle-"));
   const repository = `fixture/lifecycle-${randomUUID()}`;
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  t.after(() => rm(stateRoot(repository), { recursive: true, force: true }));
+  // A killed owner's Git child can still be finishing a write.
+  const removal = { recursive: true, force: true, maxRetries: 10, retryDelay: 200 };
+  t.after(() => rm(directory, removal));
+  t.after(() => rm(stateRoot(repository), removal));
   const checkout = join(directory, "target"),
     remote = join(directory, "archive.git");
   await mkdir(checkout);
@@ -1273,7 +1275,9 @@ function owner(fixture, mode, objective) {
           action: "cancel",
         }).catch(() => undefined);
       const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-      if (mode === "service") child.kill("SIGKILL");
+      // SIGTERM hands the service off: it stops its maintenance and awaits
+      // its Git children, so none writes into the fixture after it exits.
+      if (mode === "service") child.kill("SIGTERM");
       await exited.catch(() => undefined);
       clearTimeout(timer);
     },

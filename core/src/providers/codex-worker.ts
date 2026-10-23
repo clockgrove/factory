@@ -31,7 +31,12 @@ import {
   toolchainDirectories,
 } from "../sandbox.js";
 import { errorMessage } from "../text.js";
-import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
+import {
+  ACTIVITY_INTERVAL_MS,
+  type Worker,
+  type WorkerInput,
+  type WorkerResult,
+} from "../work/worker.js";
 import { workerToolchainPath } from "../worktree.js";
 import {
   type CodexEffort,
@@ -46,6 +51,7 @@ import {
   addCodexTelemetry,
   type CodexBaseline,
   codexBaseline,
+  codexLiveRecord,
   codexSessionRecord,
   codexTelemetry,
   codexTokens,
@@ -470,6 +476,19 @@ export class CodexWorker implements Worker {
       captureRequest(record, turn.prompt);
       baseline = codexBaseline(join(home.root, "codex-home"), turn.resumed.id);
     }
+    // The SDK stream has no token counts until the turn ends: the session
+    // record gives the context and compactions as they happen.
+    const live = codexLiveRecord(join(home.root, "codex-home"), baseline?.size);
+    const readLive = () => {
+      const thread = (record.thread as string | undefined) ?? turn.resumed?.id;
+      if (!thread) return;
+      const { context, compactions } = live(thread);
+      if (context) input.activity({ kind: "context", ...context });
+      for (let n = 0; n < compactions; n++)
+        input.activity({ kind: "compaction" });
+    };
+    const reading = setInterval(readLive, ACTIVITY_INTERVAL_MS);
+    reading.unref();
     /** Track codex's group with the shared registry as soon as it exists. */
     const track = () => {
       if (group !== undefined) return;
@@ -594,6 +613,8 @@ export class CodexWorker implements Worker {
       // A failed codex process: its stderr is in the message.
       return failed(codexFailure(redact(errorMessage(error), secrets)));
     } finally {
+      clearInterval(reading);
+      readLive();
       clearInterval(polling);
       watchdog.stop();
       watchdog.signal.removeEventListener("abort", kill);

@@ -655,13 +655,26 @@ export interface CopilotWorkerOptions {
 /** Copilot's file tools that write the file their `path` names. */
 const EDIT_TOOLS = ["create", "edit"];
 
-/** A Copilot session event as worker activity: tools, edits, commands, turns. */
+/** A Copilot session event as worker activity: tools, edits, commands, turns, context and compactions. */
 function copilotActivity(
   input: WorkerInput,
   event: SessionEvent,
   toolNames: Map<string, string>,
 ): void {
   if (event.type === "assistant.turn_start") input.activity({ kind: "turn" });
+  // The main agent's context; a sub-agent's events carry its agentId.
+  if (event.type === "session.usage_info" && !event.agentId)
+    input.activity({
+      kind: "context",
+      tokens: event.data.currentTokens,
+      window: event.data.tokenLimit,
+    });
+  if (
+    event.type === "session.compaction_complete" &&
+    event.data.success &&
+    !event.agentId
+  )
+    input.activity({ kind: "compaction" });
   if (event.type === "tool.execution_complete") {
     const tool = toolNames.get(event.data.toolCallId);
     toolNames.delete(event.data.toolCallId);

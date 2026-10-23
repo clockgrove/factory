@@ -3392,29 +3392,61 @@ test("the run log: tail, follow, and status reads its end", async () => {
   });
   await until(() => /#54 - \S+ (hold|cancelled|done)/.test(view), "the rows");
   const run = readdirSync(join(inst.logs, "54")).sort().at(-1);
+  // Item a's validation failed 3 minutes ago; b's worker went quiet 5
+  // minutes ago without reporting its context.
+  const ago = (minutes) =>
+    new Date(Date.now() - minutes * 60_000).toISOString();
   appendFileSync(
     join(inst.logs, "54", run),
-    `${JSON.stringify({
-      at: new Date().toISOString(),
-      step: "item:a:work",
-      event: "worker-activity",
-      item: "a",
-      counts: {
-        toolsStarted: 2,
-        toolsFinished: 1,
-        edits: 1,
-        commands: 1,
-        turns: 3,
+    [
+      {
+        at: ago(3),
+        step: "item:a:work",
+        event: "validation-result",
+        index: 0,
+        command: "npm test",
+        passed: false,
       },
-      tools: ["Bash"],
-      paths: ["src/a.ts"],
-      command: "npm test ghp_abcdefghijklmnop",
-    })}\n`,
+      {
+        at: new Date().toISOString(),
+        step: "item:a:work",
+        event: "worker-activity",
+        item: "a",
+        counts: {
+          toolsStarted: 2,
+          toolsFinished: 1,
+          edits: 1,
+          commands: 1,
+          turns: 3,
+          compactions: 2,
+        },
+        tools: ["Bash"],
+        paths: ["src/a.ts"],
+        command: "npm test ghp_abcdefghijklmnop",
+        context: { tokens: 84_000, window: 272_000 },
+      },
+      {
+        at: ago(5),
+        step: "item:b:work",
+        event: "worker-activity",
+        item: "b",
+        counts: { turns: 1 },
+        tools: [],
+        paths: [],
+      },
+    ]
+      .map((event) => `${JSON.stringify(event)}\n`)
+      .join(""),
   );
   await until(() => /#54 a work running .*3 turns/.test(view), "the activity");
+  await until(() => /#54 b work running/.test(view), "the quiet worker");
   assert.match(
     view,
-    /2 tools \(Bash\) · 1 edits \(src\/a\.ts\) · \$ npm test \[REDACTED\]/,
+    /2 tools \(Bash\) · 1 edits \(src\/a\.ts\) · \$ npm test \[REDACTED\] · context 84K\/272K \(31%\) · 2 compactions · validation failing for 3m/,
+  );
+  assert.match(
+    view,
+    /#54 b work running .*1 turns · context and compactions unknown · no progress for 5m/,
   );
   watching.kill("SIGINT");
   assert.equal(refusal(cli(inst, "log", "77")), "no_factory_state");

@@ -469,3 +469,91 @@ export function codexTokens(usage: {
     reasoning: usage.reasoning_output_tokens,
   });
 }
+
+/** The most of a session record one live read takes; older lines are skipped. */
+const LIVE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * A running thread's context and compactions, read from its session record
+ * as it grows: each call reads what was appended since the last one and
+ * returns the last `token_count`'s context (its last request's input
+ * tokens and the model's window) and the compactions it saw. Best effort:
+ * a missing or unreadable record gives nothing.
+ */
+export function codexLiveRecord(
+  codexHome: string,
+  /** A continued thread's record size before this turn. */
+  from = 0,
+): (thread: string) => {
+  context?: { tokens: number; window?: number };
+  compactions: number;
+} {
+  let file: string | undefined;
+  let offset = from;
+  let rest = "";
+  // Codex writes a compaction as a `compacted` record and a
+  // `context_compacted` event: one compaction until the next count or item.
+  let compacting = false;
+  return (thread) => {
+    let compactions = 0;
+    let context: { tokens: number; window?: number } | undefined;
+    file ??= sessionRecords(join(codexHome, "sessions")).find((path) =>
+      path.endsWith(`${thread}.jsonl`),
+    );
+    if (!file) return { compactions };
+    let text: string;
+    try {
+      const size = statSync(file).size;
+      if (size <= offset) return { compactions };
+      const start = Math.max(offset, size - LIVE_BYTES);
+      if (start > offset) rest = "";
+      const fd = openSync(file, "r");
+      try {
+        const buffer = Buffer.alloc(size - start);
+        const read = readSync(fd, buffer, 0, buffer.length, start);
+        offset = start + read;
+        text = rest + buffer.subarray(0, read).toString("utf8");
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return { compactions };
+    }
+    const lines = text.split("\n");
+    rest = lines.pop() ?? "";
+    for (const line of lines) {
+      let entry: { type?: unknown; payload?: Record<string, unknown> | null };
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = entry?.payload;
+      if (!payload || typeof payload !== "object") continue;
+      if (
+        entry.type === "compacted" ||
+        (entry.type === "event_msg" && payload.type === "context_compacted")
+      ) {
+        if (!compacting) compactions += 1;
+        compacting = true;
+        continue;
+      }
+      if (entry.type === "response_item") compacting = false;
+      if (entry.type !== "event_msg" || payload.type !== "token_count")
+        continue;
+      compacting = false;
+      const info = payload.info as Record<string, unknown> | null | undefined;
+      const last = info?.last_token_usage as
+        | Record<string, unknown>
+        | undefined;
+      const tokens = last?.input_tokens;
+      if (typeof tokens !== "number") continue;
+      const window = info?.model_context_window;
+      context = {
+        tokens,
+        ...(typeof window === "number" ? { window } : {}),
+      };
+    }
+    return { ...(context ? { context } : {}), compactions };
+  };
+}

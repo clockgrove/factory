@@ -96,7 +96,14 @@ export type WorkerActivity =
   | { kind: "command"; command: string }
   /** A command ended with a non-zero exit, a signal or its time limit. */
   | { kind: "command-failed" }
-  | { kind: "turn" };
+  | { kind: "turn" }
+  /**
+   * The tokens in the worker's context at its last model request, and the
+   * model's window when the provider says. Only providers that report it.
+   */
+  | { kind: "context"; tokens: number; window?: number }
+  /** The provider compacted the worker's conversation. */
+  | { kind: "compaction" };
 
 /** At most one `worker-activity` event per Work Item per this long. */
 export const ACTIVITY_INTERVAL_MS = 5_000;
@@ -112,10 +119,13 @@ interface ActivityWindow {
     commands: number;
     commandsFailed: number;
     turns: number;
+    compactions: number;
   };
   tools: string[];
   paths: string[];
   command?: string;
+  /** The last context report in this interval. */
+  context?: { tokens: number; window?: number };
 }
 
 const emptyWindow = (): ActivityWindow => ({
@@ -126,6 +136,7 @@ const emptyWindow = (): ActivityWindow => ({
     commands: 0,
     commandsFailed: 0,
     turns: 0,
+    compactions: 0,
   },
   tools: [],
   paths: [],
@@ -180,6 +191,21 @@ export class ActivityLog {
       case "turn":
         window.counts.turns += 1;
         break;
+      case "context":
+        if (!(Number.isSafeInteger(activity.tokens) && activity.tokens >= 0))
+          return;
+        window.context = {
+          tokens: activity.tokens,
+          ...(typeof activity.window === "number" &&
+          Number.isSafeInteger(activity.window) &&
+          activity.window > 0
+            ? { window: activity.window }
+            : {}),
+        };
+        break;
+      case "compaction":
+        window.counts.compactions += 1;
+        break;
     }
     this.pending = true;
     if (this.timer) return;
@@ -201,7 +227,7 @@ export class ActivityLog {
     clearTimeout(this.timer);
     this.timer = undefined;
     if (!this.pending) return;
-    const { counts, tools, paths, command } = this.window;
+    const { counts, tools, paths, command, context } = this.window;
     this.log({
       event: "worker-activity",
       item: this.item,
@@ -209,6 +235,7 @@ export class ActivityLog {
       tools,
       paths,
       ...(command !== undefined ? { command } : {}),
+      ...(context ? { context } : {}),
     });
     this.window = emptyWindow();
     this.pending = false;

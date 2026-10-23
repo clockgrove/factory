@@ -949,6 +949,12 @@ interface ManagedEvent {
   tool_use_id?: string;
   is_error?: boolean;
   content?: { type: string; text?: string }[];
+  /** A Claude managed `span.model_request_end`'s usage. */
+  model_usage?: {
+    input_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
 }
 
 /**
@@ -988,13 +994,25 @@ function observeTools(
 /** Hosted tools that write the file their `file_path` or `path` names. */
 const MANAGED_EDIT_TOOLS = ["write", "edit"];
 
-/** A hosted session event as worker activity: tools, edits, commands, turns. */
+/** A hosted session event as worker activity: tools, edits, commands, turns, and a Claude session's context and compactions. */
 function managedActivity(
   input: WorkerInput,
   event: ManagedEvent,
   toolNames: Map<string, string>,
 ): void {
   if (event.type === "agent.message") input.activity({ kind: "turn" });
+  // Claude managed sessions only; the API gives no window.
+  const usage = event.model_usage;
+  if (event.type === "span.model_request_end" && usage)
+    input.activity({
+      kind: "context",
+      tokens:
+        (usage.input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0),
+    });
+  if (event.type === "agent.thread_context_compacted")
+    input.activity({ kind: "compaction" });
   if (event.type === "agent.tool_result" && event.tool_use_id) {
     const tool = toolNames.get(event.tool_use_id);
     toolNames.delete(event.tool_use_id);

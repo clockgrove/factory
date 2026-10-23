@@ -1307,6 +1307,16 @@ export class ClaudeWorker implements Worker {
         ) {
           firstToken(record, callStarted);
           record.reportedModel = message.message.model;
+          // The main thread's context at this request; the SDK gives no window.
+          const usage = message.message.usage;
+          if (message.parent_tool_use_id === null && usage)
+            input.activity({
+              kind: "context",
+              tokens:
+                usage.input_tokens +
+                (usage.cache_read_input_tokens ?? 0) +
+                (usage.cache_creation_input_tokens ?? 0),
+            });
           // One response may arrive split over several messages with its id.
           if (message.message.id !== response) tools.response();
           response = message.message.id;
@@ -1359,8 +1369,13 @@ export class ClaudeWorker implements Worker {
           if (message.message.model !== SYNTHETIC_MODEL)
             facts.modelResponded = true;
         }
-        if (message.type === "system" && message.subtype === "compact_boundary")
+        if (
+          message.type === "system" &&
+          message.subtype === "compact_boundary"
+        ) {
           compacted = true;
+          input.activity({ kind: "compaction" });
+        }
         if (message.type === "system" && message.subtype === "init") {
           facts.initialized = true;
           record.session = message.session_id;

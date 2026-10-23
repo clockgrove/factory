@@ -254,6 +254,17 @@ factory queue list                       # the Project's queued, candidate and i
 
 On GitHub, each Objective has a live status comment, each Work Item has its issue and pull request, and the final report closes the issue. Decide from `--json` fields and exit codes, never from message text.
 
+### Export model calls
+
+`factory export-captures N` builds OpenTelemetry (OTLP/HTTP JSON) spans from a run's model calls and sends nothing. Sending is explicit: preview with the collector's base URL, then authorize that exact preview's digest.
+
+```sh
+factory export-captures N --endpoint https://collector.example.com [--content metadata|retained] [--invocation ID]...
+factory export-captures N --endpoint https://collector.example.com --send --authorize DIGEST
+```
+
+`metadata` (the default) reads no captured text; `retained` adds the captured request and response, redacted again. `--output ABSOLUTE_FILE` writes the preview's requests to a new local file instead. Headers come from `OTEL_EXPORTER_OTLP_TRACES_HEADERS` or `OTEL_EXPORTER_OTLP_HEADERS` and are never printed. Changing the selection, content, endpoint or headers needs a new preview. Plain HTTP is allowed only to a loopback collector.
+
 ## Answer questions
 
 A hold is posted on the issue as one comment listing its answers, each with what it does and one marked recommended. `factory status N` shows the same, with the hold's id.

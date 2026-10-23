@@ -706,6 +706,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           adaptive: wire.adaptive,
           recipe: Boolean(inputs.recipe),
           executionProfiles: Boolean(profiles),
+          ...(inputs.predecessors
+            ? { prerequisites: inputs.predecessors }
+            : {}),
         }),
         schema: revisionSchema(facts, wire),
         readDir: workDir,
@@ -821,6 +824,7 @@ function amendReviewStep(
         sources: facts.sources,
         decisions: all,
         localExecutables: local.observations,
+        prerequisites: inputs.predecessors,
         amendment: {
           actor: proposal.actor,
           discovery: proposal.discovery,

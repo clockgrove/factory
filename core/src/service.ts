@@ -783,9 +783,10 @@ export async function serve(options: ServeOptions): Promise<number> {
         !workflow.steps(state).some((step) => allow(step.key))
       )
         run = Object.keys(state.attempts).length > 0;
-      // The check (and a new run's cleanup) runs when the Objective is first
-      // seen, slot or not (rule 7), within the host's `github` cap;
-      // planning and building need a slot.
+      // The check (and a new run's cleanup, and the wait for predecessors
+      // before it) runs when the Objective is first seen, slot or not
+      // (rule 7), within the host's `github` cap; planning and building
+      // need a slot. So an Objective waiting on its predecessors takes none.
       else if (!state.done.check) run = true;
       else if (runner.busy) {
         // Running steps keep their slot, even while another step's question is open.

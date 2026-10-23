@@ -40,6 +40,12 @@ import {
   position,
 } from "./plan.js";
 import {
+  type PredecessorEvidence,
+  predecessorEvidence,
+  predecessorsHold,
+  predecessorsOnBase,
+} from "./predecessors.js";
+import {
   draftItems,
   renderCompilationCall,
   renderGraphReviewCall,
@@ -92,6 +98,8 @@ export interface PlanningDeps {
   planner: Planner;
   /** A private directory for one Objective's working files. */
   workDir(issue: number): string;
+  /** This installation's Objective state directory: a predecessor's record is read from it. */
+  objectives: string;
 }
 
 /**
@@ -151,6 +159,8 @@ export interface ObjectiveInputs {
    * and every plan round use this, so a config change can't split them.
    */
   adaptiveGraph?: true;
+  /** The done predecessors' accepted results, checked to be on `base` (planning/predecessors.ts). */
+  predecessors?: PredecessorEvidence[];
 }
 
 interface PlanRound {
@@ -462,6 +472,7 @@ function planRoundStep(
         adaptive: wire.adaptive,
         recipe: Boolean(inputs.recipe),
         executionProfiles: Boolean(profiles),
+        ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
       });
       const answer = await deps.planner.answer({
         role: "planner",
@@ -562,6 +573,7 @@ function reviewStep(
         sources: facts.sources,
         decisions: all,
         localExecutables: local.observations,
+        prerequisites: inputs.predecessors,
       });
       const { workDir, repository } = await planningTree(
         deps,
@@ -1167,6 +1179,18 @@ export async function readObjective(
   if (!problems.length)
     problems.push(...(await localExecutables(inputs, config, signal)).problems);
   if (problems.length) return { hold: objectiveProblemsHold(problems, again) };
+  // Planning reads a base that has its predecessors' accepted work.
+  const predecessors = predecessorEvidence(state);
+  if (predecessors.length) {
+    const off = await predecessorsOnBase(
+      config.checkout,
+      predecessors,
+      inputs.base,
+      signal,
+    );
+    if (off) return { hold: predecessorsHold(off) };
+    inputs.predecessors = predecessors;
+  }
   return { inputs };
 }
 

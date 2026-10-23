@@ -137,7 +137,7 @@ for each active Objective (up to queue.maxActiveObjectives):
 The steps:
 
 ```text
-check → per planning round g:n: plan:g:n → review:g:n → decide:g:n [hold: plan question?]
+predecessors → check → per planning round g:n: plan:g:n → review:g:n → decide:g:n [hold: plan question?]
   → plan (accept, post the plan comment) → build:units (or build:split)
   → per Work Item, in dependency order:
       item:<id>:work → select (media items) → validate → review → publish (push, PR) → ci → merge
@@ -179,7 +179,7 @@ Any other retry is a wait. Waiting more than a few hours is never right, so a wa
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Fatal until a person acts        | An expired or invalid gh or provider login; GitHub 401 or a 403 refusal; a missing repository or issue (404); a full disk; a required check with no run or status 15 min after the push; a workflow that didn't trigger | Hold at once, with a question naming the fix.                                                                                                                                                                                                                                                                |
 | A known reset time               | A GitHub rate limit; a provider usage limit that reports its reset                                                                                                                                                      | Wait until the reset when it is at most 3 h away. Further away or unknown (a weekly limit): hold with `wait` (keep waiting until it resets), `switch NAME` (run this Objective on another configured provider, which becomes its frozen provider; plain `switch` when there is only one other) and `cancel`. |
-| A human gate Factory doesn't own | An environment approval; a review the branch requires                                                                                                                                                                   | Wait with no deadline. Status shows "waiting on" the gate, and one reminder comment follows after 24 h.                                                                                                                                                                                                      |
+| A human gate Factory doesn't own | An environment approval; a review the branch requires; a predecessor Objective (see [Predecessors](#predecessors))                                                                                                      | Wait with no deadline. Status shows "waiting on" the gate, and one reminder comment follows after 24 h.                                                                                                                                                                                                      |
 | An unknown transient cause       | The network down; 5xx or an outage at GitHub or the provider; 409, 410, 422 or a GraphQL error from GitHub; CI queued or running                                                                                        | Retry with backoff. After 1 h, post one status note on the issue (edited in place). After 3 h, hold with a question naming the cause and the last error: `wait` (another 3 h), `retry` and `cancel`.                                                                                                         |
 
 A problem on the host counts as fatal when it is certain (disk, login) and as transient otherwise. Times are wall-clock times saved in the state, so a restart doesn't reset a budget, and the question comes only after the step ran again and still had to wait.
@@ -268,9 +268,20 @@ The GitHub Project is the source of truth for what is queued.
 
 ## Check at queue time
 
-When the service first sees a queued Objective, it runs the Objective checks at once (first, that every `autonomy.requiredEnvironment` variable is set: see [Allowances](#allowances)), whether or not a slot is free, within the host-wide `github` cap (`queue.maxActiveObjectives` checks and re-run cleanups at once, in queue order): template sections, pinned Sources that resolve at the default branch, no duplicate headings, and declarations that parse. Planning uses the same function. A checked Objective then waits for a slot.
+When the service first sees a queued Objective, it waits for its predecessors (see [Predecessors](#predecessors)), then runs the Objective checks at once (first, that every `autonomy.requiredEnvironment` variable is set: see [Allowances](#allowances)), whether or not a slot is free, within the host-wide `github` cap (`queue.maxActiveObjectives` checks and re-run cleanups at once, in queue order): template sections, pinned Sources that resolve at the default branch, no duplicate headings, and declarations that parse. Planning uses the same function. A checked Objective then waits for a slot.
 
 A failed check is a hold. It names each problem and how to fix it, and Status goes to "Needs you". Edit the issue and answer `recheck` to check it again.
+
+## Predecessors
+
+An Objective issue can be blocked by other Objective issues through GitHub's native blocked-by links. The `predecessors` step (planning/predecessors.ts) runs before the check, so the check and planning read a default branch that has the predecessors' work (a Source a predecessor adds resolves). Each run reads the links again:
+
+- **Wait.** While a blocker is open, or closed as completed while its Objective isn't done here, the Objective waits with no question. It is a gate wait (see [Waits](#waits)): no deadline, no slot (like the check, it runs slot or not, within the `github` cap), status shows "Waiting on predecessor #N (why)", and one reminder follows after 24 h. A dequeue while it waits withdraws it, as before the check.
+- **Ended.** A blocker closed as not planned or duplicate, one whose Objective was cancelled, one closed that Factory never ran here, one in another repository, and one whose issue was edited after Factory accepted it hold the Objective with `replan` (read the links again, after editing them), `ignore N <reason>` (go on without that predecessor; the reason is kept with the answer's author and time) and `cancel`.
+- **Cycle.** A cycle of open blocked-by links through the Objective holds, naming it, with `retry` (after removing a link), `ignore N <reason>` and `cancel`.
+- **Evidence.** Once every predecessor is done or ignored, each done one's accepted result (the commit final validation and review passed on, its tree, its final commands, and each Work Item's PR and merge commit) is saved as the step's result. The check (and a replan's re-read) checks it against Git: the commit must exist with that tree, and it and every merge must be on the base planning reads; otherwise it holds with `retry` and `cancel`. Planning, plan review and amendments get it as the native prerequisites.
+
+A replan after acceptance runs the step again. A state checked before this step existed doesn't.
 
 ## Holds and answers
 

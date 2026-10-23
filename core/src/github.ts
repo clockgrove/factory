@@ -187,6 +187,10 @@ export interface IssueSummary {
   created_at?: string;
   /** Its native issue type, where the repository has them. */
   type?: { name: string } | null;
+  /** Why a closed issue closed: `completed`, `not_planned`, `duplicate`. */
+  state_reason?: string | null;
+  /** The API URL of the issue's repository: a blocked-by link may name another one. */
+  repository_url?: string;
 }
 
 export interface PullRequest {
@@ -735,7 +739,7 @@ export class GitHub {
     signal?: AbortSignal,
   ): Promise<void> {
     const path = `/repos/${this.repository}/issues/${issue}/dependencies/blocked_by`;
-    const linked = await this.pages<IssueSummary>(path, signal, undefined, 3);
+    const linked = await this.blockedBy(issue, signal);
     const want = new Set(blockers.map((blocker) => blocker.number));
     const has = new Set(linked.map((blocker) => blocker.number));
     for (const blocker of blockers)
@@ -750,6 +754,26 @@ export class GitHub {
         await this.rest("DELETE", `${path}/${blocker.id}`, undefined, signal);
         crashPoint(`${point}:after`);
       }
+  }
+
+  /** The issues `issue` is blocked by (its native blocked-by links), bounded. */
+  blockedBy(issue: number, signal?: AbortSignal): Promise<IssueSummary[]> {
+    return this.pages<IssueSummary>(
+      `/repos/${this.repository}/issues/${issue}/dependencies/blocked_by`,
+      signal,
+      undefined,
+      3,
+    );
+  }
+
+  /** Whether `found` is an issue of this repository, not one a link names elsewhere. */
+  ownIssue(found: Pick<IssueSummary, "repository_url">): boolean {
+    return (
+      found.repository_url === undefined ||
+      found.repository_url
+        .toLowerCase()
+        .endsWith(`/repos/${this.repository.toLowerCase()}`)
+    );
   }
 
   /** Branch names under `prefix` (such as `factory/12/`) on the repository. */

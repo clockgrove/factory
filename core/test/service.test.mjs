@@ -168,7 +168,8 @@ function seed(inst, issue, status = "checking", fields = {}) {
       retries: {},
       asking: {},
       kept: {},
-      done: {},
+      // No blocked-by links: these tests start at the check.
+      done: { predecessors: { predecessors: [], ignored: [] } },
       attempts: {},
       appliedRequests: [],
       modules: {},
@@ -1176,7 +1177,9 @@ test("an execution profile frozen at admission is kept through a config change; 
       },
     ],
   };
-  seed(inst, 46, "checking", { done: { plan } });
+  seed(inst, 46, "checking", {
+    done: { plan, predecessors: { predecessors: [], ignored: [] } },
+  });
   const admitted = stateOf(inst, 46).frozen;
   const careful = () =>
     stateOf(inst, 46).frozen.config.execution.profiles.careful;
@@ -2019,6 +2022,120 @@ test("a wait on a human gate takes no slot", async () => {
   const service = serve(inst);
   await until(() => stateOf(inst, 42).holds.length, "#42 runs and asks");
   assert.deepEqual(stateOf(inst, 41).holds, [], "#41 still waits on its gate");
+  await stopped(service);
+});
+
+test("blocked-by predecessors: a wait without a slot, an ended one holds until ignored, a cycle holds, a done one is evidence", async () => {
+  const inst = installation();
+  const SHOWN_95 = "<p>Ship the parser.</p>";
+  let state90 = { state: "open" };
+  const links = {
+    91: () => [{ id: 900, number: 90, ...state90 }],
+    90: () => [],
+    93: () => [{ id: 940, number: 94, state: "open" }],
+    94: () => [{ id: 930, number: 93, state: "open" }],
+    96: () => [
+      { id: 950, number: 95, state: "closed", state_reason: "completed" },
+    ],
+  };
+  const server = createHttpServer((req, res) => {
+    const reply = (code, body) => {
+      res.writeHead(code, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    const path = new URL(req.url, "http://github").pathname;
+    const linked = /\/issues\/(\d+)\/dependencies\/blocked_by$/.exec(path);
+    if (linked && links[linked[1]]) return reply(200, links[linked[1]]());
+    if (path.endsWith("/issues/95"))
+      return reply(200, {
+        title: "Parser",
+        body: "Ship the parser.",
+        body_html: SHOWN_95,
+        state: "closed",
+        state_reason: "completed",
+        user: { login: "kirk" },
+      });
+    reply(404, { message: "Not Found" });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  after(() => server.close());
+  configured(
+    inst,
+    `http://127.0.0.1:${server.address().port}`,
+    {},
+    {
+      queue: { projectId: "PVT_none", pollSeconds: 5, maxActiveObjectives: 1 },
+    },
+  );
+  // #95 is done: its record is the evidence.
+  seed(inst, 95, "done", {
+    done: {
+      check: { shown: readShown(SHOWN_95, { sources: false }) },
+      plan: { items: [{ id: "a", title: "Parse", ownedPaths: ["src/"] }] },
+      "item:a:publish": { pr: 7 },
+      "item:a:merge": { mergeSha: "a".repeat(40) },
+      final: { commit: "b".repeat(40), tree: "c".repeat(40), commands: [] },
+      report: true,
+    },
+  });
+  mkdirSync(join(inst.objectives, "finished"), { recursive: true });
+  writeFileSync(
+    join(inst.objectives, "finished", "95.json"),
+    readFileSync(join(inst.objectives, "95.json")),
+  );
+  for (const issue of [91, 93, 96]) seed(inst, issue, "checking", { done: {} });
+  // #92 needs the only slot: #91's wait doesn't take it.
+  seed(inst, 92, "planning", { done: { check: {} } });
+  const service = serve(inst);
+  await until(
+    () => stateOf(inst, 91).retries.predecessors?.wait?.kind === "gate",
+    "#91 waits on #90",
+  );
+  assert.equal(
+    stateOf(inst, 91).retries.predecessors.wait.gate,
+    "predecessor #90 (open)",
+  );
+  assert.deepEqual(stateOf(inst, 91).holds, [], "a wait asks nothing");
+  await until(() => stateOf(inst, 92).holds.length, "#92 runs and asks");
+  // A cycle holds, naming it.
+  await until(() => stateOf(inst, 93).holds.length, "#93's cycle");
+  assert.match(
+    stateOf(inst, 93).holds[0].question,
+    /#93 is blocked by #94 is blocked by #93/,
+  );
+  // A done predecessor's accepted result is the evidence; the check follows.
+  await until(() => stateOf(inst, 96).done.predecessors, "#96's evidence");
+  assert.deepEqual(stateOf(inst, 96).done.predecessors.predecessors, [
+    {
+      issue: 95,
+      title: "Parser",
+      commit: "b".repeat(40),
+      tree: "c".repeat(40),
+      commands: [],
+      items: [{ id: "a", title: "Parse", pr: 7, merged: "a".repeat(40) }],
+    },
+  ]);
+  // #90 closed as not planned: #91 holds until the operator ignores it.
+  state90 = { state: "closed", state_reason: "not_planned" };
+  assert.equal(cli(inst, "retry", "91").code, 0);
+  await until(() => stateOf(inst, 91).holds.length, "#91 asks");
+  const [ended] = stateOf(inst, 91).holds;
+  assert.match(ended.question, /#90: closed as not planned/);
+  assert.deepEqual(
+    ended.options.map((option) => [option.answer, option.arg]),
+    [
+      ["replan", undefined],
+      ["ignore", "90"],
+      ["cancel", undefined],
+    ],
+  );
+  const ignore = (...text) =>
+    cli(inst, "answer", "91", "ignore", "90", "--question", ended.id, ...text);
+  assert.equal(refusal(ignore()), "invalid_answer", "a reason is required");
+  assert.equal(ignore("--text", "Done by hand").code, 0);
+  await until(() => stateOf(inst, 91).done.predecessors, "#91 goes on");
+  const [ignored] = stateOf(inst, 91).done.predecessors.ignored;
+  assert.deepEqual([ignored.issue, ignored.reason], [90, "Done by hand"]);
   await stopped(service);
 });
 

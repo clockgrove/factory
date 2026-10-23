@@ -10,6 +10,7 @@ import {
 import { GitRefusal } from "./git.js";
 import { githubOutcome } from "./github.js";
 import { currentPlan } from "./planning/plan.js";
+import { PREDECESSORS, predecessorsStep } from "./planning/predecessors.js";
 import {
   type PlanningDeps,
   planningReplan,
@@ -41,8 +42,8 @@ import {
 const MINUTE = 60_000;
 
 /**
- * The Objective workflow: check → plan → build → final → report, then
- * cleanup after cancel. Steps are ported onto the core slice by slice; a
+ * The Objective workflow: predecessors → check → plan → build → final →
+ * report, then cleanup after cancel. Steps are ported onto the core slice by slice; a
  * step that isn't ported yet holds with an honest question, so an Objective
  * on this build always has an answer that works. `deps` is absent when
  * Factory has no configuration.
@@ -57,7 +58,13 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       }
       if (state.status === "done") return [];
       if (deps && state.kept?.[RERUN]) return [rerunCleanupStep(deps)];
-      if (!state.done.check) return [check];
+      // The predecessors come first, so the check reads a base that has
+      // their work (CORE.md#Predecessors); a state checked without the
+      // step never runs it.
+      if (!state.done.check)
+        return deps && !state.done[PREDECESSORS]
+          ? [predecessorsStep(deps)]
+          : [check];
       if (!currentPlan(state)) {
         const step = deps ? planningStep(state, deps) : unavailable("plan");
         return step ? [step] : [];
@@ -221,9 +228,9 @@ const cleanup: Step = {
 };
 
 /**
- * Whether the Objective has started: a step past the check (and a
- * re-run's cleanup) is done, waiting, asking or running. The one rule for
- * queue order and for withdrawal before start.
+ * Whether the Objective has started: a step past the check (and the
+ * predecessors' wait and a re-run's cleanup) is done, waiting, asking or
+ * running. The one rule for queue order and for withdrawal before start.
  */
 export function started(state: ObjectiveState): boolean {
   return [
@@ -231,5 +238,7 @@ export function started(state: ObjectiveState): boolean {
     ...Object.keys(state.retries),
     ...Object.keys(state.asking),
     ...Object.keys(state.attempts),
-  ].some((key) => key !== "check" && key !== RERUN_CLEANUP);
+  ].some(
+    (key) => key !== PREDECESSORS && key !== "check" && key !== RERUN_CLEANUP,
+  );
 }

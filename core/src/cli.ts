@@ -569,6 +569,7 @@ async function serveCommand(
           github,
           planner: planner(config, each),
           workDir: (issue) => join(paths.root, "work", String(issue)),
+          objectives: paths.objectives,
           worker: providerWorker(settings, config),
         }),
       });

@@ -63,6 +63,9 @@ export function knowledgeSettings(): KnowledgeSettings | undefined {
   return configured;
 }
 
+/** A Dream model call's deadline; a call still submitted past it was interrupted. */
+export const DREAM_DEADLINE_MS = 45 * 60_000;
+
 export function knowledgeDir(root: string): string {
   return join(root, "knowledge");
 }

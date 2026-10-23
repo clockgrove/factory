@@ -387,7 +387,9 @@ async function dream(
       settledState: (issue) => settledState(paths, issue),
       send: async (write) => {
         // Only the service writes the store: no fallback to a direct write.
-        if (!(await serviceLive(paths)))
+        // A call's end waits for the service instead, so a finished model
+        // call is never lost to a restart.
+        if (write.op !== "end" && !(await serviceLive(paths)))
           throw new Refusal(
             "service_not_running",
             "The service isn't running, and only it writes the knowledge store: start it (factory serve), then run this again.",

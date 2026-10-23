@@ -16,7 +16,11 @@ import type { Plan } from "../planning/types.js";
 import type { ObjectiveState } from "../state.js";
 import { runOf, TERMINAL } from "../state.js";
 import { mergeOf } from "../work/merged.js";
-import { admitted, type PlanningContext } from "./settings.js";
+import {
+  admitted,
+  DREAM_DEADLINE_MS,
+  type PlanningContext,
+} from "./settings.js";
 import { type Database, sha256, transaction, withStore } from "./store.js";
 
 export type MemoryKind =
@@ -57,7 +61,8 @@ interface StoredRecord extends MemoryRecord {
  * oldest. Dream reads the newest episodes first and planning bounds what
  * it shows, so neither reaches the dropped ones. An episode a Dream
  * approval still checks is kept past the cap: every episode given to the
- * newest playbook or to an undecided proposal.
+ * newest playbook, to an undecided proposal, or to a Dream call still
+ * running (submitted, within its deadline; its detail holds them).
  */
 export const MAX_EPISODES = 1000;
 export const MAX_RECORDS = 10_000;
@@ -116,9 +121,10 @@ function prune(db: Database): void {
           .prepare(
             `SELECT body FROM (SELECT body FROM playbook ORDER BY version DESC LIMIT 1)
              UNION ALL SELECT body FROM proposals
-             WHERE id NOT IN (SELECT proposal FROM playbook) AND id NOT IN (SELECT proposal FROM rejections)`,
+             WHERE id NOT IN (SELECT proposal FROM playbook) AND id NOT IN (SELECT proposal FROM rejections)
+             UNION ALL SELECT detail FROM dream_calls WHERE outcome = 'submitted' AND at >= ?`,
           )
-          .all()
+          .all(new Date(Date.now() - DREAM_DEADLINE_MS).toISOString())
           .flatMap(
             (row) =>
               (JSON.parse(String(row.body)) as { sources: string[] }).sources,

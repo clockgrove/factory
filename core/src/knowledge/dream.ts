@@ -42,6 +42,7 @@ import {
 } from "./memory.js";
 import {
   DEFAULT_BOUNDS,
+  DREAM_DEADLINE_MS,
   type KnowledgeSettings,
   knowledgeDir,
   knowledgeSettings,
@@ -55,8 +56,6 @@ import {
 } from "./store.js";
 
 export const DEFAULT_PLAYBOOK_BUDGET_BYTES = 32_768;
-
-const DREAM_DEADLINE_MS = 45 * 60_000;
 
 interface Entry {
   text: string;
@@ -565,8 +564,11 @@ export interface DreamOptions {
 
 /** A `dream` write, applied by the service ({@link applyDream}). */
 export type DreamWrite =
-  /** A model call starts: until it ends, `--show` lists it as interrupted. */
-  | { op: "call"; id: string }
+  /**
+   * A model call starts with the episodes it was given, kept until it ends
+   * or passes its deadline. Until it ends, `--show` lists it.
+   */
+  | { op: "call"; id: string; sources: string[] }
   /** The call ended: with a proposal (the draft file's text), or failed or refused. */
   | {
       op: "end";
@@ -754,12 +756,21 @@ function show(
         created: String(row.created),
         draft: draftPath(settings, String(row.id)),
       })),
-    interruptedCalls: db
-      .prepare(
-        "SELECT id, at FROM dream_calls WHERE outcome = 'submitted' ORDER BY at",
-      )
-      .all()
-      .map((row) => ({ id: String(row.id), at: String(row.at) })),
+    ...Object.fromEntries(
+      [
+        ["runningCalls", "outcome = 'submitted' AND at >= ?"],
+        [
+          "interruptedCalls",
+          "(outcome = 'interrupted' OR (outcome = 'submitted' AND at < ?))",
+        ],
+      ].map(([name, where]) => [
+        name,
+        db
+          .prepare(`SELECT id, at FROM dream_calls WHERE ${where} ORDER BY at`)
+          .all(new Date(Date.now() - DREAM_DEADLINE_MS).toISOString())
+          .map((row) => ({ id: String(row.id), at: String(row.at) })),
+      ]),
+    ),
   };
 }
 
@@ -782,7 +793,7 @@ async function dream(
   );
   // A call that dies leaves its start recorded; `--show` lists it. A model
   // call has no outside effect, so it never blocks another.
-  await options.send({ op: "call", id });
+  await options.send({ op: "call", id, sources: selection.sources });
   crashPoint("dream:submitted");
   const planner = options.planner();
   const signal = AbortSignal.timeout(DREAM_DEADLINE_MS);
@@ -915,11 +926,17 @@ function write(
   stored: StoredRequest,
 ): Record<string, unknown> {
   switch (change.op) {
-    case "call":
+    case "call": {
+      // A call still submitted past its deadline died with its CLI.
       db.prepare(
-        "INSERT OR IGNORE INTO dream_calls VALUES (?, ?, 'submitted', '')",
-      ).run(change.id, stored.at);
+        "UPDATE dream_calls SET outcome = 'interrupted', detail = '' WHERE outcome = 'submitted' AND at < ?",
+      ).run(new Date(Date.now() - DREAM_DEADLINE_MS).toISOString());
+      // Until it ends, its detail names the episodes retention keeps for it.
+      db.prepare(
+        "INSERT OR IGNORE INTO dream_calls VALUES (?, ?, 'submitted', ?)",
+      ).run(change.id, stored.at, JSON.stringify({ sources: change.sources }));
       return {};
+    }
     case "end": {
       const { proposal } = change;
       transaction(db, "dream:proposal", () => {

@@ -290,7 +290,13 @@ function itemRows(state: ObjectiveState, plan: Plan): ItemRow[] {
       id: item.id,
       kind: item.kind ?? "work",
       phase: mergeOf(state, item.id)
-        ? "merged"
+        ? (
+            state.done[`item:${item.id}:merge`] as
+              | { settled?: string }
+              | undefined
+          )?.settled === "skipped"
+          ? "skipped"
+          : "merged"
         : running
           ? `${phase(running)} (running)`
           : hold

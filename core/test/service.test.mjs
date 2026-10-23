@@ -2005,7 +2005,9 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
 
   // Discovery observes the planned base with no model call and settles,
   // keeping its result for dependents; semantic discovery of nothing needs
-  // no call either; past its allowance it holds with the evidence.
+  // no call either; past its allowance it holds with the evidence. A
+  // conditional item off its branch settles as skipped with the evidence,
+  // and its dependent runs; one whose condition can't be read asks.
   const sha = (text) => createHash("sha256").update(text).digest("hex");
   const discovery = (id, mode, selectors, maxEntries = 10) => ({
     id,
@@ -2031,6 +2033,41 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
           discovery("d", "inventory", ["src/"]),
           discovery("s", "semantic", ["none/"]),
           discovery("e", "inventory", ["src/"], 1),
+          {
+            id: "k",
+            ownedPaths: ["src/k.ts"],
+            dependencies: ["d"],
+            condition: { conditionId: "src-empty", when: true },
+          },
+          { ...discovery("f", "inventory", ["src/"]), dependencies: ["k"] },
+          {
+            id: "u",
+            ownedPaths: ["src/u.ts"],
+            dependencies: ["d"],
+            condition: { conditionId: "unread", when: false },
+          },
+        ],
+        conditions: [
+          {
+            schemaVersion: 1,
+            id: "src-empty",
+            input: {
+              producerItemId: "d",
+              role: "d-files",
+              schema: "factory.repository-inventory/v1",
+            },
+            predicate: { kind: "inventory-empty" },
+          },
+          {
+            schemaVersion: 1,
+            id: "unread",
+            input: {
+              producerItemId: "d",
+              role: "other-files",
+              schema: "factory.repository-inventory/v1",
+            },
+            predicate: { kind: "inventory-empty" },
+          },
         ],
         coverage: [],
       },
@@ -2042,8 +2079,9 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
     () =>
       stateOf(baseline, 54).done["item:d:merge"] &&
       stateOf(baseline, 54).done["item:s:merge"] &&
-      stateOf(baseline, 54).holds.length,
-    "d and s settle, e asks",
+      stateOf(baseline, 54).done["item:f:merge"] &&
+      stateOf(baseline, 54).holds.length === 2,
+    "d, s, k and f settle, e and u ask",
     30_000,
   );
   const observed = stateOf(baseline, 54);
@@ -2064,8 +2102,21 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
     git(work, "rev-parse", `${planned}:src/a.ts`),
   );
   assert.deepEqual(observed.kept["item:s:discovery"].entries, []);
-  const [allowance] = observed.holds;
-  assert.equal(allowance.step, "item:e:work");
+  const skipped = observed.done["item:k:merge"];
+  assert.equal(skipped.settled, "skipped");
+  assert.deepEqual(
+    [skipped.condition.conditionId, skipped.condition.value],
+    ["src-empty", false],
+  );
+  assert.match(skipped.condition.evidence, /listed 2 files: src\/a\.ts/);
+  assert.equal(observed.done["item:k:work"], undefined);
+  const unread = observed.holds.find((hold) => hold.step === "item:u:work");
+  assert.match(unread.question, /no such kept result/);
+  assert.deepEqual(
+    unread.options.map((option) => option.answer),
+    ["replan", "retry", "cancel"],
+  );
+  const allowance = observed.holds.find((hold) => hold.step === "item:e:work");
   assert.match(allowance.question, /2 files of 4 bytes/);
   assert.deepEqual(
     allowance.options.map((option) => option.answer),

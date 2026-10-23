@@ -63,8 +63,9 @@ export interface CoreConfig {
      * Offer discovery items, declared work conditions and expansion
      * envelopes to the planner for an Adaptive workflow Objective. Off by
      * default, and kept off until the core runs them all: discovery items
-     * run (work/discovery.ts), but a conditional plan would run both
-     * branches, and an expansion would add no children.
+     * run (work/discovery.ts) and conditions skip the other branch
+     * (planning/plan.ts conditionVerdict), but an expansion would add no
+     * children.
      */
     adaptiveGraph: boolean;
     /** The ceiling on a discovery item's entry, byte and attempt allowance: the wire and graph.ts refuse more. */

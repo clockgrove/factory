@@ -55,7 +55,12 @@ import {
   planningSources,
 } from "../planning/facts.js";
 import { baselineQa } from "../planning/graph.js";
-import { acceptedInputs, currentPlan } from "../planning/plan.js";
+import {
+  acceptedInputs,
+  type ConditionVerdict,
+  conditionVerdict,
+  currentPlan,
+} from "../planning/plan.js";
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
 import {
@@ -266,6 +271,15 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
         place?.unit.items.some((layer) => !done(layer.id, "ci")))
     )
       return undefined;
+    // A conditional item's condition decides before it starts: off its
+    // branch it settles as skipped; unreadable, it asks.
+    if (phase === phasesOf(item, place)[0]) {
+      const verdict = conditionVerdict(state, item);
+      if (typeof verdict === "string")
+        return conditionUnknown(item, phase, verdict);
+      if (verdict && verdict.value !== verdict.when)
+        return skipStep(item, verdict);
+    }
     if (phase === "work" && item.kind === "discovery")
       return discoveryStep(item, deps);
     // Aggregates, QA and discovery deliver nothing: their merge step settles them.
@@ -2218,6 +2232,53 @@ async function discoveryBase(
   return (await integrationProblem(state, plan, head, deps, signal)) ?? head;
 }
 
+/** A conditional item's settled result off its branch: no worker, no PR. */
+interface Skipped {
+  settled: "skipped";
+  condition: ConditionVerdict;
+}
+
+/** A conditional item off its branch settles as skipped, with the condition and its evidence. */
+function skipStep(item: WorkItem, condition: ConditionVerdict): Step {
+  return {
+    key: stepKey(item.id, "merge"),
+    deadlineMs: MINUTE,
+    async run(context): Promise<Outcome> {
+      context.log({ event: "item-skipped", item: item.id, ...condition });
+      const result: Skipped = { settled: "skipped", condition };
+      return { kind: "done", result };
+    },
+  };
+}
+
+/** A conditional item whose condition can't be read: it asks at its first step. */
+function conditionUnknown(item: WorkItem, phase: Phase, problem: string): Step {
+  return {
+    key: stepKey(item.id, phase),
+    deadlineMs: MINUTE,
+    run: async () =>
+      hold(
+        `Work Item ${item.id} runs only when its condition holds, and it can't be evaluated: ${problem}\n\nAnswer \`replan\` to plan it again, \`retry\` to evaluate it again, or cancel.`,
+        ["replan", "retry", "cancel"],
+      ),
+  };
+}
+
+/** The items the plan's conditions skipped, with each verdict. */
+function skippedItems(
+  state: ObjectiveState,
+  plan: Plan,
+): { item: WorkItem; condition: ConditionVerdict }[] {
+  return plan.items.flatMap((item) => {
+    const settled = state.done[stepKey(item.id, "merge")] as
+      | Partial<Skipped>
+      | undefined;
+    return settled?.settled === "skipped" && settled.condition
+      ? [{ item, condition: settled.condition }]
+      : [];
+  });
+}
+
 /** The merge step of an item that delivers nothing (aggregate, QA, discovery): it settles. */
 function settleStep(item: WorkItem): Step {
   return {
@@ -2442,6 +2503,10 @@ function finalReviewStep(deps: BuildDeps): Step {
         dir: join(deps.workDir(state.issue), "final-review"),
         ...(decisions ? { decisions } : {}),
         qa,
+        skipped: skippedItems(state, plan).map(({ item, condition }) => ({
+          itemId: item.id,
+          ...condition,
+        })),
         signal,
         log: context.log,
       });
@@ -2648,7 +2713,16 @@ function reportStep(deps: BuildDeps): Step {
       }
       const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
+      const skipped = new Map(
+        skippedItems(state, plan).map(({ item, condition }) => [
+          item.id,
+          condition,
+        ]),
+      );
       const lines = plan.items.map((item) => {
+        const condition = skipped.get(item.id);
+        if (condition)
+          return `- **${item.id}** ${item.title} — skipped: it runs only when condition ${condition.conditionId} is ${condition.when}. ${condition.evidence}`;
         const published = state.done[stepKey(item.id, "publish")] as
           | PublishResult
           | undefined;

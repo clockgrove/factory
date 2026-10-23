@@ -17,6 +17,7 @@
  */
 import type { CandidateRecord, InputRecord } from "../media.js";
 import { coverageCriterion } from "../planning/graph.js";
+import type { ConditionVerdict } from "../planning/plan.js";
 import { DESIGN_CHECKLIST } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
@@ -32,6 +33,11 @@ import {
   runReview,
   workItemDesign,
 } from "./result.js";
+
+/** A conditional Work Item its declared condition skipped. */
+export interface SkippedItem extends ConditionVerdict {
+  itemId: string;
+}
 
 /** Review the integrated Objective. See the module comment for the outcomes. */
 export function reviewObjective(input: {
@@ -68,13 +74,19 @@ export function reviewObjective(input: {
   decisions?: readonly CriterionDecision[];
   /** What each accepted read-only QA item observed. */
   qa?: readonly QaObservation[];
+  /** The conditional Work Items their declared condition skipped, with its evidence. */
+  skipped?: readonly SkippedItem[];
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
 }): Promise<ResultReview> {
   return runReview({
     ...input,
     phase: "objective-review",
-    criteria: finalCriteria(input.plan, input.acceptance),
+    criteria: finalCriteria(
+      input.plan,
+      input.acceptance,
+      new Set((input.skipped ?? []).map((entry) => entry.itemId)),
+    ),
     instructions: FINAL_INSTRUCTIONS,
     design: [
       ...input.plan.items.map((item) => ({
@@ -84,6 +96,15 @@ export function reviewObjective(input: {
         complete: true,
       })),
       ...(input.qa ?? []).map(qaObservationRow),
+      ...(input.skipped ?? []).map((entry) => ({
+        origin: "controller" as const,
+        path: `Skipped Work Item: ${entry.itemId}`,
+        content: JSON.stringify({
+          scope: `Work Item ${entry.itemId} runs only when declared condition ${entry.conditionId} is ${entry.when}; Factory evaluated it as ${entry.value} from the discovery result it reads, so the item was skipped: no worker ran and it merged nothing. Its design is not delivered and is not under review; unconditional items own every obligation.`,
+          ...entry,
+        }),
+        complete: true,
+      })),
     ],
     artifacts: input.artifacts ?? [],
   });
@@ -99,11 +120,18 @@ export function reviewObjective(input: {
  * reuses its helpers and types. Each question names the criteria it bears on
  * by index, so its refusal stays tied to them.
  */
-function finalCriteria(plan: Plan, objective: readonly string[]): string[] {
+function finalCriteria(
+  plan: Plan,
+  objective: readonly string[],
+  skipped: ReadonlySet<string>,
+): string[] {
   const judged = [
     ...new Set([...objective, ...plan.coverage.map(coverageCriterion)]),
   ];
-  const coding = plan.items.filter((item) => (item.kind ?? "work") === "work");
+  // A skipped item delivered nothing, so it integrates with nothing.
+  const coding = plan.items.filter(
+    (item) => (item.kind ?? "work") === "work" && !skipped.has(item.id),
+  );
   const ids = new Set(coding.map((item) => item.id));
   const linked = (a: WorkItem, b: WorkItem) =>
     a.dependencies.includes(b.id) || b.dependencies.includes(a.id);

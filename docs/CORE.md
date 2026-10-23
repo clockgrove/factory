@@ -359,7 +359,7 @@ Each service run appends to `logs/<issue>/<run id>.jsonl`: step start and end, o
 - `factory status` reads the state file plus the end of the log.
 - `factory watch [ISSUE]` follows the log like `log --follow` and shows one row per Work Item: its step, its last outcome or hold, and its worker's activity. It reads the log only.
 - Diagnostics, capture export, accounting, scorecards and analysis read logs. They never write state.
-- **Retention.** A run is its log file and its capture directory, kept or deleted together. The service keeps the last 20 runs per Objective and 2 GB in total, deleting the oldest first.
+- **Retention.** A run is its log file and its capture directory, kept or deleted together. The service keeps the last 20 runs per Objective and 2 GB in total, deleting the oldest first. It never deletes its own run, or a run whose files changed in the last 10 minutes (a `factory dream` call still running); they still count toward both bounds.
 
 ### Model usage
 

@@ -294,12 +294,32 @@ const DEFAULT_RETENTION: Retention = {
   totalBytes: 2 * 1024 ** 3,
 };
 
+/** A run whose files changed this recently may still be written: rotation keeps it. */
+const LIVE_MS = 10 * 60 * 1000;
+
 /**
  * Keep the newest runs per Objective, then the newest runs overall within
  * the byte cap. A run is its log file and its capture directory, removed
- * together. Run ids sort by start time, so id order is age order.
+ * together. Run ids sort by start time, so id order is age order. The
+ * `active` run (the caller's own) and any run changed in the last 10
+ * minutes (a `factory dream` call still running) are never removed; they
+ * still count toward both bounds.
  */
-export function rotateLogs(dir: string, retention = DEFAULT_RETENTION): void {
+export function rotateLogs(
+  dir: string,
+  active?: string,
+  retention = DEFAULT_RETENTION,
+): void {
+  const now = Date.now();
+  const kept = (id: string, paths: string[]) =>
+    id === active ||
+    paths.some((path) => {
+      try {
+        return now - statSync(path).mtimeMs < LIVE_MS;
+      } catch {
+        return false;
+      }
+    });
   const runs: { paths: string[]; id: string; bytes: number }[] = [];
   for (const issue of safeList(dir)) {
     const issueDir = join(dir, issue);
@@ -312,7 +332,7 @@ export function rotateLogs(dir: string, retention = DEFAULT_RETENTION): void {
     const excess = ids.length - retention.runsPerObjective;
     ids.forEach((id, i) => {
       const paths = byRun.get(id)!;
-      if (i < excess) remove(paths);
+      if (i < excess && !kept(id, paths)) remove(paths);
       else runs.push({ paths, id, bytes: paths.reduce(addSize, 0) });
     });
   }
@@ -320,7 +340,8 @@ export function rotateLogs(dir: string, retention = DEFAULT_RETENTION): void {
   let total = 0;
   for (const run of runs) {
     total += run.bytes;
-    if (total > retention.totalBytes) remove(run.paths);
+    if (total > retention.totalBytes && !kept(run.id, run.paths))
+      remove(run.paths);
   }
 }
 

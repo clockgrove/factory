@@ -966,7 +966,7 @@ export async function serve(options: ServeOptions): Promise<number> {
   );
   const housekeeping = (): void => {
     try {
-      rotateLogs(paths.logs);
+      rotateLogs(paths.logs, runId);
       sweepResults(paths.requests);
     } catch (error) {
       log.write(0, { event: "housekeeping-failed", error: String(error) });

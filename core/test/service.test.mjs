@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
@@ -604,6 +605,7 @@ test("logs keep the newest runs, each with its captures", async () => {
   const inst = installation();
   const dir = join(inst.logs, "5");
   mkdirSync(dir, { recursive: true });
+  const old = new Date(Date.now() - 60 * 60 * 1000);
   for (let i = 0; i < 25; i++) {
     const run = `2026-01-01T00-00-${String(i).padStart(2, "0")}`;
     writeFileSync(join(dir, `${run}.jsonl`), "{}\n");
@@ -611,17 +613,20 @@ test("logs keep the newest runs, each with its captures", async () => {
     if (i % 2) {
       mkdirSync(join(dir, `${run}.captures`));
       writeFileSync(join(dir, `${run}.captures`, "c.json"), "{}");
+      utimesSync(join(dir, `${run}.captures`), old, old);
     }
+    // Run 1 was written to minutes ago (a dream call still running): kept.
+    if (i !== 1) utimesSync(join(dir, `${run}.jsonl`), old, old);
   }
   const service = serve(inst);
   await until(() => status(inst).service === "running", "service");
   await stopped(service);
   const kept = readdirSync(dir).sort();
   const runs = kept.filter((name) => name.endsWith(".jsonl"));
-  assert.equal(runs.length, 20);
-  assert.equal(runs[0], "2026-01-01T00-00-05.jsonl");
-  assert.equal(kept[0], "2026-01-01T00-00-05.captures");
-  assert.equal(kept.length, 30, "the 10 kept odd runs keep their captures");
+  assert.equal(runs.length, 21, "the 20 newest and the live one");
+  assert.equal(runs[0], "2026-01-01T00-00-01.jsonl");
+  assert.equal(runs[1], "2026-01-01T00-00-05.jsonl");
+  assert.equal(kept.length, 32, "the 11 kept odd runs keep their captures");
   // The service's own events went to a file named by its run id.
   assert.ok(
     readdirSync(join(inst.logs, "0")).some((name) =>

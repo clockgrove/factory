@@ -65,20 +65,24 @@ export function codexTelemetry(
   let total: Record<string, unknown> | undefined;
   for (const line of lines) {
     if (!line.trim()) continue;
-    let entry: { type?: unknown; payload?: Record<string, unknown> };
+    let entry: unknown;
     try {
       entry = JSON.parse(line);
     } catch {
       continue;
     }
-    const payload = entry.payload;
+    if (!entry || typeof entry !== "object") continue;
+    const { type, payload } = entry as {
+      type?: unknown;
+      payload?: Record<string, unknown> | null;
+    };
     if (!payload || typeof payload !== "object") continue;
-    if (entry.type === "event_msg" && payload.type === "token_count") {
+    if (type === "event_msg" && payload.type === "token_count") {
       const info = payload.info as { total_token_usage?: unknown } | null;
       if (info?.total_token_usage && typeof info.total_token_usage === "object")
         total = info.total_token_usage as Record<string, unknown>;
     }
-    if (entry.type === "response_item" && CALLS.has(String(payload.type))) {
+    if (type === "response_item" && CALLS.has(String(payload.type))) {
       const name =
         typeof payload.name === "string" ? payload.name : String(payload.type);
       const id = payload.call_id ?? payload.id;

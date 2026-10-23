@@ -3,6 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type Allowances, DEFAULT_ALLOWANCES } from "./allowances.js";
 import {
   absolute,
   type Check,
@@ -53,8 +54,6 @@ export interface CoreConfig {
   /** The provider new work uses unless `serve --provider` names another. */
   defaultProvider: string;
   planning: {
-    /** Revision rounds before Factory asks; `more` grants two more. */
-    revisions: number;
     /** A curated playbook file in the target, read at the base. */
     playbook: string;
     /** Admits Adaptive workflow Objectives; absent, they are refused. */
@@ -74,8 +73,16 @@ export interface CoreConfig {
     workers: number;
     /** CPU-heavy steps (validation) at once across the host. */
     validations: number;
-    /** Repairs of one Work Item before Factory asks. */
-    repairs: number;
+  };
+  /** How much an Objective may do unattended; frozen with it. */
+  autonomy: {
+    /** What an Objective may spend before Factory asks (allowances.ts). */
+    allowances: Allowances;
+    /**
+     * Operator variables (names in policy.allowedSecretNames) that must be
+     * set before planning starts; the check holds while one isn't.
+     */
+    requiredEnvironment: string[];
   };
   policy: {
     /** Operator variables a worker's shell may see, by name. */
@@ -400,8 +407,6 @@ const RETIRED: Record<string, Retired> = {
     capture: "session capture isn't configurable here yet; leave it out",
     nativeBoundaryTelemetry:
       "session capture isn't configurable here yet; leave it out",
-    autonomy:
-      "planning revisions are planning.revisions, repairs execution.repairs",
     planningContext: "moved to planning.context",
     githubManagement:
       "removed: Factory always writes queue.field and progress comments",
@@ -417,8 +422,14 @@ const RETIRED: Record<string, Retired> = {
       "removed: Factory manages queue.field and queue.orderField",
     objectiveDeadlineSeconds: "removed: each step has its own deadline",
   },
-  planning: { provider: PROVIDERS_HINT, models: PROVIDERS_HINT },
+  planning: {
+    provider: PROVIDERS_HINT,
+    models: PROVIDERS_HINT,
+    revisions: "moved to autonomy.allowances.planningRevisions",
+  },
   execution: {
+    repairs:
+      "replaced by autonomy.allowances.perPath (repairs of one Work Item) and autonomy.allowances.implementationRepairs (the Objective's)",
     workerProvider: PROVIDERS_HINT,
     codexNetwork: "use providers.<name>.worker.network",
     claudeWorker: PROVIDERS_HINT,
@@ -430,6 +441,26 @@ const RETIRED: Record<string, Retired> = {
   policy: {
     network: "use providers.<name>.worker.network for a Codex worker",
   },
+  autonomy: {
+    repairClasses:
+      "replaced: every failure holds with its cause, and your answer decides",
+    repairPolicy: "per-path repairs are autonomy.allowances.perPath",
+  },
+};
+
+const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** `autonomy.requiredEnvironment`: distinct variable names. */
+const environmentNames: Check<string[]> = (value, path, problems) => {
+  const names = strings(value, path, problems);
+  if (
+    names.some((name) => !ENVIRONMENT_NAME.test(name)) ||
+    new Set(names).size !== names.length
+  )
+    problems.push(
+      `${path} must be distinct variable names matching ${ENVIRONMENT_NAME.source}`,
+    );
+  return names;
 };
 
 /**
@@ -486,7 +517,6 @@ export function loadConfig(repository: string): CoreConfig {
       defaultProvider: (value) => value,
       planning: object(
         {
-          revisions: whole(0, 4),
           playbook: text(".factory/playbook.md"),
           context: optional(planningContext),
           adaptiveGraph: flag(false),
@@ -498,9 +528,22 @@ export function loadConfig(repository: string): CoreConfig {
           concurrency: whole(1, 8),
           workers: whole(1, Math.max(2, Math.floor(cpus / 2))),
           validations: whole(1, Math.max(2, Math.floor(cpus / 4))),
-          repairs: whole(1, 6),
         },
         RETIRED.execution,
+      ),
+      autonomy: object(
+        {
+          allowances: object(
+            Object.fromEntries(
+              Object.entries(DEFAULT_ALLOWANCES).map(([name, fallback]) => [
+                name,
+                whole(0, fallback),
+              ]),
+            ) as Record<keyof Allowances, Check<number>>,
+          ),
+          requiredEnvironment: environmentNames,
+        },
+        RETIRED.autonomy,
       ),
       policy: object(
         {
@@ -561,6 +604,12 @@ export function loadConfig(repository: string): CoreConfig {
       )
     )
       problems.push(`${name} ${inside} must be outside ${where} ${root}`);
+  // A required variable a worker may not see would be checked for nothing.
+  for (const name of config.autonomy.requiredEnvironment)
+    if (!config.policy.allowedSecretNames.includes(name))
+      problems.push(
+        `autonomy.requiredEnvironment names ${name}, which policy.allowedSecretNames doesn't allow`,
+      );
   const own = ownRepositoryProblem(config.repository, config.checkout);
   if (own) problems.push(own);
   if (process.env.FACTORY_SECRETLINT_CONFIG !== undefined)

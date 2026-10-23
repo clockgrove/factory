@@ -1024,7 +1024,7 @@ test("a changed configuration holds once, naming the frozen keys; adopt re-freez
   const before = stateOf(inst, 44).frozen.digest;
   // One frozen key and two operational ones change under the Objective.
   const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
-  config.planning = { revisions: 1 };
+  config.autonomy = { allowances: { planningRevisions: 1 } };
   config.queue.pollSeconds = 7;
   config.execution = { workers: 1 };
   writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
@@ -1038,13 +1038,17 @@ test("a changed configuration holds once, naming the frozen keys; adopt re-freez
   );
   assert.match(
     stale.question,
-    /changed since this Objective froze it .*: planning\.revisions\./,
+    /changed since this Objective froze it .*: autonomy\.allowances\.planningRevisions\./,
   );
   assert.doesNotMatch(stale.question, /pollSeconds|workers/);
   await stopped(first);
   // A second edit while the question is open: adopt never freezes a
   // configuration the question didn't name, and the question is asked again.
-  config.execution.repairs = 2;
+  config.autonomy.allowances.perPath = 2;
+  // The service has one of the two variables planning requires.
+  config.autonomy.requiredEnvironment = ["NEEDED_TOKEN", "SET_TOKEN"];
+  config.policy = { allowedSecretNames: ["NEEDED_TOKEN", "SET_TOKEN"] };
+  inst.env.SET_TOKEN = "present-value-xyz";
   writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
   const service = serve(inst);
   await until(() => status(inst).service === "running", "service");
@@ -1056,7 +1060,10 @@ test("a changed configuration holds once, naming the frozen keys; adopt re-freez
     "the question asked again",
   );
   const [asked] = stateOf(inst, 44).holds;
-  assert.match(asked.question, /execution\.repairs, planning\.revisions\./);
+  assert.match(
+    asked.question,
+    /autonomy\.allowances\.perPath, autonomy\.allowances\.planningRevisions, autonomy\.requiredEnvironment, policy\.allowedSecretNames\./,
+  );
   assert.equal(stateOf(inst, 44).frozen.digest, before);
   assert.equal(
     cli(inst, "answer", "44", "adopt", "--question", asked.id).code,
@@ -1064,13 +1071,26 @@ test("a changed configuration holds once, naming the frozen keys; adopt re-freez
   );
   const state = stateOf(inst, 44);
   assert.notEqual(state.frozen.digest, before);
-  assert.equal(state.frozen.config.planning.revisions, 1);
-  assert.equal(state.frozen.config.execution.repairs, 2);
+  assert.equal(state.frozen.config.autonomy.allowances.planningRevisions, 1);
+  assert.equal(state.frozen.config.autonomy.allowances.perPath, 2);
+  // The check runs on the adopted configuration: it holds the whole
+  // Objective, naming only the missing variable, and never a value.
   await until(
-    () => stateOf(inst, 44).done.check || stateOf(inst, 44).retries.check,
-    "the check runs on the adopted configuration",
+    () => stateOf(inst, 44).holds.some((open) => open.step === "check"),
+    "the check holds on the missing variable",
   );
-  assert.ok(stateOf(inst, 44).holds.every((open) => open.step !== "config"));
+  const [missing] = stateOf(inst, 44).holds;
+  assert.equal(missing.step, "check");
+  assert.equal(missing.item, undefined);
+  assert.deepEqual(
+    missing.options.map((option) => option.answer),
+    ["retry", "cancel"],
+  );
+  assert.match(missing.question, /needs `NEEDED_TOKEN` set/);
+  assert.doesNotMatch(missing.question, /SET_TOKEN|present-value/);
+  const dir = join(inst.logs, "44");
+  for (const name of readdirSync(dir))
+    assert.doesNotMatch(readFileSync(join(dir, name), "utf8"), /present-value/);
   assert.equal(cli(inst, "cancel", "44").code, 0);
   await stopped(service);
 });
@@ -1364,8 +1384,15 @@ test("a deferred question asks right after the covering one; stack layers and ba
   const keys = ["item:a:work", "item:b:ci", "item:c:work", "item:d:ci"];
   const started = [];
   const outcomes = {};
+  // No repair allowed on any path, on either provider.
+  const config = { autonomy: { allowances: { perPath: 0 } } };
   const runner = new ObjectiveRunner(
-    newObjective(1, new Date()),
+    newObjective(1, new Date(), {
+      provider: "codex",
+      selectedBy: "defaultProvider",
+      digest: "x",
+      config,
+    }),
     {
       steps: (state) =>
         keys
@@ -1381,12 +1408,11 @@ test("a deferred question asks right after the covering one; stack layers and ba
       status: () => "building",
       // b is the native-stack layer above a.
       upstream: (_, item) => (item === "b" ? ["a"] : []),
-      freezable: { claude: { digest: "c", config: {} } },
+      freezable: { claude: { digest: "c", config } },
     },
     mkdtempSync(join(tmpdir(), "factory-defer-")),
     { write() {} },
     { id: "run", finished: 0, resumeAt: 0 },
-    { ...(await import("../dist/engine.js")).DEFAULT_LIMITS, maxRepairs: 0 },
   );
   const settle = async () => {
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
@@ -1442,7 +1468,6 @@ test("a deferred question asks right after the covering one; stack layers and ba
   });
   assert.equal(runner.state.holds.length, 2);
   assert.ok(due("item:d:ci"), "d runs right after the answer");
-  assert.ok(runner.state.asking["item:c:work"]);
   // c's earlier limit retry is still on record: `switch` drops it, not the question.
   runner.state.retries["item:c:work"] = {
     count: 0,
@@ -1460,32 +1485,53 @@ test("a deferred question asks right after the covering one; stack layers and ba
     null,
   );
   assert.ok(!runner.state.retries["item:c:work"]);
-  assert.ok(runner.state.asking["item:c:work"], "switch keeps c's question");
+  assert.equal(runner.state.repairs["item:c:work"].count, 1);
   const ran = started.length;
   outcomes["item:d:ci"] = undefined;
   runner.tick();
   await settle();
   const asked = runner.state.holds.find((h) => h.step === "item:c:work");
-  assert.match(asked?.question ?? "", /repaired 0 times/);
+  assert.match(
+    asked?.question ?? "",
+    /item:c:work needs another repair, past its repair path's 0 .*still fails:\n\nstill failing/s,
+  );
+  assert.equal(asked.cause, "failure");
+  assert.deepEqual(
+    asked.options.map((option) => option.answer),
+    ["more", "cancel"],
+  );
   assert.ok(
     !started.slice(ran).includes("item:c:work"),
     "c asks before it runs again",
   );
   assert.ok(started.slice(ran).includes("item:d:ci"), "d ran at once");
+  // `more` is the engine's: it grants as much again (one, at least) and
+  // c runs its repair, never seeing the answer.
+  assert.equal(
+    runner.transact(() =>
+      runner.answer("more", undefined, "op", undefined, asked.id),
+    ),
+    null,
+  );
+  assert.equal(runner.state.answers["item:c:work"], undefined);
+  assert.deepEqual(runner.state.kept["allowances:granted"], {
+    "perPath:item:c:work": 1,
+  });
+  runner.tick();
+  await settle();
+  assert.ok(started.slice(ran).includes("item:c:work"), "c repairs");
 });
 
 test("a replan answer is the workflow's, spent once applied, and the new plan starts with a fresh repair budget", async () => {
-  const { DEFAULT_LIMITS, ObjectiveRunner, failure } = await import(
-    "../dist/engine.js"
-  );
+  const { ObjectiveRunner, failure } = await import("../dist/engine.js");
   const { newObjective } = await import("../dist/state.js");
   const order = ["check", "plan", "item:api:work", "final"];
   const seen = [];
   const state = newObjective(1, new Date());
   // The old plan spent item api's budget, and an earlier replan's history is on check.
   state.repairs = {
-    "item:api:work": { count: 6, findings: ["old finding"] },
-    check: { count: 6, findings: ["The operator asked to replan."] },
+    "item:api:work": { count: 3, findings: ["old finding"] },
+    check: { count: 3, findings: ["The operator asked to replan."] },
   };
   const runner = new ObjectiveRunner(
     state,
@@ -1518,7 +1564,6 @@ test("a replan answer is the workflow's, spent once applied, and the new plan st
     mkdtempSync(join(tmpdir(), "factory-replan-")),
     { write() {} },
     { id: "run", finished: 0, resumeAt: 0 },
-    DEFAULT_LIMITS,
   );
   const settle = async () => {
     for (let i = 0; i < 20; i++) {
@@ -2225,10 +2270,16 @@ test("status shows times in the display zone and redacts named secrets", () => {
   configured(inst, "http://127.0.0.1:1", { MY_TOKEN: "s3cret-value-123" });
   const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
   config.policy = { allowedSecretNames: ["MY_TOKEN"] };
+  config.autonomy = { allowances: { implementationRepairs: 5 } };
   writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
   seed(inst, 55, "building", {
     done: { check: {}, plan: { items: [] }, "item:a:validate": { tree: "t1" } },
-    kept: { "item:a:flaky": { tree: "t1", command: "npm test" } },
+    kept: {
+      "item:a:flaky": { tree: "t1", command: "npm test" },
+      "item:a:rereviews": { used: 1, granted: 1 },
+      "allowances:granted": { "perPath:item:a:work": 3 },
+    },
+    repairs: { "item:a:work": { count: 4, findings: ["refused"] } },
     retries: {
       build: {
         count: 0,
@@ -2245,6 +2296,10 @@ test("status shows times in the display zone and redacts named secrets", () => {
   assert.match(text, /Possibly flaky: a: `npm test` failed once/);
   assert.match(
     text,
+    /Allowances: planning revisions 0\/4, implementation repairs 4\/5, result rereviews 1\/2; repairs per path: item:a:work 4\/6/,
+  );
+  assert.match(
+    text,
     /Provider: codex \(selectedBy: defaultProvider\); configuration [0-9a-f]{12}/,
   );
   assert.doesNotMatch(text, /s3cret/);
@@ -2258,6 +2313,12 @@ test("status shows times in the display zone and redacts named secrets", () => {
     "JSON stays ISO",
   );
   assert.deepEqual(row.flakyRerun, [{ item: "a", command: "npm test" }]);
+  assert.deepEqual(row.allowances, {
+    planningRevisions: { used: 0, allowed: 4 },
+    implementationRepairs: { used: 4, allowed: 5 },
+    resultRereviews: { used: 1, allowed: 2 },
+    perPath: { "item:a:work": { used: 4, allowed: 6 } },
+  });
   assert.equal(row.frozen.provider, "codex");
   assert.equal(row.frozen.selectedBy, "defaultProvider");
   assert.match(row.frozen.digest, /^[0-9a-f]{64}$/);

@@ -7,7 +7,7 @@
  * refusal) goes to a diagnosis call. A correction must name a file the item
  * owns, and a correction that already failed for the same failure is
  * refused. The step returns the correction as its `repair` finding; the
- * engine keeps the repair budget.
+ * engine keeps the repair allowances (allowances.ts).
  */
 
 import { readBlobs } from "./git.js";

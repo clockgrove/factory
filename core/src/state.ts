@@ -43,7 +43,7 @@ export const TERMINAL: readonly ObjectiveStatus[] = ["done", "cancelled"];
 
 /**
  * Why a question is open: a decision only a person can make, or a step
- * that can't succeed as it is (errors in a row, a repair budget spent, a
+ * that can't succeed as it is (errors in a row, an allowance spent, a
  * crash loop, a result it can't produce), which also offers `replan`
  * where the workflow can plan again (engine.ts `Workflow.replannable`).
  */
@@ -166,8 +166,8 @@ export interface Retry {
 }
 
 /**
- * A question the engine raised about a step (a repair over budget, a
- * crash-loop suspect) while another question that stops it was open.
+ * A question the engine raised about a step (a crash-loop suspect) while
+ * another question that stops it was open.
  */
 export interface PendingQuestion {
   question: string;

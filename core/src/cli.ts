@@ -10,6 +10,12 @@ import {
 } from "node:fs";
 import { connect } from "node:net";
 import { isAbsolute, join } from "node:path";
+import {
+  implementationRepairs,
+  perPath,
+  resultRereviews,
+  type Usage,
+} from "./allowances.js";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { displayTime, redactDeep } from "./display.js";
 import {
@@ -46,6 +52,7 @@ import {
   recipeInstallation,
   selectRecipe,
 } from "./planning/recipes.js";
+import { planningRevisions } from "./planning/steps.js";
 import { PLANNERS, WORKERS } from "./providers/config.js";
 import type { Planner } from "./providers/planner.js";
 import {
@@ -353,12 +360,7 @@ async function serveCommand(
       : {}),
     limits: {
       ...limits,
-      ...(loaded
-        ? {
-            concurrency: loaded.execution.concurrency,
-            maxRepairs: loaded.execution.repairs,
-          }
-        : {}),
+      ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),
     },
   });
 }
@@ -507,6 +509,16 @@ interface StatusRow {
   running: string[];
   /** Work Items whose validation failed once and passed on its one rerun. */
   flakyRerun: { item: string; command: string }[];
+  /**
+   * Each autonomy allowance, used and allowed with the operator's grants:
+   * across the Objective, and repairs per repair path (target step).
+   */
+  allowances?: {
+    planningRevisions: Usage;
+    implementationRepairs: Usage;
+    resultRereviews: Usage;
+    perPath: Record<string, Usage>;
+  };
   /** A reset rebuilding the state from GitHub. */
   reset?: { requestedAt: string; hadState: boolean };
   /** What happens next, and the command that moves it, if one does. */
@@ -607,6 +619,12 @@ async function status(
       waitsOn: service.waits[issue] ?? null,
       running: Object.keys(state.attempts),
       flakyRerun: flakyReruns(state),
+      allowances: {
+        planningRevisions: planningRevisions(state),
+        implementationRepairs: implementationRepairs(state),
+        resultRereviews: resultRereviews(state),
+        perPath: perPath(state),
+      },
       ...(reset && !TERMINAL.includes(state.status)
         ? {
             reset: {
@@ -691,6 +709,16 @@ async function status(
       lines.push(
         `  Possibly flaky: ${flaky.item}: \`${flaky.command}\` failed once; its rerun passed`,
       );
+    if (row.allowances) {
+      const { perPath: paths, ...objective } = row.allowances;
+      const used = ({ used, allowed }: Usage) => `${used}/${allowed}`;
+      const each = Object.entries(paths).map(
+        ([path, usage]) => `${path} ${used(usage)}`,
+      );
+      lines.push(
+        `  Allowances: planning revisions ${used(objective.planningRevisions)}, implementation repairs ${used(objective.implementationRepairs)}, result rereviews ${used(objective.resultRereviews)}${each.length ? `; repairs per path: ${each.join(", ")}` : ""}`,
+      );
+    }
     if (row.lastEvent) lines.push(`  Last: ${eventLine(row.lastEvent)}`);
     lines.push(
       row.nextAction.command

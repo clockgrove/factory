@@ -66,9 +66,9 @@ import {
  * - Every coverage obligation and source exclusion stays accounted for, and
  *   a started native stack keeps its layers.
  * - Every proposal is charged once, when it is taken in, against
- *   `planning.revisions`; a rejection or a replacement never refunds it,
- *   and widening an item leaves its spent repairs as they are. A replan
- *   accepts a new plan, which starts a new allowance.
+ *   `autonomy.allowances.planningRevisions`; a rejection or a replacement
+ *   never refunds it, and widening an item leaves its spent repairs as they
+ *   are. A replan accepts a new plan, which starts a new allowance.
  * - A rejected amendment is replaced only by a proposal whose seven
  *   discovery fields (scope, reason, evidence, ownership, acceptance,
  *   dependencies, worker) deep-equal the rejected one, with a new diagnosis
@@ -266,7 +266,7 @@ export function proposalProblems(
     );
   if (ledger.used >= allowance)
     problems.push(
-      `This Objective has used all ${allowance} amendments (planning.revisions); replan to plan again from the Objective`,
+      `This Objective has used all ${allowance} amendments (autonomy.allowances.planningRevisions); replan to plan again from the Objective`,
     );
   if (!proposal.replacement) {
     if (ledger.rejected)

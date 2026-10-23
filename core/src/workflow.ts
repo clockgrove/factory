@@ -142,13 +142,27 @@ export function errorOutcome(
   );
 }
 
-/** The issue is open, the Objective passes its checks, and the base is the default branch head. */
+/**
+ * The service has every variable autonomy.requiredEnvironment names, the
+ * issue is open, the Objective passes its checks, and the base is the
+ * default branch head.
+ */
 function checkStep(deps: PlanningDeps): Step {
   return {
     key: "check",
     resource: "github",
     deadlineMs: 10 * MINUTE,
     run: async (context: StepContext): Promise<Outcome> => {
+      // Names only: a value is never read past this test, or written.
+      const missing = deps.config.autonomy.requiredEnvironment.filter(
+        (name) => !process.env[name],
+      );
+      if (missing.length)
+        return objectiveWide(
+          hold(
+            `Planning needs ${missing.map((name) => `\`${name}\``).join(", ")} set in the service's environment (autonomy.requiredEnvironment), and ${missing.length === 1 ? "it isn't" : "they aren't"}. Set ${missing.length === 1 ? "it" : "them"}, restart the service, then answer retry; or cancel.`,
+          ),
+        );
       const read = await readObjective(deps, "recheck", context);
       return "hold" in read
         ? read.hold

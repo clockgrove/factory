@@ -1,5 +1,6 @@
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { allowances, grant, type Usage } from "../allowances.js";
 import { type CoreConfig, ownRepositoryProblem } from "../config.js";
 import {
   errored,
@@ -624,7 +625,7 @@ function decideStep(
           ...(decision ? { decision } : {}),
         } satisfies Decision);
       }
-      const question = questionFor(state, g, n, planned, fixes, asks, deps);
+      const question = questionFor(state, g, n, planned, fixes, asks);
       // An `approve` that found the Objective edited (see changedHold).
       const approvedKey = `${key}:approved`;
       const approved = state.kept?.[approvedKey] as PlannerDecision | undefined;
@@ -642,7 +643,7 @@ function decideStep(
           case "more":
             return done({
               corrections: fixes,
-              grant: 2,
+              grant: grant(state, "planningRevisions"),
               decision: record(),
             } satisfies Decision);
           case "approve":
@@ -780,7 +781,6 @@ function questionFor(
   planned: PlanRound,
   fixes: Finding[],
   asks: Finding[],
-  deps: PlanningDeps,
 ): { text: string; offers: Offer[] } | undefined {
   const list = (items: Finding[]) =>
     items.map((f, i) => `${i + 1}. ${f.message}`).join("\n");
@@ -815,15 +815,19 @@ function questionFor(
       text: `Plan round ${n} came back with the same problems as round ${n - 1}:\n\n${list(fixes)}\n\nAnswer with guidance for the planner, or \`replan\` after editing the Objective.`,
       offers: ASK,
     };
-  const allowance = deps.config.planning.revisions + granted(state, g, n);
+  const allowance = allowances(state).planningRevisions + granted(state, g, n);
   if (fixRounds(state, g, n) > allowance)
     return {
-      text: `The plan still has ${fixes.length} problem${fixes.length === 1 ? "" : "s"} after ${n} rounds:\n\n${list(fixes)}\n\n\`more\` allows two more rounds.`,
+      text: `The plan still has ${fixes.length} problem${fixes.length === 1 ? "" : "s"} after ${n} rounds, past the ${allowance} autonomy.allowances.planningRevisions allows:
+
+${list(fixes)}
+
+\`more\` allows ${grant(state, "planningRevisions")} more rounds.`,
       offers: [
         {
           answer: "more",
           family: "retry",
-          consequence: "Allows two more plan rounds.",
+          consequence: `Allows ${grant(state, "planningRevisions")} more plan rounds.`,
         },
         ...ASK,
       ],
@@ -840,6 +844,18 @@ function fixRounds(state: ObjectiveState, g: number, n: number): number {
     if (decided && (!decided.decision || decided.grant)) rounds += 1;
   }
   return rounds;
+}
+
+/**
+ * Planning revisions of the current generation: the rounds spent on fixes
+ * before this one, and the rounds allowed with the operator's grants.
+ */
+export function planningRevisions(state: ObjectiveState): Usage {
+  const { g, n } = position(state);
+  return {
+    used: fixRounds(state, g, n) - 1,
+    allowed: allowances(state).planningRevisions + granted(state, g, n),
+  };
 }
 
 function granted(state: ObjectiveState, g: number, n: number): number {

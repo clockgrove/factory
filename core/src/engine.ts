@@ -1,3 +1,10 @@
+import {
+  askedOverrun,
+  grantOverrun,
+  isOverrun,
+  overrun,
+  overrunQuestion,
+} from "./allowances.js";
 import { crashPoint } from "./crash.js";
 import type { RunLog } from "./log.js";
 import type { FrozenConfig } from "./providers/selection.js";
@@ -76,7 +83,7 @@ export type Outcome =
   /**
    * The work is wrong (validation, review or CI refused it): clear `clear`
    * from the finished steps and run `target` again with the finding, within
-   * the repair budget.
+   * the repair allowances (allowances.ts).
    */
   | {
       kind: "repair";
@@ -321,8 +328,6 @@ export const hostLimits = new HostLimiter({ worker: 2, cpu: 2, github: 2 });
 export interface EngineLimits {
   /** Escaped errors and missed deadlines in a row before a step holds. */
   maxErrors: number;
-  /** Repairs of one target before Factory asks. */
-  maxRepairs: number;
   /**
    * How long an unknown transient cause is retried before Factory asks, and
    * the longest reset a limit is waited for without asking.
@@ -344,7 +349,6 @@ const HOUR = 60 * 60 * 1000;
 
 export const DEFAULT_LIMITS: EngineLimits = {
   maxErrors: 3,
-  maxRepairs: 6,
   maxWaitMs: 3 * HOUR,
   noteAfterMs: HOUR,
   remindAfterMs: 24 * HOUR,
@@ -357,6 +361,8 @@ export const DEFAULT_LIMITS: EngineLimits = {
 const WAIT = "wait";
 const SWITCH = "switch";
 const ADOPT = "adopt";
+/** Grants as much again of each repair allowance the step overran (allowances.ts). */
+const MORE = "more";
 /**
  * The configuration digest the open `adopt` question names (`state.kept`,
  * set by the question's step): `adopt` freezes only that one.
@@ -544,6 +550,30 @@ export class ObjectiveRunner {
         crashPoint(`engine:${step.key}:replan-applied`);
         return;
       }
+      // A repair past an allowance asks before it runs (allowances.ts):
+      // `more` grants as much again. Past the Objective's, every step waits.
+      const over = overrun(this.state, step.key);
+      if (over.length) {
+        this.transact(() => {
+          this.hold(step.key, {
+            ...failure(overrunQuestion(this.state, step.key, over), [
+              {
+                answer: MORE,
+                family: "retry",
+                consequence:
+                  "Allows as much again of each spent allowance, and the repair runs.",
+              },
+              "cancel",
+            ]),
+            ...(over.includes("implementationRepairs")
+              ? { scope: "objective" as const }
+              : {}),
+          });
+          const asked = this.state.holds.at(-1);
+          if (asked?.step === step.key) askedOverrun(this.state, asked.id);
+        });
+        continue;
+      }
       if (step.resource && !hostLimits.acquire(step.resource)) continue;
       try {
         this.start(step);
@@ -728,12 +758,14 @@ export class ObjectiveRunner {
           this.close(moot);
         state.repairs ??= {};
         // A replan starts again: the cleared steps' history goes, and
-        // nothing counts against a budget (`check` included).
+        // nothing counts against an allowance (`check` included).
         if (replan) {
           for (const cleared of [key, ...outcome.clear])
             delete state.repairs[cleared];
           break;
         }
+        // Counted against the allowances: past one, the target asks
+        // before it runs again (`tick`).
         const repair = state.repairs[outcome.target] ?? {
           count: 0,
           findings: [],
@@ -741,24 +773,6 @@ export class ObjectiveRunner {
         repair.count += 1;
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
         state.repairs[outcome.target] = repair;
-        // Over budget: ask, before the step that would repair runs again
-        // (`asking`). Its `retry` lets that one repair run.
-        if (repair.count > this.limits.maxRepairs)
-          this.hold(
-            outcome.target,
-            failure(
-              `${outcome.target} has been repaired ${repair.count - 1} times and still fails:\n\n${outcome.finding}\n\n\`retry\` allows one more repair.`,
-              [
-                {
-                  answer: "retry",
-                  family: "retry",
-                  consequence: "Allows one more repair.",
-                },
-                "cancel",
-              ],
-            ),
-            true,
-          );
         break;
       }
     }
@@ -924,10 +938,9 @@ export class ObjectiveRunner {
    * answered, and then must not wait longer to ask: its retry comes due at
    * once, so it runs again right after the answer and asks then (an
    * Objective-wide cause the answer fixed asks nothing). A question that
-   * running the step again wouldn't ask (`saved`: a repair over budget, a
-   * crash-loop suspect) is saved in `asking` instead, and asked before
-   * the step runs (`tick`). A failure offers `replan` where the workflow
-   * can plan again.
+   * running the step again wouldn't ask (`saved`: a crash-loop suspect) is
+   * saved in `asking` instead, and asked before the step runs (`tick`). A
+   * failure offers `replan` where the workflow can plan again.
    */
   private hold(
     key: string,
@@ -1137,6 +1150,8 @@ export class ObjectiveRunner {
       }
       frozen = { ...current, ...structuredClone(live) };
     }
+    // `more` to an overrun question is the engine's; any other is the step's.
+    const granting = answer === MORE && isOverrun(this.state, hold.id);
     const retry = this.state.retries[hold.step];
     this.close(hold);
     if (answer === WAIT && retry) {
@@ -1154,7 +1169,8 @@ export class ObjectiveRunner {
           for (const [key, other] of Object.entries(this.state.retries))
             if (other.wait?.kind === "reset" && other.wait.provider)
               delete this.state.retries[key];
-      } else
+      } else if (granting) grantOverrun(this.state, hold.step);
+      else
         this.state.answers[hold.step] = {
           holdId: hold.id,
           question: hold.question,

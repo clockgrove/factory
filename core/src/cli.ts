@@ -147,16 +147,16 @@ const COMMANDS: Record<string, Command> = {
     help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`), --text the explanation",
     check: (args) => {
       const answer = args.positional[2];
-      if (!answer)
-        return (
-          issueCheck(args) ??
-          "answer needs an answer: factory answer ISSUE ANSWER --question ID"
-        );
-      // Bound to the question the operator read, so a delayed answer
-      // never lands on a newer one. Cancel needs no question.
-      if (answer !== "cancel" && args.flags.question === undefined)
-        return `answer needs --question with the open question's id, so it can't answer a newer one: see \`factory status ${args.positional[1]}\``;
-      return issueCheck(args);
+      return (
+        issueCheck(args) ??
+        (!answer
+          ? "answer needs an answer: factory answer ISSUE ANSWER --question ID"
+          : // Bound to the question the operator read, so a delayed answer
+            // never lands on a newer one. Cancel needs no question.
+            answer !== "cancel" && args.flags.question === undefined
+            ? `answer needs --question with the open question's id, so it can't answer a newer one: see \`factory status ${args.positional[1]}\``
+            : undefined)
+      );
     },
   },
   retry: {

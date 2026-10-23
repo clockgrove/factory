@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 import { gitEnvironment } from "../git.js";
@@ -190,14 +191,24 @@ function utf8(bytes: Buffer): string | undefined {
 // ── Objective ───────────────────────────────────────────────────────────
 
 /**
- * A Factory-created child Objective carries its parent's model-written goal.
- * Read from the raw issue body by the marker's exact pattern, as structure;
- * the marker is never planning text.
+ * The parent and key a split child's marker names. A Factory-created child
+ * Objective carries its parent's model-written goal. Read from the raw
+ * issue body by the marker's exact pattern, as structure; the marker is
+ * never planning text.
  */
-export function childIdentity(raw: string): boolean {
-  return /^<!-- factory:parent=[1-9][0-9]*;child=[a-z][a-z0-9-]{0,63} -->\r?\n/.test(
-    raw,
-  );
+export function childOf(
+  raw: string,
+): { parent: number; key: string } | undefined {
+  const match =
+    /^<!-- factory:parent=([1-9][0-9]{0,15});child=([a-z][a-z0-9-]{0,63}) -->\r?\n/.exec(
+      raw,
+    );
+  return match ? { parent: Number(match[1]), key: match[2]! } : undefined;
+}
+
+/** What ties a child issue to the graph its parent planned: its title and body as written. */
+export function childDigest(title: string, body: string): string {
+  return createHash("sha256").update(`${title}\0${body}`).digest("hex");
 }
 
 /**
@@ -1023,7 +1034,7 @@ export interface FactsArgs {
   objective: number;
   /** The Objective as shown: its structure and the planner text. */
   shown: ShownObjective;
-  /** The Objective is a Factory-created split child (childIdentity). */
+  /** The Objective is a Factory-created split child (childOf). */
   child?: boolean;
   base: string;
   checkout: string;
@@ -1106,7 +1117,7 @@ export async function objectiveCommandProblems(
     requiredCommands?: readonly string[];
     ciOnlyCommands?: readonly string[];
     signal?: AbortSignal;
-    /** The Objective is a Factory-created split child (childIdentity). */
+    /** The Objective is a Factory-created split child (childOf). */
     child?: boolean;
   } = {},
 ): Promise<string[]> {

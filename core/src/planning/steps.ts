@@ -22,14 +22,15 @@ import { resolvedProvider } from "../providers/selection.js";
 import { logRefused } from "../providers/usage.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
-import type { Answer, ObjectiveState } from "../state.js";
+import { type Answer, findState, type ObjectiveState } from "../state.js";
 import { adaptiveWorkflow, declarationProblems } from "../validate.js";
 import { checkPlan } from "./checks.js";
 import { observeLocalExecutables } from "./executables.js";
 import {
   BaseFiles,
   buildFacts,
-  childIdentity,
+  childDigest,
+  childOf,
   commandInstructions,
   finalCommands,
   objectiveCommandProblems,
@@ -42,6 +43,7 @@ import {
   generationInputs,
   position,
   proposalsOf,
+  splitRecord,
 } from "./plan.js";
 import {
   type PredecessorEvidence,
@@ -148,6 +150,13 @@ export interface ObjectiveInputs {
   writer?: true;
   /** A Factory-created split child, from the raw body's marker (structure, never text). */
   child?: true;
+  /**
+   * A split child Factory wrote: its parent, key and title and body digest
+   * (facts.ts childDigest). Its first plan round takes the graph its
+   * parent's pass planned for it when the parent's record names this
+   * issue with this digest (`adoptedGraph`).
+   */
+  adopt?: { parent: number; key: string; digest: string };
   base: string;
   title: string;
   /**
@@ -179,6 +188,33 @@ interface PlanRound {
   question?: string;
   /** The operator answered `replan` to a problem with the Objective. */
   replan?: true;
+  /** The draft is the graph this split parent's pass planned (no planner answer). */
+  adopted?: number;
+}
+
+/**
+ * The graph a split parent's accepted plan holds for this child: only
+ * while the parent's record names this issue for `key` with the digest of
+ * the title and body it wrote, and the child has no dependencies (a stub is
+ * planned now, against its dependencies' merged code).
+ */
+function adoptedGraph(
+  objectives: string,
+  issue: number,
+  adopt: NonNullable<ObjectiveInputs["adopt"]>,
+): Draft | undefined {
+  const found = findState(objectives, adopt.parent);
+  if (found?.kind !== "ok") return undefined;
+  const record = splitRecord(found.state);
+  if (
+    record?.children[adopt.key] !== issue ||
+    record.bodies[adopt.key] !== adopt.digest
+  )
+    return undefined;
+  const child = currentPlan(found.state)?.split?.children.find(
+    (each) => each.key === adopt.key,
+  );
+  return child && !child.dependsOn.length ? child.graph : undefined;
 }
 
 interface ReviewRound {
@@ -393,6 +429,29 @@ function planRoundStep(
       if ("problems" in built)
         return objectiveProblemsHold(built.problems, "replan");
       const { facts } = built;
+      // A ready split child's first round is the graph its parent's pass
+      // planned and reviewed for it, checked here against its own
+      // Objective; review follows as for any round.
+      const adopted =
+        g === 1 && n === 1 && inputs.adopt
+          ? adoptedGraph(deps.objectives, state.issue, inputs.adopt)
+          : undefined;
+      if (adopted) {
+        const draft: Draft = { ...adopted, base: inputs.base };
+        const findings = [
+          ...(await checkPlan(draft, facts, files)),
+          ...(inputs.recipe ? recipeFindings(draft, inputs.recipe.recipe) : []),
+        ];
+        context.log({
+          event: "child-graph-adopted",
+          parent: inputs.adopt!.parent,
+        });
+        return done({
+          draft,
+          adopted: inputs.adopt!.parent,
+          ...(findings.length ? { findings } : {}),
+        });
+      }
       const { workDir, repository } = await planningTree(
         deps,
         state.issue,
@@ -1169,8 +1228,9 @@ export async function readObjective(
   // A child Objective Factory created from an accepted split carries only
   // its parent's approved text and the accepted plan: it inherits the
   // parent's approval (work/split.ts).
+  const marked = childOf(found.body ?? "");
   const factoryChild =
-    childIdentity(found.body ?? "") &&
+    marked !== undefined &&
     !!author &&
     sameLogin(author, await deps.github.login(signal));
   if (!writer && !factoryChild) {
@@ -1180,7 +1240,13 @@ export async function readObjective(
   const inputs: ObjectiveInputs = {
     shown,
     ...(writer && { writer: true as const }),
-    ...(childIdentity(found.body ?? "") && { child: true as const }),
+    ...(marked && { child: true as const }),
+    ...(factoryChild && {
+      adopt: {
+        ...marked,
+        digest: childDigest(found.title, found.body ?? ""),
+      },
+    }),
     base: await defaultHead(config.checkout, config.repository, signal),
     title: found.title,
     reviewArtifacts: config.reviewArtifacts,

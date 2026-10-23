@@ -23,6 +23,28 @@ import type { Plan, Retirement, WorkItem } from "./types.js";
  * (`conditionVerdict`), from its producer's kept discovery result.
  */
 
+/**
+ * A split's record (work/split.ts): `build:split` saves each child's issue
+ * and the digest of the title and body Factory wrote for it; then
+ * `build:split:children` waits for the children and closes the parent.
+ */
+export const SPLIT = "build:split";
+export const SPLIT_CHILDREN = "build:split:children";
+/** `ended.by` of a parent its child Objectives delivered. */
+export const SPLIT_END = "split";
+
+export interface SplitRecord {
+  /** Each child's issue, by key. */
+  children: Record<string, number>;
+  /** Each child's title and body digest as created (facts.ts childDigest), by key. */
+  bodies: Record<string, string>;
+}
+
+/** The split's record once its children exist; undefined otherwise. */
+export function splitRecord(state: ObjectiveState): SplitRecord | undefined {
+  return state.done[SPLIT] as SplitRecord | undefined;
+}
+
 /** When the plan was accepted, for the order of owned-path waits (service.ts). */
 export const ACCEPTED_AT = "plan:acceptedAt";
 

@@ -58,6 +58,7 @@ import {
   controllerGuarantees,
   decodePlan,
   planChoices,
+  planSchema,
   revisionSchema,
 } from "./wire.js";
 
@@ -258,10 +259,6 @@ export function proposalProblems(
   if (!plan || proposal.plan !== state.kept[ACCEPTED_AT])
     problems.push(
       "An amendment amends the plan accepted now; propose it against the current plan",
-    );
-  else if (!revisable(state))
-    problems.push(
-      "This plan was rebuilt from its comment by factory reset, so it has no planner answer to amend; replan to plan again from the Objective",
     );
   // One at a time, a replacement too: two in flight would both apply.
   if (ledger.pending)
@@ -489,15 +486,11 @@ export function discoveryText(discovery: WorkDiscovery): string {
 // ── The plan as amended ─────────────────────────────────────────────────
 
 /**
- * Whether the current plan can be amended: it has the planner's full
- * answer to revise. A plan `factory reset` rebuilt from its comment has
- * none, so proposals are refused and `amend` isn't offered.
+ * The planner's full answer for the current plan: the base the next
+ * revision edits. A plan with none (a ready split child's graph from its
+ * parent's pass, or one `factory reset` rebuilt from its comment) is
+ * amended by a whole plan instead.
  */
-export function revisable(state: ObjectiveState): boolean {
-  return currentAnswer(state) !== undefined;
-}
-
-/** The planner's full answer for the current plan: the base the next revision edits. */
 function currentAnswer(state: ObjectiveState): unknown {
   const proposals = proposalsOf(state);
   for (let at = proposals.length - 1; at >= 0; at--) {
@@ -873,19 +866,24 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           : []),
       ];
       const base = currentAnswer(state);
-      if (base === undefined)
-        return done({
-          rejected:
-            "This plan has no planner answer to amend (factory reset rebuilt it); replan to plan again",
-        } satisfies AmendRound);
+      // No planner answer to revise (a ready split child's first plan came
+      // from its parent's pass, or factory reset rebuilt the plan): the
+      // planner answers in full, with the plan as it stands to amend.
+      const whole = base === undefined;
+      const schema = (whole ? planSchema : revisionSchema)(facts, wire);
       const lookups = plannerLookups(state, key, inputs, config);
       const data = {
         ...planChoices(facts, wire),
         ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
         instructions: `${renderPlanningInstructions(inputs.shown.blocks, corrections, true)}${await commandInstructions(facts, config.checkout, signal)}`,
-        currentPlan: base,
+        currentPlan: whole ? currentPlan(state) : base,
         amendment: {
-          rules: AMENDMENT_RULES,
+          rules: whole
+            ? AMENDMENT_RULES.replace(
+                "Answer with only the changes that serve it.",
+                "Answer with the whole plan, with the changes that serve it.",
+              )
+            : AMENDMENT_RULES,
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
@@ -904,7 +902,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       const { prompt, facts: promptFacts } = renderCompilationCall({
         facts,
         data,
-        revising: true,
+        revising: !whole,
         repository,
         workers: workers(config),
         localExecutables: local.observations,
@@ -920,9 +918,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         phase: "plan",
         prompt,
         facts: promptFacts,
-        schema: lookups
-          ? lookups.schema(revisionSchema(facts, wire))
-          : revisionSchema(facts, wire),
+        schema: lookups ? lookups.schema(schema) : schema,
         readDir: workDir,
         signal,
         log: context.log,
@@ -943,7 +939,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           })
         : { value: answer.value };
       if ("outcome" in taken) return taken.outcome;
-      const revised = applyRevision(base, taken.value, facts, wire);
+      const revised = whole
+        ? { answer: taken.value, findings: [] }
+        : applyRevision(base, taken.value, facts, wire);
       const reject = (findings: Finding[]): Outcome =>
         done({
           answer: revised.answer,

@@ -534,6 +534,8 @@ const GITHUB_CRASH_POINTS = [
   "split:blocked-by:after",
   "split:comment:before",
   "split:comment:after",
+  "split:done-comment:before",
+  "split:done-comment:after",
   "split:close:before",
   "split:close:after",
 ];
@@ -2054,7 +2056,7 @@ test("a wait on a human gate takes no slot", async () => {
   await stopped(service);
 });
 
-test("blocked-by predecessors: a wait without a slot, an ended one holds until ignored, a cycle holds, a done one is evidence; a split creates its blocked-by children once", async () => {
+test("blocked-by predecessors: a wait without a slot, an ended one holds until ignored, a cycle holds, a done one is evidence; a split creates its blocked-by children once, waits for them and stands for them", async () => {
   const inst = installation();
   const SHOWN_95 = "<p>Ship the parser.</p>";
   let state90 = { state: "open" };
@@ -2172,35 +2174,46 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
 
   // An accepted split creates its children once, through a crash right
   // after the first create: sub-issues of the parent, the dependent one
-  // blocked by the other, both queued; then the parent closes, done by
-  // its split.
+  // blocked by the other, both queued. The parent stays open, waiting on
+  // them with no question and showing each one's status; a cancelled child
+  // holds, naming it; once every child is done, the parent closes, done by
+  // its split, and an Objective blocked by it takes the children's evidence.
   const split = installation();
+  const render = (markdown) =>
+    micromark(markdown, { extensions: [gfm()], htmlExtensions: [gfmHtml()] });
   const RAW_97 =
     "## Goal\n\nShip parser and printer.\n\n## Acceptance\n\n- Parser parses\n- Printer prints\n\n## Constraints\n\nKeep it small.\n";
-  const HTML_97 = micromark(RAW_97, {
-    extensions: [gfm()],
-    htmlExtensions: [gfmHtml()],
-  });
   const now = () => new Date().toISOString();
+  const entry = (number, fields) => ({
+    id: number * 100,
+    number,
+    state: "open",
+    labels: [],
+    created_at: now(),
+    comments: [],
+    subs: [],
+    blockers: [],
+    ...fields,
+  });
   const issues = {
-    97: {
-      id: 9700,
-      number: 97,
+    97: entry(97, {
       title: "Parser and printer",
       body: RAW_97,
-      body_html: HTML_97,
-      state: "open",
       user: { login: "kirk" },
       labels: [{ name: "factory:objective" }, { name: "P1" }],
-      created_at: now(),
-      comments: [],
-      subs: [],
-      blockers: [],
-    },
+    }),
+    98: entry(98, {
+      title: "After",
+      body: "",
+      user: { login: "kirk" },
+      blockers: [97],
+    }),
   };
+  let next = 100;
   const queuedCards = [];
   const view = ({ comments: _c, subs: _s, blockers: _b, ...issue }) => ({
     ...issue,
+    body_html: render(issue.body ?? ""),
     type: null,
     repository_url: `http://api/repos/${REPO}`,
   });
@@ -2266,19 +2279,12 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
       return reply(200, { errors: [{ message: "not served" }] });
     }
     if (path === `/repos/${REPO}/issues` && req.method === "POST") {
-      const number = 99 + Object.keys(issues).length;
-      issues[number] = {
+      const number = next++;
+      issues[number] = entry(number, {
         ...body,
-        id: number * 100,
-        number,
-        state: "open",
         user: { login: "factory" },
         labels: body.labels.map((name) => ({ name })),
-        created_at: now(),
-        comments: [],
-        subs: [],
-        blockers: [],
-      };
+      });
       return reply(201, view(issues[number]));
     }
     if (path === `/repos/${REPO}/issues`) {
@@ -2355,7 +2361,7 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
     done: {
       predecessors: { predecessors: [], ignored: [] },
       check: {
-        shown: readShown(HTML_97, { sources: false }),
+        shown: readShown(render(RAW_97), { sources: false }),
         title: "Parser and printer",
       },
       plan: { items: [], coverage: [], split: { children } },
@@ -2366,18 +2372,26 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
   assert.equal((await crashing.exit).signal, "SIGKILL");
   assert.deepEqual(
     Object.keys(issues),
-    ["97", "100"],
+    ["97", "98", "100"],
     "one child, then the crash",
   );
+  // #98 is blocked by the parent: it waits while the parent is open.
+  seed(split, 98, "checking", { done: {} });
   const resumed = serve(split);
-  await until(() => stateOf(split, 97).status === "done", "the split is done");
-  await stopped(resumed);
-  const parent = stateOf(split, 97);
-  assert.deepEqual(parent.done["build:split"], {
-    children: { parser: 100, printer: 101 },
-  });
-  assert.equal(parent.ended.by, "split");
-  assert.deepEqual(Object.keys(issues), ["97", "100", "101"], "no duplicate");
+  const waiting = (issue, step) =>
+    stateOf(split, issue).retries[step]?.wait?.kind === "gate";
+  await until(
+    () => waiting(97, "build:split:children") && waiting(98, "predecessors"),
+    "the parent waits on its children, and #98 on the parent",
+  );
+  const record = stateOf(split, 97).done["build:split"];
+  assert.deepEqual(record.children, { parser: 100, printer: 101 });
+  assert.deepEqual(
+    Object.keys(issues),
+    ["97", "98", "100", "101"],
+    "no duplicate",
+  );
+  assert.equal(issues[97].state, "open", "the parent stays open");
   assert.deepEqual(issues[97].subs, [100, 101]);
   assert.deepEqual(issues[101].blockers, [100]);
   assert.deepEqual(issues[100].blockers, []);
@@ -2401,10 +2415,68 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
     told[0].body,
     /- #100 `parser` Parser\n- #101 `printer` Printer \(after #100\)/,
   );
+  const row = () => status(split).objectives.find((each) => each.issue === 97);
+  assert.deepEqual(row().children, [
+    { key: "parser", issue: 100, status: "queued" },
+    { key: "printer", issue: 101, status: "queued" },
+  ]);
+  // A child's record, done with its accepted result, or cancelled.
+  const child = (issue, ended) => {
+    Object.assign(issues[issue], {
+      state: "closed",
+      state_reason: ended === "done" ? "completed" : "not_planned",
+    });
+    seed(split, issue, ended, {
+      done: {
+        check: {
+          shown: readShown(render(issues[issue].body), { sources: false }),
+          title: issues[issue].title,
+        },
+        plan: { items: [{ id: "a", title: "A", ownedPaths: ["src/"] }] },
+        "item:a:merge": { mergeSha: `${issue}`.repeat(10).slice(0, 40) },
+        final: { commit: "b".repeat(40), tree: "c".repeat(40), commands: [] },
+        report: true,
+      },
+    });
+  };
+  child(100, "done");
+  child(101, "cancelled");
+  await until(() => stateOf(split, 97).holds.length, "the parent asks");
+  const [asked] = stateOf(split, 97).holds;
+  assert.match(asked.question, /#101 `printer`/);
+  assert.deepEqual(
+    asked.options.map((option) => option.answer),
+    ["continue", "retry", "cancel"],
+  );
+  assert.deepEqual(
+    row().children.map((each) => each.status),
+    ["done", "cancelled"],
+  );
+  // The child runs again and is done: retry closes the parent.
+  child(101, "done");
+  assert.equal(
+    cli(split, "answer", "97", "retry", "--question", asked.id).code,
+    0,
+  );
+  await until(() => stateOf(split, 97).status === "done", "the split is done");
+  assert.equal(stateOf(split, 97).ended.by, "split");
   assert.deepEqual(
     [issues[97].state, issues[97].state_reason],
     ["closed", "completed"],
   );
+  assert.equal(
+    issues[97].comments.filter((c) =>
+      c.body.startsWith("<!-- factory:97:split-done:"),
+    ).length,
+    1,
+  );
+  // The parent stands for its children: #98's evidence is theirs.
+  await until(() => stateOf(split, 98).done.predecessors, "#98's evidence");
+  assert.deepEqual(
+    stateOf(split, 98).done.predecessors.predecessors.map((each) => each.issue),
+    [100, 101],
+  );
+  await stopped(resumed);
 });
 
 test("a state file that can't be read now is read again, not marked unreadable", {
@@ -4396,10 +4468,9 @@ test("an amendment comes before the build: intake is checked where it enters, a 
     "a's work starts after continue",
   );
   assert.ok(stateOf(inst, 82).done["amend:op-1:continue"]);
-  // A plan with no planner answer to revise refuses amendments.
-  const rebuilt = cli(inst, "propose-amendment", "82", "--file", file);
-  assert.equal(refusal(rebuilt), "amendment_refused");
-  assert.match(rebuilt.err, /factory reset/);
+  // A plan with no planner answer to revise takes amendments too: the
+  // planner answers with the whole plan.
+  assert.equal(cli(inst, "propose-amendment", "82", "--file", file).code, 0);
 
   // An operator's proposal is taken in and planned before a's work; a
   // second waits for the first, and a malformed one names what passes.

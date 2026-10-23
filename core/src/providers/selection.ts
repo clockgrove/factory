@@ -114,6 +114,9 @@ export function providerWorker(
           config: worker.settings as ClaudeWorkerConfig,
           allowedSecretNames,
           commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
+          worktreeRead:
+            profile !== undefined &&
+            config.execution.profiles?.[profile]?.worktreeRead === true,
         });
       case "copilot":
         return new CopilotWorker({

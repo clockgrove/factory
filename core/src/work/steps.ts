@@ -721,6 +721,11 @@ async function workStep(
     );
     const pin = packageManagerUpdate(shown.blocks);
     const memory = await itemMemory("work", item, context, deps, base);
+    const profile = item.executionProfile?.id;
+    const instructions =
+      profile === undefined
+        ? undefined
+        : config.execution.profiles?.[profile]?.instructions;
     const prepared = await prepareWorkPrompt({
       checkout: config.checkout,
       worktree,
@@ -746,6 +751,7 @@ async function workStep(
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
       discoveryInputs: discoveryInputs(state, item),
       ...(memory ? { memory } : {}),
+      ...(instructions ? { profileInstructions: instructions } : {}),
       signal,
     });
     if ("problem" in prepared)
@@ -762,7 +768,7 @@ async function workStep(
       deps.config.secrets,
     );
     const { spend, ...result } = await deps
-      .worker(plan, shown.blocks, item.executionProfile?.id)
+      .worker(plan, shown.blocks, profile)
       .run({
         worktree,
         prompt: prepared.prompt,

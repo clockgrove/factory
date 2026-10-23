@@ -211,7 +211,7 @@ Status words:
 - A shared Codex model list, so each private Codex home skips the fetch at start. (new) **ported** (codex.ts privateCodexHome seeds each planner and worker home from it; saveModelsCache keeps a fetched list).
 - Provider event timing and tracing: each provider event is logged with its kind and time since the call started; FACTORY_PROVIDER_TRACE keeps each Codex call's home, session record and stderr, copied when the trace directory is on another filesystem, and a home it can't keep is logged (provider-trace-failed). (new) **ported** (codex.ts codex-event, traceWrapper and keepOrRemove, claude.ts claude-event; codex-worker.ts logs worker commands and edits).
 - Host-wide resource limits shared by all Objectives: worker runs (execution.workers) and CPU-heavy validation (execution.validations), plus Work Item steps per Objective (execution.concurrency). (new) **ported** (engine.ts HostLimiter and Step.resource; config.ts; cli.ts).
-- Prompt and workspace instructions per profile, and the Claude worktree-read MCP. Old: USER-GUIDE#Execution profiles. **slice 6**.
+- Prompt and workspace instructions per profile, and the Claude worktree-read MCP. Old: USER-GUIDE#Execution profiles. **ported** (`execution.profiles.<id>.instructions`, bounded at 8,000 characters and refused with a secret value at load, appended to the worker prompt (work/prompt.ts); `worktreeRead: true` serves the old opt-in `read_file` from claude-worker.ts as an in-process SDK MCP server with Read's path checks, only beside a granted `Read`. Both are frozen with the profile; CORE.md#Execution profiles).
 
 ## Validation and review
 

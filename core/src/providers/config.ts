@@ -7,6 +7,7 @@
 
 import {
   type Check,
+  flag,
   isObject,
   names,
   object,
@@ -387,7 +388,8 @@ function workerConfig(
 /**
  * An execution profile: a named provider's worker the planner may assign
  * to a Work Item, described for the planner. Its worker settings are that
- * provider's; a profile has no worker settings of its own.
+ * provider's; the profile adds only the operator's instructions and the
+ * Claude worktree-read server.
  */
 export interface ExecutionProfile {
   /** A key of `providers`. */
@@ -396,10 +398,29 @@ export interface ExecutionProfile {
   description: string;
   /** When to choose it, shown to the planner. */
   selectionHints: string[];
+  /** The operator's standing instructions, appended to the worker prompt (work/prompt.ts). */
+  instructions?: string;
+  /** A Claude worker gets the read-only `read_file` server over its worktree. */
+  worktreeRead?: boolean;
 }
 
+/** The longest profile instructions: standing guidance, not a document. */
+export const MAX_PROFILE_INSTRUCTIONS = 8_000;
+
+/** Operator text for every prompt on a profile: bounded, no NUL. */
+const instructions: Check<string | undefined> = (value, path, problems) => {
+  const given = optional(text())(value, path, problems);
+  if (given === undefined) return undefined;
+  if (given.length > MAX_PROFILE_INSTRUCTIONS || given.includes("\0"))
+    problems.push(
+      `${path} must be at most ${MAX_PROFILE_INSTRUCTIONS} characters, without NUL`,
+    );
+  return given;
+};
+
 /**
- * `execution.profiles`: `{<id>: {provider, description, selectionHints?}}`.
+ * `execution.profiles`: `{<id>: {provider, description, selectionHints?,
+ * instructions?, worktreeRead?}}`.
  * Absent, there are none and every Work Item runs on its Objective's
  * provider. That each `provider` is configured is checked by
  * profileProblems, once the providers are known.
@@ -423,7 +444,13 @@ export const executionProfiles: Check<
     profiles[id] = section(
       entry,
       `${path}.${id}`,
-      { provider: text(), description: text(), selectionHints: strings },
+      {
+        provider: text(),
+        description: text(),
+        selectionHints: strings,
+        instructions,
+        worktreeRead: optional(flag(false)),
+      },
       problems,
       RETIRED_PROFILE,
     );
@@ -433,8 +460,9 @@ export const executionProfiles: Check<
 
 /**
  * Problems with the execution profiles once the providers are known: each
- * names a configured provider, and no profile text, which the planner
- * sees, holds a secret value.
+ * names a configured provider; no profile text, which the planner or the
+ * worker sees, holds a secret value; and `worktreeRead` names a Claude
+ * worker that already has Read, so the server grants nothing new.
  */
 export function profileProblems(
   profiles: Readonly<Record<string, ExecutionProfile>> | undefined,
@@ -448,10 +476,28 @@ export function profileProblems(
       problems.push(
         `${path}.provider ${JSON.stringify(profile.provider)} is not one of providers (${Object.keys(providers).join(", ")})`,
       );
-    const shown = [profile.description, ...profile.selectionHints];
+    const shown = [
+      profile.description,
+      ...profile.selectionHints,
+      profile.instructions ?? "",
+    ];
     if (secrets.some((secret) => shown.some((text) => text.includes(secret))))
       problems.push(
-        `${path}: the description and selectionHints are shown to the planner, so they may not hold a secret value`,
+        `${path}: the description, selectionHints and instructions are shown to the planner or the worker, so they may not hold a secret value`,
       );
+    const worker = providers[profile.provider]?.worker;
+    if (profile.worktreeRead && worker) {
+      const settings = worker.kind === "claude" ? worker.settings : undefined;
+      const granted = (list: readonly string[] | undefined) =>
+        (list ?? CLAUDE_TOOLS).includes("Read");
+      if (
+        !settings ||
+        !granted(settings.tools) ||
+        !granted(settings.allowedTools)
+      )
+        problems.push(
+          `${path}.worktreeRead needs a Claude worker with Read in its tools and allowedTools`,
+        );
+    }
   }
 }

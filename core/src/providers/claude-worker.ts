@@ -3,9 +3,10 @@
  * Agent SDK on the operator's subscription login, in-process. The worker gets
  * Read, Edit and Write inside its worktree (Glob and Grep too when it has no
  * shell), `run_command` in the bubblewrap sandbox with no network, the
- * owned-file `copy_file` and `delete_file`, and Validate, which runs the
+ * owned-file `copy_file` and `delete_file`, Validate, which runs the
  * item's declared commands through `validateTree` on a snapshot commit of
- * its current files. Every grant is enforced in both SDK permission callbacks.
+ * its current files, and on a profile with `worktreeRead`, the read-only
+ * `read_file`. Every grant is enforced in both SDK permission callbacks.
  * Factory, not the worker, collects and commits the result.
  */
 
@@ -124,6 +125,8 @@ export interface ClaudeWorkerOptions {
   allowedSecretNames?: readonly string[];
   /** Each Validate command's limit: `validation.commandTimeoutSeconds`, in ms. */
   commandTimeoutMs: number;
+  /** The item's execution profile serves `read_file` (providers/config.ts `worktreeRead`). */
+  worktreeRead?: boolean;
 }
 
 // Prompts
@@ -252,6 +255,8 @@ const VALIDATION_TOOL = `mcp__${VALIDATION_SERVER}__${VALIDATION_TOOL_NAME}`;
 const FILES_SERVER = "factory-files";
 const DELETE_TOOL = `mcp__${FILES_SERVER}__delete_file`;
 const COPY_TOOL = `mcp__${FILES_SERVER}__copy_file`;
+const READ_SERVER = "factory-worktree";
+const READ_TOOL = `mcp__${READ_SERVER}__read_file`;
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_TIMEOUT_MS = 600_000;
@@ -264,6 +269,9 @@ const RETURNED_TAIL = 14_000;
 /** The largest file copy_file copies: well above a check's actual values. */
 const MAX_COPIED_BYTES = 16 * 1024 * 1024;
 const COPY_BOUND = `${MAX_COPIED_BYTES / (1024 * 1024)} MiB copy bound`;
+/** The largest file read_file returns: larger ones are read in parts with Read. */
+const MAX_READ_BYTES = 256 * 1024;
+const READ_BOUND = `${MAX_READ_BYTES / 1024} KiB read_file bound; use Read with offset and limit`;
 
 type SdkModule = typeof import("@anthropic-ai/claude-agent-sdk");
 type Zod = typeof import("zod").z;
@@ -302,7 +310,12 @@ class Attempt {
     readonly input: WorkerInput,
     readonly config: ClaudeWorkerConfig,
     readonly options: ClaudeWorkerOptions,
-    readonly grants: { shell: boolean; validate: boolean; files: boolean },
+    readonly grants: {
+      shell: boolean;
+      validate: boolean;
+      files: boolean;
+      read: boolean;
+    },
     private readonly sdk: SdkModule,
     private readonly z: Zod,
   ) {
@@ -328,7 +341,64 @@ class Attempt {
       ...(this.grants.validate && { [VALIDATION_SERVER]: this.validation() }),
       ...(this.grants.files && { [FILES_SERVER]: this.files() }),
       ...(this.grants.shell && { [SHELL_SERVER]: this.shell() }),
+      ...(this.grants.read && { [READ_SERVER]: this.worktreeRead() }),
     };
+  }
+
+  // read_file
+
+  private worktreeRead(): McpSdkServerConfigWithInstance {
+    const { tool, createSdkMcpServer } = this.sdk;
+    const z = this.z;
+    return createSdkMcpServer({
+      name: READ_SERVER,
+      version: "1.0.0",
+      tools: [
+        tool(
+          "read_file",
+          `Read one regular file inside your worktree as UTF-8 text, by its path. Links are followed only while they stay inside the worktree; Git metadata and files over ${MAX_READ_BYTES / 1024} KiB are refused.`,
+          { path: z.string().min(1) },
+          async ({ path }) => {
+            try {
+              return text(this.readWorktreeFile(path));
+            } catch (error) {
+              return text(`File not read: ${errorMessage(error)}`, true);
+            }
+          },
+          {
+            alwaysLoad: true,
+            annotations: {
+              readOnlyHint: true,
+              destructiveHint: false,
+              idempotentHint: true,
+              openWorldHint: false,
+            },
+          },
+        ),
+      ],
+    });
+  }
+
+  /**
+   * One worktree file's text, checked as Read is (pathInsideRoot), then
+   * opened at its resolved place by held descriptors with no link
+   * followed, so a link swapped in after the check can't lead out.
+   */
+  private readWorktreeFile(path: string): string {
+    if (this.closed.signal.aborted) throw new Error("the worker attempt ended");
+    const worktree = this.input.worktree;
+    if (!pathInsideRoot(path, worktree))
+      throw new Error(`${path} is not a file inside the worktree`);
+    const root = realpathSync(worktree);
+    const relativePath = relative(root, realpathSync(resolve(worktree, path)));
+    if (!relativePath || !within(join(root, relativePath), root))
+      throw new Error(`${path} is not a file inside the worktree`);
+    return this.readRegularFile(
+      root,
+      relativePath,
+      MAX_READ_BYTES,
+      READ_BOUND,
+    ).toString("utf8");
   }
 
   // run_command
@@ -538,11 +608,16 @@ class Attempt {
   }
 
   /**
-   * The bytes of one regular file under the worktree, at most the copy
-   * bound: never followed through a link, and the read stops one byte past
-   * the bound even if the file grows.
+   * The bytes of one regular file under the worktree, at most `limit`:
+   * never followed through a link, and the read stops one byte past the
+   * limit even if the file grows.
    */
-  private readOwnedFile(root: string, relativePath: string): Buffer {
+  private readRegularFile(
+    root: string,
+    relativePath: string,
+    limit: number,
+    bound: string,
+  ): Buffer {
     const parent = openParent(root, relativePath, false);
     let fd: number;
     try {
@@ -563,19 +638,19 @@ class Attempt {
       const stat = fstatSync(fd);
       if (!stat.isFile())
         throw new Error(`${relativePath} is not a regular file`);
-      if (stat.size > MAX_COPIED_BYTES)
+      if (stat.size > limit)
         throw new Error(
-          `${relativePath} has ${stat.size} bytes, over the ${COPY_BOUND}`,
+          `${relativePath} has ${stat.size} bytes, over the ${bound}`,
         );
-      const buffer = Buffer.alloc(MAX_COPIED_BYTES + 1);
+      const buffer = Buffer.alloc(limit + 1);
       let length = 0;
       for (;;) {
         const read = readSync(fd, buffer, length, buffer.length - length, null);
         if (!read) break;
         length += read;
-        if (length > MAX_COPIED_BYTES)
+        if (length > limit)
           throw new Error(
-            `${relativePath} grew past the ${COPY_BOUND} while it was read`,
+            `${relativePath} grew past the ${bound} while it was read`,
           );
       }
       return buffer.subarray(0, length);
@@ -596,7 +671,12 @@ class Attempt {
     const destination = this.ownedRelative(root, to);
     if (source === destination)
       throw new Error("from and to name the same file");
-    const content = this.readOwnedFile(root, source);
+    const content = this.readRegularFile(
+      root,
+      source,
+      MAX_COPIED_BYTES,
+      COPY_BOUND,
+    );
     const parent = openParent(root, destination, true);
     try {
       let fd: number;
@@ -708,6 +788,14 @@ function toolAllowed(
         provenance(server, FILES_SERVER) &&
         keys === "path" &&
         typeof args.path === "string"
+      );
+    case READ_TOOL:
+      return (
+        grants.read &&
+        provenance(server, READ_SERVER) &&
+        keys === "path" &&
+        typeof args.path === "string" &&
+        pathInsideRoot(args.path, input.worktree)
       );
     case COPY_TOOL:
       return (
@@ -932,7 +1020,13 @@ export class ClaudeWorker implements Worker {
       input,
       config,
       this.options,
-      { shell, validate, files: granted("Write") },
+      {
+        shell,
+        validate,
+        files: granted("Write"),
+        // Only beside Read, so it grants no file the worker couldn't read.
+        read: this.options.worktreeRead === true && granted("Read"),
+      },
       sdk,
       z,
     );
@@ -950,6 +1044,7 @@ export class ClaudeWorker implements Worker {
       effort: config.effort,
       shell,
       validate,
+      worktreeRead: attempt.grants.read,
     });
     try {
       return await this.converse(attempt, sdk, login);

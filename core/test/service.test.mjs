@@ -1110,7 +1110,12 @@ test("an execution profile frozen at admission is kept through a config change; 
     claude: { planner: "claude", worker: { kind: "claude" } },
   };
   const profiles = {
-    careful: { provider: "claude", description: "Delicate changes." },
+    careful: {
+      provider: "claude",
+      description: "Delicate changes.",
+      instructions: "Keep public signatures unchanged.",
+      worktreeRead: true,
+    },
   };
   configured(
     inst,
@@ -1135,10 +1140,12 @@ test("an execution profile frozen at admission is kept through a config change; 
     stateOf(inst, 46).frozen.config.execution.profiles.careful;
   assert.equal(careful().settings.planner, "claude");
   const model = careful().settings.worker.settings.model;
-  // The profile's provider changes model: the Objective holds and keeps
-  // the frozen worker settings.
+  assert.equal(careful().instructions, "Keep public signatures unchanged.");
+  // The profile's provider changes model and its instructions change: the
+  // Objective holds and keeps the frozen worker settings and instructions.
   const config = JSON.parse(readFileSync(inst.env.FACTORY_CONFIG, "utf8"));
   config.providers.claude.worker.model = "another-model";
+  config.execution.profiles.careful.instructions = "Rename freely.";
   writeFileSync(inst.env.FACTORY_CONFIG, JSON.stringify(config));
   let service = serve(inst);
   await until(() => stateOf(inst, 46).holds.length > 0, "the question");
@@ -1146,9 +1153,10 @@ test("an execution profile frozen at admission is kept through a config change; 
   assert.equal(changed.step, "config");
   assert.match(
     changed.question,
-    /execution\.profiles\.careful\.settings\.worker\.settings\.model/,
+    /execution\.profiles\.careful\.instructions, execution\.profiles\.careful\.settings\.worker\.settings\.model/,
   );
   assert.equal(careful().settings.worker.settings.model, model);
+  assert.equal(careful().instructions, "Keep public signatures unchanged.");
   assert.equal(stateOf(inst, 46).frozen.digest, admitted.digest);
   await stopped(service);
   // The profile is gone: only restoring it helps.

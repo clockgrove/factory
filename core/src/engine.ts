@@ -813,6 +813,13 @@ export class ObjectiveRunner {
       event: "outcome",
       outcome: outcome.kind,
       ...("reason" in outcome ? { reason: outcome.reason } : {}),
+      // A retry's wait class, or a continuation: what analysis splits waits by.
+      ...(outcome.kind === "retry" && outcome.wait
+        ? { wait: outcome.wait.kind }
+        : {}),
+      ...(outcome.kind === "retry" && outcome.progress
+        ? { progress: true }
+        : {}),
       ...(outcome.kind === "repair"
         ? { target: outcome.target, finding: oneLine(outcome.finding, 300) }
         : {}),

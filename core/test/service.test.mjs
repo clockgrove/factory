@@ -2980,6 +2980,67 @@ test("the run log: tail, follow, and status reads its end", async () => {
     cli(inst, "diagnostics", "54", "--summary").out,
     /By role:\n {2}reviewer: 1 calls · 120 tokens/,
   );
+  // --captures, --analyze and --gantt read the same log, redacted.
+  const listed = JSON.parse(
+    cli(inst, "diagnostics", "54", "--captures", "--json").out,
+  );
+  assert.deepEqual(
+    listed.captures.map((row) => [row.id, row.role, row.item]),
+    [["c1", "reviewer", "a"]],
+  );
+  assert.match(
+    cli(inst, "diagnostics", "54", "--captures", "--content", "c1").out,
+    /^c1 · reviewer result-review · item a .*\nrequest:\nreview \[REDACTED\]\nresponse:\nrefused\n/,
+  );
+  assert.equal(
+    refusal(cli(inst, "diagnostics", "54", "--captures", "--content", "c9")),
+    "no_factory_state",
+  );
+  const analysis = JSON.parse(
+    cli(inst, "diagnostics", "54", "--analyze", "--json", "--group-by", "role")
+      .out,
+  );
+  assert.equal(analysis.groups[0].key.role, "reviewer");
+  assert.equal(analysis.calls.cache.hitRate, 0.5);
+  assert.equal(analysis.repairs.byItem.a, 1);
+  assert.equal(analysis.phases.review.outcomes.repair, 1);
+  assert.equal(
+    JSON.parse(
+      cli(
+        inst,
+        "diagnostics",
+        "54",
+        "--analyze",
+        "--json",
+        "--filter",
+        "provider=claude",
+      ).out,
+    ).calls.usage.calls,
+    0,
+  );
+  assert.match(
+    cli(inst, "diagnostics", "54", "--analyze").out,
+    /Model calls, all:\n {2}1 calls · 120 tokens[^]*cache: 50\.0% of input/,
+  );
+  const bars = JSON.parse(
+    cli(inst, "diagnostics", "54", "--gantt", "--json").out,
+  ).bars;
+  const review = bars.find(
+    (bar) => bar.lane === "a review" && bar.kind === "step",
+  );
+  assert.equal(review.outcome, "repair");
+  assert.ok(review.ms >= 2000 && review.start < review.end);
+  assert.match(
+    cli(inst, "diagnostics", "54", "--gantt").out,
+    /\n {2}a review +\|[ r]*r[ r]*\|\n {4}model calls +\|[ m]*m/,
+  );
+  for (const wrong of [
+    ["--analyze", "--gantt"],
+    ["--analyze", "--group-by", "colour"],
+    ["--content", "c1"],
+    ["--gantt", "--follow"],
+  ])
+    assert.equal(cli(inst, "diagnostics", "54", ...wrong).code, 2, wrong);
   assert.equal(
     refusal(cli(inst, "diagnostics", "54", "--run", "nope")),
     "no_factory_state",

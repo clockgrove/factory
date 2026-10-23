@@ -7,7 +7,6 @@
  * run file is streamed in chunks, so a large log costs time, not memory.
  * Every event is redacted as it is read. It never writes anything.
  */
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { displayTime, duration, redactDeep } from "./display.js";
 import { itemOf } from "./engine.js";
@@ -21,6 +20,7 @@ import {
   sizeOf,
   untilInterrupted,
 } from "./log.js";
+import { captureFile, readContained } from "./paths.js";
 import { oneLine } from "./text.js";
 
 /** Which runs: the latest (default), one by id, or all. */
@@ -136,20 +136,29 @@ export function streamFile(
   return done;
 }
 
+/** Stream `file` from `from` like streamFile, each event redacted and marked with its run. */
+export function readRun(
+  file: string,
+  from: number,
+  secrets: readonly string[],
+  visit: (event: LogEvent) => void,
+): number {
+  const run = runOfFile(file);
+  return streamFile(file, from, (event) => {
+    const shown = redactDeep(event, secrets);
+    shown.run = run;
+    visit(shown);
+  });
+}
+
 /** Print the diagnostics `options` asks for to `write`; with follow, until interrupted. */
 export async function diagnostics(
   options: DiagnosticsOptions,
   write: (text: string) => void,
 ): Promise<void> {
   const files = chosenFiles(options.logs, options.issue, options.runs);
-  const read = (file: string, from: number, visit: (e: LogEvent) => void) => {
-    const run = runOfFile(file);
-    return streamFile(file, from, (event) => {
-      const shown = redactDeep(event, options.secrets);
-      shown.run = run;
-      visit(shown);
-    });
-  };
+  const read = (file: string, from: number, visit: (e: LogEvent) => void) =>
+    readRun(file, from, options.secrets, visit);
   if (options.summary) {
     const summary = new Summary(options.issue);
     for (const file of files) read(file, 0, (event) => summary.add(event));
@@ -230,35 +239,50 @@ function captureOf(
   | { path: string; request?: string; response?: string; truncated?: boolean }
   | undefined {
   const id = entry.event.capture;
-  if (entry.kind !== "model" || typeof id !== "string" || !/^[\w-]+$/.test(id))
-    return undefined;
-  const path = join(
-    options.logs,
-    String(options.issue),
-    `${entry.run}.captures`,
-    `${id}.json`,
-  );
+  const file =
+    entry.kind === "model" && typeof id === "string"
+      ? captureFile(options.issue, entry.run, id)
+      : undefined;
+  if (!file) return undefined;
+  const path = join(options.logs, file);
   if (!bodies) return { path };
+  const body = readCapture(options.logs, file, options.secrets);
+  return body ? { path, ...body } : { path };
+}
+
+/** The most a capture file is read: 2 × the 256 MiB maxBytesPerCall cap, with JSON escapes. */
+const CAPTURE_READ_MAX = 768 * 1024 * 1024;
+
+/**
+ * A capture file's bodies (`file` under `logs`, from paths.ts captureFile),
+ * read without following links; undefined when it was rotated away or
+ * can't be read. Stored redacted and cut to capture.maxBytesPerCall, and
+ * redacted again here with today's secrets.
+ */
+export function readCapture(
+  logs: string,
+  file: string,
+  secrets: readonly string[],
+): { request?: string; response?: string; truncated?: true } | undefined {
   try {
-    // Stored redacted and cut to capture.maxBytesPerCall; redacted again with today's secrets.
     const body = redactDeep(
-      JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>,
-      options.secrets,
+      JSON.parse(
+        readContained(logs, file, CAPTURE_READ_MAX, true).toString("utf8"),
+      ) as Record<string, unknown>,
+      secrets,
     );
     return {
-      path,
       ...(typeof body.request === "string" ? { request: body.request } : {}),
       ...(typeof body.response === "string" ? { response: body.response } : {}),
-      ...(body.truncated === true ? { truncated: true } : {}),
+      ...(body.truncated === true ? { truncated: true as const } : {}),
     };
   } catch {
-    // Rotated away or unreadable: the path alone.
-    return { path };
+    return undefined;
   }
 }
 
 /** `+4:05`, `+1:02:03`: a time since the run's start. */
-function relative(ms: number): string {
+export function relative(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -268,19 +292,19 @@ function relative(ms: number): string {
     : `+${String(m).padStart(2, "0")}:${s}`;
 }
 
-const str = (value: unknown): string | undefined =>
+export const str = (value: unknown): string | undefined =>
   typeof value === "string" ? value : undefined;
-const num = (value: unknown): number | undefined =>
+export const num = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
-const count = (n: number) => n.toLocaleString("en-US");
+export const count = (n: number) => n.toLocaleString("en-US");
 
 /** `item:a:work` is `work`; an Objective step is its key. */
-function phaseOf(step: string): string {
+export function phaseOf(step: string): string {
   return itemOf(step) ? step.split(":").slice(2).join(":") : step;
 }
 
 /** The Work Item an event is about: its own, its step's, or an answer's question's. */
-function itemOfEvent(event: LogEvent): string | undefined {
+export function itemOfEvent(event: LogEvent): string | undefined {
   const step = str(event.step);
   const request = event.request as Record<string, unknown> | undefined;
   const question = str(request?.question);
@@ -431,7 +455,9 @@ class Timeline {
             entry("activity", activityText(item ?? "-", running.activity)),
           );
         }
-        if (outcome === "retry")
+        if (outcome === "retry" && event.progress)
+          done.push(entry("step-end", `${step} continues after ${took}`));
+        else if (outcome === "retry")
           done.push(
             entry(
               "wait",
@@ -619,7 +645,7 @@ export interface SummaryReport {
   slowest: StepSpan[];
 }
 
-const emptyUsage = (): Usage => ({
+export const emptyUsage = (): Usage => ({
   calls: 0,
   ms: 0,
   tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
@@ -758,7 +784,7 @@ class Summary {
   }
 }
 
-function addUsage(usage: Usage, event: LogEvent): void {
+export function addUsage(usage: Usage, event: LogEvent): void {
   usage.calls += 1;
   usage.ms += num(event.ms) ?? 0;
   const tokens = (event.tokens ?? {}) as Record<string, unknown>;
@@ -790,7 +816,7 @@ function criticalPath(spans: StepSpan[]): StepSpan[] {
   return path;
 }
 
-function usageText(usage: Usage): string {
+export function usageText(usage: Usage): string {
   const t = usage.tokens;
   return [
     `${usage.calls} calls`,

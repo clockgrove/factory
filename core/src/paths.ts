@@ -51,6 +51,25 @@ export function installationPaths(repository: string): Paths {
   };
 }
 
+/** A capture id: what `RunLog` names a capture file by (a UUID). */
+export const CAPTURE_ID = /^[\w-]{1,128}$/;
+
+/** A run's capture directory under the logs directory: `<issue>/<run id>.captures` (CORE.md#Content capture). */
+export function captureDir(issue: number, run: string): string {
+  return `${issue}/${run}.captures`;
+}
+
+/** A capture file under the logs directory, or undefined when `id` isn't a capture id. */
+export function captureFile(
+  issue: number,
+  run: string,
+  id: string,
+): string | undefined {
+  return CAPTURE_ID.test(id)
+    ? `${captureDir(issue, run)}/${id}.json`
+    : undefined;
+}
+
 /** `path` is `directory` or below it, compared after resolving both. */
 export function within(path: string, directory: string): boolean {
   const root = resolve(directory);

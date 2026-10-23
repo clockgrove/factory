@@ -13,6 +13,13 @@ import {
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import {
+  ANALYSIS_FIELDS,
+  type AnalysisField,
+  analyze,
+  captures,
+  gantt,
+} from "./analysis.js";
+import {
   type CapacityRecommendation,
   capacityRecommendation,
   hostCapacity,
@@ -223,22 +230,47 @@ const COMMANDS: Record<string, Command> = {
       run: "value",
       "all-runs": "switch",
       "show-captures": "switch",
+      captures: "switch",
+      content: "value",
+      analyze: "switch",
+      "group-by": "list",
+      filter: "list",
+      gantt: "switch",
       json: "switch",
     },
-    help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps; the latest run, or --run ID, or --all-runs",
+    help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps, --captures lists the captured model calls (--content ID prints one), --analyze the time, wait, retry, repair, hold, validation, activity and history views and per group (--group-by FIELD, default phase; --filter FIELD=VALUE, null for missing) tokens, cache effectiveness, tool calls, outcomes and efficiency, --gantt a chart of each Work Item's steps over time in lanes per item and phase; the latest run, or --run ID, or --all-runs",
     check: (args) => {
-      const { flags } = args;
+      const { flags, lists } = args;
+      const modes = ["summary", "logs", "captures", "analyze", "gantt"].filter(
+        (mode) => flags[mode] !== undefined,
+      );
+      const fields = [
+        ...(lists["group-by"] ?? []),
+        ...(lists.filter ?? []).map((filter) => filter.split("=")[0]!),
+      ];
+      const unknown = fields.find(
+        (field) => !ANALYSIS_FIELDS.includes(field as AnalysisField),
+      );
       return (
         issueCheck(args) ??
-        (flags.summary !== undefined && flags.logs !== undefined
-          ? "give --summary or --logs ITEM, not both"
-          : flags.summary !== undefined && flags.follow !== undefined
-            ? "--follow goes with the timeline or --logs ITEM, not --summary"
+        (modes.length > 1
+          ? `give one of --${modes.join(", --")}, not several`
+          : flags.follow !== undefined && modes.length && modes[0] !== "logs"
+            ? `--follow goes with the timeline or --logs ITEM, not --${modes[0]}`
             : flags.run !== undefined && flags["all-runs"] !== undefined
               ? "give --run ID or --all-runs, not both"
               : flags["show-captures"] !== undefined && flags.logs === undefined
                 ? "--show-captures goes with --logs ITEM"
-                : undefined)
+                : flags.content !== undefined && flags.captures === undefined
+                  ? "--content ID goes with --captures"
+                  : (lists["group-by"] || lists.filter) &&
+                      flags.analyze === undefined
+                    ? "--group-by and --filter go with --analyze"
+                    : (lists.filter ?? []).some((f) => f.indexOf("=") < 1)
+                      ? "--filter takes FIELD=VALUE, such as --filter role=worker"
+                      : unknown !== undefined
+                        ? `Unknown analysis field ${unknown}; use ${ANALYSIS_FIELDS.join(", ")}`
+                        : undefined)
       );
     },
   },
@@ -373,7 +405,14 @@ const COMMANDS: Record<string, Command> = {
 /** How an option is written in help and fixes: `--tail N`, `--json`. */
 function flagForm(name: string, kind: FlagKind | undefined): string {
   const value =
-    { tail: "N", logs: "ITEM", run: "ID" }[name] ?? name.toUpperCase();
+    {
+      tail: "N",
+      logs: "ITEM",
+      run: "ID",
+      content: "ID",
+      "group-by": "FIELD",
+      filter: "FIELD=VALUE",
+    }[name] ?? name.toUpperCase();
   return kind === "switch"
     ? `--${name}`
     : kind === "list"
@@ -905,7 +944,7 @@ async function logCommand(
   return 0;
 }
 
-/** `factory diagnostics ISSUE [--follow] [--logs ITEM [--show-captures]] [--summary] [--run ID | --all-runs] [--json]`. */
+/** `factory diagnostics ISSUE [--follow] [--logs ITEM [--show-captures]] [--summary] [--captures [--content ID]] [--analyze [--group-by F]... [--filter F=V]...] [--gantt] [--run ID | --all-runs] [--json]`. */
 async function diagnosticsCommand(
   paths: Paths,
   repository: string,
@@ -924,16 +963,53 @@ async function diagnosticsCommand(
       "no_factory_state",
       `#${issue} has no run ${flags.run} in its run log; its runs: ${runs.join(", ") || "none"}.`,
     );
+  const read = {
+    logs: paths.logs,
+    issue,
+    runs:
+      flags.run !== undefined
+        ? { kind: "run" as const, id: flags.run }
+        : flags["all-runs"] !== undefined
+          ? { kind: "all" as const }
+          : { kind: "latest" as const },
+    json: flags.json !== undefined,
+    secrets: configOf(repository)?.secrets ?? [],
+  };
+  const write = (text: string) => {
+    process.stdout.write(text);
+  };
+  if (flags.captures !== undefined) {
+    const missing = captures(
+      {
+        ...read,
+        ...(flags.content !== undefined ? { id: flags.content } : {}),
+      },
+      write,
+    );
+    if (missing) throw new Refusal("no_factory_state", missing);
+    return 0;
+  }
+  if (flags.analyze !== undefined) {
+    const filters: Partial<Record<AnalysisField, string>> = {};
+    for (const filter of args.lists.filter ?? []) {
+      const at = filter.indexOf("=");
+      filters[filter.slice(0, at) as AnalysisField] = filter.slice(at + 1);
+    }
+    const groupBy = [
+      ...new Set((args.lists["group-by"] ?? ["phase"]) as AnalysisField[]),
+    ];
+    analyze({ ...read, groupBy, filters }, write);
+    return 0;
+  }
+  if (flags.gantt !== undefined) {
+    gantt(read, write);
+    return 0;
+  }
   await diagnostics(
     {
       logs: paths.logs,
       issue,
-      runs:
-        flags.run !== undefined
-          ? { kind: "run", id: flags.run }
-          : flags["all-runs"] !== undefined
-            ? { kind: "all" }
-            : { kind: "latest" },
+      runs: read.runs,
       ...(flags.logs !== undefined ? { item: flags.logs } : {}),
       summary: flags.summary !== undefined,
       follow: flags.follow !== undefined,

@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
+import { captureDir } from "./paths.js";
 
 /**
  * A new run id: the start time, then the process id. Ids sort by start
@@ -88,7 +89,7 @@ export class RunLog {
    */
   private captured(issue: number, body: CaptureBody): string | undefined {
     try {
-      const dir = join(this.dir, String(issue), `${this.runId}.captures`);
+      const dir = join(this.dir, captureDir(issue, this.runId));
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       const id = randomUUID();
       const half = Math.floor(this.capture.maxBytesPerCall / 2);

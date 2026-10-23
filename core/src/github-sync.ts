@@ -1,5 +1,6 @@
 import type { CoreConfig, QueueOption } from "./config.js";
 import { crashPoint } from "./crash.js";
+import { displayTime } from "./display.js";
 import { DEADLINE, type EngineLimits, type ObjectiveRunner } from "./engine.js";
 import {
   type GitHub,
@@ -1028,7 +1029,7 @@ export class GitHubSync {
         await this.github.upsertComment(
           issue,
           marker,
-          `${marker}\n**Factory is waiting.** Step ${code(step)} has been retrying since ${code(retry.since)}. It began with: ${excerpt(retry.cause ?? retry.lastError, this.config.secrets, 500)}\n\nLast error: ${excerpt(retry.lastError, this.config.secrets, 500)}\n\nFactory keeps retrying on its own, and asks here if the wait goes on.`,
+          `${marker}\n**Factory is waiting.** Step ${code(step)} has been retrying since ${code(displayTime(retry.since))}. It began with: ${excerpt(retry.cause ?? retry.lastError, this.config.secrets, 500)}\n\nLast error: ${excerpt(retry.lastError, this.config.secrets, 500)}\n\nFactory keeps retrying on its own, and asks here if the wait goes on.`,
           "sync:note",
           signal,
         );

@@ -11,7 +11,7 @@ import {
   rereviewQuestion,
 } from "./allowances.js";
 import { crashPoint } from "./crash.js";
-import { duration } from "./display.js";
+import { displayTime, duration } from "./display.js";
 import type { RunLog } from "./log.js";
 import { profilesLacking } from "./planning/plan.js";
 import type { FrozenConfig } from "./providers/selection.js";
@@ -1033,7 +1033,7 @@ export class ObjectiveRunner {
           wait.provider !== own.worker?.kind;
         question = {
           ...hold(
-            `${outcome.reason}\n\nThe limit resets ${Number.isFinite(at) ? `at ${new Date(at).toISOString()}` : "at a time it didn't say"}, more than ${hours(this.limits.maxWaitMs)} away. \`${WAIT}\` keeps waiting until it resets, or cancel.`,
+            `${outcome.reason}\n\nThe limit resets ${Number.isFinite(at) ? `at ${displayTime(new Date(at).toISOString())}` : "at a time it didn't say"}, more than ${hours(this.limits.maxWaitMs)} away. \`${WAIT}\` keeps waiting until it resets, or cancel.`,
             ["wait", ...(elsewhere ? [] : this.switchOptions(false)), "cancel"],
           ),
           // A limit is the account's, not the step's: one question for all.
@@ -1732,7 +1732,7 @@ function deadlineNote(deadline: string | undefined, now: Date): string[] {
   const left = Date.parse(deadline ?? "") - now.getTime();
   return left >= 0 && left <= HOUR
     ? [
-        `This Objective's deadline is ${deadline}, ${duration(left)} from now: Factory cancels it then, answered or not.`,
+        `This Objective's deadline is ${displayTime(deadline!)}, ${duration(left)} from now: Factory cancels it then, answered or not.`,
       ]
     : [];
 }

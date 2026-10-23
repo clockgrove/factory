@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
-import { redactDeep } from "./display.js";
+import { displayTime, redactDeep } from "./display.js";
 import { type LogEvent, logFiles, readNew } from "./log.js";
 import { code, prose } from "./markdown.js";
 import { COMMENT_LIMIT, decisions } from "./planning/steps.js";
@@ -163,7 +163,9 @@ function render(
         ]
       : [];
   const when = (iso: string) =>
-    full ? `${code(iso)} (${ago(iso, now)})` : code(iso);
+    full
+      ? `${code(displayTime(iso))} (${ago(iso, now)})`
+      : code(displayTime(iso));
   const lines = [
     "### Factory status",
     "",
@@ -210,7 +212,7 @@ function render(
       "",
       wait.gate
         ? `**Waiting on** ${text(wait.gate)} since ${when(wait.since)}.`
-        : `**Waiting:** ${code(wait.step)} retries at ${code(wait.nextAt)}, since ${when(wait.since)}.`,
+        : `**Waiting:** ${code(wait.step)} retries at ${code(displayTime(wait.nextAt))}, since ${when(wait.since)}.`,
     );
   if (view.holds.length && options.questions) {
     lines.push("", "**Open questions**");
@@ -259,7 +261,7 @@ function render(
     ...(full
       ? [
           "",
-          `<sub>Updated ${code(new Date(now).toISOString())}. Factory edits this comment in place; it posts a new comment only when it needs you.</sub>`,
+          `<sub>Updated ${code(displayTime(new Date(now).toISOString()))}. Factory edits this comment in place; it posts a new comment only when it needs you.</sub>`,
         ]
       : []),
   ];

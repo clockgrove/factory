@@ -52,7 +52,8 @@ import { within } from "./paths.js";
 import { BoundedText, errorMessage } from "./text.js";
 import { workerToolchainPath } from "./worktree.js";
 
-const real = (path: string) =>
+/** `path` by its real path when it exists. */
+export const real = (path: string) =>
   existsSync(path) ? realpathSync(path) : resolve(path);
 
 /**

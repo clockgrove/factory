@@ -18,7 +18,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config.js";
 import { hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
@@ -68,8 +68,8 @@ export interface WorkDiscovery {
 }
 
 export interface CollectInput {
-  /** The target checkout: a Secretlint config must lie outside it. */
-  checkout: string;
+  /** The operator's Secretlint rules (policy.secretlintConfig), checked at load. */
+  secretlintConfig?: string;
   worktree: string;
   /** The commit the worktree started from. */
   base: string;
@@ -140,7 +140,7 @@ export async function collect(input: CollectInput): Promise<Collection> {
 async function collectResult(collected: CollectInput): Promise<Collection> {
   const input: Scan = {
     ...collected,
-    rules: await scannerRules(collected.checkout, collected.worktree),
+    rules: await scannerRules(collected.secretlintConfig),
   };
   const { worktree, item, base, signal } = input;
   const git = (...args: string[]) => hostGit(worktree, args, { signal });
@@ -839,30 +839,19 @@ try {
 const SCAN_TIMEOUT_MS = 5 * 60_000;
 
 /** The operator's Secretlint rules, or a hold naming the fix. */
-async function scannerRules(
-  checkout: string,
-  worktree: string,
-): Promise<string> {
-  const config = process.env.FACTORY_SECRETLINT_CONFIG;
+async function scannerRules(config: string | undefined): Promise<string> {
   if (!config) return RECOMMENDED_RULES;
-  const stat = isAbsolute(config)
-    ? await lstat(config).catch(() => undefined)
-    : undefined;
-  const real = stat?.isFile() ? await realpath(config) : undefined;
-  if (
-    !real ||
-    [config, real].some(
-      (path) => within(path, checkout) || within(path, worktree),
-    )
-  )
+  try {
+    return await readFile(config, "utf8");
+  } catch (error) {
     throw new CollectionStop(
       objectiveWide(
         hold(
-          "FACTORY_SECRETLINT_CONFIG must be a regular absolute file outside the target checkout. Fix or unset it for the service, then answer retry.",
+          `policy.secretlintConfig ${config} can't be read (${errorMessage(error)}). Fix the file or the configuration, restart the service, then answer retry.`,
         ),
       ),
     );
-  return readFile(config, "utf8");
+  }
 }
 
 /**
@@ -933,11 +922,11 @@ async function scanFile(
  * file again. Undefined when clean; otherwise one secret hold naming every
  * finding (`repair` → repair to work, `retry` → collect again, `cancel`), or
  * a retry when the scanner can't run or a hold when
- * FACTORY_SECRETLINT_CONFIG is unusable. collect and media's captureAssets
+ * policy.secretlintConfig can't be read. collect and media's captureAssets
  * both call it.
  */
 export async function scanStaging(
-  input: Pick<CollectInput, "checkout" | "worktree" | "signal"> & {
+  input: Pick<CollectInput, "secretlintConfig" | "worktree" | "signal"> & {
     rules?: string;
   },
   entries: readonly ({ name: string } & (
@@ -948,8 +937,7 @@ export async function scanStaging(
   const scanRoot = await mkdtemp(join(dirname(input.worktree), "secret-scan-"));
   try {
     const scanner = {
-      rules:
-        input.rules ?? (await scannerRules(input.checkout, input.worktree)),
+      rules: input.rules ?? (await scannerRules(input.secretlintConfig)),
       signal: input.signal,
     };
     const findings: SecretFinding[] = [];
@@ -981,7 +969,7 @@ function secretHold(
     .map(({ path, rules }) => `${JSON.stringify(path)} (${rules.join(", ")})`)
     .join(", ");
   return hold(
-    `Secretlint found suspected secret in ${found}. Publication stopped. Operator: review the finding; remove or rotate the value, or supply a reviewed Secretlint config outside the target checkout via FACTORY_SECRETLINT_CONFIG and explicitly retry. Answer repair to have the worker remove the value, retry to collect again, or cancel.`,
+    `Secretlint found suspected secret in ${found}. Publication stopped. Operator: review the finding; remove or rotate the value, or name a reviewed Secretlint config outside the target checkout in policy.secretlintConfig, restart the service and explicitly retry. Answer repair to have the worker remove the value, retry to collect again, or cancel.`,
     ["repair", "retry", "cancel"],
   );
 }

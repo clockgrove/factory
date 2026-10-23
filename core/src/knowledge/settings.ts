@@ -1,14 +1,12 @@
 /**
  * Knowledge settings: where the curated store lives and the optional
- * `planningContext` section that admits adaptive planning context. The
- * section is read from the installation's configuration file and checked
- * once, when the service or a `dream` command starts.
+ * `planning.context` section that admits adaptive planning context,
+ * checked with the rest of the configuration (config.ts loadConfig).
  */
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { configPath } from "../config.js";
+import { type Check, flag, object, section, whole } from "../checked.js";
 
-/** Bounds on the context one planning call is given and on Dream's input. */
+/** Bounds on the context one planning call is given and on Dream's input; a bound left out takes its default. */
 export interface ContextBounds {
   /** Planner-requested lookup rounds (planner lookups are not on the core yet). */
   maxRounds: number;
@@ -69,80 +67,43 @@ export function knowledgeDir(root: string): string {
   return join(root, "knowledge");
 }
 
-/**
- * The settings for `repository`, with its `planningContext` checked. A
- * malformed section throws, naming each problem, like the rest of the
- * configuration.
- */
-export function loadKnowledgeSettings(input: {
-  repository: string;
-  root: string;
-  checkout: string;
-  secrets: string[];
-}): KnowledgeSettings {
-  const path = configPath(input.repository);
-  const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  const problems: string[] = [];
-  const planningContext = parsePlanningContext(raw.planningContext, problems);
-  if (problems.length) throw new Error(`${path}: ${problems.join("; ")}`);
-  return {
-    repository: input.repository,
-    root: input.root,
-    checkout: input.checkout,
-    ...(planningContext ? { planningContext } : {}),
-    secrets: input.secrets,
-  };
-}
-
-function parsePlanningContext(
-  value: unknown,
-  problems: string[],
-): PlanningContext | undefined {
-  if (value === undefined) return undefined;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    problems.push("planningContext must be an object");
-    return undefined;
-  }
-  const section = value as Record<string, unknown>;
-  for (const key of Object.keys(section))
-    if (!["enabled", "bounds", "selectors", "memory"].includes(key))
-      problems.push(`planningContext.${key} is not a setting`);
-  if (section.enabled !== true)
-    problems.push(
-      "planningContext.enabled must be true; leave the section out to refuse Adaptive workflow Objectives",
-    );
-  const bounds = section.bounds as Record<string, unknown> | undefined;
-  const names = Object.keys(DEFAULT_BOUNDS);
-  if (
-    !bounds ||
-    typeof bounds !== "object" ||
-    Object.keys(bounds).sort().join() !== [...names].sort().join() ||
-    names.some(
-      (name) => !Number.isSafeInteger(bounds[name]) || Number(bounds[name]) < 1,
-    )
-  )
-    problems.push(
-      `planningContext.bounds needs exactly ${names.join(", ")}, each a whole number of at least 1`,
-    );
-  const selectors = section.selectors;
-  if (
-    !Array.isArray(selectors) ||
-    !selectors.length ||
-    selectors.length > 64 ||
-    new Set(selectors).size !== selectors.length ||
-    !selectors.every(literalSelector)
-  )
-    problems.push(
-      "planningContext.selectors needs 1–64 distinct literal relative files or directory prefixes ending in /",
-    );
-  if (section.memory !== undefined && typeof section.memory !== "boolean")
-    problems.push("planningContext.memory must be a boolean");
-  return {
-    bounds: bounds as unknown as ContextBounds,
-    selectors: (selectors ?? []) as string[],
-    memory: section.memory === true,
-  };
-}
+/** The `planning.context` section: its presence admits Adaptive workflow Objectives. */
+export const planningContext: Check<PlanningContext> = (
+  value,
+  path,
+  problems,
+) =>
+  section(
+    value,
+    path,
+    {
+      bounds: object(
+        Object.fromEntries(
+          Object.entries(DEFAULT_BOUNDS).map(([name, bound]) => [
+            name,
+            whole(1, bound),
+          ]),
+        ) as Record<keyof ContextBounds, Check<number>>,
+      ),
+      selectors: (selectors: unknown, at: string, found: string[]) => {
+        if (
+          Array.isArray(selectors) &&
+          selectors.length &&
+          selectors.length <= 64 &&
+          new Set(selectors).size === selectors.length &&
+          selectors.every(literalSelector)
+        )
+          return selectors as string[];
+        found.push(
+          `${at} needs 1–64 distinct literal relative files or directory prefixes ending in /`,
+        );
+        return [];
+      },
+      memory: flag(false),
+    },
+    problems,
+    { enabled: "the section's presence turns planning context on" },
+  );
 
 function literalSelector(selector: unknown): boolean {
   return (

@@ -54,7 +54,8 @@ const DEFAULT_CODEX_WORKER_MODEL: ModelChoice<CodexEffort> = {
 const WORKER_IDLE_MS = 15 * 60 * 1000;
 
 export interface CodexWorkerOptions {
-  model?: ModelChoice<CodexEffort>;
+  /** The provider's `worker` model, effort and serviceTier, over the defaults. */
+  model?: Partial<ModelChoice<CodexEffort>>;
   /** Only `required` applies: Codex sandboxes its own shell. */
   sandbox: SandboxConfig;
   /** The shell's network; `off` (the default) or the host's. */
@@ -231,7 +232,7 @@ export class CodexWorker implements Worker {
   private readonly model: ModelChoice<CodexEffort>;
 
   constructor(private readonly options: CodexWorkerOptions) {
-    this.model = options.model ?? DEFAULT_CODEX_WORKER_MODEL;
+    this.model = { ...DEFAULT_CODEX_WORKER_MODEL, ...options.model };
   }
 
   async run(input: WorkerInput): Promise<WorkerResult> {

@@ -17,7 +17,6 @@ import { knowledgeObserver } from "./knowledge/index.js";
 import {
   configureKnowledge,
   type KnowledgeSettings,
-  loadKnowledgeSettings,
 } from "./knowledge/settings.js";
 import { RunLog } from "./log.js";
 import { installationPaths, type Paths } from "./paths.js";
@@ -47,6 +46,13 @@ import { objectiveWorkflow } from "./workflow.js";
 
 /** Worker kinds setup can write: the managed ones need settings by hand. */
 const SETUP_WORKERS = ["codex", "claude", "copilot"];
+
+/** The settings a managed worker needs, which setup doesn't take. */
+const MANAGED_FIELDS: Record<string, string> = {
+  "openai-agents": '"model", "effort", "containerSize", "apiKeyEnv"',
+  "claude-managed-agents":
+    '"agentId", "agentVersion", "environmentId", "workspaceId", "credentialEnv"',
+};
 
 const USAGE = `Usage: factory <command> --repo OWNER/NAME
 
@@ -231,12 +237,15 @@ function planner(
 }
 
 function knowledge(config: CoreConfig, paths: Paths): KnowledgeSettings {
-  return loadKnowledgeSettings({
+  return {
     repository: config.repository,
     root: paths.root,
     checkout: config.checkout,
+    ...(config.planning.context
+      ? { planningContext: config.planning.context }
+      : {}),
     secrets: config.secrets,
-  });
+  };
 }
 
 /** An Objective's state once it is terminal with nothing left to run, or why not. */
@@ -404,7 +413,7 @@ function setup(repository: string, args: Args): number {
   if (worker && !SETUP_WORKERS.includes(worker)) {
     process.stderr.write(
       (WORKERS as readonly string[]).includes(worker)
-        ? `factory: a ${worker} worker needs settings setup doesn't take (account, model, key variable, limits): write providers.${name}.worker in ${path} by hand, as the user guide's managed execution section shows\n`
+        ? `factory: a ${worker} worker needs settings setup doesn't take: write providers.${name}.worker = { "kind": "${worker}", ${MANAGED_FIELDS[worker]} } in ${path} by hand\n`
         : `factory: --worker is one of ${SETUP_WORKERS.join(", ")}\n`,
     );
     return 2;

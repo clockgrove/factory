@@ -691,7 +691,7 @@ async function workStep(
   }
   if (!finished.sets) {
     const captured = await captureAssets({
-      checkout: config.checkout,
+      secretlintConfig: config.policy.secretlintConfig,
       worktree,
       item,
       directory: media,
@@ -720,7 +720,7 @@ async function workStep(
   const keepFinished = { ...keepAll, [finishedKey]: finished };
 
   const collected = await collect({
-    checkout: config.checkout,
+    secretlintConfig: config.policy.secretlintConfig,
     worktree,
     base,
     plan,

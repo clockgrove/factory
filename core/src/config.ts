@@ -1,16 +1,33 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  absolute,
+  type Check,
+  directories,
+  flag,
+  isObject,
+  object,
+  oneOf,
+  optional,
+  type Retired,
+  section,
+  strings,
+  text,
+  whole,
+} from "./checked.js";
 import { remoteRepository } from "./git.js";
+import { type PlanningContext, planningContext } from "./knowledge/settings.js";
+import { stateRoot, within } from "./paths.js";
 import { serviceCredential } from "./providers/claude.js";
 import { type ProviderConfig, providersConfig } from "./providers/config.js";
 import {
   loadReviewArtifacts,
   type ReviewArtifactSelector,
 } from "./review/artifacts.js";
-import { localRootRefusal } from "./sandbox.js";
+import { localRootRefusal, real } from "./sandbox.js";
 
 /** The installation's configuration, checked once when it's loaded. */
 export interface CoreConfig {
@@ -39,6 +56,8 @@ export interface CoreConfig {
     revisions: number;
     /** A curated playbook file in the target, read at the base. */
     playbook: string;
+    /** Admits Adaptive workflow Objectives; absent, they are refused. */
+    context?: PlanningContext;
   };
   execution: {
     /** Steps of one Objective running at once (independent Work Items run in parallel). */
@@ -53,6 +72,11 @@ export interface CoreConfig {
   policy: {
     /** Operator variables a worker's shell may see, by name. */
     allowedSecretNames: string[];
+    /**
+     * The operator's reviewed Secretlint rules, outside the target checkout;
+     * absent, Factory's packaged rules apply.
+     */
+    secretlintConfig?: string;
   };
   /**
    * Every secret value Factory's output is redacted of, derived once here:
@@ -165,91 +189,26 @@ const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES = 4096;
 const REFUSED_SANDBOX_ENVIRONMENT_NAME =
   /^(PATH|HOME|TMPDIR|TMP|TEMP|SHELL|USER|LOGNAME|NODE_OPTIONS|GIT_.*|GH_.*|GITHUB_.*|LD_.*|NPM_CONFIG_.*|PNPM_.*|COREPACK_.*|YARN_.*|.*_PROXY|NODE_.*|BASH_ENV|ENV|DYLD_.*|PYTHON.*|PERL5.*|SSL_.*|CURL_.*)$|TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY/;
 
-/** The `sandbox` section checked, with defaults; problems are appended. */
-function sandboxConfig(value: unknown, problems: string[]): SandboxConfig {
-  const config: SandboxConfig = {
-    required: true,
-    network: "off",
-    readOnlyPaths: [],
-    environment: {},
-    limits: { ...DEFAULT_SANDBOX_LIMITS },
-  };
-  if (value === undefined) return config;
-  const object = (entry: unknown, name: string) => {
-    if (entry && typeof entry === "object" && !Array.isArray(entry))
-      return entry as Record<string, unknown>;
-    problems.push(`${name} must be an object`);
-    return undefined;
-  };
-  const sandbox = object(value, "sandbox");
-  if (!sandbox) return config;
-  const known = (
-    entry: Record<string, unknown>,
-    names: string[],
-    name: string,
-  ) => {
-    for (const key of Object.keys(entry))
-      if (!names.includes(key))
-        problems.push(`${name}.${key} is not a setting`);
-  };
-  known(
-    sandbox,
-    [
-      "required",
-      "network",
-      "packageStore",
-      "readOnlyPaths",
-      "environment",
-      "limits",
-    ],
-    "sandbox",
-  );
-  if (sandbox.required !== undefined) {
-    if (typeof sandbox.required === "boolean")
-      config.required = sandbox.required;
-    else problems.push("sandbox.required must be a boolean");
+/** `sandbox.environment`: fixed variables, with refused names left out. */
+const sandboxEnvironment: Check<Record<string, string>> = (
+  value,
+  path,
+  problems,
+) => {
+  const environment: Record<string, string> = {};
+  if (value === undefined) return environment;
+  if (!isObject(value)) {
+    problems.push(`${path} must be an object`);
+    return environment;
   }
-  if (sandbox.network !== undefined) {
-    if (sandbox.network === "off" || sandbox.network === "package-install")
-      config.network = sandbox.network;
-    else problems.push('sandbox.network must be "off" or "package-install"');
-  }
-  const absolute = (path: unknown): path is string =>
-    typeof path === "string" &&
-    isAbsolute(path) &&
-    resolve(path) === path &&
-    path !== "/";
-  if (sandbox.packageStore !== undefined) {
-    if (absolute(sandbox.packageStore))
-      config.packageStore = sandbox.packageStore;
-    else
-      problems.push(
-        "sandbox.packageStore must be an absolute, normalized directory path",
-      );
-  }
-  if (sandbox.readOnlyPaths !== undefined) {
-    if (
-      Array.isArray(sandbox.readOnlyPaths) &&
-      sandbox.readOnlyPaths.every(absolute)
-    )
-      config.readOnlyPaths = [...sandbox.readOnlyPaths];
-    else
-      problems.push(
-        "sandbox.readOnlyPaths must be absolute, normalized directory paths",
-      );
-  }
-  const environment =
-    sandbox.environment === undefined
-      ? undefined
-      : object(sandbox.environment, "sandbox.environment");
-  for (const [name, entry] of Object.entries(environment ?? {})) {
+  for (const [name, entry] of Object.entries(value)) {
     if (!SANDBOX_ENVIRONMENT_NAME.test(name))
       problems.push(
-        `sandbox.environment name ${name} must match ${SANDBOX_ENVIRONMENT_NAME.source}`,
+        `${path} name ${name} must match ${SANDBOX_ENVIRONMENT_NAME.source}`,
       );
     else if (REFUSED_SANDBOX_ENVIRONMENT_NAME.test(name))
       problems.push(
-        `sandbox.environment name ${name} is refused: Factory controls it or it could leak or redirect commands`,
+        `${path} name ${name} is refused: Factory controls it or it could leak or redirect commands`,
       );
     else if (
       typeof entry !== "string" ||
@@ -257,91 +216,40 @@ function sandboxConfig(value: unknown, problems: string[]): SandboxConfig {
       entry.includes("\0")
     )
       problems.push(
-        `sandbox.environment.${name} must be a string of at most ${MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES} bytes`,
+        `${path}.${name} must be a string of at most ${MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES} bytes`,
       );
-    else config.environment[name] = entry;
+    else environment[name] = entry;
   }
-  const limits =
-    sandbox.limits === undefined
-      ? undefined
-      : object(sandbox.limits, "sandbox.limits");
-  if (limits) {
-    known(limits, Object.keys(SANDBOX_LIMIT_MINIMUMS), "sandbox.limits");
-    for (const [name, minimum] of Object.entries(SANDBOX_LIMIT_MINIMUMS)) {
-      const entry = limits[name];
-      if (entry === undefined) continue;
-      if (
-        typeof entry === "number" &&
-        Number.isSafeInteger(entry) &&
-        entry >= minimum
-      )
-        config.limits[name as keyof SandboxLimits] = entry;
-      else
-        problems.push(
-          `sandbox.limits.${name} must be an integer of at least ${minimum}`,
-        );
-    }
-  }
-  return config;
-}
+  return environment;
+};
 
-/** The `media` section checked, with defaults; problems are appended. */
-function mediaConfig(value: unknown, problems: string[]): CoreConfig["media"] {
-  const config: CoreConfig["media"] = { localAssetRoots: [] };
-  if (value === undefined) return config;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    problems.push("media must be an object");
-    return config;
-  }
-  const media = value as Record<string, unknown>;
-  for (const key of Object.keys(media))
-    if (key !== "localAssetRoots")
-      problems.push(`media.${key} is not a setting`);
-  const roots = media.localAssetRoots;
-  if (roots === undefined) return config;
-  if (
-    !Array.isArray(roots) ||
-    !roots.every(
-      (root) =>
-        typeof root === "string" &&
-        isAbsolute(root) &&
-        resolve(root) === root &&
-        root !== "/",
-    )
-  ) {
-    problems.push(
-      "media.localAssetRoots must be absolute, normalized directory paths",
-    );
-    return config;
-  }
-  for (const root of roots as string[]) {
+const sandboxSection = object({
+  required: flag(true),
+  network: oneOf(["off", "package-install"] as const, "off"),
+  packageStore: optional<string>((value, path, problems) => {
+    if (absolute(value)) return value;
+    problems.push(`${path} must be an absolute, normalized directory path`);
+    return "";
+  }),
+  readOnlyPaths: directories,
+  environment: sandboxEnvironment,
+  limits: object(
+    Object.fromEntries(
+      Object.entries(SANDBOX_LIMIT_MINIMUMS).map(([name, minimum]) => [
+        name,
+        whole(minimum, DEFAULT_SANDBOX_LIMITS[name as keyof SandboxLimits]),
+      ]),
+    ) as Record<keyof SandboxLimits, Check<number>>,
+  ),
+});
+
+/** `media.localAssetRoots`: directories that show workers nothing sealed. */
+const localAssetRoots: Check<string[]> = (value, path, problems) =>
+  directories(value, path, problems).filter((root) => {
     const refused = localRootRefusal(root);
-    if (refused) problems.push(`media.localAssetRoots: ${refused}`);
-    else config.localAssetRoots.push(root);
-  }
-  return config;
-}
-
-/** The `delivery` section checked, with defaults; problems are appended. */
-function deliveryConfig(
-  value: unknown,
-  problems: string[],
-): CoreConfig["delivery"] {
-  const config: CoreConfig["delivery"] = { kind: "regular" };
-  if (value === undefined) return config;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    problems.push("delivery must be an object");
-    return config;
-  }
-  const delivery = value as Record<string, unknown>;
-  for (const key of Object.keys(delivery))
-    if (key !== "kind") problems.push(`delivery.${key} is not a setting`);
-  if (delivery.kind === "regular" || delivery.kind === "native-stack")
-    config.kind = delivery.kind;
-  else if (delivery.kind !== undefined)
-    problems.push('delivery.kind must be "regular" or "native-stack"');
-  return config;
-}
+    if (refused) problems.push(`${path}: ${refused}`);
+    return !refused;
+  });
 
 export type QueueOption =
   | "queued"
@@ -433,7 +341,6 @@ export function configPath(repository: string): string {
   );
 }
 
-/** Load and check the configuration. Throws one message naming every problem. */
 /** Shorter values would redact ordinary text. */
 const MIN_SECRET_LENGTH = 4;
 
@@ -468,122 +375,164 @@ function secretValues(
   return [...values].filter((value) => value.length >= MIN_SECRET_LENGTH);
 }
 
+/** What replaced each key an earlier Factory configuration used. */
+const PROVIDERS_HINT = "name the planner and worker under providers.<name>";
+const RETIRED: Record<string, Retired> = {
+  "": {
+    schemaVersion: "the configuration has no schema version; remove it",
+    gitPersistence: "removed: Factory keeps no remote state history",
+    capture: "session capture isn't configurable here yet; leave it out",
+    nativeBoundaryTelemetry:
+      "session capture isn't configurable here yet; leave it out",
+    autonomy:
+      "planning revisions are planning.revisions, repairs execution.repairs",
+    planningContext: "moved to planning.context",
+    githubManagement:
+      "removed: Factory always writes queue.field and progress comments",
+    scheduling: "host limits are execution.workers and execution.validations",
+  },
+  queue: {
+    project:
+      "use queue.projectId, queue.field, queue.orderField and queue.options",
+    orderFieldId: "queue.orderField names the order field",
+    metadataFieldId: "removed: Factory keeps no metadata field",
+    controlItemId: "removed: Factory has no control card",
+    factoryManagedFields:
+      "removed: Factory manages queue.field and queue.orderField",
+    objectiveDeadlineSeconds: "removed: each step has its own deadline",
+  },
+  planning: { provider: PROVIDERS_HINT, models: PROVIDERS_HINT },
+  execution: {
+    workerProvider: PROVIDERS_HINT,
+    codexNetwork: "use providers.<name>.worker.network",
+    claudeWorker: PROVIDERS_HINT,
+    kind: PROVIDERS_HINT,
+    harness: PROVIDERS_HINT,
+    profiles: PROVIDERS_HINT,
+    defaultProfile: PROVIDERS_HINT,
+  },
+  policy: {
+    network: "use providers.<name>.worker.network for a Codex worker",
+  },
+};
+
+/**
+ * `policy.secretlintConfig`: an absolute regular file, not a link, outside
+ * the target checkout. Collection reads it.
+ */
+const secretlintConfig: Check<string> = (value, path, problems) => {
+  if (absolute(value) && lstatSync(value, { throwIfNoEntry: false })?.isFile())
+    return value;
+  problems.push(`${path} must be an absolute path of a regular file`);
+  return "";
+};
+
+/**
+ * Load and check the configuration: every section through checked.ts, so
+ * an unknown key is refused by name. Throws one message naming every
+ * problem.
+ */
 export function loadConfig(repository: string): CoreConfig {
   const path = configPath(repository);
-  let raw: Record<string, unknown>;
+  let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    raw = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
     throw new Error(`Can't read ${path}: ${String(error)}`);
   }
   const problems: string[] = [];
-  const text = (value: unknown, name: string): string => {
-    if (typeof value === "string" && value.trim()) return value;
-    problems.push(`${name} must be a non-empty string`);
-    return "";
-  };
-  const queue = (raw.queue ?? {}) as Record<string, unknown>;
-  const options = {
-    ...DEFAULT_OPTIONS,
-    ...((queue.options ?? {}) as Partial<Record<QueueOption, string>>),
-  };
-  const config = {
-    repository: text(raw.repository, "repository"),
-    checkout: text(raw.checkout, "checkout"),
-    queue: {
-      projectId: text(queue.projectId, "queue.projectId"),
-      field:
-        queue.field === undefined
-          ? "Factory"
-          : text(queue.field, "queue.field"),
-      orderField:
-        queue.orderField === undefined
-          ? "Factory order"
-          : text(queue.orderField, "queue.orderField"),
-      options,
-      pollSeconds:
-        typeof queue.pollSeconds === "number" && queue.pollSeconds >= 5
-          ? queue.pollSeconds
-          : 30,
-    },
-  } as CoreConfig;
-  const planning = (raw.planning ?? {}) as Record<string, unknown>;
-  Object.assign(config, providersConfig(raw, problems));
-  const final = (raw.finalValidation ?? {}) as Record<string, unknown>;
-  const list = (value: unknown, name: string): string[] => {
-    if (value === undefined) return [];
-    if (Array.isArray(value) && value.every((v) => typeof v === "string"))
-      return value as string[];
-    problems.push(`${name} must be a list of strings`);
-    return [];
-  };
-  config.planning = {
-    revisions:
-      typeof planning.revisions === "number" && planning.revisions >= 0
-        ? planning.revisions
-        : 4,
-    playbook:
-      typeof planning.playbook === "string"
-        ? planning.playbook
-        : ".factory/playbook.md",
-  };
-  const execution = (raw.execution ?? {}) as Record<string, unknown>;
-  const count = (value: unknown, name: string, fallback: number): number => {
-    if (value === undefined) return fallback;
-    if (typeof value === "number" && Number.isInteger(value) && value >= 1)
-      return value;
-    problems.push(`${name} must be a whole number of at least 1`);
-    return fallback;
-  };
   const cpus = availableParallelism();
-  config.queue.maxActiveObjectives = count(
-    queue.maxActiveObjectives,
-    "queue.maxActiveObjectives",
-    3,
+  const checked = section(
+    raw,
+    "",
+    {
+      repository: text(repository),
+      checkout: text(),
+      queue: object(
+        {
+          projectId: text(),
+          field: text("Factory"),
+          orderField: text("Factory order"),
+          options: object(
+            Object.fromEntries(
+              Object.entries(DEFAULT_OPTIONS).map(([name, option]) => [
+                name,
+                text(option),
+              ]),
+            ) as Record<QueueOption, Check<string>>,
+          ),
+          pollSeconds: whole(5, 30),
+          maxActiveObjectives: whole(1, 3),
+        },
+        RETIRED.queue,
+      ),
+      providers: (value) => value,
+      defaultProvider: (value) => value,
+      planning: object(
+        {
+          revisions: whole(0, 4),
+          playbook: text(".factory/playbook.md"),
+          context: optional(planningContext),
+        },
+        RETIRED.planning,
+      ),
+      execution: object(
+        {
+          concurrency: whole(1, 8),
+          workers: whole(1, Math.max(2, Math.floor(cpus / 2))),
+          validations: whole(1, Math.max(2, Math.floor(cpus / 4))),
+          repairs: whole(1, 6),
+        },
+        RETIRED.execution,
+      ),
+      policy: object(
+        {
+          allowedSecretNames: strings,
+          secretlintConfig: optional(secretlintConfig),
+        },
+        RETIRED.policy,
+      ),
+      finalValidation: object({
+        requiredCommands: strings,
+        ciOnlyCommands: strings,
+      }),
+      delivery: object({
+        kind: oneOf(["regular", "native-stack"] as const, "regular"),
+      }),
+      reviewArtifacts: (value, _path, found) =>
+        loadReviewArtifacts(value, found),
+      sandbox: sandboxSection,
+      media: object({ localAssetRoots }),
+    },
+    problems,
+    RETIRED[""],
   );
-  config.execution = {
-    concurrency: count(execution.concurrency, "execution.concurrency", 8),
-    workers: count(
-      execution.workers,
-      "execution.workers",
-      Math.max(2, Math.floor(cpus / 2)),
-    ),
-    validations: count(
-      execution.validations,
-      "execution.validations",
-      Math.max(2, Math.floor(cpus / 4)),
-    ),
-    repairs: count(execution.repairs, "execution.repairs", 6),
-  };
-  const policy = (raw.policy ?? {}) as Record<string, unknown>;
-  config.policy = {
-    allowedSecretNames: list(
-      policy.allowedSecretNames,
-      "policy.allowedSecretNames",
-    ),
-  };
-  config.secrets = secretValues(
-    config.policy.allowedSecretNames,
-    config.providers ?? {},
+  const { providers, defaultProvider } = providersConfig(
+    isObject(raw) ? raw : {},
+    problems,
   );
-  config.finalValidation = {
-    requiredCommands: list(
-      final.requiredCommands,
-      "finalValidation.requiredCommands",
-    ),
-    ciOnlyCommands: list(
-      final.ciOnlyCommands,
-      "finalValidation.ciOnlyCommands",
-    ),
+  const config: CoreConfig = {
+    ...checked,
+    providers,
+    defaultProvider,
+    secrets: secretValues(checked.policy.allowedSecretNames, providers),
   };
-  config.delivery = deliveryConfig(raw.delivery, problems);
-  config.reviewArtifacts = loadReviewArtifacts(raw.reviewArtifacts, problems);
-  config.sandbox = sandboxConfig(raw.sandbox, problems);
-  config.media = mediaConfig(raw.media, problems);
-  if (config.repository && config.repository !== repository)
+  if (config.repository !== repository)
     problems.push(
       `repository is ${config.repository}, but the command named ${repository}`,
     );
+  // The target's files never hold Factory's configuration, state or rules,
+  // and a worker's worktree (under the state directory) never holds the rules.
+  const state = stateRoot();
+  const rules = config.policy.secretlintConfig;
+  for (const [name, inside, root, where] of [
+    ["The configuration file", path, config.checkout, "the target checkout"],
+    ["The state directory", state, config.checkout, "the target checkout"],
+    ["policy.secretlintConfig", rules, config.checkout, "the target checkout"],
+    ["policy.secretlintConfig", rules, state, "the state directory"],
+  ] as const)
+    if (inside && root && within(real(inside), real(root)))
+      problems.push(`${name} ${inside} must be outside ${where} ${root}`);
   const own = ownRepositoryProblem(config.repository, config.checkout);
   if (own) problems.push(own);
   if (problems.length) throw new Error(`${path}: ${problems.join("; ")}`);

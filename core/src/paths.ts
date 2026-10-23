@@ -26,14 +26,18 @@ export interface Paths {
   readonly lockName: string;
 }
 
-export function installationPaths(
-  repository: string,
-  stateRoot = process.env.FACTORY_STATE_DIR ??
-    join(homedir(), ".local", "state", "factory"),
-): Paths {
+/** Where every installation's state lives: FACTORY_STATE_DIR, or under home. */
+export function stateRoot(): string {
+  return (
+    process.env.FACTORY_STATE_DIR ??
+    join(homedir(), ".local", "state", "factory")
+  );
+}
+
+export function installationPaths(repository: string): Paths {
   // Lock on the real directory, so two spellings of one path share one lock.
   const named = resolve(
-    join(stateRoot, repository.toLowerCase().replace("/", "__")),
+    join(stateRoot(), repository.toLowerCase().replace("/", "__")),
   );
   mkdirSync(named, { recursive: true, mode: 0o700 });
   const root = realpathSync(named);

@@ -70,13 +70,16 @@ export function providerWorker(
         return new OpenAIManagedWorker(worker);
       case "claude-managed-agents":
         return new ClaudeManagedWorker(worker);
-      default:
+      default: {
+        const { kind: _, network, ...model } = worker;
         return new CodexWorker({
+          model,
           sandbox: config.sandbox,
-          network: worker.network,
+          network,
           allowedSecretNames,
           secrets: config.secrets,
         });
+      }
     }
   };
 }

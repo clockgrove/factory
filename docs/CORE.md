@@ -270,6 +270,7 @@ Rules for modules:
 - A module returns step outcomes. It never writes state directly, takes a lock, starts a background loop, or keeps its own archive.
 - A module keeps its data in `modules.<name>` of the state file, or in the run log.
 - A module validates its input once, where the input enters, and doesn't re-verify it later.
+- **Configuration** is checked once, when it loads, by one helper (checked.ts `section`): each section lists its known keys with their types and defaults. An unknown key is refused by name, and a key an earlier configuration used names what replaced it. All problems are reported in one message. The configuration file and the state directory must lie outside the target checkout.
 
 Review and knowledge see what the worker saw:
 

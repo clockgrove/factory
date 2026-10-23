@@ -1394,7 +1394,7 @@ export function declarationProblems(
   if (adaptive.problem) problems.push(adaptive.problem);
   else if (adaptive.enabled && !knowledgeSettings()?.planningContext)
     problems.push(
-      "Adaptive workflow is enabled, but this installation admits no planning context. Add a planningContext section (enabled, bounds, selectors, memory) to the configuration and restart the service, or set the section to disabled.",
+      "Adaptive workflow is enabled, but this installation admits no planning context. Add a planning.context section (selectors, and optionally bounds and memory) to the configuration and restart the service, or set the section to disabled.",
     );
   return problems;
 }

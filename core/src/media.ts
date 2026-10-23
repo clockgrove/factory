@@ -596,8 +596,8 @@ function safeName(path: string): string {
  * destinationFinding.
  */
 export async function captureAssets(input: {
-  /** The target checkout: the operator's Secretlint config lies outside it. */
-  checkout: string;
+  /** The operator's Secretlint rules (policy.secretlintConfig). */
+  secretlintConfig?: string;
   worktree: string;
   item: WorkItem;
   directory: string;

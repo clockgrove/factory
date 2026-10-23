@@ -28,7 +28,7 @@ When a prerequisite needs you, Factory’s operator should collect all retained 
 
 Repeating setup with a matching binding reuses the configuration. A conflicting option stops, because Factory never changes an active binding. Setup with a new `--provider NAME` adds that provider and leaves the others unchanged.
 
-Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` and state under `$XDG_STATE_HOME/clockgrove-factory` (defaults `~/.config` and `~/.local/state`). Keep both, and all plan output and logs, outside the checkout.
+Configuration lives under `$XDG_CONFIG_HOME/clockgrove-factory` and state under `$XDG_STATE_HOME/clockgrove-factory` (defaults `~/.config` and `~/.local/state`). Keep both, and all plan output and logs, outside the checkout: the core refuses to load a configuration file or a state directory inside the target checkout. It also refuses any key it doesn't know, naming the key, and for a key an earlier configuration used, what replaced it (for example `policy.network` is now `providers.<name>.worker.network`).
 
 ### Command sandbox
 
@@ -119,6 +119,8 @@ The records distinguish local startup/stdin flush and thread startup; completed 
 A first quiet timeout of a Codex structured call stops unchanged automatic replay, including replay by the enclosing Factory step. Diagnose the retained fault before an authorized corrected continuation. Bounded review-capacity retries retain their existing shared allowance and any tighter explicit limit. Unproved cessation (including Claude SDK timeout cleanup), active-tool inactivity or exhausted allowances stops continuation. Failed calls and available usage stay recorded; missing usage remains unknown.
 
 Choose these at setup. New Codex configurations default to `gpt-6.1-sol` for planner, reviewer and worker, with `high` reasoning for the planner and `medium` for the reviewer and worker. New Claude planning configurations also default review reasoning to `medium`, with `high` for planning; both models must be supplied explicitly. The reviewer setting covers graph, Work Item result and final Objective reviews. Optional `planning.reviewEffort` gives one review phase its own reasoning effort with the reviewer's model: keys `graph-review`, `result-review` and `objective-review`, values from that provider's reasoning efforts; an omitted phase, or an omitted `reviewEffort`, uses `planning.reviewer.reasoningEffort`. Leaving it out keeps the configuration digest unchanged; setting it changes the digest like any other configuration change. Explicit choices and existing configurations remain unchanged. Codex planner, reviewer and local harness selections also accept optional `serviceTier: "standard" | "fast"` in their configuration objects, including Codex execution profiles. Use `"standard"` for explicit native `default` routing or `"fast"` for native `priority`; omitting the field retains the native/catalog choice and does not establish Standard. The same model and reasoning effort are preserved. Fast availability and consumption follow the [Codex speed contract](https://developers.openai.com/codex/speed/). Requested tiers are recorded separately from reported native settings; an absent report supplies no effective-tier fact. Changing a configured tier changes the admitted configuration/session selection, so it cannot silently reconfigure a retained turn.
+
+A core Codex worker takes the same choice in its own keys: `providers.<name>.worker` accepts `model`, `effort` and `serviceTier` next to `kind` and `network`, for example `{ "kind": "codex", "model": "gpt-6.1-sol", "effort": "high", "serviceTier": "fast" }`; a key left out keeps the default (`gpt-6.1-sol`, `medium`, the native tier). The Claude worker's `model` and `effort` work the same way.
 
 For an explicit comparison, set a provider's `planning.planner` to `{ "model": "gpt-6.1-sol", "reasoningEffort": "high", "serviceTier": "standard" }` or the same object with `"serviceTier": "fast"`. The independent reviewer and `execution.harness` have their own selections; changing the planner does not change them. A comparison is easiest as a second provider, for example `codex-fast`, chosen with `--provider codex-fast`. Likewise, to run graph and result reviews at `high` while final Objective review keeps the reviewer's effort, add `"reviewEffort": { "graph-review": "high", "result-review": "high" }` to that provider's `planning` object.
 
@@ -452,21 +454,22 @@ Every Objective plans with read-only access to the repository at its base commit
 enabled
 ```
 
-Also add `planningContext` to the private installation configuration before starting that Objective. All six positive integer bounds are required. For example:
+Also add `planning.context` to the private installation configuration before starting that Objective. The section's presence turns it on. `selectors` is required; each of the six bounds is a positive integer, and a bound left out takes the default shown here. For example:
 
 ```json
 {
-  "planningContext": {
-    "enabled": true,
-    "selectors": ["src/", "docs/ARCHITECTURE.md"],
-    "memory": true,
-    "bounds": {
-      "maxRounds": 4,
-      "maxRequestsPerRound": 8,
-      "maxResults": 64,
-      "maxBytes": 262144,
-      "maxElapsedMs": 30000,
-      "maxProviderCalls": 5
+  "planning": {
+    "context": {
+      "selectors": ["src/", "docs/ARCHITECTURE.md"],
+      "memory": true,
+      "bounds": {
+        "maxRounds": 4,
+        "maxRequestsPerRound": 8,
+        "maxResults": 64,
+        "maxBytes": 262144,
+        "maxElapsedMs": 30000,
+        "maxProviderCalls": 5
+      }
     }
   }
 }
@@ -484,7 +487,7 @@ Custom library adapters must implement the admission contracts: adaptive `Planni
 
 Memory lookup supplies verified text. Binary bodies remain retained under their exact content references and report an unavailable text body; they are never decoded into replacement text. Supplied documentation is retained with its exact path, selected heading, version digest and observation time. A complete heading selection does not claim the whole underlying file was supplied. Already supplied source bodies are excluded from optional memory ranking and remain reachable through their existing pinned-source indices.
 
-Discovery selectors must also fit the admitted `planningContext.selectors` ceiling. A missing-context human question must cite an actual required, unresolved lookup receipt; human-owned choices and permissions do not require an unnecessary search.
+Discovery selectors must also fit the admitted `planning.context.selectors` ceiling. A missing-context human question must cite an actual required, unresolved lookup receipt; human-owned choices and permissions do not require an unnecessary search.
 
 For an approved migration or cross-cutting fix whose file inventory is unknown, describe the permitted directory, intended change and final acceptance. The compiler can include a reviewed expansion envelope rather than inventing a file list. It declares the discovery input, work template, literal scope, selected profile/resources, batch and child limits and integration barriers before execution. Complete discovered files become stable multi-file Work Items without another model compilation or review for each conforming child.
 
@@ -780,7 +783,7 @@ The same fence applies to retained model turns: an active or unknown submitted t
 
 ## Safety
 
-Factory checks changed-path ownership, unsafe links and special files, and scans staged content with its packaged Secretlint rules before publishing. A finding names the rule and path, never the value. Review false positives outside the checkout, then point `FACTORY_SECRETLINT_CONFIG` at a reviewed config and retry. Workers get a filtered environment without controller GitHub, Git or SSH credentials. Workers run as your OS user and are not a boundary against hostile code. Follow the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).
+Factory checks changed-path ownership, unsafe links and special files, and scans staged content with its packaged Secretlint rules before publishing. A finding names the rule and path, never the value. Review false positives outside the checkout, then name a reviewed config in `policy.secretlintConfig` (an absolute regular file outside the checkout and the state directory, checked when the configuration loads), restart the service and retry. Workers get a filtered environment without controller GitHub, Git or SSH credentials. Workers run as your OS user and are not a boundary against hostile code. Follow the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).
 
 ## Diagnostic capture and export
 

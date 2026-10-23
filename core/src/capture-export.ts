@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import {
   chosenFiles,
+  itemOfEvent,
   num,
   type RunChoice,
   readCapture,
@@ -32,6 +33,8 @@ export interface ExportOptions {
   repository: string;
   issue: number;
   runs: RunChoice;
+  /** `--invocation ID`: only these model calls, by capture id or span id; every id must match one. */
+  invocations?: readonly string[];
   /** `metadata` reads no captured text; `retained` adds the captured request and response. */
   content: "metadata" | "retained";
   /** The collector's base URL; the preview's digest needs it. */
@@ -191,20 +194,42 @@ const FIELDS = [
  * run; no invented parentage. Ids hash the run and the call's place in it,
  * so a repeat export keeps them.
  */
-function spansOf(options: ExportOptions): { runs: string[]; spans: Span[] } {
+function spansOf(options: ExportOptions): {
+  runs: string[];
+  spans: Span[];
+  calls: Invocation[];
+} {
   const spans: Span[] = [];
+  const calls: Invocation[] = [];
   const runs: string[] = [];
+  const chosen = options.invocations;
   const secrets = options.secrets;
   for (const file of chosenFiles(options.logs, options.issue, options.runs)) {
     let index = 0;
     readRun(file, 0, secrets, (event) => {
       if (event.event !== "model-usage") return;
       const run = String(event.run);
-      if (!runs.includes(run)) runs.push(run);
       const end = Date.parse(event.at);
       if (!Number.isFinite(end)) return;
       const ms = num(event.ms) ?? 0;
       const key = `${options.repository}#${options.issue}:${run}:${index++}`;
+      const spanId = hash(`factory-span:${key}`).slice(0, 16);
+      const capture = str(event.capture);
+      if (
+        chosen?.length &&
+        !chosen.includes(spanId) &&
+        !(capture !== undefined && chosen.includes(capture))
+      )
+        return;
+      if (!runs.includes(run)) runs.push(run);
+      calls.push({
+        spanId,
+        run,
+        ...(capture !== undefined ? { capture } : {}),
+        ...(str(event.role) ? { role: str(event.role) } : {}),
+        ...(str(event.phase) ? { phase: str(event.phase) } : {}),
+        ...(itemOfEvent(event) ? { item: itemOfEvent(event) } : {}),
+      });
       const attributes = [
         attribute("session.id", `${options.repository}#${options.issue}`, []),
         attribute("factory.run", run, secrets),
@@ -258,7 +283,7 @@ function spansOf(options: ExportOptions): { runs: string[]; spans: Span[] } {
         traceId: hash(
           `factory-trace:${options.repository}#${options.issue}:${run}`,
         ).slice(0, 32),
-        spanId: hash(`factory-span:${key}`).slice(0, 16),
+        spanId,
         name: `Factory ${str(event.phase) ?? str(event.role) ?? "model call"}`,
         kind: 1,
         startTimeUnixNano: nanos(Math.max(0, end - ms)),
@@ -267,7 +292,17 @@ function spansOf(options: ExportOptions): { runs: string[]; spans: Span[] } {
       });
     });
   }
-  return { runs, spans };
+  return { runs, spans, calls };
+}
+
+/** A selected model call: `--invocation` takes its span id, or its capture id. */
+export interface Invocation {
+  spanId: string;
+  run: string;
+  capture?: string;
+  role?: string;
+  phase?: string;
+  item?: string;
 }
 
 /** One OTLP request body per batch: at most BATCH_SPANS spans and BATCH_BYTES each. */
@@ -314,6 +349,7 @@ function batchesOf(spans: Span[]): string[] {
 function authorizationDigest(
   endpoint: string,
   content: string,
+  selection: readonly string[],
   batches: string[],
   headers: Record<string, string>,
 ): string {
@@ -325,7 +361,13 @@ function authorizationDigest(
     ),
   );
   return hash(
-    JSON.stringify([endpoint, content, batches.map(hash), headerDigest]),
+    JSON.stringify([
+      endpoint,
+      content,
+      [...selection].sort(),
+      batches.map(hash),
+      headerDigest,
+    ]),
   );
 }
 
@@ -336,6 +378,8 @@ export interface Prepared {
     runs: string[];
     content: ExportOptions["content"];
     spans: number;
+    /** The selected model calls; `--invocation` takes a span id or capture id. */
+    invocations: Invocation[];
     batches: number;
     payloadBytes: number;
     endpoint: string | null;
@@ -360,7 +404,12 @@ export function prepareExport(
   const read = otlpHeaders(environment);
   if ("refused" in read) return read.refused;
   const { headers } = read;
-  const { runs, spans } = spansOf(options);
+  const { runs, spans, calls } = spansOf(options);
+  const unknown = options.invocations?.find(
+    (id) => !calls.some((call) => call.spanId === id || call.capture === id),
+  );
+  if (unknown !== undefined)
+    return `#${options.issue} has no model call ${unknown} in the chosen runs: a preview lists each call's span id and capture id (--all-runs for every run).`;
   if (!spans.length)
     return `#${options.issue} has no model calls to export in the chosen runs: \`factory diagnostics ${options.issue} --all-runs\` shows them.`;
   const batches = batchesOf(spans);
@@ -371,6 +420,7 @@ export function prepareExport(
       runs,
       content: options.content,
       spans: spans.length,
+      invocations: calls,
       batches: batches.length,
       payloadBytes: batches.reduce((sum, b) => sum + Buffer.byteLength(b), 0),
       endpoint,
@@ -378,7 +428,13 @@ export function prepareExport(
       authorizationDigest:
         endpoint === null
           ? null
-          : authorizationDigest(endpoint, options.content, batches, headers),
+          : authorizationDigest(
+              endpoint,
+              options.content,
+              options.invocations ?? [],
+              batches,
+              headers,
+            ),
       limitations: [
         "Each model call is a root span in its run's trace; Factory invents no parentage.",
         "Ids are stable, so a repeat send may update or duplicate spans at the collector: check it before sending again.",
@@ -415,6 +471,10 @@ export function previewText(prepared: Prepared): string {
       ? "  endpoint: none (add --endpoint URL for the digest a send needs)"
       : `  endpoint: ${p.endpoint}`,
     `  headers: ${p.headerNames.join(", ") || "none"} (values never shown)`,
+    ...p.invocations.map(
+      (call) =>
+        `  ${call.spanId}${call.capture ? ` capture ${call.capture}` : ""} · ${[call.role ?? "?", call.phase].filter(Boolean).join(" ")} · ${call.item ? `item ${call.item}` : "objective"} · run ${call.run}`,
+    ),
     ...(p.authorizationDigest
       ? [
           `  send with: --send --endpoint ${p.endpoint} --authorize ${p.authorizationDigest}`,

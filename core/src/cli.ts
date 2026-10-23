@@ -304,6 +304,7 @@ const COMMANDS: Record<string, Command> = {
     flags: {
       run: "value",
       "all-runs": "switch",
+      invocation: "list",
       content: "value",
       endpoint: "value",
       output: "value",
@@ -311,7 +312,7 @@ const COMMANDS: Record<string, Command> = {
       send: "switch",
       authorize: "value",
     },
-    help: "Preview an Objective's model calls as OpenTelemetry spans (OTLP/HTTP JSON) and send nothing: --content metadata (the default; no captured text) or retained (adds the captured request and response, redacted again), --output ABSOLUTE_FILE writes the OTLP requests to a new local file, --endpoint URL (a collector's base URL, HTTPS or loopback HTTP; headers from OTEL_EXPORTER_OTLP_TRACES_HEADERS or OTEL_EXPORTER_OTLP_HEADERS, never shown) prints the digest a send needs; --send --endpoint URL --authorize DIGEST sends exactly what that preview showed, in bounded batches; the latest run, or --run ID, or --all-runs",
+    help: "Preview an Objective's model calls as OpenTelemetry spans (OTLP/HTTP JSON) and send nothing: --content metadata (the default; no captured text) or retained (adds the captured request and response, redacted again), --output ABSOLUTE_FILE writes the OTLP requests to a new local file, --endpoint URL (a collector's base URL, HTTPS or loopback HTTP; headers from OTEL_EXPORTER_OTLP_TRACES_HEADERS or OTEL_EXPORTER_OTLP_HEADERS, never shown) prints the digest a send needs; --invocation ID (repeatable) selects model calls by the span id or capture id the preview lists; --send --endpoint URL --authorize DIGEST sends exactly what that preview showed, in bounded batches; the latest run, or --run ID, or --all-runs",
     check: (args) => {
       const { flags } = args;
       const content = flags.content ?? "metadata";
@@ -503,6 +504,7 @@ function flagForm(
       endpoint: "URL",
       output: "ABSOLUTE_FILE",
       authorize: "DIGEST",
+      invocation: "ID",
     }[name] ??
     name.toUpperCase();
   return kind === "switch"
@@ -1182,7 +1184,7 @@ function scorecardCommand(
 }
 
 /**
- * `factory export-captures ISSUE [--run ID | --all-runs] [--content
+ * `factory export-captures ISSUE [--run ID | --all-runs] [--invocation ID]... [--content
  * metadata|retained] [--endpoint URL] [--output FILE] [--json]`: a
  * preview that sends nothing; `--send --endpoint URL --authorize DIGEST`
  * sends what that preview showed. Exits 0 only when every batch was fully
@@ -1217,6 +1219,9 @@ async function exportCommand(
           ? { kind: "all" }
           : { kind: "latest" },
     content: flags.content === "retained" ? "retained" : "metadata",
+    ...(args.lists.invocation
+      ? { invocations: [...new Set(args.lists.invocation)] }
+      : {}),
     ...(flags.endpoint !== undefined ? { endpoint: flags.endpoint } : {}),
     secrets: configOf(repository)?.secrets ?? [],
   });

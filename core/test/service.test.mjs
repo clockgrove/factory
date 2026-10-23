@@ -3387,6 +3387,54 @@ test("the run log: tail, follow, and status reads its end", async () => {
   );
   assert.equal((await exporting("--send", "--endpoint", endpoint)).code, 2);
   assert.equal(received.length, 0, "no send without the preview's digest");
+  // --invocation selects one call by its capture or span id; the digest binds it.
+  const one = JSON.parse(
+    (
+      await exporting(
+        "--content",
+        "retained",
+        "--endpoint",
+        endpoint,
+        "--invocation",
+        "c1",
+        "--json",
+      )
+    ).out,
+  );
+  assert.deepEqual(
+    one.invocations.map((call) => call.capture),
+    ["c1"],
+  );
+  assert.notEqual(one.authorizationDigest, digest);
+  assert.equal(
+    JSON.parse(
+      (await exporting("--invocation", shown.invocations[0].spanId, "--json"))
+        .out,
+    ).spans,
+    1,
+  );
+  assert.equal(
+    refusal(await exporting("--invocation", "nope")),
+    "export_refused",
+  );
+  assert.equal(
+    refusal(
+      await exporting(
+        "--content",
+        "retained",
+        "--send",
+        "--endpoint",
+        endpoint,
+        "--invocation",
+        "c1",
+        "--authorize",
+        digest,
+      ),
+    ),
+    "export_refused",
+    "the digest binds the selection",
+  );
+  assert.equal(received.length, 0);
   const sent = await exporting(
     "--content",
     "retained",

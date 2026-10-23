@@ -6,7 +6,8 @@ import type { Plan, WorkItem } from "./types.js";
  * item goes first (`rank`; the engine starts steps in emitted order, so
  * order is priority), which fresh starts a shared resource holds back
  * (`resourceGate`, a wait with no question), and which peer handoff notes a
- * worker gets (`peerNotes`, from accepted results only). Ported from the
+ * worker and its result review get (`peerNotes`) and final review gets
+ * (`objectiveNotes`), from accepted results only. Ported from the
  * old scheduler (src/scheduler.ts) and the old handoff note routing
  * (src/objective-knowledge.ts).
  *
@@ -178,6 +179,23 @@ export function peerNotes<Note extends RoutedNote>(
     }
   }
   return routed;
+}
+
+/**
+ * Every item's notes, verification and design notes included, in plan order
+ * of their producers: the Objective-wide set final review reads (as the old
+ * objective-review knowledge view).
+ */
+export function objectiveNotes<Note extends RoutedNote>(
+  plan: Pick<Plan, "items">,
+  notesByItem: ReadonlyMap<string, readonly Note[]>,
+): (Note & { from: string })[] {
+  return plan.items.flatMap((producer) =>
+    (notesByItem.get(producer.id) ?? []).map((note) => ({
+      ...note,
+      from: producer.id,
+    })),
+  );
 }
 
 /** Every item `item` depends on, directly or transitively. */

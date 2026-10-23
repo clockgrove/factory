@@ -10,13 +10,16 @@
  * under review. A refusal lists every refused criterion; a needs-human
  * verdict becomes a question for the operator. An invalid answer is asked
  * again once with the error; still invalid, the criteria it left undecided go
- * to the operator. Provider failures escape as `PlannerError`.
+ * to the operator. Provider failures escape as `PlannerError`. The reviewer
+ * also gets the Objective's knowledge: every item's accepted handoff notes
+ * and the bytes they cite (result.ts knowledgeRows).
  */
 import type { CandidateRecord, InputRecord } from "../media.js";
 import { coverageCriterion } from "../planning/graph.js";
 import { DESIGN_CHECKLIST } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
+import type { PeerNote } from "../work/prompt.js";
 import type { ReviewArtifactGroup } from "./artifacts.js";
 import {
   type CriterionDecision,
@@ -52,6 +55,8 @@ export function reviewObjective(input: {
   candidates?: readonly CandidateRecord[];
   /** Each merged item's read-only worker inputs. */
   inputs?: readonly InputRecord[];
+  /** Every item's accepted handoff notes (planning/schedule.ts objectiveNotes). */
+  peerNotes?: readonly PeerNote[];
   /** A private directory for the evidence root. */
   dir: string;
   /** Operator decisions; those on this tree replace the reviewer's verdict. */
@@ -144,8 +149,8 @@ function finalCriteria(plan: Plan, objective: readonly string[]): string[] {
 
 /**
  * The final-review instructions: the old objective-review prompt, trimmed to
- * what the core supplies (no receipts, bindings, retained bodies, Work Item
- * findings or design notes). They don't depend on the Objective, so every
+ * what the core supplies (no receipts, bindings, retained bodies or Work Item
+ * findings). They don't depend on the Objective, so every
  * final review shares a provider-cache prefix.
  */
 const FINAL_INSTRUCTIONS = [

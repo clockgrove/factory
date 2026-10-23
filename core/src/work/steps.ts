@@ -54,6 +54,7 @@ import {
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
 import {
+  objectiveNotes,
   peerNotes,
   rank,
   resourceGate,
@@ -1320,6 +1321,7 @@ async function reviewStep(
       ? { candidates: [{ item, sets: work.sets, selection: chosen }] }
       : {}),
     inputs: workerInputs(state, [item.id]),
+    peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
     ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
     decisions,
     delivery: position,
@@ -2165,6 +2167,7 @@ function finalReviewStep(deps: BuildDeps): Step {
               : [];
           }),
           inputs: workerInputs(state, mergedIds),
+          peerNotes: objectiveNotes(plan, acceptedNotes(state, plan)),
           sources: await pinnedSources(state, deps, signal),
           acceptance: checkObjective(
             objectiveInputs(state).shown.blocks,

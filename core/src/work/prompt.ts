@@ -73,7 +73,7 @@ export type PeerNote = HandoffNote & { from: string; commit: string };
  * with the producer's bytes, staged from the producer's result (an
  * unmerged peer's file isn't in this checkout), or not available.
  */
-interface PeerSource {
+export interface PeerSource {
   path: string;
   availability: "in-checkout" | "staged" | "too-large" | "absent";
   /** The staged copy's checkout path, read-only private staging. */
@@ -81,7 +81,7 @@ interface PeerSource {
   bytes?: number;
 }
 
-/** Bounds on the peer source bytes staged for one attempt. */
+/** Bounds on the peer source bytes staged for one attempt or one review. */
 const PEER_FILE_BYTES = 1024 * 1024;
 const PEER_TOTAL_BYTES = 8 * 1024 * 1024;
 
@@ -168,7 +168,14 @@ async function deliverSources(
     return { sources: [], assets: [], peers: notes.map(() => []) };
   await mkdir(staging, { mode: 0o700 });
   const assets = await stageInputs(input.worktree, media);
-  const peers = await stagePeerSources(input, staging, notes);
+  const peers = await stagePeerSources(
+    input.checkout,
+    input.base,
+    notes,
+    input.worktree,
+    ".factory-inputs/peer-sources",
+    input.signal,
+  );
   if (!input.item.citations.length) return { sources: [], assets, peers };
   const files = new BaseFiles(input.checkout, input.plan.base, input.signal);
   await mkdir(root, { mode: 0o700 });
@@ -210,22 +217,26 @@ async function deliverSources(
 
 /**
  * The paths each peer note cites, compared between the producer's result
- * and this worker's base: the same blob is in the checkout; a file the
- * base lacks or holds otherwise is staged read-only from the producer's
- * result under `.factory-inputs/peer-sources`, within PEER_FILE_BYTES each
- * and PEER_TOTAL_BYTES in all (as the old Objective knowledge view shipped
- * the cited bytes of a peer that hadn't merged).
+ * and `base` (a worker's base, or the reviewed commit): the same blob is in
+ * that checkout; a file `base` lacks or holds otherwise is staged read-only
+ * from the producer's result under `dir` (relative to `top`), within
+ * PEER_FILE_BYTES each and PEER_TOTAL_BYTES in all (as the old Objective
+ * knowledge view shipped the cited bytes of a peer that hadn't merged).
+ * The worker prompt and the result and final review share it.
  */
-async function stagePeerSources(
-  input: WorkPromptInput,
-  staging: string,
+export async function stagePeerSources(
+  checkout: string,
+  base: string,
   notes: readonly PeerNote[],
+  top: string,
+  dir: string,
+  signal?: AbortSignal,
 ): Promise<PeerSource[][]> {
-  const options = input.signal ? { signal: input.signal } : {};
+  const options = signal ? { signal } : {};
   const blob = async (commit: string, path: string) => {
     const listed = (
       await hostGit(
-        input.checkout,
+        checkout,
         ["ls-tree", "-z", "--long", commit, "--", path],
         options,
       )
@@ -233,7 +244,6 @@ async function stagePeerSources(
     const match = /^(100644|100755) blob ([a-f0-9]+)\s+(\d+)\t/.exec(listed);
     return match ? { oid: match[2]!, bytes: Number(match[3]) } : undefined;
   };
-  const root = join(staging, "peer-sources");
   let total = 0;
   let count = 0;
   const staged = new Map<string, string>();
@@ -246,7 +256,7 @@ async function stagePeerSources(
         sources.push({ path, availability: "absent" });
         continue;
       }
-      if ((await blob(input.base, path))?.oid === theirs.oid) {
+      if ((await blob(base, path))?.oid === theirs.oid) {
         sources.push({ path, availability: "in-checkout" });
         continue;
       }
@@ -259,15 +269,11 @@ async function stagePeerSources(
       }
       let file = staged.get(theirs.oid);
       if (!file) {
-        if (!count) await mkdir(root, { mode: 0o700 });
-        file = `.factory-inputs/peer-sources/${count++}`;
+        if (!count) await mkdir(join(top, dir), { mode: 0o700 });
+        file = `${dir}/${count++}`;
         await writeFile(
-          join(input.worktree, file),
-          await hostGit(
-            input.checkout,
-            ["cat-file", "blob", theirs.oid],
-            options,
-          ),
+          join(top, file),
+          await hostGit(checkout, ["cat-file", "blob", theirs.oid], options),
           { flag: "wx", mode: 0o400 },
         );
         staged.set(theirs.oid, file);

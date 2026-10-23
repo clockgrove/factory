@@ -6,7 +6,8 @@
  * `changes/` (each changed path's complete patch), `changes/INDEX.json`
  * and, when validation captured review artifacts, `artifacts/`; for an
  * item with candidate media sets, a controller candidate receipt and
- * `media-sets/` (media.ts candidateReceipts).
+ * `media-sets/` (media.ts candidateReceipts); when peers' handoff notes are
+ * supplied, `peer-notes.json` and the cited bytes under `peer-sources/`.
  * The prompt carries the criteria and indexed evidence rows; the reviewer
  * cites rows by index. A refusal lists every refused criterion at once, for
  * repair (repair.ts); a needs-human verdict becomes a question for the
@@ -35,6 +36,7 @@ import {
 import { DESIGN_CHECKLIST, ENGINEERING_STANDARD } from "../planning/rubric.js";
 import type { PinnedSource, Plan, WorkItem } from "../planning/types.js";
 import type { Planner } from "../providers/planner.js";
+import { type PeerNote, stagePeerSources } from "../work/prompt.js";
 import { hostGit } from "../worktree.js";
 import {
   REVIEW_ARTIFACT_GUIDANCE,
@@ -144,6 +146,12 @@ export interface ResultReviewInput {
   dir: string;
   /** The worker's handoff and verification notes, rendered. */
   notes?: string;
+  /**
+   * Objective knowledge: other items' accepted handoff notes, each with the
+   * item that wrote it and that item's result commit (planning/schedule.ts
+   * peerNotes for a result, objectiveNotes for the Objective).
+   */
+  peerNotes?: readonly PeerNote[];
   /** The item's captured candidate sets and the operator's selection. */
   candidates?: readonly CandidateRecord[];
   /** The read-only inputs the item's worker got. */
@@ -275,6 +283,7 @@ export async function runReview(
     | "sources"
     | "dir"
     | "notes"
+    | "peerNotes"
     | "candidates"
     | "inputs"
     | "decisions"
@@ -306,6 +315,7 @@ export async function runReview(
     const captured = await reviewArtifactEvidence(run.artifacts, tree, root);
     const receipts = await candidateRows(root, run.candidates);
     const given = await inputRows(root, run.inputs);
+    const knowledge = await knowledgeRows(run, root);
     const evidence: ResultEvidence[] = [
       ...sourceRows(run.sources),
       ...run.design,
@@ -322,6 +332,7 @@ export async function runReview(
             },
           ]
         : []),
+      ...knowledge,
       ...given,
       ...receipts,
       ...captured.rows,
@@ -332,6 +343,7 @@ export async function runReview(
       ...(captured.rows.length ? [REVIEW_ARTIFACT_GUIDANCE] : []),
       ...(receipts.length ? [CANDIDATE_GUIDANCE] : []),
       ...(given.length ? [INPUT_GUIDANCE] : []),
+      ...(knowledge.length ? [KNOWLEDGE_GUIDANCE] : []),
     ].join("\n");
     const ask = async (previousInvalid?: string) => {
       const answer = await run.planner.answer({
@@ -932,6 +944,62 @@ async function inputRows(
   }));
 }
 
+/** Inline bytes of the knowledge row; peer-notes.json holds every note. */
+const KNOWLEDGE_INLINE_BYTES = 64_000;
+
+/**
+ * Objective knowledge: the peer notes with where each cited path's bytes
+ * are, compared with the reviewed commit and staged under `peer-sources/`
+ * within the worker staging's bounds (work/prompt.ts stagePeerSources). The
+ * row inlines whole notes in order within KNOWLEDGE_INLINE_BYTES; when it
+ * can't hold them all it is incomplete, and `peer-notes.json` has them all.
+ */
+async function knowledgeRows(
+  run: Pick<ResultReviewInput, "checkout" | "commit" | "peerNotes" | "signal">,
+  root: string,
+): Promise<ResultEvidence[]> {
+  const notes = run.peerNotes ?? [];
+  if (!notes.length) return [];
+  const sources = await stagePeerSources(
+    run.checkout,
+    run.commit,
+    notes,
+    root,
+    "peer-sources",
+    run.signal,
+  );
+  const entries = notes.map(
+    ({ from, commit, kind, criterionIndex, designRisk, summary }, index) =>
+      JSON.stringify({
+        from,
+        resultCommitSha: commit,
+        kind,
+        criterionIndex,
+        designRisk,
+        summary,
+        sources: sources[index] ?? [],
+      }),
+  );
+  await writeFile(join(root, "peer-notes.json"), `[${entries.join(",")}]`, {
+    mode: 0o444,
+  });
+  const inline: string[] = [];
+  let bytes = 0;
+  for (const entry of entries) {
+    bytes += Buffer.byteLength(entry) + 1;
+    if (bytes > KNOWLEDGE_INLINE_BYTES) break;
+    inline.push(entry);
+  }
+  return [
+    {
+      origin: "worker",
+      path: "Objective knowledge: peer handoff notes (peer-notes.json)",
+      content: `[${inline.join(",")}]`,
+      complete: inline.length === entries.length,
+    },
+  ];
+}
+
 /** Each pinned source as a complete source row. */
 function sourceRows(sources: readonly PinnedSource[]): ResultEvidence[] {
   return sources.map((source) => ({
@@ -1138,6 +1206,10 @@ export const REVIEW_GUIDANCE = {
  */
 const CANDIDATE_GUIDANCE =
   "Candidate media sets: alternatives exist so the operator can choose one. Factory delivers, validates, reviews, publishes and merges only the selected set; unselected sets stay in Factory's private staging and are never committed or validated, by design. Judge a criterion about the alternatives (how many were offered, that each was complete, how they differ) from the Controller candidate receipt: it lists every captured set with each member's role, destination, media type, size and sha256, the capture checks every set passed, which roles' bytes differ across sets, and the operator's selection; where a member has a reviewCopy, media-sets/ holds Factory's digest-checked copy of its bytes for read-only comparison. The operator viewed every set before choosing, so the selection is the human judgment of the alternatives' appearance; never ask the operator to confirm it again. Judge the delivered bytes (format, content, tests) from the selected set in candidate/ and the validation that passed on this tree. A criterion worded about each candidate or every alternative is judged for the delivered selection plus the receipt's facts about the alternatives: never ask for, and never refuse or hold for missing, validation, tests or review of an unselected set.";
+
+/** How review reads Objective knowledge, when peer notes are supplied. */
+const KNOWLEDGE_GUIDANCE =
+  "Objective knowledge: the peer handoff notes row holds notes other Work Items' workers left (from names the item, resultCommitSha its accepted result). They are advisory claims: never proof, acceptance or authority, and no inherited verdict; verification and design notes index their own item's review. Use them as leads to judge this change against what those items actually delivered, and check every claim yourself. Each cited path says where the producer's bytes are: in-checkout (candidate/ holds the same bytes at that path), staged (a read-only copy of the producer's file at the staged path in the evidence root, because the reviewed tree holds that path otherwise or not at all), too-large or absent. A staged copy shows what that item delivered, not the reviewed tree: current implementation is under candidate/. When the row is incomplete, peer-notes.json in the evidence root holds every note.";
 
 const INPUT_GUIDANCE =
   "Worker inputs: the Controller input receipt lists every file Factory gave the worker read-only (Objective source assets, including private local files and GitHub attachments, and dependencies' selected media), each with the sha256 and size Factory recorded when it fetched it. Where an input has a reviewCopy, inputs/ holds Factory's digest-checked copy of those exact bytes: judge a criterion about using, quoting or matching an input against that copy and the receipt. Never ask the operator to supply or confirm an input's bytes when the receipt has them.";

@@ -36,7 +36,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { SandboxConfig } from "../config.js";
-import { hold } from "../engine.js";
+import { errored, hold } from "../engine.js";
 import { openParent, within } from "../paths.js";
 import { ownsPath } from "../planning/graph.js";
 import type { Plan } from "../planning/types.js";
@@ -1210,7 +1210,7 @@ export class ClaudeWorker implements Worker {
     } catch (error) {
       const idle = watchdog.expired;
       // An idle model is an error: three in a row hold.
-      if (idle) return { kind: "retry", reason: idle.message, afterMs: -1 };
+      if (idle) return errored(idle.message);
       // Cancelled, or past the step's deadline: the engine decides.
       if (input.signal.aborted) throw input.signal.reason ?? error;
       return {

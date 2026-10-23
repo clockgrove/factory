@@ -147,7 +147,7 @@ function seed(inst, issue, status = "checking", fields = {}) {
   writeFileSync(
     join(inst.objectives, `${issue}.json`),
     JSON.stringify({
-      version: 3,
+      version: 4,
       issue,
       status,
       frozen: frozen(inst),
@@ -974,7 +974,7 @@ test("switch moves an Objective held on a usage limit to the named provider", as
   const state = stateOf(inst, 41);
   assert.deepEqual(state.holds, []);
   assert.ok(
-    Object.values(state.retries).every((retry) => !retry.wait),
+    Object.values(state.retries).every((retry) => retry.wait?.kind !== "reset"),
     "every step on the limit runs now",
   );
   assert.equal(state.frozen.provider, "claude");
@@ -1441,15 +1441,15 @@ test("a deferred question asks right after the covering one; stack layers and ba
   assert.ok(started.slice(ran).includes("item:d:ci"), "d ran at once");
 });
 
-test("a replan answer is spent once applied, and the new plan starts with a fresh repair budget", async () => {
-  const { DEFAULT_LIMITS, ObjectiveRunner, hold } = await import(
+test("a replan answer is the workflow's, spent once applied, and the new plan starts with a fresh repair budget", async () => {
+  const { DEFAULT_LIMITS, ObjectiveRunner, failure } = await import(
     "../dist/engine.js"
   );
   const { newObjective } = await import("../dist/state.js");
   const order = ["check", "plan", "item:api:work", "final"];
   const seen = [];
   const state = newObjective(1, new Date());
-  // The old plan spent item api's budget, and earlier replans counted on check.
+  // The old plan spent item api's budget, and an earlier replan's history is on check.
   state.repairs = {
     "item:api:work": { count: 6, findings: ["old finding"] },
     check: { count: 6, findings: ["The operator asked to replan."] },
@@ -1464,24 +1464,23 @@ test("a replan answer is spent once applied, and the new plan starts with a fres
           {
             key,
             deadlineMs: 60_000,
-            run: async ({ answer, state: copy }) => {
+            run: async ({ answer }) => {
               if (key !== "final") return { kind: "done" };
               seen.push(answer?.answer);
-              // As work/steps.ts replanOutcome answers `replan`.
-              return answer?.answer === "replan"
-                ? {
-                    kind: "repair",
-                    finding: "The operator asked to replan.",
-                    target: "check",
-                    reset: true,
-                    clear: Object.keys(copy.done),
-                  }
-                : hold("Final validation failed.", ["retry", "replan"]);
+              return failure("Final validation failed.");
             },
           },
         ];
       },
       status: () => "building",
+      replannable: (_, key) => key === "final",
+      // As work/steps.ts replanOutcome answers `replan` after acceptance.
+      replan: (current) => ({
+        kind: "repair",
+        finding: "The operator asked to replan.",
+        target: "check",
+        clear: Object.keys(current.done),
+      }),
     },
     mkdtempSync(join(tmpdir(), "factory-replan-")),
     { write() {} },
@@ -1497,6 +1496,8 @@ test("a replan answer is spent once applied, and the new plan starts with a fres
   await settle();
   const [asked] = runner.state.holds;
   assert.equal(asked?.step, "final");
+  assert.equal(asked.cause, "failure");
+  assert.deepEqual(asked.answers, ["retry", "replan", "cancel"]);
   assert.equal(
     runner.transact(() =>
       runner.answer("replan", undefined, "op", undefined, asked.id),
@@ -1504,7 +1505,7 @@ test("a replan answer is spent once applied, and the new plan starts with a fres
     null,
   );
   await settle();
-  assert.deepEqual(seen, [undefined, "replan", undefined]);
+  assert.deepEqual(seen, [undefined, undefined], "the step never sees replan");
   assert.equal(runner.state.answers.final, undefined, "the answer is spent");
   assert.deepEqual(runner.state.repairs, {}, "the budget starts afresh");
   const [again] = runner.state.holds;

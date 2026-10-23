@@ -5,7 +5,7 @@
  */
 import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { type HoldScope, hold, type Outcome } from "../engine.js";
+import { failure, type HoldScope, hold, type Outcome } from "../engine.js";
 import type { Wait } from "../state.js";
 
 export const PLANNER_PHASES = [
@@ -66,9 +66,10 @@ export class PlannerError extends Error {
   constructor(
     readonly outcome: "retry" | "hold" | "fail",
     reason: string,
-    /** For `retry`: when to come back; -1 makes it an error (an idle model), which holds after three. */
-    readonly afterMs?: number,
-    /** For `retry`: a usage limit and its reset (CORE.md#Waits). */
+    /**
+     * For `retry`: a usage limit and its reset (CORE.md#Waits), or an
+     * error (an idle model), which holds after three.
+     */
     readonly wait?: Wait,
     /** For `hold`: its answers, when not `retry` and `cancel`. */
     readonly answers?: string[],
@@ -81,14 +82,7 @@ export class PlannerError extends Error {
 
   /** A hold whose cause is one Work Item's own: it stops that item only. */
   static itemHold(reason: string): PlannerError {
-    return new PlannerError(
-      "hold",
-      reason,
-      undefined,
-      undefined,
-      undefined,
-      "item",
-    );
+    return new PlannerError("hold", reason, undefined, undefined, "item");
   }
 }
 
@@ -98,22 +92,21 @@ type Held = Extract<Outcome, { kind: "hold" }>;
 /**
  * A classified provider failure as a step's outcome: the one rule every
  * provider's planner and workers share. A hold takes the error's scope;
- * `fail` (a turn too large for the model) is the Work Item's, worded by
- * `failed`.
+ * `fail` (a turn too large for the model) is a failure, worded by
+ * `tooLarge`: the Work Item's by default.
  */
 export function providerOutcome(
   error: PlannerError,
-  failed: (message: string) => Held = (message) =>
-    hold(`${message}. Narrow the Work Item, then answer retry.`),
+  tooLarge: (message: string) => Held = (message) =>
+    failure(`${message}. Narrow the Work Item, then answer retry.`),
 ): Retried | Held {
   if (error.outcome === "retry")
     return {
       kind: "retry",
       reason: error.message,
-      ...(error.afterMs !== undefined && { afterMs: error.afterMs }),
       ...(error.wait && { wait: error.wait }),
     };
-  if (error.outcome === "fail") return failed(error.message);
+  if (error.outcome === "fail") return tooLarge(error.message);
   const held = hold(error.message, error.answers);
   return error.scope === "objective" ? { ...held, scope: "objective" } : held;
 }

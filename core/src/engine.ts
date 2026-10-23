@@ -6,6 +6,7 @@ import {
   type Answer,
   type Frozen,
   type Hold,
+  type HoldCause,
   type ObjectiveState,
   type ObjectiveStatus,
   type Retry,
@@ -24,14 +25,14 @@ export type Outcome =
       keep?: Record<string, unknown>;
     }
   /**
-   * Try again. `afterMs: -1` is an error (an escaped exception, a missed
-   * deadline, an idle model or an invalid answer): three in a row hold.
-   * `progress`: the step kept what it did (`keep`) and goes on at once (a
-   * continuation, such as collecting captured media): not a wait, so it
-   * ends any run of retries, and no note or wait clock counts it.
-   * An attempt the service's death interrupted is never an outcome: it
-   * runs again (see `ObjectiveRunner.tick`).
-   * Anything else is a wait, classed by `wait` (CORE.md#Waits).
+   * Try again: a wait, classed by `wait` (CORE.md#Waits); an `error`
+   * (`errored`) counts toward `maxErrors`. `afterMs` sets when it comes
+   * back, else the backoff does. `progress`: the step kept what it did
+   * (`keep`) and goes on at once (a continuation, such as collecting
+   * captured media): not a wait, so it ends any run of retries, and no
+   * note or wait clock counts it. An attempt the service's death
+   * interrupted is never an outcome: it runs again (see
+   * `ObjectiveRunner.tick`).
    */
   | {
       kind: "retry";
@@ -39,6 +40,8 @@ export type Outcome =
       afterMs?: number;
       progress?: boolean;
       wait?: Wait;
+      /** A wait that becomes a question after a while (see `HoldAfter`). */
+      holdAfter?: HoldAfter;
       keep?: Record<string, unknown>;
     }
   | {
@@ -48,10 +51,18 @@ export type Outcome =
       recommended: string;
       /** What the question stops; absent: `item` (see `HoldScope`). */
       scope?: HoldScope;
+      /** Absent: `question` (see `HoldCause`). */
+      cause?: HoldCause;
+      /** Answers that need text after them (see `Hold.needsText`). */
+      needsText?: string[];
+      /**
+       * Repair number `repair` of `target` stops counting against its
+       * budget (`ObjectiveState.repairs`): asking about it was Factory's
+       * cost, not the work's. Applying it twice is harmless.
+       */
+      free?: { target: string; repair: number };
       keep?: Record<string, unknown>;
     }
-  /** The step can't succeed as planned. */
-  | { kind: "fail"; reason: string }
   /**
    * The whole state is replaced (`factory reset`'s rebuild step, reset.ts):
    * the rebuilt Objective, or, with `withdraw`, the record is withdrawn as
@@ -77,14 +88,29 @@ export type Outcome =
       finding: string;
       target: string;
       clear: string[];
+      /** An operator's rerun (not a fix): it adds no repair to the budget. */
+      uncounted?: true;
       /**
-       * A new start, not a fix (an operator's `replan`): the cleared steps'
-       * repair history goes with them, and it isn't counted against the
-       * target's budget.
+       * Answers the target step takes besides `retry` and `cancel`, offered
+       * when its repair budget is spent; any of them allows one more.
        */
-      reset?: boolean;
+      exhausted?: string[];
       keep?: Record<string, unknown>;
     };
+
+/**
+ * A wait that becomes a question once it has gone on `ms`: from `since`
+ * when given (a push's time), else from when the step's run of retries of
+ * this class began. GitHub lagging behind what Factory did, and a check
+ * that never registers, are asked about this way.
+ */
+export interface HoldAfter {
+  ms: number;
+  question: string;
+  /** Absent: `retry` and `cancel`. */
+  answers?: string[];
+  since?: string;
+}
 
 /**
  * What a question stops (CORE.md#Holds and answers). `item`: a Work Item
@@ -122,6 +148,22 @@ export function hold(
   return { kind: "hold", question, answers, recommended };
 }
 
+/**
+ * The step can't succeed as it is: a hold with the cause `failure`, which
+ * also offers `replan` where the workflow can plan again.
+ */
+export function failure(
+  question: string,
+  answers = ["retry", "cancel"],
+): Extract<Outcome, { kind: "hold" }> {
+  return { ...hold(question, answers), cause: "failure" };
+}
+
+/** An error: it retries with backoff, and `maxErrors` in a row hold. */
+export function errored(reason: string): Extract<Outcome, { kind: "retry" }> {
+  return { kind: "retry", reason, wait: { kind: "error" } };
+}
+
 /** The outcome, with a question in it made the whole Objective's (see `HoldScope`). */
 export function objectiveWide<T extends Outcome>(outcome: T): T {
   return outcome.kind === "hold" ? { ...outcome, scope: "objective" } : outcome;
@@ -147,14 +189,43 @@ export interface Step {
   readonly deadlineMs: number;
   /** A host-wide limit this step counts against (see `HostResource`). */
   readonly resource?: HostResource;
+  /**
+   * Cleanup after the end (cancel's): it never asks. Any outcome but
+   * `done` retries in the background with the usual backoff.
+   */
+  readonly neverAsks?: true;
+  /**
+   * The answer that gets past a model call too large for the model
+   * (`Workflow.outcomeOf`): `replan` by default; `refuse` for a step whose
+   * input the operator can reject instead.
+   */
+  readonly redo?: "replan" | "refuse";
   run(context: StepContext): Promise<Outcome>;
 }
 
-/** What to do next. Both functions are pure functions of the state. */
+/** What to do next. Every function is a pure function of its input. */
 export interface Workflow {
   steps(state: ObjectiveState): Step[];
   /** The status of a state that isn't holding or terminal. */
   status(state: ObjectiveState): ObjectiveStatus;
+  /**
+   * An error that escaped `step` as its outcome: the one map from
+   * failures (GitHub's, a provider's, Git's, the host's) to waits and
+   * holds (CORE.md#Waits). Absent, or undefined: an error (`errored`).
+   */
+  outcomeOf?(error: unknown, step: Step): Outcome | undefined;
+  /**
+   * Whether `replan` can answer a question of step `key`: the engine then
+   * offers it on the step's failures, and applies `replan` itself.
+   */
+  replannable?(state: ObjectiveState, key: string): boolean;
+  /**
+   * The operator answered `replan` (`answer`) to step `key`'s question:
+   * what happens instead of running the step. A `repair` here is a new
+   * start, not a fix: the cleared steps' repair history goes with them,
+   * and it counts against no budget.
+   */
+  replan?(state: ObjectiveState, key: string, answer: Answer): Outcome;
   /**
    * The configuration as an Objective freezes it now, per configured
    * provider, for the `switch NAME` and `adopt` answers.
@@ -253,8 +324,7 @@ export const DEFAULT_LIMITS: EngineLimits = {
   concurrency: 2,
 };
 
-const ERROR_ANSWERS = ["retry", "cancel"];
-/** Answers the engine applies itself, for its own wait questions. */
+/** Answers the engine applies itself. */
 const WAIT = "wait";
 const SWITCH = "switch";
 const ADOPT = "adopt";
@@ -263,6 +333,7 @@ const ADOPT = "adopt";
  * set by the question's step): `adopt` freezes only that one.
  */
 export const ADOPTS = "config:adopts";
+const REPLAN = "replan";
 
 interface Running {
   token: number;
@@ -278,9 +349,17 @@ interface Running {
  */
 export class ObjectiveRunner {
   private readonly running = new Map<string, Running>();
+  /** Every started attempt until it ends, aborted ones too (see `stop`). */
+  private readonly inFlight = new Set<Promise<unknown>>();
   private nextToken = 1;
   /** Replaced by a new run of the same Objective: it never saves again. */
   private stopped = false;
+  /**
+   * The replaced run's steps haven't stopped yet (`after`): no step that
+   * isn't cleanup after cancel starts, so nothing reads GitHub while an
+   * effect of theirs may still land.
+   */
+  private waiting = false;
   /** Effects outside the state, run only once the change is saved. */
   private afterSave: (() => void)[] = [];
 
@@ -330,6 +409,22 @@ export class ObjectiveRunner {
   /** Whether this Objective has steps to run: cleanup after cancel counts. */
   get hasWork(): boolean {
     return this.busy || this.workflow.steps(this.state).length > 0;
+  }
+
+  /** Terminal, with nothing left to run. */
+  get settled(): boolean {
+    return settled(this.state, this.workflow, this.busy);
+  }
+
+  /**
+   * Start no step until `stopped` (a replaced run's `stop`) resolves,
+   * except cleanup after cancel: a cancel never waits.
+   */
+  after(stopped: Promise<void>): void {
+    this.waiting = true;
+    void stopped.then(() => {
+      this.waiting = false;
+    });
   }
 
   /**
@@ -385,17 +480,12 @@ export class ObjectiveRunner {
         if (!this.heldBy(step.key))
           this.transact(() => {
             delete this.state.asking[step.key];
-            this.hold(
-              step.key,
-              asking.question,
-              asking.answers,
-              asking.recommended,
-              asking.scope,
-            );
+            this.hold(step.key, asking);
           });
         continue;
       }
       if (this.running.size >= this.limits.concurrency) return;
+      if (this.waiting && !step.neverAsks) return;
       // An operator's pause or drain (service.ts `allowed`) starts nothing
       // new; an interrupted attempt still resumes.
       if (!this.state.attempts[step.key] && !allow(step.key)) continue;
@@ -405,6 +495,22 @@ export class ObjectiveRunner {
       else {
         const retry = this.state.retries[step.key];
         if (retry && Date.parse(retry.nextAt) > now) continue;
+      }
+      // `replan` is the workflow's where it can plan again, never the
+      // step's: the plan changes, so the steps do too.
+      const answer = this.state.answers[step.key];
+      if (
+        answer?.answer === REPLAN &&
+        this.workflow.replan &&
+        this.workflow.replannable?.(this.state, step.key)
+      ) {
+        this.apply(
+          step.key,
+          this.workflow.replan(structuredClone(this.state), step.key, answer),
+          true,
+        );
+        crashPoint(`engine:${step.key}:replan-applied`);
+        return;
       }
       if (step.resource && !hostLimits.acquire(step.resource)) continue;
       try {
@@ -441,27 +547,20 @@ export class ObjectiveRunner {
       timer = setTimeout(
         () => {
           controller.abort(new Error("deadline"));
-          resolve({ kind: "retry", reason: "deadline", afterMs: -1 });
+          resolve(errored("deadline"));
         },
         Math.min(step.deadlineMs, this.limits.maxDeadlineMs ?? Infinity),
       );
     });
     const run = (async () => step.run(context))().catch(
       (error: unknown): Outcome =>
-        // A full disk needs a person; retrying can't free it.
-        (error as NodeJS.ErrnoException | null)?.code === "ENOSPC"
-          ? objectiveWide(
-              hold(
-                `The service host's disk is full (${errorMessage(error)}). Free space, then answer retry; or cancel.`,
-              ),
-            )
-          : {
-              kind: "retry",
-              reason: `error: ${errorMessage(error)}`,
-              afterMs: -1,
-            },
+        this.workflow.outcomeOf?.(error, step) ??
+        errored(`error: ${errorMessage(error)}`),
     );
-    void Promise.race([run, deadline]).then((outcome) => {
+    const ended = Promise.race([run, deadline]);
+    this.inFlight.add(ended);
+    void ended.then((outcome) => {
+      this.inFlight.delete(ended);
       clearTimeout(timer);
       // Released once per start, even when cancel already dropped the step.
       if (step.resource) hostLimits.release(step.resource);
@@ -483,17 +582,13 @@ export class ObjectiveRunner {
   }
 
   /**
-   * Apply one outcome and save. `afterMs: -1` marks an escaped error or a
-   * missed deadline, which counts toward `maxErrors`; other retries are
-   * waits (see `retry`). Throws only if the save fails, after putting the
-   * state back as it is on disk.
+   * Apply one outcome and save; `replan`: the workflow's answer to an
+   * operator's `replan` (`Workflow.replan`). Throws only if the save
+   * fails, after putting the state back as it is on disk.
    */
-  apply(key: string, outcome: Outcome): void {
-    const terminal = TERMINAL.includes(this.state.status);
-    if (
-      terminal &&
-      !this.workflow.steps(this.state).some((s) => s.key === key)
-    ) {
+  apply(key: string, outcome: Outcome, replan = false): void {
+    const step = this.workflow.steps(this.state).find((s) => s.key === key);
+    if (TERMINAL.includes(this.state.status) && !step) {
       // A step from before cancel: drop its outcome and its open attempt.
       this.log.write(this.state.issue, {
         step: key,
@@ -507,7 +602,9 @@ export class ObjectiveRunner {
       return;
     }
     crashPoint(`engine:${key}:before-apply`);
-    this.transact(() => this.applyChange(key, outcome));
+    this.transact(() =>
+      this.applyChange(key, outcome, replan, step?.neverAsks === true),
+    );
     this.log.write(this.state.issue, {
       step: key,
       event: "outcome",
@@ -517,7 +614,12 @@ export class ObjectiveRunner {
     crashPoint(`engine:${key}:applied`);
   }
 
-  private applyChange(key: string, outcome: Outcome): void {
+  private applyChange(
+    key: string,
+    outcome: Outcome,
+    replan: boolean,
+    neverAsks: boolean,
+  ): void {
     if (outcome.kind === "replace") {
       // The rebuilt record stands whole; the steps of the one it replaces
       // are gone with it.
@@ -539,7 +641,7 @@ export class ObjectiveRunner {
         if (value === null) delete state.kept[fact];
         else state.kept[fact] = value;
     }
-    if (TERMINAL.includes(state.status) && outcome.kind !== "done") {
+    if (neverAsks && outcome.kind !== "done") {
       // Cleanup after the end never asks and never blocks: it retries in
       // the background with the usual backoff.
       const previous = state.retries[key];
@@ -573,21 +675,12 @@ export class ObjectiveRunner {
         else this.retry(key, outcome);
         break;
       case "hold":
-        this.hold(
-          key,
-          outcome.question,
-          outcome.answers,
-          outcome.recommended,
-          outcome.scope,
-        );
-        break;
-      case "fail":
-        this.hold(
-          key,
-          `Step ${key} failed: ${outcome.reason}`,
-          ERROR_ANSWERS,
-          "retry",
-        );
+        if (outcome.free) {
+          const repair = state.repairs[outcome.free.target];
+          if (repair && !repair.free?.includes(outcome.free.repair))
+            repair.free = [...(repair.free ?? []), outcome.free.repair];
+        }
+        this.hold(key, outcome);
         break;
       case "repair": {
         delete state.retries[key];
@@ -607,7 +700,9 @@ export class ObjectiveRunner {
         ))
           this.close(moot);
         state.repairs ??= {};
-        if (outcome.reset) {
+        // A replan starts again: the cleared steps' history goes, and
+        // nothing counts against a budget (`check` included).
+        if (replan) {
           for (const cleared of [key, ...outcome.clear])
             delete state.repairs[cleared];
           break;
@@ -616,22 +711,32 @@ export class ObjectiveRunner {
           count: 0,
           findings: [],
         };
-        repair.count += 1;
+        if (!outcome.uncounted) repair.count += 1;
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
         state.repairs[outcome.target] = repair;
-        // Over budget: ask, on the step that would repair. Each `retry` allows one more.
+        // Over budget: ask, on the step that would repair. Any answer but
+        // `replan` allows one more.
+        const charged = repair.count - (repair.free?.length ?? 0);
+        const answered = state.answers[outcome.target]?.answer;
         if (
-          repair.count > this.limits.maxRepairs &&
-          state.answers[outcome.target]?.answer !== "retry"
-        )
+          !outcome.uncounted &&
+          charged > this.limits.maxRepairs &&
+          (answered === undefined || answered === REPLAN)
+        ) {
+          const answers = [
+            "retry",
+            ...(outcome.exhausted ?? []).filter((a) => a !== "retry"),
+            "cancel",
+          ];
           this.hold(
             outcome.target,
-            `${outcome.target} has been repaired ${repair.count - 1} times and still fails:\n\n${outcome.finding}\n\n\`retry\` allows one more repair.`,
-            ERROR_ANSWERS,
-            "retry",
-            undefined,
+            failure(
+              `${outcome.target} has been repaired ${charged - 1} times and still fails:\n\n${outcome.finding}\n\n${answers.length > 2 ? "Any answer but cancel" : "`retry`"} allows one more repair.`,
+              answers,
+            ),
             true,
           );
+        }
         break;
       }
     }
@@ -647,7 +752,8 @@ export class ObjectiveRunner {
    * a long gate never spends the transient budget. Times are wall-clock
    * times saved in the state, so a restart doesn't reset a budget and a
    * suspended host doesn't spend it twice: the question comes only after
-   * the step ran again and still had to wait.
+   * the step ran again and still had to wait. A `holdAfter` asks its own
+   * question once its time has passed, whatever the class.
    */
   private retry(
     key: string,
@@ -656,7 +762,7 @@ export class ObjectiveRunner {
     const state = this.state;
     const now = this.now().getTime();
     const wait = outcome.wait;
-    const isError = outcome.afterMs === -1;
+    const isError = wait?.kind === "error";
     const before = state.retries[key];
     // The run of retries this one continues, if it is of the same class.
     const previous =
@@ -672,18 +778,14 @@ export class ObjectiveRunner {
       previous?.grantedUntil !== undefined &&
       now < Date.parse(previous.grantedUntil);
     let nextAt =
-      outcome.afterMs !== undefined && outcome.afterMs >= 0
-        ? now + outcome.afterMs
-        : now + backoff;
-    let question:
-      | { text: string; answers: string[]; scope?: HoldScope }
-      | undefined;
-    if (isError) {
+      outcome.afterMs !== undefined ? now + outcome.afterMs : now + backoff;
+    let question: Extract<Outcome, { kind: "hold" }> | undefined;
+    const after = outcome.holdAfter;
+    if (after && now - Date.parse(after.since ?? since) >= after.ms)
+      question = hold(after.question, after.answers);
+    else if (isError) {
       if (count >= this.limits.maxErrors)
-        question = {
-          text: `Step ${key} keeps failing (${outcome.reason}).`,
-          answers: ERROR_ANSWERS,
-        };
+        question = failure(`Step ${key} keeps failing (${outcome.reason}).`);
     } else if (wait?.kind === "reset") {
       const at = wait.at ? Date.parse(wait.at) : Number.NaN;
       // A reset already past (clock skew) still backs off: never a hot loop.
@@ -692,8 +794,10 @@ export class ObjectiveRunner {
         const others = this.otherProviders();
         const named = others.map((name) => `\`${name}\``).join(", ");
         question = {
-          text: `${outcome.reason}\n\nThe limit resets ${Number.isFinite(at) ? `at ${new Date(at).toISOString()}` : "at a time it didn't say"}, more than ${hours(this.limits.maxWaitMs)} away. \`${WAIT}\` keeps waiting until it resets${others.length === 1 ? `; \`${SWITCH}\` runs this Objective on provider ${named} instead` : others.length ? `; \`${SWITCH} NAME\` runs this Objective on another configured provider: ${named}` : ""}; or cancel.`,
-          answers: [WAIT, ...(others.length ? [SWITCH] : []), "cancel"],
+          ...hold(
+            `${outcome.reason}\n\nThe limit resets ${Number.isFinite(at) ? `at ${new Date(at).toISOString()}` : "at a time it didn't say"}, more than ${hours(this.limits.maxWaitMs)} away. \`${WAIT}\` keeps waiting until it resets${others.length === 1 ? `; \`${SWITCH}\` runs this Objective on provider ${named} instead` : others.length ? `; \`${SWITCH} NAME\` runs this Objective on another configured provider: ${named}` : ""}; or cancel.`,
+            [WAIT, ...(others.length ? [SWITCH] : []), "cancel"],
+          ),
           // A limit is the account's, not the step's: one question for all.
           scope: "objective",
         };
@@ -705,10 +809,10 @@ export class ObjectiveRunner {
     )
       // A human gate (an approval, a required review) is never timed out:
       // the display shows it and a reminder follows a day later.
-      question = {
-        text: `Step ${key} has been retrying since ${since}, for more than ${hours(this.limits.maxWaitMs)}. It began with: ${(previous?.cause ?? outcome.reason).slice(0, 500)}\n\nLast error: ${outcome.reason.slice(0, 500)}\n\n\`${WAIT}\` keeps retrying for another ${hours(this.limits.maxWaitMs)}; \`retry\` tries again now; or cancel.`,
-        answers: [WAIT, "retry", "cancel"],
-      };
+      question = hold(
+        `Step ${key} has been retrying since ${since}, for more than ${hours(this.limits.maxWaitMs)}. It began with: ${(previous?.cause ?? outcome.reason).slice(0, 500)}\n\nLast error: ${outcome.reason.slice(0, 500)}\n\n\`${WAIT}\` keeps retrying for another ${hours(this.limits.maxWaitMs)}; \`retry\` tries again now; or cancel.`,
+        [WAIT, "retry", "cancel"],
+      );
     const record: Retry = {
       count,
       attempts,
@@ -720,14 +824,7 @@ export class ObjectiveRunner {
       ...(granted ? { grantedUntil: previous.grantedUntil } : {}),
     };
     state.retries[key] = record;
-    if (question)
-      this.hold(
-        key,
-        question.text,
-        question.answers,
-        question.answers[0]!,
-        question.scope,
-      );
+    if (question) this.hold(key, question);
   }
 
   /**
@@ -736,15 +833,12 @@ export class ObjectiveRunner {
    * again. Cleanup after the end never asks: the crash loop's delay covers it.
    */
   suspect(key: string, question: string): void {
-    if (
-      TERMINAL.includes(this.state.status) ||
-      this.running.has(key) ||
-      !this.state.attempts[key]
-    )
+    const step = this.workflow.steps(this.state).find((s) => s.key === key);
+    if (step?.neverAsks || this.running.has(key) || !this.state.attempts[key])
       return;
     this.transact(() => {
       delete this.state.attempts[key];
-      this.hold(key, question, ERROR_ANSWERS, "retry", undefined, true);
+      this.hold(key, failure(question), true);
     });
     this.log.write(this.state.issue, { step: key, event: "suspect" });
   }
@@ -778,9 +872,11 @@ export class ObjectiveRunner {
    * queued a finished Objective again): abort its steps, and never save
    * again, so only the new run writes the Objective's file.
    */
-  stop(): void {
+  stop(): Promise<void> {
     this.stopped = true;
     this.abort([...this.running.keys()], "replaced");
+    // Each ends by its deadline at the latest.
+    return Promise.allSettled([...this.inFlight]).then(() => undefined);
   }
 
   /**
@@ -793,18 +889,18 @@ export class ObjectiveRunner {
    * Objective-wide cause the answer fixed asks nothing). A question that
    * running the step again wouldn't ask (`saved`: a repair over budget, a
    * crash-loop suspect) is saved in `asking` instead, and asked before
-   * the step runs (`tick`).
+   * the step runs (`tick`). A failure offers `replan` where the workflow
+   * can plan again.
    */
   private hold(
     key: string,
-    question: string,
-    answers: string[],
-    recommended: string,
-    scope?: HoldScope,
+    asked: Omit<Extract<Outcome, { kind: "hold" }>, "kind" | "keep" | "free">,
     saved = false,
   ): void {
     const state = this.state;
     const now = this.now().toISOString();
+    const { question, scope, needsText } = asked;
+    const cause = asked.cause ?? "question";
     const item = scope === "objective" ? undefined : itemOf(key);
     const open = state.holds.find(
       (hold) =>
@@ -814,9 +910,10 @@ export class ObjectiveRunner {
       if (saved)
         state.asking[key] = {
           question,
-          answers,
-          recommended,
+          answers: asked.answers,
+          recommended: asked.recommended,
           ...(scope ? { scope } : {}),
+          ...(cause === "failure" ? { cause } : {}),
         };
       else {
         const retry = state.retries[key];
@@ -824,7 +921,15 @@ export class ObjectiveRunner {
       }
       return;
     }
-    const all = answers.includes("cancel") ? answers : [...answers, "cancel"];
+    const all = asked.answers.includes("cancel")
+      ? [...asked.answers]
+      : [...asked.answers, "cancel"];
+    if (
+      cause === "failure" &&
+      !all.includes(REPLAN) &&
+      this.workflow.replannable?.(state, key)
+    )
+      all.splice(all.indexOf("cancel"), 0, REPLAN);
     state.holds = [
       ...state.holds.filter((hold) => hold !== open),
       {
@@ -833,7 +938,11 @@ export class ObjectiveRunner {
         ...(item !== undefined ? { item } : {}),
         question,
         answers: all,
-        recommended: all.includes(recommended) ? recommended : all[0]!,
+        recommended: all.includes(asked.recommended)
+          ? asked.recommended
+          : all[0]!,
+        cause,
+        ...(needsText?.length ? { needsText } : {}),
         askedAt: now,
       },
     ];
@@ -906,6 +1015,11 @@ export class ObjectiveRunner {
       return refused(
         "invalid_answer",
         `"${answer}" isn't an answer to question ${hold.id}. Answers: ${hold.answers.join(", ")}.`,
+      );
+    if (hold.needsText?.includes(answer) && !text?.trim())
+      return refused(
+        "invalid_answer",
+        `\`${answer}\` needs text after it, for example \`/factory ${answer} <your text>\`.`,
       );
     let frozen: Frozen | undefined;
     if (answer === SWITCH) {
@@ -1056,12 +1170,7 @@ export class ObjectiveRunner {
     this.state.attempts = {};
     this.state.retries = {};
     this.state.asking = {};
-    this.state.answers.cancel = {
-      holdId: "",
-      answer: "cancel",
-      by,
-      at: this.now().toISOString(),
-    };
+    this.state.ended = { at: this.now().toISOString(), by };
     // Stop running steps only once the cancel is saved.
     this.afterSave.push(() => {
       this.abort([...this.running.keys()], "cancelled");
@@ -1109,7 +1218,7 @@ export class ObjectiveRunner {
   /** The refusal for a finished Objective: only re-queuing runs it again. */
   private finishedRefusal(): RequestResult | null {
     const status = this.state.status;
-    return status === "done" || status === "failed"
+    return status === "done"
       ? refused(
           "objective_finished",
           `#${this.state.issue} has already finished (${status}).`,
@@ -1120,7 +1229,7 @@ export class ObjectiveRunner {
   private save(): void {
     this.state.updatedAt = this.now().toISOString();
     if (TERMINAL.includes(this.state.status))
-      this.state.endedAt ??= this.state.updatedAt;
+      this.state.ended ??= { at: this.state.updatedAt };
     saveState(this.dir, this.state);
   }
 }
@@ -1162,7 +1271,23 @@ function sameLimit(a: Retry, b: Retry): boolean {
 
 /** A retry's class: a reset, a gate, or an unknown cause (errors included). */
 function waitClass(wait: Wait | undefined): string {
-  return wait?.kind ?? "unknown";
+  return !wait || wait.kind === "error" ? "unknown" : wait.kind;
+}
+
+/**
+ * Terminal, with nothing left to run: cleanup after cancel is done and no
+ * step runs (`busy`; on disk, an open attempt).
+ */
+export function settled(
+  state: ObjectiveState,
+  workflow: Workflow,
+  busy = Object.keys(state.attempts).length > 0,
+): boolean {
+  return (
+    TERMINAL.includes(state.status) &&
+    !busy &&
+    workflow.steps(state).length === 0
+  );
 }
 
 function hours(ms: number): string {

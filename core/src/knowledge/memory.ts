@@ -320,8 +320,8 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
       digests: {},
     });
   for (const [step, answer] of Object.entries(state.answers)) {
-    // A bare retry or cancel says nothing a later plan can use.
-    if (!answer.text && ["retry", "cancel"].includes(answer.answer)) continue;
+    // A bare retry says nothing a later plan can use.
+    if (!answer.text && answer.answer === "retry") continue;
     const { item } = scope(step);
     records.push({
       kind: "decision",
@@ -373,7 +373,7 @@ function episodeRecord(
     objective: state.issue,
     title: title ?? null,
     outcome: state.status,
-    endedAt: state.endedAt ?? state.updatedAt,
+    endedAt: state.ended?.at ?? state.updatedAt,
     sourceLinks: links,
     items,
     objectiveRepairs: Object.entries(state.repairs)

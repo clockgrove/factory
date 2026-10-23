@@ -71,7 +71,6 @@ function modelHold(why: string, listed: boolean): PlannerError {
     "hold",
     `${why}. Set this provider's model to one the Copilot login can use and restart the service, then answer \`switch NAME\` with this provider's name to run on its new settings, or with another configured provider's name;${listed ? " answer `retry` once the login can use the model (an admin enabled it), which checks the model list again before any request;" : ""} or cancel.`,
     undefined,
-    undefined,
     listed ? ["retry", "switch", "cancel"] : ["switch", "cancel"],
   );
 }
@@ -149,13 +148,13 @@ function sessionFailure(
         )
       : // A spent premium-request quota resets at a time Copilot doesn't
         // say: Factory asks whether to wait or switch (CORE.md#Waits).
-        new PlannerError("retry", `Copilot quota: ${shown}`, undefined, {
+        new PlannerError("retry", `Copilot quota: ${shown}`, {
           kind: "reset",
           provider: "copilot",
         });
   if (data.errorType === "rate_limit")
     return data.errorCode === "user_weekly_rate_limited"
-      ? new PlannerError("retry", `Copilot weekly limit: ${shown}`, undefined, {
+      ? new PlannerError("retry", `Copilot weekly limit: ${shown}`, {
           kind: "reset",
           provider: "copilot",
         })

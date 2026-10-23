@@ -13,7 +13,7 @@
  * repair (repair.ts); a needs-human verdict becomes a question for the
  * operator. An invalid answer is asked again once with the error; still
  * invalid, the criteria it left undecided go to the operator. Provider
- * failures escape as `PlannerError` for the step's `guarded`.
+ * failures escape as `PlannerError` to the engine (workflow.ts `errorOutcome`).
  */
 import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";

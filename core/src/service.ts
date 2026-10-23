@@ -56,8 +56,8 @@ import {
   saveState,
   TERMINAL,
 } from "./state.js";
-import { built, RERUN, startedItems } from "./work/steps.js";
-import { objectiveWorkflow } from "./workflow.js";
+import { built, RERUN, RERUN_CLEANUP, startedItems } from "./work/steps.js";
+import { objectiveWorkflow, started } from "./workflow.js";
 
 export interface ServeOptions {
   paths: Paths;
@@ -104,13 +104,9 @@ export interface StateObserver {
 const OBSERVE_BACKOFF_MS = 1000;
 const OBSERVE_DEADLINE_MS = 5 * 60 * 1000;
 
-/** Terminal with nothing left to run. */
-const settled = (runner: ObjectiveRunner): boolean =>
-  TERMINAL.includes(runner.state.status) && !runner.hasWork;
-
 /** What the observer last saw: the status and whether it had settled. */
 const observeMark = (runner: ObjectiveRunner): string =>
-  `${runner.state.status}:${settled(runner)}`;
+  `${runner.state.status}:${runner.settled}`;
 const OBSERVE_MAX_BACKOFF_MS = 5 * 60 * 1000;
 /** One run's observations, live or late, share this job key. */
 const observeKey = (state: ObjectiveState): string =>
@@ -235,7 +231,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     // may have died before its end was recorded, or before its file moved.
     if (
       runner &&
-      settled(runner) &&
+      runner.settled &&
       (options.sync?.synced(runner.state) ?? true) &&
       !options.observer
     )
@@ -420,7 +416,7 @@ export async function serve(options: ServeOptions): Promise<number> {
       // replies and shows it cancelled.
       const state = newObjective(request.issue, new Date());
       state.status = "cancelled";
-      state.endedAt = state.updatedAt;
+      state.ended = { at: state.updatedAt, by: stored.by };
       state.appliedRequests = [{ id: stored.id, message: "ok" }];
       if (broken.github) state.modules.github = broken.github;
       saveState(paths.objectives, state);
@@ -534,16 +530,18 @@ export async function serve(options: ServeOptions): Promise<number> {
       unreadable.get(issue)?.github,
       options.frozen,
     );
-    // Its steps are stopped, not waited for: an effect already in flight
-    // (a merge) may land after the rebuild read GitHub (deferred to the
-    // engine outcomes rework, W1-03).
-    known?.stop();
+    // Its steps are stopped, and the rebuild starts only once they have
+    // ended (each by its deadline at the latest), so no effect of theirs
+    // (a merge) lands after the rebuild read GitHub. A cancel meanwhile
+    // replaces the reset at once.
+    const stopped = known?.stop();
     runners.delete(issue);
     unreadable.delete(issue);
     options.sync?.forget(issue);
     saveState(paths.objectives, state);
     crashPoint("reset:recorded");
-    open(state);
+    const runner = open(state);
+    if (stopped) runner.after(stopped);
     log.write(issue, { event: "reset-started", by: stored.by, hadState });
     return undefined;
   };
@@ -567,7 +565,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     release(runner.state);
     removeState(paths.objectives, issue);
     crashPoint("serve:withdrawn");
-    runner.stop();
+    void runner.stop();
     runners.delete(issue);
     options.sync?.withdrawn(runner.state);
     log.write(issue, { event: "withdrawn" });
@@ -595,7 +593,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     const ordered = [...runners.values()].sort(
       (a, b) =>
         Number(b.busy) - Number(a.busy) ||
-        Number(started(b)) - Number(started(a)) ||
+        Number(started(b.state)) - Number(started(a.state)) ||
         queueOrder(a) - queueOrder(b) ||
         a.state.issue - b.state.issue,
     );
@@ -675,7 +673,7 @@ export async function serve(options: ServeOptions): Promise<number> {
       if (observed.get(state.issue) === mark) continue;
       // The mark is kept only once the observation succeeded, and only
       // while this run is the issue's (a released one goes on late).
-      const end = settled(runner);
+      const end = runner.settled;
       observing.run(
         state.issue,
         observeKey(state),
@@ -714,18 +712,14 @@ export async function serve(options: ServeOptions): Promise<number> {
         const previous = find(issue);
         if (unreadable.has(issue)) return; // never over an unreadable file
         // Never over an unfinished run, nor one whose cleanup still runs.
-        if (
-          previous &&
-          (!TERMINAL.includes(previous.state.status) || previous.hasWork)
-        )
-          return;
+        if (previous && !previous.settled) return;
         // A run again after the operator queued a finished one. The observer
         // ends the old run first (its episode, its playbook pin), now or in
         // the background.
         if (previous) release(previous.state);
         // The old run stops for good (its steps, its saves, its sync jobs)
         // before the new one exists, so only one run ever writes the file.
-        previous?.stop();
+        void previous?.stop();
         options.sync?.forget(issue);
         const state = newObjective(issue, new Date(), options.frozen);
         state.modules.github = github;
@@ -750,7 +744,7 @@ export async function serve(options: ServeOptions): Promise<number> {
         if (
           !runner ||
           TERMINAL.includes(runner.state.status) ||
-          !unstarted(runner.state)
+          started(runner.state)
         )
           return false;
         // Its check or a re-run's cleanup still runs: it goes once that
@@ -775,7 +769,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     for (const runner of [...runners.values()]) {
       const issue = runner.state.issue;
       if (
-        settled(runner) &&
+        runner.settled &&
         (options.sync?.idle(issue) ?? true) &&
         !observing.active(observeKey(runner.state))
       )
@@ -919,8 +913,6 @@ function gated(runner: ObjectiveRunner, workflow: Workflow): boolean {
   );
 }
 
-const CLEANUP = "rerun:cleanup";
-
 /**
  * A dequeued run waits to be withdrawn only while a step runs, or a re-run's
  * cleanup has begun (an attempt is open): its effects are half made.
@@ -928,24 +920,7 @@ const CLEANUP = "rerun:cleanup";
 function ending(runner: ObjectiveRunner): boolean {
   return (
     runner.busy ||
-    Boolean(runner.state.kept?.[RERUN] && runner.state.attempts[CLEANUP])
-  );
-}
-
-/** Not started: nothing past the check (and a re-run's cleanup) has run or begun. */
-function unstarted(state: ObjectiveState): boolean {
-  const early = (key: string) => key === "check" || key === CLEANUP;
-  return [
-    ...Object.keys(state.done),
-    ...Object.keys(state.retries),
-    ...Object.keys(state.asking),
-    ...Object.keys(state.attempts),
-  ].every(early);
-}
-
-function started(runner: ObjectiveRunner): boolean {
-  return (
-    runner.busy || Object.keys(runner.state.done).some((key) => key !== "check")
+    Boolean(runner.state.kept?.[RERUN] && runner.state.attempts[RERUN_CLEANUP])
   );
 }
 

@@ -12,7 +12,12 @@ import { connect } from "node:net";
 import { isAbsolute, join } from "node:path";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { displayTime, redactDeep } from "./display.js";
-import { DEFAULT_LIMITS, type EngineLimits, hostLimits } from "./engine.js";
+import {
+  DEFAULT_LIMITS,
+  type EngineLimits,
+  hostLimits,
+  settled,
+} from "./engine.js";
 import { gitEnvironment } from "./git.js";
 import { GitHub } from "./github.js";
 import { GitHubSync, moved } from "./github-sync.js";
@@ -421,12 +426,8 @@ function settledState(paths: Paths, issue: number): ObjectiveState | string {
   if (loaded.kind === "unreadable")
     return `#${issue} has unreadable state (${loaded.error})`;
   const { state } = loaded;
-  if (
-    !TERMINAL.includes(state.status) ||
-    Object.keys(state.attempts).length > 0 ||
-    objectiveWorkflow().steps(state).length > 0
-  )
-    return `Objective #${issue} is ${state.status} and hasn't settled; record it once it is done, failed or cancelled and cleaned up`;
+  if (!settled(state, objectiveWorkflow()))
+    return `Objective #${issue} is ${state.status} and hasn't settled; record it once it is done, or cancelled and cleaned up`;
   return state;
 }
 
@@ -539,6 +540,7 @@ async function status(
             question: `Factory can't read this Objective's state (${loaded.error}).`,
             answers: ["reset", "cancel"],
             recommended: "reset",
+            cause: "question",
             askedAt: "",
           },
         ],

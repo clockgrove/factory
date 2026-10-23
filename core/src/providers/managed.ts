@@ -111,7 +111,7 @@ function apiKey(name: string): string {
 
 /** A failure after a hosted run billed: a counted error, so three in a row hold. */
 function billed(reason: string): PlannerError {
-  return new PlannerError("retry", reason, -1);
+  return new PlannerError("retry", reason, { kind: "error" });
 }
 
 /** The hosted resources one run made, recorded as they are made. */
@@ -359,7 +359,6 @@ function statusFailure(
     return new PlannerError(
       "retry",
       `${what} rate limit (429)`,
-      undefined,
       at ? { kind: "reset", at, ...(provider ? { provider } : {}) } : undefined,
     );
   }

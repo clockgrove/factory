@@ -1,18 +1,24 @@
 import {
+  errored,
   hold,
   type Outcome,
+  objectiveWide,
   type Step,
   type StepContext,
   type Workflow,
 } from "./engine.js";
+import { GitRefusal } from "./git.js";
+import { githubOutcome } from "./github.js";
 import {
-  guarded,
   type PlanningDeps,
+  planningReplan,
   planningStep,
   REOPENED,
   readObjective,
 } from "./planning/steps.js";
+import { PlannerError, providerOutcome } from "./providers/planner.js";
 import type { ObjectiveState, ObjectiveStatus } from "./state.js";
+import { errorMessage } from "./text.js";
 import {
   type BuildDeps,
   built,
@@ -20,6 +26,8 @@ import {
   deliverySteps,
   layersBelow,
   RERUN,
+  RERUN_CLEANUP,
+  replanOutcome,
   rerunCleanupStep,
 } from "./work/steps.js";
 
@@ -40,7 +48,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
         const step = deps ? cancelCleanupStep(deps) : cleanup;
         return state.done[step.key] ? [] : [step];
       }
-      if (state.status === "done" || state.status === "failed") return [];
+      if (state.status === "done") return [];
       if (deps && state.kept?.[RERUN]) return [rerunCleanupStep(deps)];
       if (!state.done.check) return [check];
       if (!state.done.plan) {
@@ -60,7 +68,66 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       if (!state.done.report) return "finishing";
       return "done";
     },
+
+    outcomeOf: (error, step) =>
+      errorOutcome(error, deps?.config.repository ?? "", step.redo),
+
+    replannable: (state, key) =>
+      state.done.plan
+        ? /^(item|build):/.test(key) ||
+          ["final", "final-review", "report"].includes(key)
+        : /^(plan|review|decide):\d+:\d+$/.test(key),
+
+    // Before acceptance a new planning generation re-reads the issue;
+    // after it, the plan and the build are forgotten and the Objective is
+    // checked again.
+    replan: (state, key, answer) =>
+      state.done.plan
+        ? replanOutcome(state)
+        : planningReplan(state, key, answer),
   };
+}
+
+/**
+ * An error that escaped a step as its outcome (CORE.md#Waits), the one
+ * place errors are classified: a full disk, and a Git refusal (the
+ * checkout's configuration, or an origin that no longer names the
+ * target), hold for the whole Objective; a provider's classified failure
+ * and GitHub's answers map as providers/planner.ts `providerOutcome` and
+ * github.ts `githubOutcome` say; anything else is an error. `redo` is the
+ * answer that gets past a call too large for the model (`Step.redo`).
+ */
+export function errorOutcome(
+  error: unknown,
+  repository: string,
+  redo: "replan" | "refuse" = "replan",
+): Outcome {
+  // A full disk needs a person; retrying can't free it.
+  if ((error as NodeJS.ErrnoException | null)?.code === "ENOSPC")
+    return objectiveWide(
+      hold(
+        `The service host's disk is full (${errorMessage(error)}). Free space, then answer retry; or cancel.`,
+      ),
+    );
+  if (error instanceof GitRefusal) return objectiveWide(hold(error.message));
+  // A usage limit waits for its reset; an idle model is an error; a hold
+  // takes the provider error's scope. Too large for the model, or refused:
+  // the Objective (or the step's input) has to change.
+  if (error instanceof PlannerError)
+    return providerOutcome(error, (message) =>
+      objectiveWide({
+        ...hold(
+          redo === "replan"
+            ? `${message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`
+            : `${message}\n\n\`refuse\` rejects this amendment, so it can be replaced or the plan can continue without it.`,
+          [redo, "retry", "cancel"],
+        ),
+        cause: "failure",
+      }),
+    );
+  return (
+    githubOutcome(error, repository) ?? errored(`error: ${errorMessage(error)}`)
+  );
 }
 
 /** The issue is open, the Objective passes its checks, and the base is the default branch head. */
@@ -69,13 +136,12 @@ function checkStep(deps: PlanningDeps): Step {
     key: "check",
     resource: "github",
     deadlineMs: 10 * MINUTE,
-    run: (context: StepContext) =>
-      guarded(deps.config.repository, async (): Promise<Outcome> => {
-        const read = await readObjective(deps, "recheck", context);
-        return "hold" in read
-          ? read.hold
-          : { kind: "done", result: read.inputs, keep: { [REOPENED]: null } };
-      }),
+    run: async (context: StepContext): Promise<Outcome> => {
+      const read = await readObjective(deps, "recheck", context);
+      return "hold" in read
+        ? read.hold
+        : { kind: "done", result: read.inputs, keep: { [REOPENED]: null } };
+    },
   };
 }
 
@@ -94,8 +160,23 @@ function unavailable(key: string): Step {
 const cleanup: Step = {
   key: "cancel:cleanup",
   deadlineMs: 10 * MINUTE,
+  neverAsks: true,
   async run(): Promise<Outcome> {
     // Closing open PRs and removing worktrees arrive with delivery.
     return { kind: "done" };
   },
 };
+
+/**
+ * Whether the Objective has started: a step past the check (and a
+ * re-run's cleanup) is done, waiting, asking or running. The one rule for
+ * queue order and for withdrawal before start.
+ */
+export function started(state: ObjectiveState): boolean {
+  return [
+    ...Object.keys(state.done),
+    ...Object.keys(state.retries),
+    ...Object.keys(state.asking),
+    ...Object.keys(state.attempts),
+  ].some((key) => key !== "check" && key !== RERUN_CLEANUP);
+}

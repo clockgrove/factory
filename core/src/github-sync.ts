@@ -104,7 +104,6 @@ const OPTION: Record<ObjectiveStatus, QueueOption> = {
   holding: "holding",
   resetting: "planning",
   done: "done",
-  failed: "failed",
   cancelled: "cancelled",
 };
 
@@ -250,8 +249,7 @@ export class GitHubSync {
     for (const runner of sync.runners.values()) {
       const module = runner.state.modules.github as GitHubModule | undefined;
       const issue = runner.state.issue;
-      const finished =
-        TERMINAL.includes(runner.state.status) && !runner.hasWork;
+      const finished = runner.settled;
       if (finished && this.settled.has(issue)) continue;
       // An issue GitHub no longer has here (deleted, or moved away) has no
       // card or comments to write: its replies are dropped, and once it

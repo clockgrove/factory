@@ -702,7 +702,7 @@ function settle(
           `The request is larger than the model's context window: ${ended}`,
         );
       case "limit":
-        throw new PlannerError("retry", failed.message, undefined, failed.wait);
+        throw new PlannerError("retry", failed.message, failed.wait);
       // Overload, connection, turn or output limits, structured output
       // retries and anything unknown: a fresh call may succeed.
       case "other":
@@ -968,7 +968,8 @@ export class ClaudePlanner implements Planner {
     } catch (error) {
       if (error instanceof PlannerError) throw error;
       const idle = watchdog.expired;
-      if (idle) throw new PlannerError("retry", idle.message, -1);
+      if (idle)
+        throw new PlannerError("retry", idle.message, { kind: "error" });
       // The step was cancelled or hit its deadline: the engine decides.
       if (call.signal.aborted) throw call.signal.reason ?? error;
       throw error;

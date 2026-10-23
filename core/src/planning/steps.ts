@@ -2,21 +2,19 @@ import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type CoreConfig, ownRepositoryProblem } from "../config.js";
 import {
+  errored,
+  failure,
   hold,
   type Outcome,
   objectiveWide,
   type Step,
   type StepContext,
 } from "../engine.js";
-import { defaultHead, GitRefusal } from "../git.js";
-import { type GitHub, githubOutcome } from "../github.js";
+import { defaultHead } from "../git.js";
+import type { GitHub } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
 import { checkObjective } from "../objective.js";
-import {
-  type Planner,
-  PlannerError,
-  providerOutcome,
-} from "../providers/planner.js";
+import type { Planner } from "../providers/planner.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
 import type { Answer, ObjectiveState } from "../state.js";
@@ -317,167 +315,158 @@ function planRoundStep(
   return {
     key,
     deadlineMs: 45 * MINUTE,
-    run: (context) =>
-      guarded(deps.config.repository, async () => {
-        const { state, signal } = context;
-        const { config } = deps;
-        // `replan` after an Objective problem: start a new generation, which re-reads the issue.
-        if (context.answer?.answer === "replan")
-          return done({
-            replan: true,
-            decision: decisionOf(context.answer),
-          } satisfies PlanRound);
-        let inputs: ObjectiveInputs;
-        if (g > 1 && n === 1) {
-          // A replan re-reads the issue and the default branch.
-          const fresh = await readObjective(deps, "replan", context);
-          if ("hold" in fresh) return fresh.hold;
-          inputs = fresh.inputs;
-        } else inputs = generationInputs(state, g);
-        const files = new BaseFiles(config.checkout, inputs.base, signal);
-        const built = await planningFacts(state, inputs, files, config);
-        if ("problems" in built)
-          return objectiveProblemsHold(built.problems, "replan");
-        const { facts } = built;
-        const { workDir, repository } = await planningTree(
-          deps,
-          state.issue,
-          inputs.base,
-          signal,
-        );
-        const previousKey = n > 1 ? `plan:${g}:${n - 1}` : undefined;
-        const previous = previousKey
-          ? (state.done[previousKey] as PlanRound)
-          : undefined;
-        const fixes =
-          n > 1
-            ? (
-                (state.done[`decide:${g}:${n - 1}`] as Decision).corrections ??
-                []
-              ).filter((f) => f.source !== "operator")
-            : [];
-        // A broken answer last time: the planner sees why, once.
-        const lastError = state.retries[key]?.lastError;
-        const corrections = [
-          ...operatorCorrections(generationDecisions(state, g)),
-          ...fixes,
-          ...(lastError?.startsWith(INVALID_ANSWER)
-            ? [{ source: "check" as const, message: lastError }]
-            : []),
-        ];
-        const revising = Boolean(previous?.answer);
-        const wire = {
-          child: inputs.child === true,
-          reviewArtifacts: inputs.reviewArtifacts.length > 0,
-          adaptive: adaptiveGraph(
-            inputs.shown.blocks,
-            inputs.adaptiveGraph === true,
-          ),
-        };
-        // An enabled section still plans, with its context and memory but
-        // without the graph kinds; say so once per generation.
-        if (
-          n === 1 &&
-          adaptiveWorkflow(inputs.shown.blocks).enabled &&
-          inputs.adaptiveGraph !== true
-        )
-          context.log({
-            event: "adaptive-graph-off",
-            message:
-              "Adaptive workflow is enabled, but planning.adaptiveGraph is off: the planner isn't offered discovery items, work conditions or expansions",
-          });
-        const cited = revising
-          ? await citedSections(previous!.draft, fixes, facts, files)
+    run: async (context): Promise<Outcome> => {
+      const { state, signal } = context;
+      const { config } = deps;
+      let inputs: ObjectiveInputs;
+      if (g > 1 && n === 1) {
+        // A replan re-reads the issue and the default branch.
+        const fresh = await readObjective(deps, "replan", context);
+        if ("hold" in fresh) return fresh.hold;
+        inputs = fresh.inputs;
+      } else inputs = generationInputs(state, g);
+      const files = new BaseFiles(config.checkout, inputs.base, signal);
+      const built = await planningFacts(state, inputs, files, config);
+      if ("problems" in built)
+        return objectiveProblemsHold(built.problems, "replan");
+      const { facts } = built;
+      const { workDir, repository } = await planningTree(
+        deps,
+        state.issue,
+        inputs.base,
+        signal,
+      );
+      const previousKey = n > 1 ? `plan:${g}:${n - 1}` : undefined;
+      const previous = previousKey
+        ? (state.done[previousKey] as PlanRound)
+        : undefined;
+      const fixes =
+        n > 1
+          ? (
+              (state.done[`decide:${g}:${n - 1}`] as Decision).corrections ?? []
+            ).filter((f) => f.source !== "operator")
           : [];
-        const data = {
-          ...planChoices(facts, wire),
-          ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
-          instructions: `${renderPlanningInstructions(
-            inputs.shown.blocks,
-            corrections,
-            revising,
-          )}${await commandInstructions(facts, config.checkout, signal)}`,
-          ...(revising
-            ? {
-                currentPlan: previous!.answer,
-                citedSections: cited.map((section, at) => ({
-                  path: section.path,
-                  heading: section.heading ?? "",
-                  content: { block: `section ${at}` },
-                })),
-              }
-            : {}),
-        };
-        const local = await localExecutables(inputs, config, signal);
-        const prompt = renderCompilationCall({
-          facts,
-          data,
-          revising,
-          repository,
-          workers: WORKERS,
-          citedSections: cited,
-          localExecutables: local.observations,
-          reviewArtifacts: inputs.reviewArtifacts,
-          adaptive: wire.adaptive,
-          recipe: Boolean(inputs.recipe),
-        });
-        const answer = await deps.planner.answer({
-          role: "planner",
-          phase: "plan",
-          prompt,
-          schema: revising
-            ? revisionSchema(facts, wire)
-            : planSchema(facts, wire),
-          readDir: workDir,
-          signal,
-          log: context.log,
-        });
+      // A broken answer last time: the planner sees why, once.
+      const lastError = state.retries[key]?.lastError;
+      const corrections = [
+        ...operatorCorrections(generationDecisions(state, g)),
+        ...fixes,
+        ...(lastError?.startsWith(INVALID_ANSWER)
+          ? [{ source: "check" as const, message: lastError }]
+          : []),
+      ];
+      const revising = Boolean(previous?.answer);
+      const wire = {
+        child: inputs.child === true,
+        reviewArtifacts: inputs.reviewArtifacts.length > 0,
+        adaptive: adaptiveGraph(
+          inputs.shown.blocks,
+          inputs.adaptiveGraph === true,
+        ),
+      };
+      // An enabled section still plans, with its context and memory but
+      // without the graph kinds; say so once per generation.
+      if (
+        n === 1 &&
+        adaptiveWorkflow(inputs.shown.blocks).enabled &&
+        inputs.adaptiveGraph !== true
+      )
         context.log({
-          event: "planner-answer",
-          model: answer.model,
-          ms: answer.ms,
-          usage: answer.usage,
+          event: "adaptive-graph-off",
+          message:
+            "Adaptive workflow is enabled, but planning.adaptiveGraph is off: the planner isn't offered discovery items, work conditions or expansions",
         });
-        let full: unknown = answer.value;
-        if (revising) {
-          const revised = applyRevision(
-            previous!.answer,
-            answer.value,
-            facts,
-            wire,
-          );
-          if (revised.invalidShape) return invalidAnswer(revised.findings);
-          if (!revised.answer)
-            return done({
-              ...(g > 1 && n === 1 ? { inputs } : {}),
-              answer: previous!.answer,
-              findings: revised.findings,
-            });
-          full = revised.answer;
-        }
-        const decoded = decodePlan(full, facts, wire);
-        if (decoded.invalidShape) return invalidAnswer(decoded.findings);
-        const round: PlanRound = {
-          ...(g > 1 && n === 1 ? { inputs } : {}),
-          answer: full,
-        };
-        if (decoded.question)
-          return done({ ...round, question: decoded.question });
-        if (!decoded.plan)
-          return done({ ...round, findings: decoded.findings });
-        const findings = [
-          ...decoded.findings,
-          ...(await checkPlan(decoded.plan, facts, files, previous?.draft)),
-          ...(inputs.recipe
-            ? recipeFindings(decoded.plan, inputs.recipe.recipe)
-            : []),
-        ];
-        return done({
-          ...round,
-          draft: decoded.plan,
-          ...(findings.length ? { findings } : {}),
-        });
-      }),
+      const cited = revising
+        ? await citedSections(previous!.draft, fixes, facts, files)
+        : [];
+      const data = {
+        ...planChoices(facts, wire),
+        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
+        instructions: `${renderPlanningInstructions(
+          inputs.shown.blocks,
+          corrections,
+          revising,
+        )}${await commandInstructions(facts, config.checkout, signal)}`,
+        ...(revising
+          ? {
+              currentPlan: previous!.answer,
+              citedSections: cited.map((section, at) => ({
+                path: section.path,
+                heading: section.heading ?? "",
+                content: { block: `section ${at}` },
+              })),
+            }
+          : {}),
+      };
+      const local = await localExecutables(inputs, config, signal);
+      const prompt = renderCompilationCall({
+        facts,
+        data,
+        revising,
+        repository,
+        workers: WORKERS,
+        citedSections: cited,
+        localExecutables: local.observations,
+        reviewArtifacts: inputs.reviewArtifacts,
+        adaptive: wire.adaptive,
+        recipe: Boolean(inputs.recipe),
+      });
+      const answer = await deps.planner.answer({
+        role: "planner",
+        phase: "plan",
+        prompt,
+        schema: revising
+          ? revisionSchema(facts, wire)
+          : planSchema(facts, wire),
+        readDir: workDir,
+        signal,
+        log: context.log,
+      });
+      context.log({
+        event: "planner-answer",
+        model: answer.model,
+        ms: answer.ms,
+        usage: answer.usage,
+      });
+      let full: unknown = answer.value;
+      if (revising) {
+        const revised = applyRevision(
+          previous!.answer,
+          answer.value,
+          facts,
+          wire,
+        );
+        if (revised.invalidShape) return invalidAnswer(revised.findings);
+        if (!revised.answer)
+          return done({
+            ...(g > 1 && n === 1 ? { inputs } : {}),
+            answer: previous!.answer,
+            findings: revised.findings,
+          });
+        full = revised.answer;
+      }
+      const decoded = decodePlan(full, facts, wire);
+      if (decoded.invalidShape) return invalidAnswer(decoded.findings);
+      const round: PlanRound = {
+        ...(g > 1 && n === 1 ? { inputs } : {}),
+        answer: full,
+      };
+      if (decoded.question)
+        return done({ ...round, question: decoded.question });
+      if (!decoded.plan) return done({ ...round, findings: decoded.findings });
+      const findings = [
+        ...decoded.findings,
+        ...(await checkPlan(decoded.plan, facts, files, previous?.draft)),
+        ...(inputs.recipe
+          ? recipeFindings(decoded.plan, inputs.recipe.recipe)
+          : []),
+      ];
+      return done({
+        ...round,
+        draft: decoded.plan,
+        ...(findings.length ? { findings } : {}),
+      });
+    },
   };
 }
 
@@ -500,93 +489,82 @@ function reviewStep(
   return {
     key,
     deadlineMs: 45 * MINUTE,
-    run: (context) =>
-      guarded(deps.config.repository, async () => {
-        const { state, signal } = context;
-        const { config } = deps;
-        if (context.answer?.answer === "replan")
-          return done({
-            findings: [],
-            replan: true,
-            decision: decisionOf(context.answer),
-          } satisfies ReviewRound);
-        const inputs = generationInputs(state, g);
-        const built = await planningFacts(
-          state,
-          inputs,
-          new BaseFiles(config.checkout, inputs.base, signal),
-          config,
-        );
-        if ("problems" in built)
-          return objectiveProblemsHold(built.problems, "replan");
-        const { facts } = built;
-        const draft = (state.done[`plan:${g}:${n}`] as PlanRound).draft!;
-        const all = decisions(state);
-        const local = await localExecutables(inputs, config, signal);
-        const evidence = planningReviewEvidence({
-          sources: facts.sources,
-          decisions: all,
-          localExecutables: local.observations,
-        });
-        const { workDir, repository } = await planningTree(
-          deps,
-          state.issue,
-          inputs.base,
-          signal,
-        );
-        const scope = lastReview(state, g, n);
-        const prompt = renderGraphReviewCall({
-          facts,
-          draft,
-          evidence,
-          decisions: all,
-          finalCommands: finalCommands(
-            inputs.shown.blocks,
-            config.finalValidation.requiredCommands,
-          ),
-          controllerCapabilities: controllerGuarantees(
-            inputs.reviewArtifacts.length > 0,
-          ),
-          reviewArtifacts: inputs.reviewArtifacts,
-          repository,
-          workers: WORKERS,
-          ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
-          ...(scope
-            ? {
-                scope: revisionScope(
-                  n,
-                  {
-                    ...scope,
-                    decisions: decisionsBefore(state, g, scope.round),
-                  },
-                  { draft, decisions: all },
-                ),
-              }
-            : {}),
-        });
-        const answer = await deps.planner.answer({
-          role: "reviewer",
-          phase: "graph-review",
-          prompt,
-          schema: graphReviewSchema(),
-          readDir: workDir,
-          signal,
-          log: context.log,
-        });
-        const decoded = decodeGraphReview(
-          answer.value,
-          evidence,
-          draftItems(draft).map((item) => item.id),
-        );
-        if (decoded.invalid)
-          return {
-            kind: "retry",
-            reason: `The plan review answer was invalid: ${decoded.reason}`,
-            afterMs: -1,
-          };
-        const result: ReviewRound = { findings: decoded.findings };
-        return done(result);
-      }),
+    run: async (context): Promise<Outcome> => {
+      const { state, signal } = context;
+      const { config } = deps;
+      const inputs = generationInputs(state, g);
+      const built = await planningFacts(
+        state,
+        inputs,
+        new BaseFiles(config.checkout, inputs.base, signal),
+        config,
+      );
+      if ("problems" in built)
+        return objectiveProblemsHold(built.problems, "replan");
+      const { facts } = built;
+      const draft = (state.done[`plan:${g}:${n}`] as PlanRound).draft!;
+      const all = decisions(state);
+      const local = await localExecutables(inputs, config, signal);
+      const evidence = planningReviewEvidence({
+        sources: facts.sources,
+        decisions: all,
+        localExecutables: local.observations,
+      });
+      const { workDir, repository } = await planningTree(
+        deps,
+        state.issue,
+        inputs.base,
+        signal,
+      );
+      const scope = lastReview(state, g, n);
+      const prompt = renderGraphReviewCall({
+        facts,
+        draft,
+        evidence,
+        decisions: all,
+        finalCommands: finalCommands(
+          inputs.shown.blocks,
+          config.finalValidation.requiredCommands,
+        ),
+        controllerCapabilities: controllerGuarantees(
+          inputs.reviewArtifacts.length > 0,
+        ),
+        reviewArtifacts: inputs.reviewArtifacts,
+        repository,
+        workers: WORKERS,
+        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
+        ...(scope
+          ? {
+              scope: revisionScope(
+                n,
+                {
+                  ...scope,
+                  decisions: decisionsBefore(state, g, scope.round),
+                },
+                { draft, decisions: all },
+              ),
+            }
+          : {}),
+      });
+      const answer = await deps.planner.answer({
+        role: "reviewer",
+        phase: "graph-review",
+        prompt,
+        schema: graphReviewSchema(),
+        readDir: workDir,
+        signal,
+        log: context.log,
+      });
+      const decoded = decodeGraphReview(
+        answer.value,
+        evidence,
+        draftItems(draft).map((item) => item.id),
+      );
+      if (decoded.invalid)
+        return errored(`The plan review answer was invalid: ${decoded.reason}`);
+      const result: ReviewRound = { findings: decoded.findings };
+      return done(result);
+    },
   };
 }
 
@@ -622,97 +600,122 @@ function decideStep(
   return {
     key,
     deadlineMs: 5 * MINUTE,
-    run: ({ state, answer, signal }: StepContext) =>
-      guarded(deps.config.repository, async (): Promise<Outcome> => {
-        const planned = state.done[`plan:${g}:${n}`] as PlanRound;
-        const reviewed = state.done[`review:${g}:${n}`] as
-          | ReviewRound
-          | undefined;
-        const findings: (Finding & { itemIds?: string[] })[] = [
-          ...(planned.findings ?? []),
-          ...(reviewed?.findings ?? []),
-        ];
-        const fixes = findings.filter((f) => f.kind !== "operator-decision");
-        const asks = findings.filter((f) => f.kind === "operator-decision");
-        if (planned.replan || reviewed?.replan) {
-          const decision = planned.decision ?? reviewed?.decision;
-          return done({
-            replan: true,
-            ...(decision ? { decision } : {}),
-          } satisfies Decision);
-        }
-        const question = questionFor(state, g, n, planned, fixes, asks, deps);
-        // An `approve` that found the Objective edited (see changedHold).
-        const approvedKey = `${key}:approved`;
-        const approved = state.kept?.[approvedKey] as
-          | PlannerDecision
-          | undefined;
-        const withApproved = (
-          decision: Decision,
-          keep: Record<string, unknown> = {},
-        ): Outcome => ({
-          kind: "done",
-          result: approved ? { ...decision, approved } : decision,
-          keep: { [approvedKey]: null, ...keep },
-        });
-        if (answer) {
-          const record = (text?: string) => decisionOf(answer, text);
-          switch (answer.answer) {
-            case "replan":
-              return withApproved({ replan: true, decision: record() });
-            case "more":
-              return done({
-                corrections: fixes,
-                grant: 2,
-                decision: record(),
-              } satisfies Decision);
-            case "approve":
-              if (await objectiveChanged(state, g, deps, signal))
-                return {
-                  ...changedHold(state),
-                  keep: { [approvedKey]: record() },
-                };
-              return done({
-                accept: true,
-                decision: record(),
-              } satisfies Decision);
-            case "continue":
-              // The operator keeps this plan for the text GitHub shows now:
-              // build-time edit detection starts from it.
-              return withApproved(
-                { accept: true, decision: record() },
-                {
-                  [OBJECTIVE_ACCEPTED]: await shownNow(state, g, deps, signal),
-                },
-              );
-            case "answer":
-            case "allow": {
-              if (!answer.text?.trim())
-                return hold(
-                  `${question?.text ?? "Planning needs your answer."}\n\n\`${answer.answer}\` needs text after it, for example \`/factory ${answer.answer === "allow" ? "allow pnpm run test:e2e" : "answer use the existing parser"}\`.`,
-                  question?.answers ?? ASK,
-                  answer.answer,
-                );
-              const decision = record(answer.text.trim());
-              return done({
-                decision,
-                corrections: [...fixes, ...operatorCorrections([decision])],
-              } satisfies Decision);
-            }
+    run: async ({ state, answer, signal }: StepContext): Promise<Outcome> => {
+      const planned = state.done[`plan:${g}:${n}`] as PlanRound;
+      const reviewed = state.done[`review:${g}:${n}`] as
+        | ReviewRound
+        | undefined;
+      const findings: (Finding & { itemIds?: string[] })[] = [
+        ...(planned.findings ?? []),
+        ...(reviewed?.findings ?? []),
+      ];
+      const fixes = findings.filter((f) => f.kind !== "operator-decision");
+      const asks = findings.filter((f) => f.kind === "operator-decision");
+      if (planned.replan || reviewed?.replan) {
+        const decision = planned.decision ?? reviewed?.decision;
+        return done({
+          replan: true,
+          ...(decision ? { decision } : {}),
+        } satisfies Decision);
+      }
+      const question = questionFor(state, g, n, planned, fixes, asks, deps);
+      // An `approve` that found the Objective edited (see changedHold).
+      const approvedKey = `${key}:approved`;
+      const approved = state.kept?.[approvedKey] as PlannerDecision | undefined;
+      const withApproved = (
+        decision: Decision,
+        keep: Record<string, unknown> = {},
+      ): Outcome => ({
+        kind: "done",
+        result: approved ? { ...decision, approved } : decision,
+        keep: { [approvedKey]: null, ...keep },
+      });
+      if (answer) {
+        const record = (text?: string) => decisionOf(answer, text);
+        switch (answer.answer) {
+          case "more":
+            return done({
+              corrections: fixes,
+              grant: 2,
+              decision: record(),
+            } satisfies Decision);
+          case "approve":
+            if (await objectiveChanged(state, g, deps, signal))
+              return {
+                ...changedHold(state),
+                keep: { [approvedKey]: record() },
+              };
+            return done({
+              accept: true,
+              decision: record(),
+            } satisfies Decision);
+          case "continue":
+            // The operator keeps this plan for the text GitHub shows now:
+            // build-time edit detection starts from it.
+            return withApproved(
+              { accept: true, decision: record() },
+              {
+                [OBJECTIVE_ACCEPTED]: await shownNow(state, g, deps, signal),
+              },
+            );
+          case "answer":
+          case "allow": {
+            // Text is required (`needsText`): the engine refuses an answer without it.
+            const decision = record((answer.text ?? "").trim());
+            return done({
+              decision,
+              corrections: [...fixes, ...operatorCorrections([decision])],
+            } satisfies Decision);
           }
         }
-        if (question)
-          return hold(question.text, question.answers, question.recommended);
-        if (findings.length === 0) {
-          // Before accepting, the Objective must still read as planning read it.
-          if (answer?.answer !== "continue") {
-            const changed = await objectiveChanged(state, g, deps, signal);
-            if (changed) return changedHold(state);
-          }
-          return done({ accept: true } satisfies Decision);
+      }
+      if (question)
+        return {
+          ...hold(question.text, question.answers, question.recommended),
+          needsText: ["answer", "allow"],
+        };
+      if (findings.length === 0) {
+        // Before accepting, the Objective must still read as planning read it.
+        if (answer?.answer !== "continue") {
+          const changed = await objectiveChanged(state, g, deps, signal);
+          if (changed) return changedHold(state);
         }
-        return done({ corrections: fixes } satisfies Decision);
-      }),
+        return done({ accept: true } satisfies Decision);
+      }
+      return done({ corrections: fixes } satisfies Decision);
+    },
+  };
+}
+
+/**
+ * The operator's `replan` to a planning question (`plan:g:n`,
+ * `review:g:n`, `decide:g:n`), routed by the workflow: the step records
+ * it with the decision, and the decide step starts a new generation,
+ * which re-reads the issue.
+ */
+export function planningReplan(
+  state: ObjectiveState,
+  key: string,
+  answer: Answer,
+): Outcome {
+  const decision = decisionOf(answer);
+  if (!key.startsWith("decide:"))
+    return done({
+      replan: true,
+      decision,
+      ...(key.startsWith("review:") ? { findings: [] } : {}),
+    } satisfies PlanRound | ReviewRound);
+  // An `approve` that found the Objective edited (see changedHold).
+  const approvedKey = `${key}:approved`;
+  const approved = state.kept?.[approvedKey] as PlannerDecision | undefined;
+  return {
+    kind: "done",
+    result: {
+      replan: true,
+      decision,
+      ...(approved ? { approved } : {}),
+    } satisfies Decision,
+    keep: { [approvedKey]: null },
   };
 }
 
@@ -860,37 +863,34 @@ function acceptStep(g: number, n: number, deps: PlanningDeps): Step {
   return {
     key: "plan",
     deadlineMs: 10 * MINUTE,
-    run: ({ state, signal }) =>
-      guarded(deps.config.repository, async () => {
-        const inputs = generationInputs(state, g);
-        // The accepted draft is the last round that had one.
-        let draft: Draft | undefined;
-        for (let m = n; m >= 1 && !draft; m--)
-          draft = (state.done[`plan:${g}:${m}`] as PlanRound | undefined)
-            ?.draft;
-        if (!draft)
-          return {
-            kind: "fail",
-            reason: "the accepted round has no plan",
-          };
-        const plan: Plan = {
-          ...draft,
-          finalCommands: finalCommands(
-            inputs.shown.blocks,
-            deps.config.finalValidation.requiredCommands,
-          ),
-          decisions: decisions(state),
-          ...(inputs.reviewArtifacts.length
-            ? { reviewArtifacts: inputs.reviewArtifacts }
-            : {}),
-        };
-        await postPlan(deps, state.issue, plan, signal);
-        return {
-          kind: "done",
-          result: plan,
-          keep: { [ACCEPTED_AT]: new Date().toISOString() },
-        };
-      }),
+    run: async ({ state, signal }): Promise<Outcome> => {
+      const inputs = generationInputs(state, g);
+      // The accepted draft is the last round that had one.
+      let draft: Draft | undefined;
+      for (let m = n; m >= 1 && !draft; m--)
+        draft = (state.done[`plan:${g}:${m}`] as PlanRound | undefined)?.draft;
+      if (!draft)
+        return failure(
+          "Step plan failed: the accepted round has no plan. Answer retry to read it again; or cancel.",
+        );
+      const plan: Plan = {
+        ...draft,
+        finalCommands: finalCommands(
+          inputs.shown.blocks,
+          deps.config.finalValidation.requiredCommands,
+        ),
+        decisions: decisions(state),
+        ...(inputs.reviewArtifacts.length
+          ? { reviewArtifacts: inputs.reviewArtifacts }
+          : {}),
+      };
+      await postPlan(deps, state.issue, plan, signal);
+      return {
+        kind: "done",
+        result: plan,
+        keep: { [ACCEPTED_AT]: new Date().toISOString() },
+      };
+    },
   };
 }
 
@@ -1202,57 +1202,10 @@ function done(result: unknown): Outcome {
 export function invalidAnswer(
   findings: Finding[],
 ): Extract<Outcome, { kind: "retry" }> {
-  return {
-    kind: "retry",
-    reason: `${INVALID_ANSWER}: ${findings
+  return errored(
+    `${INVALID_ANSWER}: ${findings
       .map((f) => f.message)
       .join("; ")
       .slice(0, 500)}`,
-    afterMs: -1,
-  };
-}
-
-/**
- * Map provider and GitHub failures to outcomes (CORE.md#Waits), and a Git
- * refusal (the checkout's configuration, or an origin that no longer names
- * the target) to an Objective-wide hold; anything else escapes to the
- * engine as an error.
- */
-export async function guarded(
-  repository: string,
-  work: () => Promise<Outcome>,
-  /**
-   * The answer that gets past a call the model can't take: `replan` (edit
-   * the Objective and plan again), or `refuse` for an amendment, which
-   * rejects it.
-   */
-  redo: "replan" | "refuse" = "replan",
-): Promise<Outcome> {
-  try {
-    return await work();
-  } catch (error) {
-    if (error instanceof GitRefusal) return objectiveWide(hold(error.message));
-    // A usage limit waits for its reset; an idle model is an error
-    // (afterMs -1); a hold takes the provider error's scope. Too large
-    // for the model, or refused: the Objective has to change.
-    if (error instanceof PlannerError)
-      return providerOutcome(error, (message) =>
-        objectiveWide(
-          hold(
-            redo === "replan"
-              ? `${message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`
-              : `${message}\n\n\`refuse\` rejects this amendment, so it can be replaced or the plan can continue without it.`,
-            [redo, "retry", "cancel"],
-          ),
-        ),
-      );
-    const outcome = githubOutcome(
-      error,
-      repository,
-      undefined,
-      "GitHub says the issue doesn't exist or Factory can't see it",
-    );
-    if (outcome) return outcome;
-    throw error;
-  }
+  );
 }

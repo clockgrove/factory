@@ -82,8 +82,8 @@ const MAX_DIAGNOSIS_CALLS = 3;
 
 /**
  * The correction for `finding`, or a question when only the operator can
- * decide. Provider failures escape as `PlannerError` for the step's
- * `guarded`; nothing else throws on a model answer.
+ * decide. Provider failures escape as `PlannerError` to the engine
+ * (workflow.ts `errorOutcome`); nothing else throws on a model answer.
  */
 export async function correction(
   input: CorrectionInput,

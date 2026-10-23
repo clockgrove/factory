@@ -1,5 +1,11 @@
 import { isDeepStrictEqual } from "node:util";
-import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
+import {
+  errored,
+  hold,
+  type Outcome,
+  type Step,
+  type StepContext,
+} from "../engine.js";
 import type { ObjectiveState } from "../state.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
@@ -19,7 +25,6 @@ import {
   ACCEPTED_AT,
   acceptedRound,
   decisions,
-  guarded,
   INVALID_ANSWER,
   invalidAnswer,
   localExecutables,
@@ -605,177 +610,172 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
   return {
     key,
     deadlineMs: 45 * MINUTE,
-    run: (context) =>
-      guarded(
-        deps.config.repository,
-        async (): Promise<Outcome> => {
-          const { state, signal } = context;
-          const { config } = deps;
-          const refused = refusal(context.answer);
-          if (refused) return refused;
-          // Each answer is kept, once per question, before the planner sees
-          // it: a later error hold's answer can't overwrite it, and a rerun
-          // doesn't add it again.
-          const answered = (state.kept[ANSWERS_KEY(proposal.id)] ?? []) as {
-            holdId: string;
-            question: string;
-            answer: string;
-          }[];
-          const reply = context.answer;
-          if (
-            reply?.answer === "answer" &&
-            !answered.some((entry) => entry.holdId === reply.holdId)
-          ) {
-            if (!reply.text?.trim())
-              return hold(
-                `${reply.question ?? "Planning this amendment needs your answer."}\n\n\`answer\` needs text after it, for example \`/factory answer use the existing parser\`.`,
-                ["answer", "refuse", "cancel"],
-              );
-            return {
-              kind: "retry",
-              reason:
-                "Recorded the operator's answer for the amendment planner",
-              afterMs: 0,
-              keep: {
-                [ANSWERS_KEY(proposal.id)]: [
-                  ...answered,
-                  {
-                    holdId: reply.holdId,
-                    question: reply.question ?? "",
-                    answer: reply.text.trim(),
-                  },
-                ],
-              },
-            };
-          }
-          const inputs = amendmentInputs(state);
-          const files = new BaseFiles(config.checkout, inputs.base, signal);
-          const built = await planningFacts(state, inputs, files, config);
-          if ("problems" in built)
-            return done({ rejected: built.problems.join("; ") });
-          const { facts } = built;
-          const plan = currentPlan(state)!;
-          const progress = amendmentProgress(state, plan, proposal);
-          const wire = {
-            child: inputs.child === true,
-            reviewArtifacts: inputs.reviewArtifacts.length > 0,
-            adaptive: adaptiveGraph(
-              inputs.shown.blocks,
-              inputs.adaptiveGraph === true,
-            ),
-          };
-          const lastError = state.retries[key]?.lastError;
-          const corrections: Finding[] = [
-            ...answered.map(({ question, answer }) => ({
-              source: "operator" as const,
-              message: `${question}\nAnswer: ${answer}`,
-            })),
-            ...(proposal.replacement
-              ? [
-                  {
-                    source: "operator" as const,
-                    message: `The previous amendment was rejected. Diagnosis: ${proposal.replacement.diagnosis}\nCorrection: ${proposal.replacement.correction}`,
-                  },
-                ]
-              : []),
-            ...(lastError?.startsWith(INVALID_ANSWER)
-              ? [{ source: "check" as const, message: lastError }]
-              : []),
-          ];
-          const base = currentAnswer(state);
-          const data = {
-            ...planChoices(facts, wire),
-            ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
-            instructions: `${renderPlanningInstructions(inputs.shown.blocks, corrections, true)}${await commandInstructions(facts, config.checkout, signal)}`,
-            currentPlan: base,
-            amendment: {
-              rules: AMENDMENT_RULES,
-              actor: proposal.actor,
-              discovery: proposal.discovery,
-              ...(proposal.worker ? { worker: proposal.worker } : {}),
-              startedItemIds: [...progress.started],
-              reattemptItemIds: [...progress.reattempt],
-            },
-          };
-          const { workDir, repository } = await planningTree(
-            deps,
-            state.issue,
-            inputs.base,
-            signal,
+    redo: "refuse",
+    run: async (context): Promise<Outcome> => {
+      const { state, signal } = context;
+      const { config } = deps;
+      const refused = refusal(context.answer);
+      if (refused) return refused;
+      // Each answer is kept, once per question, before the planner sees
+      // it: a later error hold's answer can't overwrite it, and a rerun
+      // doesn't add it again.
+      const answered = (state.kept[ANSWERS_KEY(proposal.id)] ?? []) as {
+        holdId: string;
+        question: string;
+        answer: string;
+      }[];
+      const reply = context.answer;
+      if (
+        reply?.answer === "answer" &&
+        !answered.some((entry) => entry.holdId === reply.holdId)
+      ) {
+        if (!reply.text?.trim())
+          return hold(
+            `${reply.question ?? "Planning this amendment needs your answer."}\n\n\`answer\` needs text after it, for example \`/factory answer use the existing parser\`.`,
+            ["answer", "refuse", "cancel"],
           );
-          const local = await localExecutables(inputs, config, signal);
-          const answer = await deps.planner.answer({
-            role: "planner",
-            phase: "plan",
-            prompt: renderCompilationCall({
-              facts,
-              data,
-              revising: true,
-              repository,
-              workers: WORKERS,
-              localExecutables: local.observations,
-              reviewArtifacts: inputs.reviewArtifacts,
-              adaptive: wire.adaptive,
-              recipe: Boolean(inputs.recipe),
-            }),
-            schema: revisionSchema(facts, wire),
-            readDir: workDir,
-            signal,
-            log: context.log,
-          });
-          context.log({
-            event: "amendment-answer",
-            amendment: proposal.id,
-            model: answer.model,
-            ms: answer.ms,
-            usage: answer.usage,
-          });
-          const revised = applyRevision(base, answer.value, facts, wire);
-          const reject = (findings: Finding[]): Outcome =>
-            done({
-              answer: revised.answer,
-              rejected: findings.map((f) => f.message).join("; "),
-            } satisfies AmendRound);
-          // An invalid answer gets one retry with its error; a second in a
-          // row rejects the amendment, which can be replaced or dropped.
-          const invalid = (findings: Finding[]): Outcome =>
-            lastError?.startsWith(INVALID_ANSWER)
-              ? reject([
-                  {
-                    source: "check",
-                    message: `The planner's answer stayed invalid: ${findings.map((f) => f.message).join("; ")}`,
-                  },
-                ])
-              : invalidAnswer(findings);
-          if (revised.invalidShape) return invalid(revised.findings);
-          if (!revised.answer) return reject(revised.findings);
-          const decoded = decodePlan(revised.answer, facts, wire);
-          if (decoded.invalidShape) return invalid(decoded.findings);
-          if (decoded.question)
-            return hold(
-              `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; \`refuse\` rejects the amendment.`,
-              ["answer", "refuse", "cancel"],
-            );
-          if (!decoded.plan) return reject(decoded.findings);
-          const findings = [
-            ...decoded.findings,
-            ...(await checkPlan(decoded.plan, facts, files, plan)),
-            ...(inputs.recipe
-              ? recipeFindings(decoded.plan, inputs.recipe.recipe)
-              : []),
-            ...amendmentFindings(plan, decoded.plan, progress, {
-              answered: answered.length > 0,
-              nativeStack: config.delivery.kind === "native-stack",
-            }),
-          ];
-          if (findings.length) return reject(findings);
-          return done({
-            answer: revised.answer,
-            draft: decoded.plan,
-          } satisfies AmendRound);
+        return {
+          kind: "retry",
+          reason: "Recorded the operator's answer for the amendment planner",
+          afterMs: 0,
+          keep: {
+            [ANSWERS_KEY(proposal.id)]: [
+              ...answered,
+              {
+                holdId: reply.holdId,
+                question: reply.question ?? "",
+                answer: reply.text.trim(),
+              },
+            ],
+          },
+        };
+      }
+      const inputs = amendmentInputs(state);
+      const files = new BaseFiles(config.checkout, inputs.base, signal);
+      const built = await planningFacts(state, inputs, files, config);
+      if ("problems" in built)
+        return done({ rejected: built.problems.join("; ") });
+      const { facts } = built;
+      const plan = currentPlan(state)!;
+      const progress = amendmentProgress(state, plan, proposal);
+      const wire = {
+        child: inputs.child === true,
+        reviewArtifacts: inputs.reviewArtifacts.length > 0,
+        adaptive: adaptiveGraph(
+          inputs.shown.blocks,
+          inputs.adaptiveGraph === true,
+        ),
+      };
+      const lastError = state.retries[key]?.lastError;
+      const corrections: Finding[] = [
+        ...answered.map(({ question, answer }) => ({
+          source: "operator" as const,
+          message: `${question}\nAnswer: ${answer}`,
+        })),
+        ...(proposal.replacement
+          ? [
+              {
+                source: "operator" as const,
+                message: `The previous amendment was rejected. Diagnosis: ${proposal.replacement.diagnosis}\nCorrection: ${proposal.replacement.correction}`,
+              },
+            ]
+          : []),
+        ...(lastError?.startsWith(INVALID_ANSWER)
+          ? [{ source: "check" as const, message: lastError }]
+          : []),
+      ];
+      const base = currentAnswer(state);
+      const data = {
+        ...planChoices(facts, wire),
+        ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
+        instructions: `${renderPlanningInstructions(inputs.shown.blocks, corrections, true)}${await commandInstructions(facts, config.checkout, signal)}`,
+        currentPlan: base,
+        amendment: {
+          rules: AMENDMENT_RULES,
+          actor: proposal.actor,
+          discovery: proposal.discovery,
+          ...(proposal.worker ? { worker: proposal.worker } : {}),
+          startedItemIds: [...progress.started],
+          reattemptItemIds: [...progress.reattempt],
         },
-        "refuse",
-      ),
+      };
+      const { workDir, repository } = await planningTree(
+        deps,
+        state.issue,
+        inputs.base,
+        signal,
+      );
+      const local = await localExecutables(inputs, config, signal);
+      const answer = await deps.planner.answer({
+        role: "planner",
+        phase: "plan",
+        prompt: renderCompilationCall({
+          facts,
+          data,
+          revising: true,
+          repository,
+          workers: WORKERS,
+          localExecutables: local.observations,
+          reviewArtifacts: inputs.reviewArtifacts,
+          adaptive: wire.adaptive,
+          recipe: Boolean(inputs.recipe),
+        }),
+        schema: revisionSchema(facts, wire),
+        readDir: workDir,
+        signal,
+        log: context.log,
+      });
+      context.log({
+        event: "amendment-answer",
+        amendment: proposal.id,
+        model: answer.model,
+        ms: answer.ms,
+        usage: answer.usage,
+      });
+      const revised = applyRevision(base, answer.value, facts, wire);
+      const reject = (findings: Finding[]): Outcome =>
+        done({
+          answer: revised.answer,
+          rejected: findings.map((f) => f.message).join("; "),
+        } satisfies AmendRound);
+      // An invalid answer gets one retry with its error; a second in a
+      // row rejects the amendment, which can be replaced or dropped.
+      const invalid = (findings: Finding[]): Outcome =>
+        lastError?.startsWith(INVALID_ANSWER)
+          ? reject([
+              {
+                source: "check",
+                message: `The planner's answer stayed invalid: ${findings.map((f) => f.message).join("; ")}`,
+              },
+            ])
+          : invalidAnswer(findings);
+      if (revised.invalidShape) return invalid(revised.findings);
+      if (!revised.answer) return reject(revised.findings);
+      const decoded = decodePlan(revised.answer, facts, wire);
+      if (decoded.invalidShape) return invalid(decoded.findings);
+      if (decoded.question)
+        return hold(
+          `Planning amendment ${proposal.id} needs a decision:\n\n${decoded.question}\n\n\`answer <your choice>\` plans the amendment again with it; \`refuse\` rejects the amendment.`,
+          ["answer", "refuse", "cancel"],
+        );
+      if (!decoded.plan) return reject(decoded.findings);
+      const findings = [
+        ...decoded.findings,
+        ...(await checkPlan(decoded.plan, facts, files, plan)),
+        ...(inputs.recipe
+          ? recipeFindings(decoded.plan, inputs.recipe.recipe)
+          : []),
+        ...amendmentFindings(plan, decoded.plan, progress, {
+          answered: answered.length > 0,
+          nativeStack: config.delivery.kind === "native-stack",
+        }),
+      ];
+      if (findings.length) return reject(findings);
+      return done({
+        answer: revised.answer,
+        draft: decoded.plan,
+      } satisfies AmendRound);
+    },
   };
 }
 
@@ -796,101 +796,91 @@ function amendReviewStep(
   return {
     key: `${KEY(proposal.id)}:review`,
     deadlineMs: 45 * MINUTE,
-    run: (context) =>
-      guarded(
-        deps.config.repository,
-        async (): Promise<Outcome> => {
-          const { state, signal } = context;
-          const { config } = deps;
-          const refused = refusal(context.answer);
-          if (refused) return refused;
-          const inputs = amendmentInputs(state);
-          const built = await planningFacts(
-            state,
-            inputs,
-            new BaseFiles(config.checkout, inputs.base, signal),
-            config,
-          );
-          if ("problems" in built)
-            return done({ rejected: built.problems.join("; ") });
-          const { facts } = built;
-          const draft = (state.done[`${KEY(proposal.id)}:plan`] as AmendRound)
-            .draft!;
-          const all = decisions(state);
-          const local = await localExecutables(inputs, config, signal);
-          const evidence = planningReviewEvidence({
-            sources: facts.sources,
-            decisions: all,
-            localExecutables: local.observations,
-            amendment: {
-              actor: proposal.actor,
-              discovery: proposal.discovery,
-              ...(proposal.worker ? { worker: proposal.worker } : {}),
-              previousPlan: currentPlan(state),
-            },
-          });
-          const { workDir, repository } = await planningTree(
-            deps,
-            state.issue,
-            inputs.base,
-            signal,
-          );
-          const answer = await deps.planner.answer({
-            role: "reviewer",
-            phase: "graph-review",
-            prompt: renderGraphReviewCall({
-              facts,
-              draft,
-              evidence,
-              decisions: all,
-              finalCommands: finalCommands(
-                inputs.shown.blocks,
-                config.finalValidation.requiredCommands,
-              ),
-              controllerCapabilities: controllerGuarantees(
-                inputs.reviewArtifacts.length > 0,
-              ),
-              reviewArtifacts: inputs.reviewArtifacts,
-              repository,
-              workers: WORKERS,
-              ...(inputs.recipe
-                ? { workflowRecipe: inputs.recipe.recipe }
-                : {}),
-            }),
-            schema: graphReviewSchema(),
-            readDir: workDir,
-            signal,
-            log: context.log,
-          });
-          const decoded = decodeGraphReview(
-            answer.value,
-            evidence,
-            draftItems(draft).map((item) => item.id),
-          );
-          const invalidReview = "The amendment review answer was invalid";
-          // One retry with the error; a second invalid answer rejects it.
-          if (decoded.invalid)
-            return state.retries[
-              `${KEY(proposal.id)}:review`
-            ]?.lastError?.startsWith(invalidReview)
-              ? done({
-                  rejected: `${invalidReview} twice: ${decoded.reason}`,
-                })
-              : {
-                  kind: "retry",
-                  reason: `${invalidReview}: ${decoded.reason}`,
-                  afterMs: -1,
-                };
-          return done(
-            decoded.findings.length
-              ? {
-                  rejected: `Independent amendment review: ${decoded.findings.map((f) => f.message).join("; ")}`,
-                }
-              : {},
-          );
+    redo: "refuse",
+    run: async (context): Promise<Outcome> => {
+      const { state, signal } = context;
+      const { config } = deps;
+      const refused = refusal(context.answer);
+      if (refused) return refused;
+      const inputs = amendmentInputs(state);
+      const built = await planningFacts(
+        state,
+        inputs,
+        new BaseFiles(config.checkout, inputs.base, signal),
+        config,
+      );
+      if ("problems" in built)
+        return done({ rejected: built.problems.join("; ") });
+      const { facts } = built;
+      const draft = (state.done[`${KEY(proposal.id)}:plan`] as AmendRound)
+        .draft!;
+      const all = decisions(state);
+      const local = await localExecutables(inputs, config, signal);
+      const evidence = planningReviewEvidence({
+        sources: facts.sources,
+        decisions: all,
+        localExecutables: local.observations,
+        amendment: {
+          actor: proposal.actor,
+          discovery: proposal.discovery,
+          ...(proposal.worker ? { worker: proposal.worker } : {}),
+          previousPlan: currentPlan(state),
         },
-        "refuse",
-      ),
+      });
+      const { workDir, repository } = await planningTree(
+        deps,
+        state.issue,
+        inputs.base,
+        signal,
+      );
+      const answer = await deps.planner.answer({
+        role: "reviewer",
+        phase: "graph-review",
+        prompt: renderGraphReviewCall({
+          facts,
+          draft,
+          evidence,
+          decisions: all,
+          finalCommands: finalCommands(
+            inputs.shown.blocks,
+            config.finalValidation.requiredCommands,
+          ),
+          controllerCapabilities: controllerGuarantees(
+            inputs.reviewArtifacts.length > 0,
+          ),
+          reviewArtifacts: inputs.reviewArtifacts,
+          repository,
+          workers: WORKERS,
+          ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
+        }),
+        schema: graphReviewSchema(),
+        readDir: workDir,
+        signal,
+        log: context.log,
+      });
+      const decoded = decodeGraphReview(
+        answer.value,
+        evidence,
+        draftItems(draft).map((item) => item.id),
+      );
+      const invalidReview = "The amendment review answer was invalid";
+      // One retry with the error; a second invalid answer rejects it.
+      if (decoded.invalid)
+        return state.retries[
+          `${KEY(proposal.id)}:review`
+        ]?.lastError?.startsWith(invalidReview)
+          ? done({
+              rejected: `${invalidReview} twice: ${decoded.reason}`,
+            })
+          : errored(`${invalidReview}: ${decoded.reason}`);
+      return done(
+        decoded.findings.length
+          ? {
+              rejected: `Independent amendment review: ${decoded.findings.map((f) => f.message).join("; ")}`,
+            }
+          : {},
+      );
+    },
   };
 }
 
@@ -902,35 +892,31 @@ function amendAcceptStep(
   return {
     key: KEY(proposal.id),
     deadlineMs: 10 * MINUTE,
-    run: ({ state, signal, answer }) =>
-      guarded(
-        deps.config.repository,
-        async (): Promise<Outcome> => {
-          const refused = refusal(answer);
-          if (refused) return refused;
-          const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
-          const review = state.done[`${KEY(proposal.id)}:review`] as
-            | { rejected?: string }
-            | undefined;
-          const rejected = round.rejected ?? review?.rejected;
-          if (rejected) return done({ rejected } satisfies AmendmentResult);
-          const inputs = amendmentInputs(state);
-          const plan: Plan = {
-            ...round.draft!,
-            finalCommands: currentPlan(state)!.finalCommands,
-            decisions: decisions(state),
-            ...(inputs.reviewArtifacts.length
-              ? { reviewArtifacts: inputs.reviewArtifacts }
-              : {}),
-          };
-          await postPlan(deps, state.issue, plan, signal);
-          return done({
-            plan,
-            answer: round.answer,
-          } satisfies AmendmentResult);
-        },
-        "refuse",
-      ),
+    redo: "refuse",
+    run: async ({ state, signal, answer }): Promise<Outcome> => {
+      const refused = refusal(answer);
+      if (refused) return refused;
+      const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
+      const review = state.done[`${KEY(proposal.id)}:review`] as
+        | { rejected?: string }
+        | undefined;
+      const rejected = round.rejected ?? review?.rejected;
+      if (rejected) return done({ rejected } satisfies AmendmentResult);
+      const inputs = amendmentInputs(state);
+      const plan: Plan = {
+        ...round.draft!,
+        finalCommands: currentPlan(state)!.finalCommands,
+        decisions: decisions(state),
+        ...(inputs.reviewArtifacts.length
+          ? { reviewArtifacts: inputs.reviewArtifacts }
+          : {}),
+      };
+      await postPlan(deps, state.issue, plan, signal);
+      return done({
+        plan,
+        answer: round.answer,
+      } satisfies AmendmentResult);
+    },
   };
 }
 

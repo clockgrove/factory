@@ -32,6 +32,13 @@ export class Unreadable extends TransientError {}
 
 /** GitHub answered, and the answer won't change by asking again: 404, 422. */
 export class GitHubError extends Error {
+  /** The permission the refused call needs, for its hold (`needing`). */
+  permission?: string;
+  /**
+   * A 404 of an issue (or what GitHub serves under one): the issue is
+   * missing, not a refusal; set by the client from the request's path.
+   */
+  missingIssue?: number;
   constructor(
     message: string,
     readonly status: number,
@@ -75,6 +82,12 @@ export function moved(error: unknown): boolean {
   );
 }
 
+/** The error, naming the permission its call needs if GitHub refused it. */
+export function needing(error: unknown, permission: string): unknown {
+  if (error instanceof GitHubError) error.permission = permission;
+  return error;
+}
+
 /** An issue GitHub no longer has here: deleted (404, 410) or moved away. */
 export function issueGone(error: unknown): error is GitHubError {
   return (
@@ -88,19 +101,17 @@ const TIMEOUT_MS = 60_000;
 
 /**
  * A GitHub failure as a step outcome (CORE.md#Waits): only what a person
- * must fix holds, at once: a rejected login (401), a refusal (403; rate
- * limits are TransientErrors) naming the `permission` the call needs, and
- * a missing repository or issue (404, `missing`). A rate limit waits for
- * its reset. Everything else (5xx, timeouts, 409, 410, 422, GraphQL
- * errors) may change, so it retries as an unknown transient wait; a 5xx's
- * retry-after only sets its backoff. Undefined for an error that isn't
- * GitHub's.
+ * must fix holds, at once: a rejected login (401), a refusal (403, or a
+ * 404 of anything but an issue; rate limits are TransientErrors) naming
+ * the permission the call needs (`needing`), and a missing issue (404).
+ * A rate limit waits for its reset. Everything else (5xx, timeouts, 409,
+ * 410, 422, GraphQL errors) may change, so it retries as an unknown
+ * transient wait; a 5xx's retry-after only sets its backoff. Undefined
+ * for an error that isn't GitHub's.
  */
 export function githubOutcome(
   error: unknown,
   repository: string,
-  permission = "read access to the repository, its issues, pull requests and checks",
-  missing?: string,
 ): Outcome | undefined {
   if (error instanceof TransientError)
     return {
@@ -133,15 +144,19 @@ export function githubOutcome(
         `GitHub rejected Factory's login on ${repository} (${detail}). Log in again with \`gh auth login\` (or replace FACTORY_GITHUB_TOKEN), then answer retry; or cancel.`,
       ),
     );
-  if (error.status === 403 || (error.status === 404 && !missing))
+  if (error.status === 404 && error.missingIssue !== undefined)
     return objectiveWide(
       hold(
-        `${detail}. Give Factory's login ${permission} on ${repository}, then answer retry; or cancel.`,
+        `GitHub says issue #${error.missingIssue} doesn't exist or Factory can't see it (${detail}).`,
+        ["retry", "cancel"],
+        "cancel",
       ),
     );
-  if (error.status === 404)
+  if (error.status === 403 || error.status === 404)
     return objectiveWide(
-      hold(`${missing} (${detail}).`, ["retry", "cancel"], "cancel"),
+      hold(
+        `${detail}. Give Factory's login ${error.permission ?? "read access to the repository, its issues, pull requests and checks"} on ${repository}, then answer retry; or cancel.`,
+      ),
     );
   return { kind: "retry", reason: error.message };
 }
@@ -1312,12 +1327,17 @@ export class GitHub {
         detail,
         retryAfter > 0 ? retryAfter * 1000 : undefined,
       );
-    throw new GitHubError(
+    const failed = new GitHubError(
       detail,
       response.status,
       answer,
       response.headers.get("location") ?? undefined,
     );
+    const issue = path.startsWith(`${root}/issues/`)
+      ? /^(\d+)(?:[/?]|$)/.exec(path.slice(root.length + 8))
+      : null;
+    if (issue) failed.missingIssue = Number(issue[1]);
+    throw failed;
   }
 
   /** The service token, for downloads outside the REST API (media attachments). */

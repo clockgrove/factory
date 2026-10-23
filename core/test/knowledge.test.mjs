@@ -83,7 +83,7 @@ function seedDone(inst, issue) {
   writeFileSync(
     join(inst.objectives, `${issue}.json`),
     JSON.stringify({
-      version: 3,
+      version: 4,
       issue,
       status: "done",
       holds: [],
@@ -130,7 +130,7 @@ function seedDone(inst, issue) {
       modules: {},
       updatedAt: "2026-10-02T00:00:00.000Z",
       startedAt: "2026-10-01T00:00:00.000Z",
-      endedAt: "2026-10-02T00:00:00.000Z",
+      ended: { at: "2026-10-02T00:00:00.000Z" },
     }),
   );
 }

@@ -2,7 +2,7 @@ import type { CoreConfig } from "./config.js";
 import { hold, type Outcome, type Step, type Workflow } from "./engine.js";
 import { type GitHub, GitHubError, type IssueComment } from "./github.js";
 import type { GitHubModule } from "./github-sync.js";
-import { ACCEPTED_AT, guarded } from "./planning/steps.js";
+import { ACCEPTED_AT } from "./planning/steps.js";
 import type { Plan } from "./planning/types.js";
 import { readQueue } from "./queue.js";
 import { type RequestResult, refused, type StoredRequest } from "./requests.js";
@@ -73,12 +73,9 @@ export function resettable(inner: Workflow, rebuild: Step): Workflow {
   const resetting = (state: ObjectiveState) =>
     Boolean(state.kept?.[RESET]) && !TERMINAL.includes(state.status);
   return {
+    ...inner,
     steps: (state) => (resetting(state) ? [rebuild] : inner.steps(state)),
     status: (state) => (resetting(state) ? "resetting" : inner.status(state)),
-    ...(inner.upstream
-      ? { upstream: (state, item) => inner.upstream!(state, item) }
-      : {}),
-    ...(inner.freezable ? { freezable: inner.freezable } : {}),
   };
 }
 
@@ -88,36 +85,35 @@ export function rebuildStep(github: GitHub, config: CoreConfig): Step {
     key: "rebuild",
     deadlineMs: 15 * 60_000,
     resource: "github",
-    run: ({ state, signal }) =>
-      guarded(config.repository, async (): Promise<Outcome> => {
-        const record = state.kept[RESET] as ResetRecord;
-        const found = await rebuildState(github, config, state, signal);
-        if ("version" in found)
-          return {
-            kind: "replace",
-            build: (live) =>
-              carried(found, live, record.request, { message: "ok" }),
-          };
-        // Refused: the old state stands again, or, with none, the record
-        // goes as if never admitted. With an unreadable old state and a
-        // plan it can't read, only the operator can say.
-        if (record.old) {
-          const old = record.old;
-          return {
-            kind: "replace",
-            build: (live) => carried(old, live, record.request, found),
-          };
-        }
-        if (found.code === "plan_unreadable")
-          return hold(
-            `${found.message} Answer retry once the plan comment is fixed or deleted (then Factory plans afresh); or cancel.`,
-          );
+    run: async ({ state, signal }): Promise<Outcome> => {
+      const record = state.kept[RESET] as ResetRecord;
+      const found = await rebuildState(github, config, state, signal);
+      if ("version" in found)
         return {
           kind: "replace",
-          build: (live) => carried(live, live, record.request, found),
-          withdraw: true,
+          build: (live) =>
+            carried(found, live, record.request, { message: "ok" }),
         };
-      }),
+      // Refused: the old state stands again, or, with none, the record
+      // goes as if never admitted. With an unreadable old state and a
+      // plan it can't read, only the operator can say.
+      if (record.old) {
+        const old = record.old;
+        return {
+          kind: "replace",
+          build: (live) => carried(old, live, record.request, found),
+        };
+      }
+      if (found.code === "plan_unreadable")
+        return hold(
+          `${found.message} Answer retry once the plan comment is fixed or deleted (then Factory plans afresh); or cancel.`,
+        );
+      return {
+        kind: "replace",
+        build: (live) => carried(live, live, record.request, found),
+        withdraw: true,
+      };
+    },
   };
 }
 
@@ -306,13 +302,13 @@ export async function rebuildState(
     if (reported) {
       state.status = "done";
       state.done.report = true;
-      state.endedAt = state.updatedAt;
+      state.ended = { at: state.updatedAt };
       return state;
     }
   }
   if (!open) {
     state.status = "cancelled";
-    state.endedAt = state.updatedAt;
+    state.ended = { at: state.updatedAt };
   }
   return state;
 }

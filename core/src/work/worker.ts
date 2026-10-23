@@ -48,7 +48,7 @@ export type WorkerResult = (
       /** The tree the worker's own Validate last passed, with its commands. */
       validated?: { tree: string; commands: string[] };
     }
-  /** Usage or rate limit (`wait`), lost turn; an idle timeout has `afterMs: -1` (an error). */
+  /** Usage or rate limit (`wait`), lost turn; an idle timeout is an error (`wait.kind` "error"). */
   | { kind: "retry"; reason: string; afterMs?: number; wait?: Wait }
   /** Login expired, sandbox unavailable, configuration fault. */
   | {

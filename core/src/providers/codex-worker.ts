@@ -16,7 +16,7 @@ import {
 import { join, relative, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { SandboxConfig } from "../config.js";
-import { hold } from "../engine.js";
+import { errored, hold } from "../engine.js";
 import { redact } from "../log.js";
 import {
   gitMetadata,
@@ -413,7 +413,7 @@ export class CodexWorker implements Worker {
       if (error instanceof PlannerError) return outcome(error);
       const idle = watchdog.expired;
       // An idle model is an error: three in a row hold.
-      if (idle) return { kind: "retry", reason: idle.message, afterMs: -1 };
+      if (idle) return errored(idle.message);
       // Cancelled or past the step deadline: the engine decides.
       if (input.signal.aborted) throw input.signal.reason ?? error;
       // A failed codex process: its stderr is in the message.

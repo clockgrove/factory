@@ -327,7 +327,7 @@ export function codexFailure(message: string): PlannerError {
     (has("try again at ") || !has("upgrade to plus to continue using codex"))
   ) {
     const at = codexResetAt(message);
-    return new PlannerError("retry", `Codex usage limit: ${shown}`, undefined, {
+    return new PlannerError("retry", `Codex usage limit: ${shown}`, {
       kind: "reset",
       ...(at ? { at: at.toISOString() } : {}),
       provider: "codex",
@@ -591,7 +591,8 @@ export class CodexPlanner implements Planner {
     } catch (error) {
       if (error instanceof PlannerError) throw error;
       const idle = watchdog.expired;
-      if (idle) throw new PlannerError("retry", idle.message, -1);
+      if (idle)
+        throw new PlannerError("retry", idle.message, { kind: "error" });
       // The step was cancelled or hit its deadline: the engine decides.
       if (call.signal.aborted) throw call.signal.reason ?? error;
       // A failed codex process: its stderr is in the message.

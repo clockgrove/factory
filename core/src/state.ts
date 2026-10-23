@@ -17,11 +17,13 @@ import type { FrozenConfig } from "./providers/selection.js";
 import type { QueueMode, RefusalCode } from "./requests.js";
 
 /**
- * 3: one frozen configuration (`frozen`) in place of the frozen provider.
- * Another version is unreadable, with no migration; `factory reset`
- * rebuilds it from GitHub (reset.ts), with no open question.
+ * 4: a hold has a cause, an error retry is a wait class, cancel and the
+ * end are one `ended` record (3: one frozen configuration in place of the
+ * frozen provider). Another version is unreadable, with no migration;
+ * `factory reset` rebuilds it from GitHub (reset.ts), with no open
+ * question.
  */
-const STATE_VERSION = 3;
+const STATE_VERSION = 4;
 
 export type ObjectiveStatus =
   | "checking"
@@ -32,14 +34,17 @@ export type ObjectiveStatus =
   /** `factory reset`: rebuilding the state from GitHub (reset.ts). */
   | "resetting"
   | "done"
-  | "failed"
   | "cancelled";
 
-export const TERMINAL: readonly ObjectiveStatus[] = [
-  "done",
-  "failed",
-  "cancelled",
-];
+export const TERMINAL: readonly ObjectiveStatus[] = ["done", "cancelled"];
+
+/**
+ * Why a question is open: a decision only a person can make, or a step
+ * that can't succeed as it is (errors in a row, a repair budget spent, a
+ * crash loop, a result it can't produce), which also offers `replan`
+ * where the workflow can plan again (engine.ts `Workflow.replannable`).
+ */
+export type HoldCause = "question" | "failure";
 
 /** A question only a person can answer. Every answer it lists works. */
 export interface Hold {
@@ -55,6 +60,9 @@ export interface Hold {
   question: string;
   answers: string[];
   recommended: string;
+  cause: HoldCause;
+  /** Answers that need text after them: one without is refused, with no change. */
+  needsText?: string[];
   askedAt: string;
   /**
    * When its issue comment last changed to what it shows now, by GitHub's
@@ -81,6 +89,12 @@ export interface Answer {
  * such as the network, a GitHub or provider outage, or CI still running.
  */
 export type Wait =
+  /**
+   * An error: an escaped exception, a missed deadline, an idle model or an
+   * invalid answer. It shares the unknown cause's budget, and three in a
+   * row hold.
+   */
+  | { kind: "error" }
   /** A limit that resets at `at` (unknown when absent), from `provider` when a model provider set it. */
   | { kind: "reset"; at?: string; provider?: string }
   /** A person outside Factory: an environment approval, a required review. */
@@ -97,7 +111,7 @@ export interface Retry {
   lastError: string;
   /** The reason this run of retries began with. */
   cause?: string;
-  /** The latest wait's class; absent for errors and unknown transient causes. */
+  /** The latest wait's class; absent for unknown transient causes. */
   wait?: Wait;
   /** The operator answered `wait`: no question until then. */
   grantedUntil?: string;
@@ -112,6 +126,7 @@ export interface PendingQuestion {
   answers: string[];
   recommended: string;
   scope?: HoldScope;
+  cause?: HoldCause;
 }
 
 /**
@@ -153,8 +168,15 @@ export interface ObjectiveState {
   asking: Record<string, PendingQuestion>;
   /** Facts steps keep across repairs (Outcome `keep`), by key. */
   kept: Record<string, unknown>;
-  /** Repairs per target step, with the latest findings (newest last). */
-  repairs: Record<string, { count: number; findings: string[] }>;
+  /**
+   * Repairs per target step, with the latest findings (newest last).
+   * `free`: repair numbers a hold set free (Outcome `free`): they don't
+   * count against the budget.
+   */
+  repairs: Record<
+    string,
+    { count: number; findings: string[]; free?: number[] }
+  >;
   /** Steps that finished, with their saved results. */
   done: Record<string, unknown>;
   /**
@@ -183,8 +205,8 @@ export interface ObjectiveState {
   updatedAt: string;
   /** When this run was admitted: with the issue, it names the run. */
   startedAt?: string;
-  /** The first save at a terminal status. */
-  endedAt?: string;
+  /** The first save at a terminal status; `by` names who cancelled. */
+  ended?: { at: string; by?: string };
 }
 
 export function newObjective(

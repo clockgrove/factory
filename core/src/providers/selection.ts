@@ -345,6 +345,9 @@ export function providerWorkflow(
     ...(fallback.replannable ? { replannable: fallback.replannable } : {}),
     ...(fallback.replan ? { replan: fallback.replan } : {}),
     ...(fallback.endedBy ? { endedBy: fallback.endedBy } : {}),
+    ...(fallback.deadlineExempt
+      ? { deadlineExempt: fallback.deadlineExempt }
+      : {}),
     freezable,
   };
 }

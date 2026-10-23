@@ -128,7 +128,13 @@ export function planningStep(
   const { g, n } = position(state);
   const planKey = `plan:${g}:${n}`;
   const planned = state.done[planKey] as PlanRound | undefined;
-  if (!planned) return forgetting(planRoundStep(planKey, g, n, deps));
+  if (!planned)
+    return g === 1 &&
+      n === 1 &&
+      generationInputs(state, 1).adopt &&
+      !state.kept[ADOPT_TRIED]
+      ? adoptStep(planKey, deps)
+      : forgetting(planRoundStep(planKey, g, n, deps));
   const reviewKey = `review:${g}:${n}`;
   if (cleanDraft(planned) && !state.done[reviewKey])
     return reviewStep(reviewKey, g, n, deps);
@@ -404,6 +410,50 @@ async function citedSections(
 // ---------------------------------------------------------------------------
 // plan:g:n
 
+/** Set once a split child found no graph of its parent's to adopt: its first round asks the planner. */
+const ADOPT_TRIED = "plan:adopt-tried";
+
+/**
+ * A ready split child's first round: the graph its parent's pass planned
+ * and reviewed for it, checked here against its own Objective, with no
+ * planner call and no planner slot; review follows as for any round.
+ * Without one to adopt (`adoptedGraph`), the round asks the planner.
+ */
+function adoptStep(key: string, deps: PlanningDeps): Step {
+  return {
+    key,
+    deadlineMs: 10 * MINUTE,
+    run: async (context): Promise<Outcome> => {
+      const { state, signal } = context;
+      const inputs = generationInputs(state, 1);
+      const adopt = inputs.adopt!;
+      const adopted = adoptedGraph(deps.objectives, state.issue, adopt);
+      if (!adopted)
+        return {
+          kind: "retry",
+          reason: "No planned graph of its parent's to adopt: planning it.",
+          progress: true,
+          keep: { [ADOPT_TRIED]: true },
+        };
+      const files = new BaseFiles(deps.config.checkout, inputs.base, signal);
+      const built = await planningFacts(state, inputs, files, deps.config);
+      if ("problems" in built)
+        return objectiveProblemsHold(built.problems, "replan");
+      const draft: Draft = { ...adopted, base: inputs.base };
+      const findings = [
+        ...(await checkPlan(draft, built.facts, files)),
+        ...(inputs.recipe ? recipeFindings(draft, inputs.recipe.recipe) : []),
+      ];
+      context.log({ event: "child-graph-adopted", parent: adopt.parent });
+      return done({
+        draft,
+        adopted: adopt.parent,
+        ...(findings.length ? { findings } : {}),
+      });
+    },
+  };
+}
+
 function planRoundStep(
   key: string,
   g: number,
@@ -429,29 +479,6 @@ function planRoundStep(
       if ("problems" in built)
         return objectiveProblemsHold(built.problems, "replan");
       const { facts } = built;
-      // A ready split child's first round is the graph its parent's pass
-      // planned and reviewed for it, checked here against its own
-      // Objective; review follows as for any round.
-      const adopted =
-        g === 1 && n === 1 && inputs.adopt
-          ? adoptedGraph(deps.objectives, state.issue, inputs.adopt)
-          : undefined;
-      if (adopted) {
-        const draft: Draft = { ...adopted, base: inputs.base };
-        const findings = [
-          ...(await checkPlan(draft, facts, files)),
-          ...(inputs.recipe ? recipeFindings(draft, inputs.recipe.recipe) : []),
-        ];
-        context.log({
-          event: "child-graph-adopted",
-          parent: inputs.adopt!.parent,
-        });
-        return done({
-          draft,
-          adopted: inputs.adopt!.parent,
-          ...(findings.length ? { findings } : {}),
-        });
-      }
       const { workDir, repository } = await planningTree(
         deps,
         state.issue,
@@ -1253,8 +1280,18 @@ export async function readObjective(
   };
   const problems = await objectiveProblems(config, inputs, signal);
   if (problems.length) return { hold: objectiveProblemsHold(problems, again) };
-  // Planning reads a base that has its predecessors' accepted work.
-  const predecessors = predecessorEvidence(state);
+  // Planning reads a base that has its predecessors' accepted work; a
+  // split child's include its parent's, whose plan it carries.
+  const parent = inputs.adopt
+    ? findState(deps.objectives, inputs.adopt.parent)
+    : null;
+  const direct = predecessorEvidence(state);
+  const predecessors = [
+    ...(parent?.kind === "ok" ? predecessorEvidence(parent.state) : []).filter(
+      (evidence) => !direct.some((each) => each.issue === evidence.issue),
+    ),
+    ...direct,
+  ];
   if (predecessors.length) {
     const off = await predecessorsOnBase(
       config.checkout,

@@ -10,7 +10,12 @@ import {
 import { GitRefusal } from "./git.js";
 import { githubOutcome } from "./github.js";
 import { amendmentSteps } from "./planning/amendments.js";
-import { currentPlan, SPLIT_CHILDREN, SPLIT_END } from "./planning/plan.js";
+import {
+  currentPlan,
+  SPLIT_CHILDREN,
+  SPLIT_END,
+  splitRecord,
+} from "./planning/plan.js";
 import { PREDECESSORS, predecessorsStep } from "./planning/predecessors.js";
 import {
   type PlanningDeps,
@@ -22,7 +27,7 @@ import {
 import { PlannerError, providerOutcome } from "./providers/planner.js";
 import type { Answer, ObjectiveState, ObjectiveStatus } from "./state.js";
 import { errorMessage } from "./text.js";
-import { splitSteps } from "./work/split.js";
+import { splitSteps, waitingOnChildren } from "./work/split.js";
 import {
   type BuildDeps,
   built,
@@ -85,6 +90,8 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       return amend.length ? amend : deliverySteps(state, deps);
     },
 
+    deadlineExempt: waitingOnChildren,
+
     endedBy: (state) => (state.done[SPLIT_CHILDREN] ? SPLIT_END : undefined),
 
     upstream: (state, item) => (deps ? layersBelow(state, deps, item) : []),
@@ -103,7 +110,10 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
 
     replannable: (state, key) =>
       currentPlan(state)
-        ? /^(item|build):/.test(key) ||
+        ? // Once a split's children exist, a new plan would orphan them.
+          (key.startsWith("build:split")
+            ? !splitRecord(state)
+            : /^(item|build):/.test(key)) ||
           ["final", "final-review", "report"].includes(key)
         : /^(plan|review|decide):\d+:\d+$/.test(key),
 

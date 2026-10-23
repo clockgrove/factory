@@ -613,6 +613,23 @@ export async function queueIssue(
   return "queued";
 }
 
+/**
+ * The option of issue N's card on the queue's Project: null when it has
+ * no card there or none set; undefined when the issue isn't here (deleted,
+ * transferred, a pull request).
+ */
+export async function cardOption(
+  github: GitHub,
+  config: CoreConfig,
+  issue: number,
+  signal?: AbortSignal,
+): Promise<{ open: boolean; option: string | null } | undefined> {
+  const found = await runIssue(github, config, issue, signal);
+  if (!found) return undefined;
+  const card = found.cards.find((node) => !node.isArchived);
+  return { open: found.open, option: card?.option?.name ?? null };
+}
+
 const CARD_PROJECT = `
 query($item: ID!) {
   node(id: $item) {

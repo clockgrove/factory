@@ -933,7 +933,17 @@ export async function serve(options: ServeOptions): Promise<number> {
         const asked = runs.get(issue);
         // A split child runs on its parent's frozen configuration while
         // the parent waits for it (work/split.ts), unless `factory run
-        // --provider` names another.
+        // --provider` names another. A configuration changed since the
+        // parent froze it gives only the provider choice, frozen anew, so
+        // the child doesn't start on a question.
+        const inherited = (from: Frozen | undefined): Frozen | undefined => {
+          if (!from) return undefined;
+          const live = options.freeze?.(from.provider);
+          if (!live) return undefined;
+          return live.digest === from.digest
+            ? from
+            : { ...live, selectedBy: from.selectedBy };
+        };
         const parent = [...runners.values()].find((runner) =>
           Object.values(splitRecord(runner.state)?.children ?? {}).includes(
             issue,
@@ -942,7 +952,7 @@ export async function serve(options: ServeOptions): Promise<number> {
         const frozen =
           asked?.request.provider !== undefined
             ? (options.freeze?.(asked.request.provider) ?? options.frozen)
-            : (parent?.state.frozen ?? options.frozen);
+            : (inherited(parent?.state.frozen) ?? options.frozen);
         const state = newObjective(issue, now, frozen);
         const deadline = deadlineAt(
           now,

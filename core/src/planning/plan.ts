@@ -29,6 +29,7 @@ import type { Plan, Retirement, WorkItem } from "./types.js";
  * `build:split:children` waits for the children and closes the parent.
  */
 export const SPLIT = "build:split";
+export const SPLIT_QUEUE = "build:split:queue";
 export const SPLIT_CHILDREN = "build:split:children";
 /** `ended.by` of a parent its child Objectives delivered. */
 export const SPLIT_END = "split";

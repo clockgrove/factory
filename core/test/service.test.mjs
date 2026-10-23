@@ -2211,6 +2211,8 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
   };
   let next = 100;
   const queuedCards = [];
+  // Each issue's card option on the Project, by issue.
+  const cards = {};
   const view = ({ comments: _c, subs: _s, blockers: _b, ...issue }) => ({
     ...issue,
     body_html: render(issue.body ?? ""),
@@ -2245,9 +2247,23 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
               issue: {
                 id: `I_${variables.issue}`,
                 number: variables.issue,
-                state: "OPEN",
+                state: issues[variables.issue].state.toUpperCase(),
                 repository: { nameWithOwner: REPO },
-                projectItems: { nodes: [] },
+                projectItems: {
+                  nodes: cards[variables.issue]
+                    ? [
+                        {
+                          id: `PVTI_I_${variables.issue}`,
+                          isArchived: false,
+                          project: { id: "PVT_none" },
+                          option: {
+                            name: cards[variables.issue],
+                            updatedAt: now(),
+                          },
+                        },
+                      ]
+                    : [],
+                },
               },
             },
           },
@@ -2268,6 +2284,7 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
         });
       if (query.includes("updateProjectV2ItemFieldValue")) {
         queuedCards.push(variables.item);
+        cards[variables.item.replace("PVTI_I_", "")] = "Queued";
         return reply(200, {
           data: {
             updateProjectV2ItemFieldValue: {
@@ -2439,23 +2456,40 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
       },
     });
   };
-  child(100, "done");
+  // A cancelled child asks; `continue` goes on without it and the parent
+  // still waits for the other.
   child(101, "cancelled");
   await until(() => stateOf(split, 97).holds.length, "the parent asks");
   const [asked] = stateOf(split, 97).holds;
-  assert.match(asked.question, /#101 `printer`/);
+  assert.match(asked.question, /#101 `printer` \(cancelled\)/);
   assert.deepEqual(
     asked.options.map((option) => option.answer),
     ["continue", "retry", "cancel"],
   );
+  assert.equal(
+    cli(split, "answer", "97", "continue", "--question", asked.id).code,
+    0,
+  );
+  await until(
+    () =>
+      !stateOf(split, 97).holds.length &&
+      stateOf(split, 97).kept["split:dropped"] &&
+      waiting(97, "build:split:children"),
+    "the parent waits on the other child",
+  );
   assert.deepEqual(
     row().children.map((each) => each.status),
-    ["done", "cancelled"],
+    ["queued", "cancelled (gone on without)"],
   );
-  // The child runs again and is done: retry closes the parent.
-  child(101, "done");
+  // A child closed by hand before its admission would never run: it asks.
+  Object.assign(issues[100], { state: "closed", state_reason: "completed" });
+  await until(() => stateOf(split, 97).holds.length, "the parent asks again");
+  const [closed] = stateOf(split, 97).holds;
+  assert.match(closed.question, /#100 `parser` \(closed\)/);
+  // It runs after all and is done: retry closes the parent.
+  child(100, "done");
   assert.equal(
-    cli(split, "answer", "97", "retry", "--question", asked.id).code,
+    cli(split, "answer", "97", "retry", "--question", closed.id).code,
     0,
   );
   await until(() => stateOf(split, 97).status === "done", "the split is done");
@@ -2464,17 +2498,37 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
     [issues[97].state, issues[97].state_reason],
     ["closed", "completed"],
   );
-  assert.equal(
-    issues[97].comments.filter((c) =>
-      c.body.startsWith("<!-- factory:97:split-done:"),
-    ).length,
-    1,
+  const finished = issues[97].comments.filter((c) =>
+    c.body.startsWith("<!-- factory:97:split-done:"),
   );
-  // The parent stands for its children: #98's evidence is theirs.
+  assert.equal(finished.length, 1);
+  assert.match(
+    finished[0].body,
+    /#101 `printer`: cancelled \(gone on without it\)/,
+  );
+  // The parent stands for its children: #98 holds on the cancelled one,
+  // and once that is ignored, takes the done one's evidence.
+  await until(() => stateOf(split, 98).holds.length, "#98 asks");
+  const [blocked] = stateOf(split, 98).holds;
+  assert.match(blocked.question, /#101: closed as not planned; a child of #97/);
+  assert.equal(
+    cli(
+      split,
+      "answer",
+      "98",
+      "ignore",
+      "101",
+      "--question",
+      blocked.id,
+      "--text",
+      "Dropped from the split",
+    ).code,
+    0,
+  );
   await until(() => stateOf(split, 98).done.predecessors, "#98's evidence");
   assert.deepEqual(
     stateOf(split, 98).done.predecessors.predecessors.map((each) => each.issue),
-    [100, 101],
+    [100],
   );
   await stopped(resumed);
 });

@@ -357,6 +357,12 @@ export interface Workflow {
    * `ended.by`: `split` when its child Objectives deliver it.
    */
   endedBy?(state: ObjectiveState): string | undefined;
+  /**
+   * Whether the Objective's own deadline doesn't cancel it now: it only
+   * waits for other Objectives that run on their own (a split parent
+   * waiting for its children).
+   */
+  deadlineExempt?(state: ObjectiveState): boolean;
 }
 
 /**
@@ -1623,6 +1629,7 @@ export class ObjectiveRunner {
       withdrawing ||
       status === "resetting" ||
       TERMINAL.includes(status) ||
+      this.workflow.deadlineExempt?.(this.state) ||
       this.now().getTime() < Date.parse(deadline)
     )
       return false;

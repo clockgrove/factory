@@ -268,7 +268,6 @@ export function deliverySteps(state: ObjectiveState, deps: BuildDeps): Step[] {
  */
 function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   const plan = currentPlan(state)!;
-  if (plan.split) return [splitPending(plan.split.children.length)];
   const stacked = stackOf(plan, deps);
   if (stacked && "problem" in stacked) return [unitsProblem(stacked.problem)];
   // Each item's place in its native stack, worked out once per tick and
@@ -406,7 +405,7 @@ export function startedItems(state: ObjectiveState): Set<string> {
 /** Whether every item has merged (or, for aggregates, completed). */
 export function built(state: ObjectiveState): boolean {
   const plan = currentPlan(state);
-  // A split delivers through its children, which aren't created yet.
+  // A split delivers through its children (work/split.ts).
   if (!plan || plan.split) return false;
   return plan.items.every((item) => mergeOf(state, item.id));
 }
@@ -471,23 +470,6 @@ function unitsProblem(problem: string): Step {
     run: async () =>
       hold(
         `${problem}, so Factory can't deliver the plan as native stacks. Answer replan to plan again, or cancel.`,
-        ["replan", "cancel"],
-      ),
-  };
-}
-
-/**
- * A plan that splits the Objective into child Objectives. Creating the
- * children is not ported yet (slice 6), so the plan holds rather than
- * report done with nothing delivered.
- */
-function splitPending(children: number): Step {
-  return {
-    key: "build:split",
-    deadlineMs: MINUTE,
-    run: async () =>
-      hold(
-        `The accepted plan splits this Objective into ${children} child Objectives, and Factory can't create child Objectives yet. Answer replan to plan it without a split, or cancel.`,
         ["replan", "cancel"],
       ),
   };
@@ -3920,7 +3902,7 @@ function finalReviewStep(deps: BuildDeps): Step {
  * The Objective was edited or closed after its plan was accepted: ask before
  * the next effect. `continue` keeps the plan and accepts the new text.
  */
-async function objectiveEdited(
+export async function objectiveEdited(
   context: StepContext,
   deps: BuildDeps,
 ): Promise<Outcome | undefined> {

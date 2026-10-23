@@ -527,6 +527,15 @@ const GITHUB_CRASH_POINTS = [
   "run:queue:after",
   "run:unqueue:before",
   "run:unqueue:after",
+  "split:create:before",
+  "split:sub-issue:before",
+  "split:sub-issue:after",
+  "split:blocked-by:before",
+  "split:blocked-by:after",
+  "split:comment:before",
+  "split:comment:after",
+  "split:close:before",
+  "split:close:after",
 ];
 for (const point of GITHUB_CRASH_POINTS)
   test(`crash at ${point}, restart, finish once`, {
@@ -2045,7 +2054,7 @@ test("a wait on a human gate takes no slot", async () => {
   await stopped(service);
 });
 
-test("blocked-by predecessors: a wait without a slot, an ended one holds until ignored, a cycle holds, a done one is evidence", async () => {
+test("blocked-by predecessors: a wait without a slot, an ended one holds until ignored, a cycle holds, a done one is evidence; a split creates its blocked-by children once", async () => {
   const inst = installation();
   const SHOWN_95 = "<p>Ship the parser.</p>";
   let state90 = { state: "open" };
@@ -2160,6 +2169,242 @@ test("blocked-by predecessors: a wait without a slot, an ended one holds until i
   const [ignored] = stateOf(inst, 91).done.predecessors.ignored;
   assert.deepEqual([ignored.ref, ignored.reason], ["#90", "Done by hand"]);
   await stopped(service);
+
+  // An accepted split creates its children once, through a crash right
+  // after the first create: sub-issues of the parent, the dependent one
+  // blocked by the other, both queued; then the parent closes, done by
+  // its split.
+  const split = installation();
+  const RAW_97 =
+    "## Goal\n\nShip parser and printer.\n\n## Acceptance\n\n- Parser parses\n- Printer prints\n\n## Constraints\n\nKeep it small.\n";
+  const HTML_97 = micromark(RAW_97, {
+    extensions: [gfm()],
+    htmlExtensions: [gfmHtml()],
+  });
+  const now = () => new Date().toISOString();
+  const issues = {
+    97: {
+      id: 9700,
+      number: 97,
+      title: "Parser and printer",
+      body: RAW_97,
+      body_html: HTML_97,
+      state: "open",
+      user: { login: "kirk" },
+      labels: [{ name: "factory:objective" }, { name: "P1" }],
+      created_at: now(),
+      comments: [],
+      subs: [],
+      blockers: [],
+    },
+  };
+  const queuedCards = [];
+  const view = ({ comments: _c, subs: _s, blockers: _b, ...issue }) => ({
+    ...issue,
+    type: null,
+    repository_url: `http://api/repos/${REPO}`,
+  });
+  const byId = (id) => Object.values(issues).find((issue) => issue.id === id);
+  const splitServer = createHttpServer(async (req, res) => {
+    let text = "";
+    for await (const chunk of req) text += chunk;
+    const body = text ? JSON.parse(text) : {};
+    const reply = (code, value) => {
+      res.writeHead(code, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    const { pathname: path, searchParams } = new URL(req.url, "http://g");
+    const at = /^\/repos\/drill\/target\/issues\/(\d+)(\/.*)?$/.exec(path);
+    const issue = at && issues[at[1]];
+    if (path === "/user") return reply(200, { login: "factory" });
+    if (path.startsWith(`/repos/${REPO}/labels/`)) return reply(200, {});
+    if (path === "/graphql") {
+      const { query, variables } = body;
+      if (query.includes("issueTypes"))
+        return reply(200, {
+          data: { repository: { issueTypes: { nodes: [] } } },
+        });
+      if (query.includes("issue(number: $issue)") && issues[variables.issue])
+        return reply(200, {
+          data: {
+            repository: {
+              nameWithOwner: REPO,
+              issue: {
+                id: `I_${variables.issue}`,
+                number: variables.issue,
+                state: "OPEN",
+                repository: { nameWithOwner: REPO },
+                projectItems: { nodes: [] },
+              },
+            },
+          },
+        });
+      if (query.includes("addProjectV2ItemById"))
+        return reply(200, {
+          data: {
+            addProjectV2ItemById: { item: { id: `PVTI_${variables.content}` } },
+          },
+        });
+      if (query.includes("{ id options { id name } }"))
+        return reply(200, {
+          data: {
+            node: {
+              field: { id: "F", options: [{ id: "O", name: "Queued" }] },
+            },
+          },
+        });
+      if (query.includes("updateProjectV2ItemFieldValue")) {
+        queuedCards.push(variables.item);
+        return reply(200, {
+          data: {
+            updateProjectV2ItemFieldValue: {
+              projectV2Item: { value: { updatedAt: now() } },
+            },
+          },
+        });
+      }
+      return reply(200, { errors: [{ message: "not served" }] });
+    }
+    if (path === `/repos/${REPO}/issues` && req.method === "POST") {
+      const number = 99 + Object.keys(issues).length;
+      issues[number] = {
+        ...body,
+        id: number * 100,
+        number,
+        state: "open",
+        user: { login: "factory" },
+        labels: body.labels.map((name) => ({ name })),
+        created_at: now(),
+        comments: [],
+        subs: [],
+        blockers: [],
+      };
+      return reply(201, view(issues[number]));
+    }
+    if (path === `/repos/${REPO}/issues`) {
+      const label = searchParams.get("labels");
+      return reply(
+        200,
+        searchParams.get("page") === "1"
+          ? Object.values(issues)
+              .filter((found) => found.labels.some((l) => l.name === label))
+              .reverse()
+              .map(view)
+          : [],
+      );
+    }
+    if (!issue) return reply(404, { message: "Not Found" });
+    const rest = at[2] ?? "";
+    const page = searchParams.get("page") ?? "1";
+    if (rest === "" && req.method === "PATCH") {
+      Object.assign(issue, body);
+      return reply(200, view(issue));
+    }
+    if (rest === "") return reply(200, view(issue));
+    if (rest === "/comments" && req.method === "POST") {
+      const posted = {
+        id: issue.comments.length + 1,
+        body: body.body,
+        created_at: now(),
+        user: { login: "factory" },
+      };
+      issue.comments.push(posted);
+      return reply(201, posted);
+    }
+    if (rest === "/comments")
+      return reply(200, page === "1" ? issue.comments : []);
+    if (rest === "/labels") return reply(200, []);
+    const linked = {
+      "/sub_issues": "subs",
+      "/dependencies/blocked_by": "blockers",
+    }[rest];
+    if (linked && req.method === "POST") {
+      issue[linked].push(byId(body.sub_issue_id ?? body.issue_id).number);
+      return reply(201, {});
+    }
+    if (linked)
+      return reply(
+        200,
+        page === "1" ? issue[linked].map((n) => view(issues[n])) : [],
+      );
+    reply(404, { message: "Not Found" });
+  });
+  await new Promise((resolve) => splitServer.listen(0, "127.0.0.1", resolve));
+  after(() => splitServer.close());
+  configured(split, `http://127.0.0.1:${splitServer.address().port}`);
+  const children = [
+    {
+      key: "parser",
+      title: "Parser",
+      goal: "Parse <input> for @someone & more.",
+      outcomes: ["Parser parses"],
+      sources: [{ path: "docs/parse.md", heading: "Parse" }],
+      dependsOn: [],
+    },
+    {
+      key: "printer",
+      title: "Printer",
+      goal: "Print.",
+      outcomes: ["Printer prints"],
+      sources: [],
+      dependsOn: ["parser"],
+    },
+  ];
+  seed(split, 97, "building", {
+    startedAt: now(),
+    done: {
+      predecessors: { predecessors: [], ignored: [] },
+      check: {
+        shown: readShown(HTML_97, { sources: false }),
+        title: "Parser and printer",
+      },
+      plan: { items: [], coverage: [], split: { children } },
+    },
+    kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
+  });
+  const crashing = serve(split, "split:create:after");
+  assert.equal((await crashing.exit).signal, "SIGKILL");
+  assert.deepEqual(
+    Object.keys(issues),
+    ["97", "100"],
+    "one child, then the crash",
+  );
+  const resumed = serve(split);
+  await until(() => stateOf(split, 97).status === "done", "the split is done");
+  await stopped(resumed);
+  const parent = stateOf(split, 97);
+  assert.deepEqual(parent.done["build:split"], {
+    children: { parser: 100, printer: 101 },
+  });
+  assert.equal(parent.ended.by, "split");
+  assert.deepEqual(Object.keys(issues), ["97", "100", "101"], "no duplicate");
+  assert.deepEqual(issues[97].subs, [100, 101]);
+  assert.deepEqual(issues[101].blockers, [100]);
+  assert.deepEqual(issues[100].blockers, []);
+  assert.deepEqual([...new Set(queuedCards)].sort(), [
+    "PVTI_I_100",
+    "PVTI_I_101",
+  ]);
+  assert.deepEqual(
+    issues[100].labels.map((label) => label.name),
+    ["factory:objective", "P1"],
+  );
+  assert.equal(
+    issues[100].body,
+    "<!-- factory:parent=97;child=parser -->\nPart of #97. Factory created this child Objective from its accepted plan.\n\n## Goal\n\nParse &lt;input&gt; for &#64;someone &amp; more.\n\n## Acceptance\n\n- Parser parses\n\n## Sources\n\n- `docs/parse.md#Parse`\n\n## Constraints\n\nKeep it small.\n",
+  );
+  const told = issues[97].comments.filter((c) =>
+    c.body.startsWith("<!-- factory:97:split:"),
+  );
+  assert.equal(told.length, 1);
+  assert.match(
+    told[0].body,
+    /- #100 `parser` Parser\n- #101 `printer` Printer \(after #100\)/,
+  );
+  assert.deepEqual(
+    [issues[97].state, issues[97].state_reason],
+    ["closed", "completed"],
+  );
 });
 
 test("a state file that can't be read now is read again, not marked unreadable", {
@@ -2660,13 +2905,24 @@ _No response_
 
 1. Shown note.`;
 
-test("a non-writer's Objective is approved by the text GitHub shows", async () => {
+test("a non-writer's Objective is approved by the text GitHub shows; a split child Factory wrote needs no approval", async () => {
   const inst = installation();
   const server = createHttpServer((req, res) => {
     const reply = (code, body) => {
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     };
+    if (req.url === "/user") return reply(200, { login: "factory[bot]" });
+    // #72 is a split child Factory wrote; #73 copies its marker.
+    const child = /\/issues\/(7[23])$/.exec(req.url);
+    if (child)
+      return reply(200, {
+        title: `Child ${child[1]}`,
+        body: `<!-- factory:parent=70;child=golden -->\n${HIDDEN_BODY}`,
+        body_html: HIDDEN_HTML,
+        state: "open",
+        user: { login: child[1] === "72" ? "factory" : "outsider" },
+      });
     if (req.url.endsWith("/issues/71"))
       return reply(200, {
         title: "Golden 71",
@@ -2686,7 +2942,7 @@ test("a non-writer's Objective is approved by the text GitHub shows", async () =
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   after(() => server.close());
   configured(inst, `http://127.0.0.1:${server.address().port}`);
-  seed(inst, 71);
+  for (const issue of [71, 72, 73]) seed(inst, issue);
   const service = serve(inst);
   await until(() => stateOf(inst, 71).holds.length, "#71 asks");
   const shown = readShown(HIDDEN_HTML, { sources: false });
@@ -2735,6 +2991,16 @@ test("a non-writer's Objective is approved by the text GitHub shows", async () =
     stateOf(inst, 71).holds[0].question,
     new RegExp(`digest \`${shownDigest(shown).slice(0, 16)}\``),
   );
+  // A split child Factory wrote inherits its parent's approval; the same
+  // marker from anyone else is approved like any non-writer's Objective.
+  await until(() => stateOf(inst, 73).holds.length, "#73 asks");
+  assert.match(stateOf(inst, 73).holds[0].question, /approve to plan it/);
+  await until(
+    () => stateOf(inst, 72).holds.length || stateOf(inst, 72).retries.check,
+    "#72 is checked",
+  );
+  for (const asked of stateOf(inst, 72).holds)
+    assert.doesNotMatch(asked.question, /approve/);
   await stopped(service);
 });
 test("an answer or retry bound to a question that changed is refused", async () => {

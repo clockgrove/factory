@@ -32,6 +32,7 @@ import {
 } from "./state.js";
 import type { Tracking } from "./tracking.js";
 import { mergeOf } from "./work/merged.js";
+import { SPLIT_END } from "./work/split.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 /** The list view hides Objectives that finished longer ago than this. */
@@ -446,7 +447,7 @@ function nextAction(
         .join(", ")}.`,
     };
   if (TERMINAL.includes(row.status as ObjectiveStatus)) {
-    const how = `It has ${row.status}${row.endedBy === DEADLINE ? " at its deadline" : ""}`;
+    const how = `It has ${row.status}${row.endedBy === DEADLINE ? " at its deadline" : row.endedBy === SPLIT_END ? ": its child Objectives deliver it" : ""}`;
     return row.running.length || row.waiting.length
       ? { command: null, reason: `${how}; Factory is cleaning up.` }
       : { command: null, reason: `${how}.` };

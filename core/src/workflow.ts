@@ -22,6 +22,7 @@ import {
 import { PlannerError, providerOutcome } from "./providers/planner.js";
 import type { Answer, ObjectiveState, ObjectiveStatus } from "./state.js";
 import { errorMessage } from "./text.js";
+import { SPLIT, SPLIT_END, splitStep } from "./work/split.js";
 import {
   type BuildDeps,
   built,
@@ -44,7 +45,8 @@ const MINUTE = 60_000;
 
 /**
  * The Objective workflow: predecessors → check → plan → build → final →
- * report, then cleanup after cancel. Steps are ported onto the core slice by slice; a
+ * report (or, for a plan that splits, the children's creation in place of
+ * the build), then cleanup after cancel. Steps are ported onto the core slice by slice; a
  * step that isn't ported yet holds with an honest question, so an Objective
  * on this build always has an answer that works. `deps` is absent when
  * Factory has no configuration.
@@ -77,15 +79,21 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
         return step ? [step] : [];
       }
       if (!deps) return [unavailable("build")];
+      // A split delivers through its child Objectives (work/split.ts).
+      if (currentPlan(state)!.split)
+        return state.done[SPLIT] ? [] : [splitStep(deps)];
       const amend = amendmentSteps(state, deps);
       return amend.length ? amend : deliverySteps(state, deps);
     },
+
+    endedBy: (state) => (state.done[SPLIT] ? SPLIT_END : undefined),
 
     upstream: (state, item) => (deps ? layersBelow(state, deps, item) : []),
 
     status(state: ObjectiveState): ObjectiveStatus {
       if (!state.done.check) return "checking";
       if (!currentPlan(state)) return "planning";
+      if (state.done[SPLIT]) return "done";
       if (!built(state)) return "building";
       if (!state.done.report) return "finishing";
       return "done";

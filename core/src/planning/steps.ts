@@ -13,7 +13,7 @@ import {
   type StepContext,
 } from "../engine.js";
 import { defaultHead } from "../git.js";
-import type { GitHub } from "../github.js";
+import { type GitHub, sameLogin } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
 import { prose } from "../markdown.js";
 import { checkObjective } from "../objective.js";
@@ -1166,7 +1166,14 @@ export async function readObjective(
   const author = found.user?.login;
   const writer = !!author && (await deps.github.canWrite(author, signal));
   const shown = readShown(found.body_html, { sources: writer });
-  if (!writer) {
+  // A child Objective Factory created from an accepted split carries only
+  // its parent's approved text and the accepted plan: it inherits the
+  // parent's approval (work/split.ts).
+  const factoryChild =
+    childIdentity(found.body ?? "") &&
+    !!author &&
+    sameLogin(author, await deps.github.login(signal));
+  if (!writer && !factoryChild) {
     const unapproved = authorHold(author, shown, context);
     if (unapproved) return { hold: unapproved };
   }

@@ -229,6 +229,13 @@ async function classify(
   const final = previous.done.final as
     | { commit: string; tree: string; commands: string[] }
     | undefined;
+  // A split parent has no accepted result: its children deliver it.
+  if (plan?.split)
+    return {
+      ref,
+      kind: "ended",
+      why: "it was split into child Objectives (its sub-issues), so it has no accepted result of its own; block on its children instead",
+    };
   if (!plan || !final)
     return {
       ref,

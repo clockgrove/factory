@@ -1785,7 +1785,7 @@ export class GitHub {
 }
 
 /** One account, as a user (`name`) or as its app's bot (`name[bot]`). */
-function sameLogin(a: string, b: string): boolean {
+export function sameLogin(a: string, b: string): boolean {
   const plain = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
   return plain(a) === plain(b);
 }

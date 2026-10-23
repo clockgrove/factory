@@ -352,6 +352,11 @@ export interface Workflow {
    * dependents aren't runnable until it merges, so they wait anyway.)
    */
   upstream?(state: ObjectiveState, item: string): readonly string[];
+  /**
+   * What ended a `done` Objective other than its own report, for
+   * `ended.by`: `split` when its child Objectives deliver it.
+   */
+  endedBy?(state: ObjectiveState): string | undefined;
 }
 
 /**
@@ -1698,8 +1703,13 @@ export class ObjectiveRunner {
 
   private save(): void {
     this.state.updatedAt = this.now().toISOString();
-    if (TERMINAL.includes(this.state.status))
-      this.state.ended ??= { at: this.state.updatedAt };
+    if (TERMINAL.includes(this.state.status) && !this.state.ended) {
+      const by =
+        this.state.status === "done"
+          ? this.workflow.endedBy?.(this.state)
+          : undefined;
+      this.state.ended = { at: this.state.updatedAt, ...(by && { by }) };
+    }
     saveState(this.dir, this.state);
   }
 }

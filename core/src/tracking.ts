@@ -534,7 +534,12 @@ export async function track(context: TrackContext): Promise<void> {
     try {
       await addCard(github, project, node, signal);
     } catch (error) {
-      if (error instanceof TransientError || signal.aborted) throw error;
+      if (
+        error instanceof TransientError ||
+        (error instanceof GitHubError && error.status === 401) ||
+        signal.aborted
+      )
+        throw error;
       context.save((tracking) => {
         tracking.uncarded = true;
       });
@@ -593,7 +598,8 @@ async function setType(
     if (
       !(error instanceof GitHubError) ||
       error.status < 400 ||
-      error.status >= 500
+      error.status >= 500 ||
+      error.status === 401
     )
       throw error;
     context.save((tracking) => {

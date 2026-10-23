@@ -167,7 +167,9 @@ export async function objectiveRole(
       if (
         !(error instanceof GitHubError) ||
         error.status < 400 ||
-        error.status >= 500
+        error.status >= 500 ||
+        // A rejected login isn't the repository refusing the type.
+        error.status === 401
       )
         throw error;
       typeRefused = error;

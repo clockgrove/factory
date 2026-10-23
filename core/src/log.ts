@@ -410,12 +410,16 @@ function ofRun(file: string, events: LogEvent[]): LogEvent[] {
 /**
  * Call `poll` every `everyMs` until SIGINT, SIGTERM or `signal`, or until
  * it returns a result (anything but undefined): a follow's loop. Returns
- * that result, undefined when interrupted.
+ * that result, undefined when interrupted. `started` runs once the signals
+ * are caught: what tells a person (or a script) that Ctrl-C now stops the
+ * follow goes there, so a signal sent on seeing it never meets Node's
+ * default exit.
  */
 export async function untilInterrupted<T>(
   poll: () => T | undefined | Promise<T | undefined>,
   signal?: AbortSignal,
   everyMs = 500,
+  started?: () => void,
 ): Promise<T | undefined> {
   let stop = signal?.aborted ?? false;
   const stopping = () => {
@@ -425,6 +429,7 @@ export async function untilInterrupted<T>(
   process.once("SIGTERM", stopping);
   signal?.addEventListener("abort", stopping, { once: true });
   try {
+    started?.();
     while (!stop) {
       await new Promise((resolve) => setTimeout(resolve, everyMs));
       if (stop) break;

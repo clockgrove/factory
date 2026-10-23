@@ -267,9 +267,6 @@ export async function followRun(
     return { code: 2 };
   };
   if (!(await serviceLive(paths))) return stoppedService();
-  write(
-    `Queued #${issue}; following it (Ctrl-C stops following, and it keeps running).\n`,
-  );
   const resultFile = join(paths.requests, `${id}.result`);
   let admitted = false;
   const result = await untilInterrupted(
@@ -301,6 +298,13 @@ export async function followRun(
       return { code: row.status === "done" ? 0 : ended ? 1 : 2, status: view };
     },
     options.signal,
+    500,
+    // Printed once Ctrl-C is caught: a script that interrupts on seeing it
+    // gets the follower's 130, never Node's default exit.
+    () =>
+      write(
+        `Queued #${issue}; following it (Ctrl-C stops following, and it keeps running).\n`,
+      ),
   );
   if (result !== undefined) return result;
   write(

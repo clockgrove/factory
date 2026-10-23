@@ -43,6 +43,7 @@ import type { Plan } from "../planning/types.js";
 import { runSandboxed, sandboxAvailable } from "../sandbox.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { BoundedText, errorMessage, headAndTail } from "../text.js";
+import { validationDeadlineMs } from "../validate.js";
 import { privateStagingPath } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
 import {
@@ -1045,10 +1046,17 @@ export class ClaudeWorker implements Worker {
     login: Record<string, string>,
   ): Promise<WorkerResult> {
     const { input } = attempt;
+    // A running Validate or shell command sends no events; its silence is
+    // bounded by the item's whole validation deadline, as for Copilot.
     const watchdog = new IdleWatchdog(
       IDLE_MS,
       input.signal,
-      ACTIVE_TOOL_IDLE_MS,
+      attempt.grants.validate || attempt.grants.shell
+        ? Math.max(
+            ACTIVE_TOOL_IDLE_MS,
+            validationDeadlineMs(input.item, attempt.options.commandTimeoutMs),
+          )
+        : ACTIVE_TOOL_IDLE_MS,
     );
     let turns = userTurns();
     let controller = new AbortController();

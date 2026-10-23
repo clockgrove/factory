@@ -12,6 +12,11 @@ import {
   rmSync,
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import {
+  type CapacityRecommendation,
+  capacityRecommendation,
+  hostCapacity,
+} from "./capacity.js";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { eventLine, redactDeep } from "./display.js";
 import {
@@ -86,7 +91,12 @@ import {
   type ObjectiveState,
   TERMINAL,
 } from "./state.js";
-import { readStatus, statusText } from "./status.js";
+import {
+  capacityText,
+  readStatus,
+  recommendationText,
+  statusText,
+} from "./status.js";
 import { CONFIGURATION_EXIT } from "./systemd.js";
 import { errorMessage } from "./text.js";
 import { adaptiveWorkflow } from "./validate.js";
@@ -140,8 +150,8 @@ const COMMANDS: Record<string, Command> = {
   },
   status: {
     args: "[ISSUE]",
-    flags: { json: "switch", all: "switch" },
-    help: "Show the service, the queue and each Objective: its phase, the next command, its Work Items, provider, allowances and open questions; --json is the full model with the plan, --all also lists Objectives finished more than 24 h ago",
+    flags: { json: "switch", all: "switch", capacity: "switch" },
+    help: "Show the service, the queue and each Objective: its phase, the next command, its Work Items, provider, allowances and open questions; --json is the full model with the plan, --all also lists Objectives finished more than 24 h ago, --capacity shows the host's slots and memory in use and how the configured capacity fits the host",
     check: (args) =>
       args.positional[1] === undefined ? undefined : issueCheck(args),
   },
@@ -480,11 +490,9 @@ async function serveCommand(
     );
   }
   if (loaded)
-    hostLimits.configure({
-      worker: loaded.execution.workers,
-      cpu: loaded.execution.validations,
-      github: loaded.queue.maxActiveObjectives,
-    });
+    hostLimits.configure(
+      hostCapacity(loaded.execution, loaded.queue.maxActiveObjectives),
+    );
   return await serve({
     paths,
     workflow,
@@ -633,6 +641,27 @@ async function status(
   args: Args,
 ): Promise<number> {
   const only = args.positional[1] ? issueOf(args) : undefined;
+  if (args.flags.capacity !== undefined) {
+    const live = await serviceLive(paths);
+    const use = live
+      ? readStatus(paths, { live, secrets: [] }).capacity
+      : undefined;
+    let recommendation: CapacityRecommendation | undefined;
+    try {
+      const config = loadConfig(repository);
+      recommendation = capacityRecommendation(
+        hostCapacity(config.execution, config.queue.maxActiveObjectives),
+      );
+    } catch (error) {
+      process.stderr.write(`factory: ${errorMessage(error)}\n`);
+    }
+    process.stdout.write(
+      args.flags.json !== undefined
+        ? `${JSON.stringify({ service: live ? "running" : "stopped", ...(use ? { capacity: use } : {}), ...(recommendation ? { recommendation } : {}) }, null, 2)}\n`
+        : capacityText(live, use, recommendation),
+    );
+    return 0;
+  }
   const view = readStatus(paths, {
     ...(only !== undefined ? { only } : {}),
     live: await serviceLive(paths),
@@ -687,7 +716,7 @@ async function setupCommand(repository: string, args: Args): Promise<number> {
       )
       .join("");
     process.stdout.write(
-      `Setup ${report.status}: ${what}.\n${report.problems.map((problem) => `- ${problem}\n`).join("")}${checklist ? `Readiness (no model calls):\n${checklist}` : ""}${report.status === "refused" || report.created || !report.changed.length ? "" : "Restart the service to use the change.\n"}`,
+      `Setup ${report.status}: ${what}.\n${report.problems.map((problem) => `- ${problem}\n`).join("")}${checklist ? `Readiness (no model calls):\n${checklist}` : ""}${report.capacity ? `Capacity: ${recommendationText(report.capacity)}` : ""}${report.status === "refused" || report.created || !report.changed.length ? "" : "Restart the service to use the change.\n"}`,
     );
   }
   return report.status === "configured" ? 0 : 1;

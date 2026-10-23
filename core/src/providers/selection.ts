@@ -152,10 +152,13 @@ export const OPERATIONAL: readonly string[] = [
   "secrets",
   // Polling, the slots for Objectives at once, and the Project fields progress is shown in.
   "queue",
-  // Steps at once, and the host's caps on workers and validations.
+  // Steps at once, and the host's caps and memory reservations (capacity.ts).
   "execution.concurrency",
   "execution.workers",
   "execution.validations",
+  "execution.planners",
+  "execution.memoryMiB",
+  "execution.reservations",
   // The sandbox's resource caps and the package cache's place on the host.
   "sandbox.limits",
   "sandbox.packageStore",

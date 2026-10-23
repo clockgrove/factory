@@ -306,12 +306,28 @@ export interface Workflow {
 
 /**
  * What a step uses that the host caps across every Objective: model-bound
- * `worker` runs, CPU-heavy validation (`cpu`), and the `github` reads and
- * shared-checkout fetch of a newly queued Objective's check or re-run
- * cleanup, which run before it has a slot: a burst of queued issues waits
- * its turn, in queue order, instead of fanning out.
+ * `worker` runs, CPU-heavy validation (`cpu`), `planner` calls (planning
+ * rounds and reviews), and the `github` reads and shared-checkout fetch of
+ * a newly queued Objective's check or re-run cleanup, which run before it
+ * has a slot: a burst of queued issues waits its turn, in queue order,
+ * instead of fanning out.
  */
-export type HostResource = "worker" | "cpu" | "github";
+export type HostResource = "worker" | "cpu" | "planner" | "github";
+
+/** The limiter's settings (config.ts `execution`): slots, and memory each step reserves. */
+export interface HostCapacity {
+  caps: Record<HostResource, number>;
+  /** MiB a step of each resource reserves while it runs. */
+  reserveMiB: Record<HostResource, number>;
+  /** MiB every running step may reserve together. */
+  budgetMiB: number;
+}
+
+/** What the limiter holds now: `service.json` keeps it for `status --capacity`. */
+export interface CapacityUse extends HostCapacity {
+  used: Record<HostResource, number>;
+  reservedMiB: number;
+}
 
 /** This run of the service, shared by its Objectives' runners. */
 export interface ServiceRun {
@@ -323,36 +339,73 @@ export interface ServiceRun {
   resumeAt: number;
 }
 
-/** Host-wide caps shared by every Objective in the service, per `HostResource`. */
+/**
+ * Host-wide caps shared by every Objective in the service: a step takes a
+ * slot of its resource and reserves its memory, and starts only when both
+ * fit. Memory is what a host runs out of first (CPU only slows), so a
+ * full host makes the next step wait instead of the kernel killing one.
+ * Planner calls take only the memory the free worker and validation slots
+ * don't need.
+ */
 export class HostLimiter {
   private readonly used: Record<HostResource, number> = {
     worker: 0,
     cpu: 0,
+    planner: 0,
     github: 0,
   };
-  constructor(private caps: Record<HostResource, number>) {}
+  private reservedMiB = 0;
+  constructor(private capacity: HostCapacity) {}
 
-  configure(caps: Record<HostResource, number>): void {
-    this.caps = caps;
+  configure(capacity: HostCapacity): void {
+    this.capacity = capacity;
   }
 
   acquire(resource: HostResource): boolean {
-    if (this.used[resource] >= this.caps[resource]) return false;
+    const { caps, reserveMiB, budgetMiB } = this.capacity;
+    if (this.used[resource] >= caps[resource]) return false;
+    // A planner call leaves room for every free worker and validation slot,
+    // so memory never holds those below their caps.
+    const room =
+      resource === "planner"
+        ? (["worker", "cpu"] as const).reduce(
+            (sum, each) =>
+              sum +
+              Math.max(0, caps[each] - this.used[each]) * reserveMiB[each],
+            0,
+          )
+        : 0;
+    if (this.reservedMiB + reserveMiB[resource] + room > budgetMiB)
+      return false;
     this.used[resource] += 1;
+    this.reservedMiB += reserveMiB[resource];
     return true;
   }
 
   release(resource: HostResource): void {
-    this.used[resource] = Math.max(0, this.used[resource] - 1);
+    if (this.used[resource] === 0) return;
+    this.used[resource] -= 1;
+    this.reservedMiB = Math.max(
+      0,
+      this.reservedMiB - this.capacity.reserveMiB[resource],
+    );
   }
 
-  usage(): Record<HostResource, number> {
-    return { ...this.used };
+  usage(): CapacityUse {
+    return {
+      ...this.capacity,
+      used: { ...this.used },
+      reservedMiB: this.reservedMiB,
+    };
   }
 }
 
-/** The service's limiter; `serve` sets its caps from configuration. */
-export const hostLimits = new HostLimiter({ worker: 2, cpu: 2, github: 2 });
+/** The service's limiter; `serve` sets it from configuration. */
+export const hostLimits = new HostLimiter({
+  caps: { worker: 2, cpu: 2, planner: 4, github: 2 },
+  reserveMiB: { worker: 0, cpu: 0, planner: 0, github: 0 },
+  budgetMiB: Number.MAX_SAFE_INTEGER,
+});
 
 export interface EngineLimits {
   /** Escaped errors and missed deadlines in a row before a step holds. */

@@ -6,8 +6,9 @@ import {
   resultRereviews,
   type Usage,
 } from "./allowances.js";
+import type { CapacityRecommendation } from "./capacity.js";
 import { displayTime, duration, eventLine, redactDeep } from "./display.js";
-import { DEADLINE, hold as question } from "./engine.js";
+import { type CapacityUse, DEADLINE, hold as question } from "./engine.js";
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
 import { currentPlan } from "./planning/plan.js";
@@ -110,6 +111,8 @@ export interface ObjectiveView {
 export interface ServiceView {
   crashLoop?: { crashes: number; resumeAt: string };
   problem?: string;
+  /** The host limiter's slots and memory in use (engine.ts HostLimiter). */
+  capacity?: CapacityUse;
   waits: Record<string, { slot: true } | { paths: number }>;
 }
 
@@ -118,6 +121,7 @@ export interface StatusView {
   service: "running" | "stopped";
   crashLoop?: ServiceView["crashLoop"];
   problem?: string;
+  capacity?: CapacityUse;
   queue: QueueControl;
   objectives: ObjectiveView[];
 }
@@ -446,6 +450,7 @@ function serviceRecord(paths: Paths): ServiceView {
       starts?: string[];
       resumeAt?: string;
       problem?: string;
+      capacity?: CapacityUse;
       waits?: ServiceView["waits"];
     };
     return {
@@ -461,6 +466,7 @@ function serviceRecord(paths: Paths): ServiceView {
       ...(typeof record.problem === "string"
         ? { problem: record.problem }
         : {}),
+      ...(record.capacity ? { capacity: record.capacity } : {}),
       waits: record.waits ?? {},
     };
   } catch {
@@ -589,4 +595,38 @@ function itemTable(items: ItemRow[]): string[] {
         .join("  ")
         .trimEnd()}`,
   );
+}
+
+/**
+ * `status --capacity`: the host limiter's slots and memory in use, and how
+ * the configured capacity fits the host (capacity.ts).
+ */
+export function capacityText(
+  live: boolean,
+  use: CapacityUse | undefined,
+  recommendation: CapacityRecommendation | undefined,
+): string {
+  let line = live
+    ? "In use: not recorded yet; a service from before this release records it once restarted."
+    : "In use: the service isn't running.";
+  if (use) {
+    const { caps, used, reserveMiB } = use;
+    line = `In use: ${used.worker}/${caps.worker} workers, ${used.cpu}/${caps.cpu} validations, ${used.planner}/${caps.planner} planner calls, ${used.github}/${caps.github} queue checks; ${use.reservedMiB}/${use.budgetMiB} MiB reserved (worker ${reserveMiB.worker}, validation ${reserveMiB.cpu}, planner ${reserveMiB.planner} MiB each).`;
+  }
+  return `${line}\n${recommendation ? recommendationText(recommendation) : ""}`;
+}
+
+/** How the configured capacity fits the host; setup prints it too. */
+export function recommendationText({
+  host,
+  defaults,
+  fullLoadMiB,
+  advice,
+}: CapacityRecommendation): string {
+  return `${[
+    `Host: ${host.cpus} CPUs, ${host.memoryMiB} MiB; its defaults are ${defaults.workers} workers, ${defaults.validations} validations and ${defaults.memoryMiB} MiB to reserve. Every worker and validation at once reserves ${fullLoadMiB} MiB.`,
+    ...(advice.length
+      ? advice.map((line) => `  Recommended: ${line}`)
+      : ["  The configured capacity fits this host."]),
+  ].join("\n")}\n`;
 }

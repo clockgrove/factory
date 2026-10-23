@@ -1,9 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
-import { availableParallelism, homedir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Allowances, DEFAULT_ALLOWANCES } from "./allowances.js";
+import {
+  DEFAULT_RESERVATIONS,
+  hostDefaults,
+  type Reservations,
+} from "./capacity.js";
 import {
   absolute,
   type Check,
@@ -84,6 +89,12 @@ export interface CoreConfig {
     workers: number;
     /** CPU-heavy steps (validation) at once across the host. */
     validations: number;
+    /** Planner calls (planning rounds and reviews) at once across the host. */
+    planners: number;
+    /** MiB the running steps may reserve together (capacity.ts). */
+    memoryMiB: number;
+    /** MiB a worker run, a validation and a planner call each reserve. */
+    reservations: Reservations;
   };
   /** How much an Objective may do unattended; frozen with it. */
   autonomy: {
@@ -504,7 +515,7 @@ export function loadConfig(repository: string): CoreConfig {
     throw new Error(`Can't read ${path}: ${String(error)}`);
   }
   const problems: string[] = [];
-  const cpus = availableParallelism();
+  const host = hostDefaults();
   const checked = section(
     raw,
     "",
@@ -548,8 +559,18 @@ export function loadConfig(repository: string): CoreConfig {
       execution: object(
         {
           concurrency: whole(1, 8),
-          workers: whole(1, Math.max(2, Math.floor(cpus / 2))),
-          validations: whole(1, Math.max(2, Math.floor(cpus / 4))),
+          workers: whole(1, host.workers),
+          validations: whole(1, host.validations),
+          planners: optional(whole(1)),
+          memoryMiB: whole(256, host.budgetMiB),
+          reservations: object(
+            Object.fromEntries(
+              Object.entries(DEFAULT_RESERVATIONS).map(([name, fallback]) => [
+                name,
+                whole(0, fallback),
+              ]),
+            ) as Record<keyof Reservations, Check<number>>,
+          ),
         },
         RETIRED.execution,
       ),
@@ -596,8 +617,28 @@ export function loadConfig(repository: string): CoreConfig {
     isObject(raw) ? raw : {},
     problems,
   );
+  const execution = {
+    ...checked.execution,
+    reservations: { ...checked.execution.reservations },
+    // Two planner calls per worker: each Work Item is reviewed beside its work.
+    planners: checked.execution.planners ?? 2 * checked.execution.workers,
+  };
+  // A default reservation fits a small budget; one the operator set must.
+  const given =
+    isObject(raw) && isObject(raw.execution)
+      ? raw.execution.reservations
+      : undefined;
+  for (const [name, mib] of Object.entries(execution.reservations))
+    if (mib <= execution.memoryMiB) continue;
+    else if (isObject(given) && given[name] !== undefined)
+      problems.push(
+        `execution.reservations.${name} ${mib} is more than execution.memoryMiB ${execution.memoryMiB}, so that step could never start`,
+      );
+    else
+      execution.reservations[name as keyof Reservations] = execution.memoryMiB;
   const config: CoreConfig = {
     ...checked,
+    execution,
     providers,
     defaultProvider,
     secrets: secretValues(checked.policy.allowedSecretNames, providers),

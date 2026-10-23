@@ -470,7 +470,9 @@ function itemStep(
       ? { resource: "worker" as const }
       : phase === "validate"
         ? { resource: "cpu" as const }
-        : {}),
+        : phase === "review"
+          ? { resource: "planner" as const }
+          : {}),
     deadlineMs:
       phase === "work"
         ? 2 * 60 * MINUTE
@@ -2492,6 +2494,7 @@ function finalStep(plan: Plan, deps: BuildDeps): Step {
 function finalReviewStep(deps: BuildDeps): Step {
   return {
     key: "final-review",
+    resource: "planner",
     deadlineMs: 45 * MINUTE,
     run: async (context): Promise<Outcome> => {
       const { state, signal } = context;

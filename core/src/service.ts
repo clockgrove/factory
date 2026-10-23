@@ -11,8 +11,10 @@ import {
 import { join } from "node:path";
 import { crashPoint } from "./crash.js";
 import {
+  type CapacityUse,
   DEFAULT_LIMITS,
   type EngineLimits,
+  hostLimits,
   itemOf,
   ObjectiveRunner,
   type ServiceRun,
@@ -313,6 +315,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     });
   const heartbeat = (stopped = false): void => {
     record.queue = queue;
+    record.capacity = hostLimits.usage();
     record.waits = Object.fromEntries([
       ...[...waitingForSlot].map((issue) => [issue, { slot: true as const }]),
       ...[...waitingOnPaths].map(([issue, other]) => [issue, { paths: other }]),
@@ -1040,6 +1043,8 @@ interface ServiceRecord {
   problem?: string;
   /** The queue's mode. */
   queue?: QueueControl;
+  /** The host limiter's slots and memory in use, as of the last heartbeat. */
+  capacity?: CapacityUse;
   /** Objectives waiting, as of the last tick: for a slot, or on another Objective's paths. */
   waits?: Record<string, { slot: true } | { paths: number }>;
 }

@@ -16,6 +16,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import {
+  type CapacityRecommendation,
+  capacityRecommendation,
+  hostCapacity,
+} from "./capacity.js";
 import { isObject } from "./checked.js";
 import { configPath, loadConfig } from "./config.js";
 import { originRefusal } from "./git.js";
@@ -60,6 +65,14 @@ const CONFIG_OPTIONS: Record<string, Option> = {
   concurrency: { key: "execution.concurrency", read: "number" },
   workers: { key: "execution.workers", read: "number" },
   validations: { key: "execution.validations", read: "number" },
+  planners: { key: "execution.planners", read: "number" },
+  "memory-mib": { key: "execution.memoryMiB", read: "number" },
+  "worker-mib": { key: "execution.reservations.worker", read: "number" },
+  "validation-mib": {
+    key: "execution.reservations.validation",
+    read: "number",
+  },
+  "planner-mib": { key: "execution.reservations.planner", read: "number" },
   "planning-revisions": {
     key: "autonomy.allowances.planningRevisions",
     read: "number",
@@ -162,6 +175,8 @@ export interface SetupReport {
   problems: string[];
   /** The readiness checklist, once the configuration loads (readiness.ts). */
   readiness?: Readiness;
+  /** How the configured capacity fits this host (capacity.ts), once it loads. */
+  capacity?: CapacityRecommendation;
 }
 
 /** Equal as JSON, whatever the order of object keys. */
@@ -346,6 +361,9 @@ export async function setup(
     defaultProvider: config.defaultProvider,
     problems,
     readiness: ready,
+    capacity: capacityRecommendation(
+      hostCapacity(config.execution, config.queue.maxActiveObjectives),
+    ),
   };
 }
 

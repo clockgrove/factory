@@ -303,6 +303,7 @@ function planRoundStep(
 ): Step {
   return {
     key,
+    resource: "planner",
     deadlineMs: 45 * MINUTE,
     run: async (context): Promise<Outcome> => {
       const { state, signal } = context;
@@ -477,6 +478,7 @@ function reviewStep(
 ): Step {
   return {
     key,
+    resource: "planner",
     deadlineMs: 45 * MINUTE,
     run: async (context): Promise<Outcome> => {
       const { state, signal } = context;

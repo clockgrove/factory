@@ -61,8 +61,9 @@ export interface CoreConfig {
     /**
      * Offer discovery items, declared work conditions and expansion
      * envelopes to the planner for an Adaptive workflow Objective. Off by
-     * default, and kept off until the core runs them: a conditional plan
-     * would run both branches, and a discovery item would hold.
+     * default, and kept off until the core runs them all: discovery items
+     * run (work/discovery.ts), but a conditional plan would run both
+     * branches, and an expansion would add no children.
      */
     adaptiveGraph: boolean;
   };

@@ -125,16 +125,15 @@ function reviewRepositoryGuidance(
   } Work Item citations without an evidenceIndex name a repository file the planner cited at the base; the worker receives its exact base bytes.\n${repository.map}${repository.conventions}`;
 }
 
-/** What each item kind does, as the planner reads it. */
-const KIND_ROLES: Record<ItemKind, string> = {
+/** What each item kind does, as the planner reads it; discovery is in ADAPTIVE_GUIDANCE, the only place it is offered. */
+const KIND_ROLES: Record<Exclude<ItemKind, "discovery">, string> = {
   work: "work implements",
   qa: "qa checks the integrated result read-only",
   aggregate: "aggregate depends on all children and omits acceptance",
-  discovery: "discovery observes the repository read-only",
 };
 
-/** The item kinds the planner may choose: exactly the kinds this build executes. */
-const ITEM_KINDS = `Item kinds: ${EXECUTABLE_KINDS.map((kind) => KIND_ROLES[kind]).join("; ")}. Children are aggregate hierarchy, not subtasks or implicit dependencies; schedulable components are separate items.${QA_OFFERED ? " Every QA owns an obligation and integrated QA depends transitively on every implementation. Add QA only for necessary evidence unavailable from final validation/review or source-required late CI, never duplicate final proof or invent a generic tests/docs stage." : ""} Read-only nodes omit ownership, assets, candidate counts and execution profiles.`;
+/** The item kinds the planner may choose: the kinds this build executes, discovery only with Adaptive workflow. */
+const ITEM_KINDS = `Item kinds: ${EXECUTABLE_KINDS.flatMap((kind) => (kind === "discovery" ? [] : [KIND_ROLES[kind]])).join("; ")}. Children are aggregate hierarchy, not subtasks or implicit dependencies; schedulable components are separate items.${QA_OFFERED ? " Every QA owns an obligation and integrated QA depends transitively on every implementation. Add QA only for necessary evidence unavailable from final validation/review or source-required late CI, never duplicate final proof or invent a generic tests/docs stage." : ""} Read-only nodes omit ownership, assets, candidate counts and execution profiles.`;
 
 /** A plan for an Objective that changes nothing: read-only QA when offered. */
 const QUALIFY_ONLY = QA_OFFERED

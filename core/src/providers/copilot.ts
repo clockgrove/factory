@@ -484,11 +484,7 @@ export class CopilotWorker implements Worker {
 
   async run(input: WorkerInput): Promise<WorkerResult> {
     const started = Date.now();
-    // A discovery item reads only: Factory grants no writes, so it's enforced.
-    const readOnly = input.item.kind === "discovery";
-    const tools = copilotTools(this.options.tools).filter(
-      (tool) => !readOnly || READ_TOOLS.includes(tool),
-    );
+    const tools = copilotTools(this.options.tools);
     const record: Record<string, unknown> = {
       event: "worker-call",
       provider: "copilot",
@@ -500,7 +496,6 @@ export class CopilotWorker implements Worker {
     const ended = new AbortController();
     let validator: SelfValidation | undefined;
     if (
-      !readOnly &&
       this.options.validation &&
       this.options.tools.includes("Validate") &&
       input.commands.length
@@ -519,7 +514,7 @@ export class CopilotWorker implements Worker {
         choice: this.options.model,
         directory: input.worktree,
         tools,
-        writes: !readOnly,
+        writes: true,
         system: validator ? WORKER_SYSTEM + VALIDATE_SYSTEM : WORKER_SYSTEM,
         custom: validator && [
           {

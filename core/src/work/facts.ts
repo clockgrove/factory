@@ -2,6 +2,7 @@ import type { CandidateSet, MediaInput, Selection } from "../media.js";
 import type { RepairFinding } from "../repair.js";
 import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
+import type { DiscoveryResult } from "./discovery.js";
 import type { RepairContext } from "./prompt.js";
 import type { WorkerSpend } from "./worker.js";
 
@@ -43,6 +44,8 @@ export interface ItemFacts {
   secret: string;
   /** A read-only QA review refused the integrated result: its `retry` checks again from validation. */
   qaRefused: true;
+  /** A discovery item's complete result (work/discovery.ts): its dependents, conditions and expansions read it. */
+  discovery: DiscoveryResult;
 }
 
 /** What the Objective's own steps keep, by name. */

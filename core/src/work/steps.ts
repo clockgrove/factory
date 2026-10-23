@@ -98,6 +98,7 @@ import {
   worktreePath,
 } from "../worktree.js";
 import { collect, type HandoffNote } from "./collect.js";
+import { discover, discoveryInputs } from "./discovery.js";
 import {
   fact,
   facts,
@@ -265,7 +266,9 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
         place?.unit.items.some((layer) => !done(layer.id, "ci")))
     )
       return undefined;
-    // Aggregates and QA deliver nothing: their merge step settles them.
+    if (phase === "work" && item.kind === "discovery")
+      return discoveryStep(item, deps);
+    // Aggregates, QA and discovery deliver nothing: their merge step settles them.
     if (phase === "merge" && (item.kind ?? "work") !== "work")
       return settleStep(item);
     return itemStep(item, phase, deps, place);
@@ -359,11 +362,13 @@ function multiLayer(
  * The phases the item runs, in order: select only when it needs a media
  * selection, and merge only at the top of its native stack (the top merges
  * the whole stack). An aggregate only settles; read-only QA validates and
- * reviews the integrated result, then settles.
+ * reviews the integrated result, then settles; discovery observes (its
+ * work step, work/discovery.ts), then settles.
  */
 function phasesOf(item: WorkItem, place: StackPlace | undefined): Phase[] {
   if (item.kind === "aggregate") return ["merge"];
   if (item.kind === "qa") return ["validate", "review", "merge"];
+  if (item.kind === "discovery") return ["work", "merge"];
   const top = !place || place.layer === place.unit.items.length - 1;
   return PHASES.filter(
     (p) => (p !== "select" || needsSelection(item)) && (p !== "merge" || top),
@@ -647,6 +652,7 @@ async function workStep(
           }
         : {}),
       peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
+      discoveryInputs: discoveryInputs(state, item),
       ...(memory ? { memory } : {}),
       signal,
     });
@@ -2159,7 +2165,22 @@ function qaRefusal(
   );
 }
 
-/** The merge step of an item that delivers nothing (aggregate, QA): it settles. */
+/** A discovery item's observation: read-only, with no worker (work/discovery.ts). */
+function discoveryStep(item: WorkItem, deps: BuildDeps): Step {
+  return {
+    key: stepKey(item.id, "work"),
+    deadlineMs: 45 * MINUTE,
+    run: (context) =>
+      discover(item, context, {
+        checkout: deps.config.checkout,
+        repository: deps.config.repository,
+        planner: deps.planner,
+        dir: `${worktreePath(deps.workDir(context.state.issue), context.state.issue, item.id)}.discovery`,
+      }),
+  };
+}
+
+/** The merge step of an item that delivers nothing (aggregate, QA, discovery): it settles. */
 function settleStep(item: WorkItem): Step {
   return {
     key: stepKey(item.id, "merge"),

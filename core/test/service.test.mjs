@@ -1145,7 +1145,7 @@ test("an item's question holds only that item and its dependents", async () => {
   });
   const asked = new Date().toISOString();
   // a holds; b is unrelated; c depends on a; d is unrelated and asks too
-  // (discovery items hold on this build).
+  // (a discovery item with no specification holds).
   seed(inst, 61, "holding", {
     holds: [
       {
@@ -1837,7 +1837,7 @@ test("a state file that can't be read now is read again, not marked unreadable",
   await stopped(service);
 });
 
-test("a plan's steps run in order, a dependent waits for its dependency's merge, and read-only QA validates the default branch", async () => {
+test("a plan's steps run in order, a dependent waits for its dependency's merge, read-only QA validates the default branch, and discovery observes the base", async () => {
   const inst = installation();
   // GitHub is down: each step that runs reaches its first GitHub or Git
   // read and waits there, which shows which step the engine chose.
@@ -1958,7 +1958,12 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   git(baseline.root, "init", "--quiet", "--bare", "-b", "main", "origin.git");
   git(baseline.root, "clone", "--quiet", "origin.git", "work");
   const work = join(baseline.root, "work");
-  git(work, "commit", "--quiet", "--allow-empty", "-m", "planned");
+  mkdirSync(join(work, "src", "b"), { recursive: true });
+  writeFileSync(join(work, "src", "a.ts"), "a\n");
+  writeFileSync(join(work, "src", "b", "c.ts"), "c\n");
+  writeFileSync(join(work, "README.md"), "r\n");
+  git(work, "add", ".");
+  git(work, "commit", "--quiet", "-m", "planned");
   const planned = git(work, "rev-parse", "HEAD");
   git(work, "commit", "--quiet", "--allow-empty", "-m", "moved");
   git(work, "push", "--quiet", "origin", "HEAD:main");
@@ -1993,6 +1998,77 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   assert.match(moved.question, /made only of read-only QA/);
   assert.deepEqual(
     moved.options.map((option) => option.answer),
+    ["replan", "retry", "cancel"],
+  );
+  assert.equal(cli(baseline, "cancel", "53").code, 0);
+  await stopped(service);
+
+  // Discovery observes the planned base with no model call and settles,
+  // keeping its result for dependents; semantic discovery of nothing needs
+  // no call either; past its allowance it holds with the evidence.
+  const sha = (text) => createHash("sha256").update(text).digest("hex");
+  const discovery = (id, mode, selectors, maxEntries = 10) => ({
+    id,
+    kind: "discovery",
+    ownedPaths: [],
+    dependencies: [],
+    validation: [],
+    discovery: {
+      mode,
+      selectors,
+      schema: "factory.repository-inventory/v1",
+      role: `${id}-files`,
+      completeness: "complete",
+      allowance: { maxEntries, maxBytes: 1024, maxAttempts: 1 },
+    },
+  });
+  seed(baseline, 54, "building", {
+    done: {
+      check: {},
+      plan: {
+        base: planned,
+        items: [
+          discovery("d", "inventory", ["src/"]),
+          discovery("s", "semantic", ["none/"]),
+          discovery("e", "inventory", ["src/"], 1),
+        ],
+        coverage: [],
+      },
+    },
+    kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
+  });
+  service = serve(baseline);
+  await until(
+    () =>
+      stateOf(baseline, 54).done["item:d:merge"] &&
+      stateOf(baseline, 54).done["item:s:merge"] &&
+      stateOf(baseline, 54).holds.length,
+    "d and s settle, e asks",
+    30_000,
+  );
+  const observed = stateOf(baseline, 54);
+  const kept = observed.kept["item:d:discovery"];
+  assert.deepEqual(
+    [kept.commit, kept.role, kept.mode, kept.selectors],
+    [planned, "d-files", "inventory", ["src/"]],
+  );
+  assert.deepEqual(
+    kept.entries.map((entry) => [entry.path, entry.mode, entry.contentRef]),
+    [
+      ["src/a.ts", "100644", { sha256: sha("a\n"), bytes: 2 }],
+      ["src/b/c.ts", "100644", { sha256: sha("c\n"), bytes: 2 }],
+    ],
+  );
+  assert.equal(
+    kept.entries[0].blobSha,
+    git(work, "rev-parse", `${planned}:src/a.ts`),
+  );
+  assert.deepEqual(observed.kept["item:s:discovery"].entries, []);
+  const [allowance] = observed.holds;
+  assert.equal(allowance.step, "item:e:work");
+  assert.match(allowance.question, /2 files of 4 bytes/);
+  assert.deepEqual(
+    allowance.options.map((option) => option.answer),
     ["replan", "retry", "cancel"],
   );
   await stopped(service);

@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { SandboxConfig } from "../config.js";
-import { errored, hold } from "../engine.js";
+import { errored } from "../engine.js";
 import { redact } from "../log.js";
 import {
   gitMetadata,
@@ -289,13 +289,6 @@ export class CodexWorker implements Worker {
   }
 
   async run(input: WorkerInput): Promise<WorkerResult> {
-    // Codex's permission profile keeps the workspace writable, so read-only
-    // access is not enforced either.
-    if (input.item.kind === "discovery")
-      return hold(
-        `Work Item ${input.item.id} is a read-only discovery item, which the Codex worker can't run with enforced read-only access. Replan it.`,
-        ["replan", "cancel"],
-      );
     const started = Date.now();
     const record: Record<string, unknown> = {
       event: "worker-call",

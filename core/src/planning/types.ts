@@ -40,12 +40,14 @@ export type ItemKind = "work" | "qa" | "aggregate" | "discovery";
  * The kinds this build executes (work/steps.ts), and so the only kinds the
  * planner is offered: the wire, the planner prompt and the review rubric
  * read this list. A kind joins it when its executor lands; a saved plan
- * with any other kind holds at that item.
+ * with any other kind holds at that item. Discovery is offered only behind
+ * Adaptive workflow with `planning.adaptiveGraph` on as well (wire.ts).
  */
 export const EXECUTABLE_KINDS: readonly ItemKind[] = [
   "work",
   "qa",
   "aggregate",
+  "discovery",
 ];
 
 /** Whether this build executes, and the planner is offered, `kind`. */

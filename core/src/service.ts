@@ -421,7 +421,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     crashPoint("serve:withdrawn");
     runner.stop();
     runners.delete(issue);
-    options.sync?.forget(issue);
+    options.sync?.withdrawn(runner.state);
     log.write(issue, { event: "withdrawn" });
   };
 
@@ -440,14 +440,12 @@ export async function serve(options: ServeOptions): Promise<number> {
     waitingForSlot.clear();
     for (const runner of ordered) {
       const { state } = runner;
-      // Dequeued while its check or a re-run's cleanup ran: once that is
-      // done and nothing runs, it goes; nothing past them starts.
-      if (
-        state.withdrawing &&
-        !TERMINAL.includes(state.status) &&
-        !state.kept?.[RERUN]
-      ) {
-        if (!runner.busy)
+      // Dequeued while its check or a re-run's cleanup ran: it goes once
+      // that ends, and nothing past them starts. A cleanup the service's
+      // death interrupted resumes first; one that holds or errors is never
+      // asked about: the run goes at once.
+      if (state.withdrawing && !TERMINAL.includes(state.status)) {
+        if (!ending(runner)) {
           try {
             withdrawNow(runner);
           } catch (error) {
@@ -456,7 +454,9 @@ export async function serve(options: ServeOptions): Promise<number> {
               error: String(error),
             });
           }
-        continue;
+          continue;
+        }
+        if (runner.busy) continue;
       }
       let run = false;
       if (TERMINAL.includes(state.status)) run = runner.hasWork;
@@ -578,8 +578,9 @@ export async function serve(options: ServeOptions): Promise<number> {
         )
           return false;
         // Its check or a re-run's cleanup still runs: it goes once that
-        // ends, and nothing past them starts meanwhile (see tick).
-        if (runner.busy || runner.state.kept?.[RERUN]) {
+        // ends, and nothing past them starts meanwhile (see tick). A
+        // cleanup not begun never runs: the earlier run's record stands.
+        if (ending(runner)) {
           if (!runner.state.withdrawing)
             runner.transact(() => {
               runner.state.withdrawing = true;
@@ -699,9 +700,22 @@ function gated(runner: ObjectiveRunner, workflow: Workflow): boolean {
   );
 }
 
+const CLEANUP = "rerun:cleanup";
+
+/**
+ * A dequeued run waits to be withdrawn only while a step runs, or a re-run's
+ * cleanup has begun (an attempt is open): its effects are half made.
+ */
+function ending(runner: ObjectiveRunner): boolean {
+  return (
+    runner.busy ||
+    Boolean(runner.state.kept?.[RERUN] && runner.state.attempts[CLEANUP])
+  );
+}
+
 /** Not started: nothing past the check (and a re-run's cleanup) has run or begun. */
 function unstarted(state: ObjectiveState): boolean {
-  const early = (key: string) => key === "check" || key === "rerun:cleanup";
+  const early = (key: string) => key === "check" || key === CLEANUP;
   return [
     ...Object.keys(state.done),
     ...Object.keys(state.retries),

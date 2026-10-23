@@ -612,21 +612,40 @@ test("the one step running at three deaths, with progress between, holds", async
   await stopped(service);
 });
 
-test("an Objective dequeued during its check is withdrawn once the check ends, and never plans", async () => {
+test("an Objective dequeued during its check, or before a re-run's cleanup began, is withdrawn and never plans", async () => {
   const inst = installation();
   // Saved by a dequeue while the check ran: the check is done now.
   seed(inst, 71, "planning", { done: { check: true }, withdrawing: true });
+  // A finished Objective queued again, then dequeued before its re-run's
+  // cleanup began: the cleanup never runs, and the earlier run's record stands.
+  seed(inst, 72, "done", { done: { check: true, report: true } });
+  mkdirSync(join(inst.objectives, "finished"), { recursive: true });
+  writeFileSync(
+    join(inst.objectives, "finished", "72.json"),
+    readFileSync(join(inst.objectives, "72.json")),
+  );
+  seed(inst, 72, "checking", { kept: { rerun: true }, withdrawing: true });
   const service = serve(inst);
-  const logs = () =>
-    existsSync(join(inst.logs, "71"))
-      ? readdirSync(join(inst.logs, "71"))
-          .map((name) => readFileSync(join(inst.logs, "71", name), "utf8"))
+  const logs = (issue) =>
+    existsSync(join(inst.logs, String(issue)))
+      ? readdirSync(join(inst.logs, String(issue)))
+          .map((name) =>
+            readFileSync(join(inst.logs, String(issue), name), "utf8"),
+          )
           .join("")
       : "";
-  await until(() => logs().includes('"withdrawn"'), "the withdrawal");
+  for (const issue of [71, 72])
+    await until(() => logs(issue).includes('"withdrawn"'), "the withdrawal");
   assert.ok(!existsSync(join(inst.objectives, "71.json")));
   assert.ok(!existsSync(join(inst.objectives, "finished", "71.json")));
-  assert.ok(!logs().includes('"step":"plan"'), "nothing past the check");
+  assert.ok(!logs(71).includes('"step":"plan"'), "nothing past the check");
+  assert.ok(!existsSync(join(inst.objectives, "72.json")));
+  assert.equal(
+    JSON.parse(readFileSync(join(inst.objectives, "finished", "72.json")))
+      .status,
+    "done",
+  );
+  assert.ok(!logs(72).includes('"step":'), "no step ran");
   await stopped(service);
 });
 

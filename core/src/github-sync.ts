@@ -145,6 +145,12 @@ export class GitHubSync {
   private readonly changed = new Set<number>();
   /** A queue read landed since the last intake. */
   private fresh = false;
+  /**
+   * Withdrawn runs' last queued time, by GitHub's clock: a card that still
+   * reads queued from then (a read that began before the dequeue) is never
+   * a new queue. Only a later queue admits the issue again.
+   */
+  private readonly withdrawnAt = new Map<number, number>();
   /** Known issues GitHub no longer has: left out of later reads. */
   private readonly gone = new Set<number>();
   private lastPoll = 0;
@@ -278,6 +284,16 @@ export class GitHubSync {
         this.backoff.delete(key);
   }
 
+  /** The service withdrew a dequeued run: forget it, and keep the dequeue's edge. */
+  withdrawn(state: ObjectiveState): void {
+    this.forget(state.issue);
+    const module = state.modules.github as GitHubModule | undefined;
+    const marks = [module?.queuedAt, module?.shownAt]
+      .map((mark) => Date.parse(mark ?? ""))
+      .filter(Number.isFinite);
+    if (marks.length) this.withdrawnAt.set(state.issue, Math.max(...marks));
+  }
+
   /**
    * Act on a fresh queue read, once: a card set to queued after Factory's
    * last write admits its Objective (a new one is admitted on first sight,
@@ -397,6 +413,9 @@ export class GitHubSync {
    */
   private admitItem(item: QueueItem, sync: SyncView): void {
     if (!item.optionAt) return;
+    const out = this.withdrawnAt.get(item.issue);
+    if (out !== undefined && !(Date.parse(item.optionAt) > out)) return;
+    this.withdrawnAt.delete(item.issue);
     sync.admit(item.issue, {
       itemId: item.itemId,
       order: item.order,
@@ -422,7 +441,8 @@ export class GitHubSync {
    * Show the status on the card. The card is read first: Factory writes
    * only over what it last saw or wrote itself, never over someone else's
    * change (see `cardChanged`). The option being written is saved first, so
-   * after a crash the card showing it still reads as Factory's own.
+   * after a crash the card showing it still reads as Factory's own. A run
+   * being withdrawn shows nothing: the operator's dequeue stands.
    */
   private show(
     runner: ObjectiveRunner,
@@ -432,6 +452,7 @@ export class GitHubSync {
     const issue = runner.state.issue;
     const option = this.desired(runner, sync);
     if (
+      runner.state.withdrawing ||
       module.shown === option ||
       module.ceded === option ||
       this.changed.has(issue)
@@ -440,6 +461,7 @@ export class GitHubSync {
     const github = () => runner.state.modules.github as GitHubModule;
     this.background(issue, `show:${issue}`, async () => {
       const card = await this.display.get(github().itemId);
+      if (runner.state.withdrawing) return;
       const { seen, writing } = github();
       if (
         seen !== undefined &&
@@ -481,6 +503,8 @@ export class GitHubSync {
    * comment is edited to name its question too.
    */
   private ask(runner: ObjectiveRunner): void {
+    // A run being withdrawn goes instead of asking (service.ts tick).
+    if (runner.state.withdrawing) return;
     const issue = runner.state.issue;
     const holds = runner.state.holds;
     const others = holds.length > 1;

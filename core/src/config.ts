@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   absolute,
@@ -525,16 +525,28 @@ export function loadConfig(repository: string): CoreConfig {
   // and a worker's worktree (under the state directory) never holds the rules.
   const state = stateRoot();
   const rules = config.policy.secretlintConfig;
+  // Both the given path and its real path: a path through a link the
+  // target commits passes a real-path check, and each read follows it again.
   for (const [name, inside, root, where] of [
     ["The configuration file", path, config.checkout, "the target checkout"],
     ["The state directory", state, config.checkout, "the target checkout"],
     ["policy.secretlintConfig", rules, config.checkout, "the target checkout"],
     ["policy.secretlintConfig", rules, state, "the state directory"],
   ] as const)
-    if (inside && root && within(real(inside), real(root)))
+    if (
+      inside &&
+      root &&
+      [resolve(inside), real(inside)].some((candidate) =>
+        [resolve(root), real(root)].some((base) => within(candidate, base)),
+      )
+    )
       problems.push(`${name} ${inside} must be outside ${where} ${root}`);
   const own = ownRepositoryProblem(config.repository, config.checkout);
   if (own) problems.push(own);
+  if (process.env.FACTORY_SECRETLINT_CONFIG !== undefined)
+    problems.push(
+      "FACTORY_SECRETLINT_CONFIG is no longer read: set policy.secretlintConfig",
+    );
   if (problems.length) throw new Error(`${path}: ${problems.join("; ")}`);
   return config;
 }

@@ -981,8 +981,8 @@ export type SandboxRun =
       exitCode: number | null;
       stdout: string;
       stderr: string;
-      /** The middle of a long output was dropped (see `outputLimit`). */
-      truncated: boolean;
+      /** Each stream whose middle was dropped (see `outputLimit`). */
+      truncated: { stdout: boolean; stderr: boolean };
       timedOut: boolean;
       /** Over `sandbox.limits` afterwards: a failure whatever the exit code. */
       diskOverflow?: string;
@@ -1708,7 +1708,10 @@ export async function runSandboxed(
     exitCode: child.exitCode,
     stdout: output.stdout.toString(),
     stderr: output.stderr.toString(),
-    truncated: output.stdout.truncated || output.stderr.truncated,
+    truncated: {
+      stdout: output.stdout.truncated,
+      stderr: output.stderr.truncated,
+    },
     timedOut: killed === "timeout",
     ...(overflow && { diskOverflow: overflow }),
     ...(prepared.offline && { offline: prepared.offline }),

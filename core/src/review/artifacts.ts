@@ -173,6 +173,33 @@ export function selectorsFor(
   );
 }
 
+/**
+ * The characters of each output stream `command`'s run must keep whole for
+ * `selectors` to read it: a stream selector's bound, and the largest body
+ * bound for a locator (its marker can be anywhere in stdout). Undefined
+ * when the sandbox's default serves.
+ */
+export function outputLimit(
+  selectors: readonly ReviewArtifactSelector[],
+  command: string,
+): number | undefined {
+  const bounds = selectors
+    .filter((selector) => selector.command === command && "text" in selector)
+    .flatMap((selector) => {
+      const { text } = selector as TextSelector;
+      return [
+        text.stdout?.maxBytes ?? 0,
+        text.stderr?.maxBytes ?? 0,
+        text.locator ? MAX_BODY_BYTES : 0,
+      ];
+    });
+  const limit = Math.max(0, ...bounds);
+  return limit > DEFAULT_OUTPUT_LIMIT ? limit : undefined;
+}
+
+/** What the sandbox keeps of each stream unless told otherwise. */
+const DEFAULT_OUTPUT_LIMIT = 1024 * 1024;
+
 /** One selector's identity, independent of key order. */
 const identity = (selector: ReviewArtifactSelector): string =>
   JSON.stringify(selector, (_key, value: unknown) =>
@@ -509,8 +536,8 @@ export async function captureReviewArtifacts(input: {
   command: string;
   stdout: string;
   stderr: string;
-  /** The sandbox dropped the middle of a long output. */
-  truncated: boolean;
+  /** Each stream whose middle the sandbox dropped (see outputLimit). */
+  truncated: { stdout: boolean; stderr: boolean };
   /** The run's private TMPDIR. */
   temporary: string;
   dir: string;
@@ -786,7 +813,7 @@ async function readText(
   for (const stream of ["stdout", "stderr"] as const) {
     const selected = text[stream];
     if (!selected) continue;
-    if (input.truncated)
+    if (input.truncated[stream])
       throw new Problem(
         `the command's output was longer than Factory keeps, so its complete ${stream} is not available; make the command print less`,
       );
@@ -818,7 +845,7 @@ async function readText(
   let located: { stdoutPathPrefix: string; directory: string } | undefined;
   if (text.locator) {
     const prefix = text.locator.stdoutPathPrefix;
-    if (input.truncated)
+    if (input.truncated.stdout)
       throw new Problem(
         `the command's output was longer than Factory keeps, so the locator after ${JSON.stringify(prefix)} can't be read reliably; make the command print less`,
       );

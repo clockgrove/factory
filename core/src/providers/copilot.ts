@@ -13,8 +13,17 @@ import type {
   CopilotSession,
   PermissionRequest,
   SessionEvent,
+  Tool,
 } from "@github/copilot-sdk";
+import { isObject } from "../checked.js";
 import { errorMessage } from "../text.js";
+import {
+  type SelfValidateOptions,
+  SelfValidation,
+  VALIDATION_TOOL_DESCRIPTION,
+  VALIDATION_TOOL_NAME,
+  worktreeGitlinks,
+} from "../work/self-validate.js";
 import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
 import { workerEnvironment } from "../worktree.js";
 import { pathInsideRoot } from "./claude-worker.js";
@@ -67,6 +76,7 @@ function modelHold(why: string, listed: boolean): PlannerError {
 
 const WORKER_SYSTEM =
   "You are an implementation worker controlled by Factory. Work only in the current working directory and only on paths owned by the Work Item. Do not commit, push, publish, open or edit issues or pull requests, access GitHub tools, deploy, or change the current Git HEAD. You have file tools and no shell; Factory validates your result after you finish. Return a concise description and stop when complete or safely blocked.";
+const VALIDATE_SYSTEM = ` Your ${VALIDATION_TOOL_NAME} tool runs the Work Item's declared validation commands on your current files: finish only after it passes on your final files.`;
 
 /** One Copilot turn: a fresh session, one prompt, its events until idle. */
 interface Turn {
@@ -75,6 +85,8 @@ interface Turn {
   directory: string;
   /** Built-in tools, as the SDK names them. */
   tools: string[];
+  /** Factory's own tools; each is approved only with no arguments. */
+  custom?: Tool[];
   writes: boolean;
   system?: string;
   prompt: string;
@@ -107,9 +119,11 @@ function copilotEnvironment(): Record<string, string> {
   return workerEnvironment(gh, COPILOT_LOGIN);
 }
 
-/** The SDK names grep `rg`. */
+/** The SDK's built-ins, which name grep `rg`; Validate is Factory's own. */
 export function copilotTools(tools: readonly string[]): string[] {
-  return tools.map((name) => (name === "grep" ? "rg" : name));
+  return tools.flatMap((name) =>
+    name === "Validate" ? [] : [name === "grep" ? "rg" : name],
+  );
 }
 
 /** A session.error as an outcome, from its structured type and status only. */
@@ -229,7 +243,19 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
     // An error before the turn is awaited is still seen there.
     idle.catch(() => undefined);
     let sent = false;
+    const custom = new Set(turn.custom?.map((tool) => tool.name));
     const permit = (request: PermissionRequest) => {
+      // Factory's own tool takes no arguments: the model names no command.
+      if (request.kind === "custom-tool")
+        return !request.managedApprovalRequired &&
+          custom.has(request.toolName) &&
+          (request.args === undefined ||
+            (isObject(request.args) && !Object.keys(request.args).length))
+          ? { kind: "approve-once" as const }
+          : {
+              kind: "reject" as const,
+              feedback: "Factory did not grant this capability",
+            };
       if (
         request.managedApprovalRequired ||
         (request.kind !== "read" && request.kind !== "write") ||
@@ -256,7 +282,11 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
         ...(turn.system
           ? { systemMessage: { mode: "append", content: turn.system } }
           : {}),
-        availableTools: turn.tools.map((name) => `builtin:${name}`),
+        availableTools: [
+          ...turn.tools.map((name) => `builtin:${name}`),
+          ...[...custom].map((name) => `custom:${name}`),
+        ],
+        ...(turn.custom?.length && { tools: turn.custom }),
         onPermissionRequest: permit,
         onEvent: (event: SessionEvent) => {
           turn.onEvent(event);
@@ -414,6 +444,8 @@ export interface CopilotWorkerOptions {
   tools: string[];
   /** `worker.idleSeconds`, in ms. */
   idleMs: number;
+  /** What Validate needs; without it the worker has no Validate. */
+  validation?: SelfValidateOptions;
 }
 
 /** Implementation turns through Copilot with file tools inside the worktree. */
@@ -434,13 +466,49 @@ export class CopilotWorker implements Worker {
       model: this.options.model.model,
       effort: this.options.model.effort,
     };
+    // Validate, as Claude's (work/self-validate.ts): only declared commands.
+    const ended = new AbortController();
+    let validator: SelfValidation | undefined;
+    if (
+      !readOnly &&
+      this.options.validation &&
+      this.options.tools.includes("Validate") &&
+      input.commands.length
+    ) {
+      const gitlinks = await worktreeGitlinks(input);
+      if (typeof gitlinks !== "boolean") return gitlinks;
+      if (!gitlinks)
+        validator = new SelfValidation(
+          input,
+          this.options.validation,
+          AbortSignal.any([input.signal, ended.signal]),
+        );
+    }
     try {
       const result = await runTurn({
         choice: this.options.model,
         directory: input.worktree,
         tools,
         writes: !readOnly,
-        system: WORKER_SYSTEM,
+        system: validator ? WORKER_SYSTEM + VALIDATE_SYSTEM : WORKER_SYSTEM,
+        custom: validator && [
+          {
+            name: VALIDATION_TOOL_NAME,
+            description: VALIDATION_TOOL_DESCRIPTION,
+            parameters: {
+              type: "object",
+              properties: {},
+              additionalProperties: false,
+            },
+            defer: "never",
+            handler: async () => {
+              const run = await validator.call();
+              return run.isError
+                ? { textResultForLlm: run.text, resultType: "failure" }
+                : run.text;
+            },
+          },
+        ],
         prompt: input.prompt,
         idleMs: this.options.idleMs,
         signal: input.signal,
@@ -456,7 +524,13 @@ export class CopilotWorker implements Worker {
       record.session = result.session;
       record.usage = result.usage;
       record.outcome = "finished";
-      return { kind: "finished", finalResponse: result.text };
+      const tree = await validator?.finalTree();
+      if (validator) record.finalTreeValidated = Boolean(tree);
+      return {
+        kind: "finished",
+        finalResponse: result.text,
+        ...(tree && { validated: { tree, commands: [...input.commands] } }),
+      };
     } catch (error) {
       if (!(error instanceof PlannerError)) {
         record.outcome = "error";
@@ -467,6 +541,8 @@ export class CopilotWorker implements Worker {
       record.reason = error.message;
       return providerOutcome(error);
     } finally {
+      ended.abort(new Error("the worker attempt ended"));
+      await validator?.idle();
       record.ms = Date.now() - started;
       input.log(record);
     }

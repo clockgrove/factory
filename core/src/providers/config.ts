@@ -118,6 +118,7 @@ export const CLAUDE_TOOLS = [
   "Validate",
 ] as const;
 
+/** The Copilot worker's tools: the SDK's file tools and Factory's Validate. */
 export const COPILOT_TOOLS = [
   "view",
   "create",
@@ -125,6 +126,7 @@ export const COPILOT_TOOLS = [
   "apply_patch",
   "grep",
   "glob",
+  "Validate",
 ];
 
 /** A hosted run's limit: well inside the work step's 2-hour deadline. */

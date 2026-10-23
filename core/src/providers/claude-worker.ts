@@ -36,27 +36,23 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { SandboxConfig } from "../config.js";
-import { hold, objectiveWide } from "../engine.js";
-import { GitRefusal } from "../git.js";
+import { hold } from "../engine.js";
 import { openParent, within } from "../paths.js";
 import { ownsPath } from "../planning/graph.js";
-import { DESIGN_QUESTIONS } from "../planning/rubric.js";
 import type { Plan } from "../planning/types.js";
 import { runSandboxed, sandboxAvailable } from "../sandbox.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { BoundedText, errorMessage, headAndTail } from "../text.js";
-import { validateTree } from "../validate.js";
-import {
-  type HandoffNote,
-  handoffPeers,
-  privateStagingPath,
-  readHandoffNotes,
-  snapshot,
-  workHandoffSchema,
-} from "../work/collect.js";
+import { privateStagingPath } from "../work/collect.js";
 import { workItemContract } from "../work/prompt.js";
+import {
+  SelfValidation,
+  VALIDATION_TOOL_DESCRIPTION,
+  VALIDATION_TOOL_NAME,
+  worktreeGitlinks,
+} from "../work/self-validate.js";
 import type { Worker, WorkerInput, WorkerResult } from "../work/worker.js";
-import { hasGitlink, validationEnvironment } from "../worktree.js";
+import { validationEnvironment } from "../worktree.js";
 import {
   ACTIVE_TOOL_IDLE_MS,
   apiErrorStatus,
@@ -250,7 +246,7 @@ function boundedGlob(pattern: unknown): boolean {
 const SHELL_SERVER = "factory-shell";
 const SHELL_TOOL = `mcp__${SHELL_SERVER}__run_command`;
 const VALIDATION_SERVER = "factory-validation";
-const VALIDATION_TOOL = `mcp__${VALIDATION_SERVER}__run_validation`;
+const VALIDATION_TOOL = `mcp__${VALIDATION_SERVER}__${VALIDATION_TOOL_NAME}`;
 const FILES_SERVER = "factory-files";
 const DELETE_TOOL = `mcp__${FILES_SERVER}__delete_file`;
 const COPY_TOOL = `mcp__${FILES_SERVER}__copy_file`;
@@ -263,10 +259,6 @@ const KEPT_TAIL = 256 * 1024;
 /** Characters returned to the model: the start, then the end, where failures report. */
 const RETURNED_HEAD = 2_000;
 const RETURNED_TAIL = 14_000;
-/** Validate keeps the tail: failures report last. */
-const VALIDATION_OUTPUT_CHARS = 8_000;
-/** Enough of a note to see which criterion and sub-clauses it answers. */
-const NOTE_EXCERPT_CHARS = 600;
 /** The largest file copy_file copies: well above a check's actual values. */
 const MAX_COPIED_BYTES = 16 * 1024 * 1024;
 const COPY_BOUND = `${MAX_COPIED_BYTES / (1024 * 1024)} MiB copy bound`;
@@ -293,49 +285,6 @@ function returned(output: string): string {
   );
 }
 
-/** Plain text: the first line names the failed command; the tail holds the failures. */
-function bounded(output: string): string {
-  const plain = stripVTControlCharacters(output);
-  const head = (plain.split("\n", 1)[0] ?? "").slice(0, 300);
-  return headAndTail(plain, head.length, VALIDATION_OUTPUT_CHARS);
-}
-
-/**
- * Each criterion's exact text beside the note recorded for its index, so the
- * final self-review compares against the criterion, not a paraphrase.
- * Criteria are never cut; long note summaries are, since the worker has them.
- */
-function criterionMap(
-  acceptance: readonly string[],
-  notes: readonly HandoffNote[] = [],
-): string {
-  const summaries = new Map(
-    notes
-      .filter((note) => note.kind === "verification")
-      .map((note) => [note.criterionIndex, note.summary]),
-  );
-  const missing = acceptance.flatMap((_, index) =>
-    summaries.has(index) ? [] : [index],
-  );
-  const lines = acceptance.map((criterion, index) => {
-    const summary = summaries.get(index);
-    const note =
-      summary === undefined
-        ? "none recorded"
-        : summary.length <= NOTE_EXCERPT_CHARS
-          ? summary
-          : `${summary.slice(0, NOTE_EXCERPT_CHARS)} [${summary.length - NOTE_EXCERPT_CHARS} more characters]`;
-    return `[${index}] ${criterion}\nnote [${index}]: ${note}`;
-  });
-  return `Check each acceptance criterion's exact text against the verification note recorded for its index. The reviewer checks every sub-clause of this text, not a paraphrase: a note that answers another criterion, merges criteria or omits a sub-clause leaves that criterion unproved. Add any missing proof, then fix the note.${missing.length ? ` No note yet for criteria ${missing.join(", ")}.` : ""}\n${lines.join("\n")}`;
-}
-
-interface HandoffCheck {
-  passed: boolean;
-  text?: string;
-  criteria?: string;
-}
-
 /**
  * One worker attempt: its grants, the state its tools share across queries,
  * and the scratch beside the worktree (`<worktree>.shell`).
@@ -343,10 +292,9 @@ interface HandoffCheck {
 class Attempt {
   readonly closed = new AbortController();
   readonly root: string;
+  /** Validate's runs, and the handoff and final-tree checks. */
+  readonly validator: SelfValidation;
   private shellQueue: Promise<unknown> = Promise.resolve();
-  private validationQueue: Promise<unknown> = Promise.resolve();
-  private runs = 0;
-  private readonly passedTrees = new Set<string>();
 
   constructor(
     readonly input: WorkerInput,
@@ -357,6 +305,7 @@ class Attempt {
     private readonly z: Zod,
   ) {
     this.root = `${input.worktree}.shell`;
+    this.validator = new SelfValidation(input, options, this.signal);
   }
 
   /** Every tool runs with the attempt: cancel, or the turn ending, stops it. */
@@ -367,7 +316,7 @@ class Attempt {
   /** Stop running tools and wait for them, then remove the scratch. */
   async close(): Promise<void> {
     this.closed.abort(new Error("the worker attempt ended"));
-    await Promise.all([this.shellQueue, this.validationQueue]);
+    await Promise.all([this.shellQueue, this.validator.idle()]);
     rmSync(this.root, { recursive: true, force: true });
   }
 
@@ -691,20 +640,12 @@ class Attempt {
       version: "1.0.0",
       tools: [
         tool(
-          "run_validation",
-          "Run this work item's declared validation commands (the same ones Factory runs after you finish) on a snapshot of your current files, decode .factory-handoff.json as Factory will when it collects your result, and return the result. Files the commands produce under your owned paths that Git ignores (such as actual values a check writes) are copied back to your checkout at the same paths, and the result lists them. Takes several minutes. Run it after implementing and fix any failure it reports. Run it again after your last edit, including self-review and handoff fixes: finish only after a run passes on your final files.",
+          VALIDATION_TOOL_NAME,
+          VALIDATION_TOOL_DESCRIPTION,
           {},
           async () => {
-            const result = this.validationQueue.then(() => this.validate());
-            this.validationQueue = result.catch(() => undefined);
-            try {
-              return text(await result);
-            } catch (error) {
-              return text(
-                `Factory validation unavailable: ${errorMessage(error)}`,
-                true,
-              );
-            }
+            const result = await this.validator.call();
+            return text(result.text, result.isError);
           },
           {
             alwaysLoad: true,
@@ -718,127 +659,6 @@ class Attempt {
         ),
       ],
     });
-  }
-
-  /**
-   * The declared commands on a snapshot commit of the worker's current
-   * files, in a fresh checkout, so the worker's files never change and no
-   * build output or other run's temporary files reach the commands. The
-   * worker names no command: only the declared ones run.
-   */
-  private async validate(): Promise<string> {
-    const run = ++this.runs;
-    const { input, options } = this;
-    const signal = this.signal;
-    const handoff = await this.checkHandoff();
-    const snapped = await snapshot(input.worktree, options.sandbox, signal);
-    if ("problem" in snapped)
-      return `Validation failed. Fix this before you finish.\n${snapped.problem}`;
-    const { tree, commit } = snapped;
-    const result = await validateTree({
-      checkout: input.worktree,
-      repository: options.repository,
-      directory: `${input.worktree}.validation`,
-      commit,
-      item: input.item,
-      plan: options.plan,
-      blocks: options.blocks,
-      sandbox: options.sandbox,
-      commandTimeoutMs: options.commandTimeoutMs,
-      returnTo: input.worktree,
-      predecessor: input.base !== options.plan.base ? input.base : undefined,
-      signal,
-      log: input.log,
-    });
-    if (result.kind === "retry") throw new Error(result.reason);
-    if (result.kind === "hold") throw new Error(result.question);
-    const passed = result.kind === "passed";
-    const declared =
-      result.kind === "passed"
-        ? `All ${result.commands.length} declared validation commands passed:\n${result.commands.map((command) => `- ${command}`).join("\n")}`
-        : `Validation failed. Fix this before you finish.\n${bounded(result.failed ? `${result.failed.command} failed:\n${result.output}` : result.output || result.detail)}`;
-    const parts = [
-      result.produced ? `${declared}\n\n${result.produced}` : declared,
-    ];
-    if (handoff.text)
-      if (handoff.passed) parts.push(handoff.text);
-      else parts.unshift(handoff.text);
-    // Self-review follows a passing run; after the bounded output, so never cut.
-    if (passed && handoff.criteria) parts.push(handoff.criteria);
-    if (passed && !handoff.passed)
-      parts.unshift("Validation failed. Fix this before you finish.");
-    // The handoff is outside the tree; the final check decodes it again.
-    if (passed) this.passedTrees.add(tree);
-    input.log({
-      event: "worker-validate",
-      run,
-      passed: passed && handoff.passed,
-      tree,
-      handoffPassed: handoff.passed,
-    });
-    return parts.join("\n\n");
-  }
-
-  /**
-   * Decode .factory-handoff.json as collection will, so the worker can
-   * repair a manifest that would reject its whole result. `criteria` maps
-   * each criterion to its note once the manifest decodes.
-   */
-  async checkHandoff(): Promise<HandoffCheck> {
-    const { item, worktree } = this.input;
-    const { plan } = this.options;
-    const count = item.acceptance.length;
-    const notes = await readHandoffNotes(worktree, plan, item);
-    if (notes && "problem" in notes)
-      return {
-        passed: false,
-        text: `.factory-handoff.json would be rejected at collection, and your whole result with it. ${notes.problem}\nRewrite it to match this exact schema, then run validation again: ${JSON.stringify(workHandoffSchema(handoffPeers(plan, item).length, count))}`,
-      };
-    if (!notes)
-      return {
-        passed: true,
-        ...(count && {
-          text: `No .factory-handoff.json yet. Before you finish, record one verification note for each of the ${count} acceptance criteria there, using the schema in your instructions.`,
-          criteria: criterionMap(item.acceptance),
-        }),
-      };
-    const verified = notes.filter(
-      (note) => note.kind === "verification",
-    ).length;
-    const answered = new Set<string>(
-      notes.flatMap((note) => note.designRisk ?? []),
-    );
-    const unanswered = Object.keys(DESIGN_QUESTIONS).filter(
-      (risk) => !answered.has(risk),
-    );
-    return {
-      passed: true,
-      text: `.factory-handoff.json decodes: ${notes.length} notes, verification notes for ${verified} of ${count} acceptance criteria.${unanswered.length ? ` No design note yet for ${unanswered.join(", ")}.` : ""}`,
-      ...(count && { criteria: criterionMap(item.acceptance, notes) }),
-    };
-  }
-
-  /**
-   * Whether a passing Validate run covered the files the worker returns,
-   * with a handoff collection accepts: the tree, false, or undefined when
-   * the files can't be staged (collection reports that itself).
-   */
-  async finalTree(): Promise<string | false | undefined> {
-    if (!this.passedTrees.size) return false;
-    try {
-      const snapped = await snapshot(
-        this.input.worktree,
-        this.options.sandbox,
-        this.input.signal,
-      );
-      if ("problem" in snapped) return undefined;
-      return this.passedTrees.has(snapped.tree) &&
-        (await this.checkHandoff()).passed
-        ? snapped.tree
-        : false;
-    } catch {
-      return undefined;
-    }
   }
 }
 
@@ -1081,14 +901,8 @@ export class ClaudeWorker implements Worker {
       config.tools.includes(tool) && config.allowedTools.includes(tool);
     // Host Git must not enter a repository the commands could write behind
     // a gitlink, so neither Validate nor the shell runs in such a checkout.
-    let gitlinks: boolean;
-    try {
-      gitlinks = await hasGitlink(input.worktree, { signal: input.signal });
-    } catch (error) {
-      if (error instanceof GitRefusal)
-        return objectiveWide(hold(error.message));
-      throw error;
-    }
+    const gitlinks = await worktreeGitlinks(input);
+    if (typeof gitlinks !== "boolean") return gitlinks;
     const validate =
       granted(VALIDATE) && input.commands.length > 0 && !gitlinks;
     // Write and Validate together grant the shell: it adds nothing they
@@ -1363,7 +1177,7 @@ export class ClaudeWorker implements Worker {
           continue;
         }
         if (!error && handoffRefusals < MAX_HANDOFF_REFUSALS) {
-          const handoff = await watchdog.race(attempt.checkHandoff());
+          const handoff = await watchdog.race(attempt.validator.checkHandoff());
           if (!handoff.passed) {
             handoffRefusals += 1;
             turns.send(
@@ -1376,7 +1190,7 @@ export class ClaudeWorker implements Worker {
           !error &&
           attempt.grants.validate &&
           !validationRequested &&
-          (await watchdog.race(attempt.finalTree())) === false
+          (await watchdog.race(attempt.validator.finalTree())) === false
         ) {
           validationRequested = true;
           turns.send(VALIDATE_REQUEST);
@@ -1411,7 +1225,7 @@ export class ClaudeWorker implements Worker {
         reason: "Claude SDK did not report its initialized session",
       };
     const tree = attempt.grants.validate
-      ? await attempt.finalTree()
+      ? await attempt.validator.finalTree()
       : undefined;
     input.log({
       event: "worker-finished",

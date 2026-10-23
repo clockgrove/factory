@@ -67,6 +67,13 @@ export function providerWorker(
           model: { model: worker.model, effort: worker.effort },
           tools: worker.tools,
           idleMs: worker.idleSeconds * 1000,
+          validation: {
+            sandbox: config.sandbox,
+            plan,
+            blocks,
+            repository: config.repository,
+            commandTimeoutMs: config.validation.commandTimeoutSeconds * 1000,
+          },
         });
       case "openai-agents":
         return new OpenAIManagedWorker(worker);

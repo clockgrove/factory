@@ -1,6 +1,7 @@
 import { isObject } from "../checked.js";
+import type { CriterionDecision } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
-import { fact } from "../work/facts.js";
+import { fact, itemsWith } from "../work/facts.js";
 import type {
   AmendmentProposal,
   AmendmentResult,
@@ -35,6 +36,23 @@ export function proposalsOf(state: ObjectiveState): AmendmentProposal[] {
   return (
     (state.modules.amendments as AmendmentsModule | undefined)?.proposals ?? []
   ).filter((proposal) => proposal.plan === accepted);
+}
+
+/**
+ * The operator's criterion decisions (`accept <n>`, `refuse <n>`) under the
+ * plan accepted now, oldest first. Each review step keeps its own (a
+ * Work Item's, final review's); a replan leaves them behind.
+ */
+export function decisionsOf(state: ObjectiveState): CriterionDecision[] {
+  const accepted = state.kept[ACCEPTED_AT];
+  return [
+    ...itemsWith(state, "decisions").flatMap(
+      (id) => fact(state, "decisions", id) ?? [],
+    ),
+    ...(fact(state, "final-review:decisions") ?? []),
+  ]
+    .filter((entry) => entry.plan === accepted)
+    .sort((a, b) => a.at.localeCompare(b.at));
 }
 
 /** The plan the Objective runs now, with its settled expansions' children. */

@@ -71,8 +71,14 @@ export function reviewObjective(input: {
   memory?: string;
   /** A private directory for the evidence root. */
   dir: string;
-  /** Operator decisions; those on this tree replace the reviewer's verdict. */
+  /**
+   * Every operator criterion decision: final review's replace the
+   * reviewer's verdict (result.ts `decides`), and the reviewer sees the
+   * Work Items' as evidence.
+   */
   decisions?: readonly CriterionDecision[];
+  /** The final review the operator is answering: its verdicts on this tree stand. */
+  earlier?: ResultReview;
   /** What each accepted read-only QA item observed. */
   qa?: readonly QaObservation[];
   /** The conditional Work Items their declared condition skipped, with its evidence. */

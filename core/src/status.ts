@@ -11,10 +11,11 @@ import { displayTime, duration, eventLine, redactDeep } from "./display.js";
 import { type CapacityUse, DEADLINE, hold as question } from "./engine.js";
 import { type LogEvent, readLog } from "./log.js";
 import type { Paths } from "./paths.js";
-import { currentPlan } from "./planning/plan.js";
+import { currentPlan, decisionsOf } from "./planning/plan.js";
 import { planningRevisions } from "./planning/steps.js";
 import type { ItemKind, Plan } from "./planning/types.js";
 import { RESET, type ResetRecord } from "./reset.js";
+import { type CriterionDecision, decisionLines } from "./review/result.js";
 import { crashStreak, type Death } from "./service.js";
 import {
   answerForm,
@@ -86,6 +87,8 @@ export interface ObjectiveView {
    * instead of all (empty for none).
    */
   rereviews: { item: string; reviewArtifacts: string[]; by: string }[];
+  /** The operator's `accept <n>` and `refuse <n>` of single criteria under the current plan, with their reasons. */
+  decisions: CriterionDecision[];
   /**
    * Each autonomy allowance, used and allowed with the operator's grants:
    * across the Objective, and repairs per repair path (target step).
@@ -214,6 +217,7 @@ export function statusOf(
       running: [],
       flakyRerun: [],
       rereviews: [],
+      decisions: [],
       nextAction: {
         command: `factory reset ${issue}`,
         reason:
@@ -253,6 +257,7 @@ export function statusOf(
     running: Object.keys(state.attempts),
     flakyRerun: flakyReruns(state),
     rereviews: rereviews(state),
+    decisions: decisionsOf(state),
     allowances: {
       planningRevisions: planningRevisions(state),
       implementationRepairs: implementationRepairs(state),
@@ -598,6 +603,8 @@ function objectiveText(row: ObjectiveView): string[] {
     lines.push(
       `  Possibly flaky: ${flaky.item}: \`${flaky.command}\` failed once; its rerun passed`,
     );
+  for (const line of decisionLines(row.decisions, displayTime))
+    lines.push(`  Decided: ${line}`);
   for (const rereview of row.rereviews)
     lines.push(
       `  Rereview: ${rereview.item} captures ${rereview.reviewArtifacts.length ? `only the review artifacts of ${rereview.reviewArtifacts.map((command) => `\`${command}\``).join(", ")}` : "no review artifacts"} (--review-artifacts, by ${rereview.by})`,

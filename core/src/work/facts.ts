@@ -1,6 +1,7 @@
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
 import type { RepairFinding } from "../repair.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
+import type { CriterionDecision, ResultReview } from "../review/result.js";
 import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
 import type { DiscoveryResult } from "./discovery.js";
@@ -44,8 +45,10 @@ export interface ItemFacts {
   };
   /** A validation command run once more on a tree the worker's own Validate passed. */
   flaky: { tree: string; command: string };
-  /** The criteria the result review asked the operator about. */
-  questions: string[];
+  /** The result review that asked the operator, while its questions are answered. */
+  held: ResultReview;
+  /** The operator's `accept <n>` and `refuse <n>` at this item's reviews (planning/plan.ts `decisionsOf`). */
+  decisions: CriterionDecision[];
   /** Every commit pushed to the item's branch, for lease pushes. */
   pushed: string[];
   /** The next publish opens a new PR. */
@@ -75,8 +78,10 @@ export interface ObjectiveFacts {
   "objective:accepted": string;
   /** Final validation pushed missing LFS objects to origin again. */
   "final:repushed": true;
-  /** The criteria final review asked the operator about. */
-  "final-review:questions": string[];
+  /** The final review that asked the operator, while its questions are answered. */
+  "final-review:held": ResultReview;
+  /** The operator's `accept <n>` and `refuse <n>` at final review (planning/plan.ts `decisionsOf`). */
+  "final-review:decisions": CriterionDecision[];
   /** Final review refused the integrated result: its `retry` validates again. */
   "final-review:refused": true;
   /** The Objective runs again (work/steps.ts `RERUN`). */

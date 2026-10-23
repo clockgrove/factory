@@ -61,10 +61,12 @@ import {
 } from "../planning/facts.js";
 import { baselineQa } from "../planning/graph.js";
 import {
+  ACCEPTED_AT,
   acceptedInputs,
   type ConditionVerdict,
   conditionVerdict,
   currentPlan,
+  decisionsOf,
 } from "../planning/plan.js";
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
@@ -101,13 +103,20 @@ import {
   type CriterionDecision,
   type DeliveryPosition,
   type DependencyResult,
+  decisionLines,
   type ResultReview,
   receiptPath,
   reviewQa,
   reviewResult,
 } from "../review/result.js";
 import { type ObjectiveBlock, readShown, shownDigest } from "../shown.js";
-import { type Answer, type ObjectiveState, runOf, sinceRun } from "../state.js";
+import {
+  type Answer,
+  type HoldOption,
+  type ObjectiveState,
+  runOf,
+  sinceRun,
+} from "../state.js";
 import { headAndTail } from "../text.js";
 import { itemIssueOf } from "../tracking.js";
 import { validateTree, validationDeadlineMs } from "../validate.js";
@@ -1618,10 +1627,10 @@ async function reviewStep(
     state.issue,
     item.id,
   );
-  const decisions = criterionDecisions(
+  const decided = criterionDecisions(
     context,
-    validated.tree,
-    fact(state, "questions", item.id),
+    fact(state, "held", item.id),
+    item.id,
   );
   const chosen = selection(state)(item.id);
   const position: DeliveryPosition = place
@@ -1657,7 +1666,8 @@ async function reviewStep(
     peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
     ...(memory ? { memory } : {}),
     ...(validated.artifacts ? { artifacts: validated.artifacts } : {}),
-    decisions,
+    decisions: decided.decisions,
+    ...(decided.earlier ? { earlier: decided.earlier } : {}),
     delivery: position,
     dependencies: await dependencyResults(
       state,
@@ -1669,21 +1679,19 @@ async function reviewStep(
     signal,
     log: context.log,
   });
-  return reviewOutcome(
-    review,
-    (questions) => facts({ questions }, item.id),
-    () =>
+  const held = (asked: ResultReview | null) => facts({ held: asked }, item.id);
+  return withKeep(
+    reviewOutcome(review, held, REFUSES_ITEM, (refusal) =>
       repairOutcome(
         item,
         "review",
-        {
-          kind: "review",
-          tree: review.tree,
-          refused: review.kind === "refused" ? review.refused : [],
-        },
+        { kind: "review", tree: refusal.tree, refused: refusal.refused },
         context.state,
         place,
+        { keep: held(null) },
       ),
+    ),
+    decided.keep,
   );
 }
 
@@ -1776,62 +1784,143 @@ async function dependencyResults(
   return results;
 }
 
-/** Pass is done, refused repairs, needs-human asks (keeping the criteria it asks about with `pending`). */
+/**
+ * Pass is done, refused goes to `refused`, needs-human asks: one
+ * `accept <n>` and one `refuse <n>` per open criterion (`refuses` says
+ * what a refusal does), keeping the review asked with `held` until it is
+ * answered.
+ */
 function reviewOutcome(
   review: ResultReview,
-  pending: (criteria: string[]) => Record<string, unknown>,
-  refused: () => Outcome,
+  held: (asked: ResultReview | null) => Record<string, unknown>,
+  refuses: string,
+  refused: (review: Extract<ResultReview, { kind: "refused" }>) => Outcome,
 ): Outcome {
   if (review.kind === "pass")
-    return { kind: "done", result: { tree: review.tree } };
-  if (review.kind === "refused") return refused();
+    return { kind: "done", result: { tree: review.tree }, keep: held(null) };
+  if (review.kind === "refused") return refused(review);
   const lines = review.questions.map(
-    (q, i) =>
-      `${i + 1}. ${q.criterion}\n   ${q.question}${q.detail ? `\n   ${q.detail}` : ""}`,
+    (q) =>
+      `${q.criterionIndex}. ${q.criterion}\n   ${q.question}${q.detail ? `\n   ${q.detail}` : ""}`,
   );
   return {
     ...hold(
-      `The reviewer needs your judgment on this result:\n\n${lines.join("\n")}\n\n\`accept\` accepts ${review.questions.length === 1 ? "it" : "them all"}; \`refuse <reason>\` sends the result back for repair.`,
-      [
-        {
-          answer: "accept",
-          family: "accept",
-          consequence: "Accepts the result as it is.",
-        },
-        {
-          answer: "refuse",
-          family: "refuse",
-          consequence: "Sends the result back for repair with your reason.",
-        },
-        "cancel",
-      ],
+      `The reviewer needs your judgment on this result:\n\n${lines.join("\n")}\n\n${DECIDE_NOTE}`,
+      [...criterionOffers(review, refuses), "cancel"],
     ),
-    keep: pending(review.questions.map((q) => q.criterion)),
+    keep: held(review),
   };
 }
 
-/** The operator's accept or refuse, applied to every open question on this tree. */
+/** What a hold asking for criterion decisions says about them. */
+const DECIDE_NOTE =
+  "Answer `accept <n> <reason>` when criterion n is met, or `refuse <n> <reason>` when it isn't. Each answer decides one criterion, and the review goes on once every open one is decided, judging again only what is still undecided. Final review, the report and status list each decision with its reason.";
+
+/** What `refuse <n>` does at a Work Item's review. */
+const REFUSES_ITEM =
+  "and sends the result back for repair with your reason (a repair, counted against the allowances)";
+
+/**
+ * The per-criterion answers to `review`'s open criteria: `accept <n>` for
+ * each the reviewer refused, and `accept <n>` and `refuse <n>` for each it
+ * asked about, n being the criterion's index in the review. Both need the
+ * operator's reason.
+ */
+function criterionOffers(
+  review: Exclude<ResultReview, { kind: "pass" }>,
+  refuses: string,
+): HoldOption[] {
+  const short = (text: string) =>
+    text.length > 80 ? `${text.slice(0, 77)}...` : text;
+  const option = (
+    outcome: "accept" | "refuse",
+    entry: { criterionIndex: number; criterion: string },
+  ): HoldOption => ({
+    answer: outcome,
+    family: outcome,
+    arg: String(entry.criterionIndex),
+    consequence:
+      outcome === ACCEPT
+        ? `Records criterion ${entry.criterionIndex} (${short(entry.criterion)}) as met with your reason; the review counts it as passed from then on.`
+        : `Records criterion ${entry.criterionIndex} (${short(entry.criterion)}) as unmet with your reason, ${refuses}.`,
+    needsText: true,
+  });
+  const refused =
+    review.kind === "refused"
+      ? review.refused.filter((entry) => entry.source === "model")
+      : [];
+  return [
+    ...[...refused, ...review.questions].map((entry) => option(ACCEPT, entry)),
+    ...review.questions.map((entry) => option(REFUSE, entry)),
+  ];
+}
+
+/** The answer that refuses one criterion: `refuse <n> <reason>`. */
+const REFUSE = "refuse";
+
+/**
+ * The operator's criterion decisions of one review scope (Work Item
+ * `itemId`, else final review) under the plan accepted now, with an
+ * `accept <n>` or `refuse <n>` answer to the question about `held`
+ * recorded once (keyed by its hold id), and the keep that saves them.
+ * `earlier`: the review answered, whose verdicts on its tree stand; any
+ * other run of the step reviews afresh.
+ */
 function criterionDecisions(
   context: StepContext,
-  tree: string,
-  criteria: string[] | undefined,
-): CriterionDecision[] | undefined {
-  const answer = context.answer;
+  held: ResultReview | undefined,
+  itemId: string | undefined,
+): {
+  decisions: CriterionDecision[];
+  earlier?: ResultReview;
+  keep: Record<string, unknown>;
+} {
+  const { answer, state } = context;
+  const accepted = state.kept[ACCEPTED_AT] as string;
+  const kept = (
+    (itemId === undefined
+      ? fact(state, "final-review:decisions")
+      : fact(state, "decisions", itemId)) ?? []
+  ).filter((entry) => entry.plan === accepted);
+  const outcome = answer?.answer;
   if (
     !answer ||
-    !criteria?.length ||
-    (answer.answer !== "accept" && answer.answer !== "refuse")
+    !held ||
+    held.kind === "pass" ||
+    answer.arg === undefined ||
+    (outcome !== ACCEPT && outcome !== REFUSE)
   )
-    return undefined;
-  const outcome = answer.answer;
-  return criteria.map((criterion) => ({
-    criterion,
-    tree,
-    outcome,
-    by: answer.by,
-    at: answer.at,
-    ...(answer.text ? { text: answer.text } : {}),
-  }));
+    return { decisions: kept, keep: {} };
+  const open = [
+    ...(held.kind === "refused" ? held.refused : []),
+    ...held.questions,
+  ].find((entry) => String(entry.criterionIndex) === answer.arg);
+  const decisions =
+    open && !kept.some((entry) => entry.holdId === answer.holdId)
+      ? [
+          ...kept,
+          {
+            criterion: open.criterion,
+            outcome:
+              outcome === REFUSE ? ("refuse" as const) : ("accept" as const),
+            reason: answer.text ?? "",
+            by: answer.by,
+            at: answer.at,
+            tree: held.tree,
+            ...(itemId === undefined ? {} : { itemId }),
+            holdId: answer.holdId,
+            plan: accepted,
+          },
+        ]
+      : kept;
+  return {
+    decisions,
+    earlier: held,
+    keep:
+      itemId === undefined
+        ? facts({ "final-review:decisions": decisions })
+        : facts({ decisions }, itemId),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2598,6 +2687,11 @@ async function qaReviewStep(
     };
   const plan = currentPlan(state)!;
   const checked = state.done[steps[0]!] as QaResult;
+  const decided = criterionDecisions(
+    context,
+    fact(state, "held", item.id),
+    item.id,
+  );
   const merges = objectiveMerges(state, plan).map(
     (entry) => entry.merged.mergeSha,
   );
@@ -2615,30 +2709,30 @@ async function qaReviewStep(
     dir: `${worktreePath(deps.workDir(state.issue), state.issue, item.id)}.review`,
     peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
     ...(checked.artifacts ? { artifacts: checked.artifacts } : {}),
-    decisions: criterionDecisions(
-      context,
-      checked.tree,
-      fact(state, "questions", item.id),
-    ),
+    decisions: decided.decisions,
+    ...(decided.earlier ? { earlier: decided.earlier } : {}),
     signal,
     log: context.log,
   });
-  return reviewOutcome(
-    review,
-    (questions) => facts({ questions }, item.id),
-    () => ({
-      ...qaRefusal(
-        item,
-        checked.commit,
-        "its review refused",
-        review.kind === "refused"
-          ? review.refused
-              .map((r) => `- ${r.criterion}: ${r.detail}`)
-              .join("\n")
-          : "",
-      ),
-      keep: facts({ qaRefused: true }, item.id),
-    }),
+  const held = (asked: ResultReview | null) => facts({ held: asked }, item.id);
+  return withKeep(
+    reviewOutcome(
+      review,
+      held,
+      "and the QA item holds as refused",
+      (refusal) => ({
+        ...qaRefusal(
+          item,
+          checked.commit,
+          "its review refused",
+          refusal.refused
+            .map((r) => `- ${r.criterion}: ${r.detail}`)
+            .join("\n"),
+        ),
+        keep: { ...facts({ qaRefused: true }, item.id), ...held(null) },
+      }),
+    ),
+    decided.keep,
   );
 }
 
@@ -2920,15 +3014,18 @@ function finalReviewStep(deps: BuildDeps): Step {
           finding: "Final review runs again after the operator's fix.",
           target: "final",
           clear: ["final", "final-review"],
-          keep: facts({ "final-review:refused": null }),
+          keep: facts({
+            "final-review:refused": null,
+            "final-review:held": null,
+          }),
         };
       const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
       const merges = objectiveMerges(state, plan);
-      const decisions = criterionDecisions(
+      const decided = criterionDecisions(
         context,
-        final.tree,
-        fact(state, "final-review:questions"),
+        fact(state, "final-review:held"),
+        undefined,
       );
       // Every merged item in merge order; a native stack's layers share its merge.
       const mergedIds = merges.flatMap(
@@ -3006,7 +3103,12 @@ function finalReviewStep(deps: BuildDeps): Step {
         sources,
         acceptance,
         dir: join(deps.workDir(state.issue), "final-review"),
-        ...(decisions ? { decisions } : {}),
+        // Every Work Item's decisions are evidence; final review's decide.
+        decisions: [
+          ...decisionsOf(state).filter((entry) => entry.itemId !== undefined),
+          ...decided.decisions,
+        ],
+        ...(decided.earlier ? { earlier: decided.earlier } : {}),
         qa,
         skipped: skippedItems(state, plan).map(({ item, condition }) => ({
           itemId: item.id,
@@ -3018,15 +3120,35 @@ function finalReviewStep(deps: BuildDeps): Step {
         signal,
         log: context.log,
       });
-      const pending = (questions: string[]) =>
-        facts({ "final-review:questions": questions });
-      return reviewOutcome(review, pending, () => ({
-        ...hold(
-          `Final review refused the integrated result:\n\n${review.kind === "refused" ? review.refused.map((r) => `- ${r.criterion}: ${r.detail}`).join("\n") : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.`,
-          ["retry", "replan", "cancel"],
+      const held = (asked: ResultReview | null) =>
+        facts({ "final-review:held": asked });
+      return withKeep(
+        reviewOutcome(
+          review,
+          held,
+          "and final review refuses the integrated result",
+          (refusal) => {
+            const lines = refusal.refused.map(
+              (r) => `${r.criterionIndex}. ${r.criterion}: ${r.detail}`,
+            );
+            const open = refusal.questions.map(
+              (q) => `${q.criterionIndex}. ${q.criterion}\n   ${q.question}`,
+            );
+            const offers = criterionOffers(refusal, "and the refusal stands");
+            return {
+              ...hold(
+                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed from then on, and the review goes on once no refusal stands.` : ""}`,
+                ["retry", "replan", ...offers, "cancel"],
+              ),
+              keep: {
+                ...facts({ "final-review:refused": true }),
+                ...held(refusal),
+              },
+            };
+          },
         ),
-        keep: facts({ "final-review:refused": true }),
-      }));
+        decided.keep,
+      );
     },
   };
 }
@@ -3249,7 +3371,8 @@ function reportStep(deps: BuildDeps): Step {
         (sum, r) => sum + r.count,
         0,
       );
-      const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${final.media ? `\n\n${final.media}` : ""}`;
+      const decided = decisionLines(decisionsOf(state));
+      const body = `${marker}\n**Factory finished this Objective.**\n\n${lines.join("\n")}\n\nFinal validation and final review passed on \`${final.commit.slice(0, 12)}\` (${final.commands.map((c) => `\`${c}\``).join(", ")}).${repairs ? ` ${repairs} repair${repairs === 1 ? "" : "s"} along the way.` : ""}${decided.length ? `\n\nOperator decisions:\n${decided.map((line) => `- ${line}`).join("\n")}` : ""}${final.media ? `\n\n${final.media}` : ""}`;
       await github.ensureComment(
         state.issue,
         marker,

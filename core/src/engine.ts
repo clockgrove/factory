@@ -1416,6 +1416,7 @@ export class ObjectiveRunner {
           holdId: hold.id,
           question: hold.question,
           answer: given,
+          ...(option.arg !== undefined ? { arg: option.arg } : {}),
           ...(note ? { text: note } : {}),
           ...(captures ? { reviewArtifacts: captures } : {}),
           by,

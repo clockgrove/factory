@@ -128,6 +128,8 @@ export interface Answer {
   /** The question this answers, as it was asked. */
   question?: string;
   answer: string;
+  /** The option's argument, for a parameterized answer (`retire 2`). */
+  arg?: string;
   text?: string;
   /** `revalidate --review-artifacts`: the selectors this rereview captures, resolved when the answer landed; empty for none. */
   reviewArtifacts?: ReviewArtifactSelector[];

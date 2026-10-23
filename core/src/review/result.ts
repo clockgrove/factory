@@ -72,14 +72,50 @@ export interface PassedValidation {
   commands: readonly string[];
 }
 
-/** An operator's accept or refuse of one criterion on one exact tree. */
+/**
+ * An operator's `accept <n> <reason>` or `refuse <n> <reason>` to a review
+ * question: criterion n is met, or unmet. Recorded against the plan
+ * accepted then (`plan`, its acceptance time), one per answered question.
+ * An acceptance counts as passed in every later review of the same scope;
+ * a refusal only on the tree it was decided on.
+ */
 export interface CriterionDecision {
   criterion: string;
-  tree: string;
   outcome: "accept" | "refuse";
+  reason: string;
   by: string;
   at: string;
-  text?: string;
+  /** The tree the review asked about. */
+  tree: string;
+  /** The Work Item whose review asked; absent: final review. */
+  itemId?: string;
+  /** The question answered. */
+  holdId: string;
+  /** The accepted plan it decides under (planning/plan.ts ACCEPTED_AT). */
+  plan: string;
+}
+
+/** Whether `decision` settles `criterion` in a review of `tree`. */
+export function decides(
+  decision: CriterionDecision,
+  criterion: string,
+  tree: string,
+): boolean {
+  return (
+    decision.criterion === criterion &&
+    (decision.outcome === "accept" || decision.tree === tree)
+  );
+}
+
+/** The decisions as lines for final review, the report and status. */
+export function decisionLines(
+  decisions: readonly CriterionDecision[],
+  time: (at: string) => string = (at) => at,
+): string[] {
+  return decisions.map(
+    (entry) =>
+      `${entry.criterion} (${entry.itemId ? `Work Item ${entry.itemId}` : "final review"}): ${entry.outcome === "accept" ? "accepted" : "refused"} by ${entry.by} at ${time(entry.at)}: ${entry.reason}`,
+  );
 }
 
 /** One indexed evidence row the reviewer can cite. */
@@ -124,12 +160,28 @@ export interface ReviewQuestion {
   question: string;
 }
 
+/**
+ * A review's outcome. Each carries every verdict it reached, so a review
+ * of the same tree after the operator decides some criteria reuses them
+ * (`earlier`) and asks the reviewer only about the rest.
+ */
 export type ResultReview =
   | { kind: "pass"; tree: string; verdicts: ReviewedCriterion[] }
   /** Every refused criterion; the step repairs with them. */
-  | { kind: "refused"; tree: string; refused: RefusedCriterion[] }
-  /** Criteria only the operator can decide; answers are accept or refuse. */
-  | { kind: "needs-human"; tree: string; questions: ReviewQuestion[] };
+  | {
+      kind: "refused";
+      tree: string;
+      refused: RefusedCriterion[];
+      verdicts: ReviewedCriterion[];
+      questions: ReviewQuestion[];
+    }
+  /** Criteria only the operator can decide: `accept <n>` or `refuse <n>` each. */
+  | {
+      kind: "needs-human";
+      tree: string;
+      questions: ReviewQuestion[];
+      verdicts: ReviewedCriterion[];
+    };
 
 export interface ResultReviewInput {
   planner: Planner;
@@ -165,8 +217,10 @@ export interface ResultReviewInput {
    * rows, and images the reviewer sees. Captures of another tree are ignored.
    */
   artifacts?: readonly ReviewArtifact[];
-  /** Operator decisions; those on this tree replace the reviewer's verdict. */
+  /** Operator decisions of this item's criteria; they replace the reviewer's verdict (see `decides`). */
   decisions?: readonly CriterionDecision[];
+  /** The review the operator is answering: its verdicts on this tree stand, so only the rest are judged again. */
+  earlier?: ResultReview;
   /** How the result is delivered: a native-stack layer's place in its stack. */
   delivery?: DeliveryPosition;
   /** The completed result of each item this one depends on, transitively. */
@@ -214,6 +268,7 @@ export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
   const criteria = resultCriteria(input.plan, input.item);
   return runReview({
     ...input,
+    itemId: input.item.id,
     phase: "result-review",
     criteria,
     instructions: resultInstructions(input.item, criteria),
@@ -245,6 +300,7 @@ export function reviewQa(
 ): Promise<ResultReview> {
   return runReview({
     ...input,
+    itemId: input.item.id,
     phase: "result-review",
     criteria: resultCriteria(input.plan, input.item),
     instructions: QA_INSTRUCTIONS,
@@ -349,9 +405,12 @@ export async function runReview(
     | "candidates"
     | "inputs"
     | "decisions"
+    | "earlier"
     | "signal"
     | "log"
   > & {
+    /** The Work Item reviewed; absent: final review. Decisions of this scope settle criteria. */
+    itemId?: string;
     phase: "result-review" | "objective-review";
     criteria: readonly string[];
     /** The fixed instructions; guidance for supplied evidence kinds follows. */
@@ -366,11 +425,17 @@ export async function runReview(
   const { criteria, phase } = run;
   const tree = run.validation.tree;
   const decided = (criterion: string) =>
-    run.decisions?.find(
-      (entry) => entry.criterion === criterion && entry.tree === tree,
-    );
-  if (criteria.every(decided))
-    return judge(criteria, undefined, [], decided, tree, false);
+    [...(run.decisions ?? [])]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.itemId === run.itemId && decides(entry, criterion, tree),
+      );
+  const prior = earlierVerdicts(run.earlier, tree);
+  const settled = (criterion: string) =>
+    decided(criterion) ?? prior.get(criterion);
+  if (criteria.every(settled))
+    return judge(criteria, undefined, [], settled, tree, false);
   const root = await evidenceRoot(run.dir, tree);
   try {
     const { changes, rows } = await materialize(run, root);
@@ -381,7 +446,7 @@ export async function runReview(
     const evidence: ResultEvidence[] = [
       ...sourceRows(run.sources),
       ...run.design,
-      ...decisionRows(run.plan),
+      ...decisionRows(run.plan, run.decisions),
       changeIndexRow(run.base, run.commit, tree, changes, run.merges),
       validationRow(run.validation),
       ...(run.notes
@@ -441,12 +506,12 @@ export async function runReview(
       return decodeResultReview(answer.value, criteria.length, evidence);
     };
     let decoded = await ask();
-    let review = judge(criteria, decoded, evidence, decided, tree, false);
-    const first = invalidReason(decoded, criteria, decided);
+    let review = judge(criteria, decoded, evidence, settled, tree, false);
+    const first = invalidReason(decoded, criteria, settled);
     if (review.kind !== "refused" && first) {
       run.log({ event: `${phase}-invalid`, reason: first });
       decoded = await ask(first);
-      review = judge(criteria, decoded, evidence, decided, tree, true);
+      review = judge(criteria, decoded, evidence, settled, tree, true);
     }
     run.log({ event: phase, outcome: review.kind, criteria: criteria.length });
     return review;
@@ -475,11 +540,37 @@ type Decoded =
       packetError?: string;
     };
 
-/** Why an answer is invalid for the criteria the operator hasn't decided. */
+/**
+ * What settles a criterion without the reviewer: the operator's decision,
+ * or the verdict an earlier review of the same tree reached.
+ */
+type Settled =
+  | CriterionDecision
+  | { earlier: ReviewedCriterion | RefusedCriterion | ReviewQuestion };
+
+/** The model's verdicts of `earlier`, by criterion, when it reviewed `tree`. */
+function earlierVerdicts(
+  earlier: ResultReview | undefined,
+  tree: string,
+): Map<string, Settled> {
+  const verdicts = new Map<string, Settled>();
+  if (earlier?.tree !== tree) return verdicts;
+  for (const entry of [
+    ...earlier.verdicts.filter((verdict) => verdict.verdict === "pass"),
+    ...(earlier.kind === "refused"
+      ? earlier.refused.filter((refusal) => refusal.source === "model")
+      : []),
+    ...(earlier.kind === "pass" ? [] : earlier.questions),
+  ])
+    verdicts.set(entry.criterion, { earlier: entry });
+  return verdicts;
+}
+
+/** Why an answer is invalid for the criteria nothing settled. */
 function invalidReason(
   decoded: Decoded,
   criteria: readonly string[],
-  decided: (criterion: string) => CriterionDecision | undefined,
+  decided: (criterion: string) => Settled | undefined,
 ): string | undefined {
   if (decoded.invalid) return decoded.reason;
   const reasons = criteria.flatMap((criterion, index) =>
@@ -503,7 +594,7 @@ function judge(
   criteria: readonly string[],
   decoded: Decoded | undefined,
   evidence: readonly ResultEvidence[],
-  decided: (criterion: string) => CriterionDecision | undefined,
+  decided: (criterion: string) => Settled | undefined,
   tree: string,
   final: boolean,
 ): ResultReview {
@@ -518,13 +609,20 @@ function judge(
   const reason = decoded && invalidReason(decoded, criteria, decided);
   for (const [criterionIndex, criterion] of criteria.entries()) {
     const decision = decided(criterion);
+    if (decision && "earlier" in decision) {
+      const entry = { ...decision.earlier, criterionIndex };
+      if ("verdict" in entry) verdicts.push(entry);
+      else if ("source" in entry) refused.push(entry);
+      else questions.push(entry);
+      continue;
+    }
     if (decision) {
       if (decision.outcome === "refuse")
         refused.push({
           criterionIndex,
           criterion,
           source: "operator",
-          detail: `Refused by ${decision.by} at ${decision.at}${decision.text ? `: ${decision.text}` : ""}`,
+          detail: `Refused by ${decision.by} at ${decision.at}: ${decision.reason}`,
           question: "",
           evidence: [],
         });
@@ -533,7 +631,7 @@ function judge(
           criterionIndex,
           criterion,
           verdict: "human-accept",
-          detail: `${decision.by} at ${decision.at}${decision.text ? `: ${decision.text}` : ""}`,
+          detail: `Accepted by ${decision.by} at ${decision.at}: ${decision.reason}`,
           evidence: [],
         });
       continue;
@@ -579,8 +677,10 @@ function judge(
         question: finding.question.trim(),
       });
   }
-  if (refused.length) return { kind: "refused", tree, refused };
-  if (questions.length) return { kind: "needs-human", tree, questions };
+  if (refused.length)
+    return { kind: "refused", tree, refused, verdicts, questions };
+  if (questions.length)
+    return { kind: "needs-human", tree, questions, verdicts };
   return { kind: "pass", tree, verdicts };
 }
 
@@ -1107,17 +1207,36 @@ export function workItemDesign(item: WorkItem): Record<string, unknown> {
 }
 
 /** The operator's planning decisions, when there are any. */
-function decisionRows(plan: Plan): ResultEvidence[] {
-  return plan.decisions.length
-    ? [
-        {
-          origin: "controller",
-          path: "Operator planning decisions",
-          content: JSON.stringify(plan.decisions),
-          complete: true,
-        },
-      ]
-    : [];
+function decisionRows(
+  plan: Plan,
+  criteria: readonly CriterionDecision[] = [],
+): ResultEvidence[] {
+  return [
+    ...(plan.decisions.length
+      ? [
+          {
+            origin: "controller" as const,
+            path: "Operator planning decisions",
+            content: JSON.stringify(plan.decisions),
+            complete: true,
+          },
+        ]
+      : []),
+    ...(criteria.length
+      ? [
+          {
+            origin: "controller" as const,
+            path: "Operator criterion decisions",
+            content: JSON.stringify({
+              scope:
+                "The operator's accept or refuse of single criteria, with the reason. A decision of this review's scope is the verdict for its criterion: give that criterion any valid finding, which is not used. Decisions of other scopes are evidence of the operator's judgment, not proof of this tree.",
+              decisions: decisionLines(criteria),
+            }),
+            complete: true,
+          },
+        ]
+      : []),
+  ];
 }
 
 /** changes/INDEX.json with the commits and the reviewed tree. */

@@ -106,9 +106,10 @@ A refused command exits 1 and prints `{"kind":"lifecycle-refusal","code":"..."}`
 | `no_configuration`, `no_such_issue` | Wrong `--repo` or issue, or setup is missing: check them, or use the `setup` skill.                                                                       |
 | `plan_unreadable`                   | A reset can't read the plan comment. Show the operator the message; cancel only on request.                                                               |
 | `queue_not_running`                 | A reset would create the Objective while the queue is paused or draining. Tell the operator; run `factory queue resume` only if they want it.             |
+| `reset_in_progress`                 | A reset is already rebuilding the state. Tell the operator and wait for `reset` to disappear from `status`; don't retry.                                  |
 | `usage` (exit 2)                    | Fix the command.                                                                                                                                          |
 
-Any other code: show the operator the code and the message, and stop. Never retry a refused command unchanged.
+Any other code, or a non-zero exit with no JSON line: show the operator the message (and the code, if any), and stop. Never retry a refused command unchanged.
 
 ## Recover
 

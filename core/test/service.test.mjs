@@ -724,6 +724,39 @@ test("a knowledge store that can't open never holds back retirement", async () =
   await stopped(service);
 });
 
+test("concurrent defaultHead calls in one checkout all see the moved default branch", async () => {
+  const { defaultHead } = await import("../dist/git.js");
+  const dir = mkdtempSync(join(tmpdir(), "factory-fetch-"));
+  const git = (cwd, ...args) => {
+    const result = spawnSync(
+      "git",
+      ["-c", "user.name=t", "-c", "user.email=t@t", ...args],
+      { cwd, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git(dir, "init", "--quiet", "--bare", "-b", "main", "origin.git");
+  git(dir, "clone", "--quiet", "origin.git", "work");
+  const work = join(dir, "work");
+  git(work, "commit", "--quiet", "--allow-empty", "-m", "0");
+  git(work, "push", "--quiet", "origin", "HEAD:main");
+  git(dir, "clone", "--quiet", "origin.git", "checkout");
+  const checkout = join(dir, "checkout");
+  for (let round = 1; round <= 3; round++) {
+    // The default branch moves, as every merge moves it.
+    git(work, "commit", "--quiet", "--allow-empty", "-m", String(round));
+    git(work, "push", "--quiet", "origin", "HEAD:main");
+    const head = git(work, "rev-parse", "HEAD");
+    const heads = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        defaultHead(checkout, AbortSignal.timeout(60_000)),
+      ),
+    );
+    assert.deepEqual(heads, Array(8).fill(head), `round ${round}`);
+  }
+});
+
 test("a step past its deadline retries, then holds after three", async () => {
   const inst = installation();
   configured(inst, `http://127.0.0.1:${await silentServer()}`, {

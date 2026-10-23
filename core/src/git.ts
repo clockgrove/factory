@@ -226,28 +226,75 @@ export async function operatorGit(
 /**
  * Fetch the target and return its default branch head. Runs with the
  * operator's configuration, which holds the fetch credentials.
+ *
+ * Fetches in one checkout run one at a time: concurrent fetches fail
+ * against each other whenever the default branch moves ("incorrect old
+ * value"), so every caller would lose but one. A caller joins the fetch
+ * that starts after the running one ends, shared by everyone who asked
+ * meanwhile, so the head it gets is never from a fetch that began before
+ * it asked. `signal` ends the caller's wait, not the shared fetch.
  */
 export async function defaultHead(
   checkout: string,
   signal: AbortSignal,
 ): Promise<string> {
+  signal.throwIfAborted();
+  const head = sharedFetch(checkout);
+  return await new Promise<string>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    head
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+/** Per checkout: the fetch running, and the one queued after it. */
+const flights = new Map<
+  string,
+  { running: Promise<string>; next?: Promise<string> }
+>();
+
+/** The next fetch of `checkout` to start: now, or once the running one ends. */
+function sharedFetch(checkout: string): Promise<string> {
+  const flight = flights.get(checkout);
+  if (!flight) return fetchHead(checkout);
+  if (!flight.next) {
+    const start = () => fetchHead(checkout);
+    flight.next = flight.running.then(start, start);
+  }
+  return flight.next;
+}
+
+function fetchHead(checkout: string): Promise<string> {
+  const running = fetchOnce(checkout);
+  const flight: { running: Promise<string>; next?: Promise<string> } = {
+    running,
+  };
+  flights.set(checkout, flight);
+  // A queued fetch takes the checkout over when it starts.
+  const end = () => {
+    if (!flight.next && flights.get(checkout) === flight)
+      flights.delete(checkout);
+  };
+  running.then(end, end);
+  return running;
+}
+
+async function fetchOnce(checkout: string): Promise<string> {
   try {
     await operatorGit(checkout, ["fetch", "--quiet", "--prune", "origin"], {
-      signal,
       timeoutMs: 5 * MINUTE,
     });
-    await operatorGit(checkout, ["remote", "set-head", "origin", "--auto"], {
-      signal,
-    });
+    await operatorGit(checkout, ["remote", "set-head", "origin", "--auto"]);
     return (
-      await operatorGit(
-        checkout,
-        ["rev-parse", "--verify", "refs/remotes/origin/HEAD^{commit}"],
-        { signal },
-      )
+      await operatorGit(checkout, [
+        "rev-parse",
+        "--verify",
+        "refs/remotes/origin/HEAD^{commit}",
+      ])
     ).trim();
   } catch (error) {
-    if (signal.aborted) throw error;
     throw new TransientError(
       `git fetch in ${checkout}: ${errorMessage(error)}`,
     );

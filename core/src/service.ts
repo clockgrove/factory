@@ -461,7 +461,8 @@ export async function serve(options: ServeOptions): Promise<number> {
       let run = false;
       if (TERMINAL.includes(state.status)) run = runner.hasWork;
       // The check (and a new run's cleanup) runs when the Objective is first
-      // seen, slot or not (rule 7); planning and building need a slot.
+      // seen, slot or not (rule 7), within the host's `github` cap;
+      // planning and building need a slot.
       else if (!state.done.check) run = true;
       else if (runner.busy) {
         // Running steps keep their slot, even while another step's question is open.

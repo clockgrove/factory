@@ -2201,6 +2201,7 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
 export function rerunCleanupStep(deps: BuildDeps): Step {
   return {
     key: "rerun:cleanup",
+    resource: "github",
     deadlineMs: 10 * MINUTE,
     run: (context) =>
       guardedItem(deps, async () => {

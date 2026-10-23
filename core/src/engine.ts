@@ -130,7 +130,7 @@ export interface Step {
   /** Stable for the Objective, such as `plan` or `item:a:work`. */
   readonly key: string;
   readonly deadlineMs: number;
-  /** A host-wide limit this step counts against: model-bound workers or CPU-heavy validation. */
+  /** A host-wide limit this step counts against (see `HostResource`). */
   readonly resource?: HostResource;
   run(context: StepContext): Promise<Outcome>;
 }
@@ -153,7 +153,14 @@ export interface Workflow {
   upstream?(state: ObjectiveState, item: string): readonly string[];
 }
 
-export type HostResource = "worker" | "cpu";
+/**
+ * What a step uses that the host caps across every Objective: model-bound
+ * `worker` runs, CPU-heavy validation (`cpu`), and the `github` reads and
+ * shared-checkout fetch of a newly queued Objective's check or re-run
+ * cleanup, which run before it has a slot: a burst of queued issues waits
+ * its turn, in queue order, instead of fanning out.
+ */
+export type HostResource = "worker" | "cpu" | "github";
 
 /** This run of the service, shared by its Objectives' runners. */
 export interface ServiceRun {
@@ -165,12 +172,13 @@ export interface ServiceRun {
   resumeAt: number;
 }
 
-/**
- * Host-wide caps shared by every Objective in the service: how many worker
- * runs and how many CPU-heavy steps (validation) run at once.
- */
+/** Host-wide caps shared by every Objective in the service, per `HostResource`. */
 export class HostLimiter {
-  private readonly used: Record<HostResource, number> = { worker: 0, cpu: 0 };
+  private readonly used: Record<HostResource, number> = {
+    worker: 0,
+    cpu: 0,
+    github: 0,
+  };
   constructor(private caps: Record<HostResource, number>) {}
 
   configure(caps: Record<HostResource, number>): void {
@@ -193,7 +201,7 @@ export class HostLimiter {
 }
 
 /** The service's limiter; `serve` sets its caps from configuration. */
-export const hostLimits = new HostLimiter({ worker: 2, cpu: 2 });
+export const hostLimits = new HostLimiter({ worker: 2, cpu: 2, github: 2 });
 
 export interface EngineLimits {
   /** Escaped errors and missed deadlines in a row before a step holds. */

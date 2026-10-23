@@ -547,6 +547,29 @@ test("three deaths while two Objectives run hold neither; the restart backs off"
   await stopped(service);
 });
 
+test("checks of newly queued Objectives run within the host's cap", async () => {
+  const inst = installation();
+  // GitHub never answers, so every check that starts stays running.
+  configured(
+    inst,
+    `http://127.0.0.1:${await silentServer()}`,
+    {},
+    {
+      queue: { projectId: "PVT_none", pollSeconds: 5, maxActiveObjectives: 2 },
+    },
+  );
+  const issues = [81, 82, 83, 84, 85];
+  for (const issue of issues) seed(inst, issue);
+  const service = serve(inst);
+  const running = () =>
+    issues.filter((issue) => stateOf(inst, issue).attempts.check).length;
+  await until(() => running() === 2, "two checks running");
+  // Many ticks later, still two.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  assert.equal(running(), 2);
+  await stopped(service);
+});
+
 test("the one step running at three deaths, with progress between, holds", async () => {
   const inst = installation();
   const at = new Date().toISOString();

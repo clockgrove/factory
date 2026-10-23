@@ -151,6 +151,7 @@ async function main(argv: string[]): Promise<number> {
         hostLimits.configure({
           worker: loaded.execution.workers,
           cpu: loaded.execution.validations,
+          github: loaded.queue.maxActiveObjectives,
         });
       return await serve({
         paths,

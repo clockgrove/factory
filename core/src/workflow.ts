@@ -74,6 +74,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
 function checkStep(deps: PlanningDeps): Step {
   return {
     key: "check",
+    resource: "github",
     deadlineMs: 10 * MINUTE,
     run: (context: StepContext) =>
       guarded(deps.config.repository, async (): Promise<Outcome> => {

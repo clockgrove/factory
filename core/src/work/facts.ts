@@ -30,8 +30,17 @@ export interface ItemFacts {
   inputs: MediaInput[];
   /** A paid worker's spend so far. */
   spend: WorkerSpend;
-  /** The correction diagnosed for repair `repair`, and every finding diagnosed so far. */
-  diagnosis: { repair: number; context: RepairContext; applied: string[] };
+  /**
+   * The correction diagnosed for repair `repair`, and every finding
+   * diagnosed so far; `answered`: the question whose operator answer it
+   * carries, so that answer is applied once.
+   */
+  diagnosis: {
+    repair: number;
+    context: RepairContext;
+    applied: string[];
+    answered?: string;
+  };
   /** A validation command run once more on a tree the worker's own Validate passed. */
   flaky: { tree: string; command: string };
   /** The criteria the result review asked the operator about. */

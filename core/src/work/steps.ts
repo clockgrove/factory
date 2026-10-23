@@ -20,6 +20,7 @@ import {
 } from "../delivery.js";
 import {
   hold,
+  itemOf,
   type Outcome,
   objectiveWide,
   type Step,
@@ -86,7 +87,7 @@ import {
   reviewResult,
 } from "../review/result.js";
 import { type ObjectiveBlock, readShown, shownDigest } from "../shown.js";
-import { type ObjectiveState, runOf, sinceRun } from "../state.js";
+import { type Answer, type ObjectiveState, runOf, sinceRun } from "../state.js";
 import { headAndTail } from "../text.js";
 import { validateTree, validationDeadlineMs } from "../validate.js";
 import {
@@ -560,7 +561,7 @@ async function workStep(
   // back; any other answer collects it again.
   if (finished && context.answer?.answer === "repair") {
     const finding = `The operator sent this result back for repair${context.answer.text ? `: ${context.answer.text}` : "."}`;
-    return repairOutcome(item, "work", finding, context, place, {
+    return repairOutcome(item, "work", finding, context.state, place, {
       keep: keepBase,
     });
   }
@@ -758,7 +759,7 @@ async function workStep(
         signal,
       });
       if (outside)
-        return repairOutcome(item, "work", outside, context, place, {
+        return repairOutcome(item, "work", outside, context.state, place, {
           keep: keepAll,
         });
       const done: WorkResult = {
@@ -782,9 +783,16 @@ async function workStep(
       };
     }
     case "repair":
-      return repairOutcome(item, "work", collected.finding, context, place, {
-        keep: keepAll,
-      });
+      return repairOutcome(
+        item,
+        "work",
+        collected.finding,
+        context.state,
+        place,
+        {
+          keep: keepAll,
+        },
+      );
     default:
       return withKeep(collected, keepFinished);
   }
@@ -801,7 +809,7 @@ function mediaOutcome(
 ): Outcome {
   switch (outcome.kind) {
     case "repair":
-      return repairOutcome(item, from, outcome.finding, context, place, {
+      return repairOutcome(item, from, outcome.finding, context.state, place, {
         keep,
       });
     case "retry":
@@ -921,7 +929,15 @@ async function repairContext(
     };
   if (!history?.count || !finding) return undefined;
   const saved = fact(state, "diagnosis", item.id);
-  if (saved?.repair === history.count)
+  // The operator's answer is keyed by its question: one whose correction
+  // is saved (a rerun, a replayed answer) is never applied again, and a
+  // newer one replaces the saved correction.
+  const answered =
+    context.answer?.answer === "answer" &&
+    context.answer.holdId !== saved?.answered
+      ? context.answer
+      : undefined;
+  if (saved?.repair === history.count && !answered)
     return { context: saved.context, keep: {} };
   const applied = saved?.applied ?? [];
   const plan = currentPlan(state)!;
@@ -929,8 +945,7 @@ async function repairContext(
     | WorkResult
     | undefined;
   const sources = await pinnedSources(state, deps, signal);
-  const answer =
-    context.answer?.answer === "answer" ? context.answer.text : undefined;
+  const answer = answered?.text;
   const result = await correction({
     planner: deps.planner,
     plan,
@@ -964,14 +979,9 @@ async function repairContext(
       : "";
     return {
       hold: hold(
-        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer with \`answer <decision>\` to send the worker a correction, or \`retry\` to diagnose the failure again.${recheck}`,
+        `Work Item ${item.id} needs your decision before it is repaired:\n\n${result.question}\n\nAnswer \`answer <text>\` to send the worker your guidance, or \`retry\` to diagnose the failure again.${recheck}`,
         [
-          {
-            answer: "answer",
-            family: "answer",
-            consequence: "Sends the worker your correction.",
-            needsText: true,
-          },
+          "answer",
           {
             answer: "retry",
             family: "retry",
@@ -992,12 +1002,18 @@ async function repairContext(
       ),
     };
   }
+  // The operator's answer reaches the worker as their guidance, never as
+  // Factory's diagnosis.
   const repairContextValue: RepairContext = {
     finding: result.correction.failure,
-    correction: {
-      diagnosis: result.correction.diagnosis,
-      correction: result.correction.correction,
-    },
+    ...(result.correction.source === "operator"
+      ? { operator: result.correction.correction }
+      : {
+          correction: {
+            diagnosis: result.correction.diagnosis,
+            correction: result.correction.correction,
+          },
+        }),
     ...(finding.kind === "review" ? { fromReview: true } : {}),
   };
   return {
@@ -1008,6 +1024,7 @@ async function repairContext(
           repair: history.count,
           context: repairContextValue,
           applied: [...applied, result.finding],
+          ...(answered ? { answered: answered.holdId } : {}),
         },
       },
       item.id,
@@ -1154,7 +1171,7 @@ async function validateStep(
         item,
         "validate",
         { kind: "failure", detail: keptOutput },
-        context,
+        context.state,
         place,
         { shown: result.detail },
       );
@@ -1216,7 +1233,7 @@ async function selectStep(
     return { ...question, question: `${read.problem}\n\n${question.question}` };
   if (read.kind === "repair") {
     const finding = `The operator asked for new candidates${answer?.text ? `: ${answer.text}` : "."}`;
-    return repairOutcome(item, "select", finding, context, place);
+    return repairOutcome(item, "select", finding, context.state, place);
   }
   const made = await materializeSelection({
     checkout: deps.config.checkout,
@@ -1323,7 +1340,7 @@ async function reviewStep(
           tree: review.tree,
           refused: review.kind === "refused" ? review.refused : [],
         },
-        context,
+        context.state,
         place,
       ),
   );
@@ -1538,7 +1555,7 @@ async function publishStep(
   });
   if (result.kind === "secret")
     return context.answer?.answer === "repair"
-      ? repairOutcome(item, "publish", result.finding, context, place, {
+      ? repairOutcome(item, "publish", result.finding, context.state, place, {
           refusesResult: true,
         })
       : {
@@ -1564,7 +1581,7 @@ async function publishStep(
   // An empty change, or a pointer whose LFS object is missing: a fault in
   // the result itself, not a conflict, so no rebase.
   if (result.kind === "empty" || result.kind === "repair")
-    return repairOutcome(item, "publish", result.finding, context, place);
+    return repairOutcome(item, "publish", result.finding, context.state, place);
   if (result.kind !== "published") return result;
   const done: PublishResult = {
     pr: result.pr,
@@ -1767,7 +1784,7 @@ function deliveryRepair(
     item,
     phase,
     { kind: repair.conflict ? "conflict" : "failure", detail: repair.finding },
-    context,
+    context.state,
     place,
     {
       keep: facts(
@@ -1822,21 +1839,28 @@ function repairOutcome(
   item: WorkItem,
   from: Phase,
   finding: RepairFinding | string,
-  context: StepContext,
+  state: ObjectiveState,
   place: StackPlace | undefined,
   {
     keep = {},
     shown,
     refusesResult = from !== "select" && from !== "publish",
+    fresh = false,
   }: {
     /** Other facts the repair keeps. */
     keep?: Record<string, unknown>;
     /** The finding as the repair shows it; absent: the finding's detail. */
     shown?: string;
     refusesResult?: boolean;
+    /**
+     * The operator's `fresh`: the item keeps nothing of its result or work
+     * (no base, refused result, finding, diagnosis or selection), so the
+     * next attempt starts a fresh worktree on the current base, with no
+     * repair context. The layers above move as for any repair.
+     */
+    fresh?: boolean;
   } = {},
 ): Outcome {
-  const { state } = context;
   const kept: RepairFinding =
     typeof finding === "string"
       ? { kind: "failure", detail: finding }
@@ -1865,10 +1889,22 @@ function repairOutcome(
   // The result being cleared, when there is one: a repair from `work`
   // itself keeps the facts of the result before it.
   const result = state.done[stepKey(item.id, "work")] as WorkResult | undefined;
-  const moved: Record<string, unknown> = {
-    ...facts({ selection: media ? null : (own ?? null) }, item.id),
-    ...(result ? refusedFact(item.id, result, refusesResult) : {}),
-  };
+  const moved: Record<string, unknown> = fresh
+    ? facts(
+        {
+          base: null,
+          rebase: null,
+          onto: null,
+          selection: null,
+          refused: null,
+          diagnosis: null,
+        },
+        item.id,
+      )
+    : {
+        ...facts({ selection: media ? null : (own ?? null) }, item.id),
+        ...(result ? refusedFact(item.id, result, refusesResult) : {}),
+      };
   for (const layer of above) {
     const layerSelection = standing(layer);
     const work = state.done[stepKey(layer.id, "work")] as
@@ -1911,7 +1947,7 @@ function repairOutcome(
     ),
     keep: {
       ...keep,
-      ...facts({ finding: kept }, item.id),
+      ...facts({ finding: fresh ? null : kept }, item.id),
       ...moved,
       ...facts({ finished: null }, item.id),
     },
@@ -1970,6 +2006,48 @@ export function replanOutcome(state: ObjectiveState): Outcome {
       ...facts({ [RERUN]: true }),
     },
   };
+}
+
+/**
+ * Whether `fresh` can answer a question of step `key` (engine.ts
+ * `Workflow.freshable`): a Work Item of the current plan that runs a worker
+ * and hasn't merged.
+ */
+export function freshable(state: ObjectiveState, key: string): boolean {
+  const plan = currentPlan(state);
+  const item = plan?.items.find((entry) => entry.id === itemOf(key));
+  return (
+    !!item &&
+    !plan?.split &&
+    executable(item.kind) &&
+    item.kind !== "aggregate" &&
+    !mergeOf(state, item.id)
+  );
+}
+
+/**
+ * The operator's `fresh` to item step `key`'s question (workflow.ts): a
+ * repair of the item's work that keeps nothing of its result or work, so
+ * it starts again from a fresh worktree on the current base. It counts
+ * against the repair allowances like any repair, and the native-stack
+ * layers above move onto its new head.
+ */
+export function freshOutcome(
+  state: ObjectiveState,
+  deps: BuildDeps,
+  key: string,
+  answer: Answer,
+): Outcome {
+  const plan = currentPlan(state)!;
+  const item = plan.items.find((entry) => entry.id === itemOf(key))!;
+  return repairOutcome(
+    item,
+    "work",
+    `The operator asked for a fresh start${answer.text ? `: ${answer.text}` : "."}`,
+    state,
+    multiLayer(stackOf(plan, deps), item.id),
+    { fresh: true },
+  );
 }
 
 /**

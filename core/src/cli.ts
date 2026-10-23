@@ -152,10 +152,11 @@ const COMMANDS: Record<string, Command> = {
   },
   answer: {
     args: "ISSUE ANSWER [ARG]",
-    flags: { question: "value", text: "value" },
-    help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`), --text the explanation",
+    flags: { question: "value", text: "value", "text-file": "value" },
+    help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance)",
     check: (args) => {
       const answer = args.positional[2];
+      const file = args.flags["text-file"];
       return (
         issueCheck(args) ??
         (!answer
@@ -164,7 +165,14 @@ const COMMANDS: Record<string, Command> = {
             // never lands on a newer one. Cancel needs no question.
             answer !== "cancel" && args.flags.question === undefined
             ? `answer needs --question with the open question's id, so it can't answer a newer one: see \`factory status ${args.positional[1]}\``
-            : undefined)
+            : // ARG names a parameterized answer's option (`switch NAME`).
+              answer === "cancel" && args.positional[3] !== undefined
+              ? "cancel takes no argument"
+              : file !== undefined && args.flags.text !== undefined
+                ? "give --text or --text-file, not both"
+                : file !== undefined && !isAbsolute(file)
+                  ? "--text-file needs an absolute path"
+                  : undefined)
       );
     },
   },
@@ -325,7 +333,8 @@ async function main(argv: string[]): Promise<number> {
     case "answer": {
       // `answer ISSUE switch NAME`: the option's argument, never the text.
       const arg = args.positional[3];
-      const { question, text } = args.flags;
+      const { question } = args.flags;
+      const text = answerText(args);
       return await request(paths, {
         kind: "answer",
         issue: issueOf(args),
@@ -348,6 +357,26 @@ async function main(argv: string[]): Promise<number> {
         kind: command as "cancel" | "reset" | "pause" | "drain" | "resume",
         issue: issueOf(args),
       });
+  }
+}
+
+/** The most text an answer carries: a GitHub comment's limit. */
+const MAX_ANSWER_TEXT = 65_536;
+
+/** An answer's text: `--text`, or the UTF-8 file `--text-file` names. */
+function answerText(args: Args): string | undefined {
+  const file = args.flags["text-file"];
+  if (file === undefined) return args.flags.text;
+  const stat = lstatSync(file, { throwIfNoEntry: false });
+  if (!stat?.isFile()) throw usage(`--text-file ${file} isn't a regular file`);
+  if (stat.size > MAX_ANSWER_TEXT)
+    throw usage(
+      `--text-file ${file} is ${stat.size} bytes; an answer's text is at most ${MAX_ANSWER_TEXT}`,
+    );
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(file));
+  } catch {
+    throw usage(`--text-file ${file} isn't UTF-8 text`);
   }
 }
 

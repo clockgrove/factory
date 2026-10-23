@@ -156,6 +156,17 @@ const COMMON = {
     family: "adopt",
     consequence: "Freezes the configuration as it is now and continues.",
   },
+  answer: {
+    family: "answer",
+    consequence:
+      "Sends your text to the Work Item's next attempt as the operator's guidance.",
+    needsText: true,
+  },
+  fresh: {
+    family: "repair",
+    consequence:
+      "Discards the Work Item's result and work and starts it again on the current base; counts as a repair.",
+  },
 } as const satisfies Record<string, Omit<HoldOption, "answer">>;
 
 /** An answer a step offers: a common one by name, or any other written out. */
@@ -269,6 +280,17 @@ export interface Workflow {
    */
   replan?(state: ObjectiveState, key: string, answer: Answer): Outcome;
   /**
+   * Whether `fresh` can answer a question of Work Item step `key`: the
+   * engine then offers it on that item's questions, and applies it itself.
+   */
+  freshable?(state: ObjectiveState, key: string): boolean;
+  /**
+   * The operator answered `fresh` to step `key`'s question: a repair that
+   * discards the item's result and work, counted against the allowances
+   * like any repair.
+   */
+  fresh?(state: ObjectiveState, key: string, answer: Answer): Outcome;
+  /**
    * The configuration as an Objective freezes it now, per configured
    * provider, for the `switch NAME` and `adopt` answers.
    */
@@ -377,6 +399,7 @@ const REVALIDATE = "revalidate";
  */
 export const ADOPTS = "config:adopts";
 const REPLAN = "replan";
+const FRESH = "fresh";
 
 interface Running {
   token: number;
@@ -556,6 +579,19 @@ export class ObjectiveRunner {
           true,
         );
         crashPoint(`engine:${step.key}:replan-applied`);
+        return;
+      }
+      // So is `fresh`: it clears the item's steps. Applied with the answer
+      // in one save, so the answer (its hold id) takes effect once.
+      if (
+        answer?.answer === FRESH &&
+        this.workflow.fresh &&
+        this.workflow.freshable?.(this.state, step.key)
+      ) {
+        this.apply(
+          step.key,
+          this.workflow.fresh(structuredClone(this.state), step.key, answer),
+        );
         return;
       }
       // A repair past an allowance asks before it runs (allowances.ts):
@@ -1002,6 +1038,20 @@ export class ObjectiveRunner {
         options.findIndex((option) => option.answer === "cancel"),
         0,
         common(REPLAN),
+      );
+    // A Work Item's question offers a fresh start where the workflow can
+    // give one; not an allowance's question, whose way past is `more`.
+    if (
+      item !== undefined &&
+      !options.some(
+        (option) => option.answer === FRESH || option.answer === MORE,
+      ) &&
+      this.workflow.freshable?.(state, key)
+    )
+      options.splice(
+        options.findIndex((option) => option.answer === "cancel"),
+        0,
+        common(FRESH),
       );
     // A recommended `switch` with several targets recommends this
     // Objective's own provider (re-freeze), else the next other answer:

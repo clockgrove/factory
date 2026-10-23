@@ -18,13 +18,15 @@ import {
   readObjective,
 } from "./planning/steps.js";
 import { PlannerError, providerOutcome } from "./providers/planner.js";
-import type { ObjectiveState, ObjectiveStatus } from "./state.js";
+import type { Answer, ObjectiveState, ObjectiveStatus } from "./state.js";
 import { errorMessage } from "./text.js";
 import {
   type BuildDeps,
   built,
   cancelCleanupStep,
   deliverySteps,
+  freshable,
+  freshOutcome,
   layersBelow,
   RERUN,
   RERUN_CLEANUP,
@@ -86,6 +88,15 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       currentPlan(state)
         ? replanOutcome(state)
         : planningReplan(state, key, answer),
+
+    // A Work Item starts over on the current base (work/steps.ts).
+    ...(deps
+      ? {
+          freshable,
+          fresh: (state: ObjectiveState, key: string, answer: Answer) =>
+            freshOutcome(state, deps, key, answer),
+        }
+      : {}),
   };
 }
 

@@ -200,8 +200,15 @@ const LFS = [
 ];
 /** Set and role ids; set ids are also hold answers. */
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-/** Answers a select hold has besides the set ids. */
-const RESERVED = new Set(["repair", "retry", "replan", "cancel", "answer"]);
+/** Answers a select hold has besides the set ids (the engine adds `fresh`). */
+const RESERVED = new Set([
+  "repair",
+  "retry",
+  "replan",
+  "cancel",
+  "answer",
+  "fresh",
+]);
 
 /** A deterministic problem with the worker's candidates. */
 class Finding extends Error {}

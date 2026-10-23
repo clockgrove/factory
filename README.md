@@ -6,27 +6,28 @@ Turn a GitHub issue into a reviewed plan, coordinated coding work, and validated
 
 Factory is an open-source plugin for Codex and Claude Code, built for developers working with coding agents. It reads your repository's requirements, breaks an Objective into dependency-linked Work Items, runs independent work concurrently, and validates the results before delivering them through GitHub.
 
-- **Plan from your sources.** Review a plan grounded in committed requirements, owned paths, dependencies, and validation commands.
-- **Run local agents.** Use your existing Codex account and machine, with an explicit concurrency limit. Optional local Claude and Copilot harnesses are available separately.
-- **Validate and deliver.** Check exact result trees, independently review acceptance, and integrate regular pull requests or native linear stacks under your repository's rules.
-- **Handle assets.** Review complete candidate asset sets and deliver selected bytes using the repository's Git LFS policy.
+- **Plan from your sources.** A reviewed plan grounded in the repository at its default branch: Work Items with owned paths, dependencies and validation commands.
+- **Run agents in parallel.** Codex by default; Claude and GitHub Copilot as named providers. Independent Work Items run at once, within host-sized limits.
+- **Validate and deliver.** Every result is validated in an OS sandbox and reviewed against its acceptance, then delivered as regular pull requests or native linear stacks under your branch rules.
+- **Crash-safe.** One service owns the state. A crash, a reboot or a killed model resumes where it stopped, with no duplicate pull request, comment or merge. Anything it can't decide becomes a question with answers that work.
 
-**Status:** Factory is early, pre-1.0 software. Start with a disposable repository and supervise initial Objectives, and follow the [recovery guidance](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#stopping-and-recovery) when work stops. See [release notes](https://github.com/clockgrove/factory/releases) for what each version contains.
+**Status:** Factory is early, pre-1.0 software. Start with a disposable repository and supervise the first Objectives. See [release notes](https://github.com/clockgrove/factory/releases) for what each version contains.
 
-The [product direction](https://github.com/clockgrove/factory/blob/main/docs/PRODUCT-DIRECTION.md) prioritizes low-touch delivery, app quality and continuity, with GitHub tracking and reasonable time and cost.
-
-Ask questions and make human-owned decisions in your agent conversation, such as Codex. Use GitHub to inspect detailed Objective and Work Item progress, pull requests and acceptance evidence.
+You queue Objectives on a GitHub Project and answer Factory's questions from the CLI, your agent conversation, or a `/factory` comment on the issue. GitHub shows each Objective's progress, its pull requests and its report.
 
 ## Requirements
 
-- Linux x64, including a Linux environment under WSL2; Node.js 22 or later for the published bundled Codex path.
-- Git 2.31 or later, authenticated GitHub CLI access to your target repository, and authenticated access for your configured providers: a Codex login for the default Codex planning and worker path, or a Claude Code login when planning, review or work use Claude (see [providers](docs/USER-GUIDE.md#providers)). The plugin requires Codex or Claude Code with plugin support.
-- Your target's build and validation tools; Git LFS for LFS-backed media work.
-- A trusted repository with committed instructions and requirements. Local workers run under your OS account; they are not a security boundary for hostile code.
+- Linux x64, including WSL2, with Node.js 22.13 or later.
+- **Tools:**
+  - Git 2.31 or later, and Git LFS for media;
+  - bubblewrap (`bwrap`) for the command sandbox, and passt (`pasta`) if dependency installs need the network;
+  - your target's build and validation tools.
+- **Logins:**
+  - the GitHub CLI logged in with access to the target repository and its Project;
+  - a Codex login for the default provider, or a Claude Code or GitHub Copilot login for those providers.
+- **A trusted target repository.** Workers run under your OS account inside the sandbox; the sandbox isn't a boundary against hostile code.
 
-Planning, review, and workers consume your provider's usage. Different Objectives can run in parallel, each from its own foreground run, while the background service queue stays sequential. Factory runs with a configured local harness or compile-time assigned local execution profiles. [Remote execution](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#managed-execution) (Claude and OpenAI managed agents) is not yet live-qualified. See [local harnesses](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#local-providers) for optional-provider requirements and boundaries.
-
-Supported local adapters retain separate planning, implementation and review conversations across eligible follow-ups. Factory keeps each turn bound to current evidence, permissions and attempt limits; the native harness manages its working context. See [retained conversations](docs/USER-GUIDE.md#retained-conversations) for provider differences and recovery limits.
+Planning, review and workers use your providers' quota. An idle service makes no model calls.
 
 ## Install
 
@@ -83,9 +84,18 @@ export PATH="/absolute/private/factory-prefix/node_modules/.bin:$PATH"
 factory help
 ```
 
+The offline install leaves out the optional SDKs that the Claude and Copilot providers need. To use them, install the same verified tarball again with network access, then check that they're there:
+
+```sh
+npm install --prefix /absolute/private/factory-prefix "./clockgrove-factory-$VERSION.tgz"
+npm list --prefix /absolute/private/factory-prefix @anthropic-ai/claude-agent-sdk @github/copilot-sdk
+```
+
 Keep that CLI on the PATH of the terminal or agent that will operate Factory, and reload your agent host if needed to load the installed skills. Factory excludes its authenticated installation bin from worker PATH when it contains only its own launcher; controller discovery and validation commands retain the original PATH. Other protected PATH entries still require correction. Factory is distributed through GitHub Releases, not the npm registry.
 
-Verify the installed CLI package and the enabled plugin both report the release you selected:
+### Check the installation
+
+Check that the CLI and the plugin come from the release you selected:
 
 ```sh
 command -v factory
@@ -94,50 +104,27 @@ codex plugin list --marketplace clockgrove --json  # Codex host
 claude plugin list --json                        # Claude Code host
 ```
 
-Use the listing for your host. Check that `factory` on PATH belongs to that installation; an older wrapper or another prefix can select a different CLI. `factory help` lists the installed commands. A successful package check does not establish provider access or worker readiness.
-
-### Controller PATH in an agent host
-
-Codex can prepend temporary runtime aliases under `CODEX_HOME/tmp/arg0` to its tool environment. Factory refuses these protected directories as worker toolchains. For agent execution, construct a complete, reviewed PATH with the selected project tools and system binaries; do not append the inherited `$PATH`. Verify the absolute CLI against the installation above, then apply the literal environment after any shell startup:
-
-```sh
-/usr/bin/env PATH='/absolute/selected-toolchain/bin:/absolute/private/factory-prefix/node_modules/.bin:/usr/local/bin:/usr/bin:/bin' \
-  /absolute/private/factory-prefix/node_modules/.bin/factory status --config /absolute/private/config.json
-```
-
-Replace the example directories with the actual required toolchains, including Node and every declared validation tool. Use that same literal environment for setup, run, status and diagnostics. From a login shell, put the complete `/usr/bin/env ...` command inside the shell invocation so startup files cannot replace it. Run the controller through the host's supported ordinary-host permission route; never mount a credential directory or weaken worker isolation to repair PATH or socket errors.
+Use the listing for your host. `factory help` lists the installed commands. A package check doesn't prove provider access or worker readiness; setup checks those.
 
 ## Use the plugin
 
-Open your target repository in Codex or Claude Code after loading the matching plugin, and ask:
+1. **Prepare the target.** Make a clone of the target repository that only Factory uses. On the target's GitHub Project, add a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done, Failed and Cancelled, and a number field `Factory order`.
+2. **Set up.** In Codex or Claude Code, ask:
 
-> Use Factory to set up this repository with a concurrency limit of two. Do not start work.
+   > Use Factory to set up OWNER/NAME with the clone at /absolute/clone and Project PVT_.... Do not start work.
 
-Factory's setup skill binds the checkout and reports the configuration. New work runs with the configured default provider; name another with `--provider NAME` when you mean to override it. An Objective that has started keeps its provider, including under the background service. Add a second provider with setup's `--provider NAME`. See [providers](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#providers).
+   The setup skill writes the configuration and reports a readiness checklist with the fix for anything missing. To run Objectives in the background, ask it to install the background service. See [setup](docs/USER-GUIDE.md#set-up).
 
-For background operation, ask:
+3. **Write an Objective.** Create an issue in the target from the [Objective template](docs/templates/objective.md): a goal, observable Acceptance bullets, and optional Context, Sources and Constraints. See [writing an Objective](docs/USER-GUIDE.md#write-an-objective).
+4. **Run it.** Set the issue's `Factory` field to Queued, or ask:
 
-> Use Factory to set up this repository and keep watching for explicitly approved Objectives, with a concurrency limit of two.
+   > Use Factory to run Objective #123.
 
-On a supported Linux/WSL user-service host, bind the target's existing GitHub Project scheduling fields and a private-history Git checkpoint destination, then use guided setup to register, start and verify the background service. The [queue guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#queue-and-background) lists the required bindings. Project holds current membership and order; Git retains approval and ownership receipts. An idle watcher makes no model calls. It checks every 30 seconds by default and starts only explicitly authorized Objective IDs; roadmap cards and labels grant no execution authority. Add later approved batches with `factory queue add N`, and reread them with `factory queue sync`. The queue guide also covers command deadlines and upgrading the service after a release. The service must be able to run on this machine; shutdown, sleep and user-manager lifetime still apply.
+   Factory checks the issue, plans, reviews the plan, runs the Work Items, validates and reviews each result, and merges the pull requests. A question it can't settle stops only what it covers, until you answer.
 
-For a new laptop or sandbox, [restore the explicitly configured Git checkpoint](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#restore-on-another-installation) with `factory persistence restore`. It rebuilds local replicas and opens recovered work for inspection; ownership reconciliation and service activation remain separate. Without a Git archive, Factory records are local only.
+5. **Follow it.** Ask "Use Factory to show the status of Objective #123", or run `factory status 123 --repo OWNER/NAME`.
 
-The target must be a trusted GitHub repository with committed requirements and available validation tools. Factory cannot run against its own source repository.
-
-Create an Objective issue **in the target repository**: a goal paragraph, observable Acceptance bullets, optional Context and Sources, and Constraints. You can copy the [Objective issue form](https://github.com/clockgrove/factory/blob/main/docs/templates/objective.yml) into that repository. Then ask:
-
-> Use Factory to inspect Objective #123 and its committed sources. Explain any missing prerequisites or unclear acceptance. Do not run it yet.
-
-This inspects the issue and repository without starting Factory. The installed CLI has no plan-only command: `factory run` plans and independently reviews, then executes a clean plan. When you authorize execution, ask:
-
-> Use Factory to run Objective #123.
-
-The director skill runs the Objective through Factory. A planning question stops for your decision; otherwise execution creates Work Item issues, runs agents, and publishes and integrates accepted changes under your repository's permissions and branch rules. To inspect progress, ask:
-
-> Use Factory to show the status of Objective #123 and explain anything waiting for my input.
-
-Configuration and state stay outside the target checkout. Installation refuses an existing binding or repository state; the agent should inspect it rather than delete it to start over. The [plugin user guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md) explains setup, media decisions, recovery limits, and the underlying CLI commands.
+Configuration and state live outside the target checkout. Factory refuses its own repository.
 
 ## Build Factory
 
@@ -145,14 +132,12 @@ To add features or fix bugs **in Factory itself**, use a source checkout and fol
 
 ## Documentation and community
 
-| I want to…                                                          | Read                                                                                                                                            |
-| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Configure models, inspect progress, review media, or handle a pause | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                                |
-| Capture, analyze or export model usage                              | [Capture and analysis](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#diagnostic-capture-and-export)                        |
-| Select or implement a local agent harness                           | [Local harnesses](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#local-providers)                                           |
-| Report a bug or ask for help                                        | [Issue tracker](https://github.com/clockgrove/factory/issues)                                                                                   |
-| Build from source or contribute                                     | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                                 |
-| Understand the architecture and roadmap                             | [Architecture](https://github.com/clockgrove/factory/blob/main/docs/ARCHITECTURE.md) · [Project](https://github.com/orgs/clockgrove/projects/2) |
-| Inspect release changes or the release process                      | [Releases](https://github.com/clockgrove/factory/releases) · [Releasing](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md)     |
+| I want to…                                     | Read                                                                                                                                        |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Set up, run, answer questions, recover         | [User guide](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md)                                                            |
+| Know exactly how Factory behaves               | [Core design](https://github.com/clockgrove/factory/blob/main/docs/CORE.md)                                                                 |
+| Report a bug or ask for help                   | [Issue tracker](https://github.com/clockgrove/factory/issues)                                                                               |
+| Build from source or contribute                | [Contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md)                                                             |
+| Inspect release changes or the release process | [Releases](https://github.com/clockgrove/factory/releases) · [Releasing](https://github.com/clockgrove/factory/blob/main/docs/RELEASING.md) |
 
 Factory is [MIT licensed](https://github.com/clockgrove/factory/blob/main/LICENSE) and maintained by Clockgrove. Report vulnerabilities through the [security policy](https://github.com/clockgrove/factory/blob/main/SECURITY.md).

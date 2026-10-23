@@ -649,11 +649,20 @@ A configuration that doesn't load prints its problems without a stack trace and 
 
 ## Migration
 
-Pre-release, with no compatibility layer:
+From the old Factory to this core: start clean, with no compatibility layer and no importer. The configuration is about 40 lines, and the setup options cover it.
 
-1. Stop the old service.
-2. Cancel and clear the old Objective state.
-3. Install the new core and run setup.
-4. Queue Objectives again.
+1. **Stop the old service** (`systemctl --user disable --now <old unit>`). Close or cancel the Objectives it was running.
+2. **Delete the old state and configuration**, after copying anything you still need from the old configuration by hand (paths such as `sandbox.readOnlyPaths`). Old keys are refused by name, each with what replaced it, so a copied old configuration won't load.
+3. **Install the core release** (README#Install). `factory help` lists `serve`, `setup`, `run`, `status`, `queue`, `log` and `reset`.
+4. **Prepare the target:**
+   - a clone that only Factory uses;
+   - the Project fields `Factory` (single select, with the seven options) and `Factory order` (number);
+   - removal of the old control card and metadata field, which nothing reads now.
+5. **Set up** (see [Setup](#setup)):
+   - `factory setup --repo OWNER/NAME --checkout … --project-id …` with your limits, delivery, sandbox and final commands, until it reports `configured`;
+   - `--provider NAME …` for each provider;
+   - optionally, turn on "require branches to be up to date" as readiness recommends.
+6. **Start the service** with `factory setup --repo OWNER/NAME --background`, then queue one small Objective as a canary. It passes when its PRs merge with no duplicate PR, comment or merge, every hold had an answer that worked, and the issue closes with its report.
+7. **Queue the rest.**
 
-The old source tree is deleted once every capability is ported.
+Rollback: `factory setup --uninstall`, then reinstall the old release and set it up from scratch: its state was deleted, so there is none to carry back.

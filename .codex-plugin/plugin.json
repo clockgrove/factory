@@ -13,7 +13,7 @@
     "displayName": "Factory",
     "logo": "./assets/factory-mark.svg",
     "shortDescription": "Run development Objectives in a target repository",
-    "longDescription": "Compile repository Objectives into Work Items, execute with an installed harness, validate exact results, and deliver through GitHub.",
+    "longDescription": "Plan repository Objectives into Work Items, run Codex, Claude or Copilot workers, validate and review each result, and deliver through GitHub.",
     "developerName": "Clockgrove",
     "category": "Developer Tools",
     "capabilities": ["Read", "Write"],

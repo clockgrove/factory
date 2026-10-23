@@ -5,63 +5,78 @@ description: Set up Factory for a target repository, either configuration only o
 
 # Factory setup
 
-Set up the installed Factory CLI for a target repository. `factory help` lists the exact options and is the authority over this skill. Never target Factory's own source, rebuild or archive repositories.
+Set up the installed `factory` CLI for one target repository. `factory help` lists the exact options and is the authority over this skill. Never target Factory's own repository: setup refuses it, because Factory never runs on the code that runs it.
 
-Check the CLI package identity and enabled Factory plugin against the selected release using the [installation checks](https://github.com/clockgrove/factory/blob/main/README.md#cli). A host plugin and CLI can come from different releases. Report a mismatch before setup; use the installed CLI's help for supported commands.
+Check that the installed CLI and the enabled plugin come from the same release (see the [installation checks](https://github.com/clockgrove/factory/blob/main/README.md#check-the-installation)). Report a mismatch before setup.
 
 ## Choose the outcome
 
-- **Configuration only:** the request says install, configure, or "do not start work". No service.
-- **Background:** the request is to keep processing approved work. It needs a Linux or WSL systemd user manager, and the service keeps running after the terminal closes.
+- **Configuration only** (`factory setup`): the request says install, configure, or "don't start work". Nothing runs.
+- **Background** (`factory setup --background`): the request is to keep running queued Objectives. It needs Linux or WSL with a systemd user manager. Running it is the operator's consent to a service; it grants no provider spending and admits no Objective.
 
-Running `setup --background` is the service consent. It grants no provider spending and runs no Objective. Reuse choices the operator already gave. Ask once, together, for what is missing.
+Reuse choices the operator already gave. Ask once, together, for what is missing.
 
 ## Gather
 
-- GitHub `OWNER/REPO` and the trusted absolute checkout path. Read the target's instructions.
-- For background operation, the existing Project, dedicated TEXT metadata and NUMBER order field IDs, and existing control card. Bind them under `queue.project` with explicit managed-field consent and a private-history Git checkpoint destination. Reuse approved bindings; verify access and actual field types. Missing Project/field or archive choices belong to the operator; setup does not create them or infer consent from roadmap cards.
-- On a replacement installation with an approved Git archive, use `factory persistence restore` and inspect retained ownership before activation. Restore supplies no provider login, runtime preparation, watch consent or proof that a foreign owner ceased. Never copy native homes or clear a restored hold by editing state.
-- Optional: `--concurrency N` (omit it and Factory sizes workers from the host), `--delivery regular|native-stack`, `--network host|off`, and role models with `--planning-model`, `--review-model`, `--worker-model` plus matching `--*-reasoning`.
-- For `--planning claude-agent-sdk`, ask for the planning and review models. It uses the operator's `claude auth login`.
+- **Target:** the repository `OWNER/NAME`, and an absolute path to a clone of it that Factory owns (not the operator's working copy). The clone's origin must name the repository.
+- **Queue:** the GitHub Project node id (`PVT_...`). The Project needs a single-select field `Factory` with the options Queued, Planning, Building, Needs you, Done, Failed and Cancelled, plus a number field `Factory order`. Setup checks them and never creates them; creating them is the operator's step (`gh project field-create`).
+- **Providers:** `codex` is the default (planner and worker). For Claude or Copilot, add a named provider with `--provider NAME --planner KIND --worker KIND`, and `--default` to make it the default. Ask for the models rather than copying another provider's.
+- **Optional:**
+  - limits: `--max-active`, `--workers`, `--validations`;
+  - delivery: `--delivery regular|native-stack`;
+  - the sandbox: `--sandbox-network`, `--package-store`, `--read-only-path`, `--sandbox-env`;
+  - final commands: `--required-command`, `--ci-only-command`;
+  - worker settings, such as `--codex-network host` or `--claude-model`.
 
-A fresh Codex configuration persists these defaults when no model choices are given: planner `gpt-6.1-sol` with `high` reasoning, reviewer `gpt-6.1-sol` with `medium` reasoning, and worker `gpt-6.1-sol` with `medium` reasoning. For explicitly selected Claude planning, both models remain required; planner reasoning defaults to `high` and reviewer reasoning to `medium`. The reviewer setting covers graph, Work Item result and final Objective reviews. Preserve explicit choices and matching existing configurations.
+  docs/CORE.md#Setup lists every option and the key it sets.
 
-A configuration holds named providers (planning plus execution). New work uses `defaultProvider` unless a command names another with `--provider NAME`; the calling host never switches it. The service runs new work with `defaultProvider` and continues a started Objective on the provider it froze. To add a provider, run setup with `--provider NAME` and that provider's options; other providers stay unchanged. Ask for the models of a new provider rather than copying another's. Verify the selected provider's login and the target toolchain in the controller's non-login shell; configuration-only setup does not establish worker readiness.
-
-Use the host's supported ordinary-host execution route for the controller. Codex may inject private runtime aliases into PATH: follow the [controller PATH guidance](https://github.com/clockgrove/factory/blob/main/README.md#controller-path-in-an-agent-host), bind the complete reviewed literal PATH and verified absolute CLI after shell startup, and preserve that environment for subsequent commands. Include all selected project and validation tools; never append inherited `$PATH`, mount credential roots or weaken worker isolation to get past a PATH or socket error.
-
-Keep configuration, credentials and state outside the target repository. Reuse a matching existing configuration. If the binding conflicts, report it and stop, because deleting state or choosing another root hides the conflict.
+Keep the configuration, credentials and state outside the target checkout. Setup refuses a configuration or state directory inside it.
 
 ## Run
 
 ```sh
-factory setup --config-only --repository OWNER/REPO --checkout ABSOLUTE_PATH [--config PATH]
-factory setup --background --repository OWNER/REPO --checkout ABSOLUTE_PATH [--config PATH]
+factory setup --repo OWNER/NAME --checkout ABSOLUTE_CLONE --project-id PVT_... [options] --json
+factory setup --repo OWNER/NAME --provider claude --planner claude --worker claude [--default] --json
+factory setup --repo OWNER/NAME --background [--credential-file NAME=ABSOLUTE_FILE]... --json
 ```
 
-Use exactly one. For a matching existing configuration, leave out the options it already binds. Background setup also runs the model-free readiness checks. Pass `--outside-directory ABSOLUTE_EXISTING_DIRECTORY` if home is inside the checkout or writable by the worker. A service takes provider credentials only as `--credential-file NAME=ABSOLUTE_PRIVATE_FILE`, one per credential.
+- **Create:** the first run creates the configuration (mode 0600). A repeat with the same options changes nothing (`changed: []`).
+- **Bindings:** setup never changes `--checkout`, `--project-id`, `--field` or `--order-field` once set. A different value is refused, because it would move running Objectives to another target. Report it, and don't work around it.
+- **Credential files:** `--credential-file` binds a credential the service loads with systemd LoadCredential: `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, or a managed worker's credential variable. The file must be absolute, owner-only (0600) and not a link. Never ask for a credential's value in chat.
 
 ## Check the result
 
-The command prints JSON and sets its exit status.
+Decide on the JSON, never the prose.
 
-- `configured`: configuration-only setup is finished.
-- `starting`: the start request succeeded and the exact live service is still awaiting authenticated ownership. Preserve it and inspect `factory supervisor check`; ownership and fresh remote queue authorization are not yet verified. Repeat the approved setup verification once the owner is ready.
-- `ready`: the service is active and its owner verified. Report the binding, the poll interval (`queue.pollSeconds`, default 30), the queued IDs or idle reason, and that sleep pauses and shutdown stops the service.
-- `blocked`: collect all available readiness stages, retained findings and source-verified prerequisites, not just the first error. Give one concise checklist of what is missing or unknown, why it is needed, its source, supported setup step and verification command. Unchecked stages stay unknown. Ask for required operator choices together; reuse answers already given. Fix verified prerequisites and repeat the same approved command. Never remove completed stages to get past a stop.
+- `status: "configured"` (exit 0): saved, it loads, and the target and host are ready.
+- `status: "blocked"` (exit 1): saved, but something isn't ready.
+  - `problems` names the target's problems: the clone's origin, or the Project fields.
+  - `readiness.checks` is the checklist. Each check is `ok`, `warn` or `blocked` with its `fix`: the sandbox, PATH tools, provider logins, GitHub access, merge commits and required checks.
+  - Give the operator one checklist of every `blocked` item with its fix. Then repeat the same command.
+- `status: "refused"` (exit 1): nothing was saved. `problems` says why: a bad value, or a binding conflict.
+- **Branch protection:** a `warn` here recommends "require branches to be up to date". Factory never changes repository settings; that's the operator's call.
+- **Capacity:** `capacity` compares the configured slots and memory with the host. It is advice only; keep the operator's limits unless they ask to change them.
 
-For local execution, report `capacityRecommendation`: measured cores/memory, coding workers, validation/review ceilings and per-phase reservations. Compare it with the effective `capacity`; explicit overrides and recorded Objective limits stay fixed. A host recommendation grants no additional provider usage or spending. Keep existing limits unless the operator authorizes a change.
+For `--background`, the report's `status` is:
 
-Name the approved secret store or private credential file for each required secret; never ask for its value in chat or issues. A checklist is guidance, not authority to create accounts, activate a service, spend, deploy or admit work. Continue independent work only if already authorized and current gates permit it. The `director` skill describes the same prerequisite flow for a stopped Objective.
+- `running`: the unit is active and the service holds its lock;
+- `starting`: started, but not serving yet; check with `factory setup --check`;
+- `blocked`: nothing started; read `problems`, and `setup` when present.
+
+The report also has `warnings`, such as lingering off, which means the service stops at logout.
+
+## Operate the service
+
+```sh
+factory setup --repo OWNER/NAME --check      # exit 0 only when running
+factory setup --repo OWNER/NAME --stop       # stop it and keep it from starting at login
+factory setup --repo OWNER/NAME --uninstall  # remove the unit; configuration and state stay
+```
+
+After installing a new release, run `--background` again: it updates the unit and restarts the service. `--check` reports `service.current: false` until you do.
 
 An idle service with an empty queue makes no model calls.
 
 ## Queue work
 
-Only for Objectives the operator named:
-
-```sh
-factory queue add N [N ...]
-```
-
-They run in Project order, one at a time unless `queue.maxActiveObjectives` allows [several at once](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#several-objectives-at-once), within the [autonomy limits](https://github.com/clockgrove/factory/blob/main/docs/USER-GUIDE.md#autonomy-limits). Labels and roadmap cards never select an Objective. Manage the queue with `factory queue list|sync|remove N|pause|resume|drain` and the service with `factory supervisor start|check|stop [--disable]|upgrade --cli ABSOLUTE_INSTALLED_CLI|uninstall`. Queue changes have one three-minute deadline through durable completion. After installing a release, run `factory supervisor upgrade --cli ABSOLUTE_INSTALLED_CLI` before any queue command: a running service from an older release refuses a newer CLI's forwarded request deadline. Local status retains its one-second deadline; the local pause acknowledgment targets a one-second response. The pause acknowledgment does not prove remote completion or worker cessation. List/sync observe current Project data; they grant no authority or mutation replay. Preserve a timed-out operation identity and inspect its recorded outcome before any further action; never repeat an uncertain mutation. Restored Git receipts do not activate a service or prove foreign ownership settled. Day-to-day operation is the `director` skill.
+The operator queues an Objective by setting its card's `Factory` field to Queued; `factory run N` does the same and follows it. Only queue Objectives the operator named. Day-to-day operation is the `director` skill.

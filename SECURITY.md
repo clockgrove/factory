@@ -4,11 +4,16 @@ Factory runs coding agents and Git commands against repositories selected by an 
 
 ## Local harness boundary
 
-Local Codex, Claude, GitHub Copilot, and registered harnesses run as the developer's OS account. Factory supplies an owned worktree, filters the worker environment, keeps controller publication tokens out of that environment, and requires the harness to leave `HEAD` and all publication operations to the controller. Commands a worker can cause to run on the host (validation, setup, readiness probes, Claude's `Validate` and `run_command` shell) run in a bubblewrap sandbox that hides the developer's home directory, logins and Factory's state, keeps the network off and lets them write only their checkout and private temporary directories; see [command sandbox](docs/USER-GUIDE.md#command-sandbox). Codex workers run in Codex's sandbox. Other harnesses' own tools run as the developer's account. Provider credentials remain in the developer's existing local CLI/profile; Factory configuration and durable run state do not store them. A missing login stops the attempt and requires an explicit external login and retry rather than an interactive detached-worker prompt or provider fallback.
+Codex, Claude and GitHub Copilot workers run as the operator's OS account, in a worktree Factory owns. Factory keeps its GitHub token and provider credentials out of the worker's environment. Workers never move `HEAD` or publish: Factory commits, pushes and merges.
 
-Assigned profile instructions are private additive worker inputs, bound by the accepted configuration digest. They do not confer authority. The optional Claude `factory-worktree-read@1` environment exposes one in-process regular-file reader with exact SDK provenance and runtime inventory checks; it grants no commands, credential configuration, new external destinations or installation. All model tools remain denied until this environment is ready. Each attempt owns its server, and opened file descriptors are checked against that attempt's worktree. Profile membership still authorizes access to the whole worktree and supplied inputs; owned paths are not a read-isolation boundary.
+- **Commands run in a sandbox.** Every command a worker causes (validation, setup and probes, and a Claude or Copilot worker's Validate tool) runs in bubblewrap. The sandbox hides the operator's home, logins and Factory's state, keeps the network off (except the exact dependency install, when configured), and writes only the checkout and private temporary directories.
+- **Codex has its own sandbox.** A Codex worker's shell runs in Codex's sandbox under Factory's permission profile.
+- **No settings hooks.** A Claude worker never loads project or local settings, whose hooks would run on the host.
+- **No fallback.** A missing login stops the work with the fix; Factory never falls back to another provider.
 
-The local-process boundary is documented in [agent harnesses](docs/USER-GUIDE.md#local-providers); remote providers in [remote execution](docs/USER-GUIDE.md#managed-execution).
+See [sandbox and security](docs/USER-GUIDE.md#sandbox-and-security) and [CORE.md#Security](docs/CORE.md#security).
+
+The managed workers (OpenAI Agents, Claude Managed Agents) are parked and not live-qualified; see [providers](docs/USER-GUIDE.md#providers).
 
 ## Report a vulnerability
 

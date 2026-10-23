@@ -21,16 +21,15 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "factory": "./dist/cli.js"
-  },
-  "exports": {
-    ".": "./dist/index.js"
+    "factory": "./core/dist/cli.js"
   },
   "files": [
-    "dist",
+    "core/dist",
     "skills",
     "assets",
     "docs/USER-GUIDE.md",
+    "docs/CORE.md",
+    "docs/templates",
     ".codex-plugin",
     ".claude-plugin/plugin.json",
     "README.md",
@@ -58,6 +57,7 @@
     "notices": "node scripts/generate-notices.mjs",
     "notices:check": "node scripts/generate-notices.mjs --check",
     "build:core": "tsc -p core/tsconfig.json",
+    "prepack": "npm run build:core",
     "test:core": "npm run build:core && node --test --test-timeout=120000 core/test/*.test.mjs"
   },
   "devDependencies": {

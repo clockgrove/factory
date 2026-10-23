@@ -40,9 +40,9 @@ jobs:
       - run: npm run lint
       - run: npm run format:check
       - run: npm run notices:check
-      - name: Run integration tests
+      - name: Run the core's tests
         timeout-minutes: 15
-        run: npm test
+        run: npm run test:core
 
       - name: Pack
         run: |

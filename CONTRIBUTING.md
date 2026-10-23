@@ -29,7 +29,7 @@ Use this to run Factory from `main` before a release, on your own repository or 
 git clone https://github.com/clockgrove/factory.git ~/factory-main
 cd ~/factory-main
 npm ci
-npm run build
+npm run build:core
 npm link          # or the wrapper below
 factory help
 ```
@@ -37,13 +37,13 @@ factory help
 Without `npm link`, write a wrapper on your PATH that runs the build:
 
 ```sh
-printf '#!/bin/sh\nexec node "$HOME/factory-main/dist/cli.js" "$@"\n' > ~/.local/bin/factory
+printf '#!/bin/sh\nexec node "$HOME/factory-main/core/dist/cli.js" "$@"\n' > ~/.local/bin/factory
 chmod +x ~/.local/bin/factory
 ```
 
 Then run the setup skill, or `factory setup`, as the README describes. Rules:
 
-- `npm run build` again after every `git pull`; the CLI runs `dist/`, not the source.
+- `npm run build:core` again after every `git pull`; the CLI runs `core/dist/`, not the source.
 - Keep the checkout in place. The link and the wrapper point at it, and a background service keeps running it.
 - Never use this checkout as the target repository. Factory refuses to run an Objective against its own source.
 - Remove the link with `npm unlink -g @clockgrove/factory`.
@@ -56,10 +56,10 @@ CI runs these checks. Run only an affected command locally when needed:
 npm run lint
 npm run format:check
 npm run notices:check
-npm test
+npm run test:core
 ```
 
-`npm test` builds Factory and runs the small integration suite against real temporary Git repositories, processes, files, the secret scanner, and the packed CLI installed offline. These checks need no provider credentials or live GitHub target.
+`npm run test:core` builds the core and runs its integration suite against real temporary Git repositories, processes and files, including the packed CLI installed offline. These checks need no provider credentials or live GitHub target. `npm test` runs the old implementation's suite until it is removed.
 
 The [Quality workflow](.github/workflows/quality.yml) runs lint, format and notice checks plus one integration-test job on every pull request and on `main`. The required `package-gate` passes only when both jobs succeed. Release also verifies the exact tarball it publishes.
 

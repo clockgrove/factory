@@ -137,6 +137,11 @@ export interface ObjectiveInputs {
   reviewArtifacts: ReviewArtifactSelector[];
   /** The Objective's Workflow recipe, resolved once at the base. */
   recipe?: RecipeSelection;
+  /**
+   * planning.adaptiveGraph when the Objective was admitted: the recipe check
+   * and every plan round use this, so a config change can't split them.
+   */
+  adaptiveGraph?: true;
 }
 
 interface PlanRound {
@@ -364,14 +369,17 @@ function planRoundStep(
         const wire = {
           child: inputs.child === true,
           reviewArtifacts: inputs.reviewArtifacts.length > 0,
-          adaptive: adaptiveGraph(inputs.shown.blocks, config),
+          adaptive: adaptiveGraph(
+            inputs.shown.blocks,
+            inputs.adaptiveGraph === true,
+          ),
         };
         // An enabled section still plans, with its context and memory but
         // without the graph kinds; say so once per generation.
         if (
           n === 1 &&
           adaptiveWorkflow(inputs.shown.blocks).enabled &&
-          !config.planning.adaptiveGraph
+          inputs.adaptiveGraph !== true
         )
           context.log({
             event: "adaptive-graph-off",
@@ -1036,6 +1044,7 @@ export async function readObjective(
     );
     inputs.recipe = recipe.selected;
   }
+  if (config.planning.adaptiveGraph) inputs.adaptiveGraph = true;
   if (!problems.length)
     problems.push(
       ...(await objectiveCommandProblems(shown, inputs.base, config.checkout, {

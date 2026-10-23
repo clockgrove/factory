@@ -659,7 +659,10 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           const wire = {
             child: inputs.child === true,
             reviewArtifacts: inputs.reviewArtifacts.length > 0,
-            adaptive: adaptiveGraph(inputs.shown.blocks, config),
+            adaptive: adaptiveGraph(
+              inputs.shown.blocks,
+              inputs.adaptiveGraph === true,
+            ),
           };
           const lastError = state.retries[key]?.lastError;
           const corrections: Finding[] = [
@@ -899,29 +902,35 @@ function amendAcceptStep(
   return {
     key: KEY(proposal.id),
     deadlineMs: 10 * MINUTE,
-    run: ({ state, signal }) =>
-      guarded(deps.config.repository, async (): Promise<Outcome> => {
-        const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
-        const review = state.done[`${KEY(proposal.id)}:review`] as
-          | { rejected?: string }
-          | undefined;
-        const rejected = round.rejected ?? review?.rejected;
-        if (rejected) return done({ rejected } satisfies AmendmentResult);
-        const inputs = amendmentInputs(state);
-        const plan: Plan = {
-          ...round.draft!,
-          finalCommands: currentPlan(state)!.finalCommands,
-          decisions: decisions(state),
-          ...(inputs.reviewArtifacts.length
-            ? { reviewArtifacts: inputs.reviewArtifacts }
-            : {}),
-        };
-        await postPlan(deps, state.issue, plan, signal);
-        return done({
-          plan,
-          answer: round.answer,
-        } satisfies AmendmentResult);
-      }),
+    run: ({ state, signal, answer }) =>
+      guarded(
+        deps.config.repository,
+        async (): Promise<Outcome> => {
+          const refused = refusal(answer);
+          if (refused) return refused;
+          const round = state.done[`${KEY(proposal.id)}:plan`] as AmendRound;
+          const review = state.done[`${KEY(proposal.id)}:review`] as
+            | { rejected?: string }
+            | undefined;
+          const rejected = round.rejected ?? review?.rejected;
+          if (rejected) return done({ rejected } satisfies AmendmentResult);
+          const inputs = amendmentInputs(state);
+          const plan: Plan = {
+            ...round.draft!,
+            finalCommands: currentPlan(state)!.finalCommands,
+            decisions: decisions(state),
+            ...(inputs.reviewArtifacts.length
+              ? { reviewArtifacts: inputs.reviewArtifacts }
+              : {}),
+          };
+          await postPlan(deps, state.issue, plan, signal);
+          return done({
+            plan,
+            answer: round.answer,
+          } satisfies AmendmentResult);
+        },
+        "refuse",
+      ),
   };
 }
 

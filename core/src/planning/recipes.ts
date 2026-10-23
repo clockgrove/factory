@@ -868,9 +868,10 @@ export function recipeInstallation(config: CoreConfig): RecipeInstallation {
  */
 export function adaptiveGraph(
   blocks: readonly ObjectiveBlock[],
-  config: CoreConfig,
+  /** planning.adaptiveGraph as the Objective's inputs froze it at admission. */
+  gate: boolean,
 ): boolean {
-  return adaptiveWorkflow(blocks).enabled && config.planning.adaptiveGraph;
+  return adaptiveWorkflow(blocks).enabled && gate;
 }
 
 const GATED =

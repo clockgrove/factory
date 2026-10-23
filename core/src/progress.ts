@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { redactDeep } from "./display.js";
 import { type LogEvent, logFiles, readNew } from "./log.js";
-import { decisions } from "./planning/steps.js";
+import { code, prose } from "./markdown.js";
+import { COMMENT_LIMIT, decisions } from "./planning/steps.js";
 import { answerForm, type ObjectiveState } from "./state.js";
 import type { ObjectiveView } from "./status.js";
 
@@ -28,8 +29,8 @@ export interface ProgressInput {
   view: Omit<ObjectiveView, "plan">;
   /** Each Work Item's latest `worker-activity` event this run. */
   activity: Record<string, LogEvent>;
-  /** Model calls logged this run. */
-  calls: { planner: number; worker: number };
+  /** Model calls logged this run: planner-seam (planning, review, discovery, Dream) and worker, and the tokens they reported. */
+  calls: { planner: number; worker: number; tokens: number };
   /** Answers taken: planning decisions and step answers, oldest first. */
   decisions: {
     question: string;
@@ -61,7 +62,7 @@ export class RunTally {
     {
       run: string;
       offsets: Map<string, number>;
-      calls: { planner: number; worker: number };
+      calls: { planner: number; worker: number; tokens: number };
       activity: Record<string, LogEvent>;
     }
   >();
@@ -74,7 +75,7 @@ export class RunTally {
       tally = {
         run,
         offsets: new Map(),
-        calls: { planner: 0, worker: 0 },
+        calls: { planner: 0, worker: 0, tokens: 0 },
         activity: {},
       };
       this.runs.set(issue, tally);
@@ -87,7 +88,14 @@ export class RunTally {
       }
     for (const event of readNew(this.dir, issue, tally.offsets)) {
       if (event.at < run) continue;
-      if (event.event === "planner-call") tally.calls.planner += 1;
+      // `model-usage` is one event per model call (CORE.md "Model usage");
+      // `planner-call` and `worker-call` are the events it replaces.
+      if (event.event === "model-usage") {
+        if (event.role === "worker") tally.calls.worker += 1;
+        else tally.calls.planner += 1;
+        const total = (event.tokens as { total?: unknown } | undefined)?.total;
+        if (typeof total === "number") tally.calls.tokens += total;
+      } else if (event.event === "planner-call") tally.calls.planner += 1;
       else if (event.event === "worker-call") tally.calls.worker += 1;
       else if (
         event.event === "worker-activity" &&
@@ -119,9 +127,18 @@ export function decisionsOf(state: ObjectiveState): ProgressInput["decisions"] {
   return taken.sort((a, b) => a.at.localeCompare(b.at));
 }
 
+/** Work Items, questions and decisions the comment lists; past these, it names the rest. */
+const LISTED = { items: 50, holds: 20, decisions: 20 };
+/** A worker that reported within this is active; else quiet. */
+const QUIET_MS = 5 * 60_000;
+/** The body's limit, below the plan comment's (planning/steps.ts COMMENT_LIMIT). */
+const MAX_BODY = COMMENT_LIMIT - 1_000;
+
 /**
- * The comment body and the hash of its stable part (everything but the
- * ages and the edit time): an edit is due when the hash changes.
+ * The comment body and the hash of its stable part: everything but the
+ * volatile details (ages, the edit time, each worker's last report and
+ * counts; a worker shows only active or quiet there). An edit is due
+ * when the hash changes.
  */
 export function statusComment(
   marker: string,
@@ -131,9 +148,9 @@ export function statusComment(
   now: number,
 ): { body: string; hash: string } {
   const shown = redactDeep(input, secrets);
-  const stable = render(shown, options);
+  const stable = render(shown, options, now, false);
   return {
-    body: `${marker}\n${render(shown, options, now)}`,
+    body: `${marker}\n${render(shown, options, now, true)}`,
     hash: createHash("sha256").update(stable).digest("hex"),
   };
 }
@@ -141,38 +158,56 @@ export function statusComment(
 function render(
   input: ProgressInput,
   options: ProgressOptions,
-  now?: number,
+  now: number,
+  full: boolean,
 ): string {
   const { view } = input;
+  const more = (left: number, what: string) =>
+    left > 0
+      ? [
+          `- +${left} more ${what}; ${code(`factory status ${view.issue}`)} shows them all.`,
+        ]
+      : [];
   const when = (iso: string) =>
-    now === undefined ? `\`${iso}\`` : `\`${iso}\` (${ago(iso, now)})`;
+    full ? `${code(iso)} (${ago(iso, now)})` : code(iso);
   const lines = [
     "### Factory status",
     "",
-    `**Phase:** ${view.phase}${view.mode !== "running" ? ` (${view.mode})` : ""}`,
-    `**Next:** ${oneLine(view.nextAction.reason)}${view.nextAction.command ? ` \`${view.nextAction.command}\`` : ""}`,
+    `**Phase:** ${prose(view.phase)}${view.mode !== "running" ? ` (${view.mode})` : ""}`,
+    `**Next:** ${text(view.nextAction.reason)}${view.nextAction.command ? ` ${code(view.nextAction.command)}` : ""}`,
   ];
   if (view.items.length)
     lines.push(
       "",
       "| Work Item | Kind | Phase | PR | Repairs | Question |",
       "| --- | --- | --- | --- | --- | --- |",
-      ...view.items.map(
-        (item) =>
-          `| \`${cell(item.id)}\` | ${item.kind} | ${cell(item.phase)} | ${item.pr === null ? "-" : `#${item.pr}`} | ${item.repairs} | ${item.hold ? `\`${cell(item.hold)}\`` : "-"} |`,
-      ),
+      ...view.items
+        .slice(0, LISTED.items)
+        .map(
+          (item) =>
+            `| ${cell(code(item.id))} | ${item.kind} | ${cell(prose(item.phase))} | ${item.pr === null ? "-" : `#${item.pr}`} | ${item.repairs} | ${item.hold ? cell(code(item.hold)) : "-"} |`,
+        ),
+      ...(view.items.length > LISTED.items
+        ? ["", ...more(view.items.length - LISTED.items, "Work Items")]
+        : []),
     );
   const running = view.items.filter(
     (item) => input.activity[item.id] && item.phase.endsWith("(running)"),
   );
   if (running.length) {
     lines.push("", "**Workers**");
-    for (const item of running) {
+    for (const item of running.slice(0, LISTED.items)) {
       const event = input.activity[item.id]!;
+      const quiet = now - Date.parse(event.at) >= QUIET_MS;
+      const state = quiet ? "quiet for 5 min or more" : "active";
+      if (!full) {
+        lines.push(`- ${code(item.id)}: ${state}`);
+        continue;
+      }
       const counts = (event.counts ?? {}) as Record<string, number>;
       const tools = Array.isArray(event.tools) ? event.tools.join(", ") : "";
       lines.push(
-        `- \`${item.id}\`: last reported ${when(event.at)}; since its report before: turns ${counts.turns ?? 0}, edits ${counts.edits ?? 0}, commands ${counts.commands ?? 0}${tools ? `; tools ${oneLine(tools)}` : ""}${typeof event.command === "string" ? `; ran \`${oneLine(event.command)}\`` : ""}`,
+        `- ${code(item.id)}: ${state}; last reported ${when(event.at)}; since its report before: turns ${counts.turns ?? 0}, edits ${counts.edits ?? 0}, commands ${counts.commands ?? 0}${tools ? `; tools ${text(tools)}` : ""}${typeof event.command === "string" ? `; ran ${code(event.command)}` : ""}`,
       );
     }
   }
@@ -180,54 +215,76 @@ function render(
     lines.push(
       "",
       wait.gate
-        ? `**Waiting on** ${oneLine(wait.gate)} since ${when(wait.since)}.`
-        : `**Waiting:** \`${wait.step}\` retries at \`${wait.nextAt}\`, since ${when(wait.since)}.`,
+        ? `**Waiting on** ${text(wait.gate)} since ${when(wait.since)}.`
+        : `**Waiting:** ${code(wait.step)} retries at ${code(wait.nextAt)}, since ${when(wait.since)}.`,
     );
   if (view.holds.length && options.questions) {
     lines.push("", "**Open questions**");
-    for (const hold of view.holds)
+    for (const hold of view.holds.slice(0, LISTED.holds))
       lines.push(
-        `- \`${hold.id}\`${hold.item ? ` (Work Item \`${hold.item}\`)` : ""}, asked ${when(hold.askedAt)}: ${oneLine(hold.question)}`,
+        `- ${code(hold.id)}${hold.item ? ` (Work Item ${code(hold.item)})` : ""}, asked ${when(hold.askedAt)}: ${text(hold.question)}`,
         ...hold.options.map(
           (option) =>
-            `  - \`/factory ${answerForm(option, `--question ${hold.id}`)}\`${option.recommended ? " (recommended)" : ""}: ${oneLine(option.consequence)}`,
+            `  - ${code(`/factory ${answerForm(option, `--question ${hold.id}`)}`)}${option.recommended ? " (recommended)" : ""}: ${text(option.consequence)}`,
         ),
       );
+    lines.push(...more(view.holds.length - LISTED.holds, "questions"));
   } else if (view.holds.length)
     lines.push(
       "",
-      `**Open questions:** ${view.holds.length}; \`factory status ${view.issue}\` shows them.`,
+      `**Open questions:** ${view.holds.length}; ${code(`factory status ${view.issue}`)} shows them.`,
     );
   if (input.decisions.length) {
-    lines.push("", "**Decisions taken**");
-    for (const decision of input.decisions)
+    const newest = input.decisions.slice(-LISTED.decisions);
+    lines.push(
+      "",
+      "**Decisions taken**",
+      ...more(input.decisions.length - newest.length, "earlier decisions"),
+    );
+    for (const decision of newest)
       lines.push(
-        `- ${decision.question ? `${oneLine(decision.question)} ` : ""}→ \`${decision.answer}\`${decision.text ? `: ${oneLine(decision.text)}` : ""}, by ${decision.by} at ${when(decision.at)}`,
+        `- ${decision.question ? `${text(decision.question)} ` : ""}→ ${code(decision.answer)}${decision.text ? `: ${text(decision.text)}` : ""}, by ${prose(decision.by)} at ${when(decision.at)}`,
       );
   }
   const calls = input.calls.planner + input.calls.worker;
-  lines.push(
+  const details = [
     "",
     "<details><summary>Run details</summary>",
     "",
     ...(input.startedAt ? [`- Admitted: ${when(input.startedAt)}`] : []),
     ...(view.frozen
       ? [
-          `- Provider: ${view.frozen.provider} (selected by ${view.frozen.selectedBy})`,
-          `- Frozen configuration: \`${view.frozen.digest}\``,
+          `- Provider: ${prose(view.frozen.provider)} (selected by ${view.frozen.selectedBy})`,
+          `- Frozen configuration: ${code(view.frozen.digest)}`,
         ]
       : []),
-    `- Model calls so far: ${calls ? `${calls} (planner ${input.calls.planner}, worker ${input.calls.worker})` : "none logged"}`,
+    `- Model calls so far: ${calls ? `${calls} (planner ${input.calls.planner}, worker ${input.calls.worker})${input.calls.tokens ? `, ${input.calls.tokens} tokens reported` : ""}` : "none logged"}`,
     ...(view.endedAt ? [`- Ended: ${when(view.endedAt)}`] : []),
     "",
     "</details>",
-  );
-  if (now !== undefined)
-    lines.push(
-      "",
-      `<sub>Updated \`${new Date(now).toISOString()}\`. Factory edits this comment in place; it posts a new comment only when it needs you.</sub>`,
-    );
-  return lines.join("\n");
+    ...(full
+      ? [
+          "",
+          `<sub>Updated ${code(new Date(now).toISOString())}. Factory edits this comment in place; it posts a new comment only when it needs you.</sub>`,
+        ]
+      : []),
+  ];
+  // Whole lines up to the limit, then where the rest is, then the details.
+  const room = MAX_BODY - details.join("\n").length - 200;
+  let size = 0;
+  const kept: string[] = [];
+  for (const line of lines) {
+    size += line.length + 1;
+    if (size > room) {
+      kept.push(
+        "",
+        `The rest is cut to fit a comment; ${code(`factory status ${view.issue}`)} shows it all.`,
+      );
+      break;
+    }
+    kept.push(line);
+  }
+  return [...kept, ...details].join("\n");
 }
 
 /** "N min ago", by the edit's clock. */
@@ -241,13 +298,13 @@ function ago(iso: string, now: number): string {
   return hours < 48 ? `${hours} h ago` : `${Math.floor(hours / 24)} d ago`;
 }
 
-/** Text on one line, cut to 500 characters. */
-function oneLine(value: string): string {
+/** Untrusted text as prose on one line, cut to 500 characters. */
+function text(value: string): string {
   const line = value.replace(/\s+/g, " ").trim();
-  return line.length > 500 ? `${line.slice(0, 499)}…` : line;
+  return prose(line.length > 500 ? `${line.slice(0, 499)}…` : line);
 }
 
-/** A table cell: one line, no column breaks. */
+/** A table cell: no column breaks. */
 function cell(value: string): string {
-  return oneLine(value).replace(/\|/g, "\\|");
+  return value.replace(/\|/g, "\\|");
 }

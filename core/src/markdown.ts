@@ -42,3 +42,30 @@ export function markdownLines(content: string): {
     };
   });
 }
+
+/**
+ * `text` as one inline code span: its fence is one backtick longer than
+ * any backtick run inside, so the text can never close it early.
+ */
+export function code(text: string): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  const longest = Math.max(
+    0,
+    ...(line.match(/`+/g) ?? []).map((run) => run.length),
+  );
+  const fence = "`".repeat(longest + 1);
+  const pad = line.startsWith("`") || line.endsWith("`") ? " " : "";
+  return `${fence}${pad}${line}${pad}${fence}`;
+}
+
+/**
+ * Untrusted text as Markdown prose in a comment: `<` and `>` can't open
+ * HTML (or close Factory's marker), and `@` can't mention anyone.
+ */
+export function prose(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/@/g, "&#64;");
+}

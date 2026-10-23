@@ -940,7 +940,7 @@ const PART_MARK = (issue: number, part: number) =>
  * (tests only; 1,000 to 65,000) lowers it, so a small plan takes the
  * continuation comments and the `plan:data:*` crash points are reached.
  */
-const COMMENT_LIMIT = commentLimit(process.env.FACTORY_COMMENT_LIMIT);
+export const COMMENT_LIMIT = commentLimit(process.env.FACTORY_COMMENT_LIMIT);
 /** Plan JSON per continuation comment, leaving room for its wrapper. */
 const PART_SIZE = COMMENT_LIMIT - Math.min(5_000, COMMENT_LIMIT / 2);
 

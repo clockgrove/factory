@@ -1,9 +1,15 @@
 import type { CoreConfig, QueueOption } from "./config.js";
 import { crashPoint } from "./crash.js";
 import type { EngineLimits, ObjectiveRunner } from "./engine.js";
-import { type GitHub, issueGone, TransientError } from "./github.js";
+import {
+  type GitHub,
+  GitHubError,
+  issueGone,
+  TransientError,
+} from "./github.js";
 import { backoffMs, Jobs } from "./jobs.js";
 import type { RunLog } from "./log.js";
+import { code, prose } from "./markdown.js";
 import {
   decisionsOf,
   RunTally,
@@ -68,6 +74,8 @@ export interface GitHubModule {
   unchecked?: UncheckedComment[];
   /** The live status comment's last write: its stable body's hash, the status it showed, and its GitHub time. */
   status?: { hash: string; shown: ObjectiveStatus; at: string };
+  /** This run's live status comment can't be written (a lasting refusal or render failure): it counts as shown. */
+  statusGivenUp?: boolean;
 }
 
 /** A `/factory` comment waiting for its author's access to be read. */
@@ -127,6 +135,11 @@ const OPTION: Record<ObjectiveStatus, QueueOption> = {
   done: "done",
   cancelled: "cancelled",
 };
+
+/** Live status edits per hour, across the installation's Objectives. */
+const STATUS_EDITS_PER_HOUR = 300;
+/** Status job failures in a row, other than GitHub's transient errors, before the comment is given up. */
+const STATUS_GIVE_UP_AFTER = 3;
 
 /** A sync job that failed waits this long, doubling, up to MAX_BACKOFF_MS. */
 const BASE_BACKOFF_MS = 10_000;
@@ -189,6 +202,10 @@ export class GitHubSync {
   private tally?: RunTally;
   /** When each Objective's live status comment was last due to be written (this host's clock). */
   private readonly statusTried = new Map<number, number>();
+  /** Status jobs failed in a row by something other than GitHub's transient errors, per Objective. */
+  private readonly statusFailures = new Map<number, number>();
+  /** When each live status edit of the last hour was made, across Objectives (this host's clock). */
+  private statusEdits: number[] = [];
 
   constructor(
     private readonly github: GitHub,
@@ -329,7 +346,9 @@ export class GitHubSync {
         this.config.queue.options[OPTION[state.status]],
       ) &&
       !unreplied(state, module).length &&
-      (!this.config.progress.enabled || module.status?.shown === state.status)
+      (!this.config.progress.enabled ||
+        module.statusGivenUp === true ||
+        module.status?.shown === state.status)
     );
   }
 
@@ -345,6 +364,7 @@ export class GitHubSync {
     this.changed.delete(issue);
     this.wroteAt.delete(issue);
     this.statusTried.delete(issue);
+    this.statusFailures.delete(issue);
     this.tally?.forget(issue);
     this.jobs.forget(issue, (key) => key.startsWith("reply:"));
   }
@@ -586,11 +606,11 @@ export class GitHubSync {
         const answers = hold.options
           .map(
             (option) =>
-              `- \`/factory ${answerForm(option, bound ? named : undefined)}\`${option.recommended ? " (recommended)" : ""}: ${option.consequence}`,
+              `- ${code(`/factory ${answerForm(option, bound ? named : undefined)}`)}${option.recommended ? " (recommended)" : ""}: ${prose(option.consequence)}`,
           )
           .join("\n");
         const about = hold.item
-          ? ` It stops Work Item \`${hold.item}\` and the items that depend on it; other work goes on.`
+          ? ` It stops Work Item ${code(hold.item)} and the items that depend on it; other work goes on.`
           : "";
         const form = others
           ? " Other questions are open too, so the answer names this one."
@@ -600,7 +620,7 @@ export class GitHubSync {
         const comment = await this.github.upsertComment(
           issue,
           marker,
-          `${marker}\n**Factory needs you.** ${hold.question}\n\nReply with one of:\n${answers}\n\nAdd text after the answer to explain it.${about}${form}`,
+          `${marker}\n**Factory needs you.** ${prose(hold.question)}\n\nReply with one of:\n${answers}\n\nAdd text after the answer to explain it.${about}${form}`,
           "sync:ask",
           signal,
           new Date(Date.parse(hold.askedAt) - CLOCK_SKEW_MS).toISOString(),
@@ -629,62 +649,108 @@ export class GitHubSync {
   private status(runner: ObjectiveRunner, sync: SyncView): void {
     const { state } = runner;
     const issue = state.issue;
-    if (!this.config.progress.enabled || state.withdrawing) return;
+    const given = (state.modules.github as GitHubModule).statusGivenUp;
+    if (!this.config.progress.enabled || state.withdrawing || given) return;
     const now = this.now();
     if (now - (this.statusTried.get(issue) ?? -Infinity) < STATUS_EVERY_MS)
       return;
     if (this.jobs.pending(`status:${issue}`)) return;
     this.statusTried.set(issue, now);
-    this.background(issue, `status:${issue}`, async (signal) => {
-      this.tally ??= new RunTally(sync.logs);
-      const marker = MARK(issue, "status", runOf(state));
-      const view = statusOf(
-        { kind: "ok", state },
-        {
+    this.background(
+      issue,
+      `status:${issue}`,
+      async (signal) => {
+        this.tally ??= new RunTally(sync.logs);
+        const marker = MARK(issue, "status", runOf(state));
+        const view = statusOf(
+          { kind: "ok", state },
+          {
+            issue,
+            live: true,
+            queue: sync.queue,
+            waitsOn: sync.waitsOn(issue),
+            lastEvent: null,
+          },
+        );
+        const { plan: _plan, ...shown } = view;
+        const { body, hash } = statusComment(
+          marker,
+          {
+            view: shown,
+            ...this.tally.read(issue, state.startedAt ?? ""),
+            decisions: decisionsOf(state),
+            ...(state.startedAt ? { startedAt: state.startedAt } : {}),
+          },
+          this.config.secrets,
+          // W3-08: progress.includeQuestions sets this.
+          { questions: true },
+          now,
+        );
+        const last = (state.modules.github as GitHubModule).status;
+        const status = state.status;
+        if (
+          last?.hash === hash &&
+          last.shown === status &&
+          !(
+            view.running.length &&
+            now - Date.parse(last.at) >= STATUS_REFRESH_MS
+          )
+        )
+          return;
+        // The installation's hourly budget: over it, an edit waits, except
+        // the one that shows a finished Objective's final status.
+        this.statusEdits = this.statusEdits.filter(
+          (at) => now - at < 60 * 60_000,
+        );
+        if (
+          this.statusEdits.length >= STATUS_EDITS_PER_HOUR &&
+          !TERMINAL.includes(status)
+        )
+          return;
+        this.statusEdits.push(now);
+        const comment = await this.github.upsertComment(
           issue,
-          live: true,
-          queue: sync.queue,
-          waitsOn: sync.waitsOn(issue),
-          lastEvent: null,
-        },
-      );
-      const { plan: _plan, ...shown } = view;
-      const { body, hash } = statusComment(
-        marker,
-        {
-          view: shown,
-          ...this.tally.read(issue, state.startedAt ?? ""),
-          decisions: decisionsOf(state),
-          ...(state.startedAt ? { startedAt: state.startedAt } : {}),
-        },
-        this.config.secrets,
-        // W3-08: progress.includeQuestions sets this.
-        { questions: true },
-        now,
-      );
-      const last = (state.modules.github as GitHubModule).status;
-      const status = state.status;
-      if (
-        last?.hash === hash &&
-        last.shown === status &&
-        !(view.running.length && now - Date.parse(last.at) >= STATUS_REFRESH_MS)
-      )
-        return;
-      const comment = await this.github.upsertComment(
-        issue,
-        marker,
-        body,
-        "sync:status",
-        signal,
-        last ? skewed(last.at) : sinceRun(state),
-      );
-      runner.transact(() => {
-        (runner.state.modules.github as GitHubModule).status = {
-          hash,
-          shown: status,
-          at: comment.updated_at ?? comment.created_at,
-        };
-      });
+          marker,
+          body,
+          "sync:status",
+          signal,
+          last ? skewed(last.at) : sinceRun(state),
+        );
+        runner.transact(() => {
+          (runner.state.modules.github as GitHubModule).status = {
+            hash,
+            shown: status,
+            at: comment.updated_at ?? comment.created_at,
+          };
+        });
+      },
+      true,
+      (error) => this.statusFailed(runner, error),
+    );
+  }
+
+  /**
+   * A status job failed. GitHub's transient errors (network, 5xx, rate
+   * limits) retry on; a lasting refusal (a 4xx), or anything else three
+   * times in a row (a render that keeps throwing), gives the comment up
+   * for this run, so it never holds back settling.
+   */
+  private statusFailed(runner: ObjectiveRunner, error: unknown): void {
+    if (error instanceof TransientError) return;
+    const issue = runner.state.issue;
+    const failures = (this.statusFailures.get(issue) ?? 0) + 1;
+    this.statusFailures.set(issue, failures);
+    const refused =
+      error instanceof GitHubError && error.status >= 400 && error.status < 500;
+    if (!refused && failures < STATUS_GIVE_UP_AFTER) return;
+    this.statusFailures.delete(issue);
+    runner.transact(() => {
+      (runner.state.modules.github as GitHubModule).statusGivenUp = true;
+    });
+    this.log.write(issue, {
+      event: "status-given-up",
+      failures,
+      error: errorMessage(error),
     });
   }
 
@@ -991,10 +1057,13 @@ export class GitHubSync {
     key: string,
     job: (signal: AbortSignal) => Promise<void>,
     backoff = true,
+    failed?: (error: unknown) => void,
   ): void {
     this.jobs.run(issue, key, job, {
       backoff,
+      done: () => failed && this.statusFailures.delete(issue),
       failed: async (error) => {
+        failed?.(error);
         if (issue && issueGone(error)) await this.confirmGone(issue, key);
       },
     });

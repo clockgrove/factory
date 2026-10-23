@@ -580,7 +580,7 @@ export async function captureReviewArtifacts(input: {
     if (error instanceof Problem)
       return {
         kind: "failed",
-        detail: `${error.message}. The selector is installation configuration: make the command produce what it names, or update the reviewArtifacts selector.`,
+        detail: `${error.message}. The selector is installation configuration: make the command produce what it names. (An operator who updates the reviewArtifacts selector instead restarts the service, which reads its configuration only at start.)`,
       };
     return {
       kind: "retry",

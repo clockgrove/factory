@@ -197,7 +197,7 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
   if (dropped)
     return objectiveWide(
       hold(
-        `${dropped}. Restore these selectors in the installation's reviewArtifacts (others may stay or be added) and answer retry, answer replan to plan again with the current selectors, or cancel.`,
+        `${dropped}. Restore these selectors in the installation's reviewArtifacts (others may stay or be added), restart the service (it reads its configuration only at start) and answer retry; answer replan to plan again with the current selectors; or cancel.`,
         ["retry", "replan", "cancel"],
       ),
     );

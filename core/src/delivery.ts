@@ -1511,6 +1511,12 @@ const STACK_MERGE_POLL_MS = 6_000;
 const STACK_POLL_INTERVAL_MS = 2_000;
 const STACK_PERMISSION =
   "Contents: write and Pull requests: write, with stacked pull requests enabled for the repository";
+/**
+ * How to deliver without native stacks. The service reads delivery.kind
+ * once at start and an Objective's plan was split by it, so a retry never
+ * changes it: the Objective runs again under the new setting.
+ */
+const WITHOUT_STACKS = `To deliver without native stacks instead, cancel, set the installation's delivery.kind to regular, restart the service and queue the Objective again`;
 
 /** A delivery result pinned to the layer (Work Item) it belongs to. */
 export type LayerResult = (Retry | Repair | Hold | Republish) & {
@@ -1899,7 +1905,7 @@ async function ensureStack(
     lagging(
       context,
       error.message,
-      `${error.message} (for ${expected}). GitHub's native stack API may have changed: inspect the stack, or set the installation's delivery to regular, then answer retry; or cancel.`,
+      `${error.message} (for ${expected}). GitHub's native stack API may have changed: inspect the stack, then answer retry; or cancel. ${WITHOUT_STACKS}.`,
     );
   let found: Stack[];
   try {
@@ -1909,7 +1915,7 @@ async function ensureStack(
     if (error instanceof GitHubError && error.status === 404)
       return objectiveWide(
         hold(
-          `GitHub shows no native stacks for ${github.repository} (${error.message.slice(0, 300)}). Enable stacked pull requests for the repository, or set the installation's delivery to regular, then answer retry; or cancel.`,
+          `GitHub shows no native stacks for ${github.repository} (${error.message.slice(0, 300)}). Enable stacked pull requests for the repository, then answer retry; or cancel. ${WITHOUT_STACKS}.`,
         ),
       );
     throw error;

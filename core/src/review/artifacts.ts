@@ -201,7 +201,7 @@ export function outputLimit(
 const DEFAULT_OUTPUT_LIMIT = 1024 * 1024;
 
 /** One selector's identity, independent of key order. */
-const identity = (selector: ReviewArtifactSelector): string =>
+export const selectorIdentity = (selector: ReviewArtifactSelector): string =>
   JSON.stringify(selector, (_key, value: unknown) =>
     isRecord(value)
       ? Object.fromEntries(
@@ -222,9 +222,9 @@ export function plannedReviewArtifactsProblem(
   planned: readonly ReviewArtifactSelector[],
   configured: readonly ReviewArtifactSelector[],
 ): string | undefined {
-  const present = new Set(configured.map(identity));
+  const present = new Set(configured.map(selectorIdentity));
   const missing = planned.filter(
-    (selector) => !present.has(identity(selector)),
+    (selector) => !present.has(selectorIdentity(selector)),
   );
   if (!missing.length) return undefined;
   return `This Objective's plan was compiled and reviewed with reviewArtifacts selectors the installation no longer configures, so its briefs may route proof through them: ${missing

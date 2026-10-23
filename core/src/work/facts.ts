@@ -1,5 +1,6 @@
 import type { CandidateSet, MediaInput, Selection } from "../media.js";
 import type { RepairFinding } from "../repair.js";
+import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { ObjectiveState } from "../state.js";
 import type { HandoffNote } from "./collect.js";
 import type { DiscoveryResult } from "./discovery.js";
@@ -55,10 +56,15 @@ export interface ItemFacts {
   qaRefused: true;
   /**
    * The operator's `revalidate --review-artifacts` for this result: the
-   * configured selectors (numbers from 1; empty for none) its validation
-   * captures instead of all. A repair clears it.
+   * selectors (empty for none), as configured when the answer landed, its
+   * validation captures instead of all. A repair, or a repair of the
+   * stack layer below, clears it.
    */
-  rereview: { reviewArtifacts: number[]; by: string; at: string };
+  rereview: {
+    reviewArtifacts: ReviewArtifactSelector[];
+    by: string;
+    at: string;
+  };
   /** A discovery item's complete result (work/discovery.ts): its dependents, conditions and expansions read it. */
   discovery: DiscoveryResult;
 }

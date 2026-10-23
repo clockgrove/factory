@@ -15,6 +15,7 @@ import { crashPoint } from "./crash.js";
 import type { HoldScope } from "./engine.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import type { QueueMode, RefusalCode } from "./requests.js";
+import type { ReviewArtifactSelector } from "./review/artifacts.js";
 
 /**
  * 6: a hold carries its answers as `options`, each with its family and
@@ -128,8 +129,8 @@ export interface Answer {
   question?: string;
   answer: string;
   text?: string;
-  /** `revalidate --review-artifacts`: the configured selectors' numbers (1-based) this rereview captures; empty for none. */
-  reviewArtifacts?: number[];
+  /** `revalidate --review-artifacts`: the selectors this rereview captures, resolved when the answer landed; empty for none. */
+  reviewArtifacts?: ReviewArtifactSelector[];
   by: string;
   at: string;
 }

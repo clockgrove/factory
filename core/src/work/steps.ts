@@ -86,9 +86,10 @@ import {
   type RepairFinding,
   repeated,
 } from "../repair.js";
-import type {
-  ReviewArtifact,
-  ReviewArtifactSelector,
+import {
+  type ReviewArtifact,
+  type ReviewArtifactSelector,
+  selectorIdentity,
 } from "../review/artifacts.js";
 import { reviewObjective } from "../review/final.js";
 import {
@@ -190,7 +191,7 @@ interface ValidateResult {
   commands: string[];
   artifacts?: ReviewArtifact[];
   /** A rereview's `--review-artifacts`: the selectors captured instead of all. */
-  reviewArtifacts?: number[];
+  reviewArtifacts?: ReviewArtifactSelector[];
 }
 
 interface PublishResult {
@@ -496,8 +497,50 @@ function itemStep(
           : phase === "validate"
             ? validationDeadlineMs(item, commandTimeoutMs(deps))
             : 45 * MINUTE,
-    run: (context) => run(item, context, deps, place),
+    run: async (context) => {
+      const outcome = await run(item, context, deps, place);
+      return phase === "work"
+        ? recheckMark(outcome, item, context, deps)
+        : outcome;
+    },
   };
+}
+
+/**
+ * A work-step question while the kept refused result can't be checked
+ * again as it is (gone, off the item's base, or its media selection
+ * gone): the refused fact is marked `unrecheckable`, so `revalidatable`
+ * stops offering `revalidate` for it, whichever question asks. The next
+ * repair writes a new refused fact.
+ */
+async function recheckMark(
+  outcome: Outcome,
+  item: WorkItem,
+  context: StepContext,
+  deps: BuildDeps,
+): Promise<Outcome> {
+  const { state, signal } = context;
+  const kept = refusedOf(state, item.id);
+  const key = `item:${item.id}:refused`;
+  if (
+    outcome.kind !== "hold" ||
+    !kept ||
+    kept.unrecheckable ||
+    (outcome.keep && key in outcome.keep)
+  )
+    return outcome;
+  const base =
+    (outcome.keep?.[`item:${item.id}:base`] as string | undefined) ??
+    fact(state, "base", item.id);
+  if (
+    base &&
+    (await refusedResult(state, item, deps.config.checkout, base, signal))
+  )
+    return outcome;
+  return withKeep(
+    outcome,
+    facts({ refused: { ...kept, unrecheckable: true } }, item.id),
+  );
 }
 
 /** Each validation command's limit, in ms. */
@@ -608,22 +651,15 @@ async function workStep(
       base,
       signal,
     );
-    if (!refused) {
-      // Marked, so the engine no longer offers `revalidate` for it.
-      const kept = fact(state, "refused", item.id);
+    // The hold is marked unrecheckable (`recheckMark`).
+    if (!refused)
       return withKeep(
         hold(
           `Work Item ${item.id}'s refused result can no longer be checked again as it is (it is gone, or no longer sits on ${base}). Answer \`retry\` to diagnose the failure again, or cancel.`,
           ["retry", "cancel"],
         ),
-        {
-          ...keepBase,
-          ...(kept
-            ? facts({ refused: { ...kept, unrecheckable: true } }, item.id)
-            : {}),
-        },
+        keepBase,
       );
-    }
     return {
       kind: "done",
       result: refused,
@@ -1301,19 +1337,23 @@ export function revalidatable(state: ObjectiveState, key: string): boolean {
     key === stepKey(item.id, "work") &&
     !!refusedOf(state, item.id) &&
     !refusedOf(state, item.id)?.unrecheckable &&
+    // The work step takes `revalidate` only before a finished worker
+    // run is collected and when no replay onto a new start is due.
+    !fact(state, "finished", item.id) &&
+    !fact(state, "rebase", item.id) &&
     (!needsSelection(item) || !!fact(state, "selection", item.id))
   );
 }
 
 /**
- * `--review-artifacts` values as the configured selectors' numbers (from
- * 1), or why they can't be: each a configured selector's number, or
- * `none` alone.
+ * The configured selectors `--review-artifacts` values name, resolved
+ * when the answer lands, or why they can't be: each a configured
+ * selector's number (from 1), or `none` alone.
  */
-export function reviewArtifactNumbers(
+export function reviewArtifactSelection(
   values: readonly string[],
   configured: readonly ReviewArtifactSelector[],
-): number[] | string {
+): ReviewArtifactSelector[] | string {
   const listed = configured
     .map((selector, index) => `${index + 1} \`${selector.command}\``)
     .join(", ");
@@ -1333,7 +1373,9 @@ export function reviewArtifactNumbers(
   );
   if (bad.length)
     return `--review-artifacts ${bad.join(", ")} names no configured selector. ${known}`;
-  return [...new Set(numbers)].sort((a, b) => a - b);
+  return [...new Set(numbers)]
+    .sort((a, b) => a - b)
+    .map((number) => configured[number - 1]!);
 }
 
 /** The rereview fact a `revalidate` answer writes: its selectors, else none (null). */
@@ -1350,20 +1392,21 @@ function rereviewCapture(
   configured: readonly ReviewArtifactSelector[],
 ): { selected?: ReviewArtifactSelector[] } {
   const chosen = fact(state, "rereview", id)?.reviewArtifacts;
-  return chosen
-    ? {
-        selected: chosen.flatMap((n) =>
-          configured[n - 1] ? [configured[n - 1]!] : [],
-        ),
-      }
-    : {};
+  if (!chosen) return {};
+  // Only selectors still configured: a restart may have changed them.
+  const named = new Set(chosen.map(selectorIdentity));
+  return {
+    selected: configured.filter((selector) =>
+      named.has(selectorIdentity(selector)),
+    ),
+  };
 }
 
 /** The rereview's selectors, recorded on the validation result. */
 function rereviewRecord(
   state: ObjectiveState,
   id: string,
-): { reviewArtifacts?: number[] } {
+): { reviewArtifacts?: ReviewArtifactSelector[] } {
   const chosen = fact(state, "rereview", id)?.reviewArtifacts;
   return chosen ? { reviewArtifacts: chosen } : {};
 }
@@ -2093,6 +2136,39 @@ function republishOutcome(item: WorkItem, reason: string): Outcome {
 }
 
 /**
+ * The facts of a native-stack layer the layer below moves (a repair of
+ * it): it replays its change onto the new head, keeping its selection,
+ * and keeps nothing of a rereview of its old result. Every move of a
+ * layer goes through here.
+ */
+function movedLayer(
+  state: ObjectiveState,
+  layer: WorkItem,
+  layerSelection: KeptSelection | undefined,
+  detail: string,
+): Record<string, unknown> {
+  const work = state.done[stepKey(layer.id, "work")] as WorkResult | undefined;
+  return {
+    ...facts(
+      {
+        ...(layerSelection ? { selection: layerSelection } : {}),
+        rebase: true,
+        finished: null,
+        onto: null,
+        rereview: null,
+      },
+      layer.id,
+    ),
+    ...(work
+      ? {
+          ...refusedFact(layer.id, work, false),
+          ...facts({ finding: { kind: "conflict", detail } }, layer.id),
+        }
+      : {}),
+  };
+}
+
+/**
  * Clear the item's steps from `work` and run the worker again with the
  * finding. In a native stack every layer above the item is cleared too: it
  * moves onto the repaired layer's new head and replays its own change.
@@ -2187,38 +2263,16 @@ function repairOutcome(
         ...facts({ selection: media ? null : (own ?? null) }, item.id),
         ...(result ? refusedFact(item.id, result, refusesResult) : {}),
       };
-  for (const layer of above) {
-    const layerSelection = standing(layer);
-    const work = state.done[stepKey(layer.id, "work")] as
-      | WorkResult
-      | undefined;
+  for (const layer of above)
     Object.assign(
       moved,
-      facts(
-        {
-          ...(layerSelection ? { selection: layerSelection } : {}),
-          rebase: true,
-          finished: null,
-          onto: null,
-        },
-        layer.id,
+      movedLayer(
+        state,
+        layer,
+        standing(layer),
+        `Work Item ${item.id}, the stack layer below this one, is being repaired, so this change moves onto its new head.`,
       ),
     );
-    if (work)
-      Object.assign(
-        moved,
-        refusedFact(layer.id, work, false),
-        facts(
-          {
-            finding: {
-              kind: "conflict",
-              detail: `Work Item ${item.id}, the stack layer below this one, is being repaired, so this change moves onto its new head.`,
-            },
-          },
-          layer.id,
-        ),
-      );
-  }
   return {
     kind: "repair",
     finding: text,

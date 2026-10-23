@@ -33,7 +33,7 @@ import {
   replanOutcome,
   rerunCleanupStep,
   revalidatable,
-  reviewArtifactNumbers,
+  reviewArtifactSelection,
 } from "./work/steps.js";
 
 const MINUTE = 60_000;
@@ -100,7 +100,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
           // A refused result checked again, unchanged (a result rereview).
           revalidatable,
           reviewArtifacts: (values: readonly string[]) =>
-            reviewArtifactNumbers(values, deps.config.reviewArtifacts),
+            reviewArtifactSelection(values, deps.config.reviewArtifacts),
         }
       : {}),
   };

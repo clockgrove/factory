@@ -81,10 +81,10 @@ export interface ObjectiveView {
   flakyRerun: { item: string; command: string }[];
   /**
    * Work Items whose current result is a rereview with the operator's
-   * `--review-artifacts`: the configured selectors (numbers from 1; empty
-   * for none) it captures instead of all.
+   * `--review-artifacts`: the commands of the selectors it captures
+   * instead of all (empty for none).
    */
-  rereviews: { item: string; reviewArtifacts: number[]; by: string }[];
+  rereviews: { item: string; reviewArtifacts: string[]; by: string }[];
   /**
    * Each autonomy allowance, used and allowed with the operator's grants:
    * across the Objective, and repairs per repair path (target step).
@@ -366,11 +366,16 @@ function rereviews(state: ObjectiveState): ObjectiveView["rereviews"] {
   const chosen: ObjectiveView["rereviews"] = [];
   for (const [key, value] of Object.entries(state.kept ?? {})) {
     const item = /^item:(.+):rereview$/.exec(key)?.[1];
-    const rereview = value as { reviewArtifacts?: number[]; by?: string };
+    const rereview = value as {
+      reviewArtifacts?: { command: string }[];
+      by?: string;
+    };
     if (item && rereview?.reviewArtifacts)
       chosen.push({
         item,
-        reviewArtifacts: rereview.reviewArtifacts,
+        reviewArtifacts: rereview.reviewArtifacts.map(
+          (selector) => selector.command,
+        ),
         by: rereview.by ?? "",
       });
   }
@@ -594,7 +599,7 @@ function objectiveText(row: ObjectiveView): string[] {
     );
   for (const rereview of row.rereviews)
     lines.push(
-      `  Rereview: ${rereview.item} captures ${rereview.reviewArtifacts.length ? `review artifacts ${rereview.reviewArtifacts.join(", ")} of the configured selectors` : "no review artifacts"} (--review-artifacts, by ${rereview.by})`,
+      `  Rereview: ${rereview.item} captures ${rereview.reviewArtifacts.length ? `only the review artifacts of ${rereview.reviewArtifacts.map((command) => `\`${command}\``).join(", ")}` : "no review artifacts"} (--review-artifacts, by ${rereview.by})`,
     );
   if (row.lastEvent) lines.push(`  Last: ${eventLine(row.lastEvent)}`);
   return lines;

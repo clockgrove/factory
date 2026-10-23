@@ -1388,7 +1388,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
     "../dist/engine.js"
   );
   const { newObjective } = await import("../dist/state.js");
-  const { reviewArtifactNumbers } = await import("../dist/work/steps.js");
+  const { reviewArtifactSelection } = await import("../dist/work/steps.js");
   const keys = ["item:a:work", "item:b:ci", "item:c:work", "item:d:ci"];
   const started = [];
   const outcomes = {};
@@ -1420,7 +1420,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
       // c keeps a refused result it can check again.
       revalidatable: (_, key) => key === "item:c:work",
       reviewArtifacts: (values) =>
-        reviewArtifactNumbers(values, [
+        reviewArtifactSelection(values, [
           { command: "npm run shots" },
           { command: "npm test" },
         ]),
@@ -1633,8 +1633,11 @@ test("a deferred question asks right after the covering one; stack layers and ba
       /names no configured selector|can't be given with selectors/,
     );
   assert.equal(choose("revalidate", ["2"]), null, "past the allowance");
-  assert.equal(choose("more", ["2", "1", "2"]), null);
-  assert.deepEqual(runner.state.answers["item:b:ci"].reviewArtifacts, [1, 2]);
+  // That `more` reuses the selectors, resolved when the answer landed.
+  assert.equal(choose("more", undefined), null);
+  assert.deepEqual(runner.state.answers["item:b:ci"].reviewArtifacts, [
+    { command: "npm test" },
+  ]);
 });
 
 test("a replan answer is the workflow's, spent once applied, and the new plan starts with a fresh repair budget", async () => {
@@ -2821,7 +2824,11 @@ test("status: one model, the Work Item table, the full --json and the list view"
     ],
     kept: {
       "item:a:flaky": { tree: "t1", command: "npm test" },
-      "item:a:rereview": { reviewArtifacts: [2], by: "op", at: "x" },
+      "item:a:rereview": {
+        reviewArtifacts: [{ command: "npm test" }],
+        by: "op",
+        at: "x",
+      },
       "allowances:rereviews": 1,
       "allowances:granted": { "perPath:item:a:work": 3, resultRereviews: 1 },
     },
@@ -2862,7 +2869,7 @@ test("status: one model, the Work Item table, the full --json and the list view"
   assert.match(text, /Possibly flaky: a: `npm test` failed once/);
   assert.match(
     text,
-    /Rereview: a captures review artifacts 2 of the configured selectors \(--review-artifacts, by op\)/,
+    /Rereview: a captures only the review artifacts of `npm test` \(--review-artifacts, by op\)/,
   );
   assert.match(
     text,

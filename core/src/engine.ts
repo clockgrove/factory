@@ -1,5 +1,6 @@
 import {
   asked,
+  askedCaptures,
   askedFor,
   chargeRereview,
   countConflict,
@@ -14,6 +15,7 @@ import { duration } from "./display.js";
 import type { RunLog } from "./log.js";
 import type { FrozenConfig } from "./providers/selection.js";
 import { type RequestResult, refused } from "./requests.js";
+import type { ReviewArtifactSelector } from "./review/artifacts.js";
 import {
   type Answer,
   answerForm,
@@ -313,9 +315,11 @@ export interface Workflow {
   revalidatable?(state: ObjectiveState, key: string): boolean;
   /**
    * The configured review-artifact selectors `--review-artifacts` values
-   * name, as their numbers (1-based, `none` for none), or why they can't.
+   * name (by number from 1, or `none` for none), or why they can't.
    */
-  reviewArtifacts?(values: readonly string[]): number[] | string;
+  reviewArtifacts?(
+    values: readonly string[],
+  ): ReviewArtifactSelector[] | string;
   /**
    * The configuration as an Objective freezes it now, per configured
    * provider, for the `switch NAME` and `adopt` answers.
@@ -1334,7 +1338,10 @@ export class ObjectiveRunner {
     const granting =
       answer === MORE ? askedFor(this.state, hold.id) : undefined;
     const given = granting === "rereviews" ? REVALIDATE : answer;
-    let captures: number[] | undefined;
+    // A rereview's `more` reuses what its `revalidate` gave, unless
+    // this answer gives its own.
+    let captures =
+      granting === "rereviews" ? askedCaptures(this.state, hold.id) : undefined;
     if (reviewArtifacts !== undefined) {
       const named =
         given !== REVALIDATE
@@ -1382,7 +1389,7 @@ export class ObjectiveRunner {
           );
           const question = this.state.holds.at(-1);
           if (question?.step === hold.step)
-            asked(this.state, question.id, "rereviews");
+            asked(this.state, question.id, "rereviews", captures);
           delete this.state.retries[hold.step];
           this.settle();
           return null;

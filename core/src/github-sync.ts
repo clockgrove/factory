@@ -1,7 +1,7 @@
 import type { CoreConfig, QueueOption } from "./config.js";
 import { crashPoint } from "./crash.js";
 import type { EngineLimits, ObjectiveRunner } from "./engine.js";
-import { type GitHub, TransientError } from "./github.js";
+import { type GitHub, issueGone, TransientError } from "./github.js";
 import type { RunLog } from "./log.js";
 import { QueueDisplay, type QueueItem, queued, readQueue } from "./queue.js";
 import { writeRequest } from "./requests.js";
@@ -202,11 +202,7 @@ export class GitHubSync {
           this.viewKnown = new Set(known);
           this.viewAt = startedAt;
           this.fresh = true;
-          for (const issue of read.gone)
-            if (!this.gone.has(issue)) {
-              this.gone.add(issue);
-              this.log.write(issue, { event: "queue-issue-gone" });
-            }
+          for (const issue of read.gone) this.lose(issue, "queue");
           if (read.truncated)
             this.log.write(0, {
               event: "queue-truncated",
@@ -226,8 +222,18 @@ export class GitHubSync {
       const finished =
         TERMINAL.includes(runner.state.status) && !runner.hasWork;
       if (finished && this.settled.has(issue)) continue;
-      // An issue GitHub no longer has has no card or comments to write.
-      if (finished && (this.synced(runner.state) || this.gone.has(issue))) {
+      // An issue GitHub no longer has here (deleted, or moved away) has no
+      // card or comments to write: its replies are dropped, and once it
+      // finishes its sync is settled.
+      if (this.gone.has(issue)) {
+        if (finished) {
+          for (const request of module ? unreplied(runner.state, module) : [])
+            this.log.write(issue, { event: "reply-dropped", id: request.id });
+          this.settled.add(issue);
+        }
+        continue;
+      }
+      if (finished && this.synced(runner.state)) {
         this.settled.add(issue);
         continue;
       }
@@ -250,7 +256,7 @@ export class GitHubSync {
         );
     }
     for (const [issue, entry] of sync.unreadable)
-      this.unreadable(issue, entry, due, sync);
+      if (!this.gone.has(issue)) this.unreadable(issue, entry, due, sync);
   }
 
   /** Whether a finished Objective's sync is done and no job of it is running. */
@@ -831,6 +837,17 @@ export class GitHubSync {
     return (await this.github.findComment(issue, marker, from)) !== undefined;
   }
 
+  /** GitHub no longer has the issue here: nothing more is written to it. */
+  private lose(issue: number, job: string, status?: number): void {
+    if (this.gone.has(issue)) return;
+    this.gone.add(issue);
+    this.log.write(issue, {
+      event: "issue-gone",
+      job,
+      ...(status ? { status } : {}),
+    });
+  }
+
   /**
    * Run `job` for Objective `issue` (0: the queue) unless it is running or
    * backing off after a failure; log any failure and back off.
@@ -848,6 +865,9 @@ export class GitHubSync {
     job()
       .then(() => this.backoff.delete(key))
       .catch((error: unknown) => {
+        // Any job's answer that the issue is gone counts, whether or not
+        // a queue read still asks for it (a finished Objective's reply).
+        if (issue && issueGone(error)) this.lose(issue, key, error.status);
         const failures = (this.backoff.get(key)?.failures ?? 0) + 1;
         if (backs)
           this.backoff.set(key, {

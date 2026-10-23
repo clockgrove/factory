@@ -2161,6 +2161,7 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
       );
       // Cancel ends the Objective, so its branches go once their PRs are
       // closed (a stack's upper PRs first); a re-run reuses them instead.
+      // Unguarded: a moved origin's GitRefusal is an engine error (retry or cancel) until W1-03.
       for (const branch of await deps.github.branches(
         `factory/${state.issue}/`,
         signal,

@@ -47,8 +47,8 @@ import {
   GitRefusal,
   LFS_POINTER_MAX_BYTES,
   lfsPointer,
+  originBound,
   readBlobs,
-  remoteGit,
   secretSearch,
   sha256,
 } from "./git.js";
@@ -1646,13 +1646,12 @@ async function lfsFetch(input: {
   storage?: string;
   signal: AbortSignal;
 }): Promise<Exclude<MediaOutcome<never>, { kind: "repair" }> | undefined> {
-  const { checkout, signal } = input;
+  const toOrigin = await originRunner(input);
+  if (typeof toOrigin !== "function") return toOrigin;
   const plain = input.paths.every((path) => !/[,*?[\]\\!]/.test(path));
   let fetched: string | undefined;
   try {
-    await remoteGit(
-      checkout,
-      input.repository,
+    await toOrigin(
       [
         ...(input.storage ? ["-c", `lfs.storage=${input.storage}`] : []),
         ...LFS,
@@ -1662,16 +1661,12 @@ async function lfsFetch(input: {
         input.commit,
         ...(plain ? ["--include", input.paths.join(",")] : []),
       ],
-      { signal, timeoutMs: 30 * MINUTE },
+      30 * MINUTE,
     );
   } catch (error) {
-    if (error instanceof GitRefusal) return objectiveWide(hold(error.message));
     fetched = errorMessage(error);
   }
-  if (
-    fetched !== undefined &&
-    !(await reachable(checkout, input.repository, signal))
-  )
+  if (fetched !== undefined && !(await reachable(toOrigin, input.signal)))
     return {
       kind: "retry",
       reason: `Fetching LFS objects from origin: ${fetched}`,
@@ -1689,16 +1684,15 @@ async function lfsPush(input: {
   oids: readonly string[];
   signal: AbortSignal;
 }): Promise<MediaOutcome<never> | undefined> {
+  const toOrigin = await originRunner(input);
+  if (typeof toOrigin !== "function") return toOrigin;
   try {
-    await remoteGit(
-      input.checkout,
-      input.repository,
+    await toOrigin(
       [...LFS, "lfs", "push", "--object-id", "origin", ...input.oids],
-      { signal: input.signal, timeoutMs: 30 * MINUTE },
+      30 * MINUTE,
     );
   } catch (error) {
     input.signal.throwIfAborted();
-    if (error instanceof GitRefusal) return objectiveWide(hold(error.message));
     return {
       kind: "retry",
       reason: `git lfs push of ${input.oids.length} object(s): ${errorMessage(error)}`,
@@ -1818,17 +1812,33 @@ export async function verifyOriginMedia(input: {
   };
 }
 
-/** Whether origin answers at all. */
+/**
+ * The origin check (git.ts originBound) before a remote call's `try`, so
+ * no catch turns its refusal into a retry: a runner, or the hold.
+ */
+async function originRunner(input: {
+  checkout: string;
+  repository: string;
+  signal: AbortSignal;
+}): Promise<
+  | Awaited<ReturnType<typeof originBound>>
+  | Extract<MediaOutcome<never>, { kind: "hold" }>
+> {
+  try {
+    return await originBound(input.checkout, input.repository, input.signal);
+  } catch (error) {
+    if (error instanceof GitRefusal) return objectiveWide(hold(error.message));
+    throw error;
+  }
+}
+
+/** Whether origin answers at all, through a runner already bound. */
 async function reachable(
-  checkout: string,
-  repository: string,
+  toOrigin: Awaited<ReturnType<typeof originBound>>,
   signal: AbortSignal,
 ): Promise<boolean> {
   try {
-    await remoteGit(checkout, repository, ["ls-remote", "origin", "HEAD"], {
-      signal,
-      timeoutMs: MINUTE,
-    });
+    await toOrigin(["ls-remote", "origin", "HEAD"], MINUTE);
     return true;
   } catch {
     signal.throwIfAborted();

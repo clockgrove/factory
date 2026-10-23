@@ -423,12 +423,28 @@ export async function remoteGit(
   args: string[],
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<string> {
-  const refusal = await originRefusal(checkout, repository, options.signal);
+  const run = await originBound(checkout, repository, options.signal);
+  return run(args, options.timeoutMs);
+}
+
+/**
+ * The origin check of `remoteGit` on its own: throws its GitRefusal, else
+ * returns a runner for the remote call that follows at once. A caller that
+ * catches the call's failures binds before its `try`, so no catch can
+ * turn the refusal into a retry.
+ */
+export async function originBound(
+  checkout: string,
+  repository: string,
+  signal?: AbortSignal,
+): Promise<(args: string[], timeoutMs?: number) => Promise<string>> {
+  const refusal = await originRefusal(checkout, repository, signal);
   if (refusal) throw refusal;
-  return operatorGit(checkout, ["-c", "protocol.file.allow=never", ...args], {
-    ...options,
-    timeoutMs: options.timeoutMs ?? 5 * MINUTE,
-  });
+  return (args, timeoutMs = 5 * MINUTE) =>
+    operatorGit(checkout, ["-c", "protocol.file.allow=never", ...args], {
+      ...(signal ? { signal } : {}),
+      timeoutMs,
+    });
 }
 
 /**

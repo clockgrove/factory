@@ -17,10 +17,10 @@ import { hold, type Outcome, objectiveWide } from "./engine.js";
 import {
   defaultHead,
   GitRefusal,
+  originBound,
   originRefusal,
   pathsHoldingSecrets,
   pinnedGitExit,
-  remoteGit,
   sha256,
 } from "./git.js";
 import {
@@ -242,8 +242,6 @@ export function publish(
   return guarded(context, async () => {
     const { github, signal } = context;
     const branch = itemBranch(input.issue, input.item.id);
-    const origin = await originHold(context);
-    if (origin) return origin;
     const {
       expected: baseBranch,
       defaultBranch,
@@ -451,8 +449,9 @@ export async function deleteFactoryBranch(
   if (!(await factoryMade(context, remote, defaultBranch, bases)))
     return `${branch} holds commits Factory did not make`;
   crashPoint(`${point}:before`);
+  const toOrigin = await originGit(context);
   try {
-    await originGit(context, [
+    await toOrigin([
       "push",
       "--porcelain",
       `--force-with-lease=refs/heads/${branch}:${remote}`,
@@ -488,8 +487,9 @@ async function pushBranch(
   remote: string | undefined,
 ): Promise<Retry | Hold | undefined> {
   crashPoint("deliver:push:before");
+  const toOrigin = await originGit(context);
   try {
-    await originGit(context, [
+    await toOrigin([
       "push",
       "--porcelain",
       `--force-with-lease=refs/heads/${branch}:${remote ?? ""}`,
@@ -548,12 +548,9 @@ async function remoteHead(
   branch: string,
 ): Promise<string | undefined> {
   let listed: string;
+  const toOrigin = await originGit(context);
   try {
-    listed = await originGit(context, [
-      "ls-remote",
-      "origin",
-      `refs/heads/${branch}`,
-    ]);
+    listed = await toOrigin(["ls-remote", "origin", `refs/heads/${branch}`]);
   } catch (error) {
     if (context.signal.aborted) throw error;
     throw new TransientError(`git ls-remote ${branch}: ${message(error)}`);
@@ -561,13 +558,22 @@ async function remoteHead(
   return listed.split(/\s+/)[0] || undefined;
 }
 
-/** Git that reaches origin, after the origin check (git.ts remoteGit). */
-function originGit(context: DeliveryContext, args: string[]): Promise<string> {
-  return remoteGit(context.checkout, context.github.repository, args, {
-    signal: context.signal,
-  });
+/**
+ * The origin check (git.ts originBound), then a runner for one remote Git
+ * call. Bind before the call's `try`: the GitRefusal escapes every catch
+ * here, and the step holds (planning/steps.ts guarded).
+ */
+function originGit(
+  context: DeliveryContext,
+): Promise<(args: string[]) => Promise<string>> {
+  return originBound(
+    context.checkout,
+    context.github.repository,
+    context.signal,
+  );
 }
 
+/** Before a merge, which reaches GitHub, not origin: the origin check as a hold. */
 async function originHold(context: DeliveryContext): Promise<Hold | undefined> {
   const refusal = await originRefusal(
     context.checkout,
@@ -1290,19 +1296,15 @@ async function updateMerge(
   if (!onBase) return false;
   const git = (args: string[]) =>
     pinnedGitExit(context.checkout, args, { signal: context.signal });
-  if ((await git(["cat-file", "-e", `${commit.sha}^{commit}`])).code !== 0)
+  if ((await git(["cat-file", "-e", `${commit.sha}^{commit}`])).code !== 0) {
+    const toOrigin = await originGit(context);
     try {
-      await originGit(context, [
-        "fetch",
-        "--quiet",
-        "--no-tags",
-        "origin",
-        commit.sha,
-      ]);
+      await toOrigin(["fetch", "--quiet", "--no-tags", "origin", commit.sha]);
     } catch (error) {
       if (context.signal.aborted) throw error;
       throw new TransientError(`git fetch ${commit.sha}: ${message(error)}`);
     }
+  }
   const local = await git([
     "rev-parse",
     `${commit.sha}^1`,

@@ -81,6 +81,8 @@ export interface CorrectionInput {
   sources: readonly PinnedSource[];
   /** The findings of this item's earlier repairs, oldest first. */
   prior: readonly string[];
+  /** The conditional items settled as skipped: they delivered nothing to blame. */
+  skipped?: ReadonlySet<string>;
   /** The operator's answer to an earlier question: the correction itself. */
   operatorAnswer?: string;
   /**
@@ -128,7 +130,10 @@ function correctionFinding(correction: Correction): string {
 }
 
 /** Whether `correction` already failed: the same failure and the same correction. */
-function repeated(correction: Correction, prior: readonly string[]): boolean {
+export function repeated(
+  correction: Correction,
+  prior: readonly string[],
+): boolean {
   const head = `The previous attempt failed: ${correction.failure}\n`;
   const tail = `\nRequired correction: ${correction.correction}`;
   return prior.some(
@@ -307,13 +312,7 @@ async function diagnose(
       } else if (decoded.decision === "predecessor") {
         // The predecessor's repair counts against its own allowances,
         // which bound a blame loop between the two items.
-        input.log({
-          event: "diagnosis",
-          decision: "predecessor",
-          predecessor: decoded.predecessor,
-          path: decoded.path,
-        });
-        const blamed: Correction = {
+        const proposed: Correction = {
           source: "diagnosis",
           failure: bounded(
             `Work Item ${input.item.id}, which builds on this item, failed, and the diagnosis traced the failure to this item's result:\n${failure}`,
@@ -322,12 +321,22 @@ async function diagnose(
           path: decoded.path,
           correction: decoded.correction,
         };
-        return {
-          kind: "predecessor",
-          predecessor: decoded.predecessor,
-          correction: blamed,
-          finding: correctionFinding(blamed),
-        };
+        if (!repeated(proposed, input.prior)) {
+          input.log({
+            event: "diagnosis",
+            decision: "predecessor",
+            predecessor: decoded.predecessor,
+            path: decoded.path,
+          });
+          return {
+            kind: "predecessor",
+            predecessor: decoded.predecessor,
+            correction: proposed,
+            finding: correctionFinding(proposed),
+          };
+        }
+        rejected =
+          "that blame already failed for this same failure (see prior); propose a different correction, or return operator with a question";
       } else {
         const proposed: Correction = {
           source: "diagnosis",
@@ -372,9 +381,10 @@ interface DiagnosisAnswer {
 
 /**
  * The Work Items `item` builds on, directly or not, that deliver work: the
- * ones a diagnosis may blame. A native-stack layer below is one of them.
+ * ones a diagnosis may blame. A native-stack layer below is one of them; a
+ * conditional item settled as skipped (`skipped`) delivered nothing.
  */
-export function predecessors(plan: Plan, item: WorkItem): WorkItem[] {
+function predecessors({ plan, item, skipped }: CorrectionInput): WorkItem[] {
   const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
   const seen = new Set<string>();
   const visit = (id: string) => {
@@ -386,15 +396,16 @@ export function predecessors(plan: Plan, item: WorkItem): WorkItem[] {
   };
   visit(item.id);
   return plan.items.filter(
-    (entry) => seen.has(entry.id) && (entry.kind ?? "work") === "work",
+    (entry) =>
+      seen.has(entry.id) &&
+      (entry.kind ?? "work") === "work" &&
+      !skipped?.has(entry.id),
   );
 }
 
 /** Owned by one of the item's predecessors. */
 const predecessorOwns = (input: CorrectionInput, path: string): boolean =>
-  predecessors(input.plan, input.item).some((entry) =>
-    ownsPath(path, entry.ownedPaths),
-  );
+  predecessors(input).some((entry) => ownsPath(path, entry.ownedPaths));
 
 /**
  * Decode one answer, or the reason it is invalid, phrased so a re-ask with
@@ -451,12 +462,12 @@ function decodeDiagnosis(
       return `a repair's path must name one file the Work Item owns (owned paths: ${item.ownedPaths.join(", ")}); ${path || "the answer"} does not. If the fix is outside them, return operator with a question`;
   }
   if (decision === "predecessor") {
-    const blamed = predecessors(input.plan, item).find(
+    const blamed = predecessors(input).find(
       (entry) => entry.id === predecessor.trim(),
     );
     if (!blamed)
       return `a predecessor blame names one of predecessors (${
-        predecessors(input.plan, item)
+        predecessors(input)
           .map((entry) => entry.id)
           .join(", ") || "this Work Item has none"
       }); ${predecessor || "the answer"} is not one`;
@@ -697,7 +708,7 @@ function renderDiagnosis(
       validation: item.validation.map((entry) => entry.command),
       brief: item.brief,
     },
-    predecessors: predecessors(input.plan, item).map((entry) => ({
+    predecessors: predecessors(input).map((entry) => ({
       id: entry.id,
       title: entry.title,
       ownedPaths: entry.ownedPaths,

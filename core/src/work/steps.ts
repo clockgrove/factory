@@ -84,6 +84,7 @@ import {
   type CorrectionResult,
   correction,
   type RepairFinding,
+  repeated,
 } from "../repair.js";
 import type { ReviewArtifact } from "../review/artifacts.js";
 import { reviewObjective } from "../review/final.js";
@@ -113,6 +114,7 @@ import { discover, discoveryInputs } from "./discovery.js";
 import {
   fact,
   facts,
+  type ItemFacts,
   itemsWith,
   type KeptSelection,
   type Refused,
@@ -983,11 +985,12 @@ async function repairContext(
     | undefined;
   const sources = await pinnedSources(state, deps, signal);
   const answer = answered?.text;
-  const result = await correction({
+  let result = await correction({
     planner: deps.planner,
     plan,
     item,
     finding,
+    skipped: new Set(skippedItems(state, plan).map((entry) => entry.item.id)),
     checkout: deps.config.checkout,
     base,
     commit: refusedOf(state, item.id)?.commit ?? previous?.commit ?? base,
@@ -1003,8 +1006,23 @@ async function repairContext(
     signal,
     log: context.log,
   });
+  // A predecessor correction that already failed for the same failure is
+  // never repeated: it asks, like a repeated correction of this item.
+  if (
+    result.kind === "predecessor" &&
+    repeated(
+      result.correction,
+      fact(state, "diagnosis", result.predecessor)?.applied ?? [],
+    )
+  )
+    result = {
+      kind: "question",
+      question: `This correction of Work Item ${result.predecessor} already failed for the same failure, so Factory won't repeat it:\n\n${result.finding}\n\nAnswer with a different correction, or cancel.`,
+    };
   if (result.kind === "predecessor")
-    return { outcome: blameOutcome(state, deps, item, result, history.count) };
+    return {
+      outcome: blameOutcome(state, deps, item, result, history.count, saved),
+    };
   if (result.kind === "question") {
     const rereviewed = resultRereviews(state);
     const recheck = (await refusedResult(
@@ -1088,6 +1106,7 @@ function blameOutcome(
   item: WorkItem,
   blame: Extract<CorrectionResult, { kind: "predecessor" }>,
   repair: number,
+  saved: ItemFacts["diagnosis"] | undefined,
 ): Outcome {
   const plan = currentPlan(state)!;
   const stacked = stackOf(plan, deps);
@@ -1133,7 +1152,15 @@ function blameOutcome(
         ),
         ...facts(
           {
-            diagnosis: null,
+            // The blame joins this item's tried corrections, so the
+            // diagnosis never repeats it; a saved correction stays its own
+            // repair's (0: none).
+            diagnosis: {
+              repair: saved?.repair ?? 0,
+              context: saved?.context ?? { finding: blame.correction.failure },
+              applied: [...(saved?.applied ?? []), blame.finding],
+              ...(saved?.answered ? { answered: saved.answered } : {}),
+            },
             ...(refused
               ? {
                   refused: { ...refused, replayOnly: true as const },

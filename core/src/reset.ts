@@ -7,6 +7,7 @@ import type { Plan } from "./planning/types.js";
 import { readQueue } from "./queue.js";
 import { type RequestResult, refused, type StoredRequest } from "./requests.js";
 import {
+  deadlineAt,
   type Frozen,
   newObjective,
   type ObjectiveState,
@@ -47,12 +48,16 @@ export function resetRecord(
   hadState: boolean,
   github: GitHubModule | undefined,
   frozen: Frozen | undefined,
+  /** `queue.objectiveDeadlineSeconds`: a reset with no readable old state admits the Objective, so its deadline starts now. */
+  deadlineSeconds: number | undefined,
 ): ObjectiveState {
   const now = new Date();
   const state = newObjective(issue, now, old?.frozen ?? frozen);
   state.status = "resetting";
   if (old?.startedAt) state.startedAt = old.startedAt;
-  if (old?.deadline) state.deadline = old.deadline;
+  // A readable old state keeps its deadline, or its lack of one.
+  const deadline = old ? old.deadline : deadlineAt(now, deadlineSeconds);
+  if (deadline) state.deadline = deadline;
   if (old?.control) state.control = old.control;
   if (old) state.appliedRequests = old.appliedRequests;
   const module = (old?.modules.github as GitHubModule | undefined) ?? github;

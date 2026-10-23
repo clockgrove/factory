@@ -535,6 +535,7 @@ export async function serve(options: ServeOptions): Promise<number> {
       hadState,
       unreadable.get(issue)?.github,
       options.frozen,
+      options.deadlineSeconds,
     );
     // Its steps are stopped, and the rebuild starts only once they have
     // ended (each by its deadline at the latest), so no effect of theirs

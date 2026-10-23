@@ -432,6 +432,21 @@ export class GitHub {
     throw new Unreadable(`GitHub sent issue #${issue} without body_html`);
   }
 
+  /**
+   * `text` as GitHub renders an issue body in this repository (GFM, the
+   * same renderer and sanitizer as `body_html`). A read: it writes nothing.
+   */
+  async renderMarkdown(text: string, signal?: AbortSignal): Promise<string> {
+    const response = await this.send(
+      "POST",
+      "/markdown",
+      { text, mode: "gfm", context: this.repository },
+      signal,
+      { accept: "text/html" },
+    );
+    return await response.text();
+  }
+
   async postComment(
     issue: number,
     body: string,
@@ -603,20 +618,21 @@ export class GitHub {
   // next run, never made twice.
 
   /**
-   * Issues with `label` that Factory's login opened, updated from `since`
-   * on, newest first: one bounded, paginated list that stops at the first
-   * page reaching issues created before `since`. Past `maxPages` pages it
-   * throws, so a lookup never misses an issue and makes it again.
+   * Issues (with `label`, when given) that Factory's login opened, updated
+   * from `since` on, newest first: one bounded, paginated list that stops
+   * at the first page reaching issues created before `since`. Past
+   * `maxPages` pages it throws, so a lookup never misses an issue and
+   * makes it again.
    */
   async issuesByLabel(
-    label: string,
+    label: string | undefined,
     since: string | undefined,
     signal?: AbortSignal,
     maxPages = 10,
   ): Promise<IssueSummary[]> {
     const self = await this.login(signal);
     const query = [
-      `labels=${encodeURIComponent(label)}`,
+      ...(label ? [`labels=${encodeURIComponent(label)}`] : []),
       "state=all",
       `creator=${encodeURIComponent(self)}`,
       "sort=created",
@@ -634,7 +650,7 @@ export class GitHub {
     );
     if (found.length > maxPages * 100)
       throw new Error(
-        `More than ${maxPages * 100} issues labelled ${label} were updated since ${since}: too many to look up`,
+        `More than ${maxPages * 100} issues${label ? ` labelled ${label}` : ""} were updated since ${since}: too many to look up`,
       );
     return found.filter((issue) => issue.pull_request === undefined);
   }

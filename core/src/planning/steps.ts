@@ -1171,10 +1171,38 @@ export async function readObjective(
     title: found.title,
     reviewArtifacts: config.reviewArtifacts,
   };
+  const problems = await objectiveProblems(config, inputs, signal);
+  if (problems.length) return { hold: objectiveProblemsHold(problems, again) };
+  // Planning reads a base that has its predecessors' accepted work.
+  const predecessors = predecessorEvidence(state);
+  if (predecessors.length) {
+    const off = await predecessorsOnBase(
+      config.checkout,
+      predecessors,
+      inputs.base,
+      signal,
+    );
+    if (off) return { hold: predecessorsHold(off) };
+    inputs.predecessors = predecessors;
+  }
+  return { inputs };
+}
+
+/**
+ * The Objective checks on what GitHub shows of it at `inputs.base`: its
+ * sections, its declarations (Package manager update, Quality checkpoint,
+ * Workspace package additions, Adaptive workflow; checked here once,
+ * trusted afterwards), its recipe, its commands and local executables.
+ * Sets `inputs.recipe` and `inputs.adaptiveGraph`. The check step and
+ * `factory propose` (proposals.ts) both use it.
+ */
+export async function objectiveProblems(
+  config: CoreConfig,
+  inputs: ObjectiveInputs,
+  signal: AbortSignal,
+): Promise<string[]> {
+  const { shown } = inputs;
   const { problems } = checkObjective(shown.blocks);
-  // The optional declarations (Package manager update, Quality checkpoint,
-  // Workspace package additions, Adaptive workflow): checked here once,
-  // trusted afterwards.
   problems.push(...declarationProblems(shown.blocks));
   const recipe = await selectRecipe(
     shown.blocks,
@@ -1203,20 +1231,7 @@ export async function readObjective(
     );
   if (!problems.length)
     problems.push(...(await localExecutables(inputs, config, signal)).problems);
-  if (problems.length) return { hold: objectiveProblemsHold(problems, again) };
-  // Planning reads a base that has its predecessors' accepted work.
-  const predecessors = predecessorEvidence(state);
-  if (predecessors.length) {
-    const off = await predecessorsOnBase(
-      config.checkout,
-      predecessors,
-      inputs.base,
-      signal,
-    );
-    if (off) return { hold: predecessorsHold(off) };
-    inputs.predecessors = predecessors;
-  }
-  return { inputs };
+  return problems;
 }
 
 /** Where the operator's approval of a non-writer's Objective is kept. */

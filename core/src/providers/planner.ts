@@ -1,6 +1,7 @@
 /**
  * The Planner seam: one structured answer from a model, for planning, plan
- * review, result review, final review, diagnosis and semantic discovery. Provider APIs stay in
+ * review, result review, final review, diagnosis, semantic discovery and
+ * `propose` (proposals.ts). Provider APIs stay in
  * the adapters (codex.ts, claude.ts).
  */
 import { accessSync, constants, statSync } from "node:fs";
@@ -24,6 +25,7 @@ export const PLANNER_PHASES = [
   "diagnosis",
   "dream",
   "discovery",
+  "propose",
 ] as const;
 export type PlannerPhase = (typeof PLANNER_PHASES)[number];
 

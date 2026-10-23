@@ -212,6 +212,20 @@ The preview prints JSON with the resolved recipe, its stages, capabilities and a
 - Keep it to about one page of prose.
 - The core can't create child Objectives yet. If a plan splits the Objective into children, the run holds with `replan` or `cancel`; split a large goal into separate Objectives yourself.
 
+### Propose Objectives
+
+`factory propose` drafts Objectives with the planner, checks them like a queued Objective, and previews them. Nothing goes to GitHub until you approve:
+
+```sh
+factory propose "Add a --json flag to the export command" --repo OWNER/NAME
+factory propose --source 'docs/roadmap.md#Next release' --repo OWNER/NAME
+factory propose --file /abs/draft.json --approve SHA256 --enqueue --repo OWNER/NAME
+```
+
+- An intent drafts one Objective. `--source DOC#HEADING` drafts one per roadmap item of that section at the default branch, with their dependencies; a further `--source` adds context.
+- The draft is one JSON file (`--file` names a new one, outside the checkout). To change it, edit its objectives, then approve the file's new SHA-256 (`sha256sum`).
+- `--approve` creates each issue once, however often it runs, and links each dependency as blocked-by. `--enqueue` also queues them, and dependents wait for what they depend on.
+
 ## Run
 
 - **Queue it.** Set the issue's `Factory` field to Queued, or run `factory run N --repo OWNER/NAME`, which queues it and follows it to the end. `factory run` exits 0 when done, 2 when it needs you, and 1 when cancelled. `--deadline 2h` (or an ISO time) cancels it then.

@@ -875,7 +875,7 @@ export function adaptiveGraph(
 }
 
 const GATED =
-  "planning.adaptiveGraph is off: Factory doesn't run discovery items, work conditions or expansions yet, so the planner isn't offered them";
+  "planning.adaptiveGraph is off, so the planner isn't offered discovery items, work conditions or expansions";
 
 /** What this installation can do with a recipe's declarations. */
 function capabilityStatus(

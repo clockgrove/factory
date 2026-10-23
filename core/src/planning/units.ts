@@ -119,8 +119,9 @@ export function unitOf(
 
 /**
  * Items at or behind an expansion's integration barrier never chain: the
- * barrier must integrate on its own. Core does not settle expansions, so
- * every declared barrier counts.
+ * barrier waits for every child the expansion adds (planning/expansion.ts),
+ * so it integrates on its own. Children never chain either: each depends
+ * on the discovery producer, which is standalone.
  */
 function expansionBarriers(
   plan: Pick<Plan, "items" | "expansions">,

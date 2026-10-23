@@ -12,6 +12,7 @@ import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
 import {
   ACCEPTED_AT,
+  acceptedPlan,
   currentPlan,
   amendmentKey as KEY,
   proposalsOf,
@@ -637,7 +638,9 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
       if ("problems" in built)
         return done({ rejected: built.problems.join("; ") });
       const { facts } = built;
-      const plan = currentPlan(state)!;
+      // The saved plan: settled expansions' children derive from it, and
+      // an amendment keeps every envelope whose producer started.
+      const plan = acceptedPlan(state)!;
       const progress = amendmentProgress(state, plan, proposal);
       const profiles = offeredProfiles(config);
       const wire = {
@@ -822,7 +825,7 @@ function amendReviewStep(
           actor: proposal.actor,
           discovery: proposal.discovery,
           ...(proposal.worker ? { worker: proposal.worker } : {}),
-          previousPlan: currentPlan(state),
+          previousPlan: acceptedPlan(state),
         },
       });
       const { workDir, repository } = await planningTree(

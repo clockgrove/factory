@@ -79,13 +79,15 @@ export interface CoreConfig {
     context?: PlanningContext;
     /**
      * Offer discovery items, declared work conditions and expansion
-     * envelopes to the planner for an Adaptive workflow Objective. Off by
-     * default, and kept off until the core runs them all: discovery items
-     * run (work/discovery.ts) and conditions skip the other branch
-     * (planning/plan.ts conditionVerdict), but an expansion would add no
-     * children.
+     * envelopes to the planner for an Adaptive workflow Objective. The core
+     * runs them all: discovery items observe (work/discovery.ts), conditions
+     * skip the other branch (planning/plan.ts conditionVerdict) and
+     * expansions add their children (planning/expansion.ts). Still off by
+     * default: an operator turns on plans that grow at run time.
      */
     adaptiveGraph: boolean;
+    /** The controller's cap on the children one expansion envelope adds; over it the producer holds. */
+    maxExpansionChildren: number;
     /** The ceiling on a discovery item's entry, byte and attempt allowance: the wire and graph.ts refuse more. */
     discoveryLimits: DiscoveryLimits;
   };
@@ -577,6 +579,7 @@ export function loadConfig(repository: string): CoreConfig {
           playbook: text(".factory/playbook.md"),
           context: optional(planningContext),
           adaptiveGraph: flag(false),
+          maxExpansionChildren: whole(1, 50, 1000),
           discoveryLimits: object({
             maxEntries: whole(1, DISCOVERY_LIMITS.maxEntries, 100_000),
             maxBytes: whole(1, DISCOVERY_LIMITS.maxBytes, 1024 * 1024 * 1024),

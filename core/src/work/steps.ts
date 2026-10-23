@@ -48,6 +48,7 @@ import {
 } from "../media.js";
 import { checkObjective, objectiveText } from "../objective.js";
 import { forceRemove } from "../paths.js";
+import { expandAt, expansionsOf } from "../planning/expansion.js";
 import {
   BaseFiles,
   finalCommands,
@@ -305,7 +306,7 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
       return discoveryStep(item, deps);
     // Aggregates, QA and discovery deliver nothing: their merge step settles them.
     if (phase === "merge" && (item.kind ?? "work") !== "work")
-      return settleStep(item);
+      return settleStep(item, deps);
     return itemStep(item, phase, deps, place);
   };
   const steps: Step[] = [];
@@ -2713,12 +2714,40 @@ function skippedItems(
 }
 
 /** The merge step of an item that delivers nothing (aggregate, QA, discovery): it settles. */
-function settleStep(item: WorkItem): Step {
+function settleStep(item: WorkItem, deps: BuildDeps): Step {
   return {
     key: stepKey(item.id, "merge"),
     deadlineMs: MINUTE,
-    async run(): Promise<Outcome> {
-      return { kind: "done", result: { settled: item.kind } };
+    async run({ state, log }): Promise<Outcome> {
+      if (item.kind !== "discovery")
+        return { kind: "done", result: { settled: item.kind } };
+      // A discovery item settles its expansions with it: their children
+      // join the plan from this result (planning/expansion.ts).
+      const expansions = expandAt(
+        state,
+        currentPlan(state)!,
+        item,
+        deps.config.planning.maxExpansionChildren,
+      );
+      if (typeof expansions === "string")
+        return hold(
+          `Discovery item ${item.id} can't settle the expansions that read it:\n\n${expansions}\n\nAnswer \`replan\` to plan the work again, or cancel.`,
+          ["replan", "cancel"],
+        );
+      for (const expanded of expansions)
+        log({
+          event: "expansion-settled",
+          item: item.id,
+          expansion: expanded.envelopeId,
+          children: expanded.children.map((child) => child.id),
+        });
+      return {
+        kind: "done",
+        result: {
+          settled: item.kind,
+          ...(expansions.length ? { expansions } : {}),
+        },
+      };
     },
   };
 }
@@ -2941,6 +2970,9 @@ function finalReviewStep(deps: BuildDeps): Step {
           itemId: item.id,
           ...condition,
         })),
+        expansions: expansionsOf(state, plan).flatMap(({ expanded }) =>
+          expanded ? [expanded] : [],
+        ),
         signal,
         log: context.log,
       });
@@ -3167,6 +3199,10 @@ function reportStep(deps: BuildDeps): Step {
             : undefined;
         return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}`;
       });
+      for (const { envelope, expanded } of expansionsOf(state, plan))
+        lines.push(
+          `- Expansion **${envelope.id}** from ${envelope.input.producerItemId}: ${expanded!.children.length} children${expanded!.children.length ? ` (${expanded!.children.map((child) => child.id).join(", ")})` : ""}. ${expanded!.evidence}`,
+        );
       const repairs = Object.values(state.repairs ?? {}).reduce(
         (sum, r) => sum + r.count,
         0,

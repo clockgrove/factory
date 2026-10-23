@@ -2203,7 +2203,10 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   // keeping its result for dependents; semantic discovery of nothing needs
   // no call either; past its allowance it holds with the evidence. A
   // conditional item off its branch settles as skipped with the evidence,
-  // and its dependent runs; one whose condition can't be read asks.
+  // and its dependent runs; one whose condition can't be read asks. An
+  // expansion's producer settles it: one child per directory batch joins
+  // the plan and runs, and its barrier waits; over its child allowance,
+  // the producer asks instead.
   const sha = (text) => createHash("sha256").update(text).digest("hex");
   const discovery = (id, mode, selectors, maxEntries = 10) => ({
     id,
@@ -2220,6 +2223,33 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
       allowance: { maxEntries, maxBytes: 1024, maxAttempts: 1 },
     },
   });
+  const envelope = (id, producer, maxChildren) => ({
+    schemaVersion: 1,
+    id,
+    input: {
+      producerItemId: producer,
+      role: `${producer}-files`,
+      schema: "factory.repository-inventory/v1",
+    },
+    selectors: ["src/"],
+    workShape: "migration",
+    selection: { kind: "all-regular-files" },
+    batching: { maxFilesPerChild: 5 },
+    limits: { maxChildren, maxIterations: 1 },
+    resources: [],
+    eligibleProfileIds: [],
+    dependencies: [],
+    integrationBarrierItemIds: ["g"],
+    empty: "settle-without-children",
+    template: {
+      id: `${id}-template`,
+      title: "Migrate",
+      ownedPaths: ["src/"],
+      dependencies: [],
+      validation: [],
+      brief: "Migrate the file.",
+    },
+  });
   seed(baseline, 54, "building", {
     done: {
       check: {},
@@ -2227,6 +2257,15 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
         base: planned,
         items: [
           discovery("d", "inventory", ["src/"]),
+          discovery("o", "inventory", ["src/"]),
+          {
+            id: "g",
+            kind: "aggregate",
+            ownedPaths: [],
+            dependencies: [],
+            validation: [],
+            children: [],
+          },
           discovery("s", "semantic", ["none/"]),
           discovery("e", "inventory", ["src/"], 1),
           {
@@ -2265,19 +2304,28 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
             predicate: { kind: "inventory-empty" },
           },
         ],
+        expansions: [envelope("x", "d", 2), envelope("y", "o", 1)],
         coverage: [],
       },
     },
     kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
   });
   service = serve(baseline);
+  const expandedIds = () =>
+    (
+      stateOf(baseline, 54).done["item:d:merge"]?.expansions?.[0]?.children ??
+      []
+    ).map((child) => child.id);
   await until(
     () =>
       stateOf(baseline, 54).done["item:d:merge"] &&
       stateOf(baseline, 54).done["item:s:merge"] &&
       stateOf(baseline, 54).done["item:f:merge"] &&
-      stateOf(baseline, 54).holds.length === 2,
-    "d, s, k and f settle, e and u ask",
+      stateOf(baseline, 54).holds.length === 3 &&
+      expandedIds().every(
+        (id) => stateOf(baseline, 54).retries[`item:${id}:work`],
+      ),
+    "d, s, k and f settle, x's children run, e, u and o ask",
     30_000,
   );
   const observed = stateOf(baseline, 54);
@@ -2311,6 +2359,24 @@ test("a plan's steps run in order, a dependent waits for its dependency's merge,
   assert.deepEqual(
     unread.options.map((option) => option.answer),
     ["replan", "retry", "cancel"],
+  );
+  // One child per directory, with ids that hash the commit and the batch.
+  const [expanded] = observed.done["item:d:merge"].expansions;
+  assert.deepEqual(
+    expanded.children.map((child) => child.paths),
+    [["src/a.ts"], ["src/b/c.ts"]],
+  );
+  assert.equal(expanded.commit, planned);
+  for (const child of expanded.children) {
+    assert.match(child.id, /^x-[0-9a-f]{12}$/);
+    assert.ok(observed.retries[`item:${child.id}:work`], child.id);
+  }
+  assert.equal(observed.done["item:g:merge"], undefined);
+  const over = observed.holds.find((hold) => hold.step === "item:o:merge");
+  assert.match(over.question, /over its allowance of 1 children/);
+  assert.deepEqual(
+    over.options.map((option) => option.answer),
+    ["replan", "cancel"],
   );
   const allowance = observed.holds.find((hold) => hold.step === "item:e:work");
   assert.match(allowance.question, /2 files of 4 bytes/);

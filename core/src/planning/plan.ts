@@ -6,6 +6,7 @@ import type {
   AmendmentResult,
   AmendmentsModule,
 } from "./amendments.js";
+import { withExpansions } from "./expansion.js";
 import type { ObjectiveInputs } from "./steps.js";
 import type { Plan, WorkItem } from "./types.js";
 
@@ -14,6 +15,10 @@ import type { Plan, WorkItem } from "./types.js";
  * `state.done.plan`; an accepted amendment saves its plan under its own key.
  * Everything else reads the plan the Objective runs now through
  * `currentPlan`, and what it was planned from through `acceptedInputs`.
+ * Settled expansion envelopes join it as a derived layer (expansion.ts
+ * withExpansions): their children run like any Work Item. Only amendments,
+ * which keep every envelope whose producer started, read the saved plan
+ * without that layer (`acceptedPlan`).
  * A conditional Work Item's declared condition is read here too
  * (`conditionVerdict`), from its producer's kept discovery result.
  */
@@ -32,8 +37,14 @@ export function proposalsOf(state: ObjectiveState): AmendmentProposal[] {
   ).filter((proposal) => proposal.plan === accepted);
 }
 
-/** The plan the Objective runs now: the latest accepted amendment's, else the accepted plan. */
+/** The plan the Objective runs now, with its settled expansions' children. */
 export function currentPlan(state: ObjectiveState): Plan | undefined {
+  const plan = acceptedPlan(state);
+  return plan && withExpansions(state, plan);
+}
+
+/** The latest accepted amendment's plan, else the accepted plan, as saved. */
+export function acceptedPlan(state: ObjectiveState): Plan | undefined {
   const proposals = proposalsOf(state);
   for (let at = proposals.length - 1; at >= 0; at--) {
     const result = state.done[amendmentKey(proposals[at]!.id)] as
@@ -58,8 +69,12 @@ export function profilesLacking(
     isObject(execution) && isObject(execution.profiles)
       ? execution.profiles
       : {};
+  const plan = currentPlan(state);
   const used = new Set(
-    (currentPlan(state)?.items ?? []).flatMap((item) =>
+    [
+      ...(plan?.items ?? []),
+      ...(plan?.expansions ?? []).map((envelope) => envelope.template),
+    ].flatMap((item) =>
       item.executionProfile ? [item.executionProfile.id] : [],
     ),
   );

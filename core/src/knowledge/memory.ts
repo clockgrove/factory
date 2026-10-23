@@ -15,7 +15,7 @@
  */
 import { BaseFiles } from "../planning/facts.js";
 import { pathsOverlap } from "../planning/graph.js";
-import { currentPlan } from "../planning/plan.js";
+import { currentPlan, decisionsOf } from "../planning/plan.js";
 import type { ObjectiveState } from "../state.js";
 import { answersOf, runOf, TERMINAL } from "../state.js";
 import { mergeOf } from "../work/merged.js";
@@ -382,9 +382,29 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
       paths: [],
       digests: {},
     });
+  for (const decision of decisionsOf(state))
+    records.push({
+      kind: "decision",
+      objective,
+      run,
+      ...(decision.itemId ? { item: decision.itemId } : {}),
+      tree: decision.tree,
+      authority: "human-decision",
+      validity: "current",
+      summary: `Criterion ${decision.outcome === "accept" ? "accepted" : "refused"} at ${decision.itemId ? `Work Item ${decision.itemId}'s review` : "final review"}: ${firstLine(decision.reason)}`,
+      body: `Criterion: ${decision.criterion}\nOutcome: ${decision.outcome}\nReason: ${decision.reason}\nTree: ${decision.tree}\nBy ${decision.by} at ${decision.at}`,
+      paths: [],
+      digests: {},
+    });
   for (const [step, answer] of Object.entries(state.answers)) {
     // A bare retry says nothing a later plan can use.
     if (!answer.text && answer.answer === "retry") continue;
+    // A review's accept or refuse is recorded above, with its criterion.
+    if (
+      (answer.answer === "accept" || answer.answer === "refuse") &&
+      (step === "final-review" || step.endsWith(":review"))
+    )
+      continue;
     const { item } = scope(step);
     records.push({
       kind: "decision",

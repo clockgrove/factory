@@ -1801,7 +1801,7 @@ function reviewOutcome(
   if (review.kind === "refused") return refused(review);
   const lines = review.questions.map(
     (q) =>
-      `${q.criterionIndex}. ${q.criterion}\n   ${q.question}${q.detail ? `\n   ${q.detail}` : ""}`,
+      `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}${q.detail ? `\n   ${q.detail}` : ""}`,
   );
   return {
     ...hold(
@@ -1814,7 +1814,7 @@ function reviewOutcome(
 
 /** What a hold asking for criterion decisions says about them. */
 const DECIDE_NOTE =
-  "Answer `accept <n> <reason>` when criterion n is met, or `refuse <n> <reason>` when it isn't. Each answer decides one criterion, and the review goes on once every open one is decided, judging again only what is still undecided. Final review, the report and status list each decision with its reason.";
+  "Answer `accept <n> <reason>` when criterion n is met by this result, or `refuse <n> <reason>` when it isn't. Each answer decides one criterion on this exact result, and the review goes on once every open one is decided, judging again only what is still undecided. Final review, the report and status list each decision with its reason.";
 
 /** What `refuse <n>` does at a Work Item's review. */
 const REFUSES_ITEM =
@@ -1823,8 +1823,8 @@ const REFUSES_ITEM =
 /**
  * The per-criterion answers to `review`'s open criteria: `accept <n>` for
  * each the reviewer refused, and `accept <n>` and `refuse <n>` for each it
- * asked about, n being the criterion's index in the review. Both need the
- * operator's reason.
+ * asked about, n being the criterion's number in the question (its
+ * review index plus one). Both need the operator's reason.
  */
 function criterionOffers(
   review: Exclude<ResultReview, { kind: "pass" }>,
@@ -1835,16 +1835,19 @@ function criterionOffers(
   const option = (
     outcome: "accept" | "refuse",
     entry: { criterionIndex: number; criterion: string },
-  ): HoldOption => ({
-    answer: outcome,
-    family: outcome,
-    arg: String(entry.criterionIndex),
-    consequence:
-      outcome === ACCEPT
-        ? `Records criterion ${entry.criterionIndex} (${short(entry.criterion)}) as met with your reason; the review counts it as passed from then on.`
-        : `Records criterion ${entry.criterionIndex} (${short(entry.criterion)}) as unmet with your reason, ${refuses}.`,
-    needsText: true,
-  });
+  ): HoldOption => {
+    const n = entry.criterionIndex + 1;
+    return {
+      answer: outcome,
+      family: outcome,
+      arg: String(n),
+      consequence:
+        outcome === ACCEPT
+          ? `Records criterion ${n} (${short(entry.criterion)}) as met by this result with your reason; reviews of this exact result count it as passed.`
+          : `Records criterion ${n} (${short(entry.criterion)}) as unmet by this result with your reason, ${refuses}.`,
+      needsText: true,
+    };
+  };
   const refused =
     review.kind === "refused"
       ? review.refused.filter((entry) => entry.source === "model")
@@ -1894,7 +1897,7 @@ function criterionDecisions(
   const open = [
     ...(held.kind === "refused" ? held.refused : []),
     ...held.questions,
-  ].find((entry) => String(entry.criterionIndex) === answer.arg);
+  ].find((entry) => String(entry.criterionIndex + 1) === answer.arg);
   const decisions =
     open && !kept.some((entry) => entry.holdId === answer.holdId)
       ? [
@@ -3129,15 +3132,16 @@ function finalReviewStep(deps: BuildDeps): Step {
           "and final review refuses the integrated result",
           (refusal) => {
             const lines = refusal.refused.map(
-              (r) => `${r.criterionIndex}. ${r.criterion}: ${r.detail}`,
+              (r) => `${r.criterionIndex + 1}. ${r.criterion}: ${r.detail}`,
             );
             const open = refusal.questions.map(
-              (q) => `${q.criterionIndex}. ${q.criterion}\n   ${q.question}`,
+              (q) =>
+                `${q.criterionIndex + 1}. ${q.criterion}\n   ${q.question}`,
             );
             const offers = criterionOffers(refusal, "and the refusal stands");
             return {
               ...hold(
-                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed from then on, and the review goes on once no refusal stands.` : ""}`,
+                `Final review refused the integrated result:\n\n${lines.join("\n")}${open.length ? `\n\nIt also needs your judgment on:\n\n${open.join("\n")}` : ""}\n\nFix it on the default branch and answer \`retry\`, or \`replan\` to plan the remaining work, or cancel.${offers.length ? ` If the reviewer was wrong about a criterion, answer \`accept <n> <reason>\`: it counts as passed for this integrated result (a later one is judged again), and the review goes on once no refusal stands.` : ""}`,
                 ["retry", "replan", ...offers, "cancel"],
               ),
               keep: {

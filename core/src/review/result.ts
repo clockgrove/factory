@@ -76,8 +76,9 @@ export interface PassedValidation {
  * An operator's `accept <n> <reason>` or `refuse <n> <reason>` to a review
  * question: criterion n is met, or unmet. Recorded against the plan
  * accepted then (`plan`, its acceptance time), one per answered question.
- * An acceptance counts as passed in every later review of the same scope;
- * a refusal only on the tree it was decided on.
+ * Either applies only to reviews of the exact tree it was decided on, in
+ * the same scope; on another tree it is evidence, and the criterion is
+ * judged again.
  */
 export interface CriterionDecision {
   criterion: string;
@@ -101,10 +102,7 @@ export function decides(
   criterion: string,
   tree: string,
 ): boolean {
-  return (
-    decision.criterion === criterion &&
-    (decision.outcome === "accept" || decision.tree === tree)
-  );
+  return decision.criterion === criterion && decision.tree === tree;
 }
 
 /** The decisions as lines for final review, the report and status. */
@@ -114,7 +112,7 @@ export function decisionLines(
 ): string[] {
   return decisions.map(
     (entry) =>
-      `${entry.criterion} (${entry.itemId ? `Work Item ${entry.itemId}` : "final review"}): ${entry.outcome === "accept" ? "accepted" : "refused"} by ${entry.by} at ${time(entry.at)}: ${entry.reason}`,
+      `${entry.criterion} (${entry.itemId ? `Work Item ${entry.itemId}` : "final review"}, tree ${entry.tree.slice(0, 12)}): ${entry.outcome === "accept" ? "accepted" : "refused"} by ${entry.by} at ${time(entry.at)}: ${entry.reason}`,
   );
 }
 
@@ -1229,7 +1227,7 @@ function decisionRows(
             path: "Operator criterion decisions",
             content: JSON.stringify({
               scope:
-                "The operator's accept or refuse of single criteria, with the reason. A decision of this review's scope is the verdict for its criterion: give that criterion any valid finding, which is not used. Decisions of other scopes are evidence of the operator's judgment, not proof of this tree.",
+                "The operator's accept or refuse of single criteria, with the reason and the tree decided. A decision of this review's scope on the reviewed tree is the verdict for its criterion: give that criterion any valid finding, which is not used. Earlier trees' decisions, and other scopes', are evidence of the operator's judgment, not proof of this tree: re-judge the criterion.",
               decisions: decisionLines(criteria),
             }),
             complete: true,

@@ -3,7 +3,7 @@ import { hold, type Outcome, type Step, type Workflow } from "./engine.js";
 import { type GitHub, GitHubError, type IssueComment } from "./github.js";
 import type { GitHubModule } from "./github-sync.js";
 import { readExpansionComments } from "./planning/expansion.js";
-import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
+import { ACCEPTED_AT, currentPlan, decisionsOf } from "./planning/plan.js";
 import type { Plan } from "./planning/types.js";
 import { readQueue } from "./queue.js";
 import { type RequestResult, refused, type StoredRequest } from "./requests.js";
@@ -14,7 +14,7 @@ import {
   type ObjectiveState,
   TERMINAL,
 } from "./state.js";
-import { facts } from "./work/facts.js";
+import { fact, facts } from "./work/facts.js";
 
 /**
  * `factory reset N` (CORE.md#State). The service saves a resetting record
@@ -263,6 +263,31 @@ export async function rebuildState(
       );
     state.done.plan = plan;
     state.kept[ACCEPTED_AT] = planAt;
+    // The operator's criterion decisions in the saved state stay: GitHub
+    // doesn't hold them. They now decide under the rebuilt plan, still
+    // only on the exact tree each was made on.
+    for (const entry of (old && decisionsOf(old)) ?? []) {
+      const moved = { ...entry, plan: planAt };
+      Object.assign(
+        state.kept,
+        entry.itemId
+          ? facts(
+              {
+                decisions: [
+                  ...(fact(state, "decisions", entry.itemId) ?? []),
+                  moved,
+                ],
+              },
+              entry.itemId,
+            )
+          : facts({
+              "final-review:decisions": [
+                ...(fact(state, "final-review:decisions") ?? []),
+                moved,
+              ],
+            }),
+      );
+    }
     // The PR that merged Work Item `id` in this plan and run, if any.
     const mergedPull = async (id: string) => {
       const merged = (

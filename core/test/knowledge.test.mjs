@@ -107,13 +107,29 @@ function seedDone(inst, issue, dir = inst.objectives) {
         "item:a:review": {
           holdId: "h1",
           answer: "accept",
+          arg: "1",
           text: "the fixture format is intended",
           by: "op",
           at: "2026-10-01T00:00:00Z",
         },
       },
       retries: {},
-      kept: {},
+      kept: {
+        "plan:acceptedAt": "2026-10-01T00:00:00Z",
+        "item:a:decisions": [
+          {
+            criterion: "Empty input parses",
+            outcome: "accept",
+            reason: "the fixture format is intended",
+            by: "op",
+            at: "2026-10-01T00:00:00Z",
+            tree: "3".repeat(40),
+            itemId: "a",
+            holdId: "h1",
+            plan: "2026-10-01T00:00:00Z",
+          },
+        ],
+      },
       repairs: {
         "item:a:work": {
           count: 1,

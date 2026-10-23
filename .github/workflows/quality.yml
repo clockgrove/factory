@@ -24,7 +24,29 @@ jobs:
       - run: npm run format:check
       - run: npm run notices:check
 
+  # The old src/ tree is frozen until cutover. Its suite runs on every push
+  # to main, and on a pull request only when the pull request changes a file
+  # outside core/ and docs/ (the only places the rebuilt core lives).
+  legacy:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: scope
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$BASE" ]; then echo run=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          outside=$(git diff --name-only "$BASE"...HEAD | grep -Ev '^(core|docs)/' || true)
+          if [ -n "$outside" ]; then echo run=true; else echo run=false; fi >> "$GITHUB_OUTPUT"
+          printf 'Changed outside core/ and docs/:\n%s\n' "${outside:-(none)}"
+
   tests:
+    needs: legacy
+    if: needs.legacy.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -33,18 +55,32 @@ jobs:
       - uses: ./.github/actions/bubblewrap
       - run: git lfs version
       - run: npm test
+
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - uses: ./.github/actions/bubblewrap
+      - run: git lfs version
       - run: npm run test:core
 
   # The single required check for main; it passes only when every job above
-  # passes, including offline installation in the integration suite.
+  # passes (the legacy suite may be skipped as out of scope), including
+  # offline installation in the integration suite.
   package-gate:
     if: always()
-    needs: [checks, tests]
+    needs: [checks, legacy, tests, core]
     runs-on: ubuntu-24.04
     steps:
       - env:
           CHECKS: ${{ needs.checks.result }}
+          LEGACY: ${{ needs.legacy.result }}
           TESTS: ${{ needs.tests.result }}
+          CORE: ${{ needs.core.result }}
         run: |
           test "$CHECKS" = success
-          test "$TESTS" = success
+          test "$LEGACY" = success
+          test "$TESTS" = success || test "$TESTS" = skipped
+          test "$CORE" = success

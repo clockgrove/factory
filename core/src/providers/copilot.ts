@@ -17,6 +17,7 @@ import type {
 } from "@github/copilot-sdk";
 import { isObject } from "../checked.js";
 import { errorMessage } from "../text.js";
+import { validationDeadlineMs } from "../validate.js";
 import {
   type SelfValidateOptions,
   SelfValidation,
@@ -93,6 +94,8 @@ interface Turn {
   prompt: string;
   images?: string[];
   idleMs: number;
+  /** The quiet bound while a tool runs, when longer than the default. */
+  toolIdleMs?: number;
   signal: AbortSignal;
   onEvent(event: SessionEvent): void;
 }
@@ -190,11 +193,12 @@ async function runTurn(turn: Turn): Promise<TurnResult> {
   }
   const root = resolve(turn.directory);
   // A running tool sends no events (Validate takes minutes): it gets the
-  // longer bound, as Claude's do, never less than the turn's own.
+  // longer bound, as Claude's do (Validate: its whole configured deadline),
+  // never less than the turn's own.
   const watchdog = new IdleWatchdog(
     turn.idleMs,
     turn.signal,
-    Math.max(ACTIVE_TOOL_IDLE_MS, turn.idleMs),
+    Math.max(ACTIVE_TOOL_IDLE_MS, turn.idleMs, turn.toolIdleMs ?? 0),
   );
   const client: CopilotClient = new sdk.CopilotClient({
     mode: "empty",
@@ -527,6 +531,12 @@ export class CopilotWorker implements Worker {
         ],
         prompt: input.prompt,
         idleMs: this.options.idleMs,
+        ...(validator && {
+          toolIdleMs: validationDeadlineMs(
+            input.item,
+            this.options.validation!.commandTimeoutMs,
+          ),
+        }),
         signal: input.signal,
         onEvent: (event) => {
           if (event.type === "tool.execution_start")

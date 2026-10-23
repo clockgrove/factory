@@ -320,6 +320,7 @@ function providerChecks(
       const problem = codexSandboxProblem(
         network,
         config.policy.allowedSecretNames,
+        config.sandbox,
       );
       const at = `provider ${name}: codex worker sandbox`;
       checks.push(
@@ -332,7 +333,7 @@ function providerChecks(
             }
           : ok(
               at,
-              `a command writes its worktree and is refused outside it (network ${network ? "host" : "off"})`,
+              `a command writes its worktree${config.sandbox.readOnlyPaths.length ? ", reads a read-only path" : ""} and is refused outside it (network ${network ? "host" : "off"})`,
             ),
       );
     }

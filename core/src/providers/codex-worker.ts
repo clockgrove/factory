@@ -27,6 +27,7 @@ import {
   packageCacheEnvironment,
   processGroups,
   ROOT_REFUSAL,
+  readOnlyMounts,
   runsAsRoot,
   toolchainDirectories,
 } from "../sandbox.js";
@@ -95,7 +96,10 @@ const WORKER_IDLE_MS = 15 * 60 * 1000;
 export interface CodexWorkerOptions {
   /** The provider's `worker` model, effort and serviceTier, resolved (selection.ts resolvedProvider). */
   model: ModelChoice<CodexEffort>;
-  /** Only `required` applies: Codex sandboxes its own shell. */
+  /**
+   * `required`, `readOnlyPaths` (read grants) and `environment` (the
+   * shell's variables) apply: Codex sandboxes its own shell.
+   */
   sandbox: SandboxConfig;
   /** The shell's network; `off` (the default) or the host's. */
   network?: "host" | "off";
@@ -131,13 +135,19 @@ interface WorkerHome {
 const PROXY = /^(?:HTTPS?|NO|ALL)_PROXY$/i;
 
 /**
- * What the worker's shell sees of the proxy variables Codex keeps to reach
- * its API: nothing when the shell has no network; with network, each URL
- * (one without a scheme read as http://) without its user name and
- * password (a URL that doesn't parse is left out), so the shell never
- * holds a proxy credential.
+ * The worker shell's environment: sandbox.environment's variables except
+ * Factory's own, and of the proxy variables Codex keeps to reach its API,
+ * nothing when the shell has no network; with network, each URL (one
+ * without a scheme read as http://) without its user name and password (a
+ * URL that doesn't parse is left out), so the shell never holds a proxy
+ * credential.
  */
-function proxyPolicy(source: NodeJS.ProcessEnv, network: boolean): string {
+function shellPolicy(
+  source: NodeJS.ProcessEnv,
+  network: boolean,
+  configured: Record<string, string>,
+  factory: readonly string[],
+): string {
   const set: string[] = [];
   const exclude: string[] = [];
   for (const [name, value] of Object.entries(source)) {
@@ -162,6 +172,10 @@ function proxyPolicy(source: NodeJS.ProcessEnv, network: boolean): string {
     url.password = "";
     set.push(`${JSON.stringify(name)} = ${JSON.stringify(url.href)}`);
   }
+  // sandbox.environment, as for Factory's sandbox: Factory's own variables win.
+  for (const [name, value] of Object.entries(configured))
+    if (!factory.includes(name) && !PROXY.test(name))
+      set.push(`${JSON.stringify(name)} = ${JSON.stringify(value)}`);
   return `
 [shell_environment_policy]
 inherit = "all"
@@ -172,8 +186,8 @@ ${exclude.length ? `exclude = ${JSON.stringify(exclude)}\n` : ""}${set.length ? 
  * A private CODEX_HOME, HOME and TMPDIR for one turn, with Factory's
  * permission profile and a link to the operator's subscription login.
  * Shell commands see only the platform paths Codex calls `:minimal`, the
- * Codex runtime, the PATH's toolchains and the worktree's own git metadata
- * read-only, the private HOME and TMPDIR, and the worktree with its `.git`
+ * Codex runtime, the PATH's toolchains, sandbox.readOnlyPaths and the
+ * worktree's own git metadata read-only, the private HOME and TMPDIR, and the worktree with its `.git`
  * entry read-only. Not the operator's HOME, logins, SSH keys or gh config,
  * Factory's state, nor the rest of the checkout's git directory. Throws a
  * setup problem; the caller holds with it.
@@ -182,6 +196,7 @@ function workerHome(
   worktree: string,
   network: boolean,
   keep: readonly string[],
+  sandbox: Pick<SandboxConfig, "readOnlyPaths" | "environment">,
   /** A retained conversation's home (privateCodexHome `root`). */
   root?: string,
 ): WorkerHome {
@@ -198,6 +213,7 @@ function workerHome(
     PATH: workerToolchainPath(process.env.PATH),
   };
   const runtime = codexRuntimeDirectory();
+  const readOnly = readOnlyMounts(sandbox.readOnlyPaths, workspace);
   return privateCodexHome({
     ...(root && { root }),
     outside: { directory: workspace, name: "worktree" },
@@ -211,6 +227,7 @@ function workerHome(
         ...[
           ...toolchainDirectories(source, workspace, "Codex workers"),
           ...gitMetadata(workspace),
+          ...readOnly,
         ].map((directory) => `${path(directory)} = "read"`),
         `${path(home)} = "write"`,
         `${path(temporary)} = "write"`,
@@ -230,7 +247,13 @@ ${grants.join("\n")}
 
 [permissions.factory.network]
 enabled = ${network}
-${proxyPolicy(source, network)}`;
+${shellPolicy(source, network, sandbox.environment, [
+  "HOME",
+  "PATH",
+  "TMPDIR",
+  "CODEX_HOME",
+  ...Object.keys(packageCacheEnvironment(join(home, ".cache"))),
+])}`;
     },
     finish: ({ root, home, env }) => {
       // Package caches stay in the private HOME, never in the worktree.
@@ -260,20 +283,22 @@ ${proxyPolicy(source, network)}`;
 }
 
 /**
- * What the probe runs: a write outside its worktree, then its result in the
- * worktree. A file, since a network-off sandbox may not write to the pipe.
+ * What the probe runs: a write outside its worktree and a read of one
+ * read-only path (when given), then their results in the worktree. A file,
+ * since a network-off sandbox may not write to the pipe.
  */
-const PROBE = `const fs=require("node:fs");let refused="";try{fs.writeFileSync(process.argv[1]+"/outside","x")}catch(e){refused=e.code}fs.writeFileSync("result",JSON.stringify({refused}))`;
+const PROBE = `const fs=require("node:fs");let refused="",unread="";try{fs.writeFileSync(process.argv[1]+"/outside","x")}catch(e){refused=e.code}const p=process.argv[2];if(p)try{fs.statSync(p).isDirectory()?fs.readdirSync(p):fs.closeSync(fs.openSync(p,"r"))}catch(e){unread=e.code||"error"}fs.writeFileSync("result",JSON.stringify({refused,unread}))`;
 
 /**
  * Codex's sandbox under a worker's own permission profile, tried with no
- * model call (\`codex sandbox\`): a command must write its worktree and be
- * refused a directory outside it. The problem, or undefined. Readiness
- * runs it.
+ * model call (\`codex sandbox\`): a command must write its worktree, be
+ * refused a directory outside it and read the first sandbox.readOnlyPaths
+ * entry. The problem, or undefined. Readiness runs it.
  */
 export function codexSandboxProblem(
   network: boolean,
   keep: readonly string[],
+  sandbox: Pick<SandboxConfig, "readOnlyPaths" | "environment">,
 ): string | undefined {
   let worktree: string | undefined;
   let outside: string | undefined;
@@ -281,15 +306,18 @@ export function codexSandboxProblem(
   try {
     worktree = mkdtempSync(join(tmpdir(), "factory-probe-"));
     outside = mkdtempSync(join(tmpdir(), "factory-probe-outside-"));
-    home = workerHome(worktree, network, keep);
+    home = workerHome(worktree, network, keep, sandbox);
+    // workerHome checked it exists; read where it is granted.
+    const readable = sandbox.readOnlyPaths[0] && real(sandbox.readOnlyPaths[0]);
     const run = spawnSync(
       home.launcher,
-      ["sandbox", "--", "node", "-e", PROBE, outside],
+      ["sandbox", "--", "node", "-e", PROBE, outside, readable ?? ""],
       { cwd: worktree, env: home.env, encoding: "utf8", timeout: 30_000 },
     );
     let refused: unknown;
+    let unread: unknown;
     try {
-      ({ refused } = JSON.parse(
+      ({ refused, unread } = JSON.parse(
         readFileSync(join(worktree, "result"), "utf8"),
       ));
     } catch {
@@ -300,6 +328,8 @@ export function codexSandboxProblem(
       existsSync(join(outside, "outside"))
     )
       return "Codex's sandbox let a command write outside its worktree";
+    if (unread)
+      return `Codex's sandbox couldn't read read-only path ${readable} (${unread})`;
     return undefined;
   } catch (error) {
     return `Factory could not set up a Codex worker home: ${detail(errorMessage(error))}`;
@@ -448,6 +478,7 @@ export class CodexWorker implements Worker {
         input.worktree,
         this.options.network === "host",
         keep,
+        this.options.sandbox,
         conversation && codexHomeOf(conversation.dir),
       );
     } catch (error) {

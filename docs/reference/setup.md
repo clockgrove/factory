@@ -19,7 +19,7 @@ Part of [the design](../DESIGN.md).
   - `sandbox.environment` paths are covered, and `sandbox.packageStore` is a directory;
   - git, git lfs, node and each final command's program are on the PATH;
   - a final command that needs the network is flagged.
-- **Providers:** each planner's and worker's SDK is installed and its login is present. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree and be refused outside it.
+- **Providers:** each planner's and worker's SDK is installed and its login is present. Account access is first known at the first call. A Codex worker's sandbox is tried under the worker's own permission profile, with `codex sandbox` and no model: a command must write its worktree, be refused outside it, and read the first `sandbox.readOnlyPaths` entry.
 - **Repository:**
   - the GitHub CLI login can read the repository and push to it;
   - PRs into the default branch may merge with a merge commit;

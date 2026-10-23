@@ -1052,6 +1052,46 @@ class Refusal extends Error {
 }
 
 /**
+ * Throws a Refusal for a path a sandbox mount would expose: the operator's
+ * real HOME, a login, Factory's own paths, runtime sockets or a shared
+ * temporary directory.
+ */
+function exposureCheck(
+  checkout: string,
+): (path: string, field: string) => void {
+  const { exposes } = privatePaths(process.env, checkout);
+  return (path, field) => {
+    if (exposes(path) || showsHostSockets(path))
+      throw new Refusal(
+        `${field} ${path} would show sandboxed commands your HOME, a login, Factory's own files, runtime sockets or the shared temporary directory`,
+        `Point ${field} at a directory of its own, outside /tmp and the runtime directories`,
+      );
+  };
+}
+
+/**
+ * sandbox.readOnlyPaths entries as the real paths a sandbox may mount
+ * read-only. Throws a Refusal for a missing or exposing one. The Codex
+ * Worker grants the same paths (codex-worker.ts).
+ */
+export function readOnlyMounts(
+  entries: readonly string[],
+  checkout: string,
+  unsafe = exposureCheck(checkout),
+): string[] {
+  return entries.map((entry) => {
+    if (!existsSync(entry))
+      throw new Refusal(
+        `read-only path ${entry} does not exist`,
+        "Create it or remove it from sandbox.readOnlyPaths",
+      );
+    const resolved = realpathSync(entry);
+    unsafe(resolved, "read-only path");
+    return resolved;
+  });
+}
+
+/**
  * Package-manager store and cache directories under `root`: the pnpm store
  * and metadata cache and the npm cache. Set explicitly, since pnpm otherwise
  * puts its store at the root of the project's mount when that differs from
@@ -1125,15 +1165,7 @@ function launch(
   }
   if (runsAsRoot() && config.required)
     throw new Refusal(ROOT_REFUSED, ROOT_FIX);
-  // Exposure is judged against the operator's real HOME and Factory's paths.
-  const { exposes } = privatePaths(process.env, checkout);
-  const unsafe = (path: string, field: string) => {
-    if (exposes(path) || showsHostSockets(path))
-      throw new Refusal(
-        `${field} ${path} would show sandboxed commands your HOME, a login, Factory's own files, runtime sockets or the shared temporary directory`,
-        `Point ${field} at a directory of its own, outside /tmp and the runtime directories`,
-      );
-  };
+  const unsafe = exposureCheck(checkout);
   // Factory's own launcher stays off the PATH, as for workers.
   const path = workerToolchainPath(base.PATH);
   let toolchains: string[];
@@ -1149,17 +1181,10 @@ function launch(
       "Run Factory with a PATH whose directories hold only tools",
     );
   }
-  const readOnly = [...config.readOnlyPaths, ...(options.readOnly ?? [])].map(
-    (entry) => {
-      if (!existsSync(entry))
-        throw new Refusal(
-          `read-only path ${entry} does not exist`,
-          "Create it or remove it from sandbox.readOnlyPaths",
-        );
-      const resolved = realpathSync(entry);
-      unsafe(resolved, "read-only path");
-      return resolved;
-    },
+  const readOnly = readOnlyMounts(
+    [...config.readOnlyPaths, ...(options.readOnly ?? [])],
+    checkout,
+    unsafe,
   );
   const env: Record<string, string> = { ...base };
   // Configured values come first, so Factory's own variables win; the

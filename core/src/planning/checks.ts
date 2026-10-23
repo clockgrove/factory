@@ -207,6 +207,14 @@ async function boundaryFindings(
     names: new Set(paths.map((path) => path.replace(/^.*\//, ""))),
   };
   const migrations = migrationDirs(paths);
+  // A bare name could live in an owned directory that already holds a file of its type.
+  const holdsType = (directory: string, name: string) => {
+    const type = /\.[^.]+$/.exec(name)?.[0];
+    return (
+      type !== undefined &&
+      paths.some((path) => path.startsWith(directory) && path.endsWith(type))
+    );
+  };
   // A name the Objective or a pinned source uses is fixed, not the worker's choice.
   const fixedTexts = [facts.body, ...facts.sources.map((s) => s.content)];
   const authorized = facts.authorizedCommands;
@@ -256,12 +264,14 @@ async function boundaryFindings(
         item.ownedPaths.some((owned) =>
           file.includes("/")
             ? owned === file || (owned.endsWith("/") && file.startsWith(owned))
-            : owned.endsWith("/") || owned.replace(/^.*\//, "") === file,
+            : owned.endsWith("/")
+              ? holdsType(owned, file)
+              : owned.replace(/^.*\//, "") === file,
         )
       )
         continue;
       found(
-        `Work Item ${item.id} acceptance names ${file}, which does not exist at the base: a new migration number or test file is the worker's choice, so describe it by role and data and leave the name out`,
+        `Work Item ${item.id} acceptance names ${file}, which does not exist at the base: a new migration number or test file is the worker's choice, so describe it by role and data and leave the name out, or give its path in a directory the item owns`,
         item.id,
       );
     }

@@ -370,7 +370,7 @@ export class GitHubSync {
           // run reopens a closed issue (rerun:cleanup).
           if (
             item?.option === queuedOption &&
-            !runner.hasWork &&
+            runner.settled &&
             moved(item, state)
           )
             this.admitItem(item, sync);

@@ -20,7 +20,7 @@ import {
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import { readShown, type ShownObjective, shownDigest } from "../shown.js";
 import type { Answer, ObjectiveState } from "../state.js";
-import { declarationProblems } from "../validate.js";
+import { adaptiveWorkflow, declarationProblems } from "../validate.js";
 import { checkPlan } from "./checks.js";
 import { observeLocalExecutables } from "./executables.js";
 import {
@@ -39,6 +39,14 @@ import {
   renderPlanningInstructions,
   revisionScope,
 } from "./prompts.js";
+import {
+  adaptiveGraph,
+  type RecipeSelection,
+  recipeFindings,
+  recipeInstallation,
+  recipePrerequisites,
+  selectRecipe,
+} from "./recipes.js";
 import {
   exportTree,
   type RepositoryView,
@@ -127,6 +135,8 @@ export interface ObjectiveInputs {
    * accepted plan all use these, whatever the configuration says later.
    */
   reviewArtifacts: ReviewArtifactSelector[];
+  /** The Objective's Workflow recipe, resolved once at the base. */
+  recipe?: RecipeSelection;
 }
 
 interface PlanRound {
@@ -186,7 +196,7 @@ function generationInputs(state: ObjectiveState, g: number): ObjectiveInputs {
 }
 
 /** Saved operator decisions in round order, from the decide steps whose key passes `keep`. */
-function decisions(
+export function decisions(
   state: ObjectiveState,
   keep: (key: string) => boolean = () => true,
 ): PlannerDecision[] {
@@ -245,9 +255,9 @@ function decisionsBefore(
 }
 
 /** Workers get a sandboxed shell (docs/CORE.md). */
-const WORKERS = { default: "shell" } as const;
+export const WORKERS = { default: "shell" } as const;
 
-const INVALID_ANSWER = "The planner's answer didn't match the schema";
+export const INVALID_ANSWER = "The planner's answer didn't match the schema";
 
 /**
  * The exact base text of the repository sections the items named in the
@@ -354,12 +364,26 @@ function planRoundStep(
         const wire = {
           child: inputs.child === true,
           reviewArtifacts: inputs.reviewArtifacts.length > 0,
+          adaptive: adaptiveGraph(inputs.shown.blocks, config),
         };
+        // An enabled section still plans, with its context and memory but
+        // without the graph kinds; say so once per generation.
+        if (
+          n === 1 &&
+          adaptiveWorkflow(inputs.shown.blocks).enabled &&
+          !config.planning.adaptiveGraph
+        )
+          context.log({
+            event: "adaptive-graph-off",
+            message:
+              "Adaptive workflow is enabled, but planning.adaptiveGraph is off: the planner isn't offered discovery items, work conditions or expansions",
+          });
         const cited = revising
           ? await citedSections(previous!.draft, fixes, facts, files)
           : [];
         const data = {
           ...planChoices(facts, wire),
+          ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
           instructions: `${renderPlanningInstructions(
             inputs.shown.blocks,
             corrections,
@@ -386,6 +410,8 @@ function planRoundStep(
           citedSections: cited,
           localExecutables: local.observations,
           reviewArtifacts: inputs.reviewArtifacts,
+          adaptive: wire.adaptive,
+          recipe: Boolean(inputs.recipe),
         });
         const answer = await deps.planner.answer({
           role: "planner",
@@ -434,6 +460,9 @@ function planRoundStep(
         const findings = [
           ...decoded.findings,
           ...(await checkPlan(decoded.plan, facts, files, previous?.draft)),
+          ...(inputs.recipe
+            ? recipeFindings(decoded.plan, inputs.recipe.recipe)
+            : []),
         ];
         return done({
           ...round,
@@ -513,6 +542,7 @@ function reviewStep(
           reviewArtifacts: inputs.reviewArtifacts,
           repository,
           workers: WORKERS,
+          ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
           ...(scope
             ? {
                 scope: revisionScope(
@@ -801,6 +831,23 @@ function sameFindings(a: Finding[], b: Finding[]): boolean {
 // ---------------------------------------------------------------------------
 // plan (accept)
 
+/**
+ * The accepted generation's inputs and the planner's full answer for the
+ * accepted draft: the base an amendment revises.
+ */
+export function acceptedRound(state: ObjectiveState): {
+  inputs: ObjectiveInputs;
+  answer: unknown;
+} {
+  const { g, n } = position(state);
+  for (let m = n; m >= 1; m--) {
+    const round = state.done[`plan:${g}:${m}`] as PlanRound | undefined;
+    if (round?.draft)
+      return { inputs: generationInputs(state, g), answer: round.answer };
+  }
+  throw new Error("The accepted plan has no planning round");
+}
+
 function acceptStep(g: number, n: number, deps: PlanningDeps): Step {
   return {
     key: "plan",
@@ -857,7 +904,7 @@ const LISTED_ITEMS = 200;
  * it fits, else in numbered continuation comments the plan comment names;
  * it is never dropped.
  */
-async function postPlan(
+export async function postPlan(
   deps: PlanningDeps,
   issue: number,
   plan: Plan,
@@ -974,6 +1021,21 @@ export async function readObjective(
   // Workspace package additions, Adaptive workflow): checked here once,
   // trusted afterwards.
   problems.push(...declarationProblems(shown.blocks));
+  const recipe = await selectRecipe(
+    shown.blocks,
+    new BaseFiles(config.checkout, inputs.base, signal),
+  );
+  if (recipe.problem) problems.push(recipe.problem);
+  if (recipe.selected) {
+    problems.push(
+      ...recipePrerequisites(
+        recipe.selected.recipe,
+        adaptiveWorkflow(shown.blocks).enabled,
+        recipeInstallation(config),
+      ),
+    );
+    inputs.recipe = recipe.selected;
+  }
   if (!problems.length)
     problems.push(
       ...(await objectiveCommandProblems(shown, inputs.base, config.checkout, {
@@ -1038,7 +1100,7 @@ function objectiveProblemsHold(problems: string[], again: string): Outcome {
 }
 
 /** The planner's facts at the generation's base, with the operator's allowed commands. */
-async function planningFacts(
+export async function planningFacts(
   state: ObjectiveState,
   inputs: ObjectiveInputs,
   files: BaseFiles,
@@ -1067,7 +1129,7 @@ async function planningFacts(
   });
 }
 
-function localExecutables(
+export function localExecutables(
   inputs: ObjectiveInputs,
   config: CoreConfig,
   signal: AbortSignal,
@@ -1085,7 +1147,7 @@ function localExecutables(
 }
 
 /** The base tree exported for reading, and its map and conventions. */
-async function planningTree(
+export async function planningTree(
   deps: PlanningDeps,
   issue: number,
   base: string,
@@ -1116,7 +1178,9 @@ function done(result: unknown): Outcome {
   return { kind: "done", result };
 }
 
-function invalidAnswer(findings: Finding[]): Outcome {
+export function invalidAnswer(
+  findings: Finding[],
+): Extract<Outcome, { kind: "retry" }> {
   return {
     kind: "retry",
     reason: `${INVALID_ANSWER}: ${findings
@@ -1136,6 +1200,12 @@ function invalidAnswer(findings: Finding[]): Outcome {
 export async function guarded(
   repository: string,
   work: () => Promise<Outcome>,
+  /**
+   * The answer that gets past a call the model can't take: `replan` (edit
+   * the Objective and plan again), or `refuse` for an amendment, which
+   * rejects it.
+   */
+  redo: "replan" | "refuse" = "replan",
 ): Promise<Outcome> {
   try {
     return await work();
@@ -1148,8 +1218,10 @@ export async function guarded(
       return providerOutcome(error, (message) =>
         objectiveWide(
           hold(
-            `${message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`,
-            ["replan", "retry", "cancel"],
+            redo === "replan"
+              ? `${message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`
+              : `${message}\n\n\`refuse\` rejects this amendment, so it can be replaced or the plan can continue without it.`,
+            [redo, "retry", "cancel"],
           ),
         ),
       );

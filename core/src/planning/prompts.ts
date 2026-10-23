@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { declaration, onlyEntry } from "../objective.js";
 import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { ObjectiveBlock } from "../shown.js";
+import { RECIPE_GUIDANCE } from "./recipes.js";
 import { REPOSITORY_DIRECTORY, type RepositoryView } from "./repository.js";
 import type { ReviewEvidence } from "./review.js";
 import {
@@ -261,9 +262,17 @@ export interface CompilationInput {
   reviewArtifacts?: readonly ReviewArtifactSelector[];
   /** True when the installation offers execution profiles to choose from. */
   executionProfiles?: boolean;
+  /** The Objective enables Adaptive workflow: discovery, conditions and expansions are offered. */
+  adaptive?: boolean;
+  /** The data carries the Objective's workflowRecipe. */
+  recipe?: boolean;
   prerequisites?: unknown;
   localExecutables?: unknown;
 }
+
+/** What the planner must know to use discovery, conditions and expansions. */
+const ADAPTIVE_GUIDANCE =
+  "- Adaptive workflow: a discovery item is a source-authorized read-only observation with literal selectors, the inventory schema, a role and finite entry, byte and attempt allowances; it has no commands, owned paths or coverage proof, and its observations are never implementation acceptance. Inventory mode lists files with Git identities; semantic mode also classifies them. A work item reads an observation through discoveryInputs, naming the producer it directly depends on, its exact role and the typed fields; empty when none. A declared condition is a literal predicate over one unconditional discovery item's output (inventory-empty, or has-classification); a conditional work item names it and the branch (when), depends directly on the producer, and owns no coverage, so unconditional proof keeps every obligation. An expansion envelope lets Factory instantiate a reviewed template once per batch of discovered files without another model call: its selectors lie within the producer's, the template owns exactly those selectors and has exactly the envelope's dependencies, and every child joins the integration barriers, which are existing unconditional work or QA items that prove the result. Use them only when the affected set is unknown until observed; otherwise plan ordinary items. Leave conditions and expansions empty when unused.\n";
 
 /** The planner prompt. The answer schema comes from the wire. */
 export function renderCompilationCall(input: CompilationInput): string {
@@ -314,7 +323,7 @@ ${QA_EVIDENCE_GUIDANCE ? `- ${QA_EVIDENCE_GUIDANCE}\n` : ""}- ${ITEM_KINDS}
 - Resources are exact identities; give a higher priority to work the source says must run first. Give explicit non-goals.
 - Architecture risks: derive material risks from actual flows, not a universal checklist. Where asynchronous work outlives intent, assign result/error/metadata/cleanup ownership and identify superseding user transitions for shared state. Per-operation freshness alone does not establish shared-state ownership. Prove source-required interacting transitions, including failure or late cleanup; isolated happy paths may miss them. Use allowed real journeys, production tests and source ownership proof without making every interleaving a browser test. Explicit HTTP/browser, failure, ordering and negative controls retain their required proof. Do not invent framework, acceptance or split requirements from this guidance.
 - Media: workers stage candidates/manifests; Factory captures, selects, uploads and hydrates. Preserve asset path/kind/role/media type/visibility and required/LFS roles and counts. Ordinary work uses media null; code hydrates empty roles/zero candidates. Media work declares media with a staged role and positive decimal candidate-count string, decoded strictly to a safe integer. Code, tests and docs are ordinary deliverables, not media roles. Candidate sets are alternatives for the operator's choice: only the selected set reaches the destinations and validation, so criteria offer the alternatives and check the delivered selection, never each candidate (see the checklist's candidate sets).
-${input.executionProfiles ? "- Execution profiles: honor explicit compatible source assignments, otherwise choose an eligible offered profile suited to the work with a short reason. Missing environment summary means unknown, not empty. Never change providers, permissions or reviewers.\n" : ""}
+${input.adaptive ? ADAPTIVE_GUIDANCE : ""}${input.recipe ? `- ${RECIPE_GUIDANCE}\n` : ""}${input.executionProfiles ? "- Execution profiles: honor explicit compatible source assignments, otherwise choose an eligible offered profile suited to the work with a short reason. Missing environment summary means unknown, not empty. Never change providers, permissions or reviewers.\n" : ""}
 ${input.revising ? `- Revision answer: currentPlan is your earlier complete answer and stays the plan except for what you change. Answer with only the changes: items holds new items and complete replacements (same id) of current items; itemEdits replaces single fields of a current item, null keeping a field (so setting a nullable field such as media to null needs a complete replacement in items), and its acceptanceReplace rewrites single acceptance entries by index while acceptanceAppend adds entries at the end, so existing acceptance indices keep their meaning (prefer these to replacing a long acceptance list); removedItemIds drops items; coverage replaces the entries its obligationIndex selects; sourceObligations and requiredPreIntegrationChecks are null to keep the current list or the complete new list; decisionRequired and any split are given in full, as in a complete answer. Name each item id at most once. Keep indices consistent: when a change moves an item's validation entries, also replace the coverage entries and source obligations that refer to them. citedSections holds the exact base bytes of the repository sections the affected items cite; read other files only when the findings need them.\n` : ""}
 ${reviewArtifacts?.length ? `- ${REVIEW_ARTIFACT_GUIDANCE} When an obligation needs such runtime bodies as review evidence, plan a proof that runs the exact selector command in the phase whose review judges it, and name the captured bodies in that owner's brief. A selector grants no command authority; its command still needs ordinary source or base authority. These selectors are the installation's configured evidence capture: choose the proof among them and ordinary command receipts yourself, and never ask the operator which evidence mechanism to use. Only a required capture that neither can supply is an operator prerequisite.\n` : ""}
 Examples (illustrations, not command or source authority):
@@ -508,6 +517,8 @@ export interface GraphReviewInput {
   reviewArtifacts?: readonly ReviewArtifactSelector[];
   /** The installation's execution profile policy; absent means one configured harness. */
   executionProfiles?: unknown;
+  /** The Objective's resolved workflow recipe, the structure the plan keeps. */
+  workflowRecipe?: unknown;
 }
 
 /** The graph-review prompt. The answer schema is graphReviewSchema (review.ts). */
@@ -531,7 +542,7 @@ Each item is assigned an execution profile. Check that each assignment honors ex
 ${GRAPH_REVIEW_FINDINGS} ${HUMAN_PREREQUISITE_GUIDANCE}
 
 Objective:\n`;
-  const evidence = `\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}\nAuthorized commands (observed in the repository or declared in a pinned source):\n${JSON.stringify(facts.authorizedCommands)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
+  const evidence = `${input.workflowRecipe ? `\nWorkflow recipe (a reviewed structural contract the Objective selected, never normative Sources, command authority or proof; check the instantiated stages fit the Objective and its Sources, and that original acceptance is kept):\n${JSON.stringify(input.workflowRecipe)}` : ""}\nExecution profile policy: ${JSON.stringify(input.executionProfiles ?? "Single configured harness; no profile assignment")}\nFactory controller capabilities:\n${JSON.stringify(input.controllerCapabilities)}\nKnown CI check names (check runs the base's pull-request workflows report):\n${JSON.stringify(facts.checkNames)}\nAuthorized commands (observed in the repository or declared in a pinned source):\n${JSON.stringify(facts.authorizedCommands)}\n${configuredReviewArtifacts(reviewArtifacts)}${renderLiteralReviewChoices(input.evidence)}${repository?.reads ? "\nRetrieve evidence relevant to the plan; do not read every file by habit. Generated dependency state and lockfiles remain available for targeted resolution, corruption, supply-chain or explicit lock requirements. Unread file identities do not establish semantics or justify absence claims." : ""}${reviewRepositoryGuidance(repository, facts.base)}`;
   // Everything above repeats across revisions of one Objective. The
   // candidate and its round scope follow, so the provider cache reuses the
   // prefix.

@@ -1,16 +1,19 @@
 #!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { connect } from "node:net";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { displayTime, redactDeep } from "./display.js";
 import { DEFAULT_LIMITS, type EngineLimits, hostLimits } from "./engine.js";
+import { gitEnvironment } from "./git.js";
 import { GitHub } from "./github.js";
 import { GitHubSync, moved } from "./github-sync.js";
 import { dreamCommand, runDream } from "./knowledge/dream.js";
@@ -30,6 +33,13 @@ import {
   sizeOf,
 } from "./log.js";
 import { installationPaths, type Paths } from "./paths.js";
+import { BaseFiles } from "./planning/facts.js";
+import {
+  markdownBlocks,
+  previewRecipe,
+  recipeInstallation,
+  selectRecipe,
+} from "./planning/recipes.js";
 import { PLANNERS, WORKERS } from "./providers/config.js";
 import type { Planner } from "./providers/planner.js";
 import {
@@ -61,6 +71,7 @@ import {
   TERMINAL,
 } from "./state.js";
 import { errorMessage } from "./text.js";
+import { adaptiveWorkflow } from "./validate.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 /** Worker kinds setup can write: the managed ones need settings by hand. */
@@ -159,6 +170,11 @@ const COMMANDS: Record<
     },
     help: "Propose a playbook from settled episodes ([--preview] [--budget-bytes N] [--input-budget-bytes N] [--provider NAME]); --record --objective N records one; --file PATH --approve|--reject SHA256 decides a draft; --show shows the playbook",
   },
+  recipe: {
+    args: "",
+    flags: { file: true },
+    help: "Preview the Workflow recipe of the Objective in --file ABSOLUTE_PATH (Markdown) at the checkout's HEAD, with no model call; exits 1 when it can't be used",
+  },
   help: { args: "", flags: {}, help: "Show this help" },
 };
 
@@ -220,6 +236,8 @@ async function main(argv: string[]): Promise<number> {
       return await queueCommand(paths, repository, args);
     case "dream":
       return await dream(repository, paths, args);
+    case "recipe":
+      return await recipe(repository, args);
     default: {
       const issue = issueOf(args);
       if (command === "answer") {
@@ -1080,6 +1098,63 @@ async function request(paths: Paths, body: Request): Promise<number> {
       : "Sent; the service hasn't applied it yet.\n",
   );
   return 0;
+}
+
+/**
+ * `recipe --file OBJECTIVE`: resolve and check the Objective's Workflow
+ * recipe at the checkout's HEAD, as planning would, and print the preview.
+ * No model call, no request, no state. Exit 1 when it can't be used.
+ */
+async function recipe(repository: string, args: Args): Promise<number> {
+  const file = args.flags.file;
+  if (!file || !isAbsolute(file))
+    throw usage("recipe needs --file ABSOLUTE_OBJECTIVE");
+  if (!lstatSync(file, { throwIfNoEntry: false })?.isFile())
+    throw usage(`recipe --file ${file} isn't a regular file`);
+  const config = loadConfig(repository);
+  // A local file has no GitHub rendering: its sections come from the
+  // Markdown itself.
+  const blocks = markdownBlocks(readFileSync(file, "utf8"));
+  const base = execFileSync(
+    "git",
+    ["-C", config.checkout, "rev-parse", "--verify", "HEAD^{commit}"],
+    { encoding: "utf8", env: gitEnvironment() },
+  ).trim();
+  const adaptive = adaptiveWorkflow(blocks);
+  const selected = await selectRecipe(
+    blocks,
+    new BaseFiles(config.checkout, base),
+  );
+  const problems = [adaptive.problem, selected.problem].filter(
+    (problem): problem is string => problem !== undefined,
+  );
+  if (!problems.length && !selected.selected)
+    problems.push("The Objective has no Workflow recipe section.");
+  const preview = selected.selected
+    ? previewRecipe(
+        selected.selected,
+        adaptive.enabled,
+        recipeInstallation(config),
+        config.execution.concurrency,
+      )
+    : { status: "blocked", missingPrerequisites: [] };
+  const output = {
+    ...preview,
+    ...(problems.length
+      ? {
+          status: "blocked",
+          missingPrerequisites: [
+            ...problems,
+            ...(preview.missingPrerequisites as string[]),
+          ],
+        }
+      : {}),
+    repository: config.repository,
+    base,
+    admission: "preview-only",
+  };
+  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+  return output.status === "ready" ? 0 : 1;
 }
 
 /** The service holds its abstract socket while it lives. */

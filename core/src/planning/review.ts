@@ -60,6 +60,8 @@ export function planningReviewEvidence(input: {
   prerequisites?: unknown;
   /** The controller's local executable observations. */
   localExecutables?: unknown;
+  /** An amendment's discovery and the plan it amends. */
+  amendment?: unknown;
 }): ReviewEvidence[] {
   const controller = (path: string, value: unknown): ReviewEvidence[] =>
     value === undefined || value === null
@@ -99,6 +101,7 @@ export function planningReviewEvidence(input: {
       "FACTORY_LOCAL_EXECUTABLE_OBSERVATIONS",
       input.localExecutables,
     ),
+    ...controller("FACTORY_AMENDMENT", input.amendment),
   ];
 }
 

@@ -58,6 +58,13 @@ export interface CoreConfig {
     playbook: string;
     /** Admits Adaptive workflow Objectives; absent, they are refused. */
     context?: PlanningContext;
+    /**
+     * Offer discovery items, declared work conditions and expansion
+     * envelopes to the planner for an Adaptive workflow Objective. Off by
+     * default, and kept off until the core runs them: a conditional plan
+     * would run both branches, and a discovery item would hold.
+     */
+    adaptiveGraph: boolean;
   };
   execution: {
     /** Steps of one Objective running at once (independent Work Items run in parallel). */
@@ -473,6 +480,7 @@ export function loadConfig(repository: string): CoreConfig {
           revisions: whole(0, 4),
           playbook: text(".factory/playbook.md"),
           context: optional(planningContext),
+          adaptiveGraph: flag(false),
         },
         RETIRED.planning,
       ),

@@ -1,8 +1,10 @@
 import type {
   AcceptanceCoverage,
   CoverageObligation,
+  DeclaredWorkCondition,
   Draft,
   Finding,
+  GraphExpansionEnvelope,
   PinnedSource,
   WorkItem,
 } from "./types.js";
@@ -14,7 +16,7 @@ import type {
  */
 
 /** Ownership is literal Git-relative files or trailing-slash directory prefixes. */
-function validOwnershipPath(path: string): boolean {
+export function validOwnershipPath(path: string): boolean {
   const normalized = path.endsWith("/") ? path.slice(0, -1) : path;
   return (
     normalized.length > 0 &&
@@ -263,7 +265,7 @@ function itemFields(value: unknown, at: number, found: Found): boolean {
 }
 
 /** A discovery specification's literal shape; returns what is wrong, or undefined. */
-function discoveryProblem(value: unknown): string | undefined {
+export function discoveryProblem(value: unknown): string | undefined {
   if (!isRecord(value)) return "it has no discovery specification";
   if (
     Object.keys(value).sort().join() !==
@@ -501,12 +503,48 @@ function checkGraphShape(
         );
   }
   findings.push(...conditionFindings(draft, byId));
+  findings.push(...expansionFindings(draft, byId, base, pinned));
   const { order, cycle } = orderItems(items);
   if (cycle.length)
     found(
       `The dependencies of ${cycle.join(", ")} form a cycle; remove a dependency so the graph is acyclic`,
     );
   return { order, findings, usable: true };
+}
+
+/** A declared work condition's literal shape. */
+export function conditionShaped(
+  condition: unknown,
+): condition is DeclaredWorkCondition {
+  if (!isRecord(condition)) return false;
+  const { input, predicate } = condition;
+  return (
+    Object.keys(condition).sort().join() ===
+      "id,input,predicate,schemaVersion" &&
+    condition.schemaVersion === 1 &&
+    typeof condition.id === "string" &&
+    ITEM_ID.test(condition.id) &&
+    isRecord(input) &&
+    Object.keys(input).sort().join() === "producerItemId,role,schema" &&
+    typeof input.producerItemId === "string" &&
+    typeof input.role === "string" &&
+    !!input.role.trim() &&
+    input.schema === "factory.repository-inventory/v1" &&
+    isRecord(predicate) &&
+    ((predicate.kind === "inventory-empty" &&
+      Object.keys(predicate).join() === "kind") ||
+      (predicate.kind === "has-classification" &&
+        Object.keys(predicate).sort().join() ===
+          "classification,kind,otherClassifications" &&
+        typeof predicate.classification === "string" &&
+        !!predicate.classification.trim() &&
+        strings(predicate.otherClassifications) &&
+        predicate.otherClassifications.every(
+          (entry) => entry.trim() && entry !== predicate.classification,
+        ) &&
+        new Set(predicate.otherClassifications).size ===
+          predicate.otherClassifications.length))
+  );
 }
 
 /** Declared work conditions select literal branches over discovery output. */
@@ -530,35 +568,13 @@ function conditionFindings(
   }
   const declared = new Map<string, NonNullable<Draft["conditions"]>[number]>();
   for (const condition of draft.conditions) {
-    const input = condition?.input;
-    const predicate = condition?.predicate;
-    const shaped =
-      isRecord(condition) &&
-      condition.schemaVersion === 1 &&
-      typeof condition.id === "string" &&
-      ITEM_ID.test(condition.id) &&
-      isRecord(input) &&
-      typeof input.producerItemId === "string" &&
-      typeof input.role === "string" &&
-      !!input.role.trim() &&
-      input.schema === "factory.repository-inventory/v1" &&
-      isRecord(predicate) &&
-      (predicate.kind === "inventory-empty" ||
-        (predicate.kind === "has-classification" &&
-          typeof predicate.classification === "string" &&
-          !!predicate.classification.trim() &&
-          strings(predicate.otherClassifications) &&
-          predicate.otherClassifications.every(
-            (entry) => entry.trim() && entry !== predicate.classification,
-          ) &&
-          new Set(predicate.otherClassifications).size ===
-            predicate.otherClassifications.length));
-    if (!shaped) {
+    if (!conditionShaped(condition)) {
       found(
-        `Work condition ${JSON.stringify(condition?.id)} needs schemaVersion 1, a stable id, an input {producerItemId, role, schema "factory.repository-inventory/v1"} and a predicate inventory-empty or has-classification with distinct other classifications`,
+        `Work condition ${JSON.stringify((condition as { id?: unknown } | null)?.id)} needs schemaVersion 1, a stable id, an input {producerItemId, role, schema "factory.repository-inventory/v1"} and a predicate inventory-empty or has-classification with distinct other classifications`,
       );
       continue;
     }
+    const { input, predicate } = condition;
     if (declared.has(condition.id))
       found(`Work condition ${condition.id} is declared twice; keep one`);
     declared.set(condition.id, condition);
@@ -642,6 +658,286 @@ function conditionFindings(
         `Expansion ${envelope.id} template and integration barriers must be unconditional`,
       );
   return findings;
+}
+
+const EXPANSION_FIELDS = [
+  "schemaVersion",
+  "id",
+  "input",
+  "selectors",
+  "workShape",
+  "selection",
+  "batching",
+  "limits",
+  "resources",
+  "eligibleProfileIds",
+  "dependencies",
+  "integrationBarrierItemIds",
+  "empty",
+];
+
+const distinctStrings = (value: unknown, nonempty: boolean): boolean =>
+  strings(value) &&
+  (!nonempty || value.length > 0) &&
+  value.every((entry) => entry.trim().length > 0) &&
+  new Set(value).size === value.length;
+
+/**
+ * An expansion envelope's literal shape, without its template (a recipe
+ * names the template by stage instead); returns what is wrong, or undefined.
+ */
+export function expansionShapeProblem(
+  value: unknown,
+  templateField: string,
+): string | undefined {
+  if (!isRecord(value)) return "it must be an object";
+  if (
+    Object.keys(value).sort().join() !==
+    [...EXPANSION_FIELDS, templateField].sort().join()
+  )
+    return `it needs exactly ${[...EXPANSION_FIELDS, templateField].join(", ")}`;
+  if (
+    value.schemaVersion !== 1 ||
+    typeof value.id !== "string" ||
+    !ITEM_ID.test(value.id) ||
+    !["migration", "cross-cutting-fix"].includes(String(value.workShape)) ||
+    value.empty !== "settle-without-children"
+  )
+    return 'it needs schemaVersion 1, a stable id, workShape migration or cross-cutting-fix, and empty "settle-without-children"';
+  const input = value.input;
+  if (
+    !isRecord(input) ||
+    Object.keys(input).sort().join() !== "producerItemId,role,schema" ||
+    typeof input.producerItemId !== "string" ||
+    !input.producerItemId ||
+    typeof input.role !== "string" ||
+    !input.role.trim() ||
+    input.schema !== "factory.repository-inventory/v1"
+  )
+    return 'its input needs producerItemId, role and schema "factory.repository-inventory/v1"';
+  for (const field of [
+    "selectors",
+    "resources",
+    "eligibleProfileIds",
+    "dependencies",
+    "integrationBarrierItemIds",
+  ])
+    if (
+      !distinctStrings(
+        value[field],
+        field === "selectors" || field === "integrationBarrierItemIds",
+      )
+    )
+      return `its ${field} must be distinct nonempty strings${field === "selectors" || field === "integrationBarrierItemIds" ? ", at least one" : ""}`;
+  if (
+    (value.selectors as string[]).some(
+      (selector) =>
+        !validOwnershipPath(selector) ||
+        [...selector].some((c) => c.charCodeAt(0) < 32 || c === "\x7f"),
+    )
+  )
+    return "its selectors must be literal repository paths or directory prefixes ending in /";
+  const selection = value.selection;
+  if (
+    !isRecord(selection) ||
+    !(
+      (selection.kind === "all-regular-files" &&
+        Object.keys(selection).join() === "kind") ||
+      (selection.kind === "classified" &&
+        Object.keys(selection).sort().join() === "excluded,included,kind" &&
+        distinctStrings(selection.included, true) &&
+        distinctStrings(selection.excluded, false) &&
+        !(selection.included as string[]).some((label) =>
+          (selection.excluded as string[]).includes(label),
+        ))
+    )
+  )
+    return "its selection must be all-regular-files, or classified with nonempty included and disjoint excluded classifications";
+  const positive = (entry: unknown) =>
+    Number.isSafeInteger(entry) && (entry as number) >= 1;
+  const { batching, limits } = value;
+  if (
+    !isRecord(batching) ||
+    Object.keys(batching).join() !== "maxFilesPerChild" ||
+    !positive(batching.maxFilesPerChild) ||
+    !isRecord(limits) ||
+    Object.keys(limits).sort().join() !== "maxChildren,maxIterations" ||
+    !positive(limits.maxChildren) ||
+    limits.maxIterations !== 1
+  )
+    return "it needs a positive batching.maxFilesPerChild, a positive limits.maxChildren and limits.maxIterations 1 (changed inputs need a reviewed successor)";
+  return undefined;
+}
+
+/**
+ * Reviewed expansion envelopes: each instantiates its template once over a
+ * discovery item's inventory. The template is checked as if it were joined
+ * to the graph, so a materialized child can never break a graph rule.
+ */
+function expansionFindings(
+  draft: Draft,
+  byId: ReadonlyMap<string, WorkItem>,
+  base: string,
+  pinned: ReadonlySet<string>,
+): Finding[] {
+  const { findings, found } = collector();
+  if (draft.expansions === undefined) return findings;
+  if (!Array.isArray(draft.expansions) || !draft.expansions.length) {
+    found("Expansions must be a nonempty list, or left out");
+    return findings;
+  }
+  const ids = new Set<string>(byId.keys());
+  const valid: GraphExpansionEnvelope[] = [];
+  for (const envelope of draft.expansions) {
+    const name = isRecord(envelope) ? String(envelope.id) : "?";
+    const problem = expansionShapeProblem(envelope, "template");
+    if (problem) {
+      found(`Expansion ${name} is invalid: ${problem}`);
+      continue;
+    }
+    const template = envelope.template;
+    const shaped: Finding[] = [];
+    if (
+      !itemFields(template, 0, (message) =>
+        shaped.push({ source: "check", message }),
+      )
+    ) {
+      found(
+        `Expansion ${name} template is not a Work Item: ${shaped.map((f) => f.message).join("; ")}`,
+      );
+      continue;
+    }
+    if (
+      (template.kind ?? "work") !== "work" ||
+      template.discovery ||
+      template.children?.length ||
+      template.sourceAssets?.length ||
+      template.expectedOutputRoles?.length ||
+      template.minimumAssetSets ||
+      template.requiredLfsRoles?.length ||
+      template.discoveryInputs?.length ||
+      JSON.stringify(template.ownedPaths) !==
+        JSON.stringify(envelope.selectors) ||
+      JSON.stringify(template.dependencies) !==
+        JSON.stringify(envelope.dependencies) ||
+      (template.resources ?? []).some(
+        (resource) => !envelope.resources.includes(resource),
+      )
+    )
+      found(
+        `Expansion ${name} template must be an ordinary work item without media, children or discovery inputs, owning exactly the envelope's selectors, with exactly its dependencies and only its resources`,
+      );
+    for (const id of [envelope.id, template.id]) {
+      if (ids.has(id))
+        found(
+          `Expansion ${name} reuses the id ${id}; envelope and template ids must differ from every Work Item, envelope and template`,
+        );
+      ids.add(id);
+    }
+    const producer = byId.get(envelope.input.producerItemId);
+    if (
+      producer?.kind !== "discovery" ||
+      !producer.discovery ||
+      producer.discovery.role !== envelope.input.role ||
+      producer.discovery.schema !== envelope.input.schema ||
+      envelope.selectors.some(
+        (selector) => !ownsPath(selector, producer.discovery!.selectors),
+      ) ||
+      (envelope.selection.kind === "classified" &&
+        producer.discovery.mode !== "semantic")
+    ) {
+      found(
+        `Expansion ${name} input must name a discovery item with the same role and schema whose selectors cover the envelope's selectors (semantic discovery for a classified selection)`,
+      );
+      continue;
+    }
+    for (const dependency of envelope.dependencies)
+      if (
+        !byId.has(dependency) ||
+        envelope.integrationBarrierItemIds.includes(dependency)
+      )
+        found(
+          `Expansion ${name} dependency ${dependency} must be an item of this plan and not one of its integration barriers`,
+        );
+    for (const barrierId of envelope.integrationBarrierItemIds) {
+      const barrier = byId.get(barrierId);
+      if (
+        !barrier ||
+        barrier.kind === "discovery" ||
+        barrier.id === producer.id
+      )
+        found(
+          `Expansion ${name} integration barrier ${barrierId} must be an existing work, QA or aggregate item that proves or integrates the children`,
+        );
+    }
+    const profile = template.executionProfile?.id;
+    if (profile !== undefined && !envelope.eligibleProfileIds.includes(profile))
+      found(
+        `Expansion ${name} template chooses execution profile ${profile}, which is not in its eligibleProfileIds`,
+      );
+    valid.push(envelope);
+  }
+  for (const [at, envelope] of valid.entries()) {
+    for (const other of valid.slice(at + 1))
+      if (
+        envelope.selectors.some((left) =>
+          other.selectors.some((right) => pathsOverlap(left, right)),
+        )
+      )
+        found(
+          `Expansions ${envelope.id} and ${other.id} have overlapping selectors; give each envelope disjoint ownership`,
+        );
+    // The future join, on a copy: the template as a child of the producer
+    // and its own dependencies, and every barrier waiting for it.
+    const joined: WorkItem[] = draft.items.map((item) =>
+      envelope.integrationBarrierItemIds.includes(item.id)
+        ? {
+            ...item,
+            dependencies: [
+              ...new Set([
+                ...item.dependencies,
+                envelope.input.producerItemId,
+                envelope.template.id,
+              ]),
+            ],
+            ...(item.kind === "aggregate"
+              ? {
+                  children: [
+                    ...new Set([
+                      ...(item.children ?? []),
+                      envelope.template.id,
+                    ]),
+                  ],
+                }
+              : {}),
+          }
+        : item,
+    );
+    joined.push({
+      ...envelope.template,
+      dependencies: [
+        ...new Set([...envelope.dependencies, envelope.input.producerItemId]),
+      ],
+    });
+    const { expansions: _expansions, ...rest } = draft;
+    for (const finding of checkGraphShape(
+      { ...rest, items: joined },
+      base,
+      pinned,
+    ).findings)
+      found(
+        `Expansion ${envelope.id}, with its template joined: ${finding.message}`,
+      );
+  }
+  return findings;
+}
+
+/**
+ * The graph-shape findings alone: ids, kinds, dependencies, discovery,
+ * conditions and expansions, with no coverage or source checks.
+ */
+export function shapeFindings(draft: Draft): Finding[] {
+  return checkGraphShape(draft, draft.base, new Set(["OBJECTIVE"])).findings;
 }
 
 /** The plan is baseline QA: it qualifies existing bytes and delivers no change. */

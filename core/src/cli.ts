@@ -84,6 +84,12 @@ import {
   writeRequest,
 } from "./requests.js";
 import { rebuildStep, resettable } from "./reset.js";
+import {
+  type Scorecard,
+  ScorecardError,
+  scorecard,
+  scorecardText,
+} from "./scorecard.js";
 import { serve } from "./service.js";
 import {
   SERVICE_MODES,
@@ -236,11 +242,24 @@ const COMMANDS: Record<string, Command> = {
       "group-by": "list",
       filter: "list",
       gantt: "switch",
+      scorecard: "value",
       json: "switch",
     },
-    help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps, --captures lists the captured model calls (--content ID prints one), --analyze the time, wait, retry, repair, hold, validation, activity and history views and per group (--group-by FIELD, default phase; --filter FIELD=VALUE, null for missing) tokens, cache effectiveness, tool calls, outcomes and efficiency, --gantt a chart of each Work Item's steps over time in lanes per item and phase; the latest run, or --run ID, or --all-runs",
+    help: "Show what an Objective's run did, from its run log: a timeline of steps, waits, repairs, holds and answers, model calls (role, provider, model, time, tokens) and worker activity, relative to the run's start; --follow streams new lines, --logs ITEM shows one Work Item's events in detail with each model call's capture file (--show-captures prints its request and response; capture.enabled keeps them), --summary the totals per role and phase, repairs, holds, the critical path and the slowest steps, --captures lists the captured model calls (--content ID prints one), --analyze the time, wait, retry, repair, hold, validation, activity and history views and per group (--group-by FIELD, default phase; --filter FIELD=VALUE, null for missing) tokens, cache effectiveness, tool calls, outcomes and efficiency, --gantt a chart of each Work Item's steps over time in lanes per item and phase; the latest run, or --run ID, or --all-runs. Without ISSUE, --scorecard ABSOLUTE_FILE compares the Factory Objectives and codex-direct sessions the selection FILE names (docs/CORE.md#Run log): per packet, per route and per pair, with how many of each Objective's runs the run log still has",
     check: (args) => {
       const { flags, lists } = args;
+      if (flags.scorecard !== undefined) {
+        const others = Object.keys(flags).filter(
+          (flag) => !["scorecard", "json", "repo"].includes(flag),
+        );
+        return args.positional[1] !== undefined
+          ? "--scorecard reads its Objectives from the selection file; give no ISSUE"
+          : others.length || Object.keys(lists).length
+            ? `--scorecard goes with --json only, not --${[...others, ...Object.keys(lists)].join(", --")}`
+            : isAbsolute(flags.scorecard)
+              ? undefined
+              : `--scorecard takes an absolute path to the selection file; not ${flags.scorecard}`;
+      }
       const modes = ["summary", "logs", "captures", "analyze", "gantt"].filter(
         (mode) => flags[mode] !== undefined,
       );
@@ -412,6 +431,7 @@ function flagForm(name: string, kind: FlagKind | undefined): string {
       content: "ID",
       "group-by": "FIELD",
       filter: "FIELD=VALUE",
+      scorecard: "FILE",
     }[name] ?? name.toUpperCase();
   return kind === "switch"
     ? `--${name}`
@@ -945,12 +965,14 @@ async function logCommand(
   return 0;
 }
 
-/** `factory diagnostics ISSUE [--follow] [--logs ITEM [--show-captures]] [--summary] [--captures [--content ID]] [--analyze [--group-by F]... [--filter F=V]...] [--gantt] [--run ID | --all-runs] [--json]`. */
+/** `factory diagnostics --scorecard FILE [--json]`, or `factory diagnostics ISSUE [--follow] [--logs ITEM [--show-captures]] [--summary] [--captures [--content ID]] [--analyze [--group-by F]... [--filter F=V]...] [--gantt] [--run ID | --all-runs] [--json]`. */
 async function diagnosticsCommand(
   paths: Paths,
   repository: string,
   args: Args,
 ): Promise<number> {
+  if (args.flags.scorecard !== undefined)
+    return scorecardCommand(paths, repository, args);
   const issue = issueOf(args);
   const runs = logFiles(paths.logs, issue).map(runOfFile);
   if (!runs.length && !listAllObjectives(paths.objectives).includes(issue))
@@ -1019,6 +1041,44 @@ async function diagnosticsCommand(
       secrets: configOf(repository)?.secrets ?? [],
     },
     (text) => process.stdout.write(text),
+  );
+  return 0;
+}
+
+/** `factory diagnostics --scorecard ABSOLUTE_FILE [--json]`: read-only, redacted. */
+function scorecardCommand(
+  paths: Paths,
+  repository: string,
+  args: Args,
+): number {
+  const file = args.flags.scorecard!;
+  let selection: unknown;
+  try {
+    selection = JSON.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw usage(
+      `Can't read the scorecard selection ${file}: ${errorMessage(error)}`,
+    );
+  }
+  let report: Scorecard;
+  try {
+    report = scorecard(
+      {
+        logs: paths.logs,
+        objectives: paths.objectives,
+        secrets: configOf(repository)?.secrets ?? [],
+      },
+      selection as Parameters<typeof scorecard>[1],
+    );
+  } catch (error) {
+    if (error instanceof ScorecardError)
+      throw new Refusal(error.code, error.message);
+    throw error;
+  }
+  process.stdout.write(
+    args.flags.json !== undefined
+      ? `${JSON.stringify(report)}\n`
+      : scorecardText(report),
   );
   return 0;
 }

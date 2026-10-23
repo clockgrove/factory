@@ -638,7 +638,19 @@ test("logs keep the newest runs, each with its captures", async () => {
   assert.equal(runs.length, 21, "the 20 newest and the live one");
   assert.equal(runs[0], "2026-01-01T00-00-01.jsonl");
   assert.equal(runs[1], "2026-01-01T00-00-05.jsonl");
-  assert.equal(kept.length, 32, "the 11 kept odd runs keep their captures");
+  assert.equal(
+    kept.length,
+    33,
+    "the 11 kept odd runs keep their captures, and the rotated record",
+  );
+  // Each removed run is recorded, so a reader can say it is gone.
+  assert.deepEqual(
+    readFileSync(join(dir, "rotated"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).run),
+    [0, 2, 3, 4].map((i) => `2026-01-01T00-00-0${i}`),
+  );
   // The service's own events went to a file named by its run id.
   assert.ok(
     readdirSync(join(inst.logs, "0")).some((name) =>
@@ -3154,6 +3166,137 @@ test("the run log: tail, follow, and status reads its end", async () => {
     cli(inst, "diagnostics", "54", "--gantt").out,
     /\n {2}a review +\|[ r]*r[ r]*\|\n {4}model calls +\|[ m]*m/,
   );
+  // --scorecard: #54 against a codex-direct session, with one of #54's
+  // runs rotated away, which must show, never vanish.
+  const scratch = mkdtempSync(join(tmpdir(), "factory-scorecard-"));
+  const stream = join(scratch, "direct.jsonl");
+  writeFileSync(
+    stream,
+    [
+      { type: "thread.started", thread_id: "t-direct" },
+      { type: "turn.started" },
+      {
+        type: "turn.completed",
+        usage: {
+          input_tokens: 200,
+          cached_input_tokens: 150,
+          output_tokens: 40,
+          reasoning_output_tokens: 0,
+        },
+      },
+    ]
+      .map((row) => `${JSON.stringify(row)}\n`)
+      .join(""),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    join(inst.logs, "54", "rotated"),
+    `${JSON.stringify({ run: "2000-01-01T00-00-00-000Z-1", lastAt: at(0) })}\n`,
+  );
+  const base =
+    JSON.parse(
+      readFileSync(join(inst.objectives, "finished", "54.json"), "utf8"),
+    ).done.check?.base ?? "base";
+  const bindings = {
+    sourceDigest: "s",
+    baseCommit: base,
+    acceptanceReference: "a",
+    environmentReference: "e",
+  };
+  const selection = join(scratch, "selection.json");
+  const packets = [
+    {
+      id: "f",
+      task: "task ghp_abcdefghijklmnop",
+      route: "factory",
+      pairId: "p",
+      scope: "adopter",
+      factoryObjectives: [54],
+      bindings,
+      // Cancelled: Factory's state says failed, and the packet must agree.
+      acceptance: { outcome: "failed" },
+    },
+    {
+      id: "d",
+      task: "task ghp_abcdefghijklmnop",
+      route: "codex-direct",
+      pairId: "p",
+      scope: "adopter",
+      codexSessions: [
+        {
+          path: stream,
+          sessionId: "t-direct",
+          freshThread: true,
+          freshThreadReference: "launch receipt",
+          startedAt: at(0),
+          endedAt: at(60_000),
+          outcome: "completed",
+          role: "implementation",
+          cliVersion: "0.160.0",
+          provider: "codex",
+          model: "m1",
+          reasoningEffort: "high",
+          configDigest: "c",
+        },
+      ],
+      bindings,
+      acceptance: { outcome: "unfinished" },
+    },
+  ];
+  const window = { startedAt: at(-3_600_000), endedAt: at(3_600_000) };
+  writeFileSync(
+    selection,
+    JSON.stringify({ schemaVersion: 1, window, packets }),
+  );
+  const card = cli(inst, "diagnostics", "--scorecard", selection, "--json");
+  assert.equal(card.code, 0, card.err);
+  const scored = JSON.parse(card.out);
+  assert.deepEqual(scored.runs, { available: 1, total: 2 });
+  const [factoryPacket, directPacket] = scored.packets;
+  assert.deepEqual(factoryPacket.factory[0].runs.rotated, [
+    "2000-01-01T00-00-00-000Z-1",
+  ]);
+  assert.deepEqual(factoryPacket.tokens.total, {
+    known: 120,
+    availability: "partial",
+  });
+  assert.ok(factoryPacket.factory[0].holds >= 1);
+  assert.equal(factoryPacket.firstTryPlanning, null);
+  assert.deepEqual(
+    [directPacket.tokens.total, directPacket.tokens.reasoning],
+    [
+      { known: 240, availability: "available" },
+      { known: null, availability: "unavailable" },
+    ],
+  );
+  assert.equal(directPacket.cacheEffectiveness.hitRate, 0.75);
+  assert.equal(scored.pairs[0].comparable, false);
+  assert.ok(
+    scored.pairs[0].reasons.includes("Factory's run log has 1 of 2 runs"),
+  );
+  assert.doesNotMatch(card.out, /ghp_/);
+  assert.match(
+    cli(inst, "diagnostics", "--scorecard", selection).out,
+    /Factory: 1 of 2 runs available \(1 rotated away[^]*Pair p: not comparable/,
+  );
+  writeFileSync(
+    selection,
+    JSON.stringify({
+      schemaVersion: 1,
+      window,
+      packets: [{ ...packets[0], factoryObjectives: [77] }],
+    }),
+  );
+  assert.equal(
+    refusal(cli(inst, "diagnostics", "--scorecard", selection)),
+    "no_factory_state",
+  );
+  for (const wrong of [
+    ["54", "--scorecard", selection],
+    ["--scorecard", "selection.json"],
+    ["--scorecard", selection, "--summary"],
+  ])
+    assert.equal(cli(inst, "diagnostics", ...wrong).code, 2, wrong);
   for (const wrong of [
     ["--analyze", "--gantt"],
     ["--analyze", "--group-by", "colour"],

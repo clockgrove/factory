@@ -1,4 +1,4 @@
-import { lstat, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { crashPoint } from "../crash.js";
 import {
@@ -82,6 +82,7 @@ import {
 } from "../review/result.js";
 import { type ObjectiveBlock, readShown, shownDigest } from "../shown.js";
 import { type ObjectiveState, runOf, sinceRun } from "../state.js";
+import { headAndTail } from "../text.js";
 import { validateTree } from "../validate.js";
 import {
   addWorktree,
@@ -97,6 +98,9 @@ import { prepareWorkPrompt, type RepairContext } from "./prompt.js";
 import type { Worker, WorkerSpend } from "./worker.js";
 
 const MINUTE = 60_000;
+/** What a kept validation finding holds of a failed run's output. */
+const KEPT_OUTPUT_HEAD = 32_000;
+const KEPT_OUTPUT_TAIL = 96_000;
 
 /** What execution needs from the installation, beyond planning. */
 export interface BuildDeps extends PlanningDeps {
@@ -1149,12 +1153,27 @@ async function validateStep(
             [flakyKey]: { tree: result.tree, command: result.failed.command },
           },
         };
+      // State is saved on every step: it keeps a bounded finding, and the
+      // complete output (up to the raised review-artifact stream bounds)
+      // stays in a file the finding names.
+      const outputFile = join(
+        workDir,
+        "outputs",
+        item.id,
+        `${result.tree}.txt`,
+      );
+      await mkdir(dirname(outputFile), { recursive: true, mode: 0o700 });
+      await writeFile(outputFile, result.output, { mode: 0o600 });
+      const keptOutput =
+        result.output.length > KEPT_OUTPUT_HEAD + KEPT_OUTPUT_TAIL
+          ? `${headAndTail(result.output, KEPT_OUTPUT_HEAD, KEPT_OUTPUT_TAIL)}\n[Complete output: ${outputFile}]`
+          : result.output;
       return repairOutcome(
         item,
         "validate",
         result.detail,
         {
-          ...failure(item, result.output),
+          ...failure(item, keptOutput),
         },
         context,
         deps,

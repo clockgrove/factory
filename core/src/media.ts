@@ -1301,9 +1301,10 @@ export interface LfsFile {
   /**
    * A hard link to the local store's object, with its inode: the sandbox
    * mounts it read-only (runSandboxed's readOnlyFiles), so no command can
-   * change it or the store, and rewrittenMedia needn't read it. Before
-   * each command the path must still hold that inode: a command that moved
-   * its directory would leave the store's object writable to the next.
+   * change it or the store, and rewrittenMedia needn't read it. After
+   * each command the path must still hold that inode (validate.ts
+   * movedLinks): a command that moved its directory could leave other bytes
+   * at the path, and the store's object writable to the next command.
    */
   linked?: { ino: number };
 }

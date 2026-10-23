@@ -336,29 +336,6 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
           : undefined;
       const online =
         install && input.sandbox.network === "package-install" && !refused;
-      // A command that moved a linked file's directory would leave the
-      // operator's LFS object writable to the next one: stop first.
-      const moved = linked.filter(
-        (file) =>
-          lstatSync(join(worktree, file.path), { throwIfNoEntry: false })
-            ?.ino !== file.linked?.ino,
-      );
-      if (moved.length) {
-        const detail = `Validation command modified the result tree: Git LFS files moved or replaced: ${moved
-          .slice(0, 20)
-          .map((file) => file.path)
-          .join(
-            ", ",
-          )}${moved.length > 20 ? ` and ${moved.length - 20} more` : ""}`;
-        return {
-          kind: "failed",
-          tree,
-          commands: sequence,
-          results,
-          detail,
-          output: detail,
-        };
-      }
       const started = Date.now();
       input.log({ event: "validation-command", index, command, preparing });
       const limit = capture ? outputLimit(selectors, command) : undefined;
@@ -386,6 +363,27 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
             `The command sandbox could not run \`${command}\`: ${run.detail}. ${run.fix}.`,
           ),
         );
+      // After every command, the last too: a command that moved a linked
+      // file's directory left another file at its path, unchecked by
+      // rewrittenMedia, and would leave the operator's LFS object writable
+      // to the next command.
+      const moved = movedLinks(worktree, linked);
+      if (moved.length) {
+        const detail = `Validation command modified the result tree: Git LFS files moved or replaced: ${moved
+          .slice(0, 20)
+          .join(
+            ", ",
+          )}${moved.length > 20 ? ` and ${moved.length - 20} more` : ""}`;
+        return {
+          kind: "failed",
+          tree,
+          commands: sequence,
+          results,
+          failed: { index, command },
+          detail,
+          output: detail,
+        };
+      }
       const output = `${run.stdout}${run.stderr}`;
       const durationMs = Date.now() - started;
       const overflow =
@@ -548,6 +546,24 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       () => undefined,
     );
   }
+}
+
+/**
+ * The linked Git LFS files whose path no longer holds their inode as a
+ * regular file reached without links.
+ */
+function movedLinks(worktree: string, linked: readonly LfsFile[]): string[] {
+  return linked
+    .filter((file) => {
+      const path = join(worktree, file.path);
+      const seen = lstatSync(path, { throwIfNoEntry: false });
+      return (
+        !seen?.isFile() ||
+        seen.ino !== file.linked?.ino ||
+        realpathSync(path) !== join(realpathSync(worktree), file.path)
+      );
+    })
+    .map((file) => file.path);
 }
 
 const sourceDeclared = (items: readonly WorkItem[]) =>

@@ -33,6 +33,7 @@ import {
   built,
   cancelCleanupStep,
   deliverySteps,
+  diagnoseFirst,
   freshable,
   freshOutcome,
   layersBelow,
@@ -143,6 +144,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
               deps.config.finalValidation.requiredCommands,
             ),
           unspent,
+          diagnoseFirst,
         }
       : {}),
   };

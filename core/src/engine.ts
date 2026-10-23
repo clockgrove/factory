@@ -72,6 +72,8 @@ export type Outcome =
       /** Absent: `question` (see `HoldCause`). */
       cause?: HoldCause;
       keep?: Record<string, unknown>;
+      /** A repair the question's evidence blames on another Work Item: it counts against no allowance (as a repair's `free`). */
+      free?: { target: string; repair: number };
     }
   /**
    * The whole state is replaced (`factory reset`'s rebuild step, reset.ts):
@@ -347,6 +349,14 @@ export interface Workflow {
    * hasn't recorded): it then runs once past a spent repair allowance.
    */
   unspent?(state: ObjectiveState, key: string, answer: Answer): boolean;
+  /**
+   * Whether step `key` runs once past a spent repair allowance to diagnose
+   * its pending repair first: a diagnosis that blames another Work Item
+   * spends no repair, so it is decided before `more` is asked. The step
+   * then saves its diagnosis and goes on (`progress`), and the allowance
+   * question follows.
+   */
+  diagnoseFirst?(state: ObjectiveState, key: string): boolean;
   /**
    * The configuration as an Objective freezes it now, per configured
    * provider, for the `switch NAME` and `adopt` answers.
@@ -730,7 +740,7 @@ export class ObjectiveRunner {
         (answer && this.workflow.unspent?.(this.state, step.key, answer))
           ? []
           : overrun(this.state, step.key);
-      if (over.length) {
+      if (over.length && !this.workflow.diagnoseFirst?.(this.state, step.key)) {
         const offers = this.workflow.overrunOffers?.(this.state, step.key);
         this.transact(() => {
           this.hold(step.key, {
@@ -975,7 +985,9 @@ export class ObjectiveRunner {
         else this.retry(key, outcome);
         break;
       case "hold":
-        this.hold(key, outcome);
+        // Free only when this question was recorded: one another hold
+        // stops is asked again, and frees it then.
+        if (this.hold(key, outcome)) markFree(state, outcome.free);
         break;
       case "repair": {
         delete state.retries[key];
@@ -1013,10 +1025,7 @@ export class ObjectiveRunner {
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
         state.repairs[outcome.target] = repair;
         if (outcome.conflict) countConflict(state, outcome.target);
-        const { free } = outcome;
-        const blamed = free ? state.repairs[free.target] : undefined;
-        if (free && blamed && !blamed.free?.includes(free.repair))
-          blamed.free = [...(blamed.free ?? []), free.repair];
+        markFree(state, outcome.free);
         break;
       }
     }
@@ -1208,7 +1217,7 @@ export class ObjectiveRunner {
     key: string,
     asked: Omit<Extract<Outcome, { kind: "hold" }>, "kind" | "keep">,
     saved = false,
-  ): void {
+  ): boolean {
     const state = this.state;
     const now = this.now().toISOString();
     const { question, scope } = asked;
@@ -1230,7 +1239,7 @@ export class ObjectiveRunner {
         const retry = state.retries[key];
         if (retry) retry.nextAt = now;
       }
-      return;
+      return false;
     }
     // A bare `switch` is one option per configured provider; cancel always
     // works, and a failure offers replan where the workflow can plan again.
@@ -1326,6 +1335,7 @@ export class ObjectiveRunner {
       },
     ];
     state.status = "holding";
+    return true;
   }
 
   /**
@@ -1805,4 +1815,14 @@ function deadlineNote(deadline: string | undefined, now: Date): string[] {
 function hours(ms: number): string {
   const h = ms / (60 * 60 * 1000);
   return h >= 1 ? `${Number(h.toFixed(1))} h` : `${Math.round(ms / 1000)} s`;
+}
+
+/** Repair `free.repair` of `free.target` counts against no allowance (allowances.ts `charged`). */
+function markFree(
+  state: ObjectiveState,
+  free: { target: string; repair: number } | undefined,
+): void {
+  const blamed = free ? state.repairs?.[free.target] : undefined;
+  if (free && blamed && !blamed.free?.includes(free.repair))
+    blamed.free = [...(blamed.free ?? []), free.repair];
 }

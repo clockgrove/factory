@@ -712,6 +712,8 @@ async function workStep(
   // refused on still counts, else what still counts is diagnosed, within
   // the repair allowances.
   let finding = fact(state, "finding", item.id);
+  /** A retirement narrowed the finding: its saved diagnosis no longer applies. */
+  let narrowed = false;
   if (!finished && retiring(context.answer) && finding) {
     const recorded = retireKeep(
       context,
@@ -772,16 +774,20 @@ async function workStep(
     }
     if (finding.kind === "review") {
       finding = { ...finding, refused: remaining };
-      keepAll = { ...keepAll, ...facts({ finding }, item.id) };
-    }
-    // Answered past a spent allowance: what still counts asks it again.
-    if (overrun(state, stepKey(item.id, "work")).length)
-      return {
-        kind: "retry",
-        reason: `The retirement is recorded; repairing what still counts needs more of the repair allowance.`,
-        progress: true,
-        keep: keepAll,
+      // The saved diagnosis was of the whole finding: what still counts is
+      // diagnosed again (repairContext), keeping the corrections tried.
+      const saved = fact(state, "diagnosis", item.id);
+      keepAll = {
+        ...keepAll,
+        ...facts(
+          { finding, ...(saved ? { diagnosis: { ...saved, repair: 0 } } : {}) },
+          item.id,
+        ),
       };
+      narrowed = true;
+    }
+    // Past a spent allowance, repairContext diagnoses what still counts,
+    // saves it, and the engine asks for `more` (`diagnoseFirst`).
   }
   if (!finished) {
     // A merged predecessor's blame answered `amend`, or its amendment
@@ -795,14 +801,16 @@ async function workStep(
       base,
       finding,
       plan,
+      narrowed,
     );
     // A question keeps this attempt's base and any retirement just
     // recorded; a predecessor's repair moves this item onto the
     // predecessor's new head, so its facts win.
+    // Its own facts win: a fresh diagnosis replaces one a retirement voided.
     if (repair && "outcome" in repair)
-      return repair.outcome.kind === "repair"
-        ? { ...repair.outcome, keep: { ...keepAll, ...repair.outcome.keep } }
-        : withKeep(repair.outcome, keepAll);
+      return repair.outcome.kind === "replace"
+        ? repair.outcome
+        : { ...repair.outcome, keep: { ...keepAll, ...repair.outcome.keep } };
     keepAll = { ...keepAll, ...(repair?.keep ?? {}) };
     // A kept selection whose private copies are gone can't be written
     // again: this attempt makes new candidates and the operator chooses.
@@ -1200,6 +1208,8 @@ async function repairContext(
   finding: RepairFinding | undefined,
   /** The current plan, with a retirement this run just recorded. */
   plan: Plan,
+  /** A retirement narrowed `finding`: diagnose it again, never reuse the saved diagnosis. */
+  narrowed = false,
 ): Promise<
   | { context: RepairContext; keep: Record<string, unknown> }
   | { outcome: Outcome }
@@ -1225,8 +1235,18 @@ async function repairContext(
     context.answer.holdId !== saved?.answered
       ? context.answer
       : undefined;
-  if (saved?.repair === history.count && !answered)
-    return { context: saved.context, keep: {} };
+  if (saved?.repair === history.count && !answered && !narrowed)
+    // Reached past a spent allowance (a retirement that leaves the
+    // finding as it was): the engine asks for `more` first.
+    return overrun(state, stepKey(item.id, "work")).length
+      ? {
+          outcome: {
+            kind: "retry",
+            reason: `Repair ${history.count} is diagnosed; it needs more of the repair allowance`,
+            progress: true,
+          },
+        }
+      : { context: saved.context, keep: {} };
   const applied = saved?.applied ?? [];
   const previous = state.done[stepKey(item.id, "work")] as
     | WorkResult
@@ -1321,20 +1341,50 @@ async function repairContext(
         }),
     ...(finding.kind === "review" ? { fromReview: true } : {}),
   };
-  return {
-    context: repairContextValue,
-    keep: facts(
-      {
-        diagnosis: {
-          repair: history.count,
-          context: repairContextValue,
-          applied: [...applied, result.finding],
-          ...(answered ? { answered: answered.holdId } : {}),
-        },
+  const keep = facts(
+    {
+      diagnosis: {
+        repair: history.count,
+        context: repairContextValue,
+        applied: [...applied, result.finding],
+        ...(answered ? { answered: answered.holdId } : {}),
       },
-      item.id,
-    ),
-  };
+    },
+    item.id,
+  );
+  // Past a spent allowance (`diagnoseFirst`): the diagnosis blamed no other
+  // item, so it is saved and the engine asks for `more` before the worker
+  // runs; the saved diagnosis is reused then.
+  if (overrun(state, stepKey(item.id, "work")).length)
+    return {
+      outcome: {
+        kind: "retry",
+        reason: `Diagnosed repair ${history.count} before asking for more repairs`,
+        progress: true,
+        keep,
+      },
+    };
+  return { context: repairContextValue, keep };
+}
+
+/**
+ * Whether work step `key` runs past a spent repair allowance to diagnose
+ * its pending repair first (engine.ts `diagnoseFirst`): a repair not yet
+ * diagnosed, and not a merge conflict, which needs no diagnosis.
+ */
+export function diagnoseFirst(state: ObjectiveState, key: string): boolean {
+  const id = /^item:(.+):work$/.exec(key)?.[1];
+  const count = state.repairs?.[key]?.count;
+  if (id === undefined || !count) return false;
+  // Only where repairContext would call the model: a finding that isn't a
+  // merge conflict and has no diagnosis saved for this repair.
+  const finding = fact(state, "finding", id);
+  return (
+    finding !== undefined &&
+    finding !== null &&
+    finding.kind !== "conflict" &&
+    fact(state, "diagnosis", id)?.repair !== count
+  );
 }
 
 /**
@@ -1365,9 +1415,14 @@ function blameOutcome(
   const below = own?.unit.items
     .slice(0, own.layer)
     .some((layer) => layer.id === predecessor.id);
+  // A merged predecessor's blame asks, and this item's repair is free.
   if (!below || mergeOf(state, predecessor.id))
     return withKeep(
-      mergedBlame(state, item, predecessor.id, blame.correction),
+      freed(
+        mergedBlame(state, item, predecessor.id, blame.correction),
+        stepKey(item.id, "work"),
+        repair,
+      ),
       facts(
         {
           blamed: {
@@ -1441,6 +1496,11 @@ function blameOutcome(
     : outcome;
 }
 
+/** `asked`, when it holds, with repair `repair` of `target` free. */
+function freed(asked: Outcome, target: string, repair: number): Outcome {
+  return asked.kind === "hold" ? { ...asked, free: { target, repair } } : asked;
+}
+
 /**
  * A blamed predecessor that already merged: no repair of this item can fix
  * it, and a repair never reopens merged work, so the item asks with the
@@ -1460,8 +1520,11 @@ function mergedBlame(
   const amendable =
     note === undefined &&
     amendmentAllowance(state) > amendmentLedger(state).used;
+  const pr = (
+    state.done[stepKey(predecessor, "publish")] as { pr?: number } | undefined
+  )?.pr;
   return hold(
-    `Work Item ${item.id}'s failure comes from Work Item ${predecessor}'s merged result, not its own work, so repairing ${item.id} can't fix it.\n\nEvidence (${correction.path}): ${correction.diagnosis}\n\nWhat ${predecessor} needs: ${correction.correction}${note ? `\n\n${note}` : ""}\n\nAnswer ${amendable ? `\`amend\` to have the planner add a Work Item after ${predecessor} that makes this correction (reviewed independently; it uses a planning revision, and ${item.id} runs again on the amended plan with no repair charged), ` : ""}\`replan\` to plan the remaining work again from the default branch, \`answer <text>\` to send ${item.id}'s worker your guidance, \`retry\` to diagnose the failure again, or cancel.`,
+    `Work Item ${item.id}'s failure comes from Work Item ${predecessor}'s merged result${pr ? ` (#${pr})` : ""}, not its own work, so repairing ${item.id} can't fix it.\n\nEvidence (${correction.path}): ${correction.diagnosis}\n\nWhat ${predecessor} needs: ${correction.correction}${note ? `\n\n${note}` : ""}\n\nAnswer ${amendable ? `\`amend\` to have the planner add a Work Item after ${predecessor} that makes this correction (reviewed independently; it uses a planning revision, and ${item.id} runs again on the amended plan with no repair charged), ` : ""}\`replan\` to plan the remaining work again from the default branch, \`answer <text>\` to send ${item.id}'s worker your guidance, \`retry\` to diagnose the failure again, or cancel.`,
     [
       ...(amendable ? [AMEND] : []),
       "replan",

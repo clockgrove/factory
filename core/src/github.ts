@@ -45,9 +45,29 @@ export class GitHubError extends Error {
 }
 
 /**
+ * The configured repository answers under another name: renamed or
+ * transferred (GitHub.checkIdentity). The client then refuses every
+ * request, so no card, comment, close or merge lands until the
+ * configuration names the repository and the service restarts. It is
+ * transient: no step fails or holds on it, and no issue counts as gone.
+ */
+export class RepositoryMoved extends TransientError {
+  constructor(
+    readonly from: string,
+    readonly to: string,
+  ) {
+    super(
+      `repository ${from} is now ${to}; update the configuration's repository and restart`,
+    );
+  }
+}
+
+/**
  * GitHub redirects what moved: an issue transferred to another repository,
  * a renamed repository. The client never follows a redirect, so Factory
  * never acts outside its configured repository; a redirect is an answer.
+ * A redirect under the repository is checked against its identity first,
+ * so a renamed repository is RepositoryMoved, never a moved issue.
  */
 export function moved(error: unknown): boolean {
   return (
@@ -102,7 +122,7 @@ export function githubOutcome(
   if (moved(error))
     return objectiveWide(
       hold(
-        `GitHub says this moved out of ${repository} (${detail}${error.location ? `; now at ${error.location}` : ""}). Factory acts only on ${repository}: if the repository was renamed, update Factory's configuration, then answer retry; if the issue was transferred, cancel.`,
+        `GitHub says this moved out of ${repository} (${detail}${error.location ? `; now at ${error.location}` : ""}). The repository itself still answers as ${repository}, so this was transferred away, and Factory acts only on ${repository}: cancel; or answer retry once it is back.`,
         ["cancel", "retry"],
         "cancel",
       ),
@@ -210,6 +230,8 @@ export class GitHub {
   private secrets: readonly string[] = [];
   private self: string | undefined;
   private readonly writers = new Map<string, { ok: boolean; at: number }>();
+  /** Set once the repository is found under another name; never cleared (a restart reads the configuration again). */
+  private renamed: RepositoryMoved | undefined;
 
   constructor(
     readonly repository: string,
@@ -232,6 +254,69 @@ export class GitHub {
 
   get name(): string {
     return this.repository.split("/")[1]!;
+  }
+
+  /** The repository's rename or transfer, once found: every request is refused. */
+  get moved(): RepositoryMoved | undefined {
+    return this.renamed;
+  }
+
+  /**
+   * The repository's identity: `GET /repos/{owner}/{repo}`, never
+   * redirected. Its 301 means the repository was renamed or transferred
+   * (see `send`), as does a 200 that names another repository. Throws
+   * RepositoryMoved then, and from then on.
+   */
+  async checkIdentity(signal?: AbortSignal): Promise<void> {
+    const found = await this.rest<{ full_name?: unknown }>(
+      "GET",
+      `/repos/${this.repository}`,
+      undefined,
+      signal,
+    );
+    if (typeof found?.full_name === "string")
+      this.sameRepository(found.full_name);
+  }
+
+  /**
+   * The repository answered its identity read with a 301: it moved. Its new
+   * name is read over GraphQL, which resolves the old one; the redirect's
+   * location stands in when that read fails. Always throws RepositoryMoved.
+   */
+  private async repositoryMoved(
+    location: string | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<never> {
+    const name = await this.graphql<{
+      repository: { nameWithOwner: string } | null;
+    }>(
+      "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }",
+      { owner: this.owner, name: this.name },
+      signal,
+    ).then(
+      (data) => data.repository?.nameWithOwner,
+      () => undefined,
+    );
+    this.sameRepository(
+      name && name.toLowerCase() !== this.repository.toLowerCase()
+        ? name
+        : (location ?? "a new name"),
+    );
+    throw this.renamed;
+  }
+
+  /**
+   * A repository's `nameWithOwner` as GitHub reports it now (GraphQL
+   * resolves an old name): one that differs from the configured repository
+   * is a rename or transfer, and throws RepositoryMoved.
+   */
+  sameRepository(nameWithOwner: string): void {
+    if (
+      !this.renamed &&
+      nameWithOwner.toLowerCase() !== this.repository.toLowerCase()
+    )
+      this.renamed = new RepositoryMoved(this.repository, nameWithOwner);
+    if (this.renamed) throw this.renamed;
   }
 
   async rest<T>(
@@ -1116,6 +1201,7 @@ export class GitHub {
     headers: Record<string, string> = {},
     refreshed = false,
   ): Promise<Response> {
+    if (this.renamed) throw this.renamed;
     const token = await this.auth(refreshed);
     const deadline = AbortSignal.timeout(TIMEOUT_MS);
     let response: Response;
@@ -1176,6 +1262,23 @@ export class GitHub {
             : undefined,
         true,
       );
+    // A 301 for the repository itself is its move; one under it is an
+    // issue (or other resource) moved away only while the repository still
+    // answers under its configured name. An identity that can't be read
+    // now leaves the answer to a later try: never a gone issue.
+    const root = `/repos/${this.repository}`;
+    if (response.status === 301 && path.split("?")[0] === root)
+      await this.repositoryMoved(
+        response.headers.get("location") ?? undefined,
+        signal,
+      );
+    if (response.status === 301 && path.startsWith(`${root}/`))
+      await this.checkIdentity(signal).catch((error: unknown) => {
+        if (error instanceof TransientError) throw error;
+        throw new TransientError(
+          `${detail}; the repository's identity is unreadable: ${errorMessage(error)}`,
+        );
+      });
     // A 5xx is an outage, not a limit: GitHub sends x-ratelimit-* headers on
     // every answer, so only its retry-after counts, and only as a backoff.
     if (response.status >= 500)

@@ -84,6 +84,7 @@ fragment Card on Issue {
 const issuesQuery = (numbers: number[]) => `
 query($owner: String!, $name: String!, $field: String!, $order: String!) {
   repository(owner: $owner, name: $name) {
+    nameWithOwner
     recent: issues(states: OPEN, first: 20, orderBy: { field: UPDATED_AT, direction: DESC }) {
       nodes { ...Card }
     }
@@ -228,7 +229,11 @@ export async function readQueue(
       error.path[0] === "repository" &&
       aliases.has(String(error.path[1]));
     const { data } = await github.graphqlPartial<{
-      repository: Record<string, Card | { nodes: Card[] } | null> | null;
+      repository:
+        | (Record<string, Card | { nodes: Card[] } | null> & {
+            nameWithOwner: string;
+          })
+        | null;
     }>(
       issuesQuery(chunk),
       { owner: github.owner, name: github.name, ...fields },
@@ -237,6 +242,9 @@ export async function readQueue(
     );
     if (!data.repository)
       throw new Error(`Repository ${config.repository} not found`);
+    // GraphQL resolves an old name: a renamed or transferred repository
+    // throws RepositoryMoved here, so `ours` never loses its issues.
+    github.sameRepository(data.repository.nameWithOwner);
     for (const issue of (data.repository.recent as { nodes: Card[] } | null)
       ?.nodes ?? [])
       read(issue);
@@ -250,6 +258,7 @@ export async function readQueue(
       }
     }
   }
+  /** The repository itself is checked above: a mismatch here is the issue moved away. */
   function ours(issue: Card, n: number): boolean {
     return (
       issue.number === n &&
@@ -413,6 +422,7 @@ const OFF_DONE = ["In Progress", "Todo"];
 const BUILT_IN = `
 query($owner: String!, $name: String!, $issue: Int!, $project: ID!, $field: String!) {
   repository(owner: $owner, name: $name) {
+    nameWithOwner
     issue(number: $issue) {
       number
       repository { nameWithOwner }
@@ -455,6 +465,7 @@ export async function moveStatusOffDone(
   if (config.queue.field === BUILT_IN_STATUS) return undefined;
   const data = await github.graphql<{
     repository: {
+      nameWithOwner: string;
       issue: {
         number: number;
         repository: { nameWithOwner: string };
@@ -482,6 +493,7 @@ export async function moveStatusOffDone(
     },
     signal,
   );
+  if (data.repository) github.sameRepository(data.repository.nameWithOwner);
   const found = data.repository?.issue;
   // Never the Status of an issue transferred away.
   if (

@@ -460,9 +460,24 @@ export async function serve(options: ServeOptions): Promise<number> {
     log.write(issue, { event: "withdrawn" });
   };
 
+  /** The service-level problem last logged (GitHubSync.problem). */
+  let reported: string | undefined;
   const tick = (): void => {
     for (const issue of [...unloaded]) load(issue);
     applyRequests();
+    // The repository moved: every GitHub effect pauses. No step runs (no
+    // push, merge or close), no sync job runs, nothing settles or
+    // retires; states stay as they are until a restart with the fixed
+    // configuration. Requests are still recorded.
+    const problem = options.sync?.problem();
+    if (problem) {
+      if (reported !== problem)
+        log.write(0, { event: "service-problem", problem });
+      reported = problem;
+      record.problem = problem;
+      heartbeat();
+      return;
+    }
     // Running steps keep their slot; then started Objectives; then queue order.
     const ordered = [...runners.values()].sort(
       (a, b) =>
@@ -841,6 +856,8 @@ interface ServiceRecord {
   /** Set by a clean stop. */
   stopped?: boolean;
   unreadable: Record<string, string>;
+  /** What pauses the service's GitHub effects (GitHubSync.problem); `status` shows it. */
+  problem?: string;
 }
 
 interface Crash {

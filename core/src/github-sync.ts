@@ -162,6 +162,8 @@ export class GitHubSync {
   >();
   /** Finished Objectives whose final option and replies are written. */
   private readonly settled = new Set<number>();
+  /** The repository's identity was read once since the service started. */
+  private identified = false;
   private readonly display: QueueDisplay;
 
   constructor(
@@ -177,7 +179,25 @@ export class GitHubSync {
     this.display = new QueueDisplay(github, config);
   }
 
+  /**
+   * A problem that pauses every GitHub effect of the installation: the
+   * repository answers under another name (renamed or transferred). The
+   * service then runs no step and no sync job, and settles nothing, until
+   * the configuration names the repository and the service restarts.
+   */
+  problem(): string | undefined {
+    return this.github.moved?.message;
+  }
+
   tick(sync: SyncView): void {
+    if (this.problem()) return;
+    // Read once at start: a rename while the service was down pauses
+    // before any issue counts as gone (later redirects check it again).
+    if (!this.identified)
+      this.background(0, "identity", async () => {
+        await this.github.checkIdentity();
+        this.identified = true;
+      });
     const due =
       this.now() - this.lastPoll >= this.config.queue.pollSeconds * 1000;
     if (due) {
@@ -848,12 +868,19 @@ export class GitHubSync {
     });
   }
 
-  /** Read the issue itself (redirects are answers, never followed); lose it only on 404, 410 or a redirect. */
+  /**
+   * Read the issue itself (redirects are answers, never followed); lose it
+   * only on 404, 410 or a redirect while the repository still answers
+   * under its configured name. A moved repository (RepositoryMoved, from
+   * the client's identity check) never makes an issue gone.
+   */
   private async confirmGone(issue: number, job: string): Promise<void> {
+    if (this.github.moved) return;
     try {
       await this.github.issue(issue);
     } catch (error) {
-      if (issueGone(error)) this.lose(issue, job, error.status);
+      if (issueGone(error) && !this.github.moved)
+        this.lose(issue, job, error.status);
     }
   }
 

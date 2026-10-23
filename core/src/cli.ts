@@ -330,14 +330,17 @@ async function status(paths: Paths, args: Args): Promise<number> {
     });
   }
   const live = await serviceLive(paths);
-  const loop = live ? crashLoop(paths) : undefined;
+  const service = live ? serviceRecord(paths) : {};
+  const loop = service.crashLoop;
   if (args.flags.json !== undefined) {
     process.stdout.write(
-      `${JSON.stringify({ service: live ? "running" : "stopped", ...(loop ? { crashLoop: loop } : {}), objectives: rows }, null, 2)}\n`,
+      `${JSON.stringify({ service: live ? "running" : "stopped", ...service, objectives: rows }, null, 2)}\n`,
     );
     return 0;
   }
   const lines = [`Service: ${live ? "running" : "stopped"}`];
+  if (service.problem)
+    lines.push(`  Problem: ${service.problem}. GitHub effects are paused.`);
   if (loop)
     lines.push(
       `  Crash loop: the service restarted after ${loop.crashes} deaths in a row; interrupted steps ${Date.parse(loop.resumeAt) > Date.now() ? "resume" : "resumed"} at ${loop.resumeAt}.`,
@@ -528,28 +531,35 @@ async function request(
 }
 
 /**
- * The running service's crash loop, from `service.json`: the deaths in a
- * row before this start, and when it resumes interrupted steps. Shown
- * until the run has lived 10 min past that time.
+ * The running service's record, from `service.json`: its crash loop (the
+ * deaths in a row before this start, and when it resumes interrupted
+ * steps; shown until the run has lived 10 min past that time), and a
+ * problem that pauses its GitHub effects.
  */
-function crashLoop(
-  paths: Paths,
-): { crashes: number; resumeAt: string } | undefined {
+function serviceRecord(paths: Paths): {
+  crashLoop?: { crashes: number; resumeAt: string };
+  problem?: string;
+} {
   try {
     const record = JSON.parse(
       readFileSync(join(paths.root, "service.json"), "utf8"),
-    ) as { starts?: string[]; resumeAt?: string };
-    if (
-      !record.resumeAt ||
-      Date.now() > Date.parse(record.resumeAt) + 10 * 60 * 1000
-    )
-      return undefined;
+    ) as { starts?: string[]; resumeAt?: string; problem?: string };
     return {
-      crashes: (record.starts?.length ?? 1) - 1,
-      resumeAt: record.resumeAt,
+      ...(record.resumeAt &&
+      Date.now() <= Date.parse(record.resumeAt) + 10 * 60 * 1000
+        ? {
+            crashLoop: {
+              crashes: (record.starts?.length ?? 1) - 1,
+              resumeAt: record.resumeAt,
+            },
+          }
+        : {}),
+      ...(typeof record.problem === "string"
+        ? { problem: record.problem }
+        : {}),
     };
   } catch {
-    return undefined;
+    return {};
   }
 }
 

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { availableParallelism, homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -401,8 +402,22 @@ export function ownRepositoryProblem(
   const ownRepository = url && remoteRepository(url.replace(/^git\+/, ""));
   if (ownRepository && repository.toLowerCase() === ownRepository)
     return `${repository} is Factory's own repository, and Factory never runs on the code that runs it; name another target repository`;
-  if (own.name && checkout && packageName(checkout) === own.name)
-    return `The checkout ${checkout} is a Factory checkout (its package is ${own.name}), and Factory never runs on the code that runs it; point checkout at a clone of the target repository`;
+  if (!own.name || !checkout) return undefined;
+  // The checkout, and the top of the clone it lies in.
+  const places = [checkout];
+  try {
+    places.push(
+      execFileSync("git", ["-C", checkout, "rev-parse", "--show-toplevel"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 10_000,
+      }).trim(),
+    );
+  } catch {
+    // Not in a Git repository: the checkout alone.
+  }
+  if (places.some((place) => place && packageName(place) === own.name))
+    return `The checkout ${checkout} is in a Factory checkout (its package is ${own.name}), and Factory never runs on the code that runs it; point checkout at a clone of the target repository`;
   return undefined;
 }
 

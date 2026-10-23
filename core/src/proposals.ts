@@ -26,7 +26,6 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -407,23 +406,6 @@ function proposePrompt(
   ].join("\n");
 }
 
-/** A read-only export of `base` for the model, under the installation; other bases' exports are removed. */
-async function proposalTree(
-  deps: ProposeDeps,
-  base: string,
-  signal: AbortSignal,
-): Promise<string> {
-  const root = join(deps.paths.root, "proposals");
-  const name = `tree-${base.slice(0, 12)}`;
-  for (const entry of readdirSync(root))
-    if (entry.startsWith("tree-") && entry !== name)
-      rmSync(join(root, entry), { recursive: true, force: true });
-  const dir = join(root, name);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  await exportTree(deps.config.checkout, base, dir, signal);
-  return dir;
-}
-
 /** `path` is absolute, in an existing directory, and not inside the target checkout. */
 function outsideCheckout(path: string, config: CoreConfig): void {
   if (!isAbsolute(path))
@@ -474,32 +456,45 @@ export async function draftProposal(
   const base = await defaultHead(config.checkout, config.repository, signal);
   const selectors = "sources" in input ? input.sources : [];
   const sections = await sourceSections(config, selectors, base, signal);
-  const readDir = await proposalTree(deps, base, signal);
   let problems: string[] = [];
   let objectives: ProposedObjective[] | undefined;
-  for (let attempt = 0; attempt < 2 && !objectives; attempt++) {
-    const answer = await planner.answer({
-      role: "planner",
-      phase: "propose",
-      prompt: proposePrompt(input, sections, config.repository, base, problems),
-      schema: PROPOSAL_SCHEMA,
-      readDir,
-      signal,
-      log: (event) => deps.log({ ...event, proposal: id }),
-    });
-    const shaped = objectivesOf(answer.value, "intent" in input);
-    if (typeof shaped === "string") problems = [shaped];
-    else {
-      // Each roadmap Objective pins its primary section for every worker.
-      const primary = selectors[0];
-      if (primary)
-        for (const objective of shaped)
-          if (!objective.sources.includes(primary))
-            objective.sources.unshift(primary);
-      problems = await draftProblems(deps, id, shaped, base, signal);
-      if (!problems.length) objectives = shaped;
+  // This draft's own read-only export of `base`, removed when it ends.
+  const tree = join(paths.root, "proposals", `tree-${id}`);
+  try {
+    mkdirSync(tree, { recursive: true, mode: 0o700 });
+    const readDir = await exportTree(config.checkout, base, tree, signal);
+    for (let attempt = 0; attempt < 2 && !objectives; attempt++) {
+      const answer = await planner.answer({
+        role: "planner",
+        phase: "propose",
+        prompt: proposePrompt(
+          input,
+          sections,
+          config.repository,
+          base,
+          problems,
+        ),
+        schema: PROPOSAL_SCHEMA,
+        readDir,
+        signal,
+        log: (event) => deps.log({ ...event, proposal: id }),
+      });
+      const shaped = objectivesOf(answer.value, "intent" in input);
+      if (typeof shaped === "string") problems = [shaped];
+      else {
+        // Each roadmap Objective pins its primary section for every worker.
+        const primary = selectors[0];
+        if (primary)
+          for (const objective of shaped)
+            if (!objective.sources.includes(primary))
+              objective.sources.unshift(primary);
+        problems = await draftProblems(deps, id, shaped, base, signal);
+        if (!problems.length) objectives = shaped;
+      }
+      deps.log({ event: "proposal-draft", proposal: id, attempt, problems });
     }
-    deps.log({ event: "proposal-draft", proposal: id, attempt, problems });
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
   }
   if (!objectives)
     throw new ProposalRefused(

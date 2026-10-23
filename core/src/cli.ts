@@ -919,16 +919,18 @@ async function propose(
     }
     const published = await approveProposal(file!, approve, deps);
     const enqueue = args.flags.enqueue !== undefined;
-    // `factory run`'s request for each: the service sets the card to
-    // queued, and the predecessors step orders them by their links. A
-    // fixed id makes approving again harmless.
+    // `factory run`'s request for each, with its normal timestamp id so a
+    // later `factory run N` still supersedes it: the service sets the card
+    // to queued, and the predecessors step orders them by their links. A
+    // duplicate from approving again is harmless: startRun accepts an
+    // Objective that isn't terminal, and a newer waiting run replaces an
+    // older one.
     if (enqueue)
       for (const { issue } of published)
         writeRequest(
           paths.requests,
           { kind: "run", issue },
           process.env.USER ?? "operator",
-          `propose-${issue}`,
         );
     const live = enqueue && (await serviceLive(paths));
     const numbers = published.map(({ issue }) => issue).join(" ");

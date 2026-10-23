@@ -3392,7 +3392,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
   });
   await until(() => /#54 - \S+ (hold|cancelled|done)/.test(view), "the rows");
   const run = readdirSync(join(inst.logs, "54")).sort().at(-1);
-  // Item a's validation failed 3 minutes ago; b's worker went quiet 5
+  // Item a's validation failed 3 minutes ago; b's worker went quiet 20
   // minutes ago without reporting its context.
   const ago = (minutes) =>
     new Date(Date.now() - minutes * 60_000).toISOString();
@@ -3426,7 +3426,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
         context: { tokens: 84_000, window: 272_000 },
       },
       {
-        at: ago(5),
+        at: ago(20),
         step: "item:b:work",
         event: "worker-activity",
         item: "b",
@@ -3446,7 +3446,7 @@ test("the run log: tail, follow, and status reads its end", async () => {
   );
   assert.match(
     view,
-    /#54 b work running .*1 turns · context and compactions unknown · no progress for 5m/,
+    /#54 b work running .*1 turns · context and compactions unknown · no progress for 20m/,
   );
   watching.kill("SIGINT");
   assert.equal(refusal(cli(inst, "log", "77")), "no_factory_state");

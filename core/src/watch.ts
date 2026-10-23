@@ -21,7 +21,7 @@ const QUIET_MS = 24 * 60 * 60 * 1000;
 /** A terminal redraws at least this often, so ages stay current. */
 const REDRAW_MS = 5_000;
 /** A running worker without progress this long shows how long. */
-const QUIET_PROGRESS_MS = 60_000;
+const QUIET_PROGRESS_MS = 15 * 60_000;
 
 interface Totals {
   toolsStarted: number;

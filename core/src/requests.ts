@@ -40,7 +40,23 @@ export type Request =
   | { kind: "pause" | "drain" | "resume"; issue: number }
   /** Queue-wide control (issue 0); it survives restarts. */
   | { kind: "queue"; issue: 0; mode: QueueMode }
+  | RunRequest
   | DreamRequest;
+
+/**
+ * `factory run N`: queue issue N now, through its Project card, so the
+ * normal queue admission admits it, with this provider (frozen as
+ * selectedBy "--provider") and this absolute deadline in place of the
+ * defaults. It stays pending until its Objective is admitted; one already
+ * running answers at once, with no second admission.
+ */
+export type RunRequest = {
+  kind: "run";
+  issue: number;
+  provider?: string;
+  /** Absolute (ISO): the CLI resolves a duration when it writes the request. */
+  deadline?: string;
+};
 
 /** A `factory dream` write to the knowledge store (knowledge/dream.ts), installation-wide (issue 0). */
 export type DreamRequest = { kind: "dream"; issue: 0; write: DreamWrite };
@@ -68,6 +84,10 @@ export type RefusalCode =
   | "question_required"
   /** The answer isn't one the question offers, or `switch` names no usable provider. */
   | "invalid_answer"
+  /** `run --provider` names a provider the running service's configuration lacks. */
+  | "unknown_provider"
+  /** `run` names a closed issue Factory never ran: reopen it first. */
+  | "issue_closed"
   /** The Objective's state can't be read: answer reset or cancel. */
   | "state_unreadable"
   /** The command needs this repository's configuration. */
@@ -80,7 +100,7 @@ export type RefusalCode =
   | "superseded"
   /** A reset of this Objective is already rebuilding it. */
   | "reset_in_progress"
-  /** The queue is paused or draining, so nothing new is admitted (a reset of an Objective Factory has no state for). */
+  /** The queue is paused or draining, so nothing new is admitted (a `run`, or a reset of an Objective Factory has no state for). */
   | "queue_not_running"
   /** The command writes what only the running service writes (the knowledge store): start `factory serve`. */
   | "service_not_running"

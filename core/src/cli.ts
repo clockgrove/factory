@@ -148,6 +148,17 @@ const COMMANDS: Record<string, Command> = {
     flags: SETUP_FLAGS,
     help: "Write and check the configuration (--checkout PATH --project-id PVT_... to create it), the checkout's origin and the queue's Project fields; repeated, it changes nothing. --provider NAME [--planner KIND] [--worker codex|claude|copilot] [--default] adds or changes a provider; see docs/CORE.md#Setup for every option",
   },
+  run: {
+    args: "ISSUE",
+    flags: { provider: "value", deadline: "value" },
+    help: "Queue the Objective now and follow it to the end (Ctrl-C stops following; it keeps running): --provider NAME runs it on that provider, --deadline an ISO time or a duration (90m, 2h, 1d12h) cancels it then; exits 0 when done, 2 when it needs you (a question, or the service isn't running: the request waits for it), 1 when cancelled or refused. Run again on a running Objective to follow it",
+    check: (args) =>
+      issueCheck(args) ??
+      (args.flags.deadline === undefined ||
+      deadlineOf(args.flags.deadline, Date.now()) !== undefined
+        ? undefined
+        : `--deadline takes a future ISO time (2026-11-01T18:00:00Z) or a duration (90m, 2h, 1d12h); not ${args.flags.deadline}`),
+  },
   status: {
     args: "[ISSUE]",
     flags: { json: "switch", all: "switch", capacity: "switch" },
@@ -346,6 +357,8 @@ async function main(argv: string[]): Promise<number> {
       return await serveCommand(repository, paths, args);
     case "setup":
       return await setupCommand(repository, args);
+    case "run":
+      return await runCommand(paths, repository, args);
     case "status":
       return await status(paths, repository, args);
     case "log":
@@ -445,6 +458,7 @@ async function serveCommand(
   let loaded: CoreConfig | undefined;
   let workflow = objectiveWorkflow();
   let frozen: Frozen | undefined;
+  let freeze: ((provider: string) => Frozen | undefined) | undefined;
   if (existsSync(configPath(repository))) {
     let config: CoreConfig;
     try {
@@ -488,6 +502,12 @@ async function serveCommand(
       providerWorkflow(routes, routes.get(name)!.workflow),
       rebuildStep(github, config),
     );
+    freeze = (each) => {
+      const route = routes.get(each);
+      return route
+        ? { ...route.frozen, provider: each, selectedBy: "--provider" }
+        : undefined;
+    };
   }
   if (loaded)
     hostLimits.configure(
@@ -500,6 +520,7 @@ async function serveCommand(
     ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
     ...(sync ? { sync, reset: true } : {}),
     ...(frozen ? { frozen } : {}),
+    ...(freeze ? { freeze } : {}),
     ...(loaded?.queue.objectiveDeadlineSeconds
       ? { deadlineSeconds: loaded.queue.objectiveDeadlineSeconds }
       : {}),
@@ -783,6 +804,98 @@ async function logCommand(
     for (const event of readNew(paths.logs, issue, ends)) print(event);
   });
   return 0;
+}
+
+/** `--deadline`: an absolute time, or a duration from `now`; undefined when it isn't one, or has passed. */
+function deadlineOf(value: string, now: number): string | undefined {
+  const span = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(value);
+  const at =
+    span && value
+      ? now +
+        ((Number(span[1] ?? 0) * 24 + Number(span[2] ?? 0)) * 3600 +
+          Number(span[3] ?? 0) * 60 +
+          Number(span[4] ?? 0)) *
+          1000
+      : /^\d{4}-\d\d-\d\dT/.test(value)
+        ? Date.parse(value)
+        : Number.NaN;
+  return Number.isFinite(at) && at > now
+    ? new Date(at).toISOString()
+    : undefined;
+}
+
+/**
+ * `factory run ISSUE [--provider NAME] [--deadline WHEN]`: a request that
+ * queues the Objective (the service admits it through the normal queue),
+ * then a follower: its new run log events, until it ends (0 done, 1
+ * cancelled), needs a person (2: a question, or the service isn't
+ * running), or Ctrl-C, which stops only the following.
+ */
+async function runCommand(
+  paths: Paths,
+  repository: string,
+  args: Args,
+): Promise<number> {
+  const issue = issueOf(args);
+  const config = configOf(repository);
+  const { provider, deadline } = args.flags;
+  if (provider !== undefined && config) providerName(config, args);
+  const secrets = config?.secrets ?? [];
+  // Follow from here: only what happens from now on.
+  const { ends } = readLog(paths.logs, issue, 0);
+  const id = writeRequest(
+    paths.requests,
+    {
+      kind: "run",
+      issue,
+      ...(provider !== undefined ? { provider } : {}),
+      ...(deadline !== undefined
+        ? { deadline: deadlineOf(deadline, Date.now())! }
+        : {}),
+    },
+    process.env.USER ?? "operator",
+  );
+  const stoppedService = () => {
+    process.stdout.write(
+      `The service isn't running; the request applies when it starts. Start it (factory serve, or its systemd unit), then factory run ${issue} follows it.\n`,
+    );
+    return 2;
+  };
+  if (!(await serviceLive(paths))) return stoppedService();
+  process.stdout.write(
+    `Queued #${issue}; following it (Ctrl-C stops following, and it keeps running).\n`,
+  );
+  const resultFile = join(paths.requests, `${id}.result`);
+  let admitted = false;
+  const code = await untilInterrupted(async () => {
+    for (const event of readNew(paths.logs, issue, ends))
+      process.stdout.write(`${eventLine(redactDeep(event, secrets))}\n`);
+    const live = await serviceLive(paths);
+    if (!admitted && existsSync(resultFile)) {
+      const result = JSON.parse(
+        readFileSync(resultFile, "utf8"),
+      ) as RequestResult;
+      rmSync(resultFile, { force: true });
+      if (result.code) throw new Refusal(result.code, result.message);
+      admitted = true;
+    }
+    if (!live) return stoppedService();
+    // Before the admission, an earlier run's state is not this one's.
+    if (!admitted) return undefined;
+    const view = readStatus(paths, { only: issue, live, secrets });
+    const row = view.objectives[0];
+    if (!row) return undefined;
+    const ended = TERMINAL.includes(row.status as ObjectiveState["status"]);
+    if (!ended && row.status !== "unreadable" && !row.holds.length)
+      return undefined;
+    process.stdout.write(statusText(view, { list: false, all: false }));
+    return row.status === "done" ? 0 : ended ? 1 : 2;
+  });
+  if (code !== undefined) return code;
+  process.stdout.write(
+    `Stopped following #${issue}; it keeps running: factory status ${issue}, or factory run ${issue} to follow it again.\n`,
+  );
+  return 130;
 }
 
 /** `factory queue list|pause|resume|drain`. */

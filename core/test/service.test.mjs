@@ -489,6 +489,8 @@ const GITHUB_CRASH_POINTS = [
   "final:lfs-repush:before",
   "final:lfs-repush:after",
   "reset:answered",
+  "run:queue:before",
+  "run:queue:after",
 ];
 for (const point of GITHUB_CRASH_POINTS)
   test(`crash at ${point}, restart, finish once`, {
@@ -2521,6 +2523,7 @@ test("unknown and misplaced options are refused with the fix", () => {
   assert.equal(JSON.parse(leading.stdout).service, "stopped");
   for (const command of [
     "serve",
+    "run",
     "status",
     "log",
     "watch",
@@ -2608,6 +2611,86 @@ test("the run log: tail, follow, and status reads its end", async () => {
   );
   watching.kill("SIGINT");
   assert.equal(refusal(cli(inst, "log", "77")), "no_factory_state");
+  await stopped(service);
+});
+
+test("run: a request plus a follower; it exits 2 when it needs a person, 1 when cancelled or refused", async () => {
+  const inst = installation();
+  /** `factory run`, followed in the background; resolves with its exit and output. */
+  const follow = (...args) => {
+    const child = spawn(
+      process.execPath,
+      [CLI, "run", ...args, "--repo", REPO],
+      { env: inst.env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    children.add(child);
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => {
+      out += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      err += chunk;
+    });
+    const exit = new Promise((resolve) =>
+      child.on("exit", (code) => resolve({ code, out, err })),
+    );
+    return { child, exit, out: () => out };
+  };
+  for (const deadline of ["soon", "0m", "2020-01-01T00:00:00Z"]) {
+    const wrong = cli(inst, "run", "81", "--deadline", deadline);
+    assert.equal(wrong.code, 2, deadline);
+    assert.equal(refusal(wrong), "usage");
+  }
+  // The service isn't running: it needs a person, and the request waits.
+  const waiting = cli(inst, "run", "81", "--deadline", "2h");
+  assert.equal(waiting.code, 2);
+  assert.match(waiting.out, /isn't running.*factory run 81 follows it/);
+  const [sent] = readdirSync(inst.requests).filter((n) => n.endsWith(".json"));
+  const { request } = JSON.parse(
+    readFileSync(join(inst.requests, sent), "utf8"),
+  );
+  assert.equal(request.kind, "run");
+  assert.ok(Date.parse(request.deadline) > Date.now() + 119 * 60_000);
+  seed(inst, 82);
+  seed(inst, 83, "checking", {
+    control: { mode: "paused", by: "octo", at: new Date().toISOString() },
+  });
+  const service = serve(inst);
+  // Without configuration there is no queue to run #81 from.
+  await until(
+    () => readdirSync(inst.requests).every((n) => !n.endsWith(".json")),
+    "the waiting request answered",
+  );
+  const refused = cli(inst, "run", "81");
+  assert.equal(refused.code, 1);
+  assert.equal(refusal(refused), "no_configuration");
+  // Running already: it follows, with no second admission, until its
+  // question needs a person.
+  const held = await follow("82").exit;
+  assert.equal(held.code, 2, held.err);
+  assert.match(held.out, /Next: factory answer 82 retry --question \S+/);
+  assert.equal(stateOf(inst, 82).appliedRequests.length, 0);
+  // Ctrl-C stops the following only.
+  const paused = follow("83");
+  await until(() => /following it/.test(paused.out()), "following #83");
+  paused.child.kill("SIGINT");
+  const interrupted = await paused.exit;
+  assert.equal(interrupted.code, 130);
+  assert.equal(stateOf(inst, 83).status, "checking");
+  // Cancelled while followed: exit 1.
+  const cancelled = follow("83");
+  await until(() => /following it/.test(cancelled.out()), "following again");
+  assert.equal(cli(inst, "cancel", "83").code, 0);
+  const ended = await cancelled.exit;
+  assert.equal(ended.code, 1, ended.err);
+  assert.match(ended.out, /#83: cancelled/);
+  // A paused queue admits nothing new, but a running Objective still follows.
+  assert.equal(cli(inst, "queue", "pause").code, 0);
+  const closed = cli(inst, "run", "84");
+  assert.equal(closed.code, 1);
+  assert.equal(refusal(closed), "queue_not_running");
+  assert.equal((await follow("82").exit).code, 2);
   await stopped(service);
 });
 

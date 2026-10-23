@@ -17,8 +17,14 @@ import {
   STATUS_REFRESH_MS,
   statusComment,
 } from "./progress.js";
-import { QueueDisplay, type QueueItem, queued, readQueue } from "./queue.js";
-import { writeRequest } from "./requests.js";
+import {
+  QueueDisplay,
+  type QueueItem,
+  queued,
+  queueIssue,
+  readQueue,
+} from "./queue.js";
+import { type RequestResult, refused, writeRequest } from "./requests.js";
 import type { ObjectiveState, ObjectiveStatus, QueueControl } from "./state.js";
 import {
   answerForm,
@@ -192,6 +198,8 @@ export class GitHubSync {
   /** Known issues GitHub no longer has: left out of later reads. */
   private readonly gone = new Set<number>();
   private lastPoll = 0;
+  /** `factory run` cards being queued, or queued and not yet admitted: read by number until then. */
+  private readonly queuing = new Set<number>();
   private readonly jobs: Jobs;
   /** Finished Objectives whose final option and replies are written. */
   private readonly settled = new Set<number>();
@@ -261,6 +269,7 @@ export class GitHubSync {
             .filter((runner) => !TERMINAL.includes(runner.state.status))
             .map((runner) => runner.state.issue),
           ...sync.unreadable.keys(),
+          ...this.queuing,
         ]),
       ].filter((issue) => !this.gone.has(issue));
       // The poll interval paces the queue read; it needs no backoff.
@@ -331,6 +340,44 @@ export class GitHubSync {
       if (!this.gone.has(issue)) this.unreadable(issue, entry, due, sync);
   }
 
+  /**
+   * `factory run N`: set the issue's card to queued (queue.ts queueIssue),
+   * once, in the background, and read the queue at once, so the normal
+   * intake admits it. `closed` queues a closed issue (a finished Objective
+   * runs again). A missing or closed issue is `refuse`d; a failed write is
+   * retried with backoff on a later call.
+   */
+  queue(
+    issue: number,
+    closed: boolean,
+    refuse: (result: RequestResult) => void,
+  ): void {
+    if (this.problem() || this.queuing.has(issue)) return;
+    this.background(issue, `run:${issue}`, async (signal) => {
+      const outcome = await queueIssue(
+        this.github,
+        this.config,
+        this.display,
+        issue,
+        closed,
+        signal,
+      );
+      if (outcome === "queued") {
+        this.queuing.add(issue);
+        this.lastPoll = 0;
+        this.log.write(issue, { event: "run-queued" });
+      } else
+        refuse(
+          refused(
+            outcome,
+            outcome === "issue_closed"
+              ? `#${issue} is closed and Factory never ran it; reopen it, then factory run ${issue} again.`
+              : `${this.config.repository} has no issue #${issue}.`,
+          ),
+        );
+    });
+  }
+
   /** Whether a finished Objective's sync is done and no job of it is running. */
   idle(issue: number): boolean {
     return this.settled.has(issue) && !this.jobs.busy(issue);
@@ -361,6 +408,7 @@ export class GitHubSync {
    */
   forget(issue: number): void {
     this.settled.delete(issue);
+    this.queuing.delete(issue);
     this.changed.delete(issue);
     this.wroteAt.delete(issue);
     this.statusTried.delete(issue);

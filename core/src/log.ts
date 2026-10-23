@@ -106,20 +106,32 @@ export function readNew(
   return fresh.sort((a, b) => a.at.localeCompare(b.at));
 }
 
-/** Call `poll` every `everyMs` until SIGINT or SIGTERM: a follow's loop. */
-export async function untilInterrupted(
-  poll: () => void,
+/**
+ * Call `poll` every `everyMs` until SIGINT or SIGTERM, or until it returns
+ * a result (anything but undefined): a follow's loop. Returns that result,
+ * undefined when interrupted.
+ */
+export async function untilInterrupted<T>(
+  poll: () => T | undefined | Promise<T | undefined>,
   everyMs = 500,
-): Promise<void> {
+): Promise<T | undefined> {
   let stop = false;
   const stopping = () => {
     stop = true;
   };
   process.once("SIGINT", stopping);
   process.once("SIGTERM", stopping);
-  while (!stop) {
-    await new Promise((resolve) => setTimeout(resolve, everyMs));
-    if (!stop) poll();
+  try {
+    while (!stop) {
+      await new Promise((resolve) => setTimeout(resolve, everyMs));
+      if (stop) break;
+      const result = await poll();
+      if (result !== undefined) return result;
+    }
+    return undefined;
+  } finally {
+    process.off("SIGINT", stopping);
+    process.off("SIGTERM", stopping);
   }
 }
 

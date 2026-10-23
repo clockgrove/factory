@@ -277,8 +277,9 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   for (const item of rank(plan, view, runnable)) {
     const step = next(item);
     if (!step) continue;
+    // Any kind's first phase starts it, and so takes its resources.
     const first =
-      item.kind === "aggregate" || step.key === stepKey(item.id, "work");
+      step.key === stepKey(item.id, phasesOf(item, layerOf(item.id))[0]!);
     if (first && gate.admit(holder(item))) continue;
     steps.push(step);
   }
@@ -2330,9 +2331,21 @@ function finalReviewStep(deps: BuildDeps): Step {
         log: context.log,
       });
       // Read-only QA checked the integrated tree too.
-      const qaIds = plan.items
-        .filter((item) => item.kind === "qa")
-        .map((item) => item.id);
+      const qa = plan.items.flatMap((item) => {
+        const checked = state.done[stepKey(item.id, "validate")] as
+          | QaResult
+          | undefined;
+        return item.kind === "qa" && checked && mergeOf(state, item.id)
+          ? [
+              {
+                itemId: item.id,
+                commit: checked.commit,
+                checks: checked.checks,
+                commands: checked.commands,
+              },
+            ]
+          : [];
+      });
       const review = await reviewObjective({
         planner: deps.planner,
         plan,
@@ -2343,7 +2356,7 @@ function finalReviewStep(deps: BuildDeps): Step {
         validation: { tree: final.tree, commands: final.commands },
         artifacts: [
           { artifacts: final.artifacts ?? [] },
-          ...[...mergedIds, ...qaIds].map((id) => ({
+          ...[...mergedIds, ...qa.map((entry) => entry.itemId)].map((id) => ({
             itemId: id,
             artifacts:
               (
@@ -2369,6 +2382,7 @@ function finalReviewStep(deps: BuildDeps): Step {
         acceptance,
         dir: join(deps.workDir(state.issue), "final-review"),
         ...(decisions ? { decisions } : {}),
+        qa,
         signal,
         log: context.log,
       });

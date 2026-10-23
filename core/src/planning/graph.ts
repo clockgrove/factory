@@ -990,7 +990,10 @@ function sourceObligationProblem(entry: {
  * exclusions. A criterion whose environment is "missing" is returned as an
  * operator-decision finding (#1292): the planner can't fix it, a person must.
  */
-function checkCoverageShape(draft: Draft): Finding[] {
+function checkCoverageShape(
+  draft: Draft,
+  integratedCheckNames: readonly string[],
+): Finding[] {
   const { findings, found } = collector();
   if (!Array.isArray(draft.coverage)) {
     found("The plan needs a coverage list with one entry per obligation");
@@ -1078,6 +1081,14 @@ function checkCoverageShape(draft: Draft): Finding[] {
     )
       found(
         `Coverage of "${name}" uses named CI, which needs a read-only QA owner and an exact check name`,
+        item.id,
+      );
+    if (
+      proof.kind === "integrated-ci" &&
+      !integratedCheckNames.includes(proof.checkName)
+    )
+      found(
+        `Coverage of "${name}" uses integrated-ci on check ${JSON.stringify(proof.checkName)}, which no base workflow runs on a push to the default branch, so it never reports on the integrated commit; use one of ${JSON.stringify(integratedCheckNames.slice(0, 20))}, or published-ci on the PR that runs it`,
         item.id,
       );
     if (proof.kind === "published-ci") {
@@ -1383,6 +1394,8 @@ export function validateGraph(
     body: string;
     sources: readonly PinnedSource[];
     coverageObligations: readonly CoverageObligation[];
+    /** The checks a push to the default branch reports: integrated-ci's only names. */
+    integratedCheckNames: readonly string[];
   },
   previous?: Draft,
 ): { order: WorkItem[]; findings: Finding[]; usable: boolean } {
@@ -1395,7 +1408,7 @@ export function validateGraph(
     order: shape.order,
     findings: [
       ...shape.findings,
-      ...checkCoverageShape(draft),
+      ...checkCoverageShape(draft, facts.integratedCheckNames),
       ...checkCoverageSources(
         draft,
         facts.sources,

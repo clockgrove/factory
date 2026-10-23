@@ -25,6 +25,8 @@ import type { ReviewArtifactGroup } from "./artifacts.js";
 import {
   type CriterionDecision,
   type PassedValidation,
+  type QaObservation,
+  qaObservationRow,
   REVIEW_GUIDANCE,
   type ResultReview,
   runReview,
@@ -64,6 +66,8 @@ export function reviewObjective(input: {
   dir: string;
   /** Operator decisions; those on this tree replace the reviewer's verdict. */
   decisions?: readonly CriterionDecision[];
+  /** What each accepted read-only QA item observed. */
+  qa?: readonly QaObservation[];
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
 }): Promise<ResultReview> {
@@ -72,12 +76,15 @@ export function reviewObjective(input: {
     phase: "objective-review",
     criteria: finalCriteria(input.plan, input.acceptance),
     instructions: FINAL_INSTRUCTIONS,
-    design: input.plan.items.map((item) => ({
-      origin: "controller",
-      path: `Accepted Work Item design: ${item.id}`,
-      content: JSON.stringify(workItemDesign(item)),
-      complete: true,
-    })),
+    design: [
+      ...input.plan.items.map((item) => ({
+        origin: "controller" as const,
+        path: `Accepted Work Item design: ${item.id}`,
+        content: JSON.stringify(workItemDesign(item)),
+        complete: true,
+      })),
+      ...(input.qa ?? []).map(qaObservationRow),
+    ],
     artifacts: input.artifacts ?? [],
   });
 }

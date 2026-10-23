@@ -262,6 +262,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
   const sources = facts.sources;
   const obligations = facts.coverageObligations;
   const checkNames = facts.checkNames;
+  const integratedCheckNames = facts.integratedCheckNames;
   const guarantees = controllerGuarantees(Boolean(options.reviewArtifacts));
   const itemSchema = strict({
     kind: text,
@@ -489,7 +490,11 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     "integrated-semantic": {},
     "final-review": {},
     "final-controller": { guaranteeIndex: integer(guarantees.length) },
-    "integrated-ci": { checkIndex },
+    // integrated-ci observes the default-branch head, so it chooses only
+    // from the checks a push there reports.
+    "integrated-ci": {
+      integratedCheckIndex: integer(integratedCheckNames.length),
+    },
     "published-ci": { checkIndex, dependencyIndex: integer() },
   };
   // Proof modes by item kind. The wire offers only the kinds this build
@@ -504,7 +509,8 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     qa: [
       "integrated-command",
       "integrated-semantic",
-      ...(checkNames.length ? ["integrated-ci", "published-ci"] : []),
+      ...(integratedCheckNames.length ? ["integrated-ci"] : []),
+      ...(checkNames.length ? ["published-ci"] : []),
       "final-review",
       "final-controller",
     ],
@@ -905,6 +911,7 @@ function contract(facts: PlanningFacts, options: WireOptions = {}) {
     sources,
     obligations,
     checkNames,
+    integratedCheckNames,
     guarantees,
     itemSchema,
     kindSchemas,
@@ -945,10 +952,14 @@ export function planChoices(
   facts: PlanningFacts,
   options: WireOptions = {},
 ): Record<string, unknown> {
-  const { modes, obligations, sources, guarantees, checkNames } = contract(
-    facts,
-    options,
-  );
+  const {
+    modes,
+    obligations,
+    sources,
+    guarantees,
+    checkNames,
+    integratedCheckNames,
+  } = contract(facts, options);
   return {
     proofModesByItemKind: structuredClone(modes),
     obligations: obligations.map((entry, obligationIndex) => ({
@@ -980,6 +991,13 @@ export function planChoices(
     executionProfiles: options.profiles ?? null,
     ...(facts.fixedScripts.length ? { fixedScripts: facts.fixedScripts } : {}),
     checkNames: checkNames.map((name, checkIndex) => ({ checkIndex, name })),
+    ...(modes.qa?.includes("integrated-ci")
+      ? {
+          integratedCheckNames: integratedCheckNames.map(
+            (name, integratedCheckIndex) => ({ integratedCheckIndex, name }),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -1771,28 +1789,35 @@ function prove(
       };
       break;
     case "integrated-ci":
-    case "published-ci": {
-      const checkName =
-        wire.checkNames[
-          index(proof.checkIndex, wire.checkNames.length, "checkIndex")
-        ]!;
-      canonical =
-        proof.kind === "published-ci"
-          ? {
-              kind: proof.kind,
-              checkName,
-              targetItem:
-                owner.dependencies[
-                  index(
-                    proof.dependencyIndex,
-                    owner.dependencies.length,
-                    `${label} dependencyIndex`,
-                  )
-                ]!,
-            }
-          : { kind: proof.kind, checkName };
+      canonical = {
+        kind: proof.kind,
+        checkName:
+          wire.integratedCheckNames[
+            index(
+              proof.integratedCheckIndex,
+              wire.integratedCheckNames.length,
+              "integratedCheckIndex",
+            )
+          ]!,
+      };
       break;
-    }
+    case "published-ci":
+      canonical = {
+        kind: proof.kind,
+        checkName:
+          wire.checkNames[
+            index(proof.checkIndex, wire.checkNames.length, "checkIndex")
+          ]!,
+        targetItem:
+          owner.dependencies[
+            index(
+              proof.dependencyIndex,
+              owner.dependencies.length,
+              `${label} dependencyIndex`,
+            )
+          ]!,
+      };
+      break;
     default:
       throw new Refusal(`Planner ${label} proof form is invalid`, owner.id);
   }

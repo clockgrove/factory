@@ -133,6 +133,31 @@ export class BaseFiles {
     return this.tree;
   }
 
+  /**
+   * The default branch's name, as origin's HEAD names it (every fetch of
+   * the default head sets it); undefined when the checkout has none.
+   */
+  async defaultBranch(): Promise<string | undefined> {
+    try {
+      const name = (
+        await this.git([
+          "symbolic-ref",
+          "--quiet",
+          "--short",
+          "refs/remotes/origin/HEAD",
+        ])
+      )
+        .toString("utf8")
+        .trim();
+      return name.startsWith("origin/")
+        ? name.slice("origin/".length)
+        : undefined;
+    } catch (error) {
+      if (this.signal?.aborted) throw error;
+      return undefined;
+    }
+  }
+
   private async git(args: string[]): Promise<Buffer> {
     try {
       const { stdout } = await run("git", ["-C", this.checkout, ...args], {
@@ -862,6 +887,46 @@ function jobsOf(workflow: unknown): [string, Job][] {
 }
 
 /**
+ * Whether a workflow's `on` runs it on a push to `branch`: a bare push
+ * event, or a push whose branch filters select it (GitHub's filter
+ * patterns, `!` excluding, the last match deciding). A push filtered only
+ * by tags never runs for a branch; with no known branch, only an
+ * unfiltered push counts.
+ */
+function pushesTo(on: unknown, branch: string | undefined): boolean {
+  if (!events(on).includes("push")) return false;
+  const push =
+    on && typeof on === "object" && !Array.isArray(on)
+      ? (on as Record<string, unknown>).push
+      : undefined;
+  if (!push || typeof push !== "object") return true;
+  const filter = push as Record<string, unknown>;
+  const list = (key: string) =>
+    Array.isArray(filter[key])
+      ? (filter[key] as unknown[]).filter(
+          (pattern): pattern is string => typeof pattern === "string",
+        )
+      : undefined;
+  const branches = list("branches");
+  const ignored = list("branches-ignore");
+  if (!branches && !ignored) return !list("tags") && !list("tags-ignore");
+  if (branch === undefined) return false;
+  const matches = (pattern: string) =>
+    new RegExp(
+      `^${pattern
+        .replace(/[.^${}()|\\]/g, "\\$&")
+        .replace(/\*\*|\*/g, (star) => (star === "**" ? ".*" : "[^/]*"))}$`,
+    ).test(branch);
+  if (ignored) return !ignored.some(matches);
+  let selected = false;
+  for (const pattern of branches!)
+    if (pattern.startsWith("!")) {
+      if (matches(pattern.slice(1))) selected = false;
+    } else if (matches(pattern)) selected = true;
+  return selected;
+}
+
+/**
  * The check-run names GitHub reports on a pull request for the Actions
  * workflows at the base, read from their YAML structure. Only workflows in
  * the top level of .github/workflows triggered by pull_request,
@@ -870,7 +935,30 @@ function jobsOf(workflow: unknown): [string, Job][] {
  * reusable workflow "caller / callee" per called job. A workflow that can't
  * be read or parsed reports nothing.
  */
-export async function workflowCheckNames(files: BaseFiles): Promise<string[]> {
+export function workflowCheckNames(files: BaseFiles): Promise<string[]> {
+  return checkNamesOf(files, (on) =>
+    events(on).some((event) => PULL_REQUEST_EVENTS.includes(event)),
+  );
+}
+
+/**
+ * The check-run names GitHub reports on a commit pushed to the default
+ * branch `branch`: the jobs of workflows that `on: push` runs there. These
+ * are the only names an integrated-ci proof can observe on the
+ * default-branch head.
+ */
+export function pushCheckNames(
+  files: BaseFiles,
+  branch: string | undefined,
+): Promise<string[]> {
+  return checkNamesOf(files, (on) => pushesTo(on, branch));
+}
+
+/** The check-run names of the base's workflows whose `on` passes `triggered`. */
+async function checkNamesOf(
+  files: BaseFiles,
+  triggered: (on: unknown) => boolean,
+): Promise<string[]> {
   const paths = (await files.paths()).filter((path) =>
     new RegExp(`^${WORKFLOWS}/[^/]+\\.ya?ml$`).test(path),
   );
@@ -887,12 +975,7 @@ export async function workflowCheckNames(files: BaseFiles): Promise<string[]> {
   const names = new Set<string>();
   for (const path of paths) {
     const workflow = parsed.get(path);
-    if (
-      !events((workflow as { on?: unknown } | null)?.on).some((event) =>
-        PULL_REQUEST_EVENTS.includes(event),
-      )
-    )
-      continue;
+    if (!triggered((workflow as { on?: unknown } | null)?.on)) continue;
     for (const [id, job] of jobsOf(workflow)) {
       if (job.uses === undefined) {
         for (const name of jobNames(id, job)) names.add(name);
@@ -988,6 +1071,10 @@ export async function buildFacts(
     ),
     ciOnlyCommands,
     checkNames: await workflowCheckNames(files),
+    integratedCheckNames: await pushCheckNames(
+      files,
+      await files.defaultBranch(),
+    ),
     fixedScripts: await fixedScripts(
       finalCommands(args.shown.blocks, args.requiredCommands),
       files,

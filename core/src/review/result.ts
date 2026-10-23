@@ -255,23 +255,36 @@ export function reviewQa(
         content: JSON.stringify(workItemDesign(input.item)),
         complete: true,
       },
-      ...(input.checks.length
-        ? [
-            {
-              origin: "controller" as const,
-              path: "Named CI checks",
-              content: JSON.stringify({
-                scope:
-                  "Every run of each named check on its exact commit completed with success, as Factory read it from GitHub: the integrated commit for integrated-ci, the target item's delivered head for published-ci.",
-                checks: input.checks,
-              }),
-              complete: true,
-            },
-          ]
-        : []),
+      qaObservationRow({
+        itemId: input.item.id,
+        commit: input.commit,
+        checks: input.checks,
+        commands: input.validation.commands,
+      }),
     ],
     artifacts: [{ artifacts: input.artifacts ?? [] }],
   });
+}
+
+/** What a read-only QA item observed: its validate result. */
+export interface QaObservation {
+  itemId: string;
+  commit: string;
+  checks: readonly NamedCheck[];
+  commands: readonly string[];
+}
+
+/** A QA item's observation as a controller row, for its own review and final review. */
+export function qaObservationRow(observation: QaObservation): ResultEvidence {
+  return {
+    origin: "controller",
+    path: `Read-only QA observation: ${observation.itemId}`,
+    content: JSON.stringify({
+      scope: `Observed on commit ${observation.commit}: each listed validation command passed in a fresh checkout of that commit, and every run of each named CI check completed with success on its own commit (the integrated commit for integrated-ci, the target item's delivered head for published-ci), as Factory read it from GitHub.`,
+      ...observation,
+    }),
+    complete: true,
+  };
 }
 
 /** The item's delivery position and its dependencies' completed results. */

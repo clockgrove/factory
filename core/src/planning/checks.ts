@@ -606,8 +606,9 @@ function gateFindings(draft: Draft, facts: PlanningFacts, found: Found): void {
   }
   const used = [
     ...gates.map((gate) => gate?.checkName).filter(Boolean),
+    // integrated-ci names come from the push list (graph.ts checks them).
     ...draft.coverage.flatMap((entry) =>
-      entry?.proof && "checkName" in entry.proof ? [entry.proof.checkName] : [],
+      entry?.proof?.kind === "published-ci" ? [entry.proof.checkName] : [],
     ),
   ];
   for (const name of unknownCheckNames(used, facts.checkNames))

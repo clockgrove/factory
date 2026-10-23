@@ -4,7 +4,9 @@
  * providers/claude-worker.ts). Factory, not the worker, collects and commits
  * the result (work/collect.ts).
  */
+import { isAbsolute, relative, resolve } from "node:path";
 import type { HoldScope } from "../engine.js";
+import { redact } from "../log.js";
 import type { WorkItem } from "../planning/types.js";
 import type { Answer, HoldOption, Wait } from "../state.js";
 
@@ -34,6 +36,11 @@ export interface WorkerInput {
   base: string;
   signal: AbortSignal;
   log(event: Record<string, unknown>): void;
+  /**
+   * What the worker is doing, as it happens: the run log gets it throttled
+   * and redacted as `worker-activity` (ActivityLog). Never contents.
+   */
+  activity(event: WorkerActivity): void;
   /** The Work Item's spend so far, for workers that bill per run. */
   spend?: WorkerSpend;
   /** The answer to this step's last hold, such as `more`. */
@@ -65,4 +72,149 @@ export type WorkerResult = (
 
 export interface Worker {
   run(input: WorkerInput): Promise<WorkerResult>;
+}
+
+/**
+ * One thing a worker did: a tool started or finished, a file edited, a
+ * command run, a model turn. Names, paths and command lines only, never
+ * file contents or model output.
+ */
+export type WorkerActivity =
+  | { kind: "tool"; phase: "started" | "finished"; tool: string }
+  | { kind: "edit"; path: string }
+  | { kind: "command"; command: string }
+  | { kind: "turn" };
+
+/** At most one `worker-activity` event per Work Item per this long. */
+export const ACTIVITY_INTERVAL_MS = 5_000;
+const LISTED = 8;
+const COMMAND_CHARS = 200;
+const NAME_CHARS = 120;
+
+interface ActivityWindow {
+  counts: {
+    toolsStarted: number;
+    toolsFinished: number;
+    edits: number;
+    commands: number;
+    turns: number;
+  };
+  tools: string[];
+  paths: string[];
+  command?: string;
+}
+
+const emptyWindow = (): ActivityWindow => ({
+  counts: {
+    toolsStarted: 0,
+    toolsFinished: 0,
+    edits: 0,
+    commands: 0,
+    turns: 0,
+  },
+  tools: [],
+  paths: [],
+});
+
+/**
+ * A worker run's activity into the run log: the first report after a
+ * quiet interval is written at once, and later ones are coalesced into
+ * one `worker-activity` event per interval (CORE.md#Run log), so a busy
+ * worker can't balloon the log. Every string is redacted and truncated.
+ */
+export class ActivityLog {
+  private window = emptyWindow();
+  private pending = false;
+  private lastAt = 0;
+  private timer: NodeJS.Timeout | undefined;
+  private closed = false;
+
+  constructor(
+    private readonly item: string,
+    private readonly worktree: string,
+    private readonly log: (event: Record<string, unknown>) => void,
+    private readonly secrets: readonly string[],
+    private readonly intervalMs = ACTIVITY_INTERVAL_MS,
+  ) {}
+
+  readonly report = (activity: WorkerActivity): void => {
+    if (this.closed) return;
+    const window = this.window;
+    switch (activity.kind) {
+      case "tool":
+        if (activity.phase === "finished") window.counts.toolsFinished += 1;
+        else {
+          window.counts.toolsStarted += 1;
+          listOnce(window.tools, this.clean(activity.tool, NAME_CHARS));
+        }
+        break;
+      case "edit":
+        window.counts.edits += 1;
+        listOnce(
+          window.paths,
+          this.clean(this.inTree(activity.path), NAME_CHARS),
+        );
+        break;
+      case "command":
+        window.counts.commands += 1;
+        window.command = this.clean(activity.command, COMMAND_CHARS);
+        break;
+      case "turn":
+        window.counts.turns += 1;
+        break;
+    }
+    this.pending = true;
+    if (this.timer) return;
+    const wait = this.lastAt + this.intervalMs - Date.now();
+    if (wait <= 0) this.flush();
+    else {
+      this.timer = setTimeout(() => this.flush(), wait);
+      this.timer.unref();
+    }
+  };
+
+  /** Write what is pending and stop: the run ended. */
+  close(): void {
+    this.flush();
+    this.closed = true;
+  }
+
+  private flush(): void {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    if (!this.pending) return;
+    const { counts, tools, paths, command } = this.window;
+    this.log({
+      event: "worker-activity",
+      item: this.item,
+      counts,
+      tools,
+      paths,
+      ...(command !== undefined ? { command } : {}),
+    });
+    this.window = emptyWindow();
+    this.pending = false;
+    this.lastAt = Date.now();
+  }
+
+  /** A path inside the worktree relative to it; any other as given. */
+  private inTree(path: string): string {
+    const inTree = relative(
+      resolve(this.worktree),
+      resolve(this.worktree, path),
+    );
+    return inTree && !inTree.startsWith("..") && !isAbsolute(inTree)
+      ? inTree
+      : path;
+  }
+
+  /** Redacted, then one line, then cut: a cut never splits a secret into view. */
+  private clean(value: string, chars: number): string {
+    const line = redact(value, this.secrets).replace(/\s+/g, " ").trim();
+    return line.length > chars ? `${line.slice(0, chars - 1)}…` : line;
+  }
+}
+
+function listOnce(list: string[], value: string): void {
+  if (list.length < LISTED && !list.includes(value)) list.push(value);
 }

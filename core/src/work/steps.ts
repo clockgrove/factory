@@ -109,7 +109,7 @@ import {
 } from "./facts.js";
 import { type MergeResult, mergeOf } from "./merged.js";
 import { prepareWorkPrompt, type RepairContext } from "./prompt.js";
-import type { Worker } from "./worker.js";
+import { ActivityLog, type Worker } from "./worker.js";
 
 const MINUTE = 60_000;
 /** What a kept validation finding holds of a failed run's output. */
@@ -663,17 +663,27 @@ async function workStep(
       );
 
     const spent = fact(state, "spend", item.id);
-    const { spend, ...result } = await deps.worker(plan, shown.blocks).run({
+    const activity = new ActivityLog(
+      item.id,
       worktree,
-      prompt: prepared.prompt,
-      item,
-      commands: item.validation.map((v) => v.command),
-      base,
-      signal,
-      log: context.log,
-      ...(spent ? { spend: spent } : {}),
-      ...(context.answer ? { answer: context.answer } : {}),
-    });
+      context.log,
+      deps.config.secrets,
+    );
+    const { spend, ...result } = await deps
+      .worker(plan, shown.blocks)
+      .run({
+        worktree,
+        prompt: prepared.prompt,
+        item,
+        commands: item.validation.map((v) => v.command),
+        base,
+        signal,
+        log: context.log,
+        activity: activity.report,
+        ...(spent ? { spend: spent } : {}),
+        ...(context.answer ? { answer: context.answer } : {}),
+      })
+      .finally(() => activity.close());
     // A paid worker's spend outlives retries, restarts and repairs.
     if (spend) keepAll = { ...keepAll, ...facts({ spend }, item.id) };
     if (result.kind !== "finished") return withKeep(result, keepAll);

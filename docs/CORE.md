@@ -42,7 +42,7 @@ There is one process, `factory serve`, per installation, run by systemd. It is t
 
 - **Lock.** `serve` binds a Linux abstract socket named for the installation. The kernel releases it when the process dies, so there are no owner records, PID proofs or handoffs. A second `serve` exits at once with "already running".
 - **The lock is per network namespace.** A host CLI asks whether the service runs by connecting to that socket, and abstract sockets belong to a network namespace. So the CLI can't see a service inside another one (a container, `pasta`, `unshare --net`): it says "isn't running", and its request file still applies, because files are shared. Run the CLI in the service's namespace to see it.
-- **CLI.** Commands that read (`status`, `log`, `queue list`, `dream --show`, `dream --preview`, `recipe --file`) read the state files, GitHub, the checkout or the knowledge store read-only, directly. `setup` writes the configuration, never state. Commands that change something (`answer`, `cancel`, `retry`, `reset`, `pause`, `drain`, `resume`, `queue`, and `dream`'s writes) write one request file to `requests/`. A refusal prints `{"kind":"lifecycle-refusal","code":"..."}` on stderr with a stable code, then the message. The service picks it up within a second and deletes it when the request is applied. If the service isn't running, the request waits there and the CLI says so; a `dream` write is refused instead (`service_not_running`), before any model call.
+- **CLI.** Commands that read (`status`, `log`, `watch`, `queue list`, `dream --show`, `dream --preview`, `recipe --file`) read the state files, GitHub, the checkout or the knowledge store read-only, directly. `setup` writes the configuration, never state. Commands that change something (`answer`, `cancel`, `retry`, `reset`, `pause`, `drain`, `resume`, `queue`, and `dream`'s writes) write one request file to `requests/`. A refusal prints `{"kind":"lifecycle-refusal","code":"..."}` on stderr with a stable code, then the message. The service picks it up within a second and deletes it when the request is applied. If the service isn't running, the request waits there and the CLI says so; a `dream` write is refused instead (`service_not_running`), before any model call.
 - **Dream.** `factory dream` reads the store and makes its model call in the CLI, so the service's loop never waits on a model; the call's start and end (with its proposal), `--record` (whose records the CLI reads from Git) and an approval or rejection reach the service as requests, which it applies to the store (knowledge/dream.ts applyDream). Each applies again harmlessly after a crash; a refusal is `dream_refused`. Only a call's end skips the `service_not_running` check: it waits in `requests/` for the service, so a finished model call is never lost to a restart. A call still submitted past its 45-minute deadline is marked interrupted when the next call starts; `--show` lists running and interrupted calls.
 - **`factory run N`** (slice 5; not in the CLI yet) is a request plus a follower: it queues one Objective, follows its status and log to the end, and exits with the old exit codes. The service does the work, so there is only one code path and no foreground run.
 - **One installation per repository.** Two machines serving one queue are not supported.
@@ -318,8 +318,37 @@ Cancel reads only the Objective's state file and its open PRs, so its cost doesn
 Each service run appends to `logs/<issue>/<service run>.jsonl`: step start and end, outcome, durations, tokens, cost, errors, and references to body files in the same directory.
 
 - `factory status` reads the state file plus the end of the log.
+- `factory watch [ISSUE]` follows the log like `log --follow` and shows one row per Work Item: its step, its last outcome or hold, and its worker's activity. It reads the log only.
 - Diagnostics, capture export, accounting, scorecards and analysis read logs. They never write state.
 - The service keeps the last 20 runs per Objective and 2 GB in total, deleting the oldest first.
+
+### Worker activity
+
+Every worker (Codex, Claude, Copilot, managed) reports what it is doing through one hook, `WorkerInput.activity` (work/worker.ts): a tool started or finished (its name), a file edited (its path), a command run (its command line) or a model turn. `ActivityLog` writes it to the run log as one event, at most one per Work Item per 5 s: the first report after a quiet interval at once, the rest coalesced, and what is pending when the run ends. The shape is stable: the live status comment and other log readers build on it.
+
+```json
+{
+  "at": "...",
+  "step": "item:a:work",
+  "event": "worker-activity",
+  "item": "a",
+  "counts": {
+    "toolsStarted": 4,
+    "toolsFinished": 3,
+    "edits": 2,
+    "commands": 1,
+    "turns": 2
+  },
+  "tools": ["Edit", "Bash"],
+  "paths": ["src/a.ts"],
+  "command": "npm test"
+}
+```
+
+- `counts`: what happened since the previous event; every field is always present.
+- `tools`: the distinct tools started in that window, at most 8; `paths`: the distinct files edited, relative to the worktree when inside it, at most 8.
+- `command`: the last command started in the window, on one line and cut to 200 characters; absent when none ran.
+- Every string is redacted (log.ts `redact`, with the configuration's secrets) before it is cut. File contents, tool output and model text are never reported.
 
 ## Capabilities
 

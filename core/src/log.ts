@@ -85,6 +85,52 @@ export function readLog(
   };
 }
 
+/**
+ * The new complete lines of the Objective's run files since `offsets` (a
+ * file not in it from its start), in time order; `offsets` moves past
+ * them. A follow calls it with the offsets `readLog` returned.
+ */
+export function readNew(
+  dir: string,
+  issue: number,
+  offsets: Map<string, number>,
+): LogEvent[] {
+  const fresh: LogEvent[] = [];
+  for (const file of logFiles(dir, issue)) {
+    const from = offsets.get(file) ?? 0;
+    const complete = completeLines(readFrom(file, from, sizeOf(file)));
+    if (!complete.length) continue;
+    offsets.set(file, from + complete.length);
+    fresh.push(...parseLines(complete.toString("utf8")));
+  }
+  return fresh.sort((a, b) => a.at.localeCompare(b.at));
+}
+
+/** Call `poll` every `everyMs` until SIGINT or SIGTERM: a follow's loop. */
+export async function untilInterrupted(
+  poll: () => void,
+  everyMs = 500,
+): Promise<void> {
+  let stop = false;
+  const stopping = () => {
+    stop = true;
+  };
+  process.once("SIGINT", stopping);
+  process.once("SIGTERM", stopping);
+  while (!stop) {
+    await new Promise((resolve) => setTimeout(resolve, everyMs));
+    if (!stop) poll();
+  }
+}
+
+/** The issues with a run log directory, in number order (0, the service's, excluded). */
+export function loggedIssues(dir: string): number[] {
+  return safeList(dir)
+    .map(Number)
+    .filter((issue) => Number.isInteger(issue) && issue > 0)
+    .sort((a, b) => a - b);
+}
+
 /** The bytes up to and including the last newline: the complete lines. */
 export function completeLines(bytes: Buffer): Buffer {
   return bytes.subarray(0, bytes.lastIndexOf(10) + 1);

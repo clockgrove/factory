@@ -26,14 +26,11 @@ import {
   type KnowledgeSettings,
 } from "./knowledge/settings.js";
 import {
-  completeLines,
   type LogEvent,
-  logFiles,
-  parseLines,
   RunLog,
-  readFrom,
   readLog,
-  sizeOf,
+  readNew,
+  untilInterrupted,
 } from "./log.js";
 import { installationPaths, type Paths } from "./paths.js";
 import { BaseFiles } from "./planning/facts.js";
@@ -73,6 +70,7 @@ import {
 import { readStatus, statusText } from "./status.js";
 import { errorMessage } from "./text.js";
 import { adaptiveWorkflow } from "./validate.js";
+import { watch } from "./watch.js";
 import { objectiveWorkflow } from "./workflow.js";
 
 /**
@@ -140,6 +138,13 @@ const COMMANDS: Record<string, Command> = {
           : "--tail takes a whole number of events, such as --tail 100")
       );
     },
+  },
+  watch: {
+    args: "[ISSUE]",
+    flags: {},
+    help: "Follow running work live, one row per Work Item: its step, outcome or hold, and its worker's turns, tools, edits and last command; from the run log, every Objective active in the last 24 h without ISSUE",
+    check: (args) =>
+      args.positional[1] === undefined ? undefined : issueCheck(args),
   },
   answer: {
     args: "ISSUE ANSWER [ARG]",
@@ -307,6 +312,14 @@ async function main(argv: string[]): Promise<number> {
       return await status(paths, repository, args);
     case "log":
       return await logCommand(paths, repository, args);
+    case "watch":
+      await watch(
+        paths.logs,
+        args.positional[1] === undefined ? undefined : issueOf(args),
+        configOf(repository)?.secrets ?? [],
+        process.stdout,
+      );
+      return 0;
     case "queue":
       return await queueCommand(paths, repository, args);
     case "dream":
@@ -614,27 +627,9 @@ async function logCommand(
   if (args.flags.follow === undefined) return 0;
   // Follow: new complete lines of every run file, from exactly where the
   // tail read each one (a new file from its start), until interrupted.
-  const offsets = ends;
-  let stop = false;
-  process.once("SIGINT", () => {
-    stop = true;
+  await untilInterrupted(() => {
+    for (const event of readNew(paths.logs, issue, ends)) print(event);
   });
-  process.once("SIGTERM", () => {
-    stop = true;
-  });
-  while (!stop) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const fresh: LogEvent[] = [];
-    for (const file of logFiles(paths.logs, issue)) {
-      const from = offsets.get(file) ?? 0;
-      const complete = completeLines(readFrom(file, from, sizeOf(file)));
-      if (!complete.length) continue;
-      offsets.set(file, from + complete.length);
-      fresh.push(...parseLines(complete.toString("utf8")));
-    }
-    for (const event of fresh.sort((a, b) => a.at.localeCompare(b.at)))
-      print(event);
-  }
   return 0;
 }
 

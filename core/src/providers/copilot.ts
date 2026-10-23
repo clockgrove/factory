@@ -478,6 +478,32 @@ export interface CopilotWorkerOptions {
   validation?: SelfValidateOptions;
 }
 
+/** Copilot's file tools that write the file their `path` names. */
+const EDIT_TOOLS = ["create", "edit"];
+
+/** A Copilot session event as worker activity: tools, edits, commands, turns. */
+function copilotActivity(
+  input: WorkerInput,
+  event: SessionEvent,
+  toolNames: Map<string, string>,
+): void {
+  if (event.type === "assistant.turn_start") input.activity({ kind: "turn" });
+  if (event.type === "tool.execution_complete") {
+    const tool = toolNames.get(event.data.toolCallId);
+    toolNames.delete(event.data.toolCallId);
+    if (tool) input.activity({ kind: "tool", phase: "finished", tool });
+  }
+  if (event.type !== "tool.execution_start") return;
+  const tool = event.data.toolName;
+  toolNames.set(event.data.toolCallId, tool);
+  input.activity({ kind: "tool", phase: "started", tool });
+  const args = isObject(event.data.arguments) ? event.data.arguments : {};
+  if (EDIT_TOOLS.includes(tool) && typeof args.path === "string")
+    input.activity({ kind: "edit", path: args.path });
+  if (typeof args.command === "string")
+    input.activity({ kind: "command", command: args.command });
+}
+
 /** Implementation turns through Copilot with file tools inside the worktree. */
 export class CopilotWorker implements Worker {
   constructor(private readonly options: CopilotWorkerOptions) {}
@@ -492,6 +518,8 @@ export class CopilotWorker implements Worker {
       model: this.options.model.model,
       effort: this.options.model.effort,
     };
+    /** Running tool calls' names by id, for their completions. */
+    const toolNames = new Map<string, string>();
     // Validate, as Claude's (work/self-validate.ts): only declared commands.
     const ended = new AbortController();
     let validator: SelfValidation | undefined;
@@ -550,6 +578,7 @@ export class CopilotWorker implements Worker {
               item: input.item.id,
               tool: event.data.toolName,
             });
+          copilotActivity(input, event, toolNames);
         },
       });
       record.session = result.session;

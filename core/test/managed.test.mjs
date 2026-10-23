@@ -45,7 +45,7 @@ function run(tree, env) {
     const result = await worker.run({
       worktree: ${JSON.stringify(tree)}, prompt: "work", item: { id: "a", kind: "work" },
       commands: [], base: "HEAD", signal: new AbortController().signal,
-      log: (event) => log.push(event),
+      log: (event) => log.push(event), activity: () => {},
     });
     process.stdout.write(JSON.stringify({ result, log }));
   `;

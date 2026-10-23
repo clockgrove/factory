@@ -17,7 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import type { ThreadEvent } from "@openai/codex-sdk";
+import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk";
 import type { SandboxConfig } from "../config.js";
 import { errored } from "../engine.js";
 import { redact } from "../log.js";
@@ -280,6 +280,37 @@ function launchedGroup(pidFile: string): number | undefined {
   }
 }
 
+/** A Codex item as worker activity: tools by name, edits by path, commands. */
+function codexActivity(
+  input: WorkerInput,
+  type: ThreadEvent["type"],
+  item: ThreadItem,
+): void {
+  const phase =
+    type === "item.started"
+      ? "started"
+      : type === "item.completed"
+        ? "finished"
+        : undefined;
+  if (!phase) return;
+  const tool =
+    item.type === "command_execution"
+      ? "shell"
+      : item.type === "mcp_tool_call"
+        ? `${item.server}.${item.tool}`
+        : item.type === "web_search"
+          ? "web_search"
+          : undefined;
+  if (tool) input.activity({ kind: "tool", phase, tool });
+  if (phase === "started" && item.type === "command_execution")
+    input.activity({ kind: "command", command: item.command });
+  if (phase === "finished" && item.type === "file_change")
+    for (const change of item.changes)
+      input.activity({ kind: "edit", path: change.path });
+  if (phase === "finished" && item.type === "agent_message")
+    input.activity({ kind: "turn" });
+}
+
 /** Implementation turns through the Codex SDK and the operator's `codex login`. */
 export class CodexWorker implements Worker {
   private readonly model: ModelChoice<CodexEffort>;
@@ -417,6 +448,7 @@ export class CodexWorker implements Worker {
         watchdog.progress(item ? `${event.type}:${item.type}` : event.type);
         if (event.type === "thread.started") record.thread = event.thread_id;
         if (item?.type === "agent_message") finalResponse = item.text;
+        if (item) codexActivity(input, event.type, item);
         if (event.type === "item.completed" && item) {
           if (item.type === "command_execution")
             input.log({

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -2415,6 +2416,7 @@ test("unknown and misplaced options are refused with the fix", () => {
     "serve",
     "status",
     "log",
+    "watch",
     "answer",
     "retry",
     "cancel",
@@ -2456,6 +2458,48 @@ test("the run log: tail, follow, and status reads its end", async () => {
   assert.equal(cli(inst, "cancel", "54").code, 0);
   await until(() => /"event":"cancelled"/.test(out), "the cancel, followed");
   follow.kill("SIGINT");
+  // watch: the rows from the log, then a worker's activity as it lands,
+  // redacted (a worker's event, appended as an adapter's ActivityLog would).
+  const watching = spawn(
+    process.execPath,
+    [CLI, "watch", "54", "--repo", REPO],
+    {
+      env: inst.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  children.add(watching);
+  let view = "";
+  watching.stdout.on("data", (chunk) => {
+    view += chunk;
+  });
+  await until(() => /#54 - \S+ (hold|cancelled|done)/.test(view), "the rows");
+  const run = readdirSync(join(inst.logs, "54")).sort().at(-1);
+  appendFileSync(
+    join(inst.logs, "54", run),
+    `${JSON.stringify({
+      at: new Date().toISOString(),
+      step: "item:a:work",
+      event: "worker-activity",
+      item: "a",
+      counts: {
+        toolsStarted: 2,
+        toolsFinished: 1,
+        edits: 1,
+        commands: 1,
+        turns: 3,
+      },
+      tools: ["Bash"],
+      paths: ["src/a.ts"],
+      command: "npm test ghp_abcdefghijklmnop",
+    })}\n`,
+  );
+  await until(() => /#54 a work running .*3 turns/.test(view), "the activity");
+  assert.match(
+    view,
+    /2 tools \(Bash\) · 1 edits \(src\/a\.ts\) · \$ npm test \[REDACTED\]/,
+  );
+  watching.kill("SIGINT");
   assert.equal(refusal(cli(inst, "log", "77")), "no_factory_state");
   await stopped(service);
 });

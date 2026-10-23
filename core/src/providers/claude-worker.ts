@@ -861,6 +861,23 @@ function toolActivity(
   return { tool: name, ...(target && { target: target.slice(0, 200) }) };
 }
 
+/** Built-in tools whose path argument names the file they write. */
+const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", COPY_TOOL];
+
+/** A tool call as worker activity: its name, the file it edits, the command it runs. */
+function reportToolUse(input: WorkerInput, tool: string, args: unknown): void {
+  input.activity({ kind: "tool", phase: "started", tool });
+  const fields =
+    args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const path = [fields.file_path, fields.notebook_path, fields.to].find(
+    (value) => typeof value === "string",
+  ) as string | undefined;
+  if (path !== undefined && EDIT_TOOLS.includes(tool))
+    input.activity({ kind: "edit", path });
+  if (typeof fields.command === "string")
+    input.activity({ kind: "command", command: fields.command });
+}
+
 /** The Worker for Claude, on the operator's Claude login. */
 export class ClaudeWorker implements Worker {
   private readonly config: ClaudeWorkerConfig;
@@ -1079,6 +1096,8 @@ export class ClaudeWorker implements Worker {
     let spentUsd = 0;
     let queryUsd = 0;
     let result: SDKResultMessage | undefined;
+    /** Running tool calls' names by id, for their results. */
+    const toolNames = new Map<string, string>();
     try {
       let events = start(input.prompt);
       for (;;) {
@@ -1107,11 +1126,23 @@ export class ClaudeWorker implements Worker {
                 tools.push(
                   toolActivity(input.worktree, block.name, block.input),
                 );
-              } else if (block.type === "tool_result")
+                toolNames.set(block.id, block.name);
+                reportToolUse(input, block.name, block.input);
+              } else if (block.type === "tool_result") {
                 watchdog.progress("tool_result", {
                   id: block.tool_use_id,
                   active: false,
                 });
+                const tool = toolNames.get(block.tool_use_id);
+                toolNames.delete(block.tool_use_id);
+                if (tool)
+                  input.activity({ kind: "tool", phase: "finished", tool });
+              }
+          if (
+            message.type === "assistant" &&
+            message.message.model !== SYNTHETIC_MODEL
+          )
+            input.activity({ kind: "turn" });
           if (tools.length)
             input.log({ event: "worker-tools", tools: tools.slice(0, 16) });
         }

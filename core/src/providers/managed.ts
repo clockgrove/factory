@@ -782,7 +782,10 @@ export class OpenAIManagedWorker extends ManagedWorker {
     let turn: Record<string, unknown> | undefined;
     for (;;) {
       await wait(POLL_MS, signal);
+      const previous = turn?.id;
       turn = (await this.turns(session, signal))[0];
+      if (turn?.id !== undefined && turn.id !== previous)
+        input.activity({ kind: "turn" });
       if (
         turn &&
         ["completed", "failed", "cancelled"].includes(String(turn.status))
@@ -880,6 +883,46 @@ export class OpenAIManagedWorker extends ManagedWorker {
 }
 
 // Claude Managed Agents
+
+/** A Claude Managed Agents session event, as far as activity reads it. */
+interface ManagedEvent {
+  id: string;
+  type: string;
+  name?: string;
+  input?: unknown;
+  tool_use_id?: string;
+}
+
+/** Hosted tools that write the file their `file_path` or `path` names. */
+const MANAGED_EDIT_TOOLS = ["write", "edit"];
+
+/** A hosted session event as worker activity: tools, edits, commands, turns. */
+function managedActivity(
+  input: WorkerInput,
+  event: ManagedEvent,
+  toolNames: Map<string, string>,
+): void {
+  if (event.type === "agent.message") input.activity({ kind: "turn" });
+  if (event.type === "agent.tool_result" && event.tool_use_id) {
+    const tool = toolNames.get(event.tool_use_id);
+    toolNames.delete(event.tool_use_id);
+    if (tool) input.activity({ kind: "tool", phase: "finished", tool });
+  }
+  if (event.type !== "agent.tool_use" || !event.name) return;
+  toolNames.set(event.id, event.name);
+  input.activity({ kind: "tool", phase: "started", tool: event.name });
+  const args =
+    event.input && typeof event.input === "object"
+      ? (event.input as Record<string, unknown>)
+      : {};
+  const path = [args.file_path, args.path].find(
+    (value) => typeof value === "string",
+  ) as string | undefined;
+  if (path !== undefined && MANAGED_EDIT_TOOLS.includes(event.name))
+    input.activity({ kind: "edit", path });
+  if (typeof args.command === "string")
+    input.activity({ kind: "command", command: args.command });
+}
 
 type ClaudeManaged = Extract<Managed, { kind: "claude-managed-agents" }>;
 const CLAUDE_BETA = "managed-agents-2026-04-01" as const;
@@ -1085,24 +1128,26 @@ export class ClaudeManagedWorker extends ManagedWorker {
         "Claude Managed Agents did not acknowledge the Work Item message",
       );
     // Newest first, down to this turn's message: the turn ends at an idle status after it.
+    const seen = new Set<string>();
+    const toolNames = new Map<string, string>();
     for (;;) {
       await wait(POLL_MS, signal);
       let end: { stop_reason?: { type?: string } } | undefined;
       let message = "";
       let terminated = false;
+      const fresh: ManagedEvent[] = [];
       await call("events", async () => {
         for await (const event of sdk.beta.sessions.events.list(
           session,
           { ...this.scope, order: "desc" },
           options,
         )) {
-          const e = event as unknown as {
-            id: string;
-            type: string;
+          const e = event as unknown as ManagedEvent & {
             stop_reason?: { type?: string };
             content?: { type: string; text?: string }[];
           };
           if (e.id === inputEvent) break;
+          if (!seen.has(e.id)) fresh.push(e);
           if (
             e.type === "session.status_terminated" ||
             e.type === "session.deleted"
@@ -1116,6 +1161,10 @@ export class ClaudeManagedWorker extends ManagedWorker {
               .join("");
         }
       });
+      for (const e of fresh.reverse()) {
+        seen.add(e.id);
+        managedActivity(input, e, toolNames);
+      }
       if (terminated)
         throw billed(
           "The Claude managed session terminated before the turn finished",

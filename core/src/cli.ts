@@ -94,6 +94,8 @@ import {
 } from "./state.js";
 import {
   capacityText,
+  type IssueFocus,
+  issueFocus,
   readStatus,
   recommendationText,
   statusText,
@@ -126,6 +128,21 @@ const issueCheck = (args: Args): string | undefined => {
     ? undefined
     : `${command} needs an issue number: factory ${command} ${COMMANDS[command]?.args}`;
 };
+
+/** `--issue`'s issue: a number, or an issue URL (its repository is checked where it's known). */
+function issueNumber(
+  value: string,
+): { issue: number; repository?: string } | undefined {
+  const url =
+    /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/([1-9][0-9]*)(?:[/?#].*)?$/.exec(
+      value,
+    );
+  const digits = url ? url[2]! : value;
+  const issue = Number(digits);
+  if (!/^[1-9][0-9]*$/.test(digits) || !Number.isSafeInteger(issue))
+    return undefined;
+  return url ? { issue, repository: url[1]! } : { issue };
+}
 
 const QUEUE_MODES: Record<string, QueueMode> = {
   pause: "paused",
@@ -162,10 +179,23 @@ const COMMANDS: Record<string, Command> = {
   },
   status: {
     args: "[ISSUE]",
-    flags: { json: "switch", all: "switch", capacity: "switch" },
-    help: "Show the service, the queue and each Objective: its phase, the next command, its Work Items, provider, allowances and open questions; --json is the full model with the plan, --all also lists Objectives finished more than 24 h ago, --capacity shows the host's slots and memory in use and how the configured capacity fits the host",
+    flags: {
+      json: "switch",
+      all: "switch",
+      capacity: "switch",
+      issue: "value",
+    },
+    help: "Show the service, the queue and each Objective: its phase, the next command, its Work Items, provider, allowances and open questions; --json is the full model with the plan, --all also lists Objectives finished more than 24 h ago, --capacity shows the host's slots and memory in use and how the configured capacity fits the host, --issue N (or the issue's URL) shows the Objective that issue N is, or whose Work Item it is, from local state only",
     check: (args) =>
-      args.positional[1] === undefined ? undefined : issueCheck(args),
+      args.flags.issue !== undefined
+        ? args.positional[1] !== undefined
+          ? "give the Objective as ISSUE or --issue N, not both"
+          : issueNumber(args.flags.issue) === undefined
+            ? `--issue takes an issue number or its GitHub URL; not ${args.flags.issue}`
+            : undefined
+        : args.positional[1] === undefined
+          ? undefined
+          : issueCheck(args),
   },
   log: {
     args: "ISSUE",
@@ -677,7 +707,23 @@ async function status(
   repository: string,
   args: Args,
 ): Promise<number> {
-  const only = args.positional[1] ? issueOf(args) : undefined;
+  let only = args.positional[1] ? issueOf(args) : undefined;
+  let focus: IssueFocus | undefined;
+  if (args.flags.issue !== undefined) {
+    const named = issueNumber(args.flags.issue)!;
+    if (
+      named.repository &&
+      named.repository.toLowerCase() !== repository.toLowerCase()
+    )
+      throw usage(`${args.flags.issue} is not an issue of ${repository}`);
+    focus = issueFocus(paths, named.issue);
+    if (!focus)
+      throw new Refusal(
+        "no_factory_state",
+        `No Objective here is issue #${named.issue} or has it as a Work Item issue`,
+      );
+    only = focus.objective;
+  }
   if (args.flags.capacity !== undefined) {
     const live = await serviceLive(paths);
     const use = live
@@ -706,11 +752,14 @@ async function status(
   });
   process.stdout.write(
     args.flags.json !== undefined
-      ? `${JSON.stringify(view, null, 2)}\n`
-      : statusText(view, {
-          list: only === undefined,
-          all: args.flags.all !== undefined,
-        }),
+      ? `${JSON.stringify(focus ? { focus, ...view } : view, null, 2)}\n`
+      : `${focus ? `Issue #${focus.issue} is ${focus.item === undefined ? "the Objective" : `Work Item ${focus.item} of Objective #${focus.objective}`}.\n` : ""}${statusText(
+          view,
+          {
+            list: only === undefined,
+            all: args.flags.all !== undefined,
+          },
+        )}`,
   );
   return 0;
 }

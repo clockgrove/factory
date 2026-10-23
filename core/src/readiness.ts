@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { CoreConfig } from "./config.js";
 import type { GitHub } from "./github.js";
+import { missingTypes, offeredTypes } from "./github-roles.js";
 import { networkToolOfCommand } from "./planning/facts.js";
 import { codexSandboxProblem } from "./providers/codex-worker.js";
 import { executable, sandboxStatus } from "./sandbox.js";
@@ -393,6 +394,32 @@ async function repositoryChecks(
             fix: `Require the CI checks on ${branch} in a ruleset`,
           },
     );
+    if (config.tracking.enabled) {
+      const missing = await offeredTypes(github).then(
+        (offered) => missingTypes(config.tracking.issueType, offered),
+        (error: unknown) => errorMessage(error),
+      );
+      checks.push(
+        typeof missing === "string"
+          ? {
+              name: "issue types",
+              status: "warn",
+              detail: `Can't read ${config.repository}'s issue types: ${missing}`,
+              fix: "Factory's issues go without a type until it can; check the GitHub CLI login's access",
+            }
+          : missing.length
+            ? {
+                name: "issue types",
+                status: "warn",
+                detail: `${config.repository} doesn't offer the issue type${missing.length === 1 ? "" : "s"} ${missing.join(", ")}, so Factory's issues go without ${missing.length === 1 ? "it" : "them"}`,
+                fix: "Add the type in the organization's issue type settings, or name one the repository offers in tracking.issueType",
+              }
+            : ok(
+                "issue types",
+                `Objectives get ${config.tracking.issueType.objective}, Work Items ${config.tracking.issueType.workItem}`,
+              ),
+      );
+    }
     // A recommendation only: Factory never changes repository settings.
     const recommend = `Recommended: turn on "Require branches to be up to date before merging" for ${branch}. Factory updates a PR that falls behind and waits for CI again`;
     if (names.length)

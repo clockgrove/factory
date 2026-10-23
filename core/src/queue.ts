@@ -1,7 +1,7 @@
 import type { CoreConfig } from "./config.js";
 import { crashPoint } from "./crash.js";
 import type { GitHub, GraphQLError } from "./github.js";
-import { WORK_ITEM_LABEL } from "./tracking.js";
+import { WORK_ITEM_LABEL } from "./github-roles.js";
 
 /** One Objective card on the Project. */
 export interface QueueItem {
@@ -611,6 +611,54 @@ export async function queueIssue(
   await display.set(itemId, config.queue.options.queued, signal);
   crashPoint("run:queue:after");
   return "queued";
+}
+
+const CARD_PROJECT = `
+query($item: ID!) {
+  node(id: $item) {
+    ... on ProjectV2Item { project { id } }
+  }
+}`;
+
+/**
+ * The Project the Objective's card (`itemId`) is on, where its Work Item
+ * cards go; null when the card is gone.
+ */
+export async function cardProject(
+  github: GitHub,
+  itemId: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const { data } = await github.graphqlPartial<{
+    node: { project?: { id: string } } | null;
+  }>(
+    CARD_PROJECT,
+    { item: itemId },
+    signal,
+    (error) => error.type === "NOT_FOUND",
+  );
+  return data.node?.project?.id ?? null;
+}
+
+/**
+ * A Work Item issue's card on the Project (tracking.ts). The Project
+ * returns the card an issue already has instead of adding another, so
+ * this is found before it is made. The card gets no option: it is never
+ * a queue candidate (the items query leaves out the Work Item label).
+ */
+export async function addCard(
+  github: GitHub,
+  project: string,
+  content: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  crashPoint("sync:item-issue:card:before");
+  const added = await github.graphql<{
+    addProjectV2ItemById: { item: { id: string } | null } | null;
+  }>(ADD_ITEM, { project, content }, signal);
+  if (!added.addProjectV2ItemById?.item?.id)
+    throw new Error(`The Project didn't add the Work Item issue ${content}`);
+  crashPoint("sync:item-issue:card:after");
 }
 
 /**

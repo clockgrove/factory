@@ -4,20 +4,35 @@ import {
   GitHubError,
   type IssueSummary,
   issueGone,
+  TransientError,
 } from "./github.js";
+import {
+  addLabels,
+  ensureRoles,
+  objectiveRole,
+  PRIORITY,
+  type RoleTypes,
+  removeLabel,
+  WORK_ITEM_LABEL,
+} from "./github-roles.js";
 import { code, mark, prose } from "./markdown.js";
 import { currentPlan } from "./planning/plan.js";
 import type { Plan } from "./planning/types.js";
+import { addCard, cardProject } from "./queue.js";
 import { CLOCK_SKEW_MS, type ObjectiveState, TERMINAL } from "./state.js";
 import { itemRows } from "./status.js";
+import { errorMessage } from "./text.js";
 
 /**
  * Work Item issues: one display-only issue per Work Item of the plan in
  * force (planning/plan.ts `currentPlan`), a sub-issue of the Objective,
  * with blocked-by links that mirror the plan's dependencies, the
- * configured native type, the `factory:work-item` label and one live
- * comment that shows the item's state. It is closed as completed when the
- * item merges, and as not planned, with the reason in its comment, when
+ * configured native type, the `factory:work-item` label, the Objective's
+ * priority labels, a card on the Objective's Project and one live
+ * comment that shows the item's state. The Objective gets its own role
+ * once per run: the `factory:objective` label and its type when it has
+ * none (github-roles.ts); its priority labels are read then for its
+ * items. An item's issue is closed as completed when the item merges, and as not planned, with the reason in its comment, when
  * the item leaves the plan (a replan or an amendment) or the Objective
  * ends without it. The issue shows progress and never drives it:
  * questions and answers stay on the Objective.
@@ -39,14 +54,12 @@ import { itemRows } from "./status.js";
  * tracking up for the run (github-sync.ts).
  */
 
-/** The role label of a Work Item issue: the queue never takes one as an Objective. */
-export const WORK_ITEM_LABEL = "factory:work-item";
-
 /** What was written for one Work Item's issue. */
 export interface ItemIssue {
-  /** The issue's number and database id. */
+  /** The issue's number, database id and node id (a Project card takes it). */
   issue: number;
   id: number;
+  node?: string;
   /** The hash of the title and body last written (or found). */
   body: string;
   /** Its native type is written, or the repository refused it. */
@@ -57,6 +70,10 @@ export interface ItemIssue {
   blockedBy?: string[];
   /** The hash of its live comment as last written. */
   comment?: string;
+  /** The priority labels it has, as Factory last wrote or found them. */
+  labels?: string[];
+  /** It has its card on the Project. */
+  card?: true;
   closed?: true;
   /** GitHub refused a write to it: only its close is still tried this run. */
   refused?: true;
@@ -69,8 +86,14 @@ export interface Tracking {
   items: Record<string, ItemIssue>;
   /** Items whose issue may have been created without being recorded here, with when (host time) each create began: looked up first. */
   creating?: Record<string, string>;
-  /** The repository refused the native type: not tried again this run. */
+  /** The repository doesn't offer the native type, or refused it: not tried again this run. */
   untyped?: true;
+  /** The Objective has its role for this run, and the priority labels its items inherit. */
+  objective?: { priority: string[] };
+  /** The Project the Objective's card is on, where the item cards go; null when it has none. */
+  project?: string | null;
+  /** The Project refused a card: not tried again this run. */
+  uncarded?: true;
 }
 
 /** What one Work Item's issue should show. */
@@ -190,7 +213,10 @@ export function carried(tracking: Tracking): Tracking {
 export function trackingDue(state: ObjectiveState): boolean {
   const tracking = trackingOf(state);
   if (Object.keys(tracking?.creating ?? {}).length) return true;
-  for (const [id, want] of wanted(state)) {
+  const all = wanted(state);
+  if (all.size && !tracking?.objective) return true;
+  const priority = tracking?.objective?.priority.join("\n");
+  for (const [id, want] of all) {
     const has = tracking?.items[id];
     if (!has) {
       if (want.planned) return true;
@@ -208,6 +234,8 @@ export function trackingDue(state: ObjectiveState): boolean {
         (has.body !== hash(want.title, want.body) ||
           !has.parent ||
           (!has.typed && !tracking.untyped) ||
+          (has.labels ?? []).join("\n") !== priority ||
+          (!has.card && tracking.project !== null && !tracking.uncarded) ||
           has.blockedBy?.join("\n") !== want.dependencies.join("\n")))
     )
       return true;
@@ -219,8 +247,8 @@ export interface TrackContext {
   github: GitHub;
   /** The Objective's state as it is now (a save may replace it). */
   state: () => ObjectiveState;
-  /** The native type to give each issue. */
-  issueType: string;
+  /** The native type to give each role's issue (config.ts `tracking.issueType`). */
+  issueType: RoleTypes;
   /** Save a change to the recorded tracking (made if absent). */
   save(change: (tracking: Tracking) => void): void;
   /** Log an event on the Objective's run log. */
@@ -230,9 +258,11 @@ export interface TrackContext {
 
 /**
  * One pass: every write the recorded state shows is due, in an order a
- * crash can stop anywhere. Create (recorded as `creating` first), then
- * per issue: its title and body, its type, the sub-issue link, the
- * blocked-by links, the live comment, and the close (or a reopen).
+ * crash can stop anywhere. The roles (once per installation), the
+ * Objective's role (once per run), create (recorded as `creating`
+ * first), then per issue: its title and body, its type, its priority
+ * labels, its card, the sub-issue link, the blocked-by links, the live
+ * comment, and the close (or a reopen).
  * A refusal on one issue is recorded on it, and the pass goes on.
  */
 export async function track(context: TrackContext): Promise<void> {
@@ -242,6 +272,36 @@ export async function track(context: TrackContext): Promise<void> {
   const issueMark = (id: string) => mark(objective, "item", id);
   const record = () => trackingOf(context.state()) ?? { items: {} };
   const want = wanted(state);
+  const roles = await ensureRoles(github, context.issueType);
+  if (!record().objective) {
+    const role = await objectiveRole(
+      github,
+      objective,
+      roles.types.objective,
+      signal,
+    );
+    if (!roles.types.objective || role.typeRefused)
+      context.log({
+        event: "issue-type-missing",
+        role: "objective",
+        type: context.issueType.objective,
+        ...(role.typeRefused ? { status: role.typeRefused.status } : {}),
+      });
+    context.save((tracking) => {
+      tracking.objective = { priority: role.priority };
+    });
+  }
+  const priority = record().objective!.priority;
+  if (!roles.types.workItem && !record().untyped) {
+    context.save((tracking) => {
+      tracking.untyped = true;
+    });
+    context.log({
+      event: "issue-type-missing",
+      role: "workItem",
+      type: context.issueType.workItem,
+    });
+  }
   const missing = [...want].filter(
     ([id, item]) => item.planned && !record().items[id],
   );
@@ -287,7 +347,7 @@ export async function track(context: TrackContext): Promise<void> {
       {
         title: item.title,
         body: item.body,
-        labels: [WORK_ITEM_LABEL],
+        labels: [WORK_ITEM_LABEL, ...priority],
       },
       "sync:item-issue:create",
       signal,
@@ -300,6 +360,17 @@ export async function track(context: TrackContext): Promise<void> {
   const owned = new Set(
     Object.values(record().items).map((issue) => issue.issue),
   );
+  if (
+    record().project === undefined &&
+    [...want].some(([id, item]) => item.planned && !record().items[id]?.card)
+  ) {
+    const card = (state.modules.github as { itemId?: string } | undefined)
+      ?.itemId;
+    const project = card ? await cardProject(github, card, signal) : null;
+    context.save((tracking) => {
+      tracking.project = project;
+    });
+  }
   for (const [id, item] of want) {
     const has = record().items[id];
     if (!has || has.unclosed) continue;
@@ -336,7 +407,7 @@ export async function track(context: TrackContext): Promise<void> {
     }
   }
 
-  /** The issue's body, type, links, live comment and reopen, as due. */
+  /** The issue's body, type, labels, card, links, live comment and reopen, as due. */
   async function show(
     id: string,
     item: Wanted,
@@ -357,11 +428,38 @@ export async function track(context: TrackContext): Promise<void> {
         });
       }
       if (!has.typed && !record().untyped)
-        await setType(context, has, () =>
+        await setType(context, roles.types.workItem!, has, () =>
           update((issue) => {
             issue.typed = true;
           }),
         );
+      const labels = has.labels ?? [];
+      if (labels.join("\n") !== priority.join("\n")) {
+        const add = priority.filter((label) => !labels.includes(label));
+        if (add.length)
+          await addLabels(
+            github,
+            has.issue,
+            add,
+            "sync:item-issue:label",
+            signal,
+          );
+        for (const label of labels)
+          if (!priority.includes(label))
+            await removeLabel(
+              github,
+              has.issue,
+              label,
+              "sync:item-issue:label",
+              signal,
+            );
+        update((issue) => {
+          issue.labels = priority;
+        });
+      }
+      const project = record().project;
+      if (!has.card && project && !record().uncarded)
+        await card(has, project, update);
       if (!has.parent) {
         subIssues ??= await github.subIssues(objective, signal);
         await github.ensureSubIssue(
@@ -412,6 +510,46 @@ export async function track(context: TrackContext): Promise<void> {
       });
     }
   }
+
+  /**
+   * The issue's card on the Project. A refusal (no access to the Project,
+   * a Project that's gone) is logged and not tried again this run: the
+   * issue stays tracked without its card.
+   */
+  async function card(
+    has: ItemIssue,
+    project: string,
+    update: (change: (issue: ItemIssue) => void) => void,
+  ): Promise<void> {
+    const node =
+      has.node ??
+      (
+        await github.rest<{ node_id: string }>(
+          "GET",
+          `/repos/${github.repository}/issues/${has.issue}`,
+          undefined,
+          signal,
+        )
+      ).node_id;
+    try {
+      await addCard(github, project, node, signal);
+    } catch (error) {
+      if (error instanceof TransientError || signal.aborted) throw error;
+      context.save((tracking) => {
+        tracking.uncarded = true;
+      });
+      context.log({
+        event: "item-card-refused",
+        issue: has.issue,
+        error: errorMessage(error),
+      });
+      return;
+    }
+    update((issue) => {
+      issue.card = true;
+      issue.node = node;
+    });
+  }
 }
 
 /** A lasting refusal of a write to one issue: deleted, moved, locked or not allowed (a rejected login is not one). */
@@ -439,13 +577,14 @@ function created(tracking: Tracking, id: string): void {
  */
 async function setType(
   context: TrackContext,
+  type: string,
   issue: ItemIssue,
   done: () => void,
 ): Promise<void> {
   try {
     await context.github.editIssue(
       issue.issue,
-      { type: context.issueType },
+      { type },
       "sync:item-issue:edit",
       context.signal,
     );
@@ -462,18 +601,28 @@ async function setType(
     });
     context.log({
       event: "item-issue-untyped",
-      type: context.issueType,
+      type,
       status: error.status,
     });
   }
 }
 
 /** An issue found or created: recorded as it is on GitHub. */
-function adopted(issue: IssueSummary): ItemIssue {
+function adopted(
+  issue: IssueSummary & {
+    node_id?: string;
+    labels?: ({ name?: string } | string)[];
+  },
+): ItemIssue {
   return {
     issue: issue.number,
     id: issue.id,
+    ...(issue.node_id ? { node: issue.node_id } : {}),
     body: hash(issue.title, issue.body ?? ""),
+    labels: (issue.labels ?? [])
+      .map((label) => (typeof label === "string" ? label : (label.name ?? "")))
+      .filter((label) => PRIORITY.test(label))
+      .sort(),
     ...(issue.state === "open" ? {} : { closed: true }),
   };
 }

@@ -182,10 +182,15 @@ export interface CoreConfig {
   /**
    * One display-only issue per Work Item (tracking.ts), on by default:
    * a sub-issue of the Objective with blocked-by links that mirror the
-   * plan, `issueType` as its native type, and a live comment. Operational,
-   * like `progress`.
+   * plan, a card on the Project and a live comment. Each role's issue gets
+   * its role label and the native type `issueType` names for it (Feature
+   * for the Objective, Task for a Work Item), where the repository offers
+   * it. Operational, like `progress`.
    */
-  tracking: { enabled: boolean; issueType: string };
+  tracking: {
+    enabled: boolean;
+    issueType: { objective: string; workItem: string };
+  };
   /**
    * Model call bodies to capture files (log.ts CaptureSettings); off by
    * default. Operational: never frozen with an Objective.
@@ -647,7 +652,13 @@ export function loadConfig(repository: string): CoreConfig {
         enabled: flag(true),
         includeQuestions: flag(true),
       }),
-      tracking: object({ enabled: flag(true), issueType: text("Task") }),
+      tracking: object({
+        enabled: flag(true),
+        issueType: object({
+          objective: text("Feature"),
+          workItem: text("Task"),
+        }),
+      }),
       capture: object(
         {
           enabled: flag(CAPTURE_OFF.enabled),

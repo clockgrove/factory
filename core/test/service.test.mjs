@@ -430,7 +430,8 @@ test("unreadable state holds with cancel, and cancel works", async () => {
 // applied once and no stray files.
 // Crash points around GitHub effects: the hold, reply, note, reminder,
 // cancel and live status comments, the Work Item issues (create, edit, links, live
-// comment, reopen, close), the Status write, the plan, report and cancel comments, the
+// comment, reopen, close, priority labels, card), the Objective's role
+// label and type, the role labels' create, the Status write, the plan, report and cancel comments, the
 // issue close, the PR close, the branch delete, a re-queue's move of the
 // built-in Status off Done and its reopen, and delivery's effects (LFS
 // upload, push, PR, branch update, merge, native stack, the final LFS
@@ -463,6 +464,14 @@ const GITHUB_CRASH_POINTS = [
   "sync:item-issue:reopen:after",
   "sync:item-issue:close:before",
   "sync:item-issue:close:after",
+  "sync:item-issue:label:before",
+  "sync:item-issue:label:after",
+  "sync:item-issue:card:before",
+  "sync:item-issue:card:after",
+  "sync:objective-role:before",
+  "sync:objective-role:after",
+  "sync:roles:label:before",
+  "sync:roles:label:after",
   "plan:data:before",
   "plan:data:after",
   "plan:post:before",
@@ -2963,6 +2972,13 @@ test("status: one model, the Work Item table, the full --json and the list view"
       "allowances:granted": { "perPath:item:a:work": 3, resultRereviews: 1 },
     },
     repairs: { "item:a:work": { count: 4, findings: ["refused"] } },
+    modules: {
+      github: {
+        itemId: "PVTI_55",
+        commentsSince: "2026-01-01T00:00:00.000Z",
+        tracking: { items: { a: { issue: 101, id: 9101, body: "h" } } },
+      },
+    },
     retries: {
       build: {
         count: 0,
@@ -3054,6 +3070,34 @@ test("status: one model, the Work Item table, the full --json and the list view"
   assert.match(row.frozen.digest, /^[0-9a-f]{64}$/);
   inst.env.FACTORY_DISPLAY_TIMEZONE = "UTC";
   assert.match(cli(inst, "status").out, /retries at 2026-01-01 00:30:00 UTC/);
+  // --issue: an Objective or a Work Item issue, from local state only (the
+  // API is a closed port).
+  const byItem = cli(inst, "status", "--issue", "101");
+  assert.equal(byItem.code, 0, byItem.err);
+  assert.match(byItem.out, /^Issue #101 is Work Item a of Objective #55\.\n/);
+  assert.match(byItem.out, /#55: building/);
+  assert.doesNotMatch(byItem.out, /#56/);
+  assert.deepEqual(
+    JSON.parse(
+      cli(
+        inst,
+        "status",
+        "--json",
+        "--issue",
+        `https://github.com/${REPO}/issues/101`,
+      ).out,
+    ).focus,
+    { issue: 101, objective: 55, item: "a" },
+  );
+  assert.match(
+    cli(inst, "status", "--issue", "56").out,
+    /^Issue #56 is the Objective\.\n[^]*#56: done/,
+  );
+  assert.equal(
+    refusal(cli(inst, "status", "--issue", "102")),
+    "no_factory_state",
+  );
+  assert.equal(refusal(cli(inst, "status", "55", "--issue", "101")), "usage");
 });
 
 // A reset saves a resetting record at once (the old state kept inside it),

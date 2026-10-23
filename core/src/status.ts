@@ -29,6 +29,7 @@ import {
   type QueueControl,
   TERMINAL,
 } from "./state.js";
+import type { Tracking } from "./tracking.js";
 import { mergeOf } from "./work/merged.js";
 import { objectiveWorkflow } from "./workflow.js";
 
@@ -170,6 +171,43 @@ export function readStatus(
     { service: live ? "running" : "stopped", ...record, queue, objectives },
     options.secrets,
   );
+}
+
+/** What `status --issue N` found issue N to be. */
+export interface IssueFocus {
+  issue: number;
+  /** The Objective it is, or whose Work Item it is. */
+  objective: number;
+  /** The Work Item whose issue it is (tracking.ts). */
+  item?: string;
+}
+
+/**
+ * Issue N as Factory's local state knows it: an Objective, or a Work Item
+ * issue an Objective's tracking recorded (the newest Objective first). No
+ * GitHub call; undefined when no state names it.
+ */
+export function issueFocus(
+  paths: Paths,
+  issue: number,
+): IssueFocus | undefined {
+  const all = listAllObjectives(paths.objectives);
+  if (all.includes(issue)) return { issue, objective: issue };
+  for (const objective of all.reverse()) {
+    let loaded: Loaded | null;
+    try {
+      loaded = findState(paths.objectives, objective);
+    } catch {
+      continue;
+    }
+    if (loaded?.kind !== "ok") continue;
+    const items =
+      (loaded.state.modules.github as { tracking?: Tracking } | undefined)
+        ?.tracking?.items ?? {};
+    const item = Object.keys(items).find((id) => items[id]!.issue === issue);
+    if (item !== undefined) return { issue, objective, item };
+  }
+  return undefined;
 }
 
 /** One Objective's status, from its loaded state. */

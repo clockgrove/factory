@@ -9,9 +9,11 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   rmSync,
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   ANALYSIS_FIELDS,
   type AnalysisField,
@@ -62,7 +64,7 @@ import {
   runOfFile,
   untilInterrupted,
 } from "./log.js";
-import { installationPaths, type Paths } from "./paths.js";
+import { installationPaths, type Paths, validRepository } from "./paths.js";
 import { BaseFiles } from "./planning/facts.js";
 import {
   markdownBlocks,
@@ -572,8 +574,13 @@ in FACTORY_DISPLAY_TIMEZONE.
 
 const usage = (message: string) => new Refusal("usage", message);
 
-/** Runs a command line `parse` has checked: its arguments are trusted here. */
-async function main(argv: string[]): Promise<number> {
+/**
+ * Run one command line in this process, as the `factory` binary does,
+ * and resolve with its exit code; a refusal throws Refusal. A host program
+ * runs commands that build its registered kinds (dream, propose) this way
+ * (library.ts).
+ */
+export async function main(argv: string[]): Promise<number> {
   const args = parse(argv);
   const command = args.positional[0];
   if (!command || command === "help") {
@@ -581,7 +588,7 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
   const repository = args.flags.repo ?? process.env.FACTORY_REPOSITORY;
-  if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository))
+  if (!repository || !validRepository(repository))
     throw usage("give --repo OWNER/NAME");
   const paths = installationPaths(repository);
   switch (command) {
@@ -1604,18 +1611,29 @@ function misplaced(name: string, command: string | undefined): string {
   return `Unknown option --${name} for factory ${command ?? "(no command)"}; see factory help`;
 }
 
-main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
-  (error: unknown) => {
-    if (error instanceof Refusal) {
-      process.stderr.write(
-        `${JSON.stringify({ kind: "lifecycle-refusal", code: error.code })}\nfactory: ${error.message}\n`,
-      );
-      process.exit(error.code === "usage" ? 2 : 1);
-    }
-    process.stderr.write(
-      `factory: ${error instanceof Error ? error.stack : String(error)}\n`,
+// The `factory` binary; imported by the library, it only exports main.
+const entry = (): boolean => {
+  try {
+    return (
+      realpathSync(process.argv[1] ?? "") === fileURLToPath(import.meta.url)
     );
-    process.exit(1);
-  },
-);
+  } catch {
+    return false;
+  }
+};
+if (entry())
+  main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (error: unknown) => {
+      if (error instanceof Refusal) {
+        process.stderr.write(
+          `${JSON.stringify({ kind: "lifecycle-refusal", code: error.code })}\nfactory: ${error.message}\n`,
+        );
+        process.exit(error.code === "usage" ? 2 : 1);
+      }
+      process.stderr.write(
+        `factory: ${error instanceof Error ? error.stack : String(error)}\n`,
+      );
+      process.exit(1);
+    },
+  );

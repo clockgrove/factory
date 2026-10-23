@@ -6,6 +6,7 @@
  * same request `factory run` does, and every reader here only reads.
  */
 
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   ANALYSIS_FIELDS,
@@ -18,6 +19,8 @@ import {
   type Prepared,
   prepareExport,
 } from "./capture-export.js";
+import { main } from "./cli.js";
+import { configPath, loadConfig } from "./config.js";
 import {
   chosenFiles,
   type RunChoice,
@@ -25,7 +28,6 @@ import {
   readRun,
 } from "./diagnostics.js";
 import {
-  configOf,
   type FollowOptions,
   type FollowResult,
   followRun,
@@ -33,50 +35,106 @@ import {
   serveInstallation,
 } from "./host.js";
 import type { LogEvent } from "./log.js";
-import { captureFile, installationPaths } from "./paths.js";
+import {
+  captureFile,
+  installationDir,
+  installationPaths,
+  validRepository,
+} from "./paths.js";
+import { errorMessage } from "./text.js";
 
 /** Every run in the run log, oldest first: what a reader reads unless told otherwise. */
 const ALL: RunChoice = { kind: "all" };
 
-/** The installation's logs, and the secret values every event is redacted of. */
-function readable(repository: string) {
-  return {
-    logs: installationPaths(repository).logs,
-    secrets: configOf(repository)?.secrets ?? [],
-  };
+function checkRepository(repository: string): void {
+  if (!validRepository(repository))
+    throw new Refusal(
+      "usage",
+      `${JSON.stringify(repository)} is not a repository: give OWNER/NAME`,
+    );
 }
+
+function checkIssue(issue: number): void {
+  if (!Number.isSafeInteger(issue) || issue <= 0)
+    throw new Refusal("usage", `${issue} is not an issue number`);
+}
+
+/**
+ * The installation's logs, read without creating anything, and the secret
+ * values every event is redacted of. A configuration that exists but
+ * doesn't load is refused: a reader never drops redaction.
+ */
+function readable(repository: string, issue: number) {
+  checkRepository(repository);
+  checkIssue(issue);
+  let secrets: readonly string[] = [];
+  if (existsSync(configPath(repository)))
+    try {
+      secrets = loadConfig(repository).secrets;
+    } catch (error) {
+      throw new Refusal(
+        "no_configuration",
+        `The configuration doesn't load, so the run log can't be redacted: ${errorMessage(error)}`,
+      );
+    }
+  return { logs: join(installationDir(repository), "logs"), secrets };
+}
+
+/** Whether serveFactory serves in this process: until its drain is done. */
+let serving = false;
 
 /**
  * Serve `repository`'s installation in this process until SIGTERM, SIGINT
  * or `signal`, as `factory serve` does: the host kinds this process
- * registered (registerKind) run there. A second service on the
- * installation is refused by its lock; a configuration that doesn't load,
- * or names a host kind this process hasn't registered, throws.
+ * registered (registerKind) run there. It resolves only once every step
+ * and job of the run has ended and the lock is released. One service per
+ * process, and per installation (its lock): a second is refused with
+ * `service_running`. A configuration that doesn't load, or names a host
+ * kind this process hasn't registered, rejects with ConfigurationError.
  */
-export function serveFactory(options: {
+export async function serveFactory(options: {
   repository: string;
   /** The provider new Objectives freeze; defaultProvider without it. */
   provider?: string;
   signal?: AbortSignal;
-}): Promise<number> {
-  return serveInstallation(
-    options.repository,
-    installationPaths(options.repository),
-    options,
-  );
+}): Promise<0> {
+  checkRepository(options.repository);
+  if (serving)
+    throw new Refusal(
+      "service_running",
+      "This process serves an installation already: one serveFactory per process.",
+    );
+  serving = true;
+  try {
+    const code = await serveInstallation(
+      options.repository,
+      installationPaths(options.repository),
+      options,
+    );
+    if (code !== 0)
+      throw new Refusal(
+        "service_running",
+        `A service already serves ${options.repository}: its lock is held.`,
+      );
+    return 0;
+  } finally {
+    serving = false;
+  }
 }
 
 /**
  * Run an Objective as `factory run` does: one request to the service,
  * then follow it until it is done (code 0), cancelled (1), needs a person
  * (2: a question, or no service running) or `signal` stops the following
- * (130; the Objective keeps running). A refusal throws Refusal with its
- * stable code.
+ * (130; the Objective keeps running). A refusal rejects with Refusal and
+ * its stable code.
  */
-export function runFactory(
+export async function runFactory(
   options: { repository: string } & FollowOptions,
 ): Promise<FollowResult> {
   const { repository, deadline } = options;
+  checkRepository(repository);
+  checkIssue(options.issue);
   if (
     deadline !== undefined &&
     !(Date.parse(deadline) > Date.now() && /^\d{4}-\d\d-\d\dT/.test(deadline))
@@ -85,7 +143,29 @@ export function runFactory(
       "usage",
       `deadline ${deadline} is not an ISO time after now`,
     );
-  return followRun(installationPaths(repository), repository, options);
+  return await followRun(installationPaths(repository), repository, options);
+}
+
+/**
+ * `factory dream ARGS...` in this process, so a provider on a host kind
+ * this process registered can draft the playbook; it prints as the CLI
+ * does and resolves with its exit code. A refusal rejects with Refusal.
+ */
+export async function dreamFactory(
+  repository: string,
+  args: readonly string[] = [],
+): Promise<number> {
+  checkRepository(repository);
+  return await main(["dream", ...args, "--repo", repository]);
+}
+
+/** `factory propose ARGS...` in this process, as dreamFactory runs dream. */
+export async function proposeFactory(
+  repository: string,
+  args: readonly string[],
+): Promise<number> {
+  checkRepository(repository);
+  return await main(["propose", ...args, "--repo", repository]);
 }
 
 /** One model call: its redacted `model-usage` event, the run it is in, and its capture file when content was captured. */
@@ -100,7 +180,7 @@ export function readInteractionMetadata(
   issue: number,
   runs: RunChoice = ALL,
 ): InteractionRecord[] {
-  const { logs, secrets } = readable(repository);
+  const { logs, secrets } = readable(repository, issue);
   const records: InteractionRecord[] = [];
   for (const file of chosenFiles(logs, issue, runs))
     readRun(file, 0, secrets, (event) => {
@@ -129,7 +209,7 @@ export function readInteractionContent(
   issue: number,
   record: Pick<InteractionRecord, "run" | "capture">,
 ): { request?: string; response?: string; truncated?: true } {
-  const { logs, secrets } = readable(repository);
+  const { logs, secrets } = readable(repository, issue);
   const file =
     typeof record.capture === "string"
       ? captureFile(issue, record.run, record.capture)
@@ -168,7 +248,7 @@ export function analyzeInteractions(
     if (!ANALYSIS_FIELDS.includes(field as AnalysisField))
       throw new Error(`Unsupported analysis field: ${field}`);
   return analysisReport({
-    ...readable(repository),
+    ...readable(repository, issue),
     issue,
     runs: options.runs ?? ALL,
     groupBy,
@@ -205,7 +285,7 @@ export function prepareCaptureExport(
   },
 ): Prepared | string {
   return prepareExport({
-    ...readable(repository),
+    ...readable(repository, issue),
     repository,
     issue,
     runs: options.runs ?? ALL,

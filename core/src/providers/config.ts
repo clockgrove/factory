@@ -21,7 +21,6 @@ import {
   whole,
 } from "../checked.js";
 import { hostKindProblems, isHostKind } from "../kinds.js";
-import type { ClaudePlannerOptions } from "./claude.js";
 import type { ClaudeWorkerConfig } from "./claude-worker.js";
 import type { CodexEffort } from "./codex.js";
 import {
@@ -101,6 +100,12 @@ export const CLAUDE_EFFORTS = [
   "xhigh",
   "max",
 ] as const;
+export type ClaudeEffort = (typeof CLAUDE_EFFORTS)[number];
+
+export interface ClaudePlannerOptions extends PlannerModels<ClaudeEffort> {
+  /** Output token ceiling for every planning and review call. */
+  maxOutputTokens?: number;
+}
 export const CODEX_EFFORTS = [
   "minimal",
   "low",
@@ -234,7 +239,13 @@ function providerConfig(
     problems,
   );
   if (isHostKind(planner))
-    hostKindProblems(planner, "planner", `${path}.planner`, {}, problems);
+    hostKindProblems(
+      planner,
+      "planner",
+      `${path}.planner`,
+      { models },
+      problems,
+    );
   if (!worker || problems.length !== before) return undefined;
   return {
     planner,
@@ -366,7 +377,7 @@ function workerConfig(
   if (isObject(value) && isHostKind(kind)) {
     const { kind: _, ...settings } = value;
     const before = problems.length;
-    hostKindProblems(kind, "worker", path, settings, problems);
+    hostKindProblems(kind, "worker", path, { worker: settings }, problems);
     return problems.length === before
       ? ({ kind, ...settings } as unknown as WorkerConfig)
       : undefined;

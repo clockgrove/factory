@@ -18,7 +18,9 @@ export type { InteractionRecord } from "./library.js";
 export {
   analysisFields,
   analyzeInteractions,
+  dreamFactory,
   prepareCaptureExport,
+  proposeFactory,
   readInteractionContent,
   readInteractionMetadata,
   runFactory,
@@ -44,6 +46,14 @@ export {
   PlannerError,
 } from "./providers/planner.js";
 export { providerPlanner, providerWorker } from "./providers/selection.js";
+export type { ModelRole, Tokens } from "./providers/usage.js";
+export {
+  captureResponse,
+  describeRequest,
+  logUsage,
+  tokens,
+  usageRecord,
+} from "./providers/usage.js";
 export type { RefusalCode } from "./requests.js";
 export type { StatusView } from "./status.js";
 export type {

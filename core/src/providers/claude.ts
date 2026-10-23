@@ -19,7 +19,7 @@ import type {
 import { isRecord } from "../planning/graph.js";
 import type { Wait } from "../state.js";
 import { workerEnvironment } from "../worktree.js";
-import type { CLAUDE_EFFORTS } from "./config.js";
+import type { ClaudeEffort, ClaudePlannerOptions } from "./config.js";
 import {
   callImages,
   detail,
@@ -32,7 +32,6 @@ import {
   type PlannerAnswer,
   type PlannerCall,
   PlannerError,
-  type PlannerModels,
 } from "./planner.js";
 import {
   type ModelCounts,
@@ -52,12 +51,8 @@ import {
   tokens,
 } from "./usage.js";
 
-export type ClaudeEffort = (typeof CLAUDE_EFFORTS)[number];
-
-export interface ClaudePlannerOptions extends PlannerModels<ClaudeEffort> {
-  /** Output token ceiling for every planning and review call. */
-  maxOutputTokens?: number;
-}
+// Declared beside the configuration, so the package's types never need the optional SDK.
+export type { ClaudeEffort, ClaudePlannerOptions } from "./config.js";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 64000;
 

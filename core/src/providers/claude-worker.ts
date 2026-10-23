@@ -59,7 +59,6 @@ import {
   ACTIVE_TOOL_IDLE_MS,
   apiErrorStatus,
   baselineOf,
-  type ClaudeEffort,
   claudeEnvironment,
   claudeSessionEnvironment,
   claudeTurn,
@@ -75,7 +74,7 @@ import {
   usageOf,
   withModels,
 } from "./claude.js";
-import { CLAUDE_TOOLS } from "./config.js";
+import { CLAUDE_TOOLS, type ClaudeEffort } from "./config.js";
 import {
   detail,
   IdleWatchdog,

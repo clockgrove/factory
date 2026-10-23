@@ -1523,6 +1523,11 @@ export class GitHubSync {
       this.writeTransport(key);
   }
 
+  /** The service stops: abort the sync's jobs and wait until each has ended. */
+  drain(): Promise<void> {
+    return this.jobs.drain();
+  }
+
   /** Write every unwritten `github-call` tally: at the service's stop, before its run ends. */
   flushTransport(): void {
     for (const key of [...this.transportTally.keys()]) this.writeTransport(key);

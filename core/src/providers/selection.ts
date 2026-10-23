@@ -80,7 +80,7 @@ export function providerPlanner(provider: ProviderConfig): Planner {
   // A host's planner (kinds.ts) handles its own stalls: it isn't hedged.
   if (isHostKind(resolved.planner))
     return hostKind(resolved.planner, "planner").planner!(
-      resolved.models ?? {},
+      resolved.models as PlannerModels,
     );
   switch (resolved.planner) {
     case "claude":

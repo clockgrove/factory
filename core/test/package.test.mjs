@@ -137,15 +137,27 @@ test("the packed tarball installs offline and runs the core's CLI", {
     const ran = spawnSync(
       process.execPath,
       [host, join(installed, "core", "dist", "log.js"), "example/target"],
-      { encoding: "utf8", env },
+      {
+        encoding: "utf8",
+        // The served runs reach no GitHub: every call fails at once.
+        env: {
+          ...env,
+          FACTORY_GITHUB_API: "http://127.0.0.1:9",
+          FACTORY_GITHUB_TOKEN: "unused",
+          FACTORY_TICK_MS: "50",
+        },
+        timeout: 60_000,
+      },
     );
     assert.equal(ran.status, 0, ran.stderr);
     assert.deepEqual(JSON.parse(ran.stdout), {
       answer: { echo: "hello" },
       worked: "hi",
-      calls: [["host:echo", "done"]],
+      call: ["host:echo", "done"],
+      content: { request: "hello", response: "echoed" },
       grouped: [[{ provider: "host:echo" }, 1]],
-      ends: ["stopped"],
+      served: ["service_running", 0, 0],
+      ended: ["run-end", "log-health"],
     });
     const served = spawnSync(cli, ["serve", "--repo", "example/target"], {
       encoding: "utf8",

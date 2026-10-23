@@ -115,6 +115,8 @@ export type RefusalCode =
   | "queue_not_running"
   /** The command writes what only the running service writes (the knowledge store): start `factory serve`. */
   | "service_not_running"
+  /** A service already serves this installation (it holds the lock), or this process serves one already (library.ts serveFactory). */
+  | "service_running"
   /** The knowledge store refused a `dream` write: the message says why (a changed or decided draft, an unreadable store). */
   | "dream_refused"
   /** `propose-amendment` or `decline-discovery` wasn't taken: the message names each problem and what would pass. */

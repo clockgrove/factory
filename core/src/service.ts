@@ -1029,46 +1029,66 @@ export async function serve(options: ServeOptions): Promise<number> {
   const stop = (): void => {
     stopping = true;
   };
+  // A stray rejection must not end the service: log it and keep serving.
+  const stray = (reason: unknown): void =>
+    log.write(0, { event: "unhandled-rejection", error: String(reason) });
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
+  process.on("unhandledRejection", stray);
   if (options.signal?.aborted) stop();
   options.signal?.addEventListener("abort", stop, { once: true });
-  // A stray rejection must not end the service: log it and keep serving.
-  process.on("unhandledRejection", (reason) =>
-    log.write(0, { event: "unhandled-rejection", error: String(reason) }),
-  );
-  const housekeeping = (): void => {
-    try {
-      rotateLogs(paths.logs, runId);
-      sweepResults(paths.requests);
-    } catch (error) {
-      log.write(0, { event: "housekeeping-failed", error: String(error) });
+  try {
+    const housekeeping = (): void => {
+      try {
+        rotateLogs(paths.logs, runId);
+        sweepResults(paths.requests);
+      } catch (error) {
+        log.write(0, { event: "housekeeping-failed", error: String(error) });
+      }
+    };
+    housekeeping();
+    let lastHousekeeping = Date.now();
+    while (!stopping) {
+      try {
+        tick();
+      } catch (error) {
+        // A bug in the loop itself: log it and keep serving.
+        log.write(0, { event: "loop-error", error: String(error) });
+      }
+      if (Date.now() - lastHousekeeping > RESULT_TTL_MS) {
+        housekeeping();
+        lastHousekeeping = Date.now();
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, options.tickMs ?? 1000),
+      );
     }
-  };
-  housekeeping();
-  let lastHousekeeping = Date.now();
-  while (!stopping) {
-    try {
-      tick();
-    } catch (error) {
-      // A bug in the loop itself: log it and keep serving.
-      log.write(0, { event: "loop-error", error: String(error) });
-    }
-    if (Date.now() - lastHousekeeping > RESULT_TTL_MS) {
-      housekeeping();
-      lastHousekeeping = Date.now();
-    }
-    await new Promise((resolve) => setTimeout(resolve, options.tickMs ?? 1000));
+    // Nothing of this run writes after its end, or after the lock is
+    // released: every step stops (never saving again) and every
+    // observation and sync job is aborted, and each has ended.
+    const settledAtStop = new Map(
+      [...runners].map(([issue, runner]) => [issue, runner.settled]),
+    );
+    await Promise.allSettled([
+      ...[...runners.values()].map((runner) => runner.stop()),
+      observing.drain(),
+      options.sync?.drain(),
+    ]);
+    options.sync?.flushTransport();
+    // An Objective still unfinished is handed off to the next run.
+    log.end((issue) =>
+      settledAtStop.get(issue) === false ? "handed-off" : "stopped",
+    );
+    // A clean stop (an upgrade, a reboot) ends any crash streak.
+    heartbeat(true);
+    lock.close();
+    return 0;
+  } finally {
+    process.off("SIGTERM", stop);
+    process.off("SIGINT", stop);
+    process.off("unhandledRejection", stray);
+    options.signal?.removeEventListener("abort", stop);
   }
-  options.sync?.flushTransport();
-  // An Objective still unfinished is handed off to the next run.
-  log.end((issue) =>
-    runners.get(issue)?.settled === false ? "handed-off" : "stopped",
-  );
-  // A clean stop (an upgrade, a reboot) ends any crash streak.
-  heartbeat(true);
-  lock.close();
-  return 0;
 }
 
 /**

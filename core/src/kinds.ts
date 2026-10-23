@@ -32,12 +32,19 @@ export interface WorkerContext {
 export interface RegisteredKind {
   /** `host:<name>`. */
   name: string;
-  /** The provider's planner and reviewer: its `models`, as configured. */
-  planner?(models: Partial<PlannerModels>): Planner;
+  /** The provider's planner and reviewer: its `models`, as configured (both choices are required). */
+  planner?(models: PlannerModels): Planner;
   /** The provider's worker: its `worker` settings, without `kind`. */
   worker?(settings: Record<string, unknown>, context: WorkerContext): Worker;
-  /** Problems with the worker settings, checked when configuration loads in this process. */
-  check?(settings: Record<string, unknown>): string[];
+  /**
+   * Problems with the provider's settings for this kind, checked when
+   * configuration loads in this process: `models` for its planner,
+   * `worker` (without `kind`) for its worker.
+   */
+  check?(settings: {
+    models?: PlannerModels;
+    worker?: Record<string, unknown>;
+  }): string[];
 }
 
 const registered = new Map<string, RegisteredKind>();
@@ -72,22 +79,34 @@ export function hostKind(
 }
 
 /**
- * Configuration problems with host kind `name` as `role` at `path`: none
- * when this process hasn't registered it (serving checks that, see
- * unregisteredKinds); otherwise the role and the kind's own settings check.
+ * Configuration problems with host kind `name` as `role` at `path`. A
+ * planner needs its `models` choices, registered or not. When this process
+ * registered the kind, the role must be one it registers, and its own
+ * check runs; when it hasn't, serving refuses (unregisteredKinds).
  */
 export function hostKindProblems(
   name: string,
   role: "planner" | "worker",
   path: string,
-  settings: Record<string, unknown>,
+  settings: { models?: unknown; worker?: Record<string, unknown> },
   problems: string[],
 ): void {
+  const models = settings.models as Partial<PlannerModels> | undefined;
+  if (role === "planner" && (!models?.planner || !models.reviewer)) {
+    problems.push(
+      `${path}: host kind ${name} has no default models: give models.planner and models.reviewer, each {model, effort}`,
+    );
+    return;
+  }
   const kind = registered.get(name);
   if (!kind) return;
   if (!kind[role]) problems.push(`${path}: ${name} registers no ${role}`);
-  else if (role === "worker")
-    for (const problem of kind.check?.(settings) ?? [])
+  else
+    for (const problem of kind.check?.(
+      role === "planner"
+        ? { models: models as PlannerModels }
+        : { worker: settings.worker ?? {} },
+    ) ?? [])
       problems.push(`${path}: ${problem}`);
 }
 

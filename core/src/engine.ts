@@ -57,6 +57,12 @@ export type Outcome =
       finding: string;
       target: string;
       clear: string[];
+      /**
+       * A new start, not a fix (an operator's `replan`): the cleared steps'
+       * repair history goes with them, and it isn't counted against the
+       * target's budget.
+       */
+      reset?: boolean;
       keep?: Record<string, unknown>;
     };
 
@@ -539,6 +545,8 @@ export class ObjectiveRunner {
         break;
       case "repair": {
         delete state.retries[key];
+        // The answer that led here is spent: the step never acts on it again.
+        delete state.answers[key];
         for (const cleared of outcome.clear) {
           delete state.done[cleared];
           delete state.answers[cleared];
@@ -553,6 +561,11 @@ export class ObjectiveRunner {
         ))
           this.close(moot);
         state.repairs ??= {};
+        if (outcome.reset) {
+          for (const cleared of [key, ...outcome.clear])
+            delete state.repairs[cleared];
+          break;
+        }
         const repair = state.repairs[outcome.target] ?? {
           count: 0,
           findings: [],

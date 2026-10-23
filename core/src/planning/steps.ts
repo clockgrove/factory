@@ -609,10 +609,13 @@ function decideStep(
         const approved = state.kept?.[approvedKey] as
           | PlannerDecision
           | undefined;
-        const withApproved = (decision: Decision): Outcome => ({
+        const withApproved = (
+          decision: Decision,
+          keep: Record<string, unknown> = {},
+        ): Outcome => ({
           kind: "done",
           result: approved ? { ...decision, approved } : decision,
-          keep: { [approvedKey]: null },
+          keep: { [approvedKey]: null, ...keep },
         });
         if (answer) {
           const record = (text?: string) => decisionOf(answer, text);
@@ -636,7 +639,14 @@ function decideStep(
                 decision: record(),
               } satisfies Decision);
             case "continue":
-              return withApproved({ accept: true, decision: record() });
+              // The operator keeps this plan for the text GitHub shows now:
+              // build-time edit detection starts from it.
+              return withApproved(
+                { accept: true, decision: record() },
+                {
+                  [OBJECTIVE_ACCEPTED]: await shownNow(state, g, deps, signal),
+                },
+              );
             case "answer":
             case "allow": {
               if (!answer.text?.trim())
@@ -684,11 +694,32 @@ async function objectiveChanged(
   deps: PlanningDeps,
   signal: AbortSignal,
 ): Promise<boolean> {
+  return (
+    (await shownNow(state, g, deps, signal)) !==
+    shownDigest(generationInputs(state, g).shown)
+  );
+}
+
+/** The digest of what GitHub shows of the issue now, read as this generation read it. */
+async function shownNow(
+  state: ObjectiveState,
+  g: number,
+  deps: PlanningDeps,
+  signal: AbortSignal,
+): Promise<string> {
   const inputs = generationInputs(state, g);
   const issue = await deps.github.renderedIssue(state.issue, signal);
-  const shown = readShown(issue.body_html, { sources: inputs.writer === true });
-  return shownDigest(shown) !== shownDigest(inputs.shown);
+  return shownDigest(
+    readShown(issue.body_html, { sources: inputs.writer === true }),
+  );
 }
+
+/**
+ * The digest of the Objective text the operator accepted when it differs
+ * from what planning read (a `continue` to an edit): building checks for
+ * later edits against it (work/steps.ts objectiveEdited).
+ */
+export const OBJECTIVE_ACCEPTED = "objective:accepted";
 
 /** The question this round needs answered, if any. Recomputed, so an answer re-derives the same text. */
 function questionFor(

@@ -61,6 +61,7 @@ import {
 } from "../planning/schedule.js";
 import {
   guarded,
+  OBJECTIVE_ACCEPTED,
   type ObjectiveInputs,
   type PlanningDeps,
   REOPENED,
@@ -1734,6 +1735,7 @@ function replanOutcome(state: ObjectiveState): Outcome {
     kind: "repair",
     finding: "The operator asked to replan.",
     target: "check",
+    reset: true,
     clear: [
       ...new Set([
         ...Object.keys(state.done),
@@ -1986,7 +1988,7 @@ async function objectiveEdited(
     readShown(issue.body_html, { sources: planned.writer === true }),
   );
   const accepted =
-    ((state.kept ?? {})["objective:accepted"] as string | undefined) ??
+    ((state.kept ?? {})[OBJECTIVE_ACCEPTED] as string | undefined) ??
     shownDigest(planned.shown);
   if (context.answer?.answer === "continue")
     return digest === accepted
@@ -1995,7 +1997,7 @@ async function objectiveEdited(
           kind: "retry",
           reason: "Continuing with the edited Objective.",
           afterMs: 0,
-          keep: { "objective:accepted": digest },
+          keep: { [OBJECTIVE_ACCEPTED]: digest },
         };
   if (issue.state !== "open")
     return objectiveWide(

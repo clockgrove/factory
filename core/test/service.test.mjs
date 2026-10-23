@@ -1146,6 +1146,76 @@ test("a deferred question asks right after the covering one; stack layers and ba
   assert.ok(started.slice(ran).includes("item:d:ci"), "d ran at once");
 });
 
+test("a replan answer is spent once applied, and the new plan starts with a fresh repair budget", async () => {
+  const { DEFAULT_LIMITS, ObjectiveRunner, hold } = await import(
+    "../dist/engine.js"
+  );
+  const { newObjective } = await import("../dist/state.js");
+  const order = ["check", "plan", "item:api:work", "final"];
+  const seen = [];
+  const state = newObjective(1, new Date());
+  // The old plan spent item api's budget, and earlier replans counted on check.
+  state.repairs = {
+    "item:api:work": { count: 6, findings: ["old finding"] },
+    check: { count: 6, findings: ["The operator asked to replan."] },
+  };
+  const runner = new ObjectiveRunner(
+    state,
+    {
+      steps: (current) => {
+        const key = order.find((k) => !current.done[k]);
+        if (!key) return [];
+        return [
+          {
+            key,
+            deadlineMs: 60_000,
+            run: async ({ answer, state: copy }) => {
+              if (key !== "final") return { kind: "done" };
+              seen.push(answer?.answer);
+              // As work/steps.ts replanOutcome answers `replan`.
+              return answer?.answer === "replan"
+                ? {
+                    kind: "repair",
+                    finding: "The operator asked to replan.",
+                    target: "check",
+                    reset: true,
+                    clear: Object.keys(copy.done),
+                  }
+                : hold("Final validation failed.", ["retry", "replan"]);
+            },
+          },
+        ];
+      },
+      status: () => "building",
+    },
+    mkdtempSync(join(tmpdir(), "factory-replan-")),
+    { write() {} },
+    { id: "run", finished: 0, resumeAt: 0 },
+    DEFAULT_LIMITS,
+  );
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) {
+      runner.tick();
+      await new Promise((r) => setImmediate(r));
+    }
+  };
+  await settle();
+  const [asked] = runner.state.holds;
+  assert.equal(asked?.step, "final");
+  assert.equal(
+    runner.transact(() =>
+      runner.answer("replan", undefined, "op", undefined, asked.id),
+    ),
+    null,
+  );
+  await settle();
+  assert.deepEqual(seen, [undefined, "replan", undefined]);
+  assert.equal(runner.state.answers.final, undefined, "the answer is spent");
+  assert.deepEqual(runner.state.repairs, {}, "the budget starts afresh");
+  const [again] = runner.state.holds;
+  assert.equal(again?.question, "Final validation failed.");
+});
+
 test("a new wait class starts its own budget and ends a run of errors", async () => {
   const inst = installation();
   configured(inst, `http://127.0.0.1:${await closedPort()}`);

@@ -6,7 +6,7 @@ import type { RunLog } from "./log.js";
 import { QueueDisplay, type QueueItem, queued, readQueue } from "./queue.js";
 import { writeRequest } from "./requests.js";
 import type { ObjectiveState, ObjectiveStatus } from "./state.js";
-import { TERMINAL } from "./state.js";
+import { CLOCK_SKEW_MS, TERMINAL } from "./state.js";
 import { errorMessage } from "./text.js";
 
 /** What the sync keeps in an Objective's state (`modules.github`). */
@@ -36,7 +36,12 @@ export interface GitHubModule {
   queuedAt?: string;
   /** An unreadable state's question comment exists (open holds keep theirs: `Hold.shownAt`). */
   askedUnreadable?: boolean;
-  /** Comments are read from here on. */
+  /**
+   * Comments are read from here on, by GitHub's clock, and only one created
+   * at or after it is a command: an older comment edited later (GitHub's
+   * `since` filters on `updated_at`) never acts. It starts at the run's
+   * admission, or an unreadable state's question, and only moves forward.
+   */
   commentsSince: string;
   /** Request ids already replied to. */
   replied?: string[];
@@ -61,6 +66,8 @@ export interface UncheckedComment {
 /** An Objective whose state file can't be read: it holds, with `cancel`. */
 export interface UnreadableObjective {
   error: string;
+  /** Which incident: the unreadable file's digest. Its question and answers are this incident's only. */
+  incident: string;
   /** Its card and comment cursor, once the sync has seen it on the Project. */
   github?: GitHubModule;
 }
@@ -491,7 +498,7 @@ export class GitHubSync {
           `${marker}\n**Factory needs you.** ${hold.question}\n\nReply with one of: ${answers}. Add text after the answer to explain it.${about}${form}`,
           "sync:ask",
           undefined,
-          new Date(Date.parse(hold.askedAt) - 10 * 60_000).toISOString(),
+          new Date(Date.parse(hold.askedAt) - CLOCK_SKEW_MS).toISOString(),
         );
         runner.transact(() =>
           runner.shown(
@@ -575,11 +582,9 @@ export class GitHubSync {
     sync: SyncView,
   ): void {
     const item = this.view.find((i) => i.issue === issue);
+    // Comments are read once the question is shown, from its time on.
     if (!entry.github && item)
-      entry.github = {
-        itemId: item.itemId,
-        commentsSince: new Date(this.now()).toISOString(),
-      };
+      entry.github = { itemId: item.itemId, commentsSince: "" };
     const module = entry.github;
     if (!module) return;
     const option = this.config.queue.options.holding;
@@ -593,17 +598,19 @@ export class GitHubSync {
       });
     if (!module.askedUnreadable)
       this.background(issue, `ask:${issue}`, async () => {
-        const marker = MARK(issue, "hold", "unreadable");
-        const found = await this.github.markedComment(issue, marker);
-        if (found) module.commentsSince = found.created_at;
-        else {
+        // This incident's question: an earlier incident's question, and
+        // the answers to it, never count for this one.
+        const marker = MARK(issue, "hold", `unreadable:${entry.incident}`);
+        let question = await this.github.markedComment(issue, marker);
+        if (!question) {
           crashPoint("sync:ask:before");
-          await this.github.postComment(
+          question = await this.github.postComment(
             issue,
             `${marker}\n**Factory needs you.** Factory can't read this Objective's state (${entry.error.slice(0, 500)}). Reply with \`/factory cancel\` (recommended) to start over from a cancelled record; then queue it again to run it again.`,
           );
           crashPoint("sync:ask:after");
         }
+        module.commentsSince = question.created_at;
         module.askedUnreadable = true;
       });
     else if (due)
@@ -638,6 +645,9 @@ export class GitHubSync {
       let latest = since;
       const fresh: UncheckedComment[] = [];
       for (const comment of comments) {
+        // Created before the cursor: read already, or from before this run
+        // or its question, and edited since.
+        if (Date.parse(comment.created_at) < Date.parse(since)) continue;
         if (comment.created_at > latest) latest = comment.created_at;
         if (
           !comment.user ||
@@ -773,7 +783,11 @@ export class GitHubSync {
     marker: string,
     since: string,
   ): Promise<boolean> {
-    const from = new Date(Date.parse(since) - 10 * 60_000).toISOString();
+    // An unreadable state's cursor is empty until its question is shown.
+    const at = Date.parse(since);
+    const from = Number.isFinite(at)
+      ? new Date(at - CLOCK_SKEW_MS).toISOString()
+      : undefined;
     return (await this.github.findComment(issue, marker, from)) !== undefined;
   }
 

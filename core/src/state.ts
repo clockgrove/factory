@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
@@ -193,6 +194,27 @@ export function newObjective(
   };
 }
 
+/**
+ * A run's identity: its admission time (with the issue, it names the run).
+ * Every artifact Factory relies on across runs is bound to it: memory
+ * records and pins, the report comment. A record from before runs had one
+ * reads as `unknown`.
+ */
+export function runOf(state: ObjectiveState): string {
+  return state.startedAt ?? "unknown";
+}
+
+/** The most this host's clock is taken to differ from GitHub's: host times read against GitHub's go back this far. */
+export const CLOCK_SKEW_MS = 10 * 60_000;
+
+/** Where a GitHub read of this run's own comments starts: its admission (a host time), less the skew. */
+export function sinceRun(state: ObjectiveState): string | undefined {
+  const at = Date.parse(state.startedAt ?? "");
+  return Number.isFinite(at)
+    ? new Date(at - CLOCK_SKEW_MS).toISOString()
+    : undefined;
+}
+
 function statePath(dir: string, issue: number): string {
   return join(dir, `${issue}.json`);
 }
@@ -276,7 +298,13 @@ function syncDirectory(dir: string): void {
 
 export type Loaded =
   | { kind: "ok"; state: ObjectiveState }
-  | { kind: "unreadable"; issue: number; error: string };
+  | {
+      kind: "unreadable";
+      issue: number;
+      error: string;
+      /** The file's digest: one incident of unreadable state, until the file changes. */
+      incident: string;
+    };
 
 /**
  * The Objective's state; null when it has none. Only a file that doesn't
@@ -298,12 +326,21 @@ export function loadState(dir: string, issue: number): Loaded | null {
         kind: "unreadable",
         issue,
         error: `state version ${state.version}, expected ${STATE_VERSION}`,
+        incident: digest(text),
       };
     return { kind: "ok", state };
   } catch (error) {
-    return { kind: "unreadable", issue, error: String(error) };
+    return {
+      kind: "unreadable",
+      issue,
+      error: String(error),
+      incident: digest(text),
+    };
   }
 }
+
+const digest = (text: string): string =>
+  createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 /** Issue numbers with a state file. Leftover temporary files are ignored. */
 export function listObjectives(dir: string): number[] {

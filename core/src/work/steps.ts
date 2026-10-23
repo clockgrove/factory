@@ -78,7 +78,7 @@ import {
   reviewResult,
 } from "../review/result.js";
 import { type ObjectiveBlock, readShown, shownDigest } from "../shown.js";
-import type { ObjectiveState } from "../state.js";
+import { type ObjectiveState, runOf, sinceRun } from "../state.js";
 import { validateTree } from "../validate.js";
 import {
   addWorktree,
@@ -2082,13 +2082,16 @@ export function reportStep(deps: BuildDeps): Step {
         const { state, signal } = context;
         const { github } = deps;
         if (context.answer?.answer === "replan") return replanOutcome(state);
-        const marker = `<!-- factory:${state.issue}:report -->`;
+        // The report is this run's: an earlier run of the same issue (queued
+        // again after it finished) has its own, which never counts here.
+        const run = runOf(state);
+        const marker = `<!-- factory:${state.issue}:report:${run} -->`;
         // Once the report is posted, the issue close that follows is Factory's
         // own: a restart after it must not read it as the operator's.
         const reported = await github.findComment(
           state.issue,
           marker,
-          undefined,
+          sinceRun(state),
           signal,
         );
         if (!reported) {

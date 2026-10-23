@@ -7,7 +7,7 @@
 import { TransientError } from "../github.js";
 import { type BaseFiles, planningSources } from "../planning/facts.js";
 import type { ShownObjective } from "../shown.js";
-import type { ObjectiveState } from "../state.js";
+import { type ObjectiveState, runOf } from "../state.js";
 import { errorMessage } from "../text.js";
 import { adaptiveWorkflow } from "../validate.js";
 import { pinnedPlaybook } from "./dream.js";
@@ -17,7 +17,6 @@ import {
   pathDigest,
   releaseRun,
   retain,
-  runOf,
   sourceRecords,
 } from "./memory.js";
 import { knowledgeSettings } from "./settings.js";

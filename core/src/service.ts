@@ -154,7 +154,10 @@ export async function serve(options: ServeOptions): Promise<number> {
     if (known || unreadable.has(issue)) return known;
     const loaded = findState(paths.objectives, issue);
     if (loaded?.kind === "unreadable")
-      unreadable.set(issue, { error: loaded.error });
+      unreadable.set(issue, {
+        error: loaded.error,
+        incident: loaded.incident,
+      });
     return loaded?.kind === "ok" ? open(loaded.state) : undefined;
   };
   /** State files not read yet because the read failed: tried every tick. */

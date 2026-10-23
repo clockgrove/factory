@@ -21,7 +21,8 @@ import { isAbsolute, join, relative } from "node:path";
 import { crashPoint } from "../crash.js";
 import { redact } from "../log.js";
 import type { Planner } from "../providers/planner.js";
-import { episodes, observeObjective, runOf } from "./memory.js";
+import { runOf } from "../state.js";
+import { episodes, observeObjective } from "./memory.js";
 import {
   DEFAULT_BOUNDS,
   type KnowledgeSettings,

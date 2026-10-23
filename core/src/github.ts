@@ -37,9 +37,31 @@ export class GitHubError extends Error {
     readonly status: number,
     /** The response body as JSON, when it was JSON. */
     readonly body?: unknown,
+    /** Where a redirect points; never followed (see `moved`). */
+    readonly location?: string,
   ) {
     super(message);
   }
+}
+
+/**
+ * GitHub redirects what moved: an issue transferred to another repository,
+ * a renamed repository. The client never follows a redirect, so Factory
+ * never acts outside its configured repository; a redirect is an answer.
+ */
+export function moved(error: unknown): boolean {
+  return (
+    error instanceof GitHubError && [301, 302, 307, 308].includes(error.status)
+  );
+}
+
+/** An issue GitHub no longer has here: deleted (404, 410) or moved away. */
+export function issueGone(error: unknown): error is GitHubError {
+  return (
+    moved(error) ||
+    (error instanceof GitHubError &&
+      (error.status === 404 || error.status === 410))
+  );
 }
 
 const TIMEOUT_MS = 60_000;
@@ -77,6 +99,14 @@ export function githubOutcome(
     };
   if (!(error instanceof GitHubError)) return undefined;
   const detail = error.message.slice(0, 500);
+  if (moved(error))
+    return objectiveWide(
+      hold(
+        `GitHub says this moved out of ${repository} (${detail}${error.location ? `; now at ${error.location}` : ""}). Factory acts only on ${repository}: if the repository was renamed, update Factory's configuration, then answer retry; if the issue was transferred, cancel.`,
+        ["cancel", "retry"],
+        "cancel",
+      ),
+    );
   if (error.status === 401)
     return objectiveWide(
       hold(
@@ -1032,13 +1062,34 @@ export class GitHub {
     job: number,
     signal?: AbortSignal,
   ): Promise<string | undefined> {
-    const response = await this.send(
-      "GET",
-      this.repo(`actions/jobs/${job}/logs`),
-      undefined,
-      signal,
-      { range: `bytes=-${64 * 1024}` },
-    );
+    const range = { range: `bytes=-${64 * 1024}` };
+    let response: Response;
+    try {
+      response = await this.send(
+        "GET",
+        this.repo(`actions/jobs/${job}/logs`),
+        undefined,
+        signal,
+        range,
+      );
+    } catch (error) {
+      // The log is served from a signed link to storage: read without
+      // Factory's login, and never redirected again.
+      if (!(error instanceof GitHubError && error.status === 302)) throw error;
+      if (!error.location) return undefined;
+      const deadline = AbortSignal.timeout(TIMEOUT_MS);
+      try {
+        response = await fetch(error.location, {
+          headers: range,
+          redirect: "error",
+          signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+        });
+      } catch (failure) {
+        if (signal?.aborted) throw failure;
+        throw new TransientError(`job ${job} log: ${errorMessage(failure)}`);
+      }
+      if (!response.ok) return undefined;
+    }
     const reader = response.body?.getReader();
     if (!reader) return undefined;
     const chunks: Uint8Array[] = [];
@@ -1086,6 +1137,8 @@ export class GitHub {
               ),
             }),
         signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
+        // Never followed: a redirect is an answer (see `moved`).
+        redirect: "manual",
       });
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -1130,7 +1183,12 @@ export class GitHub {
         detail,
         retryAfter > 0 ? retryAfter * 1000 : undefined,
       );
-    throw new GitHubError(detail, response.status, answer);
+    throw new GitHubError(
+      detail,
+      response.status,
+      answer,
+      response.headers.get("location") ?? undefined,
+    );
   }
 
   /** The service token, for downloads outside the REST API (media attachments). */

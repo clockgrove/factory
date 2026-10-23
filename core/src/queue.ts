@@ -64,6 +64,7 @@ const ISSUE_FIELDS = `
 fragment Card on Issue {
   number
   state
+  repository { nameWithOwner }
   projectItems(first: 20) {
     nodes {
       id
@@ -116,6 +117,7 @@ interface ItemsPage {
 interface Card {
   number: number;
   state: string;
+  repository: { nameWithOwner: string };
   projectItems: {
     nodes: ({
       id: string;
@@ -240,12 +242,20 @@ export async function readQueue(
       read(issue);
     for (const n of chunk) {
       const issue = data.repository[`i${n}`] as Card | null | undefined;
-      if (issue) read(issue);
+      // One transferred away reads as the issue it is now: gone from here.
+      if (issue && ours(issue, n)) read(issue);
       else {
         gone.push(n);
         cards.set(n, null);
       }
     }
+  }
+  function ours(issue: Card, n: number): boolean {
+    return (
+      issue.number === n &&
+      issue.repository.nameWithOwner.toLowerCase() ===
+        config.repository.toLowerCase()
+    );
   }
   function read(issue: Card): void {
     const node = issue.projectItems.nodes.find(
@@ -404,6 +414,8 @@ const BUILT_IN = `
 query($owner: String!, $name: String!, $issue: Int!, $project: ID!, $field: String!) {
   repository(owner: $owner, name: $name) {
     issue(number: $issue) {
+      number
+      repository { nameWithOwner }
       projectItems(first: 50) {
         nodes {
           id
@@ -444,6 +456,8 @@ export async function moveStatusOffDone(
   const data = await github.graphql<{
     repository: {
       issue: {
+        number: number;
+        repository: { nameWithOwner: string };
         projectItems: {
           nodes: ({
             id: string;
@@ -468,7 +482,15 @@ export async function moveStatusOffDone(
     },
     signal,
   );
-  const item = data.repository?.issue?.projectItems.nodes.find(
+  const found = data.repository?.issue;
+  // Never the Status of an issue transferred away.
+  if (
+    found?.number !== issue ||
+    found.repository.nameWithOwner.toLowerCase() !==
+      config.repository.toLowerCase()
+  )
+    return undefined;
+  const item = found.projectItems.nodes.find(
     (n) => n?.project.id === config.queue.projectId && !n.isArchived,
   );
   const field = data.node?.field;

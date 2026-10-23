@@ -23,7 +23,7 @@ import {
   type StepContext,
 } from "../engine.js";
 import { defaultHead } from "../git.js";
-import { GitHubError } from "../github.js";
+import { GitHubError, issueGone } from "../github.js";
 import {
   type CandidateSet,
   captureAssets,
@@ -2166,8 +2166,9 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
       }
       // The Objective's issue closes as not planned, so the queue and the
       // issue agree; the operator can reopen and queue it again. An issue
-      // GitHub no longer has (deleted, or transferred away) has nothing to
-      // close: cleanup goes on, so it settles.
+      // GitHub no longer has here (deleted, or transferred away: GitHub
+      // redirects, and Factory never follows) has nothing to close: cleanup
+      // goes on, so it settles.
       try {
         await deps.github.closeIssue(
           state.issue,
@@ -2176,11 +2177,7 @@ export function cancelCleanupStep(deps: BuildDeps): Step {
           signal,
         );
       } catch (error) {
-        if (
-          !(error instanceof GitHubError) ||
-          (error.status !== 404 && error.status !== 410)
-        )
-          throw error;
+        if (!issueGone(error)) throw error;
         log({ event: "issue-gone", status: error.status });
       }
       await removeWorkFiles(state.issue, deps, signal);

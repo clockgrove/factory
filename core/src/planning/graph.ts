@@ -941,7 +941,7 @@ export function shapeFindings(draft: Draft): Finding[] {
 }
 
 /** The plan is baseline QA: it qualifies existing bytes and delivers no change. */
-function baselineQa(items: readonly WorkItem[]): boolean {
+export function baselineQa(items: readonly WorkItem[]): boolean {
   return (
     items.length > 0 &&
     items.every((item) => item.kind === "qa" || item.kind === "discovery")

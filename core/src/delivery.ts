@@ -733,6 +733,71 @@ export async function observeCi(
     : judged;
 }
 
+/** A named CI check's successful run on an exact commit: read-only QA's CI proof. */
+export interface NamedCheck {
+  name: string;
+  commit: string;
+  id: number;
+  url?: string;
+}
+
+/**
+ * The latest runs of check `name` on `commit`, for a QA item's
+ * integrated-ci or published-ci proof. Every run completed with success
+ * passes; any run that ended otherwise refuses, with why; a run queued or
+ * running is a wait, and no run at all is a wait that asks once it has
+ * gone on CHECK_SETTLE_MS.
+ */
+export async function observeNamedCheck(
+  context: DeliveryContext,
+  name: string,
+  commit: string,
+): Promise<
+  | { kind: "passed"; check: NamedCheck }
+  | { kind: "refused"; finding: string }
+  | Retry
+> {
+  const runs = (await context.github.checkRuns(commit, context.signal)).filter(
+    (run) => run.name === name && run.head_sha === commit,
+  );
+  const failed = runs.find(
+    (run) => run.status === "completed" && run.conclusion !== "success",
+  );
+  if (failed) {
+    const excerpt = await failureExcerpt(context, failed);
+    return {
+      kind: "refused",
+      finding: `Check ${JSON.stringify(name)} ended ${failed.conclusion} on ${commit}${failed.html_url ? ` (${failed.html_url})` : ""}${excerpt ? `:\n${excerpt}` : ""}`,
+    };
+  }
+  if (runs.length && runs.every((run) => run.status === "completed")) {
+    const run = runs[0]!;
+    return {
+      kind: "passed",
+      check: {
+        name,
+        commit,
+        id: run.id,
+        ...(run.html_url ? { url: run.html_url } : {}),
+      },
+    };
+  }
+  return {
+    kind: "retry",
+    reason: `Awaiting check ${JSON.stringify(name)} on ${commit}`,
+    afterMs: CI_POLL_MS,
+    ...(runs.length
+      ? {}
+      : {
+          holdAfter: {
+            ms: CHECK_SETTLE_MS,
+            question: `Check ${JSON.stringify(name)} has no run on ${commit} ${CHECK_SETTLE_MS / MINUTE} minutes after Factory began waiting, though the plan's QA proof requires it. Trigger or fix the workflow that reports it, then answer retry; replan to plan without it; or cancel.`,
+            offers: ["retry", "replan", "cancel"],
+          },
+        }),
+  };
+}
+
 type Judged =
   | { kind: "ready"; head: string; pull: PullRequest; defaultBranch: string }
   | Retry

@@ -42,7 +42,11 @@ export type ItemKind = "work" | "qa" | "aggregate" | "discovery";
  * read this list. A kind joins it when its executor lands; a saved plan
  * with any other kind holds at that item.
  */
-export const EXECUTABLE_KINDS: readonly ItemKind[] = ["work", "aggregate"];
+export const EXECUTABLE_KINDS: readonly ItemKind[] = [
+  "work",
+  "qa",
+  "aggregate",
+];
 
 /** Whether this build executes, and the planner is offered, `kind`. */
 export const executable = (kind: ItemKind = "work"): boolean =>

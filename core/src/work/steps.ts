@@ -9,7 +9,9 @@ import {
   itemBranch,
   merge,
   mergeUnit,
+  type NamedCheck,
   observeCi,
+  observeNamedCheck,
   type PullInput,
   publish,
   REPUBLISH,
@@ -52,6 +54,7 @@ import {
   fixedScripts,
   planningSources,
 } from "../planning/facts.js";
+import { baselineQa } from "../planning/graph.js";
 import { acceptedInputs, currentPlan } from "../planning/plan.js";
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
@@ -79,6 +82,7 @@ import {
   type DependencyResult,
   type ResultReview,
   receiptPath,
+  reviewQa,
   reviewResult,
 } from "../review/result.js";
 import { type ObjectiveBlock, readShown, shownDigest } from "../shown.js";
@@ -252,7 +256,6 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
     // The planner is offered only executable kinds; a saved plan from
     // another build may still hold one this build can't run.
     if (!executable(item.kind)) return notYet(item, `${item.kind} items`);
-    if (item.kind === "aggregate") return aggregateStep(item);
     const place = layerOf(item.id);
     const phase = phasesOf(item, place).find((p) => !done(item.id, p));
     // The top merges the stack once every layer's checks are ready.
@@ -262,6 +265,9 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
         place?.unit.items.some((layer) => !done(layer.id, "ci")))
     )
       return undefined;
+    // Aggregates and QA deliver nothing: their merge step settles them.
+    if (phase === "merge" && (item.kind ?? "work") !== "work")
+      return settleStep(item);
     return itemStep(item, phase, deps, place);
   };
   const steps: Step[] = [];
@@ -351,9 +357,12 @@ function multiLayer(
 /**
  * The phases the item runs, in order: select only when it needs a media
  * selection, and merge only at the top of its native stack (the top merges
- * the whole stack).
+ * the whole stack). An aggregate only settles; read-only QA validates and
+ * reviews the integrated result, then settles.
  */
 function phasesOf(item: WorkItem, place: StackPlace | undefined): Phase[] {
+  if (item.kind === "aggregate") return ["merge"];
+  if (item.kind === "qa") return ["validate", "review", "merge"];
   const top = !place || place.layer === place.unit.items.length - 1;
   return PHASES.filter(
     (p) => (p !== "select" || needsSelection(item)) && (p !== "merge" || top),
@@ -1064,6 +1073,7 @@ async function validateStep(
   deps: BuildDeps,
   place: StackPlace | undefined,
 ): Promise<Outcome> {
+  if (item.kind === "qa") return qaValidateStep(item, context, deps);
   const { state, signal } = context;
   const { config } = deps;
   const plan = currentPlan(state)!;
@@ -1233,6 +1243,7 @@ async function reviewStep(
   deps: BuildDeps,
   place: StackPlace | undefined,
 ): Promise<Outcome> {
+  if (item.kind === "qa") return qaReviewStep(item, context, deps);
   const { state, signal } = context;
   const plan = currentPlan(state)!;
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
@@ -1311,6 +1322,14 @@ async function reviewStep(
   );
 }
 
+/** The head an item's PR delivered: its CI step's (GitHub may have updated the branch), else its published one. */
+function deliveredHead(state: ObjectiveState, id: string): string | undefined {
+  return (
+    (state.done[stepKey(id, "ci")] as { head: string } | undefined)?.head ??
+    (state.done[stepKey(id, "publish")] as PublishResult | undefined)?.head
+  );
+}
+
 /** The read-only inputs each item's worker last got, for review. */
 function workerInputs(state: ObjectiveState, ids: string[]): InputRecord[] {
   return ids.map((id) => ({
@@ -1374,10 +1393,7 @@ async function dependencyResults(
       | ValidateResult
       | undefined;
     if (!work || !validated || (!merged && !published)) continue;
-    const ci = state.done[stepKey(entry.id, "ci")] as
-      | { head: string }
-      | undefined;
-    const head = ci?.head ?? published?.head;
+    const head = deliveredHead(state, entry.id);
     const delivered = merged?.mergeSha ?? head;
     results.push({
       id: entry.id,
@@ -1959,14 +1975,196 @@ export const RERUN = "rerun";
 export const RERUN_CLEANUP = "rerun:cleanup";
 
 // ---------------------------------------------------------------------------
-// aggregates and not-yet-ported kinds
+// read-only QA, aggregates and not-yet-ported kinds
 
-function aggregateStep(item: WorkItem): Step {
+/** A read-only QA item's validate result: the commit it checked and the named CI checks that passed. */
+interface QaResult extends ValidateResult {
+  commit: string;
+  checks: NamedCheck[];
+}
+
+/**
+ * Read-only QA checks the integrated result and delivers nothing: its
+ * named CI checks, then its commands in a fresh sandboxed checkout, on the
+ * default-branch commit once every dependency has merged. An Objective
+ * made only of QA checks the bytes it planned on. A failing check or
+ * command refuses: the item holds with the evidence.
+ */
+async function qaValidateStep(
+  item: WorkItem,
+  context: StepContext,
+  deps: BuildDeps,
+): Promise<Outcome> {
+  const { state, signal } = context;
+  const { config } = deps;
+  const plan = currentPlan(state)!;
+  const head = await defaultHead(config.checkout, config.repository, signal);
+  const problem = await integrationProblem(state, plan, head, deps, signal);
+  if (problem) return problem;
+  const checks: NamedCheck[] = [];
+  const observed = new Set<string>();
+  for (const { itemId, proof } of plan.coverage) {
+    if (
+      itemId !== item.id ||
+      (proof.kind !== "integrated-ci" && proof.kind !== "published-ci")
+    )
+      continue;
+    // published-ci: the check on the target dependency's delivered head.
+    let commit = head;
+    if (proof.kind === "published-ci") {
+      const delivered = deliveredHead(state, proof.targetItem);
+      if (!delivered)
+        return hold(
+          `Read-only QA item ${item.id} proves check ${JSON.stringify(proof.checkName)} on Work Item ${proof.targetItem}'s published PR, and it has none. Answer replan, or cancel.`,
+          ["replan", "cancel"],
+        );
+      commit = delivered;
+    }
+    if (observed.has(`${proof.checkName}\n${commit}`)) continue;
+    observed.add(`${proof.checkName}\n${commit}`);
+    const check = await observeNamedCheck(
+      delivery(context, deps),
+      proof.checkName,
+      commit,
+    );
+    if (check.kind === "refused")
+      return qaRefusal(item, head, "a named CI check failed", check.finding);
+    if (check.kind !== "passed") return check;
+    checks.push(check.check);
+  }
+  const workDir = deps.workDir(state.issue);
+  const result = await validateTree({
+    checkout: config.checkout,
+    repository: config.repository,
+    directory: `${worktreePath(workDir, state.issue, item.id)}.validation`,
+    commit: head,
+    item,
+    plan,
+    blocks: acceptedInputs(state).shown.blocks,
+    ...(head !== plan.base ? { predecessor: head } : {}),
+    reviewArtifacts: {
+      configured: config.reviewArtifacts,
+      planned: plan.reviewArtifacts,
+      dir: join(workDir, "artifacts", item.id),
+    },
+    media: validationMembers(plan, item, selection(state)),
+    sandbox: config.sandbox,
+    commandTimeoutMs: commandTimeoutMs(deps),
+    signal,
+    log: context.log,
+  });
+  switch (result.kind) {
+    case "passed": {
+      const done: QaResult = {
+        commit: head,
+        tree: result.tree,
+        commands: result.commands,
+        ...(result.artifacts ? { artifacts: result.artifacts } : {}),
+        checks,
+      };
+      return { kind: "done", result: done };
+    }
+    case "failed":
+      return qaRefusal(
+        item,
+        head,
+        result.failed
+          ? `\`${result.failed.command}\` failed`
+          : "its validation was refused",
+        result.detail,
+      );
+    default:
+      return result;
+  }
+}
+
+/**
+ * The independent review of what QA validated: its acceptance and the
+ * obligations its review proves, on that commit, over this Objective's
+ * merges. A refusal holds; its `retry` checks again from validation, on
+ * the default branch as it is then.
+ */
+async function qaReviewStep(
+  item: WorkItem,
+  context: StepContext,
+  deps: BuildDeps,
+): Promise<Outcome> {
+  const { state, signal } = context;
+  const steps = [stepKey(item.id, "validate"), stepKey(item.id, "review")];
+  if (context.answer?.answer === "retry" && fact(state, "qaRefused", item.id))
+    return {
+      kind: "repair",
+      finding: `Read-only QA item ${item.id} checks the default branch again after the operator's fix.`,
+      target: steps[0]!,
+      clear: steps,
+      keep: facts({ qaRefused: null }, item.id),
+    };
+  const plan = currentPlan(state)!;
+  const checked = state.done[steps[0]!] as QaResult;
+  const merges = objectiveMerges(state, plan).map(
+    (entry) => entry.merged.mergeSha,
+  );
+  const review = await reviewQa({
+    planner: deps.planner,
+    plan,
+    item,
+    checkout: deps.config.checkout,
+    base: plan.base,
+    commit: checked.commit,
+    ...(merges.length ? { merges } : {}),
+    validation: checked,
+    checks: checked.checks,
+    sources: await pinnedSources(state, deps, signal),
+    dir: `${worktreePath(deps.workDir(state.issue), state.issue, item.id)}.review`,
+    peerNotes: peerNotes(plan, acceptedNotes(state, plan), item),
+    ...(checked.artifacts ? { artifacts: checked.artifacts } : {}),
+    decisions: criterionDecisions(
+      context,
+      checked.tree,
+      fact(state, "questions", item.id),
+    ),
+    signal,
+    log: context.log,
+  });
+  return reviewOutcome(
+    review,
+    (questions) => facts({ questions }, item.id),
+    () => ({
+      ...qaRefusal(
+        item,
+        checked.commit,
+        "its review refused",
+        review.kind === "refused"
+          ? review.refused
+              .map((r) => `- ${r.criterion}: ${r.detail}`)
+              .join("\n")
+          : "",
+      ),
+      keep: facts({ qaRefused: true }, item.id),
+    }),
+  );
+}
+
+/** A QA refusal: no worker repairs it, so it holds with the evidence. */
+function qaRefusal(
+  item: WorkItem,
+  commit: string,
+  what: string,
+  evidence: string,
+): Outcome {
+  return hold(
+    `Read-only QA item ${item.id} refused the integrated result at ${commit.slice(0, 12)}: ${what}.\n\n${evidence}\n\nAnswer \`replan\` to plan the fix, \`retry\` to check again once the default branch is fixed, or cancel.`,
+    ["replan", "retry", "cancel"],
+  );
+}
+
+/** The merge step of an item that delivers nothing (aggregate, QA): it settles. */
+function settleStep(item: WorkItem): Step {
   return {
     key: stepKey(item.id, "merge"),
     deadlineMs: MINUTE,
     async run(): Promise<Outcome> {
-      return { kind: "done", result: { aggregate: true } };
+      return { kind: "done", result: { settled: item.kind } };
     },
   };
 }
@@ -2013,17 +2211,8 @@ function finalStep(plan: Plan, deps: BuildDeps): Step {
         config.repository,
         signal,
       );
-      for (const item of plan.items) {
-        const merged = state.done[stepKey(item.id, "merge")] as
-          | MergeResult
-          | undefined;
-        if (!merged?.mergeSha) continue;
-        if (!(await isAncestor(config.checkout, merged.mergeSha, head, signal)))
-          return hold(
-            `Work Item ${item.id}'s merge \`${merged.mergeSha.slice(0, 12)}\` is not on the default branch (${head.slice(0, 12)}); someone may have reverted or force-pushed it. Restore it and answer \`retry\`, or \`replan\`.`,
-            ["retry", "replan", "cancel"],
-          );
-      }
+      const problem = await integrationProblem(state, plan, head, deps, signal);
+      if (problem) return problem;
       const workDir = deps.workDir(state.issue);
       const members = validationMembers(plan, undefined, selection(state));
       const result = await validateTree({
@@ -2109,18 +2298,7 @@ function finalReviewStep(deps: BuildDeps): Step {
         };
       const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
-      const merges = plan.items
-        .map((item) => ({
-          id: item.id,
-          merged: state.done[stepKey(item.id, "merge")] as
-            | MergeResult
-            | undefined,
-        }))
-        .filter(
-          (entry): entry is { id: string; merged: MergeResult } =>
-            !!entry.merged?.mergeSha,
-        )
-        .sort((a, b) => a.merged.at.localeCompare(b.merged.at));
+      const merges = objectiveMerges(state, plan);
       const decisions = criterionDecisions(
         context,
         final.tree,
@@ -2151,6 +2329,10 @@ function finalReviewStep(deps: BuildDeps): Step {
         signal,
         log: context.log,
       });
+      // Read-only QA checked the integrated tree too.
+      const qaIds = plan.items
+        .filter((item) => item.kind === "qa")
+        .map((item) => item.id);
       const review = await reviewObjective({
         planner: deps.planner,
         plan,
@@ -2161,7 +2343,7 @@ function finalReviewStep(deps: BuildDeps): Step {
         validation: { tree: final.tree, commands: final.commands },
         artifacts: [
           { artifacts: final.artifacts ?? [] },
-          ...mergedIds.map((id) => ({
+          ...[...mergedIds, ...qaIds].map((id) => ({
             itemId: id,
             artifacts:
               (
@@ -2263,6 +2445,54 @@ async function objectiveEdited(
   return undefined;
 }
 
+/**
+ * Why the default branch head can't be checked as this Objective's
+ * integrated result: an Objective made only of read-only QA qualifies the
+ * bytes it planned on, so the branch must not have moved; otherwise every
+ * merge must still be on it.
+ */
+async function integrationProblem(
+  state: ObjectiveState,
+  plan: Plan,
+  head: string,
+  deps: BuildDeps,
+  signal: AbortSignal,
+): Promise<Outcome | undefined> {
+  if (baselineQa(plan.items))
+    return head === plan.base
+      ? undefined
+      : hold(
+          `This Objective is made only of read-only QA, which qualifies the bytes it was planned on (${plan.base.slice(0, 12)}), and the default branch has moved to ${head.slice(0, 12)}. Answer \`replan\` to plan again on the current default branch, \`retry\` once it is back at ${plan.base.slice(0, 12)}, or cancel.`,
+          ["replan", "retry", "cancel"],
+        );
+  for (const { id, merged } of objectiveMerges(state, plan))
+    if (
+      !(await isAncestor(deps.config.checkout, merged.mergeSha, head, signal))
+    )
+      return hold(
+        `Work Item ${id}'s merge \`${merged.mergeSha.slice(0, 12)}\` is not on the default branch (${head.slice(0, 12)}); someone may have reverted or force-pushed it. Restore it and answer \`retry\`, or \`replan\`.`,
+        ["retry", "replan", "cancel"],
+      );
+  return undefined;
+}
+
+/** This Objective's merges, in merge order. */
+function objectiveMerges(
+  state: ObjectiveState,
+  plan: Plan,
+): { id: string; merged: MergeResult }[] {
+  return plan.items
+    .map((item) => ({
+      id: item.id,
+      merged: state.done[stepKey(item.id, "merge")] as MergeResult | undefined,
+    }))
+    .filter(
+      (entry): entry is { id: string; merged: MergeResult } =>
+        !!entry.merged?.mergeSha,
+    )
+    .sort((a, b) => a.merged.at.localeCompare(b.merged.at));
+}
+
 /** The commit the next item builds on: the latest merge, else the plan base. */
 function integrated(state: ObjectiveState, plan: Plan): string {
   let latest: MergeResult | undefined;
@@ -2350,7 +2580,11 @@ function reportStep(deps: BuildDeps): Step {
           | PublishResult
           | undefined;
         const merged = mergeOf(state, item.id);
-        return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}`;
+        const checked =
+          item.kind === "qa"
+            ? (state.done[stepKey(item.id, "validate")] as QaResult | undefined)
+            : undefined;
+        return `- **${item.id}** ${item.title}${published ? ` — #${published.pr}` : ""}${merged?.mergeSha ? ` merged as \`${merged.mergeSha.slice(0, 12)}\`` : ""}${checked ? ` checked \`${checked.commit.slice(0, 12)}\`` : ""}`;
       });
       const repairs = Object.values(state.repairs ?? {}).reduce(
         (sum, r) => sum + r.count,

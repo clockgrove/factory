@@ -18,6 +18,7 @@
 import { lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import type { NamedCheck } from "../delivery.js";
 import { blobSizes, type CatFile, readBlobs } from "../git.js";
 import {
   type CandidateRecord,
@@ -224,6 +225,50 @@ export function reviewResult(input: ResultReviewInput): Promise<ResultReview> {
         complete: true,
       },
       ...deliveryRows(input),
+    ],
+    artifacts: [{ artifacts: input.artifacts ?? [] }],
+  });
+}
+
+/**
+ * Review a read-only QA item's check of the integrated result: its own
+ * acceptance and the obligations its review proves, on the commit it
+ * validated, over this Objective's merges, with the named CI checks it
+ * observed.
+ */
+export function reviewQa(
+  input: Omit<ResultReviewInput, "notes" | "candidates" | "inputs"> & {
+    /** This Objective's merges, in merge order; absent for an Objective made only of QA. */
+    merges?: readonly string[];
+    checks: readonly NamedCheck[];
+  },
+): Promise<ResultReview> {
+  return runReview({
+    ...input,
+    phase: "result-review",
+    criteria: resultCriteria(input.plan, input.item),
+    instructions: QA_INSTRUCTIONS,
+    design: [
+      {
+        origin: "controller",
+        path: "Accepted Work Item design",
+        content: JSON.stringify(workItemDesign(input.item)),
+        complete: true,
+      },
+      ...(input.checks.length
+        ? [
+            {
+              origin: "controller" as const,
+              path: "Named CI checks",
+              content: JSON.stringify({
+                scope:
+                  "Every run of each named check on its exact commit completed with success, as Factory read it from GitHub: the integrated commit for integrated-ci, the target item's delivered head for published-ci.",
+                checks: input.checks,
+              }),
+              complete: true,
+            },
+          ]
+        : []),
     ],
     artifacts: [{ artifacts: input.artifacts ?? [] }],
   });
@@ -1270,6 +1315,18 @@ function resultInstructions(
     REVIEW_GUIDANCE.evidenceRoot,
   ];
 }
+
+/** The read-only QA review instructions: the shared standard, with no worker or repair. */
+const QA_INSTRUCTIONS = [
+  REVIEW_GUIDANCE.judge,
+  "This Work Item is read-only QA: no worker changed anything, and a refusal goes to the operator, not to a repair. candidate/ is the commit it checked: the default branch after this Objective's merges, or, for an Objective made only of QA, the planned base, whose existing bytes it qualifies. The change index lists what this Objective's Work Items merged, each merge's first-parent diff; other work on the default branch is context, not under review. The criteria are its own acceptance, then the Objective's acceptance criteria and pinned-source exit items its review proves, quoted verbatim: judge each on the integrated tree with the validation commands that passed on it and the named CI checks supplied, every enumerated sub-clause with its own proof. Its brief promises nothing it did not execute.",
+  REVIEW_GUIDANCE.asyncWork,
+  REVIEW_GUIDANCE.behaviour,
+  REVIEW_GUIDANCE.findings,
+  REVIEW_GUIDANCE.design,
+  REVIEW_GUIDANCE.labels,
+  REVIEW_GUIDANCE.evidenceRoot,
+];
 
 /**
  * The prompt's end: the instructions, then the criteria and indexed evidence

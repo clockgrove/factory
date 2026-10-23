@@ -41,6 +41,8 @@ export interface ItemFacts {
   republish: boolean;
   /** The secret finding's digest the publish question names. */
   secret: string;
+  /** A read-only QA review refused the integrated result: its `retry` checks again from validation. */
+  qaRefused: true;
 }
 
 /** What the Objective's own steps keep, by name. */

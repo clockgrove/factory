@@ -1145,7 +1145,7 @@ test("an item's question holds only that item and its dependents", async () => {
   });
   const asked = new Date().toISOString();
   // a holds; b is unrelated; c depends on a; d is unrelated and asks too
-  // (QA items hold on this build).
+  // (discovery items hold on this build).
   seed(inst, 61, "holding", {
     holds: [
       {
@@ -1161,10 +1161,10 @@ test("an item's question holds only that item and its dependents", async () => {
       check: {},
       plan: {
         items: [
-          item("a", "qa"),
+          item("a", "discovery"),
           item("b", "aggregate"),
           item("c", "aggregate", ["a"]),
-          item("d", "qa"),
+          item("d", "discovery"),
         ],
       },
     },
@@ -1837,7 +1837,7 @@ test("a state file that can't be read now is read again, not marked unreadable",
   await stopped(service);
 });
 
-test("a plan's steps run in order, and a dependent waits for its dependency's merge", async () => {
+test("a plan's steps run in order, a dependent waits for its dependency's merge, and read-only QA validates the default branch", async () => {
   const inst = installation();
   // GitHub is down: each step that runs reaches its first GitHub or Git
   // read and waits there, which shows which step the engine chose.
@@ -1846,6 +1846,14 @@ test("a plan's steps run in order, and a dependent waits for its dependency's me
     items: [
       { id: "a", ownedPaths: ["src/a.ts"], dependencies: [] },
       { id: "b", ownedPaths: ["src/b.ts"], dependencies: ["a"] },
+      // Read-only QA has no worker: its first step validates.
+      {
+        id: "q",
+        kind: "qa",
+        ownedPaths: [],
+        dependencies: ["a"],
+        validation: [],
+      },
     ],
   };
   const fields = (done) => ({
@@ -1875,7 +1883,7 @@ test("a plan's steps run in order, and a dependent waits for its dependency's me
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.deepEqual(tried(stateOf(inst, 51)), ["item:a:publish"]);
   await stopped(service);
-  // Once a has merged, b starts with its first step.
+  // Once a has merged, b starts with its first step, and q with validate.
   seed(
     inst,
     51,
@@ -1890,8 +1898,14 @@ test("a plan's steps run in order, and a dependent waits for its dependency's me
     }),
   );
   service = serve(inst);
-  await until(() => stateOf(inst, 51).retries["item:b:work"], "b's work runs");
-  assert.deepEqual(tried(stateOf(inst, 51)), ["item:b:work"]);
+  // Each reaches its first Git or GitHub read, and retries or asks there.
+  const ran = (state) =>
+    [...new Set([...tried(state), ...state.holds.map((h) => h.step)])].sort();
+  await until(
+    () => ran(stateOf(inst, 51)).length === 2,
+    "b's work and q's validate run",
+  );
+  assert.deepEqual(ran(stateOf(inst, 51)), ["item:b:work", "item:q:validate"]);
   assert.equal(cli(inst, "cancel", "51").code, 0);
   await stopped(service);
   // A question on a stops a and its dependent b; c, unrelated, runs.
@@ -1926,6 +1940,61 @@ test("a plan's steps run in order, and a dependent waits for its dependency's me
   assert.deepEqual(tried(stateOf(inst, 52)), ["item:c:work"]);
   assert.equal(stateOf(inst, 52).status, "holding");
   assert.equal(cli(inst, "cancel", "52").code, 0);
+  await stopped(service);
+
+  // An Objective made only of QA qualifies the bytes it was planned on:
+  // once the default branch has moved, it holds with replan and retry.
+  const baseline = installation();
+  configured(baseline, `http://127.0.0.1:${await closedPort()}`);
+  const git = (cwd, ...args) => {
+    const result = spawnSync(
+      "git",
+      ["-c", "user.name=t", "-c", "user.email=t@t", ...args],
+      { cwd, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git(baseline.root, "init", "--quiet", "--bare", "-b", "main", "origin.git");
+  git(baseline.root, "clone", "--quiet", "origin.git", "work");
+  const work = join(baseline.root, "work");
+  git(work, "commit", "--quiet", "--allow-empty", "-m", "planned");
+  const planned = git(work, "rev-parse", "HEAD");
+  git(work, "commit", "--quiet", "--allow-empty", "-m", "moved");
+  git(work, "push", "--quiet", "origin", "HEAD:main");
+  git(baseline.root, "clone", "--quiet", "origin.git", "checkout");
+  githubOrigin(
+    join(baseline.root, "checkout"),
+    join(baseline.root, "origin.git"),
+  );
+  seed(baseline, 53, "building", {
+    done: {
+      check: {},
+      plan: {
+        base: planned,
+        items: [
+          {
+            id: "q",
+            kind: "qa",
+            ownedPaths: [],
+            dependencies: [],
+            validation: [],
+          },
+        ],
+        coverage: [],
+      },
+    },
+    kept: { "plan:acceptedAt": "2026-01-01T00:00:00.000Z" },
+  });
+  service = serve(baseline);
+  await until(() => stateOf(baseline, 53).holds.length, "q asks", 30_000);
+  const [moved] = stateOf(baseline, 53).holds;
+  assert.equal(moved.step, "item:q:validate");
+  assert.match(moved.question, /made only of read-only QA/);
+  assert.deepEqual(
+    moved.options.map((option) => option.answer),
+    ["replan", "retry", "cancel"],
+  );
   await stopped(service);
 });
 

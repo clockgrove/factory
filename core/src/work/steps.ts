@@ -1153,21 +1153,21 @@ async function validateStep(
             [flakyKey]: { tree: result.tree, command: result.failed.command },
           },
         };
-      // State is saved on every step: it keeps a bounded finding, and the
-      // complete output (up to the raised review-artifact stream bounds)
-      // stays in a file the finding names.
-      const outputFile = join(
-        workDir,
-        "outputs",
-        item.id,
-        `${result.tree}.txt`,
-      );
-      await mkdir(dirname(outputFile), { recursive: true, mode: 0o700 });
-      await writeFile(outputFile, result.output, { mode: 0o600 });
-      const keptOutput =
-        result.output.length > KEPT_OUTPUT_HEAD + KEPT_OUTPUT_TAIL
-          ? `${headAndTail(result.output, KEPT_OUTPUT_HEAD, KEPT_OUTPUT_TAIL)}\n[Complete output: ${outputFile}]`
-          : result.output;
+      // State is saved on every step: it keeps a bounded finding. Output
+      // longer than that (up to the raised review-artifact stream bounds)
+      // is kept whole in a file for the operator; no model can read it.
+      let keptOutput = result.output;
+      if (result.output.length > KEPT_OUTPUT_HEAD + KEPT_OUTPUT_TAIL) {
+        const outputFile = join(
+          workDir,
+          "outputs",
+          item.id,
+          `${result.tree}.txt`,
+        );
+        await mkdir(dirname(outputFile), { recursive: true, mode: 0o700 });
+        await writeFile(outputFile, result.output, { mode: 0o600 });
+        keptOutput = `${headAndTail(result.output, KEPT_OUTPUT_HEAD, KEPT_OUTPUT_TAIL)}\n[The complete output is kept for the operator at ${outputFile}; it is not readable from the worker's checkout.]`;
+      }
       return repairOutcome(
         item,
         "validate",

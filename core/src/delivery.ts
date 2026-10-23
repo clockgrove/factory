@@ -1196,9 +1196,10 @@ function updateBranch(
   context: DeliveryContext,
   input: { pr: number; head: string; bases: string[] },
   /**
-   * What a refused update of an unmoved head is: a stack layer's conflict
-   * with the layer below. Without it, the next observation reads the PR
-   * and its readiness again.
+   * What a refused update is when GitHub shows the unmoved head conflicting
+   * with its base: a stack layer's conflict with the layer below. Any other
+   * refusal, or none given, retries: the next observation reads the PR and
+   * its readiness again.
    */
   refused?: Repair,
 ): Promise<Retry | Hold | Repair> {
@@ -1219,11 +1220,16 @@ function updateBranch(
       // next observation reads the PR and its readiness again.
       if (!(error instanceof GitHubError && error.status === 422))
         throw needing(error, "Contents: write and Pull requests: write");
-      if (
-        refused &&
-        (await github.pull(input.pr, signal)).head.sha === input.head
-      )
-        return refused;
+      // A 422 also answers a repeat request while GitHub's first update is
+      // still pending: only a head GitHub shows conflicting is refused.
+      if (refused) {
+        const state = await github.mergeState(input.pr, signal);
+        if (
+          state.headRefOid === input.head &&
+          state.mergeStateStatus === "DIRTY"
+        )
+          return refused;
+      }
     }
     crashPoint("deliver:update-branch:after");
     return {

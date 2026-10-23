@@ -848,6 +848,15 @@ export class GitHubSync {
     });
   }
 
+  /** Read the issue itself (redirects are answers, never followed); lose it only on 404, 410 or a redirect. */
+  private async confirmGone(issue: number, job: string): Promise<void> {
+    try {
+      await this.github.issue(issue);
+    } catch (error) {
+      if (issueGone(error)) this.lose(issue, job, error.status);
+    }
+  }
+
   /**
    * Run `job` for Objective `issue` (0: the queue) unless it is running or
    * backing off after a failure; log any failure and back off.
@@ -864,10 +873,11 @@ export class GitHubSync {
     this.busy.set(key, issue);
     job()
       .then(() => this.backoff.delete(key))
-      .catch((error: unknown) => {
-        // Any job's answer that the issue is gone counts, whether or not
-        // a queue read still asks for it (a finished Objective's reply).
-        if (issue && issueGone(error)) this.lose(issue, key, error.status);
+      .catch(async (error: unknown) => {
+        // A sub-resource's 404 (comments, a card) can be transient or a
+        // permission gap: the issue is gone only if a direct read of it
+        // also says so. Otherwise the job retries with its backoff.
+        if (issue && issueGone(error)) await this.confirmGone(issue, key);
         const failures = (this.backoff.get(key)?.failures ?? 0) + 1;
         if (backs)
           this.backoff.set(key, {

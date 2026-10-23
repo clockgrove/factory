@@ -143,9 +143,10 @@ export interface Selection {
   set: CandidateSet;
   /** Direct dependents that receive the set as read-only inputs. */
   bound: string[];
-  /** Who chose the set and when. */
+  /** Who chose the set and when, and why when the answer said. */
   by: string;
   at: string;
+  reason?: string;
 }
 
 /** A file a worker gets read-only under `.factory-inputs/assets`. */
@@ -938,17 +939,19 @@ export function selectionQuestion(
     .join("\n");
   const dependents = directDependents(plan, item);
   const bind = dependents.length
-    ? ` To give the set to dependents as read-only input, add \`bind ${dependents.join(" ")}\` (any of them) after the id.`
+    ? ` To give the set to dependents as read-only input, add \`bind ${dependents.join(" ")}\` (any of them) right after the id.`
     : "";
   return hold(
-    `Work Item ${item.id} produced ${sets.length} candidate set${sets.length === 1 ? "" : "s"}, in ${join(directory, "candidates")}:\n${listed}\n\nLook at them, then answer with the id of the set to deliver.${bind} Answer repair to have the worker make new candidates, or cancel.`,
+    `Work Item ${item.id} produced ${sets.length} candidate set${sets.length === 1 ? "" : "s"}, in ${join(directory, "candidates")}:\n${listed}\n\nLook at them, then answer with the id of the set to deliver; any text after it is recorded with the selection as your reason.${bind} Answer repair to have the worker make new candidates, or cancel.`,
     [...sets.map((set) => set.id.toLowerCase()), "repair", "cancel"],
   );
 }
 
 /**
- * The operator's answer to the select hold. Set ids match ignoring case;
- * `bind ITEM...` in the answer text names direct dependents.
+ * The operator's answer to the select hold. Set ids match ignoring case.
+ * The answer text may start with `bind ITEM...`: the plan item ids after
+ * `bind` name direct dependents. The rest of the text is the operator's
+ * reason, recorded with the selection.
  *
  * Step: first, if the answer is `replan`, take the step's replan route:
  * materializeSelection's holds offer it and this function doesn't know it
@@ -964,7 +967,7 @@ export function readSelection(
   sets: readonly CandidateSet[],
   answer: { answer: string; text?: string },
 ):
-  | { kind: "chosen"; set: CandidateSet; bound: string[] }
+  | { kind: "chosen"; set: CandidateSet; bound: string[]; reason?: string }
   | { kind: "repair" }
   | { kind: "invalid"; problem: string } {
   const chosen = answer.answer.toLowerCase();
@@ -975,22 +978,34 @@ export function readSelection(
       kind: "invalid",
       problem: `${answer.answer} is not one of the candidate set ids.`,
     };
-  const words = (answer.text ?? "").trim().split(/\s+/).filter(Boolean);
-  if (words.length && words[0]!.toLowerCase() !== "bind")
-    return {
-      kind: "invalid",
-      problem: "The text after the set id may only be `bind ITEM...`.",
-    };
+  let words = (answer.text ?? "").trim().split(/\s+/).filter(Boolean);
+  const ids = new Set(plan.items.map((entry) => entry.id));
+  const named: string[] = [];
+  if (words[0]?.toLowerCase() === "bind") {
+    let count = 1;
+    while (count < words.length && ids.has(words[count]!))
+      named.push(words[count++]!);
+    if (!named.length)
+      return {
+        kind: "invalid",
+        problem: `\`bind\` must be followed by the Work Item ids to give the set to.`,
+      };
+    words = words.slice(count);
+  }
   const dependents = directDependents(plan, item);
-  const bound = [...new Set(words.slice(1))];
+  const bound = [...new Set(named)];
   const unknown = bound.filter((id) => !dependents.includes(id));
   if (unknown.length)
     return {
       kind: "invalid",
       problem: `${unknown.join(", ")} ${unknown.length === 1 ? "is not a" : "are not"} direct dependent${unknown.length === 1 ? "" : "s"} of ${item.id}${dependents.length ? ` (${dependents.join(", ")})` : ""}.`,
     };
-  return { kind: "chosen", set, bound };
+  const reason = words.join(" ").slice(0, MAX_REASON_CHARS);
+  return { kind: "chosen", set, bound, ...(reason ? { reason } : {}) };
 }
+
+/** The longest selection reason recorded; the rest of an answer is dropped. */
+const MAX_REASON_CHARS = 2000;
 
 /**
  * Write the chosen set at its destinations on top of the work commit, in a
@@ -2044,6 +2059,7 @@ export async function candidateReceipts(
           set: selection.set.id,
           by: selection.by,
           at: selection.at,
+          ...(selection.reason ? { operatorReason: selection.reason } : {}),
           boundTo: selection.bound,
           selectionCommit: selection.commit,
           checksPassed: SELECTION_CHECKS,

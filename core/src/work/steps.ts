@@ -1198,6 +1198,7 @@ async function selectStep(
       kind: "chosen",
       set: own.selection.set,
       bound: own.selection.bound,
+      ...(own.selection.reason ? { reason: own.selection.reason } : {}),
     };
     decided = own.selection;
   } else {
@@ -1237,6 +1238,7 @@ async function selectStep(
     bound: read.bound,
     by: decided.by,
     at: decided.at,
+    ...(read.reason ? { reason: read.reason } : {}),
   };
   return { kind: "done", result: done };
 }

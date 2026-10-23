@@ -1,6 +1,7 @@
 // The knowledge store under real crashes: real `factory dream` processes on
-// real files and a real SQLite store, killed with SIGKILL at the store's
-// commit points. A rerun finishes the change exactly once.
+// real files and a real SQLite store, written only by the real service,
+// which is killed with SIGKILL at the store's commit points. A restart
+// applies the pending write exactly once.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -10,6 +11,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -47,20 +49,30 @@ function installation() {
   return { root, env, objectives: join(root, "objectives") };
 }
 
-function dream(inst, crashAt, ...args) {
-  const env = { ...inst.env };
-  if (crashAt) env.FACTORY_CRASH_AT = crashAt;
-  const result = spawnSync(
+/** A real `factory dream` process; its writes go to the running service. */
+async function dream(inst, ...args) {
+  const child = spawn(
     process.execPath,
     [CLI, "dream", ...args, "--repo", REPO],
-    { env, encoding: "utf8" },
+    {
+      env: inst.env,
+    },
   );
-  return {
-    code: result.status,
-    signal: result.signal,
-    out: result.stdout,
-    err: result.stderr,
-  };
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (chunk) => {
+    out += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    err += chunk;
+  });
+  const code = await new Promise((resolve) => child.on("exit", resolve));
+  return { code, out, err };
+}
+
+/** The stable refusal code a CLI run printed. */
+function refusal(result) {
+  return JSON.parse(result.err.split("\n")[0]).code;
 }
 
 function store(inst) {
@@ -76,12 +88,16 @@ function count(inst, sql) {
   }
 }
 
-/** A settled Objective: two items, a repair, a worker learning and an operator answer. */
-function seedDone(inst, issue) {
-  mkdirSync(inst.objectives, { recursive: true });
+/**
+ * A settled Objective: two items, a repair, a worker learning and an
+ * operator answer. In finished/, the service never reads it: only
+ * `--record` records it.
+ */
+function seedDone(inst, issue, dir = inst.objectives) {
+  mkdirSync(dir, { recursive: true });
   const item = (id, paths) => ({ id, title: `Item ${id}`, ownedPaths: paths });
   writeFileSync(
-    join(inst.objectives, `${issue}.json`),
+    join(dir, `${issue}.json`),
     JSON.stringify({
       version: 5,
       issue,
@@ -135,23 +151,105 @@ function seedDone(inst, issue) {
   );
 }
 
+const services = new Set();
+after(() => {
+  for (const child of services) child.kill("SIGKILL");
+});
+
+/** A local port nothing listens on. */
+async function closedPort() {
+  const server = createServer();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  await new Promise((resolve) => server.close(resolve));
+  return port;
+}
+
+/**
+ * The real service, once it holds its lock; `crashAt` kills it at that
+ * point. Its GitHub reads fail (nothing listens on its API port) and are
+ * retried, as a run's are.
+ */
+async function serve(inst, crashAt) {
+  const record = join(inst.root, "service.json");
+  rmSync(record, { force: true });
+  const child = spawn(process.execPath, [CLI, "serve", "--repo", REPO], {
+    env: {
+      ...inst.env,
+      ...(crashAt ? { FACTORY_CRASH_AT: crashAt } : {}),
+      FACTORY_TICK_MS: "50",
+      FACTORY_GITHUB_API: `http://127.0.0.1:${await closedPort()}`,
+      FACTORY_GITHUB_TOKEN: "unused",
+    },
+    stdio: "ignore",
+  });
+  services.add(child);
+  const exit = new Promise((resolve) =>
+    child.on("exit", (code, signal) => {
+      services.delete(child);
+      resolve(signal);
+    }),
+  );
+  await until(() => existsSync(record), "the service's start");
+  return {
+    /** The signal that ended it. */
+    exit,
+    async stop() {
+      child.kill("SIGTERM");
+      await exit;
+    },
+  };
+}
+
+/** Wait for `predicate`; one that throws (the store has no tables yet) isn't met. */
+async function until(predicate, what, ms = 20_000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    try {
+      if (predicate()) return;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+function logged(inst, issue, event) {
+  const dir = join(inst.root, "logs", String(issue));
+  if (!existsSync(dir)) return false;
+  return readdirSync(dir).some((name) =>
+    readFileSync(join(dir, name), "utf8").includes(`"event":"${event}"`),
+  );
+}
+
 for (const point of [
   "knowledge:retain:before-commit",
   "knowledge:retain:committed",
 ]) {
-  test(`dream --record crashes at ${point}; a rerun records the episode once`, () => {
+  test(`dream --record crashes the service at ${point}; the restart records the episode once`, async () => {
     const inst = installation();
-    seedDone(inst, 7);
-    const crashed = dream(inst, point, "--record", "--objective", "7");
-    assert.equal(crashed.signal, "SIGKILL", crashed.err);
+    seedDone(inst, 7, join(inst.objectives, "finished"));
+    // No service: refused, and nothing is left to apply later.
+    const stopped = await dream(inst, "--record", "--objective", "7");
+    assert.equal(stopped.code, 1);
+    assert.equal(refusal(stopped), "service_not_running");
+    assert.equal(existsSync(join(inst.root, "requests")), false);
+
+    const crashing = await serve(inst, point);
+    const crashed = await dream(inst, "--record", "--objective", "7");
+    assert.equal(await crashing.exit, "SIGKILL");
+    assert.equal(crashed.code, 0, crashed.err);
+    assert.match(crashed.out, /will apply when it starts again/);
     const kept = point.endsWith("committed") ? 4 : 0;
     assert.equal(count(inst, "SELECT count(*) FROM memory"), kept);
     assert.equal(count(inst, "SELECT count(*) FROM memory_text"), kept);
 
-    const rerun = dream(inst, undefined, "--record", "--objective", "7");
+    const service = await serve(inst);
+    const rerun = await dream(inst, "--record", "--objective", "7");
+    await service.stop();
     assert.equal(rerun.code, 0, rerun.err);
     const recorded = JSON.parse(rerun.out);
-    assert.equal(recorded.recorded, !kept);
+    // The restart applied the pending write: the rerun adds nothing.
+    assert.equal(recorded.recorded, false);
     assert.equal(recorded.episode.outcome, "done");
     assert.deepEqual(recorded.episode.sourceLinks, [
       `https://github.com/${REPO}/issues/7`,
@@ -167,10 +265,12 @@ for (const point of [
   });
 }
 
-test("approve crashes before its commit; the rerun approves version 1 once", () => {
+test("approve crashes the service before its commit; the restart approves version 1 once", async () => {
   const inst = installation();
-  seedDone(inst, 7);
-  assert.equal(dream(inst, undefined, "--record", "--objective", "7").code, 0);
+  seedDone(inst, 7, join(inst.objectives, "finished"));
+  let service = await serve(inst);
+  assert.equal((await dream(inst, "--record", "--objective", "7")).code, 0);
+  await service.stop();
   const db = store(inst);
   const episode = String(
     db.prepare("SELECT id FROM memory WHERE kind = 'episode'").get().id,
@@ -206,94 +306,37 @@ test("approve crashes before its commit; the rerun approves version 1 once", () 
   writeFileSync(draft, text);
   const digest = createHash("sha256").update(text).digest("hex");
 
-  const crashed = dream(
-    inst,
-    "dream:approve:before-commit",
-    "--file",
-    draft,
-    "--approve",
-    digest,
-  );
-  assert.equal(crashed.signal, "SIGKILL", crashed.err);
-  assert.equal(
-    JSON.parse(dream(inst, undefined, "--show").out).approved,
-    false,
-  );
+  const crashing = await serve(inst, "dream:approve:before-commit");
+  const crashed = await dream(inst, "--file", draft, "--approve", digest);
+  assert.equal(await crashing.exit, "SIGKILL");
+  assert.equal(crashed.code, 0, crashed.err);
+  assert.equal(JSON.parse((await dream(inst, "--show")).out).approved, false);
 
-  const approved = dream(inst, undefined, "--file", draft, "--approve", digest);
+  service = await serve(inst);
+  // The restart applied the pending approval; the same approval again reports it.
+  const approved = await dream(inst, "--file", draft, "--approve", digest);
   assert.equal(approved.code, 0, approved.err);
   assert.deepEqual(JSON.parse(approved.out), {
     approved: proposal.id,
     version: 1,
   });
-  const again = dream(inst, undefined, "--file", draft, "--approve", digest);
-  assert.equal(again.code, 1);
-  assert.match(again.err, /already decided/);
-  const shown = JSON.parse(dream(inst, undefined, "--show").out);
+  const rejected = await dream(inst, "--file", draft, "--reject", digest);
+  await service.stop();
+  assert.equal(rejected.code, 1);
+  assert.equal(refusal(rejected), "dream_refused");
+  assert.match(rejected.err, /already decided/);
+  const shown = JSON.parse((await dream(inst, "--show")).out);
   assert.equal(shown.approved.version, 1);
   assert.match(shown.approved.playbook, /empty-input test/);
   assert.deepEqual(shown.pendingProposals, []);
   assert.equal(count(inst, "SELECT count(*) FROM playbook"), 1);
 });
 
-const services = new Set();
-after(() => {
-  for (const child of services) child.kill("SIGKILL");
-});
-
-/** A local port nothing listens on. */
-async function closedPort() {
-  const server = createServer();
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
-  await new Promise((resolve) => server.close(resolve));
-  return port;
-}
-
-/** The real service. Its GitHub reads fail (nothing listens on its API port) and are retried, as a run's are. */
-async function serve(inst) {
-  const child = spawn(process.execPath, [CLI, "serve", "--repo", REPO], {
-    env: {
-      ...inst.env,
-      FACTORY_TICK_MS: "50",
-      FACTORY_GITHUB_API: `http://127.0.0.1:${await closedPort()}`,
-      FACTORY_GITHUB_TOKEN: "unused",
-    },
-    stdio: "ignore",
-  });
-  services.add(child);
-  const exit = new Promise((resolve) => child.on("exit", resolve));
-  return {
-    async stop() {
-      child.kill("SIGTERM");
-      await exit;
-      services.delete(child);
-    },
-  };
-}
-
-async function until(predicate, what, ms = 20_000) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  assert.fail(`timed out waiting for ${what}`);
-}
-
-function logged(inst, issue, event) {
-  const dir = join(inst.root, "logs", String(issue));
-  if (!existsSync(dir)) return false;
-  return readdirSync(dir).some((name) =>
-    readFileSync(join(dir, name), "utf8").includes(`"event":"${event}"`),
-  );
-}
-
 test("the service retries a failed observation, across a restart, and one run keeps one episode across restarts and --record", async () => {
   const inst = installation();
   seedDone(inst, 7);
-  assert.equal(dream(inst, undefined, "--show").code, 0); // creates the store
-  // Another writer holds the store's write lock: the service's observation fails.
+  // Another process holds the store's write lock: the service's observation fails.
+  mkdirSync(join(inst.root, "knowledge"), { recursive: true });
   const blocker = store(inst);
   blocker.exec("BEGIN IMMEDIATE");
   const first = await serve(inst);
@@ -338,8 +381,8 @@ test("the service retries a failed observation, across a restart, and one run ke
   const second = await serve(inst);
   // Its startup observation runs on the first tick.
   await new Promise((resolve) => setTimeout(resolve, 1500));
+  const record = await dream(inst, "--record", "--objective", "7");
   await second.stop();
-  const record = dream(inst, undefined, "--record", "--objective", "7");
   assert.equal(record.code, 0, record.err);
   const { recorded, episode } = JSON.parse(record.out);
   assert.equal(recorded, false);

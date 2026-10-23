@@ -21,7 +21,7 @@ import {
 import { gitEnvironment } from "./git.js";
 import { GitHub } from "./github.js";
 import { GitHubSync, moved } from "./github-sync.js";
-import { dreamCommand, runDream } from "./knowledge/dream.js";
+import { applyDream, dreamCommand, runDream } from "./knowledge/dream.js";
 import { knowledgeObserver } from "./knowledge/index.js";
 import {
   configureKnowledge,
@@ -343,7 +343,7 @@ async function serveCommand(
     ...(loaded ? { maxActive: loaded.queue.maxActiveObjectives } : {}),
     ...(sync ? { sync, reset: true } : {}),
     ...(frozen ? { frozen } : {}),
-    ...(loaded ? { observer: knowledgeObserver } : {}),
+    ...(loaded ? { observer: knowledgeObserver, dream: applyDream } : {}),
     ...(process.env.FACTORY_TICK_MS
       ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
       : {}),
@@ -385,9 +385,19 @@ async function dream(
       planner: () => planner(config, name),
       log: (event) => log.write(0, event),
       settledState: (issue) => settledState(paths, issue),
+      send: async (write) => {
+        // Only the service writes the store: no fallback to a direct write.
+        if (!(await serviceLive(paths)))
+          throw new Refusal(
+            "service_not_running",
+            "The service isn't running, and only it writes the knowledge store: start it (factory serve), then run this again.",
+          );
+        return (await sent(paths, { kind: "dream", issue: 0, write }))?.detail;
+      },
       out: (text) => process.stdout.write(text),
     });
   } catch (error) {
+    if (error instanceof Refusal) throw error;
     process.stderr.write(`factory: ${errorMessage(error)}\n`);
     return 1;
   }
@@ -1072,13 +1082,33 @@ async function queueCommand(
 }
 
 async function request(paths: Paths, body: Request): Promise<number> {
+  const result = await sent(paths, body);
+  if (!result) return 0;
+  // Anything but "ok" is a refusal, even one that names no code.
+  if (result.message !== "ok") {
+    process.stderr.write(`factory: ${result.message}\n`);
+    return 1;
+  }
+  process.stdout.write("Done.\n");
+  return 0;
+}
+
+/**
+ * Write a request and wait up to 10 s for its result. Undefined when it
+ * is still pending: the service isn't running, stopped, or is slow (the
+ * CLI says which). A refusal with a code throws it.
+ */
+async function sent(
+  paths: Paths,
+  body: Request,
+): Promise<RequestResult | undefined> {
   const by = process.env.USER ?? "operator";
   const id = writeRequest(paths.requests, body, by);
   if (!(await serviceLive(paths))) {
     process.stdout.write(
       "The service isn't running; the request will apply when it starts.\n",
     );
-    return 0;
+    return undefined;
   }
   const file = join(paths.requests, `${id}.result`);
   for (let i = 0; i < 100; i++) {
@@ -1086,19 +1116,13 @@ async function request(paths: Paths, body: Request): Promise<number> {
       process.stdout.write(
         "The service stopped; the request will apply when it starts again.\n",
       );
-      return 0;
+      return undefined;
     }
     if (existsSync(file)) {
       const result = JSON.parse(readFileSync(file, "utf8")) as RequestResult;
       rmSync(file, { force: true });
       if (result.code) throw new Refusal(result.code, result.message);
-      // Anything but "ok" is a refusal, even one that names no code.
-      if (result.message !== "ok") {
-        process.stderr.write(`factory: ${result.message}\n`);
-        return 1;
-      }
-      process.stdout.write("Done.\n");
-      return 0;
+      return result;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -1107,7 +1131,7 @@ async function request(paths: Paths, body: Request): Promise<number> {
       ? `The reset is running; factory status ${body.issue} shows it.\n`
       : "Sent; the service hasn't applied it yet.\n",
   );
-  return 0;
+  return undefined;
 }
 
 /**

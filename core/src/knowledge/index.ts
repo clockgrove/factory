@@ -2,7 +2,8 @@
  * The Knowledge capability: the curated playbook, repository memory and
  * Dream. Planning calls {@link planningKnowledge} once per planning call
  * (its single hook, beside the playbook read); the service calls
- * {@link observeState} as Objectives move.
+ * {@link knowledgeObserver} as Objectives move, and applies `dream`
+ * writes (dream.ts applyDream).
  */
 import { TransientError } from "../github.js";
 import { type BaseFiles, planningSources } from "../planning/facts.js";
@@ -15,12 +16,11 @@ import {
   memorySection,
   observeObjective,
   pathDigest,
-  releaseRun,
   retain,
   sourceRecords,
 } from "./memory.js";
 import { knowledgeSettings } from "./settings.js";
-import { type Database, openStore, withStore } from "./store.js";
+import { type Database, openStore } from "./store.js";
 
 /**
  * The advisory text planning appends to its prompts: the target's curated
@@ -86,8 +86,8 @@ export async function planningKnowledge(input: {
 
 /**
  * The service's observer: records what an Objective's state shows as it
- * moves (`settled`: terminal with nothing left to run), and ends a run
- * that a new admission of the same issue replaces.
+ * moves, and ends a run once it is settled (terminal with nothing left to
+ * run, or replaced by a new admission or a withdrawal).
  */
 export const knowledgeObserver = {
   async observe(
@@ -96,13 +96,6 @@ export const knowledgeObserver = {
     signal: AbortSignal,
   ): Promise<void> {
     const settings = knowledgeSettings();
-    if (settings) await observeObjective(settings, state, settled, { signal });
-  },
-  release(state: ObjectiveState): void {
-    const settings = knowledgeSettings();
-    if (settings)
-      withStore(settings.root, (db) =>
-        releaseRun(db, settings.repository, state),
-      );
+    if (settings) await observeObjective(settings, state, settled, signal);
   },
 };

@@ -4,14 +4,15 @@
  * memory (with a full-text index), Dream episodes, proposals, approved
  * playbook versions and the playbook version each Objective is pinned to.
  *
- * It is not Objective state: the service adds memory as Objectives move,
- * and `dream` commands add proposals and decisions. SQLite's write lock
- * keeps the two apart; every change is one transaction in WAL mode with
+ * It is not Objective state, but it has the same one writer: the service
+ * adds memory as Objectives move, and applies the writes of `dream`
+ * commands, which reach it as requests (requests.ts). The CLI only reads
+ * it ({@link readStore}). Every change is one transaction in WAL mode with
  * full sync, so a crash keeps a change whole or not at all. Every record
  * is keyed by its content, so recording it again changes nothing.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS memory (
   created TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS memory_objective ON memory (objective, kind);
+CREATE INDEX IF NOT EXISTS memory_age ON memory (kind, created);
 CREATE UNIQUE INDEX IF NOT EXISTS memory_episode ON memory (objective, run) WHERE kind = 'episode';
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_text USING fts5(id UNINDEXED, summary, body);
 CREATE TABLE IF NOT EXISTS proposals (id TEXT PRIMARY KEY, body TEXT NOT NULL, created TEXT NOT NULL);
@@ -51,21 +53,21 @@ CREATE TABLE IF NOT EXISTS pins (objective INTEGER NOT NULL, run TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS dream_calls (id TEXT PRIMARY KEY, at TEXT NOT NULL, outcome TEXT NOT NULL, detail TEXT NOT NULL);
 `;
 
+const sqlite = (): typeof import("node:sqlite") =>
+  createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+
 /**
- * Open the store; the caller closes it. node:sqlite is loaded only when
- * knowledge is used. `busyMs` is how long a write waits for another
- * writer: short in the service, whose loop it blocks.
+ * Open the store for the service, its only writer; the caller closes it.
+ * node:sqlite is loaded only when knowledge is used. A write waits up to
+ * a second for a reader's lock: the wait blocks the service's loop.
  */
-export function openStore(root: string, busyMs = 1000): Database {
+export function openStore(root: string): Database {
   const dir = knowledgeDir(root);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const sqlite = createRequire(import.meta.url)(
-    "node:sqlite",
-  ) as typeof import("node:sqlite");
-  const db = new sqlite.DatabaseSync(join(dir, "knowledge.sqlite"));
+  const db = new (sqlite().DatabaseSync)(join(dir, "knowledge.sqlite"));
   try {
     db.exec(
-      `PRAGMA busy_timeout=${busyMs}; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; ${SCHEMA}`,
+      `PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; ${SCHEMA}`,
     );
     return db;
   } catch (error) {
@@ -75,13 +77,28 @@ export function openStore(root: string, busyMs = 1000): Database {
 }
 
 /** Open the store, run `use`, close it. */
-export function withStore<T>(
-  root: string,
-  use: (db: Database) => T,
-  busyMs?: number,
-): T {
-  const db = openStore(root, busyMs);
+export function withStore<T>(root: string, use: (db: Database) => T): T {
+  const db = openStore(root);
   try {
+    return use(db);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Run `use` on a read-only view of the store, for the CLI. A store that
+ * doesn't exist yet reads as an empty one.
+ */
+export function readStore<T>(root: string, use: (db: Database) => T): T {
+  const file = join(knowledgeDir(root), "knowledge.sqlite");
+  const { DatabaseSync } = sqlite();
+  const exists = existsSync(file);
+  const db = exists
+    ? new DatabaseSync(file, { readOnly: true })
+    : new DatabaseSync(":memory:");
+  try {
+    db.exec(exists ? "PRAGMA busy_timeout=10000" : SCHEMA);
     return use(db);
   } finally {
     db.close();

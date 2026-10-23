@@ -51,7 +51,18 @@ interface StoredRecord extends MemoryRecord {
   created: string;
 }
 
-/** Add records that aren't stored yet, in one transaction. Returns how many were new. */
+/**
+ * The store keeps the newest {@link MAX_EPISODES} episodes and the newest
+ * {@link MAX_RECORDS} other records; a write past either cap drops the
+ * oldest. Dream reads the newest episodes first and planning bounds what
+ * it shows, so neither reaches the dropped ones. An episode a Dream
+ * approval still checks is kept past the cap: every episode given to the
+ * newest playbook or to an undecided proposal.
+ */
+export const MAX_EPISODES = 1000;
+export const MAX_RECORDS = 10_000;
+
+/** Add records that aren't stored yet, in one transaction, within the caps. Returns how many were new. */
 export function retain(db: Database, records: MemoryRecord[]): number {
   if (!records.length) return 0;
   const created = new Date().toISOString();
@@ -84,8 +95,45 @@ export function retain(db: Database, records: MemoryRecord[]): number {
       index.run(id, record.summary, record.body);
       added += 1;
     }
+    if (added) prune(db);
     return added;
   });
+}
+
+/** Drop the records past the caps, oldest first. */
+function prune(db: Database): void {
+  const past = (episodes: boolean, cap: number) =>
+    db
+      .prepare(
+        `SELECT id FROM memory WHERE (kind = 'episode') = ? ORDER BY created DESC, id LIMIT -1 OFFSET ?`,
+      )
+      .all(Number(episodes), cap)
+      .map((row) => String(row.id));
+  const episodes = past(true, MAX_EPISODES);
+  const kept = new Set(
+    episodes.length
+      ? db
+          .prepare(
+            `SELECT body FROM (SELECT body FROM playbook ORDER BY version DESC LIMIT 1)
+             UNION ALL SELECT body FROM proposals
+             WHERE id NOT IN (SELECT proposal FROM playbook) AND id NOT IN (SELECT proposal FROM rejections)`,
+          )
+          .all()
+          .flatMap(
+            (row) =>
+              (JSON.parse(String(row.body)) as { sources: string[] }).sources,
+          )
+      : [],
+  );
+  const dropped = JSON.stringify([
+    ...episodes.filter((id) => !kept.has(id)),
+    ...past(false, MAX_RECORDS),
+  ]);
+  if (dropped === "[]") return;
+  for (const table of ["memory", "memory_text"])
+    db.prepare(
+      `DELETE FROM ${table} WHERE id IN (SELECT value FROM json_each(?))`,
+    ).run(dropped);
 }
 
 /**
@@ -111,56 +159,62 @@ function recordId(record: MemoryRecord): string {
 }
 
 /**
- * Record what an Objective's state shows: repairs and holds as failures,
- * worker learnings as handoffs and operator answers as decisions, each
- * with its cited files' digests at the item's tree. Once it has settled,
- * also its Dream episode and the release of its playbook pin. Git reads
- * come first; the store is opened only for the write.
+ * What an Objective's state shows, as records: repairs and holds as
+ * failures, worker learnings as handoffs and operator answers as
+ * decisions, each with its cited files' digests at the item's tree; once
+ * it has settled at a terminal status, also its Dream episode (once per
+ * run: the first record stands). Only Git is read.
  */
-export async function observeObjective(
-  settings: { root: string; repository: string; checkout: string },
+export async function observedRecords(
+  settings: { repository: string; checkout: string },
   state: ObjectiveState,
   settled: boolean,
-  options: { busyMs?: number; signal?: AbortSignal } = {},
-): Promise<number> {
-  const records = await withDigests(
-    stateRecords(state),
+  signal?: AbortSignal,
+): Promise<MemoryRecord[]> {
+  return await withDigests(
+    [
+      ...stateRecords(state),
+      ...(settled && TERMINAL.includes(state.status)
+        ? [episodeRecord(settings.repository, state)]
+        : []),
+    ],
     settings.checkout,
-    options.signal,
-  );
-  return withStore(
-    settings.root,
-    (db) =>
-      settled
-        ? releaseRun(db, settings.repository, state, records)
-        : retain(db, records),
-    options.busyMs,
+    signal,
   );
 }
 
 /**
- * The end of a run: its Dream episode (once per run: the first record
- * stands), kept in one transaction with `records`, and the release of its
- * playbook pin. For a settled run, or one a new admission of the same
- * issue replaces.
+ * Keep a run's records; a settled run's end (it finished, or a new
+ * admission or a withdrawal replaced it) also releases its playbook pin.
+ * Returns how many records were new.
  */
-export function releaseRun(
+export function keepRecords(
   db: Database,
-  repository: string,
-  state: ObjectiveState,
-  records: MemoryRecord[] = [],
+  objective: number,
+  run: string,
+  records: MemoryRecord[],
+  settled: boolean,
 ): number {
-  const added = retain(db, [
-    ...records,
-    ...(TERMINAL.includes(state.status)
-      ? [episodeRecord(repository, state)]
-      : []),
-  ]);
-  db.prepare("DELETE FROM pins WHERE objective = ? AND run = ?").run(
-    state.issue,
-    runOf(state),
-  );
+  const added = retain(db, records);
+  if (settled)
+    db.prepare("DELETE FROM pins WHERE objective = ? AND run = ?").run(
+      objective,
+      run,
+    );
   return added;
+}
+
+/** The service's observation: {@link observedRecords}, then the store is opened only for the write. */
+export async function observeObjective(
+  settings: { root: string; repository: string; checkout: string },
+  state: ObjectiveState,
+  settled: boolean,
+  signal: AbortSignal,
+): Promise<number> {
+  const records = await observedRecords(settings, state, settled, signal);
+  return withStore(settings.root, (db) =>
+    keepRecords(db, state.issue, runOf(state), records, settled),
+  );
 }
 
 /** Fill each record's digests: its cited files at its tree. A tree Git can't read leaves them out. */

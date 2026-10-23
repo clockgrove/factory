@@ -11,6 +11,7 @@ import {
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { DreamWrite } from "./knowledge/dream.js";
 
 /**
  * Operator requests: the CLI writes one file per request, and the service
@@ -36,7 +37,11 @@ export type Request =
   /** Per-Objective control; it survives restarts. */
   | { kind: "pause" | "drain" | "resume"; issue: number }
   /** Queue-wide control (issue 0); it survives restarts. */
-  | { kind: "queue"; issue: 0; mode: QueueMode };
+  | { kind: "queue"; issue: 0; mode: QueueMode }
+  | DreamRequest;
+
+/** A `factory dream` write to the knowledge store (knowledge/dream.ts), installation-wide (issue 0). */
+export type DreamRequest = { kind: "dream"; issue: 0; write: DreamWrite };
 
 /** The queue's mode: `paused` admits and starts nothing; `draining` admits nothing new. */
 export type QueueMode = "running" | "paused" | "draining";
@@ -74,12 +79,18 @@ export type RefusalCode =
   /** A reset of this Objective is already rebuilding it. */
   | "reset_in_progress"
   /** The queue is paused or draining, so nothing new is admitted (a reset of an Objective Factory has no state for). */
-  | "queue_not_running";
+  | "queue_not_running"
+  /** The command writes what only the running service writes (the knowledge store): start `factory serve`. */
+  | "service_not_running"
+  /** The knowledge store refused a `dream` write: the message says why (a changed or decided draft, an unreadable store). */
+  | "dream_refused";
 
 /** A request's result: applied (no code), or refused with a stable code. */
 export interface RequestResult {
   message: string;
   code?: RefusalCode;
+  /** What an applied `dream` write reports. */
+  detail?: Record<string, unknown>;
 }
 
 export const refused = (code: RefusalCode, message: string): RequestResult => ({

@@ -31,6 +31,7 @@ import { pathsOverlap } from "./planning/graph.js";
 import { ACCEPTED_AT } from "./planning/steps.js";
 import type { Plan } from "./planning/types.js";
 import {
+  type DreamRequest,
   isCancel,
   pendingRequests,
   type RequestResult,
@@ -72,6 +73,8 @@ export interface ServeOptions {
   frozen?: Frozen;
   /** Reads Objectives as they move; never changes them (knowledge records memory here). */
   observer?: StateObserver;
+  /** Applies a `dream` request to the knowledge store, which only the service writes. */
+  dream?: (stored: StoredRequest & { request: DreamRequest }) => RequestResult;
   /** The workflow can rebuild a state from GitHub (`factory reset`, reset.ts): it has configuration. */
   reset?: boolean;
 }
@@ -81,16 +84,15 @@ export interface ServeOptions {
  * terminal with nothing left to run) changes, and once when the service
  * reads an active state file. It gets a copy and runs beside the loop,
  * aborted by `signal` past its deadline (which frees it at once: jobs.ts);
- * a failure is retried with backoff until it succeeds. `release` ends a
- * run that a new admission of the same issue replaces, or a withdrawal
- * removes, before the new run starts.
+ * a failure is retried with backoff until it succeeds. A run that a new
+ * admission of the same issue replaces, or a withdrawal removes, is
+ * observed as settled too, which ends it.
  *
- * Knowledge is best effort for the lifecycle: a failed observation or
- * release never holds back admission, withdrawal or retirement. The run's
- * settled observation (which also releases it) is kept and retried in the
- * background, with backoff, until it lands, across restarts (saved beside
- * the finished states): an episode may be recorded late, but the queue
- * never waits on it.
+ * Knowledge is best effort for the lifecycle: admission, withdrawal and
+ * retirement never wait on an observation. A run's settled observation is
+ * kept and retried in the background, with backoff, until it lands,
+ * across restarts (saved beside the finished states): an episode may be
+ * recorded late, but the queue never waits on it.
  */
 export interface StateObserver {
   observe(
@@ -98,7 +100,6 @@ export interface StateObserver {
     settled: boolean,
     signal: AbortSignal,
   ): Promise<void>;
-  release(state: ObjectiveState): void;
 }
 
 const OBSERVE_BACKOFF_MS = 1000;
@@ -261,32 +262,19 @@ export async function serve(options: ServeOptions): Promise<number> {
     observed.delete(issue);
   };
   /**
-   * The observer ends a run that is replaced (a re-queue) or withdrawn,
-   * before its state goes. One that fails is retried in the background,
-   * never waited on.
+   * The observer ends a run that is replaced (a re-queue) or withdrawn, in
+   * the background: its settled observation goes on late, under the run's
+   * key, unless it already landed. Nothing here touches the store.
    */
   const release = (state: ObjectiveState): void => {
     if (!options.observer) return;
     const key = observeKey(state);
-    // A finished run's settled observation not landed yet (never made, in
-    // flight or backing off) goes on late, under the same key, so the
-    // replacing run never loses it. Anything else of the run is dropped.
     const owed =
-      TERMINAL.includes(state.status) &&
-      (observed.get(state.issue) !== `${state.status}:true` ||
-        observing.pending(key));
+      observed.get(state.issue) !== `${state.status}:true` ||
+      observing.pending(key);
     observed.delete(state.issue);
     if (owed) observeLate(state);
     else observing.forget(key);
-    try {
-      options.observer.release(structuredClone(state));
-    } catch (error) {
-      log.write(state.issue, {
-        event: "release-deferred",
-        error: String(error),
-      });
-      if (!owed) observeLate(state);
-    }
   };
 
   // Only the lock holder writes state, so leftover temporary files are from a crash.
@@ -388,6 +376,21 @@ export async function serve(options: ServeOptions): Promise<number> {
   /** The result; undefined while a reset rebuilds (or its state can't be read now). */
   const applyRequest = (stored: StoredRequest): RequestResult | undefined => {
     const { request } = stored;
+    if (request.kind === "dream") {
+      const result = options.dream
+        ? options.dream({ ...stored, request })
+        : refused(
+            "no_configuration",
+            "The service runs without configuration, so it has no knowledge store.",
+          );
+      log.write(0, {
+        event: "dream",
+        op: request.write.op,
+        by: stored.by,
+        ...(result.code ? { code: result.code, error: result.message } : {}),
+      });
+      return result;
+    }
     if (request.kind === "queue") {
       queue = { mode: request.mode, by: stored.by, at: stored.at };
       saveQueueControl(paths.root, queue);

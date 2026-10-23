@@ -5,6 +5,11 @@
  * its exact bytes by SHA-256. Each approval is a new playbook version.
  * Planning reads the version its Objective was pinned to when it first
  * planned, so a later approval never changes a running Objective.
+ *
+ * The CLI reads the store and makes the model call; every write (a call's
+ * start and end with its proposal, a recorded episode, a decision) is a
+ * request the service applies ({@link applyDream}), so the store has one
+ * writer. With no service running, a write is refused.
  */
 import { randomUUID } from "node:crypto";
 import {
@@ -21,21 +26,36 @@ import { isAbsolute, join, relative } from "node:path";
 import { crashPoint } from "../crash.js";
 import { redact } from "../log.js";
 import type { Planner } from "../providers/planner.js";
-import { runOf } from "../state.js";
-import { episodes, observeObjective } from "./memory.js";
+import {
+  type DreamRequest,
+  type RequestResult,
+  refused,
+  type StoredRequest,
+} from "../requests.js";
+import { type ObjectiveState, runOf } from "../state.js";
+import { errorMessage } from "../text.js";
+import {
+  episodes,
+  keepRecords,
+  type MemoryRecord,
+  observedRecords,
+} from "./memory.js";
 import {
   DEFAULT_BOUNDS,
   type KnowledgeSettings,
   knowledgeDir,
+  knowledgeSettings,
 } from "./settings.js";
-import { type Database, sha256, transaction, withStore } from "./store.js";
+import {
+  type Database,
+  readStore,
+  sha256,
+  transaction,
+  withStore,
+} from "./store.js";
 
 export const DEFAULT_PLAYBOOK_BUDGET_BYTES = 32_768;
 
-/** A `dream` command waits up to 10 s for the service's short writes. */
-function cliStore<T>(settings: KnowledgeSettings, use: (db: Database) => T): T {
-  return withStore(settings.root, use, 10_000);
-}
 const DREAM_DEADLINE_MS = 45 * 60_000;
 
 interface Entry {
@@ -532,12 +552,38 @@ export interface DreamOptions {
   /** The configured planning provider, made only when a model call is needed. */
   planner: () => Planner;
   log(event: Record<string, unknown>): void;
-  /** Settled terminal state of an Objective, for `--record`; undefined when not settled. */
-  settledState?: (
-    issue: number,
-  ) => import("../state.js").ObjectiveState | string;
+  /** Settled terminal state of an Objective, for `--record`, or why it has none. */
+  settledState: (issue: number) => ObjectiveState | string;
+  /**
+   * Send a write to the service and wait for it: its detail once applied,
+   * undefined when it is still pending (the CLI said so). A refusal, or no
+   * running service, throws.
+   */
+  send(write: DreamWrite): Promise<Record<string, unknown> | undefined>;
   out(text: string): void;
 }
+
+/** A `dream` write, applied by the service ({@link applyDream}). */
+export type DreamWrite =
+  /** A model call starts: until it ends, `--show` lists it as interrupted. */
+  | { op: "call"; id: string }
+  /** The call ended: with a proposal (the draft file's text), or failed or refused. */
+  | {
+      op: "end";
+      id: string;
+      outcome: "proposed" | "failed" | "refused";
+      detail: string;
+      proposal?: string;
+    }
+  /** A settled run's records and episode (`--record`). */
+  | { op: "record"; objective: number; run: string; records: MemoryRecord[] }
+  /** Approve or reject a reviewed draft's exact text. */
+  | {
+      op: "decide";
+      text: string;
+      digest: string;
+      outcome: "approve" | "reject";
+    };
 
 export type DreamCommand =
   | { kind: "show" }
@@ -617,33 +663,33 @@ export async function runDream(
     options.out(`${JSON.stringify(value, null, 2)}\n`);
   switch (command.kind) {
     case "show":
-      print(cliStore(settings, (db) => show(db, settings)));
+      print(readStore(settings.root, (db) => show(db, settings)));
       return 0;
     case "record": {
-      const state = options.settledState?.(command.objective);
-      if (!state || typeof state === "string")
-        throw new Error(
-          state ??
-            `Objective #${command.objective} has no settled terminal state`,
-        );
-      const added = await observeObjective(settings, state, true, {
-        busyMs: 10_000,
+      const state = options.settledState(command.objective);
+      if (typeof state === "string") throw new Error(state);
+      const run = runOf(state);
+      const applied = await options.send({
+        op: "record",
+        objective: command.objective,
+        run,
+        records: await observedRecords(settings, state, true),
       });
-      const episode = cliStore(settings, (db) =>
+      if (!applied) return 0;
+      const episode = readStore(settings.root, (db) =>
         episodes(db).find(
           (record) =>
-            record.objective === command.objective &&
-            record.run === runOf(state),
+            record.objective === command.objective && record.run === run,
         ),
       );
       print({
-        recorded: added > 0,
+        recorded: Number(applied.added) > 0,
         episode: episode ? JSON.parse(episode.body) : null,
       });
       return 0;
     }
     case "preview": {
-      const selection = cliStore(settings, (db) =>
+      const selection = readStore(settings.root, (db) =>
         selectInput(db, settings, {
           playbook: command.budgetBytes,
           input: command.inputBudgetBytes,
@@ -665,9 +711,11 @@ export async function runDream(
     }
     case "dream":
       return await dream(command, options, print);
-    case "decide":
-      print(decide(command, settings));
+    case "decide": {
+      const decided = await options.send(reviewed(command, settings));
+      if (decided) print(decided);
       return 0;
+    }
   }
 }
 
@@ -726,18 +774,15 @@ async function dream(
 ): Promise<number> {
   const { settings } = options;
   const id = randomUUID();
-  const selection = cliStore(settings, (db) => {
-    const selected = selectInput(db, settings, {
+  const selection = readStore(settings.root, (db) =>
+    selectInput(db, settings, {
       playbook: command.budgetBytes,
       input: command.inputBudgetBytes,
-    });
-    // A call that dies leaves this row; `--show` lists it. A model call has no outside effect, so it never blocks another.
-    db.prepare("INSERT INTO dream_calls VALUES (?, ?, 'submitted', '')").run(
-      id,
-      new Date().toISOString(),
-    );
-    return selected;
-  });
+    }),
+  );
+  // A call that dies leaves its start recorded; `--show` lists it. A model
+  // call has no outside effect, so it never blocks another.
+  await options.send({ op: "call", id });
   crashPoint("dream:submitted");
   const planner = options.planner();
   const signal = AbortSignal.timeout(DREAM_DEADLINE_MS);
@@ -761,17 +806,27 @@ async function dream(
         })
       ).value;
     } catch (error) {
-      settle(settings, id, "failed", String(error));
+      await options.send({
+        op: "end",
+        id,
+        outcome: "failed",
+        detail: String(error),
+      });
       throw error;
     }
     try {
-      draft = cliStore(settings, (db) => draftOf(db, answer, selection));
+      draft = readStore(settings.root, (db) => draftOf(db, answer, selection));
     } catch (error) {
-      refusal = error instanceof Error ? error.message : String(error);
+      refusal = errorMessage(error);
     }
   }
   if (!draft) {
-    settle(settings, id, "refused", refusal ?? "");
+    await options.send({
+      op: "end",
+      id,
+      outcome: "refused",
+      detail: refusal ?? "",
+    });
     throw new Error(
       `The model's draft was refused twice: ${refusal}. No proposal was saved; run dream again.`,
     );
@@ -785,24 +840,14 @@ async function dream(
     draft,
   };
   const text = `${JSON.stringify(proposal, null, 2)}\n`;
-  cliStore(settings, (db) =>
-    transaction(db, "dream:proposal", () => {
-      db.prepare("INSERT INTO proposals VALUES (?, ?, ?)").run(
-        id,
-        text,
-        proposal.createdAt,
-      );
-      db.prepare(
-        "UPDATE dream_calls SET outcome = 'proposed' WHERE id = ?",
-      ).run(id);
-    }),
-  );
-  const file = draftPath(settings, id);
-  mkdirSync(join(knowledgeDir(settings.root), "proposals"), {
-    recursive: true,
-    mode: 0o700,
+  await options.send({
+    op: "end",
+    id,
+    outcome: "proposed",
+    detail: "",
+    proposal: text,
   });
-  writeWhole(file, text);
+  const file = draftPath(settings, id);
   const digest = sha256(text);
   print({
     file,
@@ -815,38 +860,116 @@ async function dream(
   return 0;
 }
 
-function settle(
-  settings: KnowledgeSettings,
-  id: string,
-  outcome: string,
-  detail: string,
-): void {
-  cliStore(settings, (db) =>
-    db
-      .prepare("UPDATE dream_calls SET outcome = ?, detail = ? WHERE id = ?")
-      .run(outcome, redact(detail, settings.secrets).slice(0, 2000), id),
-  );
-}
-
-/** Approve or reject a reviewed draft's exact bytes. */
-function decide(
+/** A reviewed draft file, checked where it enters: an absolute path outside the checkout, with the reviewed SHA-256. */
+function reviewed(
   command: Extract<DreamCommand, { kind: "decide" }>,
   settings: KnowledgeSettings,
-): Record<string, unknown> {
+): DreamWrite {
   if (!isAbsolute(command.file))
     throw new Error("Give the draft file as an absolute path");
   const real = realpathSync(command.file);
   const local = relative(realpathSync(settings.checkout), real);
   if (!(local === ".." || local.startsWith("../") || isAbsolute(local)))
     throw new Error("The draft must be outside the target checkout");
-  const raw = readFileSync(real, "utf8");
-  if (sha256(raw) !== command.digest)
+  const text = readFileSync(real, "utf8");
+  if (sha256(text) !== command.digest)
     throw new Error(
       "The draft changed after review: approve or reject its exact current SHA-256",
     );
+  return {
+    op: "decide",
+    text,
+    digest: command.digest,
+    outcome: command.outcome,
+  };
+}
+
+/**
+ * The service applies a `dream` write to the store, its only writer. Each
+ * applies again harmlessly after a crash: records and rows are keyed, and
+ * a decision already made with the same reviewed digest reports itself
+ * again. Anything the store refuses is a `dream_refused` refusal.
+ */
+export function applyDream(
+  stored: StoredRequest & { request: DreamRequest },
+): RequestResult {
+  const settings = knowledgeSettings();
+  if (!settings)
+    return refused("no_configuration", "Knowledge is not configured.");
+  try {
+    return {
+      message: "ok",
+      detail: withStore(settings.root, (db) =>
+        write(db, settings, stored.request.write, stored),
+      ),
+    };
+  } catch (error) {
+    return refused("dream_refused", errorMessage(error));
+  }
+}
+
+function write(
+  db: Database,
+  settings: KnowledgeSettings,
+  change: DreamWrite,
+  stored: StoredRequest,
+): Record<string, unknown> {
+  switch (change.op) {
+    case "call":
+      db.prepare(
+        "INSERT OR IGNORE INTO dream_calls VALUES (?, ?, 'submitted', '')",
+      ).run(change.id, stored.at);
+      return {};
+    case "end": {
+      const { proposal } = change;
+      transaction(db, "dream:proposal", () => {
+        if (proposal)
+          db.prepare("INSERT OR IGNORE INTO proposals VALUES (?, ?, ?)").run(
+            change.id,
+            proposal,
+            (JSON.parse(proposal) as Proposal).createdAt,
+          );
+        db.prepare(
+          "UPDATE dream_calls SET outcome = ?, detail = ? WHERE id = ?",
+        ).run(
+          change.outcome,
+          redact(change.detail, settings.secrets).slice(0, 2000),
+          change.id,
+        );
+      });
+      if (proposal) {
+        mkdirSync(join(knowledgeDir(settings.root), "proposals"), {
+          recursive: true,
+          mode: 0o700,
+        });
+        writeWhole(draftPath(settings, change.id), proposal);
+      }
+      return {};
+    }
+    case "record":
+      return {
+        added: keepRecords(
+          db,
+          change.objective,
+          change.run,
+          change.records,
+          true,
+        ),
+      };
+    case "decide":
+      return decide(db, change, stored);
+  }
+}
+
+/** Approve or reject a reviewed draft's exact text. */
+function decide(
+  db: Database,
+  command: Extract<DreamWrite, { op: "decide" }>,
+  stored: StoredRequest,
+): Record<string, unknown> {
   let edited: Proposal;
   try {
-    edited = JSON.parse(raw) as Proposal;
+    edited = JSON.parse(command.text) as Proposal;
   } catch (error) {
     throw new Error(`The draft isn't JSON: ${String(error)}`);
   }
@@ -858,72 +981,84 @@ function decide(
     throw new Error(
       `The draft must keep exactly the fields ${PROPOSAL_KEYS.join(", ")}`,
     );
-  const actor = process.env.USER ?? "operator";
-  const at = new Date().toISOString();
-  return cliStore(settings, (db) => {
-    const row = db
-      .prepare("SELECT body FROM proposals WHERE id = ?")
-      .get(String(edited.id));
-    if (!row)
-      throw new Error(
-        `No Dream proposal ${String(edited.id)} in this installation`,
-      );
-    const original = JSON.parse(String(row.body)) as Proposal;
-    for (const key of PROPOSAL_KEYS)
-      if (
-        key !== "draft" &&
-        JSON.stringify(edited[key as keyof Proposal]) !==
-          JSON.stringify(original[key as keyof Proposal])
-      )
-        throw new Error(`Edit only the draft: ${key} must stay as proposed`);
-    const decided =
-      db
-        .prepare("SELECT 1 FROM playbook WHERE proposal = ?")
-        .get(original.id) ??
-      db
-        .prepare("SELECT 1 FROM rejections WHERE proposal = ?")
-        .get(original.id);
-    if (decided)
-      throw new Error(`Dream proposal ${original.id} is already decided`);
-    if (command.outcome === "reject") {
-      transaction(db, "dream:reject", () =>
-        db
-          .prepare("INSERT INTO rejections VALUES (?, ?, ?, ?)")
-          .run(original.id, command.digest, actor, at),
-      );
-      return { rejected: original.id };
-    }
-    return transaction(db, "dream:approve", () => {
-      const parent = latest(db);
-      if ((parent?.version ?? null) !== original.parent)
-        throw new Error(
-          `The proposal consolidates playbook version ${original.parent ?? "none"}, but version ${parent?.version} is approved now; run dream again`,
-        );
-      checkDraft(
-        db,
-        edited.draft,
-        parent,
-        original.budgetBytes,
-        original.sources,
-      );
-      const revision: Revision = {
-        ...original,
-        draft: edited.draft,
-        version: (parent?.version ?? 0) + 1,
-        approval: {
-          actor,
-          at,
-          reviewedDigest: command.digest,
-          edited: raw !== String(row.body),
-        },
-      };
-      db.prepare("INSERT INTO playbook VALUES (?, ?, ?, ?)").run(
-        revision.version,
-        original.id,
-        JSON.stringify(revision),
-        at,
-      );
+  const actor = stored.by;
+  const at = stored.at;
+  const row = db
+    .prepare("SELECT body FROM proposals WHERE id = ?")
+    .get(String(edited.id));
+  if (!row)
+    throw new Error(
+      `No Dream proposal ${String(edited.id)} in this installation`,
+    );
+  const original = JSON.parse(String(row.body)) as Proposal;
+  for (const key of PROPOSAL_KEYS)
+    if (
+      key !== "draft" &&
+      JSON.stringify(edited[key as keyof Proposal]) !==
+        JSON.stringify(original[key as keyof Proposal])
+    )
+      throw new Error(`Edit only the draft: ${key} must stay as proposed`);
+  const approved = db
+    .prepare("SELECT body FROM playbook WHERE proposal = ?")
+    .get(original.id);
+  const rejected = db
+    .prepare("SELECT reviewed FROM rejections WHERE proposal = ?")
+    .get(original.id);
+  // The same decision applied again (a crash before its result) reports itself.
+  if (approved) {
+    const revision = JSON.parse(String(approved.body)) as Revision;
+    if (
+      command.outcome === "approve" &&
+      revision.approval.reviewedDigest === command.digest
+    )
       return { approved: original.id, version: revision.version };
-    });
+  }
+  if (
+    rejected &&
+    command.outcome === "reject" &&
+    String(rejected.reviewed) === command.digest
+  )
+    return { rejected: original.id };
+  if (approved || rejected)
+    throw new Error(`Dream proposal ${original.id} is already decided`);
+  if (command.outcome === "reject") {
+    transaction(db, "dream:reject", () =>
+      db
+        .prepare("INSERT INTO rejections VALUES (?, ?, ?, ?)")
+        .run(original.id, command.digest, actor, at),
+    );
+    return { rejected: original.id };
+  }
+  return transaction(db, "dream:approve", () => {
+    const parent = latest(db);
+    if ((parent?.version ?? null) !== original.parent)
+      throw new Error(
+        `The proposal consolidates playbook version ${original.parent ?? "none"}, but version ${parent?.version} is approved now; run dream again`,
+      );
+    checkDraft(
+      db,
+      edited.draft,
+      parent,
+      original.budgetBytes,
+      original.sources,
+    );
+    const revision: Revision = {
+      ...original,
+      draft: edited.draft,
+      version: (parent?.version ?? 0) + 1,
+      approval: {
+        actor,
+        at,
+        reviewedDigest: command.digest,
+        edited: command.text !== String(row.body),
+      },
+    };
+    db.prepare("INSERT INTO playbook VALUES (?, ?, ?, ?)").run(
+      revision.version,
+      original.id,
+      JSON.stringify(revision),
+      at,
+    );
+    return { approved: original.id, version: revision.version };
   });
 }

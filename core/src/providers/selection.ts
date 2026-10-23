@@ -124,6 +124,8 @@ export function providerWorkflow(
       return workflow ? workflow.steps(state) : [unavailable(state, providers)];
     },
     status: (state) => (frozen(state) ?? fallback).status(state),
+    upstream: (state, item) =>
+      (frozen(state) ?? fallback).upstream?.(state, item) ?? [],
     providers,
   };
 }

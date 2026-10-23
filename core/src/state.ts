@@ -95,6 +95,12 @@ export interface Retry {
   wait?: Wait;
   /** The operator answered `wait`: no question until then. */
   grantedUntil?: string;
+  /**
+   * A question the engine raised about this step (a repair over budget, a
+   * crash-loop suspect) while another question that stops it was open:
+   * asked as soon as no open question stops the step, before it runs.
+   */
+  asking?: { question: string; answers: string[]; recommended: string };
 }
 
 /** The provider an Objective was admitted with, kept for its whole run. */

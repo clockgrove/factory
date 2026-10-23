@@ -246,7 +246,9 @@ export async function serve(options: ServeOptions): Promise<number> {
         error: String(error),
       });
     }
-    // The evidence is spent: another hold needs three new deaths.
+    // The evidence is spent: the question is asked, or saved to ask as
+    // soon as no open question stops the step (engine.ts `hold`); another
+    // needs three new deaths.
     record.crashes = [];
     heartbeat();
   }

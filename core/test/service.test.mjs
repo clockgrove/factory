@@ -1027,6 +1027,112 @@ test("a Codex worker's login or quota hold on one item stops every item, once", 
   }
 });
 
+test("a deferred question asks right after the covering one; stack layers and bare retries respect item holds", async () => {
+  const { ObjectiveRunner, hold, objectiveWide } = await import(
+    "../dist/engine.js"
+  );
+  const { newObjective } = await import("../dist/state.js");
+  const keys = ["item:a:work", "item:b:ci", "item:c:work", "item:d:ci"];
+  const started = [];
+  const outcomes = {};
+  const runner = new ObjectiveRunner(
+    newObjective(1, new Date()),
+    {
+      steps: (state) =>
+        keys
+          .filter((key) => !state.done[key])
+          .map((key) => ({
+            key,
+            deadlineMs: 60_000,
+            run: async () => {
+              started.push(key);
+              return outcomes[key] ?? { kind: "done" };
+            },
+          })),
+      status: () => "building",
+      // b is the native-stack layer above a.
+      upstream: (_, item) => (item === "b" ? ["a"] : []),
+    },
+    mkdtempSync(join(tmpdir(), "factory-defer-")),
+    { write() {} },
+    { id: "run", finished: 0, resumeAt: 0 },
+    { ...(await import("../dist/engine.js")).DEFAULT_LIMITS, maxRepairs: 0 },
+  );
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  const due = (key) =>
+    Date.parse(runner.state.retries[key].nextAt) <= Date.now();
+
+  // a's question stops a and the layer above it; d goes on, and backs off.
+  runner.apply("item:a:work", hold("Which asset set?"));
+  outcomes["item:d:ci"] = {
+    kind: "retry",
+    reason: "GitHub 502",
+    afterMs: 3_600_000,
+  };
+  runner.tick();
+  await settle();
+  assert.ok(!started.includes("item:b:ci"), "b waits on the layer below");
+  assert.ok(started.includes("item:d:ci"));
+  assert.ok(!due("item:d:ci"));
+  // A bare retry cuts d's backoff and answers nothing.
+  assert.equal(
+    runner.transact(() => runner.retryNow("op")),
+    null,
+  );
+  assert.ok(due("item:d:ci"));
+  assert.equal(runner.state.holds.length, 1);
+
+  // An Objective question is open: a bare retry is refused.
+  runner.apply(
+    "final",
+    objectiveWide(hold("Issue closed?", ["continue", "cancel"])),
+  );
+  assert.match(
+    runner.transact(() => runner.retryNow("op")),
+    /stops every step/,
+  );
+  // d meets a limit 5 h away, and c a repair over budget: neither is
+  // asked now, and neither waits past the covering answer.
+  runner.apply("item:d:ci", {
+    kind: "retry",
+    reason: "usage limit",
+    wait: {
+      kind: "reset",
+      at: new Date(Date.now() + 5 * 3_600_000).toISOString(),
+      provider: "codex",
+    },
+  });
+  runner.apply("item:c:ci", {
+    kind: "repair",
+    finding: "still failing",
+    target: "item:c:work",
+    clear: ["item:c:work", "item:c:ci"],
+  });
+  assert.equal(runner.state.holds.length, 2);
+  assert.ok(due("item:d:ci"), "d runs right after the answer");
+  assert.ok(runner.state.retries["item:c:work"].asking);
+  const final = runner.state.holds.find((h) => h.step === "final");
+  assert.equal(
+    runner.transact(() =>
+      runner.answer("continue", undefined, "op", undefined, final.id),
+    ),
+    null,
+  );
+  const ran = started.length;
+  outcomes["item:d:ci"] = undefined;
+  runner.tick();
+  await settle();
+  const asked = runner.state.holds.find((h) => h.step === "item:c:work");
+  assert.match(asked?.question ?? "", /repaired 0 times/);
+  assert.ok(
+    !started.slice(ran).includes("item:c:work"),
+    "c asks before it runs again",
+  );
+  assert.ok(started.slice(ran).includes("item:d:ci"), "d ran at once");
+});
+
 test("a new wait class starts its own budget and ends a run of errors", async () => {
   const inst = installation();
   configured(inst, `http://127.0.0.1:${await closedPort()}`);

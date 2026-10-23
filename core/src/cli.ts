@@ -60,8 +60,8 @@ const USAGE = `Usage: factory <command> --repo OWNER/NAME
                                  Answer the open question ID (see status)
                                  (switch NAME: run it on another provider)
   cancel ISSUE                   Cancel an Objective
-  retry ISSUE [--question ID]    Retry an Objective's waiting steps now; while a
-                                 question is open, answer retry to question ID
+  retry ISSUE [--question ID]    Retry the waiting steps no open question stops
+                                 now; with --question, answer retry to question ID
   dream [--preview] [--budget-bytes N] [--input-budget-bytes N] [--provider NAME]
                                  Propose a playbook from settled episodes
   dream --record --objective N   Record a settled Objective's episode

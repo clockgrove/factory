@@ -20,6 +20,7 @@ import {
   cancelCleanupStep,
   finalReviewStep,
   finalStep,
+  layersBelow,
   RERUN,
   reportStep,
   rerunCleanupStep,
@@ -56,6 +57,8 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       if (!state.done.report) return [reportStep(deps)];
       return [];
     },
+
+    upstream: (state, item) => (deps ? layersBelow(state, deps, item) : []),
 
     status(state: ObjectiveState): ObjectiveStatus {
       if (!state.done.check) return "checking";

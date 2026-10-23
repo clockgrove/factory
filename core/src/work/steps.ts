@@ -290,6 +290,26 @@ export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   return steps;
 }
 
+/**
+ * The native-stack layers below item `id`, whose questions stop it too
+ * (engine.ts Workflow `upstream`): `buildSteps` makes a layer runnable once
+ * the layer below is published, before it settles, so a stack successor
+ * waits on its predecessors' holds as a dependent waits on its
+ * dependencies'.
+ */
+export function layersBelow(
+  state: ObjectiveState,
+  deps: BuildDeps,
+  id: string,
+): string[] {
+  const plan = state.done.plan as Plan | undefined;
+  if (!plan || plan.split) return [];
+  const place = stackLayer(plan, deps, id);
+  return place
+    ? place.unit.items.slice(0, place.layer).map((layer) => layer.id)
+    : [];
+}
+
 /** Whether every item has merged (or, for aggregates, completed). */
 export function built(state: ObjectiveState): boolean {
   const plan = state.done.plan as Plan | undefined;

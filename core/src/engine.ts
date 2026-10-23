@@ -107,11 +107,6 @@ export function itemOf(key: string): string | undefined {
   return /^item:([^:]+):/.exec(key)?.[1];
 }
 
-/** Whether an open question stops step `key`. */
-function stops(hold: Hold, key: string): boolean {
-  return hold.item === undefined || hold.item === itemOf(key);
-}
-
 export interface StepContext {
   /** A copy: steps read state, the engine writes it. */
   readonly state: ObjectiveState;
@@ -140,6 +135,12 @@ export interface Workflow {
    * freezes them, for the `switch NAME` answer to a usage limit.
    */
   readonly providers?: Readonly<Record<string, ProviderConfig>>;
+  /**
+   * The Work Items whose questions also stop `item` although it can run
+   * before they settle: the native-stack layers below it. (A dependency's
+   * dependents aren't runnable until it merges, so they wait anyway.)
+   */
+  upstream?(state: ObjectiveState, item: string): readonly string[];
 }
 
 export type HostResource = "worker" | "cpu";
@@ -260,11 +261,23 @@ export class ObjectiveRunner {
 
   /**
    * The open question that stops `key`: the Objective's, or one on the
-   * step's Work Item. An item's dependents (by dependencies and stack
-   * layers) aren't runnable until it settles, so they wait with it.
+   * step's Work Item or on a native-stack layer below it (`upstream`).
+   * An item's dependents aren't runnable until it merges, so they wait
+   * with it too.
    */
   heldBy(key: string): Hold | undefined {
-    return this.state.holds.find((hold) => stops(hold, key));
+    return this.state.holds.find((hold) => this.stops(hold, key));
+  }
+
+  /** Whether an open question stops step `key`. */
+  private stops(hold: Hold, key: string): boolean {
+    if (hold.item === undefined) return true;
+    const item = itemOf(key);
+    return (
+      item !== undefined &&
+      (hold.item === item ||
+        (this.workflow.upstream?.(this.state, item) ?? []).includes(hold.item))
+    );
   }
 
   /** Whether open questions stop every step it could start: then it takes no slot. */
@@ -326,8 +339,23 @@ export class ObjectiveRunner {
       });
     const now = this.now().getTime();
     for (const step of steps) {
-      if (this.running.size >= this.limits.concurrency) return;
       if (this.running.has(step.key)) continue;
+      // A question saved while another stopped the step: ask it now.
+      const asking = this.state.retries[step.key]?.asking;
+      if (asking && !this.state.attempts[step.key]) {
+        if (!this.heldBy(step.key))
+          this.transact(() => {
+            delete this.state.retries[step.key]?.asking;
+            this.hold(
+              step.key,
+              asking.question,
+              asking.answers,
+              asking.recommended,
+            );
+          });
+        continue;
+      }
+      if (this.running.size >= this.limits.concurrency) return;
       if (this.state.attempts[step.key]) {
         if (now < this.run.resumeAt) continue;
       } else if (this.heldBy(step.key)) continue;
@@ -540,6 +568,8 @@ export class ObjectiveRunner {
             `${outcome.target} has been repaired ${repair.count - 1} times and still fails:\n\n${outcome.finding}\n\n\`retry\` allows one more repair.`,
             ERROR_ANSWERS,
             "retry",
+            undefined,
+            true,
           );
         break;
       }
@@ -653,7 +683,7 @@ export class ObjectiveRunner {
       return;
     this.transact(() => {
       delete this.state.attempts[key];
-      this.hold(key, question, ERROR_ANSWERS, "retry");
+      this.hold(key, question, ERROR_ANSWERS, "retry", undefined, true);
     });
     this.log.write(this.state.issue, { step: key, event: "suspect" });
   }
@@ -695,10 +725,14 @@ export class ObjectiveRunner {
   /**
    * Open a question, on the step's Work Item, or on the Objective (any
    * other step's, or one `scope` makes the Objective's). One question is
-   * open per scope: a step that asks while a question that covers its
-   * scope is open (the Objective's, or its item's) records nothing; it
-   * can't run while that question is open, so it runs again after the
-   * answer, and asks then.
+   * open per scope. A step that asks while a question covering its scope
+   * is open (the Objective's, or its item's) can't run until that one is
+   * answered, and then must not wait longer to ask: its retry comes due at
+   * once, so it runs again right after the answer and asks then (an
+   * Objective-wide cause the answer fixed asks nothing). A question that
+   * running the step again wouldn't ask (`saved`: a repair over budget, a
+   * crash-loop suspect) is saved on its retry instead, and asked before
+   * the step runs (`tick`).
    */
   private hold(
     key: string,
@@ -706,6 +740,7 @@ export class ObjectiveRunner {
     answers: string[],
     recommended: string,
     scope?: HoldScope,
+    saved = false,
   ): void {
     const state = this.state;
     const now = this.now().toISOString();
@@ -714,7 +749,22 @@ export class ObjectiveRunner {
       (hold) =>
         hold.item === undefined || (item !== undefined && hold.item === item),
     );
-    if (open && open.step !== key) return;
+    if (open && open.step !== key) {
+      const retry = state.retries[key];
+      if (saved)
+        state.retries[key] = {
+          ...(retry ?? {
+            count: 0,
+            attempts: 0,
+            since: now,
+            lastError: question,
+          }),
+          nextAt: now,
+          asking: { question, answers, recommended },
+        };
+      else if (retry) retry.nextAt = now;
+      return;
+    }
     const all = answers.includes("cancel") ? answers : [...answers, "cancel"];
     state.holds = [
       ...state.holds.filter((hold) => hold !== open),
@@ -858,11 +908,11 @@ export class ObjectiveRunner {
     const rest = this.state.holds.filter((open) => open !== hold);
     for (const [key, retry] of Object.entries(this.state.retries)) {
       if (key === hold.step || retry.wait?.kind === "gate") continue;
-      if (!stops(hold, key)) continue;
+      if (!this.stops(hold, key)) continue;
       const until = Math.min(
         now,
         ...rest
-          .filter((open) => stops(open, key))
+          .filter((open) => this.stops(open, key))
           .map((open) => Date.parse(open.askedAt)),
       );
       const paused =
@@ -928,21 +978,27 @@ export class ObjectiveRunner {
   }
 
   /**
-   * Run waiting steps now; or, while a question is open, answer `retry` to
-   * the one `question` names.
+   * Answer `retry` to the open question `question` names; or, naming none,
+   * run the waiting steps no open question stops now. A bare retry never
+   * answers a question: while one stops every step, it is refused.
    */
   retryNow(by: string, question?: string): string | null {
+    const issue = this.state.issue;
     const holds = this.state.holds;
-    if (question !== undefined || holds.length) {
-      if (question === undefined)
-        return `#${this.state.issue} has an open question, so retry must name it. ${openQuestions(this.state.issue, holds)}`;
+    if (question !== undefined) {
       const hold = holds.find((open) => open.id === question);
       if (hold && !hold.answers.includes("retry"))
-        return `#${this.state.issue}'s question ${hold.id} has no retry answer. Answers: ${hold.answers.join(", ")}.`;
+        return `#${issue}'s question ${hold.id} has no retry answer. Answers: ${hold.answers.join(", ")}.`;
       return this.answer("retry", undefined, by, undefined, question);
     }
-    for (const retry of Object.values(this.state.retries))
-      retry.nextAt = this.now().toISOString();
+    if (holds.some((hold) => hold.item === undefined))
+      return `#${issue} has an open question that stops every step, so retry must name it. ${openQuestions(issue, holds)}`;
+    const waiting = Object.entries(this.state.retries).filter(
+      ([key]) => !this.heldBy(key),
+    );
+    if (holds.length && !waiting.length)
+      return `#${issue}'s waiting steps all wait on an open question, so retry must name it. ${openQuestions(issue, holds)}`;
+    for (const [, retry] of waiting) retry.nextAt = this.now().toISOString();
     return null;
   }
 

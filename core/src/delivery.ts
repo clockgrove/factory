@@ -1181,17 +1181,24 @@ async function unregisteredChecks(
 // ── Branch update ───────────────────────────────────────────────────────
 
 /**
- * Bring a PR that is BEHIND its base under strict protection up to date:
+ * Bring a PR up to date with its base: one BEHIND its base under strict
+ * protection, or a stack layer that doesn't contain the layer below it.
  * GitHub merges the base into `head`, guarded by the expected head, while
  * the PR still targets one of `bases` (a stack layer's predecessor branch,
- * or the default branch). GitHub
- * makes the merge asynchronously, so this always ends in a retry; the next
- * observation accepts the new head by its shape (see deliveredHead).
+ * or the default branch). No worker runs. GitHub makes the merge
+ * asynchronously, so this ends in a retry; the next observation accepts
+ * the new head by its shape (see deliveredHead).
  */
 function updateBranch(
   context: DeliveryContext,
   input: { pr: number; head: string; bases: string[] },
-): Promise<Retry | Hold> {
+  /**
+   * What a refused update of an unmoved head is: a stack layer's conflict
+   * with the layer below. Without it, the next observation reads the PR
+   * and its readiness again.
+   */
+  refused?: Repair,
+): Promise<Retry | Hold | Repair> {
   return guarded(context, async () => {
     const { github, signal } = context;
     const pull = await github.pull(input.pr, signal);
@@ -1209,6 +1216,11 @@ function updateBranch(
       // next observation reads the PR and its readiness again.
       if (!(error instanceof GitHubError && error.status === 422))
         throw needing(error, "Contents: write and Pull requests: write");
+      if (
+        refused &&
+        (await github.pull(input.pr, signal)).head.sha === input.head
+      )
+        return refused;
     }
     crashPoint("deliver:update-branch:after");
     return {
@@ -1533,7 +1545,9 @@ interface Layer {
  * the bottom against the default branch), so a failed check or conflict is
  * pinned to its own layer; merge commits must be allowed; the stack is found
  * by its bottom PR, or created and checked; each layer must contain the
- * head of the layer below it; then GitHub merges it through the top PR at
+ * head of the layer below it (GitHub merges that head into a layer that
+ * doesn't, as it updates a BEHIND bottom layer; only a conflict is the
+ * layer's repair); then GitHub merges it through the top PR at
  * Factory's top head. Every layer must then be merged at its own head with
  * one shared merge commit, on the default branch, on every path (fresh,
  * already merged, refused as merged, after a crash). Layers merged with
@@ -1552,8 +1566,8 @@ interface Layer {
  * - `merged` → `done` with `{ mergeSha, integratedSha }`; every item in
  *   `items` counts as merged at `mergeSha`.
  * - `repair` → the delivery repair of `item` (the layer that failed, or a
- *   layer that does not contain its predecessor's head), which also clears
- *   the layers above it.
+ *   layer GitHub can't update with its predecessor's head), which also
+ *   clears the layers above it.
  * - `republish` → the republish repair of `item`.
  * - `retry` and `hold` → returned as they are; `item` names the layer the
  *   wait or question is about (the top layer for the unit as a whole). A
@@ -1727,13 +1741,24 @@ async function mergeUnitOnce(
           ),
           layer.input,
         );
+      // The layer below moved (GitHub updated it with the default branch,
+      // or it was repaired): GitHub merges it into this layer the same way,
+      // with no worker. Only a refused update, a real conflict, is a repair.
       if (relation !== "identical" && relation !== "ahead")
         return pin(
-          {
-            kind: "repair",
-            finding: `PR #${pull.number} (${branch}) at ${layer.head} does not contain the head ${below.head} of the layer below it (PR #${below.pull.number}, ${below.pull.head.ref}): it was built on an older head of that layer. Rebuild the change on the current ${below.pull.head.ref}.`,
-            conflict: { onto: below.head },
-          },
+          await updateBranch(
+            context,
+            {
+              pr: pull.number,
+              head: layer.head,
+              bases: [below.pull.head.ref],
+            },
+            {
+              kind: "repair",
+              finding: `PR #${pull.number} (${branch}) at ${layer.head} does not contain the head ${below.head} of the layer below it (PR #${below.pull.number}, ${below.pull.head.ref}), and GitHub can't merge that head into it. Rebuild the change on the current ${below.pull.head.ref}.`,
+              conflict: { onto: below.head },
+            },
+          ),
           layer.input,
         );
     }

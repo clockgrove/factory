@@ -1,4 +1,4 @@
-import { lstat, readdir } from "node:fs/promises";
+import { lstat, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { crashPoint } from "../crash.js";
 import {
@@ -168,6 +168,8 @@ interface KeptSelection {
 /** A finished worker run, kept until its result is collected, so a collection question doesn't run the worker again. */
 interface Finished {
   finalResponse: string;
+  /** Factory's clean replay of the kept change, with no worker: its notes are that change's. */
+  replayed?: true;
   validated?: { tree: string; commands: string[] };
   /** Captured once; absent until then. */
   sets?: CandidateSet[];
@@ -498,6 +500,7 @@ async function workStep(
   const keptBase = kept<string>(state, item.id, "base");
   let base = keptBase ?? (await start());
   const added = await addWorktree(config.checkout, worktree, base, signal);
+  let replayed = false;
   if (added === "kept" && keptBase === undefined) {
     // A worktree from an attempt that never kept its base (interrupted
     // before its outcome) sits on that attempt's base, which the default
@@ -514,9 +517,9 @@ async function workStep(
     // A conflict or failed delivery: move onto the current start and replay
     // the kept change, so the worker can resolve it there.
     const head = await start();
-    const replay = kept<string>(state, item.id, "replay");
+    const replay = kept<Replay>(state, item.id, "replay")?.commit;
     if (head !== base) {
-      await rebaseWorktree(
+      replayed = await rebaseWorktree(
         config.checkout,
         worktree,
         base,
@@ -536,6 +539,20 @@ async function workStep(
   const selectionKey = keptKey(item.id, "selection");
   let finished = kept<Finished>(state, item.id, "finished");
   let own = kept<KeptSelection>(state, item.id, "selection");
+  // A conflict repair whose replay applied cleanly onto the change's own
+  // base is mechanical: the replayed change is the result, collected,
+  // validated and reviewed again with no worker run. A media item's
+  // worker runs, for its candidates.
+  if (
+    !finished &&
+    replayed &&
+    !needsSelection(item) &&
+    kept<RepairFinding>(state, item.id, "finding")?.kind === "conflict"
+  )
+    finished = {
+      finalResponse: `Factory replayed the previous result onto ${base} with no conflict.`,
+      replayed: true,
+    };
   let keepAll: Record<string, unknown> = keepBase;
   // The worker finished and collection asked: `repair` sends the result
   // back; any other answer collects it again.
@@ -752,7 +769,10 @@ async function workStep(
         base,
         commit: collected.commit,
         tree: collected.tree,
-        notes: collected.notes,
+        // A replay's collection has no handoff file: the notes are kept.
+        notes: finished.replayed
+          ? (kept<Replay>(state, item.id, "replay")?.notes ?? [])
+          : collected.notes,
         ...(finished.validated ? { validated: finished.validated } : {}),
         sets,
       };
@@ -846,30 +866,49 @@ function withKeep(outcome: Outcome, keep: Record<string, unknown>): Outcome {
 
 /**
  * Move a kept worktree from `from` to `to` and replay the kept change
- * (`replay`) on it. Conflicts stay in the files for the worker to resolve.
+ * (`replay`) on it: that commit's own change, from its parent. Conflicts
+ * stay in the files for the worker to resolve. True only when the change
+ * was built on `from` and applied whole with no conflict: the worktree
+ * then holds `to` plus exactly that change. A change on another base (an
+ * attempt stopped after its base moved) is replayed for the worker, never
+ * taken as it is.
  */
 async function rebaseWorktree(
   checkout: string,
   worktree: string,
   from: string,
   to: string,
-  refused: string | undefined,
+  replay: string | undefined,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
   await hostGit(worktree, ["checkout", "--detach", "--force", to], { signal });
   await hostGit(worktree, ["clean", "-ffdx", "--", "."], { signal });
-  if (!refused) return;
+  if (!replay) return false;
+  const parent = (
+    await hostGit(checkout, ["rev-parse", `${replay}^`], { signal })
+  )
+    .toString("utf8")
+    .trim();
   const diff = await hostGit(
     checkout,
-    ["diff", "--no-ext-diff", "--no-textconv", from, refused],
+    ["diff", "--binary", "--no-ext-diff", "--no-textconv", parent, replay],
     { signal },
   );
-  if (!diff.length) return;
-  // Applying may conflict; the worker resolves what remains.
-  await hostGitExit(worktree, ["apply", "--3way", "--whitespace=nowarn"], {
-    input: diff.toString("utf8"),
-    signal,
-  });
+  if (!diff.length) return false;
+  // Applying may conflict; the worker resolves what remains. The patch is
+  // passed as a file: its bytes need not be UTF-8.
+  const patch = `${worktree}.replay.patch`;
+  await writeFile(patch, diff, { mode: 0o600 });
+  try {
+    const applied = await hostGitExit(
+      worktree,
+      ["apply", "--3way", "--whitespace=nowarn", patch],
+      { signal },
+    );
+    return applied.code === 0 && parent === from;
+  } finally {
+    await rm(patch, { force: true });
+  }
 }
 
 /**
@@ -985,8 +1024,16 @@ interface Refused {
  * that result. Separate from the refused fact, whose tree collection reads
  * as "no change".
  */
-function replayFact(id: string, work: WorkResult): Record<string, string> {
-  return { [keptKey(id, "replay")]: work.commit };
+function replayFact(id: string, work: WorkResult): Record<string, Replay> {
+  return {
+    [keptKey(id, "replay")]: { commit: work.commit, notes: work.notes },
+  };
+}
+
+/** The change a rebase replays, with its notes for a replay without a worker. */
+interface Replay {
+  commit: string;
+  notes: HandoffNote[];
 }
 
 /** The one writer of the refused fact, from the refused work result. */

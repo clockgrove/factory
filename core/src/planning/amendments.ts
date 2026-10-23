@@ -11,6 +11,12 @@ import { fact } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
 import {
+  ACCEPTED_AT,
+  currentPlan,
+  amendmentKey as KEY,
+  proposalsOf,
+} from "./plan.js";
+import {
   draftItems,
   renderCompilationCall,
   renderGraphReviewCall,
@@ -23,7 +29,6 @@ import {
   planningReviewEvidence,
 } from "./review.js";
 import {
-  ACCEPTED_AT,
   acceptedRound,
   decisions,
   INVALID_ANSWER,
@@ -120,7 +125,6 @@ interface AmendRound {
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MINUTE = 60_000;
-const KEY = (id: string) => `amend:${id}`;
 const ANSWERS_KEY = (id: string) => `amend:${id}:answers`;
 
 // ── Intake ──────────────────────────────────────────────────────────────
@@ -177,14 +181,6 @@ export interface AmendmentLedger {
   };
   /** Proposals charged so far; never refunded. */
   used: number;
-}
-
-/** The proposals against the plan accepted now; a replan leaves earlier ones behind. */
-function proposalsOf(state: ObjectiveState): AmendmentProposal[] {
-  const accepted = state.kept[ACCEPTED_AT];
-  return (
-    (state.modules.amendments as AmendmentsModule | undefined)?.proposals ?? []
-  ).filter((proposal) => proposal.plan === accepted);
 }
 
 /** An item's work attempt: 1, plus one per repair of its work step. */
@@ -318,18 +314,6 @@ export function proposalProblems(
 }
 
 // ── The plan as amended ─────────────────────────────────────────────────
-
-/** The plan the Objective runs now: the latest accepted amendment's, else the accepted plan. */
-export function currentPlan(state: ObjectiveState): Plan | undefined {
-  const proposals = proposalsOf(state);
-  for (let at = proposals.length - 1; at >= 0; at--) {
-    const result = state.done[KEY(proposals[at]!.id)] as
-      | AmendmentResult
-      | undefined;
-    if (result?.plan) return result.plan;
-  }
-  return state.done.plan as Plan | undefined;
-}
 
 /** The planner's full answer for the current plan: the base the next revision edits. */
 function currentAnswer(state: ObjectiveState): unknown {

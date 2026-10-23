@@ -50,6 +50,7 @@ import {
   fixedScripts,
   planningSources,
 } from "../planning/facts.js";
+import { acceptedInputs, currentPlan } from "../planning/plan.js";
 import { packageManagerUpdate } from "../planning/prompts.js";
 import { repositoryView } from "../planning/repository.js";
 import {
@@ -61,7 +62,6 @@ import {
 } from "../planning/schedule.js";
 import {
   OBJECTIVE_ACCEPTED,
-  type ObjectiveInputs,
   type PlanningDeps,
   REOPENED,
 } from "../planning/steps.js";
@@ -180,7 +180,7 @@ export function deliverySteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   return !built(state)
     ? buildSteps(state, deps)
     : !state.done.final
-      ? [finalStep(state.done.plan as Plan, deps)]
+      ? [finalStep(currentPlan(state)!, deps)]
       : !state.done["final-review"]
         ? [finalReviewStep(deps)]
         : !state.done.report
@@ -195,11 +195,12 @@ export function deliverySteps(state: ObjectiveState, deps: BuildDeps): Step[] {
  * question, while an in-flight item holds a resource it declares.
  */
 function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
-  const plan = state.done.plan as Plan;
+  const plan = currentPlan(state)!;
   if (plan.split) return [splitPending(plan.split.children.length)];
-  const stacked =
-    deps.config.delivery.kind === "native-stack" ? units(plan) : undefined;
+  const stacked = stackOf(plan, deps);
   if (stacked && "problem" in stacked) return [unitsProblem(stacked.problem)];
+  // Each item's place in its native stack, worked out once per tick and
+  // passed to its steps.
   const layerOf = (id: string) => multiLayer(stacked, id);
   const done = (id: string, phase: Phase) =>
     Boolean(state.done[stepKey(id, phase)]);
@@ -235,7 +236,7 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
   );
   const ready = (item: WorkItem): boolean => {
     const place = layerOf(item.id);
-    const below = place?.unit.items[place.layer - 1];
+    const below = layerBelow(place);
     if (below) return done(below.id, "publish");
     const external = place
       ? place.unit.externalDependencies
@@ -251,13 +252,7 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
     if (!executable(item.kind)) return notYet(item, `${item.kind} items`);
     if (item.kind === "aggregate") return aggregateStep(item);
     const place = layerOf(item.id);
-    const top = !place || place.layer === place.unit.items.length - 1;
-    const phase = PHASES.find(
-      (p) =>
-        !done(item.id, p) &&
-        (p !== "select" || needsSelection(item)) &&
-        (p !== "merge" || top),
-    );
+    const phase = phasesOf(item, place).find((p) => !done(item.id, p));
     // The top merges the stack once every layer's checks are ready.
     if (
       !phase ||
@@ -265,7 +260,7 @@ function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
         place?.unit.items.some((layer) => !done(layer.id, "ci")))
     )
       return undefined;
-    return itemStep(item, phase, deps);
+    return itemStep(item, phase, deps, place);
   };
   const steps: Step[] = [];
   const runnable = plan.items.filter(
@@ -294,9 +289,9 @@ export function layersBelow(
   deps: BuildDeps,
   id: string,
 ): string[] {
-  const plan = state.done.plan as Plan | undefined;
+  const plan = currentPlan(state);
   if (!plan || plan.split) return [];
-  const place = stackLayer(plan, deps, id);
+  const place = multiLayer(stackOf(plan, deps), id);
   return place
     ? place.unit.items.slice(0, place.layer).map((layer) => layer.id)
     : [];
@@ -324,51 +319,57 @@ export function startedItems(state: ObjectiveState): Set<string> {
 
 /** Whether every item has merged (or, for aggregates, completed). */
 export function built(state: ObjectiveState): boolean {
-  const plan = state.done.plan as Plan | undefined;
+  const plan = currentPlan(state);
   // A split delivers through its children, which aren't created yet.
   if (!plan || plan.split) return false;
   return plan.items.every((item) => mergeOf(state, item.id));
 }
 
-/** The item's unit and layer when it is in a native stack of more than one item. */
+/** An item's place in a native stack of more than one item: its unit and layer. */
+type StackPlace = { unit: DeliveryUnit; layer: number };
+
+/** The plan's native stacks under this installation's delivery; none for regular PRs. */
+function stackOf(
+  plan: Plan,
+  deps: BuildDeps,
+): ReturnType<typeof units> | undefined {
+  return deps.config.delivery.kind === "native-stack" ? units(plan) : undefined;
+}
+
+/** The item's place when it is in a native stack of more than one item. */
 function multiLayer(
   stacked: ReturnType<typeof units> | undefined,
   id: string,
-): { unit: DeliveryUnit; layer: number } | undefined {
+): StackPlace | undefined {
   if (!stacked || "problem" in stacked) return undefined;
   const found = unitOf(stacked.units, id);
   return found && found.unit.items.length > 1 ? found : undefined;
 }
 
-/** The item's place in a native stack under this installation's delivery. */
-function stackLayer(
-  plan: Plan,
-  deps: BuildDeps,
-  id: string,
-): { unit: DeliveryUnit; layer: number } | undefined {
-  return deps.config.delivery.kind === "native-stack"
-    ? multiLayer(units(plan), id)
-    : undefined;
+/**
+ * The phases the item runs, in order: select only when it needs a media
+ * selection, and merge only at the top of its native stack (the top merges
+ * the whole stack).
+ */
+function phasesOf(item: WorkItem, place: StackPlace | undefined): Phase[] {
+  const top = !place || place.layer === place.unit.items.length - 1;
+  return PHASES.filter(
+    (p) => (p !== "select" || needsSelection(item)) && (p !== "merge" || top),
+  );
 }
 
 /** The native-stack layer below the item, whose published head it builds on. */
-function stackBelow(
-  plan: Plan,
-  deps: BuildDeps,
-  item: WorkItem,
-): WorkItem | undefined {
-  const place = stackLayer(plan, deps, item.id);
+function layerBelow(place: StackPlace | undefined): WorkItem | undefined {
   return place?.unit.items[place.layer - 1];
 }
 
 /** The PR base of a native-stack layer above the bottom: the branch below it. */
 function baseBranch(
-  state: ObjectiveState,
-  deps: BuildDeps,
-  item: WorkItem,
+  issue: number,
+  place: StackPlace | undefined,
 ): string | undefined {
-  const below = stackBelow(state.done.plan as Plan, deps, item);
-  return below ? itemBranch(state.issue, below.id) : undefined;
+  const below = layerBelow(place);
+  return below ? itemBranch(issue, below.id) : undefined;
 }
 
 /** A plan that does not split into native stacks: only a new plan helps. */
@@ -415,7 +416,12 @@ function candidate(state: ObjectiveState, id: string): string {
   );
 }
 
-function itemStep(item: WorkItem, phase: Phase, deps: BuildDeps): Step {
+function itemStep(
+  item: WorkItem,
+  phase: Phase,
+  deps: BuildDeps,
+  place: StackPlace | undefined,
+): Step {
   const key = stepKey(item.id, phase);
   const run = {
     work: workStep,
@@ -441,7 +447,7 @@ function itemStep(item: WorkItem, phase: Phase, deps: BuildDeps): Step {
           : phase === "validate"
             ? validationDeadlineMs(item, commandTimeoutMs(deps))
             : 45 * MINUTE,
-    run: (context) => run(item, context, deps),
+    run: (context) => run(item, context, deps, place),
   };
 }
 
@@ -457,11 +463,12 @@ async function workStep(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
+  place: StackPlace | undefined,
 ): Promise<Outcome> {
   const { state, signal } = context;
   const { config } = deps;
-  const plan = state.done.plan as Plan;
-  const { shown } = objectiveInputs(state);
+  const plan = currentPlan(state)!;
+  const { shown } = acceptedInputs(state);
   const body = shown.body;
   const workDir = deps.workDir(state.issue);
   const worktree = worktreePath(workDir, state.issue, item.id);
@@ -471,7 +478,7 @@ async function workStep(
   // builds on the layer below's current delivered head: the head a merge
   // check named (`onto`), else its CI's (GitHub may have updated the
   // branch), else its published one. It keeps that base across repairs.
-  const below = stackBelow(plan, deps, item);
+  const below = layerBelow(place);
   const start = async () => {
     if (!below) return defaultHead(config.checkout, config.repository, signal);
     const delivered = (phase: Phase) =>
@@ -536,7 +543,7 @@ async function workStep(
   // back; any other answer collects it again.
   if (finished && context.answer?.answer === "repair") {
     const finding = `The operator sent this result back for repair${context.answer.text ? `: ${context.answer.text}` : "."}`;
-    return repairOutcome(item, "work", finding, context, deps, {
+    return repairOutcome(item, "work", finding, context, place, {
       keep: keepBase,
     });
   }
@@ -593,7 +600,7 @@ async function workStep(
       signal,
     });
     if (inputs.kind !== "done")
-      return mediaOutcome(item, inputs, context, deps, keepAll);
+      return mediaOutcome(item, inputs, context, place, keepAll);
     // Review gets the same inputs (InputRecord): the last ones resolved.
     keepAll = { ...keepAll, ...facts({ inputs: inputs.value }, item.id) };
 
@@ -685,7 +692,7 @@ async function workStep(
       signal,
     });
     if (captured.kind !== "done")
-      return mediaOutcome(item, captured, context, deps, {
+      return mediaOutcome(item, captured, context, place, {
         ...keepAll,
         ...facts({ finished }, item.id),
       });
@@ -730,7 +737,7 @@ async function workStep(
         signal,
       });
       if (outside)
-        return repairOutcome(item, "work", outside, context, deps, {
+        return repairOutcome(item, "work", outside, context, place, {
           keep: keepAll,
         });
       const done: WorkResult = {
@@ -754,7 +761,7 @@ async function workStep(
       };
     }
     case "repair":
-      return repairOutcome(item, "work", collected.finding, context, deps, {
+      return repairOutcome(item, "work", collected.finding, context, place, {
         keep: keepAll,
       });
     default:
@@ -767,13 +774,13 @@ function mediaOutcome(
   item: WorkItem,
   outcome: Exclude<MediaOutcome<unknown>, { kind: "done" }>,
   context: StepContext,
-  deps: BuildDeps,
+  place: StackPlace | undefined,
   keep: Record<string, unknown> = {},
   from: Phase = "work",
 ): Outcome {
   switch (outcome.kind) {
     case "repair":
-      return repairOutcome(item, from, outcome.finding, context, deps, {
+      return repairOutcome(item, from, outcome.finding, context, place, {
         keep,
       });
     case "retry":
@@ -896,7 +903,7 @@ async function repairContext(
   if (saved?.repair === history.count)
     return { context: saved.context, keep: {} };
   const applied = saved?.applied ?? [];
-  const plan = state.done.plan as Plan;
+  const plan = currentPlan(state)!;
   const previous = state.done[stepKey(item.id, "work")] as
     | WorkResult
     | undefined;
@@ -1020,10 +1027,11 @@ async function validateStep(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
+  place: StackPlace | undefined,
 ): Promise<Outcome> {
   const { state, signal } = context;
   const { config } = deps;
-  const plan = state.done.plan as Plan;
+  const plan = currentPlan(state)!;
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
   const workDir = deps.workDir(state.issue);
   const worktree = worktreePath(workDir, state.issue, item.id);
@@ -1035,7 +1043,7 @@ async function validateStep(
     commit: candidate(state, item.id),
     item,
     plan,
-    blocks: objectiveInputs(state).shown.blocks,
+    blocks: acceptedInputs(state).shown.blocks,
     ...(work.base !== plan.base ? { predecessor: work.base } : {}),
     reviewArtifacts: {
       configured: config.reviewArtifacts,
@@ -1095,7 +1103,7 @@ async function validateStep(
         "validate",
         { kind: "failure", detail: keptOutput },
         context,
-        deps,
+        place,
         { shown: result.detail },
       );
     }
@@ -1117,9 +1125,10 @@ async function selectStep(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
+  place: StackPlace | undefined,
 ): Promise<Outcome> {
   const { state, signal } = context;
-  const plan = state.done.plan as Plan;
+  const plan = currentPlan(state)!;
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
   const workDir = deps.workDir(state.issue);
   const question = selectionQuestion(
@@ -1150,7 +1159,7 @@ async function selectStep(
     return { ...question, question: `${read.problem}\n\n${question.question}` };
   if (read.kind === "repair") {
     const finding = `The operator asked for new candidates${answer?.text ? `: ${answer.text}` : "."}`;
-    return repairOutcome(item, "select", finding, context, deps);
+    return repairOutcome(item, "select", finding, context, place);
   }
   const made = await materializeSelection({
     checkout: deps.config.checkout,
@@ -1162,7 +1171,7 @@ async function selectStep(
     signal,
   });
   if (made.kind !== "done")
-    return mediaOutcome(item, made, context, deps, {}, "select");
+    return mediaOutcome(item, made, context, place, {}, "select");
   const done: Selection = {
     commit: made.value.commit,
     tree: made.value.tree,
@@ -1182,9 +1191,10 @@ async function reviewStep(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
+  place: StackPlace | undefined,
 ): Promise<Outcome> {
   const { state, signal } = context;
-  const plan = state.done.plan as Plan;
+  const plan = currentPlan(state)!;
   const work = state.done[stepKey(item.id, "work")] as WorkResult;
   const validated = state.done[stepKey(item.id, "validate")] as ValidateResult;
   const worktree = worktreePath(
@@ -1198,7 +1208,6 @@ async function reviewStep(
     fact(state, "questions", item.id),
   );
   const chosen = selection(state)(item.id);
-  const place = stackLayer(plan, deps, item.id);
   const position: DeliveryPosition = place
     ? {
         kind: "native-stack",
@@ -1249,7 +1258,7 @@ async function reviewStep(
           refused: review.kind === "refused" ? review.refused : [],
         },
         context,
-        deps,
+        place,
       ),
   );
 }
@@ -1274,7 +1283,7 @@ async function dependencyResults(
   base: string,
   signal: AbortSignal,
 ): Promise<DependencyResult[]> {
-  const plan = state.done.plan as Plan;
+  const plan = currentPlan(state)!;
   const byId = new Map(plan.items.map((entry) => [entry.id, entry]));
   const closure = new Set<string>();
   const visit = (id: string) => {
@@ -1399,6 +1408,7 @@ async function publishStep(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
+  place: StackPlace | undefined,
 ): Promise<Outcome> {
   const { state } = context;
   const changed = await objectiveEdited(context, deps);
@@ -1419,7 +1429,7 @@ async function publishStep(
   const rerun = fact(state, "flaky", item.id);
   const flaky = rerun?.tree === validated.tree ? rerun : undefined;
   const commit = candidate(state, item.id);
-  const branch = baseBranch(state, deps, item);
+  const branch = baseBranch(state.issue, place);
   const result = await publish(delivery(context, deps), {
     issue: state.issue,
     item,
@@ -1445,7 +1455,7 @@ async function publishStep(
   });
   if (result.kind === "secret")
     return context.answer?.answer === "repair"
-      ? repairOutcome(item, "publish", result.finding, context, deps, {
+      ? repairOutcome(item, "publish", result.finding, context, place, {
           refusesResult: true,
         })
       : {
@@ -1458,7 +1468,7 @@ async function publishStep(
   // An empty change, or a pointer whose LFS object is missing: a fault in
   // the result itself, not a conflict, so no rebase.
   if (result.kind === "empty" || result.kind === "repair")
-    return repairOutcome(item, "publish", result.finding, context, deps);
+    return repairOutcome(item, "publish", result.finding, context, place);
   if (result.kind !== "published") return result;
   const done: PublishResult = {
     pr: result.pr,
@@ -1479,11 +1489,11 @@ function pullInput(
   state: ObjectiveState,
   item: WorkItem,
   context: StepContext,
-  deps: BuildDeps,
+  place: StackPlace | undefined,
 ): PullInput {
-  const plan = state.done.plan as Plan;
+  const plan = currentPlan(state)!;
   const published = state.done[stepKey(item.id, "publish")] as PublishResult;
-  const branch = baseBranch(state, deps, item);
+  const branch = baseBranch(state.issue, place);
   return {
     issue: state.issue,
     item: item.id,
@@ -1502,10 +1512,11 @@ async function ciStep(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
+  place: StackPlace | undefined,
 ): Promise<Outcome> {
   const result = await observeCi(
     delivery(context, deps),
-    pullInput(context.state, item, context, deps),
+    pullInput(context.state, item, context, place),
   );
   switch (result.kind) {
     case "ready":
@@ -1514,7 +1525,7 @@ async function ciStep(
         result: { head: result.head, merged: result.merged },
       };
     case "repair":
-      return deliveryRepair(item, context, deps, result, "ci");
+      return deliveryRepair(item, context, place, result, "ci");
     case "republish":
       return republishOutcome(item, result.reason);
     default:
@@ -1526,14 +1537,14 @@ async function mergeStep(
   item: WorkItem,
   context: StepContext,
   deps: BuildDeps,
+  place: StackPlace | undefined,
 ): Promise<Outcome> {
   const { state } = context;
-  const plan = state.done.plan as Plan;
-  const place = stackLayer(plan, deps, item.id);
+  const plan = currentPlan(state)!;
   if (place) return mergeStack(place.unit, context, deps);
   const ci = state.done[stepKey(item.id, "ci")] as { head: string };
   const result = await merge(delivery(context, deps), {
-    ...pullInput(state, item, context, deps),
+    ...pullInput(state, item, context, place),
     head: ci.head,
     integrated: integrated(state, plan),
   });
@@ -1548,7 +1559,7 @@ async function mergeStep(
       return { kind: "done", result: done };
     }
     case "repair":
-      return deliveryRepair(item, context, deps, result, "merge");
+      return deliveryRepair(item, context, place, result, "merge");
     case "republish":
       return republishOutcome(item, result.reason);
     default:
@@ -1556,7 +1567,11 @@ async function mergeStep(
   }
 }
 
-/** Delete the merged items' branches (deleteFactoryBranch); a kept one is logged. */
+/**
+ * Delete the merged items' branches (deleteFactoryBranch), bottom first:
+ * each one's PR base is the item before it, the native-stack layer below.
+ * A kept one is logged.
+ */
 async function deleteBranches(
   context: StepContext,
   deps: BuildDeps,
@@ -1567,13 +1582,14 @@ async function deleteBranches(
     checkout: deps.config.checkout,
     signal: context.signal,
   };
-  for (const item of items) {
+  for (const [at, item] of items.entries()) {
     const branch = itemBranch(context.state.issue, item.id);
+    const below = items[at - 1];
     const kept = await deleteFactoryBranch(
       where,
       branch,
       "deliver:branch-delete",
-      baseBranch(context.state, deps, item),
+      below && itemBranch(context.state.issue, below.id),
     );
     if (kept) context.log({ event: "branch-kept", branch, reason: kept });
   }
@@ -1590,10 +1606,10 @@ async function mergeStack(
   deps: BuildDeps,
 ): Promise<Outcome> {
   const { state } = context;
-  const plan = state.done.plan as Plan;
+  const plan = currentPlan(state)!;
   const top = unit.items[unit.items.length - 1] as WorkItem;
-  const layers = unit.items.map((layer) => ({
-    ...pullInput(state, layer, context, deps),
+  const layers = unit.items.map((layer, at) => ({
+    ...pullInput(state, layer, context, { unit, layer: at }),
     head: (state.done[stepKey(layer.id, "ci")] as { head: string }).head,
   })) as [PullInput, ...PullInput[]];
   const result = await mergeUnit(
@@ -1604,6 +1620,10 @@ async function mergeStack(
   );
   const layer = (id: string) =>
     unit.items.find((entry) => entry.id === id) ?? top;
+  const placeOf = (id: string): StackPlace => ({
+    unit,
+    layer: unit.items.indexOf(layer(id)),
+  });
   switch (result.kind) {
     case "merged": {
       // Lower layers' branches are the upper PRs' bases: they go only
@@ -1618,7 +1638,13 @@ async function mergeStack(
       return { kind: "done", result: done };
     }
     case "repair":
-      return deliveryRepair(layer(result.item), context, deps, result, "merge");
+      return deliveryRepair(
+        layer(result.item),
+        context,
+        placeOf(result.item),
+        result,
+        "merge",
+      );
     case "republish":
       return republishOutcome(layer(result.item), result.reason);
     default: {
@@ -1637,7 +1663,7 @@ async function mergeStack(
 function deliveryRepair(
   item: WorkItem,
   context: StepContext,
-  deps: BuildDeps,
+  place: StackPlace | undefined,
   repair: Repair,
   phase: Phase,
 ): Outcome {
@@ -1646,7 +1672,7 @@ function deliveryRepair(
     phase,
     { kind: repair.conflict ? "conflict" : "failure", detail: repair.finding },
     context,
-    deps,
+    place,
     {
       keep: facts(
         {
@@ -1701,7 +1727,7 @@ function repairOutcome(
   from: Phase,
   finding: RepairFinding | string,
   context: StepContext,
-  deps: BuildDeps,
+  place: StackPlace | undefined,
   {
     keep = {},
     shown,
@@ -1724,7 +1750,6 @@ function repairOutcome(
     (kept.kind === "review"
       ? kept.refused.map((r) => `${r.criterion}: ${r.detail}`).join("\n")
       : kept.detail);
-  const place = stackLayer(state.done.plan as Plan, deps, item.id);
   const above = place ? place.unit.items.slice(place.layer + 1) : [];
   const standing = (entry: WorkItem): KeptSelection | undefined => {
     const chosen = selection(state)(entry.id);
@@ -1832,7 +1857,7 @@ function aboutMedia(
  */
 export function replanOutcome(state: ObjectiveState): Outcome {
   // Every item step, done or running: the engine stops the running ones.
-  const items = (state.done.plan as Plan | undefined)?.items ?? [];
+  const items = currentPlan(state)?.items ?? [];
   return {
     kind: "repair",
     finding: "The operator asked to replan.",
@@ -1909,7 +1934,7 @@ function finalStep(plan: Plan, deps: BuildDeps): Step {
     run: async (context): Promise<Outcome> => {
       const { state, signal } = context;
       const { config } = deps;
-      const plan = state.done.plan as Plan;
+      const plan = currentPlan(state)!;
       const head = await defaultHead(
         config.checkout,
         config.repository,
@@ -1934,7 +1959,7 @@ function finalStep(plan: Plan, deps: BuildDeps): Step {
         directory: join(workDir, "final"),
         commit: head,
         plan,
-        blocks: objectiveInputs(state).shown.blocks,
+        blocks: acceptedInputs(state).shown.blocks,
         reviewArtifacts: {
           configured: config.reviewArtifacts,
           planned: plan.reviewArtifacts,
@@ -2009,7 +2034,7 @@ function finalReviewStep(deps: BuildDeps): Step {
           clear: ["final", "final-review"],
           keep: facts({ "final-review:refused": null }),
         };
-      const plan = state.done.plan as Plan;
+      const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
       const merges = plan.items
         .map((item) => ({
@@ -2065,7 +2090,7 @@ function finalReviewStep(deps: BuildDeps): Step {
         peerNotes: objectiveNotes(plan, acceptedNotes(state, plan)),
         sources: await pinnedSources(state, deps, signal),
         acceptance: checkObjective(
-          objectiveInputs(state).shown.blocks,
+          acceptedInputs(state).shown.blocks,
         ).objective.acceptance.map((criterion) => criterion.text),
         dir: join(deps.workDir(state.issue), "final-review"),
         ...(decisions ? { decisions } : {}),
@@ -2098,7 +2123,7 @@ async function objectiveEdited(
 ): Promise<Outcome | undefined> {
   const { state, signal } = context;
   const issue = await deps.github.renderedIssue(state.issue, signal);
-  const planned = objectiveInputs(state);
+  const planned = acceptedInputs(state);
   const digest = shownDigest(
     readShown(issue.body_html, { sources: planned.writer === true }),
   );
@@ -2132,18 +2157,6 @@ async function objectiveEdited(
   return undefined;
 }
 
-/** The Objective as planning read it. */
-function objectiveInputs(state: ObjectiveState): ObjectiveInputs {
-  let latest = state.done.check as ObjectiveInputs;
-  for (const [key, value] of Object.entries(state.done))
-    if (
-      /^plan:\d+:1$/.test(key) &&
-      (value as { inputs?: ObjectiveInputs }).inputs
-    )
-      latest = (value as { inputs: ObjectiveInputs }).inputs;
-  return latest;
-}
-
 /** The commit the next item builds on: the latest merge, else the plan base. */
 function integrated(state: ObjectiveState, plan: Plan): string {
   let latest: MergeResult | undefined;
@@ -2159,8 +2172,8 @@ async function pinnedSources(
   deps: BuildDeps,
   signal: AbortSignal,
 ) {
-  const plan = state.done.plan as Plan;
-  const objective = objectiveInputs(state);
+  const plan = currentPlan(state)!;
+  const objective = acceptedInputs(state);
   const { sources } = await planningSources(
     objective.shown,
     new BaseFiles(deps.config.checkout, plan.base, signal),
@@ -2196,7 +2209,7 @@ function reportStep(deps: BuildDeps): Step {
         const changed = await objectiveEdited(context, deps);
         if (changed) return changed;
       }
-      const plan = state.done.plan as Plan;
+      const plan = currentPlan(state)!;
       const final = state.done.final as FinalResult;
       const lines = plan.items.map((item) => {
         const published = state.done[stepKey(item.id, "publish")] as

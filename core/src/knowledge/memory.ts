@@ -12,7 +12,7 @@
  * or `historical` (an observation of what happened then).
  */
 import { BaseFiles } from "../planning/facts.js";
-import type { Plan } from "../planning/types.js";
+import { currentPlan } from "../planning/plan.js";
 import type { ObjectiveState } from "../state.js";
 import { runOf, TERMINAL } from "../state.js";
 import { mergeOf } from "../work/merged.js";
@@ -285,7 +285,7 @@ function itemTree(state: ObjectiveState, item: string): string | undefined {
 }
 
 function stateRecords(state: ObjectiveState): MemoryRecord[] {
-  const plan = state.done.plan as Plan | undefined;
+  const plan = currentPlan(state);
   const items = new Map((plan?.items ?? []).map((item) => [item.id, item]));
   const allPaths = [...new Set(plan?.items.flatMap((i) => i.ownedPaths))];
   const objective = state.issue;
@@ -404,7 +404,7 @@ function episodeRecord(
   repository: string,
   state: ObjectiveState,
 ): MemoryRecord {
-  const plan = state.done.plan as Plan | undefined;
+  const plan = currentPlan(state);
   const title = (state.done.check as { title?: string } | undefined)?.title;
   const links = [`https://github.com/${repository}/issues/${state.issue}`];
   const items = (plan?.items ?? []).map((item) => {

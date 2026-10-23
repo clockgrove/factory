@@ -9,6 +9,7 @@ import {
 } from "./engine.js";
 import { GitRefusal } from "./git.js";
 import { githubOutcome } from "./github.js";
+import { currentPlan } from "./planning/plan.js";
 import {
   type PlanningDeps,
   planningReplan,
@@ -51,7 +52,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       if (state.status === "done") return [];
       if (deps && state.kept?.[RERUN]) return [rerunCleanupStep(deps)];
       if (!state.done.check) return [check];
-      if (!state.done.plan) {
+      if (!currentPlan(state)) {
         const step = deps ? planningStep(state, deps) : unavailable("plan");
         return step ? [step] : [];
       }
@@ -63,7 +64,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
 
     status(state: ObjectiveState): ObjectiveStatus {
       if (!state.done.check) return "checking";
-      if (!state.done.plan) return "planning";
+      if (!currentPlan(state)) return "planning";
       if (!built(state)) return "building";
       if (!state.done.report) return "finishing";
       return "done";
@@ -73,7 +74,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
       errorOutcome(error, deps?.config.repository ?? "", step.redo),
 
     replannable: (state, key) =>
-      state.done.plan
+      currentPlan(state)
         ? /^(item|build):/.test(key) ||
           ["final", "final-review", "report"].includes(key)
         : /^(plan|review|decide):\d+:\d+$/.test(key),
@@ -82,7 +83,7 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
     // after it, the plan and the build are forgotten and the Objective is
     // checked again.
     replan: (state, key, answer) =>
-      state.done.plan
+      currentPlan(state)
         ? replanOutcome(state)
         : planningReplan(state, key, answer),
   };

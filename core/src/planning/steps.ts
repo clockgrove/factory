@@ -31,6 +31,12 @@ import {
   sectionText,
 } from "./facts.js";
 import {
+  ACCEPTED_AT,
+  currentPlan,
+  generationInputs,
+  position,
+} from "./plan.js";
+import {
   draftItems,
   renderCompilationCall,
   renderGraphReviewCall,
@@ -99,7 +105,7 @@ export function planningStep(
   state: ObjectiveState,
   deps: PlanningDeps,
 ): Step | undefined {
-  if (state.done.plan) return undefined;
+  if (currentPlan(state)) return undefined;
   const { g, n } = position(state);
   const planKey = `plan:${g}:${n}`;
   const planned = state.done[planKey] as PlanRound | undefined;
@@ -175,27 +181,8 @@ interface Decision {
   approved?: PlannerDecision;
 }
 
-/** The current generation and round, from the saved decisions. */
-function position(state: ObjectiveState): { g: number; n: number } {
-  let g = 1;
-  let n = 1;
-  for (;;) {
-    const decided = state.done[`decide:${g}:${n}`] as Decision | undefined;
-    if (!decided || decided.accept) return { g, n };
-    if (decided.replan) {
-      g += 1;
-      n = 1;
-    } else n += 1;
-  }
-}
-
 function cleanDraft(round: PlanRound): boolean {
   return Boolean(round.draft && !round.findings?.length && !round.question);
-}
-
-function generationInputs(state: ObjectiveState, g: number): ObjectiveInputs {
-  if (g > 1) return (state.done[`plan:${g}:1`] as PlanRound).inputs!;
-  return state.done.check as ObjectiveInputs;
 }
 
 /** Saved operator decisions in round order, from the decide steps whose key passes `keep`. */
@@ -893,9 +880,6 @@ function acceptStep(g: number, n: number, deps: PlanningDeps): Step {
     },
   };
 }
-
-/** When the plan was accepted, for the order of owned-path waits (service.ts). */
-export const ACCEPTED_AT = "plan:acceptedAt";
 
 const PLAN_MARK = (issue: number) => `<!-- factory:${issue}:plan -->`;
 const PART_MARK = (issue: number, part: number) =>

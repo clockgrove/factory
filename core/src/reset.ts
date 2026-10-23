@@ -2,7 +2,7 @@ import type { CoreConfig } from "./config.js";
 import { hold, type Outcome, type Step, type Workflow } from "./engine.js";
 import { type GitHub, GitHubError, type IssueComment } from "./github.js";
 import type { GitHubModule } from "./github-sync.js";
-import { ACCEPTED_AT } from "./planning/steps.js";
+import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
 import type { Plan } from "./planning/types.js";
 import { readQueue } from "./queue.js";
 import { type RequestResult, refused, type StoredRequest } from "./requests.js";
@@ -230,7 +230,7 @@ export async function rebuildState(
   // A replan or a re-run that hasn't accepted its plan yet, or a plan from
   // before this run was queued: the comment is an earlier plan's.
   const planComment =
-    (old && !old.done.plan) || (!run && planAt && planAt < queuedAt!)
+    (old && !currentPlan(old)) || (!run && planAt && planAt < queuedAt!)
       ? undefined
       : planned;
 

@@ -3,10 +3,11 @@ import type { ReviewArtifactSelector } from "../review/artifacts.js";
 import type { ObjectiveBlock } from "../shown.js";
 
 /**
- * Plan data as the core stores it: plain JSON in the state file. The
- * accepted plan is `state.done.plan`; each round's draft is kept in that
- * round's `done` result. Base is immutable, so sources are cited by path and
- * heading and read again from the base when needed.
+ * Plan data as the core stores it: plain JSON in the state file. The plan
+ * step saves the accepted plan, which currentPlan (plan.ts) reads; each
+ * round's draft is kept in that round's `done` result. Base is immutable,
+ * so sources are cited by path and heading and read again from the base
+ * when needed.
  */
 
 /** A file at the base, whole or one exact heading. Path OBJECTIVE is the Objective body. */
@@ -235,7 +236,7 @@ export interface Draft {
   split?: { children: ChildObjectiveSpec[] };
 }
 
-/** The accepted plan, stored at `state.done.plan`. */
+/** The accepted plan; currentPlan (plan.ts) reads it. */
 export interface Plan extends Draft {
   /** The final commands as reviewed, so a config edit mid-run can't change them. */
   finalCommands: string[];

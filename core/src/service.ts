@@ -28,8 +28,7 @@ import { takeServiceLock } from "./lock.js";
 import { RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
 import { pathsOverlap } from "./planning/graph.js";
-import { ACCEPTED_AT } from "./planning/steps.js";
-import type { Plan } from "./planning/types.js";
+import { ACCEPTED_AT, currentPlan } from "./planning/plan.js";
 import {
   type DreamRequest,
   isCancel,
@@ -891,7 +890,7 @@ function control(
 }
 
 function ownedPaths(state: ObjectiveState): string[] {
-  const plan = state.done.plan as Plan | undefined;
+  const plan = currentPlan(state);
   return plan ? plan.items.flatMap((item) => item.ownedPaths) : [];
 }
 

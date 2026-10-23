@@ -400,6 +400,8 @@ const REVALIDATE = "revalidate";
 export const ADOPTS = "config:adopts";
 const REPLAN = "replan";
 const FRESH = "fresh";
+/** The most bytes an answer's text carries, however it came (a GitHub comment's limit). */
+export const MAX_ANSWER_TEXT = 65_536;
 
 interface Running {
   token: number;
@@ -1177,6 +1179,11 @@ export class ObjectiveRunner {
       if (arg === undefined && first !== undefined && named.arg === first)
         note = text?.trim().slice(first.length).trim() || undefined;
     }
+    if (text !== undefined && Buffer.byteLength(text) > MAX_ANSWER_TEXT)
+      return refused(
+        "invalid_answer",
+        `That answer's text is ${Buffer.byteLength(text)} bytes; an answer's text is at most ${MAX_ANSWER_TEXT}.`,
+      );
     if (option.needsText && !note?.trim())
       return refused(
         "invalid_answer",

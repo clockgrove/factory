@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+} from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { eventLine, redactDeep } from "./display.js";
@@ -8,6 +18,7 @@ import {
   DEFAULT_LIMITS,
   type EngineLimits,
   hostLimits,
+  MAX_ANSWER_TEXT,
   settled,
 } from "./engine.js";
 import { gitEnvironment } from "./git.js";
@@ -360,23 +371,44 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-/** The most text an answer carries: a GitHub comment's limit. */
-const MAX_ANSWER_TEXT = 65_536;
-
-/** An answer's text: `--text`, or the UTF-8 file `--text-file` names. */
+/**
+ * An answer's text: `--text`, or the UTF-8 file `--text-file` names, read
+ * from one descriptor (no symlink, never blocking on a FIFO), a regular
+ * file only, and at most the engine's cap, which it enforces for every
+ * answer; this read stops past it.
+ */
 function answerText(args: Args): string | undefined {
   const file = args.flags["text-file"];
   if (file === undefined) return args.flags.text;
-  const stat = lstatSync(file, { throwIfNoEntry: false });
-  if (!stat?.isFile()) throw usage(`--text-file ${file} isn't a regular file`);
-  if (stat.size > MAX_ANSWER_TEXT)
-    throw usage(
-      `--text-file ${file} is ${stat.size} bytes; an answer's text is at most ${MAX_ANSWER_TEXT}`,
-    );
+  let fd: number;
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(file));
-  } catch {
-    throw usage(`--text-file ${file} isn't UTF-8 text`);
+    fd = openSync(
+      file,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+  } catch (error) {
+    throw usage(`--text-file ${file} can't be opened: ${errorMessage(error)}`);
+  }
+  try {
+    if (!fstatSync(fd).isFile())
+      throw usage(`--text-file ${file} isn't a regular file`);
+    const buffer = Buffer.alloc(MAX_ANSWER_TEXT + 1);
+    let length = 0;
+    for (let read = 1; read > 0 && length < buffer.length; length += read)
+      read = readSync(fd, buffer, length, buffer.length - length, null);
+    if (length > MAX_ANSWER_TEXT)
+      throw usage(
+        `--text-file ${file} is over ${MAX_ANSWER_TEXT} bytes, an answer's limit`,
+      );
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(
+        buffer.subarray(0, length),
+      );
+    } catch {
+      throw usage(`--text-file ${file} isn't UTF-8 text`);
+    }
+  } finally {
+    closeSync(fd);
   }
 }
 

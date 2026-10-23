@@ -2011,13 +2011,15 @@ export function replanOutcome(state: ObjectiveState): Outcome {
 /**
  * Whether `fresh` can answer a question of step `key` (engine.ts
  * `Workflow.freshable`): a Work Item of the current plan that runs a worker
- * and hasn't merged.
+ * and hasn't merged, asked before its merge step. A merge step's question
+ * may come after GitHub merged the PR, so it keeps retry and replan only.
  */
 export function freshable(state: ObjectiveState, key: string): boolean {
   const plan = currentPlan(state);
   const item = plan?.items.find((entry) => entry.id === itemOf(key));
   return (
     !!item &&
+    key !== stepKey(item.id, "merge") &&
     !plan?.split &&
     executable(item.kind) &&
     item.kind !== "aggregate" &&

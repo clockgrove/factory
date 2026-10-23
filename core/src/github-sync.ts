@@ -1442,6 +1442,19 @@ export class GitHubSync {
     const ended = (ok: boolean) => {
       if (ok) this.transportFailed.delete(key);
       else this.transportFailed.set(key, issue);
+      // Each failed, re-sent or rate-limited request, unthrottled: one bad request stays traceable.
+      for (const request of counted.requests ?? [])
+        this.log.write(issue, {
+          event: "github-request",
+          job: key,
+          ...request,
+        });
+      if (counted.unnoted)
+        this.log.write(issue, {
+          event: "github-request",
+          job: key,
+          unnoted: counted.unnoted,
+        });
       this.countTransport(issue, key, counted, this.now() - started, !ok);
     };
     this.jobs.run(
@@ -1503,7 +1516,13 @@ export class GitHubSync {
     const tally = this.transportTally.get(key);
     this.transportTally.delete(key);
     if (!tally?.calls) return;
-    const { issue, since: _since, ...counts } = tally;
+    const {
+      issue,
+      since: _since,
+      requests: _requests,
+      unnoted: _unnoted,
+      ...counts
+    } = tally;
     this.log.write(issue, { event: "github-call", job: key, ...counts });
   }
 }

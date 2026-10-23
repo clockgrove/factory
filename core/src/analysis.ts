@@ -427,6 +427,8 @@ export interface AnalysisReport {
     failed: number;
     bytes: number;
     ms: number;
+    /** Requests traced one by one (`github-request`: failed, re-sent or rate-limited), by status. */
+    traced: Record<string, number>;
   };
   limitations: string[];
 }
@@ -699,6 +701,7 @@ class Analysis {
     failed: 0,
     bytes: 0,
     ms: 0,
+    traced: {},
   };
   private from?: string;
   private to?: string;
@@ -874,6 +877,15 @@ class Analysis {
       }
       case "aborted":
         this.aborted += Array.isArray(event.steps) ? event.steps.length : 1;
+        break;
+      case "github-request":
+        bump(
+          this.github.traced,
+          event.unnoted
+            ? "untraced"
+            : `${String(event.status ?? "network")}${event.rateLimited ? " rate-limited" : ""}`,
+          num(event.unnoted) ?? 1,
+        );
         break;
       case "github-call": {
         this.githubJobs.add(String(event.job));
@@ -1278,6 +1290,9 @@ export function analysisText(report: AnalysisReport): string {
   const g = report.github;
   section("GitHub requests (sync jobs):", [
     `  ${count(g.calls)} requests in ${g.runs} job runs (${g.jobs} jobs) · ${g.retries} retries · ${g.rateLimited} rate-limited · ${g.failed} failed · ${size(g.bytes)} · ${duration(g.ms)}`,
+    ...(Object.keys(g.traced).length
+      ? [`  traced requests by status: ${tally(g.traced)}`]
+      : []),
   ]);
   lines.push("", ...report.limitations.map((line) => `Note: ${line}`));
   return `${lines.join("\n")}\n`;

@@ -272,10 +272,82 @@ export interface Transport {
   rateLimited: number;
   failed: number;
   bytes: number;
+  /**
+   * Each request that failed, was re-sent or was rate-limited, for one
+   * `github-request` event apiece (at most MAX_NOTED per job run; the
+   * rest only counted in `unnoted`).
+   */
+  requests?: NotedRequest[];
+  unnoted?: number;
 }
+
+/** One traced request: never a body, a token or a query value. */
+export interface NotedRequest {
+  method: string;
+  /** The path with its query dropped and ids, numbers and hashes as placeholders. */
+  route: string;
+  /** Null when no answer came (the network). */
+  status: number | null;
+  /** 2: re-sent once with a fresh login after a 401. */
+  attempt: number;
+  rateLimited?: true;
+  requestId?: string;
+  retryAfterSeconds?: number;
+  rateLimitReset?: string;
+}
+
+const MAX_NOTED = 50;
 
 /** The job whose requests `send` counts; outside a job nothing is counted. */
 export const transport = new AsyncLocalStorage<Transport>();
+
+/** `path` as a route template: no query, and numbers, hashes and node ids as placeholders. */
+export function routeOf(path: string): string {
+  return path
+    .split("?")[0]!
+    .split("/")
+    .map((part) =>
+      /^\d+$/.test(part)
+        ? "{n}"
+        : /^[0-9a-f]{7,64}$/i.test(part) && /\d/.test(part)
+          ? "{sha}"
+          : part,
+    )
+    .join("/");
+}
+
+/** Keep one request of the current job for its `github-request` event. */
+function note(
+  counted: Transport | undefined,
+  method: string,
+  path: string,
+  attempt: number,
+  response: Response | undefined,
+  rateLimited = false,
+): void {
+  if (!counted) return;
+  counted.requests ??= [];
+  if (counted.requests.length >= MAX_NOTED) {
+    counted.unnoted = (counted.unnoted ?? 0) + 1;
+    return;
+  }
+  const header = (name: string) => response?.headers.get(name) ?? undefined;
+  const retryAfter = Number(header("retry-after"));
+  const reset = Number(header("x-ratelimit-reset"));
+  const requestId = header("x-github-request-id");
+  counted.requests.push({
+    method,
+    route: routeOf(path),
+    status: response?.status ?? null,
+    attempt,
+    ...(rateLimited ? { rateLimited: true as const } : {}),
+    ...(requestId ? { requestId: requestId.slice(0, 80) } : {}),
+    ...(retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}),
+    ...(reset > 0 && (rateLimited || response?.status === 429)
+      ? { rateLimitReset: new Date(reset * 1000).toISOString() }
+      : {}),
+  });
+}
 
 export class GitHub {
   private token: string | undefined;
@@ -843,6 +915,7 @@ export class GitHub {
       if (refused.some((e) => e.type === "RATE_LIMITED")) {
         const counted = transport.getStore();
         if (counted) counted.rateLimited += 1;
+        note(counted, "POST", "/graphql", 1, response, true);
         const reset = Number(response.headers.get("x-ratelimit-reset"));
         throw new TransientError(
           `GitHub GraphQL: ${message}`,
@@ -1544,6 +1617,7 @@ export class GitHub {
       });
     } catch (error) {
       if (counted) counted.failed += 1;
+      note(counted, method, path, refreshed ? 2 : 1, undefined);
       if (signal?.aborted) throw error;
       throw new TransientError(
         `GitHub ${method} ${path}: ${errorMessage(error)}`,
@@ -1551,7 +1625,11 @@ export class GitHub {
     }
     if (counted)
       counted.bytes += Number(response.headers.get("content-length")) || 0;
-    if (response.ok) return response;
+    if (response.ok) {
+      // A re-send that worked is traced too: it was retried.
+      if (refreshed) note(counted, method, path, 2, response);
+      return response;
+    }
     const text = await response.text().catch(() => "");
     let answer: unknown;
     try {
@@ -1560,8 +1638,10 @@ export class GitHub {
       answer = undefined;
     }
     const detail = `GitHub ${method} ${path}: ${response.status} ${text.slice(0, 300)}`;
-    if (response.status === 401 && !refreshed)
+    if (response.status === 401 && !refreshed) {
+      note(counted, method, path, 1, response);
       return this.send(method, path, body, signal, headers, true);
+    }
     const retryAfter = Number(response.headers.get("retry-after"));
     const reset = Number(response.headers.get("x-ratelimit-reset"));
     const limited =
@@ -1573,6 +1653,7 @@ export class GitHub {
       if (limited) counted.rateLimited += 1;
       else counted.failed += 1;
     }
+    note(counted, method, path, refreshed ? 2 : 1, response, limited);
     // A 401 that a fresh token didn't fix is a login problem, not a hiccup.
     if (response.status === 401) throw new GitHubError(detail, 401, answer);
     if (limited)

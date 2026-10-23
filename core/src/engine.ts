@@ -55,12 +55,6 @@ export type Outcome =
       cause?: HoldCause;
       /** Answers that need text after them (see `Hold.needsText`). */
       needsText?: string[];
-      /**
-       * Repair number `repair` of `target` stops counting against its
-       * budget (`ObjectiveState.repairs`): asking about it was Factory's
-       * cost, not the work's. Applying it twice is harmless.
-       */
-      free?: { target: string; repair: number };
       keep?: Record<string, unknown>;
     }
   /**
@@ -88,13 +82,6 @@ export type Outcome =
       finding: string;
       target: string;
       clear: string[];
-      /** An operator's rerun (not a fix): it adds no repair to the budget. */
-      uncounted?: true;
-      /**
-       * Answers the target step takes besides `retry` and `cancel`, offered
-       * when its repair budget is spent; any of them allows one more.
-       */
-      exhausted?: string[];
       keep?: Record<string, unknown>;
     };
 
@@ -355,11 +342,13 @@ export class ObjectiveRunner {
   /** Replaced by a new run of the same Objective: it never saves again. */
   private stopped = false;
   /**
-   * The replaced run's steps haven't stopped yet (`after`): no step that
+   * The replaced runs' steps haven't stopped yet (`after`): no step that
    * isn't cleanup after cancel starts, so nothing reads GitHub while an
    * effect of theirs may still land.
    */
-  private waiting = false;
+  waiting = false;
+  /** When the replaced runs' steps have ended (`after`); `stop` passes it on. */
+  private pending?: Promise<void>;
   /** Effects outside the state, run only once the change is saved. */
   private afterSave: (() => void)[] = [];
 
@@ -422,8 +411,9 @@ export class ObjectiveRunner {
    */
   after(stopped: Promise<void>): void {
     this.waiting = true;
+    this.pending = stopped;
     void stopped.then(() => {
-      this.waiting = false;
+      if (this.pending === stopped) this.waiting = false;
     });
   }
 
@@ -675,11 +665,6 @@ export class ObjectiveRunner {
         else this.retry(key, outcome);
         break;
       case "hold":
-        if (outcome.free) {
-          const repair = state.repairs[outcome.free.target];
-          if (repair && !repair.free?.includes(outcome.free.repair))
-            repair.free = [...(repair.free ?? []), outcome.free.repair];
-        }
         this.hold(key, outcome);
         break;
       case "repair": {
@@ -711,32 +696,19 @@ export class ObjectiveRunner {
           count: 0,
           findings: [],
         };
-        if (!outcome.uncounted) repair.count += 1;
+        repair.count += 1;
         repair.findings = [...repair.findings, outcome.finding].slice(-10);
         state.repairs[outcome.target] = repair;
-        // Over budget: ask, on the step that would repair. Any answer but
-        // `replan` allows one more.
-        const charged = repair.count - (repair.free?.length ?? 0);
-        const answered = state.answers[outcome.target]?.answer;
-        if (
-          !outcome.uncounted &&
-          charged > this.limits.maxRepairs &&
-          (answered === undefined || answered === REPLAN)
-        ) {
-          const answers = [
-            "retry",
-            ...(outcome.exhausted ?? []).filter((a) => a !== "retry"),
-            "cancel",
-          ];
+        // Over budget: ask, before the step that would repair runs again
+        // (`asking`). Its `retry` lets that one repair run.
+        if (repair.count > this.limits.maxRepairs)
           this.hold(
             outcome.target,
             failure(
-              `${outcome.target} has been repaired ${charged - 1} times and still fails:\n\n${outcome.finding}\n\n${answers.length > 2 ? "Any answer but cancel" : "`retry`"} allows one more repair.`,
-              answers,
+              `${outcome.target} has been repaired ${repair.count - 1} times and still fails:\n\n${outcome.finding}\n\n\`retry\` allows one more repair.`,
             ),
             true,
           );
-        }
         break;
       }
     }
@@ -875,8 +847,12 @@ export class ObjectiveRunner {
   stop(): Promise<void> {
     this.stopped = true;
     this.abort([...this.running.keys()], "replaced");
-    // Each ends by its deadline at the latest.
-    return Promise.allSettled([...this.inFlight]).then(() => undefined);
+    // Each ends by its deadline at the latest; so do the steps of the runs
+    // this one replaced, which a run that replaces it waits for too.
+    return Promise.allSettled([
+      ...this.inFlight,
+      this.pending ?? Promise.resolve(),
+    ]).then(() => undefined);
   }
 
   /**
@@ -894,7 +870,7 @@ export class ObjectiveRunner {
    */
   private hold(
     key: string,
-    asked: Omit<Extract<Outcome, { kind: "hold" }>, "kind" | "keep" | "free">,
+    asked: Omit<Extract<Outcome, { kind: "hold" }>, "kind" | "keep">,
     saved = false,
   ): void {
     const state = this.state;

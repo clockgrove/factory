@@ -914,12 +914,14 @@ function gated(runner: ObjectiveRunner, workflow: Workflow): boolean {
 }
 
 /**
- * A dequeued run waits to be withdrawn only while a step runs, or a re-run's
- * cleanup has begun (an attempt is open): its effects are half made.
+ * A dequeued run waits to be withdrawn only while a step runs, a re-run's
+ * cleanup has begun (an attempt is open), or the steps of a run a reset
+ * replaced haven't ended (`waiting`): their effects are half made.
  */
 function ending(runner: ObjectiveRunner): boolean {
   return (
     runner.busy ||
+    runner.waiting ||
     Boolean(runner.state.kept?.[RERUN] && runner.state.attempts[RERUN_CLEANUP])
   );
 }

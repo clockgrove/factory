@@ -118,7 +118,9 @@ export type RefusalCode =
   /** The knowledge store refused a `dream` write: the message says why (a changed or decided draft, an unreadable store). */
   | "dream_refused"
   /** `propose-amendment` or `decline-discovery` wasn't taken: the message names each problem and what would pass. */
-  | "amendment_refused";
+  | "amendment_refused"
+  /** `export-captures` can't build or send the export: the message says why (a changed export, an endpoint or headers it refuses, no model calls). */
+  | "export_refused";
 
 /** A request's result: applied (no code), or refused with a stable code. */
 export interface RequestResult {

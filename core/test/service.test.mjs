@@ -2890,7 +2890,7 @@ test("unknown and misplaced options are refused with the fix", () => {
     ],
     [
       ["cancel", "5", "--json"],
-      /--json belongs to factory setup, status, log, diagnostics, queue/,
+      /--json belongs to factory setup, status, log, diagnostics, export-captures, queue/,
     ],
     [
       ["status", "--bogus"],
@@ -3301,6 +3301,117 @@ test("the run log: tail, follow, and status reads its end", async () => {
     ["--scorecard", selection, "--summary"],
   ])
     assert.equal(cli(inst, "diagnostics", ...wrong).code, 2, wrong);
+  // export-captures: a preview sends nothing; a send to a loopback
+  // collector needs the digest of that exact preview.
+  const received = [];
+  const collector = createHttpServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      received.push({ url: req.url, headers: req.headers, body });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"partialSuccess":{}}');
+    });
+  });
+  await new Promise((resolve) => collector.listen(0, "127.0.0.1", resolve));
+  const endpoint = `http://127.0.0.1:${collector.address().port}`;
+  const exporting = (...args) =>
+    new Promise((resolve) => {
+      const child = spawn(
+        process.execPath,
+        [CLI, "export-captures", "54", ...args, "--repo", REPO],
+        {
+          env: {
+            ...inst.env,
+            OTEL_EXPORTER_OTLP_TRACES_HEADERS: "",
+            OTEL_EXPORTER_OTLP_HEADERS: "authorization=Bearer%20s3cret-token",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      children.add(child);
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (chunk) => {
+        out += chunk;
+      });
+      child.stderr.on("data", (chunk) => {
+        err += chunk;
+      });
+      child.on("exit", (code) => resolve({ code, out, err }));
+    });
+  const preview = await exporting("--json");
+  assert.equal(preview.code, 0, preview.err);
+  const shown = JSON.parse(preview.out);
+  assert.equal(shown.status, "preview");
+  assert.equal(shown.spans, 1);
+  assert.equal(shown.authorizationDigest, null);
+  assert.deepEqual(shown.headerNames, ["authorization"]);
+  const file = join(mkdtempSync(join(tmpdir(), "factory-export-")), "o.jsonl");
+  const retained = await exporting(
+    "--content",
+    "retained",
+    "--endpoint",
+    endpoint,
+    "--output",
+    file,
+  );
+  assert.equal(retained.code, 0, retained.err);
+  assert.match(retained.out, /nothing sent/);
+  assert.doesNotMatch(retained.out, /s3cret/);
+  const digest = /--authorize ([0-9a-f]{64})/.exec(retained.out)[1];
+  const written = readFileSync(file, "utf8");
+  assert.match(written, /review \[REDACTED\]/);
+  assert.doesNotMatch(written, /ghp_|sk-a|s3cret/);
+  assert.equal(received.length, 0, "a preview sends nothing");
+  assert.equal(
+    refusal(
+      await exporting(
+        "--content",
+        "retained",
+        "--send",
+        "--endpoint",
+        endpoint,
+        "--authorize",
+        "0".repeat(64),
+      ),
+    ),
+    "export_refused",
+  );
+  assert.equal(
+    refusal(await exporting("--endpoint", "http://collector.invalid")),
+    "export_refused",
+    "plain HTTP only to loopback",
+  );
+  assert.equal((await exporting("--send", "--endpoint", endpoint)).code, 2);
+  assert.equal(received.length, 0, "no send without the preview's digest");
+  const sent = await exporting(
+    "--content",
+    "retained",
+    "--send",
+    "--endpoint",
+    endpoint,
+    "--authorize",
+    digest,
+    "--json",
+  );
+  assert.equal(sent.code, 0, sent.err);
+  assert.equal(JSON.parse(sent.out).status, "accepted");
+  assert.equal(received.length, 1);
+  assert.equal(received[0].url, "/v1/traces");
+  assert.equal(received[0].headers.authorization, "Bearer s3cret-token");
+  const span = JSON.parse(received[0].body).resourceSpans[0].scopeSpans[0]
+    .spans[0];
+  const attributes = Object.fromEntries(
+    span.attributes.map((a) => [a.key, Object.values(a.value)[0]]),
+  );
+  assert.equal(attributes["factory.role"], "reviewer");
+  assert.equal(attributes["factory.request"], "review [REDACTED]");
+  assert.equal(attributes["factory.error"], "[REDACTED]");
+  assert.doesNotMatch(sent.out, /s3cret/);
+  collector.close();
   for (const wrong of [
     ["--analyze", "--gantt"],
     ["--analyze", "--group-by", "colour"],

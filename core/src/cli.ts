@@ -24,6 +24,12 @@ import {
   capacityRecommendation,
   hostCapacity,
 } from "./capacity.js";
+import {
+  prepareExport,
+  previewText,
+  sendExport,
+  writeExport,
+} from "./capture-export.js";
 import { type CoreConfig, configPath, loadConfig } from "./config.js";
 import { diagnostics } from "./diagnostics.js";
 import { eventLine, redactDeep } from "./display.js";
@@ -293,6 +299,41 @@ const COMMANDS: Record<string, Command> = {
       );
     },
   },
+  "export-captures": {
+    args: "ISSUE",
+    flags: {
+      run: "value",
+      "all-runs": "switch",
+      content: "value",
+      endpoint: "value",
+      output: "value",
+      json: "switch",
+      send: "switch",
+      authorize: "value",
+    },
+    help: "Preview an Objective's model calls as OpenTelemetry spans (OTLP/HTTP JSON) and send nothing: --content metadata (the default; no captured text) or retained (adds the captured request and response, redacted again), --output ABSOLUTE_FILE writes the OTLP requests to a new local file, --endpoint URL (a collector's base URL, HTTPS or loopback HTTP; headers from OTEL_EXPORTER_OTLP_TRACES_HEADERS or OTEL_EXPORTER_OTLP_HEADERS, never shown) prints the digest a send needs; --send --endpoint URL --authorize DIGEST sends exactly what that preview showed, in bounded batches; the latest run, or --run ID, or --all-runs",
+    check: (args) => {
+      const { flags } = args;
+      const content = flags.content ?? "metadata";
+      const output = flags.output;
+      return (
+        issueCheck(args) ??
+        (content !== "metadata" && content !== "retained"
+          ? "--content takes metadata or retained"
+          : flags.run !== undefined && flags["all-runs"] !== undefined
+            ? "give --run ID or --all-runs, not both"
+            : (flags.send !== undefined) !== (flags.authorize !== undefined)
+              ? "a send needs --send --endpoint URL --authorize DIGEST, the digest the preview printed"
+              : flags.send !== undefined && flags.endpoint === undefined
+                ? "--send needs --endpoint URL, the one the preview showed"
+                : output !== undefined && !isAbsolute(output)
+                  ? "--output needs an absolute path"
+                  : output !== undefined && flags.send !== undefined
+                    ? "--output goes with a preview, not --send"
+                    : undefined)
+      );
+    },
+  },
   watch: {
     args: "[ISSUE]",
     flags: {},
@@ -442,8 +483,15 @@ const COMMANDS: Record<string, Command> = {
 };
 
 /** How an option is written in help and fixes: `--tail N`, `--json`. */
-function flagForm(name: string, kind: FlagKind | undefined): string {
+function flagForm(
+  name: string,
+  kind: FlagKind | undefined,
+  command?: string,
+): string {
   const value =
+    (command === "export-captures" && name === "content"
+      ? "metadata|retained"
+      : undefined) ??
     {
       tail: "N",
       logs: "ITEM",
@@ -452,7 +500,11 @@ function flagForm(name: string, kind: FlagKind | undefined): string {
       "group-by": "FIELD",
       filter: "FIELD=VALUE",
       scorecard: "FILE",
-    }[name] ?? name.toUpperCase();
+      endpoint: "URL",
+      output: "ABSOLUTE_FILE",
+      authorize: "DIGEST",
+    }[name] ??
+    name.toUpperCase();
   return kind === "switch"
     ? `--${name}`
     : kind === "list"
@@ -465,7 +517,7 @@ const USAGE = `Usage: factory <command> --repo OWNER/NAME (or FACTORY_REPOSITORY
 ${Object.entries(COMMANDS)
   .map(([name, command]) => {
     const flags = Object.entries(command.flags)
-      .map(([flag, kind]) => ` [${flagForm(flag, kind)}]`)
+      .map(([flag, kind]) => ` [${flagForm(flag, kind, name)}]`)
       .join("");
     return `  ${`${name} ${command.args}${flags}`.trimEnd()}\n      ${command.help}`;
   })
@@ -516,6 +568,8 @@ async function main(argv: string[]): Promise<number> {
       return await logCommand(paths, repository, args);
     case "diagnostics":
       return await diagnosticsCommand(paths, repository, args);
+    case "export-captures":
+      return await exportCommand(paths, repository, args);
     case "watch":
       await watch(
         paths.logs,
@@ -1127,6 +1181,74 @@ function scorecardCommand(
   return 0;
 }
 
+/**
+ * `factory export-captures ISSUE [--run ID | --all-runs] [--content
+ * metadata|retained] [--endpoint URL] [--output FILE] [--json]`: a
+ * preview that sends nothing; `--send --endpoint URL --authorize DIGEST`
+ * sends what that preview showed. Exits 0 only when every batch was fully
+ * acknowledged.
+ */
+async function exportCommand(
+  paths: Paths,
+  repository: string,
+  args: Args,
+): Promise<number> {
+  const issue = issueOf(args);
+  const { flags } = args;
+  const runs = logFiles(paths.logs, issue).map(runOfFile);
+  if (!runs.length)
+    throw new Refusal(
+      "no_factory_state",
+      `Factory has no run log for #${issue}.`,
+    );
+  if (flags.run !== undefined && !runs.includes(flags.run))
+    throw new Refusal(
+      "no_factory_state",
+      `#${issue} has no run ${flags.run} in its run log; its runs: ${runs.join(", ")}.`,
+    );
+  const prepared = prepareExport({
+    logs: paths.logs,
+    repository,
+    issue,
+    runs:
+      flags.run !== undefined
+        ? { kind: "run", id: flags.run }
+        : flags["all-runs"] !== undefined
+          ? { kind: "all" }
+          : { kind: "latest" },
+    content: flags.content === "retained" ? "retained" : "metadata",
+    ...(flags.endpoint !== undefined ? { endpoint: flags.endpoint } : {}),
+    secrets: configOf(repository)?.secrets ?? [],
+  });
+  if (typeof prepared === "string")
+    throw new Refusal("export_refused", prepared);
+  if (flags.authorize === undefined) {
+    if (flags.output !== undefined)
+      try {
+        writeExport(prepared, flags.output);
+      } catch (error) {
+        throw new Refusal(
+          "export_refused",
+          `--output ${flags.output} can't be written as a new file: ${errorMessage(error)}`,
+        );
+      }
+    process.stdout.write(
+      flags.json !== undefined
+        ? `${JSON.stringify({ status: "preview", ...prepared.preview })}\n`
+        : previewText(prepared),
+    );
+    return 0;
+  }
+  const receipt = await sendExport(prepared, flags.authorize);
+  if (typeof receipt === "string") throw new Refusal("export_refused", receipt);
+  process.stdout.write(
+    flags.json !== undefined
+      ? `${JSON.stringify(receipt)}\n`
+      : `Export ${receipt.status}: ${receipt.sent} of ${receipt.batches} batch${receipt.batches === 1 ? "" : "es"} (${receipt.spans} spans) to ${receipt.endpoint}${receipt.status === "accepted" ? "" : `; ${JSON.stringify(receipt.results.at(-1))}: check the collector before sending again`}\n`,
+  );
+  return receipt.status === "accepted" ? 0 : 1;
+}
+
 /** `--deadline`: an absolute time, or a duration from `now`; undefined when it isn't one, or has passed. */
 function deadlineOf(value: string, now: number): string | undefined {
   const span = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(value);
@@ -1483,7 +1605,7 @@ function parse(argv: string[]): Args {
     const value = argv[i + 1];
     if (value === undefined || value.startsWith("--"))
       throw usage(
-        `--${name} needs a value: factory ${command ?? "<command>"} ${flagForm(name, kind)}`,
+        `--${name} needs a value: factory ${command ?? "<command>"} ${flagForm(name, kind, command)}`,
       );
     if (kind === "list")
       args.lists[name] = [...(args.lists[name] ?? []), value];
@@ -1520,7 +1642,7 @@ function misplaced(name: string, command: string | undefined): string {
     .map(([owner]) => owner);
   if (owners.length) {
     const owner = COMMANDS[owners[0]!]!;
-    return `--${name} belongs to factory ${owners.join(", ")}; use factory ${owners[0]} ${owner.args} ${flagForm(name, owner.flags[name])}`.replace(
+    return `--${name} belongs to factory ${owners.join(", ")}; use factory ${owners[0]} ${owner.args} ${flagForm(name, owner.flags[name], owners[0])}`.replace(
       /\s+/g,
       " ",
     );

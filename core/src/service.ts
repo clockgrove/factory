@@ -354,7 +354,21 @@ export async function serve(options: ServeOptions): Promise<number> {
   // Saved before any hold below, so a crash in between never counts the
   // same death twice.
   heartbeat();
-  const culprits = suspects(record.crashes);
+  // The evidence is spent before any question is visible: the steps to
+  // ask about are saved in the record first (`suspected`), so a death
+  // before their questions are saved asks them at the next start, and a
+  // reader who sees a question never sees the evidence behind it again.
+  const id = (r: { issue: number; step: string }) => `${r.issue} ${r.step}`;
+  const culprits = [
+    ...(previous?.suspected ?? []),
+    ...suspects(record.crashes),
+  ].filter((r, at, all) => all.findIndex((o) => id(o) === id(r)) === at);
+  if (culprits.length) {
+    // Another question needs three new deaths.
+    record.crashes = [];
+    record.suspected = culprits;
+    heartbeat();
+  }
   for (const culprit of culprits)
     try {
       runners
@@ -370,10 +384,9 @@ export async function serve(options: ServeOptions): Promise<number> {
       });
     }
   if (culprits.length) {
-    // The evidence is spent: the question is asked, or saved to ask as
-    // soon as no open question stops the step (engine.ts `hold`); another
-    // needs three new deaths.
-    record.crashes = [];
+    // Each question is asked, or saved to ask as soon as no open question
+    // stops the step (engine.ts `hold`).
+    delete record.suspected;
     heartbeat();
   }
   crashPoint("serve:loaded");
@@ -1044,6 +1057,8 @@ interface ServiceRecord {
   finished: number;
   /** The latest deaths, oldest first: the steps running at each, and whether the run that died finished any step. */
   crashes: Crash[];
+  /** Steps the spent evidence names, until their questions are saved. */
+  suspected?: Crash["running"];
   /** Set by a clean stop. */
   stopped?: boolean;
   unreadable: Record<string, string>;

@@ -34,8 +34,8 @@ export interface GitHubModule {
   shownAt?: string;
   /** When the card was set to queued for this run, by GitHub's clock. */
   queuedAt?: string;
-  /** The hold whose question comment exists. */
-  askedHold?: string;
+  /** The open holds whose question comment exists, and whether it names its question. */
+  asked?: { id: string; bound: boolean }[];
   /** Comments are read from here on. */
   commentsSince: string;
   /** Request ids already replied to. */
@@ -101,6 +101,8 @@ const MAX_BACKOFF_MS = 10 * 60_000;
 /** Comments kept waiting for their author's access to be read, per Objective. */
 const MAX_UNCHECKED = 20;
 const COMMAND = /^\/factory\s+(\S+)(?:\s+([\s\S]*))?$/;
+/** `--question ID` right after the answer names the hold it answers. */
+const QUESTION = /^--question\s+(\S+)(?:\s+([\s\S]*))?$/;
 
 /**
  * GitHub is input and display, never a precondition: every call here runs in
@@ -221,7 +223,7 @@ export class GitHubSync {
         this.readComments(
           issue,
           module,
-          () => Boolean(runner.state.hold),
+          () => runner.state.holds.length > 0,
           sync,
           (change) =>
             runner.transact(() =>
@@ -446,46 +448,68 @@ export class GitHubSync {
     });
   }
 
-  /** Post the open question once, with its answers. */
+  /**
+   * Post each open question once, with its answers. A comment shows the
+   * short form `/factory <answer>` only while it is the one open question
+   * (an answer that names none applies only then, see engine.ts `answer`);
+   * once another opens, it is edited to name its question.
+   */
   private ask(runner: ObjectiveRunner, module: GitHubModule): void {
-    const hold = runner.state.hold;
-    if (!hold || module.askedHold === hold.id) return;
     const issue = runner.state.issue;
-    this.background(issue, `ask:${issue}`, async () => {
-      const marker = MARK(issue, "hold", hold.id);
-      if (!(await this.posted(issue, marker, hold.askedAt))) {
+    const holds = runner.state.holds;
+    const bound = holds.length > 1;
+    for (const hold of holds) {
+      const asked = module.asked?.find((entry) => entry.id === hold.id);
+      if (asked && (asked.bound || !bound)) continue;
+      this.background(issue, `ask:${issue}:${hold.id}`, async () => {
+        const marker = MARK(issue, "hold", hold.id);
+        const named = ` --question ${hold.id}`;
         const answers = hold.answers
           .map(
             (a) =>
-              `\`/factory ${a}\`${a === hold.recommended ? " (recommended)" : ""}`,
+              `\`/factory ${a}${bound ? named : ""}\`${a === hold.recommended ? " (recommended)" : ""}`,
           )
           .join(", ");
-        crashPoint("sync:ask:before");
-        await this.github.postComment(
+        const about = hold.item
+          ? ` It stops Work Item \`${hold.item}\` and the items that depend on it; other work goes on.`
+          : "";
+        const form = bound
+          ? " Other questions are open too, so the answer names this one."
+          : ` While this is the only open question, the short form works; \`/factory <answer>${named}\` always does.`;
+        await this.github.upsertComment(
           issue,
-          `${marker}\n**Factory needs you.** ${hold.question}\n\nReply with one of: ${answers}. Add text after the answer to explain it.`,
+          marker,
+          `${marker}\n**Factory needs you.** ${hold.question}\n\nReply with one of: ${answers}. Add text after the answer to explain it.${about}${form}`,
+          "sync:ask",
+          undefined,
+          new Date(Date.parse(hold.askedAt) - 10 * 60_000).toISOString(),
         );
-        crashPoint("sync:ask:after");
-      }
-      runner.transact(() => {
-        (runner.state.modules.github as GitHubModule).askedHold = hold.id;
+        runner.transact(() => {
+          const github = runner.state.modules.github as GitHubModule;
+          const open = runner.state.holds.map((h) => h.id);
+          github.asked = [
+            ...(github.asked ?? []).filter(
+              (entry) => open.includes(entry.id) && entry.id !== hold.id,
+            ),
+            { id: hold.id, bound },
+          ];
+        });
       });
-    });
+    }
   }
 
   /**
    * A wait shown on the issue: one status note, edited in place, once an
    * unknown transient cause has lasted `noteAfterMs`; one reminder once a
    * human gate (an approval, a required review) has lasted `remindAfterMs`.
-   * Neither while a question is open: no step waits then but on its
-   * answer, and the engine pauses their clocks until it comes.
+   * Neither for a step an open question stops: it waits on the answer,
+   * and the engine pauses its clocks until it comes.
    */
   private note(runner: ObjectiveRunner, module: GitHubModule): void {
-    if (runner.state.hold) return;
     const now = this.now();
     const issue = runner.state.issue;
     const waits = Object.entries(runner.state.retries)
-      .filter(([, retry]) => retry.count === 0)
+      .filter(([step, retry]) => retry.count === 0 && !runner.heldBy(step))
       .sort(([, a], [, b]) => a.since.localeCompare(b.since));
     const transient = waits.find(
       ([, retry]) =>
@@ -561,7 +585,7 @@ export class GitHubSync {
         module.shown = option;
         if (at) module.shownAt = at;
       });
-    if (module.askedHold !== "unreadable")
+    if (!module.asked?.some((entry) => entry.id === "unreadable"))
       this.background(issue, `ask:${issue}`, async () => {
         const marker = MARK(issue, "hold", "unreadable");
         const found = await this.github.markedComment(issue, marker);
@@ -574,7 +598,7 @@ export class GitHubSync {
           );
           crashPoint("sync:ask:after");
         }
-        module.askedHold = "unreadable";
+        module.asked = [{ id: "unreadable", bound: false }];
       });
     else if (due)
       this.readComments(
@@ -688,12 +712,14 @@ export class GitHubSync {
     const command = comment.body.match(COMMAND);
     if (!command) return;
     const answer = command[1]!.toLowerCase();
-    const text = command[2]?.trim();
+    const bound = QUESTION.exec(command[2]?.trim() ?? "");
+    const question = bound?.[1];
+    const text = (bound ? bound[2] : command[2])?.trim();
     writeRequest(
       sync.requestsDir,
       answer === "cancel"
         ? { kind: "cancel", issue }
-        : answer === "retry" && !holding
+        : answer === "retry" && !holding && !question
           ? { kind: "retry", issue }
           : {
               kind: "answer",
@@ -701,6 +727,7 @@ export class GitHubSync {
               answer,
               ...(text ? { text } : {}),
               writtenAt: comment.createdAt,
+              ...(question ? { question } : {}),
             },
       comment.login,
       `comment-${comment.id}`,

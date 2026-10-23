@@ -26,9 +26,11 @@ export type Request =
       text?: string;
       /** When the answer was written (a comment's time): it only answers a question already asked then. */
       writtenAt?: string;
+      /** The id of the question this answers (`hold.id`); absent: see `ObjectiveRunner.answer`. */
+      question?: string;
     }
   | { kind: "cancel"; issue: number }
-  | { kind: "retry"; issue: number };
+  | { kind: "retry"; issue: number; question?: string };
 
 export interface StoredRequest {
   id: string;

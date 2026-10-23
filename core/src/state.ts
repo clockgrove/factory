@@ -13,7 +13,11 @@ import { join } from "node:path";
 import { crashPoint } from "./crash.js";
 import type { ProviderConfig } from "./providers/config.js";
 
-const STATE_VERSION = 1;
+/**
+ * 2: open questions are a list (`holds`). Another version is unreadable,
+ * with no migration; `factory reset` (#1775) must rebuild `holds`.
+ */
+const STATE_VERSION = 2;
 
 export type ObjectiveStatus =
   | "checking"
@@ -36,6 +40,12 @@ export interface Hold {
   id: string;
   /** The step that asked; it runs again with the answer. */
   step: string;
+  /**
+   * The Work Item it stops (a Work Item step's question about that item):
+   * that item waits, and the items that depend on it. Absent: the whole
+   * Objective waits (CORE.md#Holds and answers).
+   */
+  item?: string;
   question: string;
   answers: string[];
   recommended: string;
@@ -91,12 +101,18 @@ export interface FrozenProvider {
 export interface ObjectiveState {
   version: number;
   issue: number;
+  /** `holding` while any question is open. */
   status: ObjectiveStatus;
   /** Frozen at admission; absent only for a record that never ran. */
   provider?: FrozenProvider;
-  /** The status to return to when a hold is answered. */
-  resumeStatus?: ObjectiveStatus;
-  hold: Hold | null;
+  /** Open questions, oldest first: at most one for the Objective and one per Work Item. */
+  holds: Hold[];
+  /**
+   * When a question last opened or closed. An answer that names no
+   * question applies only if it was written after this, while one question
+   * was open, so it can't land on a question its author didn't see.
+   */
+  holdsChangedAt?: string;
   /** The latest answer per step, read by the step when it runs again. */
   answers: Record<string, Answer>;
   retries: Record<string, Retry>;
@@ -134,7 +150,7 @@ export function newObjective(
     issue,
     status: "checking",
     ...(provider ? { provider } : {}),
-    hold: null,
+    holds: [],
     answers: {},
     retries: {},
     repairs: {},

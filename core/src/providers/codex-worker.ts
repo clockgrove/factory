@@ -16,7 +16,7 @@ import {
 import { join, relative, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { SandboxConfig } from "../config.js";
-import { hold } from "../engine.js";
+import { hold, objectiveWide } from "../engine.js";
 import { redact } from "../log.js";
 import {
   gitMetadata,
@@ -282,14 +282,16 @@ export class CodexWorker implements Worker {
     // Under a root controller Codex's `:minimal` profile reads root-only
     // host files (/etc/shadow, SSH host keys) too.
     if (runsAsRoot() && this.options.sandbox.required !== false)
-      return hold(ROOT_REFUSAL);
+      return objectiveWide(hold(ROOT_REFUSAL));
     input.signal.throwIfAborted();
     let Codex: typeof import("@openai/codex-sdk").Codex;
     try {
       ({ Codex } = await import("@openai/codex-sdk"));
     } catch (error) {
-      return hold(
-        `Codex workers need the @openai/codex-sdk package; install it, then answer retry (${detail(String(error))})`,
+      return objectiveWide(
+        hold(
+          `Codex workers need the @openai/codex-sdk package; install it, then answer retry (${detail(String(error))})`,
+        ),
       );
     }
     const keep = this.options.allowedSecretNames ?? [];
@@ -298,8 +300,10 @@ export class CodexWorker implements Worker {
     try {
       home = workerHome(input.worktree, this.options.network === "host", keep);
     } catch (error) {
-      return hold(
-        `Factory could not set up the Codex worker home: ${detail(errorMessage(error))}. Fix the host or installation, then answer retry.`,
+      return objectiveWide(
+        hold(
+          `Factory could not set up the Codex worker home: ${detail(errorMessage(error))}. Fix the host or installation, then answer retry.`,
+        ),
       );
     }
     const watchdog = new IdleWatchdog(

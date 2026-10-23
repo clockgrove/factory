@@ -4,6 +4,7 @@ import type { RunLog } from "./log.js";
 import type { ProviderConfig } from "./providers/config.js";
 import {
   type Answer,
+  type Hold,
   type ObjectiveState,
   type ObjectiveStatus,
   type Retry,
@@ -40,6 +41,8 @@ export type Outcome =
       question: string;
       answers: string[];
       recommended: string;
+      /** What the question stops; absent: `item` (see `HoldScope`). */
+      scope?: HoldScope;
       keep?: Record<string, unknown>;
     }
   /** The step can't succeed as planned. */
@@ -57,7 +60,15 @@ export type Outcome =
       keep?: Record<string, unknown>;
     };
 
-/** A question for the operator; the first answer is recommended unless another is named. */
+/**
+ * What a question stops (CORE.md#Holds and answers). `item`: a Work Item
+ * step's question stops that item and the items that depend on it; any
+ * other step's stops the Objective. `objective`: the cause is the whole
+ * Objective's (its issue, the repository, the host, a provider account),
+ * so it stops every step, and is asked once.
+ */
+export type HoldScope = "item" | "objective";
+
 /**
  * Providers `switch` can move to: every other configured one, and the
  * current one when its configured settings changed since they were frozen
@@ -77,12 +88,28 @@ export function switchTargets(
     .map(([name]) => name);
 }
 
+/** A question for the operator; the first answer is recommended unless another is named. */
 export function hold(
   question: string,
   answers = ["retry", "cancel"],
   recommended = answers[0]!,
 ): Extract<Outcome, { kind: "hold" }> {
   return { kind: "hold", question, answers, recommended };
+}
+
+/** The outcome, with a question in it made the whole Objective's (see `HoldScope`). */
+export function objectiveWide<T extends Outcome>(outcome: T): T {
+  return outcome.kind === "hold" ? { ...outcome, scope: "objective" } : outcome;
+}
+
+/** The Work Item a step belongs to: item steps are keyed `item:<id>:<phase>`. */
+export function itemOf(key: string): string | undefined {
+  return /^item:([^:]+):/.exec(key)?.[1];
+}
+
+/** Whether an open question stops step `key`. */
+function stops(hold: Hold, key: string): boolean {
+  return hold.item === undefined || hold.item === itemOf(key);
 }
 
 export interface StepContext {
@@ -231,6 +258,23 @@ export class ObjectiveRunner {
     return this.running.size > 0;
   }
 
+  /**
+   * The open question that stops `key`: the Objective's, or one on the
+   * step's Work Item. An item's dependents (by dependencies and stack
+   * layers) aren't runnable until it settles, so they wait with it.
+   */
+  heldBy(key: string): Hold | undefined {
+    return this.state.holds.find((hold) => stops(hold, key));
+  }
+
+  /** Whether open questions stop every step it could start: then it takes no slot. */
+  get held(): boolean {
+    return (
+      this.state.holds.length > 0 &&
+      this.workflow.steps(this.state).every((step) => this.heldBy(step.key))
+    );
+  }
+
   /** Whether this Objective has steps to run: cleanup after cancel counts. */
   get hasWork(): boolean {
     return this.busy || this.workflow.steps(this.state).length > 0;
@@ -266,9 +310,10 @@ export class ObjectiveRunner {
    * An attempt saved as started but not running here was interrupted: by
    * the service's death, or by a save that failed after the step finished.
    * That is never the step's error: it runs again at once, with no backoff,
-   * even while another step's question is open, unless the service is in a
+   * even while a question that stops it is open, unless the service is in a
    * crash loop (`ServiceRun.resumeAt`). An interrupted attempt of a step
-   * that is no longer next is dropped.
+   * that is no longer next is dropped. Any other step waits while a
+   * question that stops it is open (`heldBy`).
    */
   tick(): void {
     const steps = this.workflow.steps(this.state);
@@ -279,14 +324,13 @@ export class ObjectiveRunner {
       this.transact(() => {
         for (const key of stale) delete this.state.attempts[key];
       });
-    const holding = this.state.status === "holding";
     const now = this.now().getTime();
     for (const step of steps) {
       if (this.running.size >= this.limits.concurrency) return;
       if (this.running.has(step.key)) continue;
       if (this.state.attempts[step.key]) {
         if (now < this.run.resumeAt) continue;
-      } else if (holding) continue;
+      } else if (this.heldBy(step.key)) continue;
       else {
         const retry = this.state.retries[step.key];
         if (retry && Date.parse(retry.nextAt) > now) continue;
@@ -335,8 +379,10 @@ export class ObjectiveRunner {
       (error: unknown): Outcome =>
         // A full disk needs a person; retrying can't free it.
         (error as NodeJS.ErrnoException | null)?.code === "ENOSPC"
-          ? hold(
-              `The service host's disk is full (${errorMessage(error)}). Free space, then answer retry; or cancel.`,
+          ? objectiveWide(
+              hold(
+                `The service host's disk is full (${errorMessage(error)}). Free space, then answer retry; or cancel.`,
+              ),
             )
           : {
               kind: "retry",
@@ -441,18 +487,18 @@ export class ObjectiveRunner {
         state.done[key] = outcome.result ?? true;
         delete state.retries[key];
         delete state.answers[key];
-        if (TERMINAL.includes(state.status)) break;
-        // Another step's question may be open: keep holding, and resume
-        // to the status this step's progress gives.
-        if (state.status === "holding")
-          state.resumeStatus = this.workflow.status(state);
-        else state.status = this.workflow.status(state);
         break;
       case "retry":
         this.retry(key, outcome);
         break;
       case "hold":
-        this.hold(key, outcome.question, outcome.answers, outcome.recommended);
+        this.hold(
+          key,
+          outcome.question,
+          outcome.answers,
+          outcome.recommended,
+          outcome.scope,
+        );
         break;
       case "fail":
         this.hold(
@@ -471,6 +517,11 @@ export class ObjectiveRunner {
           if (cleared !== outcome.target) delete state.retries[cleared];
         }
         this.abortRunning(outcome.clear);
+        // A question about work the repair cleared is moot.
+        for (const moot of state.holds.filter((hold) =>
+          outcome.clear.includes(hold.step),
+        ))
+          this.close(moot);
         state.repairs ??= {};
         const repair = state.repairs[outcome.target] ?? {
           count: 0,
@@ -493,6 +544,7 @@ export class ObjectiveRunner {
         break;
       }
     }
+    this.settle();
   }
 
   /**
@@ -532,7 +584,9 @@ export class ObjectiveRunner {
       outcome.afterMs !== undefined && outcome.afterMs >= 0
         ? now + outcome.afterMs
         : now + backoff;
-    let question: { text: string; answers: string[] } | undefined;
+    let question:
+      | { text: string; answers: string[]; scope?: HoldScope }
+      | undefined;
     if (isError) {
       if (count >= this.limits.maxErrors)
         question = {
@@ -549,6 +603,8 @@ export class ObjectiveRunner {
         question = {
           text: `${outcome.reason}\n\nThe limit resets ${Number.isFinite(at) ? `at ${new Date(at).toISOString()}` : "at a time it didn't say"}, more than ${hours(this.limits.maxWaitMs)} away. \`${WAIT}\` keeps waiting until it resets${others.length === 1 ? `; \`${SWITCH}\` runs this Objective on provider ${named} instead` : others.length ? `; \`${SWITCH} NAME\` runs this Objective on another configured provider: ${named}` : ""}; or cancel.`,
           answers: [WAIT, ...(others.length ? [SWITCH] : []), "cancel"],
+          // A limit is the account's, not the step's: one question for all.
+          scope: "objective",
         };
       }
     } else if (
@@ -574,7 +630,13 @@ export class ObjectiveRunner {
     };
     state.retries[key] = record;
     if (question)
-      this.hold(key, question.text, question.answers, question.answers[0]!);
+      this.hold(
+        key,
+        question.text,
+        question.answers,
+        question.answers[0]!,
+        question.scope,
+      );
   }
 
   /**
@@ -631,69 +693,123 @@ export class ObjectiveRunner {
   }
 
   /**
-   * Open a question. One question is open at a time: a second step that
-   * asks while another question is open records nothing; it can't run
-   * while the question is open, so it runs again after the answer, and
-   * asks then.
+   * Open a question, on the step's Work Item, or on the Objective (any
+   * other step's, or one `scope` makes the Objective's). One question is
+   * open per scope: a step that asks while a question that covers its
+   * scope is open (the Objective's, or its item's) records nothing; it
+   * can't run while that question is open, so it runs again after the
+   * answer, and asks then.
    */
   private hold(
     key: string,
     question: string,
     answers: string[],
     recommended: string,
+    scope?: HoldScope,
   ): void {
     const state = this.state;
     const now = this.now().toISOString();
-    if (state.hold && state.hold.step !== key) return;
+    const item = scope === "objective" ? undefined : itemOf(key);
+    const open = state.holds.find(
+      (hold) =>
+        hold.item === undefined || (item !== undefined && hold.item === item),
+    );
+    if (open && open.step !== key) return;
     const all = answers.includes("cancel") ? answers : [...answers, "cancel"];
-    state.hold = {
-      id: `${key}@${now}`,
-      step: key,
-      question,
-      answers: all,
-      recommended: all.includes(recommended) ? recommended : all[0]!,
-      askedAt: now,
-    };
-    if (state.status !== "holding") state.resumeStatus = state.status;
+    this.setHolds([
+      ...state.holds.filter((hold) => hold !== open),
+      {
+        id: `${key}@${now}`,
+        step: key,
+        ...(item !== undefined ? { item } : {}),
+        question,
+        answers: all,
+        recommended: all.includes(recommended) ? recommended : all[0]!,
+        askedAt: now,
+      },
+    ]);
     state.status = "holding";
   }
 
+  /** Change the open questions, noting when (see `answer`). */
+  private setHolds(holds: Hold[]): void {
+    this.state.holds = holds;
+    this.state.holdsChangedAt = this.now().toISOString();
+  }
+
   /**
-   * Answer the open question. Returns null when applied, or the reason it
-   * doesn't fit. The caller saves (see `transact`).
+   * Answer the open question `question` names (a hold id). An answer that
+   * names none (a `/factory <answer>` comment) applies only if one question
+   * alone was open from before it was written until now, so it can't land
+   * on a question its author didn't see. Returns null when applied, or the
+   * reason it doesn't fit. The caller saves (see `transact`).
    */
   answer(
     answer: string,
     text: string | undefined,
     by: string,
     writtenAt?: string,
+    question?: string,
   ): string | null {
     if (answer === "cancel") return this.cancel(by);
-    const hold = this.state.hold;
-    if (!hold) return `#${this.state.issue} has no open question.`;
+    const issue = this.state.issue;
+    const holds = this.state.holds;
+    if (!holds.length)
+      return question === undefined
+        ? `#${issue} has no open question.`
+        : `#${issue}'s question ${question} was already answered, and no question is open now.`;
+    if (
+      question === undefined &&
+      !(
+        holds.length === 1 &&
+        writtenAt !== undefined &&
+        Date.parse(writtenAt) >= Date.parse(this.state.holdsChangedAt ?? "")
+      )
+    )
+      return `That answer names no question, and ${holds.length > 1 ? "more than one question is open" : "the open questions changed after it was written"}, so it wasn't applied. ${openQuestions(issue, holds)}`;
+    const hold =
+      question === undefined
+        ? holds[0]!
+        : holds.find((open) => open.id === question);
+    if (!hold)
+      return `#${issue}'s question ${question} isn't open, so that answer wasn't applied. ${openQuestions(issue, holds)}`;
     if (writtenAt && Date.parse(writtenAt) < Date.parse(hold.askedAt) - 60_000)
-      return `That answer was written before the current question was asked, so it wasn't applied. The open question asks: ${hold.question.slice(0, 300)} Answers: ${hold.answers.join(", ")}.`;
+      return `That answer was written before question ${hold.id} was asked, so it wasn't applied. It asks: ${hold.question.slice(0, 300)} Answers: ${hold.answers.join(", ")}.`;
     if (!hold.answers.includes(answer))
-      return `"${answer}" isn't an answer to this question. Answers: ${hold.answers.join(", ")}.`;
+      return `"${answer}" isn't an answer to question ${hold.id}. Answers: ${hold.answers.join(", ")}.`;
+    let provider: string | undefined;
+    if (answer === SWITCH) {
+      const others = this.otherProviders();
+      provider =
+        text?.trim().split(/\s+/)[0] ||
+        (others.length === 1 ? others[0] : undefined);
+      if (
+        !provider ||
+        !this.workflow.providers?.[provider] ||
+        !others.includes(provider)
+      )
+        return others.length
+          ? `Name the provider to switch to: \`${SWITCH} NAME\`, one of ${others.join(", ")}.`
+          : "No other provider is configured, and this one's settings are unchanged, so there is nothing to switch to.";
+    }
     const retry = this.state.retries[hold.step];
-    if (answer === WAIT && retry) this.grant(retry);
-    else {
-      if (answer === SWITCH) {
-        const others = this.otherProviders();
-        const name =
-          text?.trim().split(/\s+/)[0] ||
-          (others.length === 1 ? others[0] : undefined);
-        const settings = name ? this.workflow.providers?.[name] : undefined;
-        if (!name || !settings || !others.includes(name))
-          return others.length
-            ? `Name the provider to switch to: \`${SWITCH} NAME\`, one of ${others.join(", ")}.`
-            : "No other provider is configured, and this one's settings are unchanged, so there is nothing to switch to.";
-        // The Objective's frozen provider changes for the rest of its run.
+    this.close(hold);
+    if (answer === WAIT && retry) {
+      // A limit is the account's: waiting for it is every step's answer.
+      for (const other of Object.values(this.state.retries))
+        if (other === retry || sameLimit(retry, other)) this.grant(other);
+    } else {
+      if (provider) {
+        // The Objective's frozen provider changes for the rest of its run,
+        // and every step waiting on a provider's limit runs now, on it.
         this.state.provider = {
-          name,
+          name: provider,
           selectedBy: "switch",
-          settings: structuredClone(settings),
+          settings: structuredClone(this.workflow.providers![provider]!),
         };
+        for (const [key, other] of Object.entries(this.state.retries))
+          if (other.wait?.kind === "reset" && other.wait.provider)
+            delete this.state.retries[key];
       } else
         this.state.answers[hold.step] = {
           holdId: hold.id,
@@ -705,35 +821,52 @@ export class ObjectiveRunner {
         };
       delete this.state.retries[hold.step];
     }
-    this.resume(hold.askedAt, hold.step);
-    this.state.hold = null;
-    this.state.status =
-      this.state.resumeStatus ?? this.workflow.status(this.state);
-    delete this.state.resumeStatus;
+    this.settle();
     return null;
   }
 
+  /** `holding` while any question is open; else the status progress gives. */
+  private settle(): void {
+    if (TERMINAL.includes(this.state.status)) return;
+    this.state.status = this.state.holds.length
+      ? "holding"
+      : this.workflow.status(this.state);
+  }
+
   /**
-   * A closed question's time is not the waiting steps' time: a step can't
-   * run while a question is open, so its wait clocks (`since`, a granted
-   * wait) pause from when it was due, or the question was asked if later,
-   * until now. Its budgets and the status note count only time it could run.
+   * Close a question (answered, or moot after a repair). Its time is not
+   * the time of the steps it stopped: a step can't run while a question
+   * that stops it is open, so its wait clocks (`since`, a granted wait)
+   * pause from when it was due, or the question was asked if later, until
+   * now, or until another open question that stops it too was asked, if
+   * earlier (that one's close pauses the rest). Only steps the question
+   * stopped pause: an item's question leaves other items' clocks running.
+   * Budgets and the status note count only time a step could run.
    * A human gate's `since` stays: it is never timed out, and its reminder
    * (github-sync note) is keyed to the original start, so moving it would
    * post the reminder again.
    */
-  private resume(askedAt: string, held: string): void {
+  private close(hold: Hold): void {
     const now = this.now().getTime();
+    const rest = this.state.holds.filter((open) => open !== hold);
     for (const [key, retry] of Object.entries(this.state.retries)) {
-      if (key === held || retry.wait?.kind === "gate") continue;
+      if (key === hold.step || retry.wait?.kind === "gate") continue;
+      if (!stops(hold, key)) continue;
+      const until = Math.min(
+        now,
+        ...rest
+          .filter((open) => stops(open, key))
+          .map((open) => Date.parse(open.askedAt)),
+      );
       const paused =
-        now - Math.max(Date.parse(askedAt), Date.parse(retry.nextAt));
+        until - Math.max(Date.parse(hold.askedAt), Date.parse(retry.nextAt));
       if (!(paused > 0)) continue;
       const later = (at: string) =>
         new Date(Date.parse(at) + paused).toISOString();
       retry.since = later(retry.since);
       if (retry.grantedUntil) retry.grantedUntil = later(retry.grantedUntil);
     }
+    this.setHolds(rest);
   }
 
   private otherProviders(): string[] {
@@ -770,10 +903,9 @@ export class ObjectiveRunner {
       return `#${this.state.issue} has already finished (${status}).`;
     if (status === "cancelled") return null;
     this.state.status = "cancelled";
-    this.state.hold = null;
+    this.setHolds([]);
     this.state.attempts = {};
     this.state.retries = {};
-    delete this.state.resumeStatus;
     this.state.answers.cancel = {
       holdId: "",
       answer: "cancel",
@@ -788,13 +920,19 @@ export class ObjectiveRunner {
     return null;
   }
 
-  /** Run waiting steps now, or answer `retry` to an open question that offers it. */
-  retryNow(by: string): string | null {
-    const hold = this.state.hold;
-    if (hold) {
-      if (!hold.answers.includes("retry"))
-        return `#${this.state.issue}'s open question has no retry answer. Answers: ${hold.answers.join(", ")}.`;
-      return this.answer("retry", undefined, by);
+  /**
+   * Run waiting steps now; or, while a question is open, answer `retry` to
+   * the one `question` names.
+   */
+  retryNow(by: string, question?: string): string | null {
+    const holds = this.state.holds;
+    if (question !== undefined || holds.length) {
+      if (question === undefined)
+        return `#${this.state.issue} has an open question, so retry must name it. ${openQuestions(this.state.issue, holds)}`;
+      const hold = holds.find((open) => open.id === question);
+      if (hold && !hold.answers.includes("retry"))
+        return `#${this.state.issue}'s question ${hold.id} has no retry answer. Answers: ${hold.answers.join(", ")}.`;
+      return this.answer("retry", undefined, by, undefined, question);
     }
     for (const retry of Object.values(this.state.retries))
       retry.nextAt = this.now().toISOString();
@@ -807,6 +945,21 @@ export class ObjectiveRunner {
       this.state.endedAt ??= this.state.updatedAt;
     saveState(this.dir, this.state);
   }
+}
+
+function openQuestions(issue: number, holds: readonly Hold[]): string {
+  return holds.length
+    ? `Open questions: ${holds.map((hold) => `${hold.id} (${hold.answers.join(", ")})`).join("; ")}. Name one: \`factory answer ${issue} <answer> --question <id>\`, or comment \`/factory <answer> --question <id>\`.`
+    : "No question is open now.";
+}
+
+/** Whether two retries wait on the same limit: a limit is its account's, not one step's. */
+function sameLimit(a: Retry, b: Retry): boolean {
+  return (
+    a.wait?.kind === "reset" &&
+    b.wait?.kind === "reset" &&
+    a.wait.provider === b.wait.provider
+  );
 }
 
 /** A retry's class: a reset, a gate, or an unknown cause (errors included). */

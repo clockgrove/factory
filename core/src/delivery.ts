@@ -13,7 +13,7 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 import { crashPoint } from "./crash.js";
-import { hold, type Outcome } from "./engine.js";
+import { hold, type Outcome, objectiveWide } from "./engine.js";
 import {
   defaultHead,
   operatorGit,
@@ -503,8 +503,10 @@ async function pushBranch(
       // No ref was refused: the push never reached the refs (network, or
       // credentials). A login without push access is a setting to change.
       if ((await context.github.canPush(context.signal)) === false)
-        return hold(
-          `Factory's login may not push to ${context.github.repository} (git push of ${branch} failed: ${message(error).slice(0, 300)}). Give it write access (fine-grained token: Contents: write), then answer retry; or cancel.`,
+        return objectiveWide(
+          hold(
+            `Factory's login may not push to ${context.github.repository} (git push of ${branch} failed: ${message(error).slice(0, 300)}). Give it write access (fine-grained token: Contents: write), then answer retry; or cancel.`,
+          ),
         );
       throw new TransientError(`git push of ${branch}: ${message(error)}`);
     }
@@ -512,8 +514,10 @@ async function pushBranch(
     // it again; if it did not, the remote refuses the push itself.
     if ((await remoteHead(context, branch)) !== remote)
       return retry(`Remote branch ${branch} moved during the push`);
-    return hold(
-      `The remote refused Factory's push of ${branch} (${refused}) although the branch did not move. Allow Factory's login to push and force-push its own branches (factory/*), then answer retry; or cancel.`,
+    return objectiveWide(
+      hold(
+        `The remote refused Factory's push of ${branch} (${refused}) although the branch did not move. Allow Factory's login to push and force-push its own branches (factory/*), then answer retry; or cancel.`,
+      ),
     );
   }
   crashPoint("deliver:push:after");
@@ -574,8 +578,10 @@ async function originHold(context: DeliveryContext): Promise<Hold | undefined> {
     context.signal,
   );
   return problem
-    ? hold(
-        `${problem}. Point origin's fetch and push URLs (and any insteadOf rewrite) at ${context.github.repository} with its default LFS route, then answer retry; or cancel.`,
+    ? objectiveWide(
+        hold(
+          `${problem}. Point origin's fetch and push URLs (and any insteadOf rewrite) at ${context.github.repository} with its default LFS route, then answer retry; or cancel.`,
+        ),
       )
     : undefined;
 }
@@ -1426,8 +1432,10 @@ async function mergeCommitsHold(
     context.signal,
   ))
     ? undefined
-    : hold(
-        `The repository does not allow merge commits into ${defaultBranch}, which Factory needs to bind each delivered head into the default branch. Allow merge commits in the repository settings (Settings → General → Pull Requests) and any ruleset, then answer retry; or cancel.`,
+    : objectiveWide(
+        hold(
+          `The repository does not allow merge commits into ${defaultBranch}, which Factory needs to bind each delivered head into the default branch. Allow merge commits in the repository settings (Settings → General → Pull Requests) and any ruleset, then answer retry; or cancel.`,
+        ),
       );
 }
 
@@ -1879,8 +1887,10 @@ async function ensureStack(
   } catch (error) {
     if (error instanceof Unreadable) return unreadable(error);
     if (error instanceof GitHubError && error.status === 404)
-      return hold(
-        `GitHub shows no native stacks for ${github.repository} (${error.message.slice(0, 300)}). Enable stacked pull requests for the repository, or set the installation's delivery to regular, then answer retry; or cancel.`,
+      return objectiveWide(
+        hold(
+          `GitHub shows no native stacks for ${github.repository} (${error.message.slice(0, 300)}). Enable stacked pull requests for the repository, or set the installation's delivery to regular, then answer retry; or cancel.`,
+        ),
       );
     throw error;
   }

@@ -1,7 +1,13 @@
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { CoreConfig } from "../config.js";
-import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
+import {
+  hold,
+  type Outcome,
+  objectiveWide,
+  type Step,
+  type StepContext,
+} from "../engine.js";
 import { defaultHead } from "../git.js";
 import { type GitHub, githubOutcome } from "../github.js";
 import { planningKnowledge } from "../knowledge/index.js";
@@ -969,9 +975,11 @@ function authorHold(
         [AUTHOR_APPROVAL]: { digest, by: answer.by, at: answer.at },
       },
     };
-  return hold(
-    `Issue #${state.issue} was written by ${author ? `@${author}` : "a deleted account"}, who has no write access; approve to plan it.\n\nFactory plans from what GitHub shows of it (digest \`${digest}\`), so content GitHub hides never reaches a model. Diagram and math sources aren't planner input either: each mermaid diagram is \`[mermaid diagram]\` and each math block \`[math]\`, as you see only the drawing. Nothing in it counts until you approve, and an edit asks again.`,
-    ["approve", "cancel"],
+  return objectiveWide(
+    hold(
+      `Issue #${state.issue} was written by ${author ? `@${author}` : "a deleted account"}, who has no write access; approve to plan it.\n\nFactory plans from what GitHub shows of it (digest \`${digest}\`), so content GitHub hides never reaches a model. Diagram and math sources aren't planner input either: each mermaid diagram is \`[mermaid diagram]\` and each math block \`[math]\`, as you see only the drawing. Nothing in it counts until you approve, and an edit asks again.`,
+      ["approve", "cancel"],
+    ),
   );
 }
 
@@ -1093,11 +1101,14 @@ export async function guarded(
           ...(error.afterMs !== undefined ? { afterMs: error.afterMs } : {}),
           ...(error.wait ? { wait: error.wait } : {}),
         };
-      if (error.outcome === "hold") return hold(error.message, error.answers);
+      if (error.outcome === "hold")
+        return objectiveWide(hold(error.message, error.answers));
       // Too large for the model, or refused: the Objective has to change.
-      return hold(
-        `${error.message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`,
-        ["replan", "retry", "cancel"],
+      return objectiveWide(
+        hold(
+          `${error.message}\n\nEdit the Objective (for example, pin smaller Sources) and answer \`replan\`.`,
+          ["replan", "retry", "cancel"],
+        ),
       );
     }
     const outcome = githubOutcome(

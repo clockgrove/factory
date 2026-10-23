@@ -25,7 +25,7 @@ import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isScalar, parseDocument, visit } from "yaml";
 import type { SandboxConfig } from "./config.js";
-import { hold, type Outcome } from "./engine.js";
+import { hold, type Outcome, objectiveWide } from "./engine.js";
 import { knowledgeSettings } from "./knowledge/settings.js";
 import {
   hydrateTree,
@@ -184,8 +184,10 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
   // gitlink, host-side Git would enter a repository they wrote, with its
   // configuration; so no tree with one is validated.
   if (await hasGitlink(checkout, { commit, signal }))
-    return hold(
-      "Factory does not validate trees that contain submodule gitlinks: host-side Git would enter repositories sandboxed commands can write. Use Factory on a repository without submodules.",
+    return objectiveWide(
+      hold(
+        "Factory does not validate trees that contain submodule gitlinks: host-side Git would enter repositories sandboxed commands can write. Use Factory on a repository without submodules.",
+      ),
     );
   const capture = input.reviewArtifacts;
   const dropped =
@@ -347,8 +349,10 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         timeoutMs: input.commandTimeoutMs ?? 30 * MINUTE,
       });
       if (run.kind === "fault")
-        return hold(
-          `The command sandbox could not run \`${command}\`: ${run.detail}. ${run.fix}.`,
+        return objectiveWide(
+          hold(
+            `The command sandbox could not run \`${command}\`: ${run.detail}. ${run.fix}.`,
+          ),
         );
       const output = `${run.stdout}${run.stderr}`;
       const durationMs = Date.now() - started;
@@ -417,14 +421,18 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
       // Without pasta, it failed for the host's lack of network, whatever
       // the candidate changed: the operator's fix, never a repair (#1623).
       if (run.offline !== undefined && offlineMissing)
-        return hold(
-          `${failed}the install ran offline, because ${run.offline}, and the package store lacks packages it needs:\n${failedOutput(output)}\n\nInstall passt so pasta is on Factory's PATH, and run Factory as a regular user, so verified installs reach the configured registry; then answer \`retry\`.`,
+        return objectiveWide(
+          hold(
+            `${failed}the install ran offline, because ${run.offline}, and the package store lacks packages it needs:\n${failedOutput(output)}\n\nInstall passt so pasta is on Factory's PATH, and run Factory as a regular user, so verified installs reach the configured registry; then answer \`retry\`.`,
+          ),
         );
       // When Factory could not verify its package inputs, the limit is
       // Factory's, not the candidate's (#1628).
       if (refused?.unverified && offlineMissing)
-        return hold(
-          `${failed}the install ran offline, because ${refused.reason}, and the package store lacks packages it needs:\n${failedOutput(output)}\n\nKeep the base's registry configuration literal http(s) URLs and its lockfiles plain YAML or JSON, or warm packageStore with the packages the install needs; then answer \`retry\`.`,
+        return objectiveWide(
+          hold(
+            `${failed}the install ran offline, because ${refused.reason}, and the package store lacks packages it needs:\n${failedOutput(output)}\n\nKeep the base's registry configuration literal http(s) URLs and its lockfiles plain YAML or JSON, or warm packageStore with the packages the install needs; then answer \`retry\`.`,
+          ),
         );
       // With the network off by configuration, an install whose inputs are
       // the base's can't fetch what the store lacks however often it runs.
@@ -434,8 +442,10 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         input.sandbox.network === "off" &&
         !(await dependencyInputsChanged(checkout, plan.base, commit, signal))
       )
-        return hold(
-          `${failed}the install ran offline, because sandbox.network is off, and the package store lacks packages the base's lockfile needs:\n${failedOutput(output)}\n\nSet sandbox.network to package-install, or warm sandbox.packageStore with those packages; then answer \`retry\`.`,
+        return objectiveWide(
+          hold(
+            `${failed}the install ran offline, because sandbox.network is off, and the package store lacks packages the base's lockfile needs:\n${failedOutput(output)}\n\nSet sandbox.network to package-install, or warm sandbox.packageStore with those packages; then answer \`retry\`.`,
+          ),
         );
       // A grant the candidate's package inputs refused stays its fault,
       // but says why the install was offline.

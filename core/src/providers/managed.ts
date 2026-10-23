@@ -47,7 +47,7 @@ import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { create, extract, list } from "tar";
 import { crashPoint } from "../crash.js";
-import { hold } from "../engine.js";
+import { hold, objectiveWide } from "../engine.js";
 import { validPath } from "../objective.js";
 import { ContainedError, copyContained } from "../paths.js";
 import { errorMessage } from "../text.js";
@@ -390,7 +390,7 @@ function outcome(error: unknown, signal: AbortSignal): WorkerResult {
         ...(error.afterMs !== undefined && { afterMs: error.afterMs }),
         ...(error.wait && { wait: error.wait }),
       };
-    return hold(error.message);
+    return objectiveWide(hold(error.message));
   }
   if (signal.aborted) throw signal.reason ?? error;
   return {

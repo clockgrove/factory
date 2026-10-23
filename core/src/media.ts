@@ -40,7 +40,7 @@ import { basename, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebStream } from "node:stream/web";
-import { hold } from "./engine.js";
+import { hold, objectiveWide } from "./engine.js";
 import {
   blobSizes,
   type CatFile,
@@ -1649,8 +1649,10 @@ async function lfsFetch(input: {
   const { checkout, signal } = input;
   const problem = await originProblem(checkout, input.repository, signal);
   if (problem)
-    return hold(
-      `${problem}. Factory fetches LFS objects from origin's default route. Fix origin, then answer retry; or cancel.`,
+    return objectiveWide(
+      hold(
+        `${problem}. Factory fetches LFS objects from origin's default route. Fix origin, then answer retry; or cancel.`,
+      ),
     );
   const plain = input.paths.every((path) => !/[,*?[\]\\!]/.test(path));
   const fetched = await operatorGit(
@@ -1695,8 +1697,10 @@ async function lfsPush(input: {
     input.signal,
   );
   if (problem)
-    return hold(
-      `${problem}. Factory uploads LFS objects to origin's default route. Fix origin, then answer retry; or cancel.`,
+    return objectiveWide(
+      hold(
+        `${problem}. Factory uploads LFS objects to origin's default route. Fix origin, then answer retry; or cancel.`,
+      ),
     );
   try {
     await operatorGit(
@@ -2106,8 +2110,10 @@ async function copyChecked(
   });
   if (held?.sha256 !== expected.oid || held.bytes !== expected.size) {
     await rm(file, { force: true });
-    return hold(
-      `The local Git LFS object ${expected.oid} is not a regular file holding the bytes its name says. Remove it from the checkout's .git/lfs/objects and answer retry, or cancel.`,
+    return objectiveWide(
+      hold(
+        `The local Git LFS object ${expected.oid} is not a regular file holding the bytes its name says. Remove it from the checkout's .git/lfs/objects and answer retry, or cancel.`,
+      ),
     );
   }
   return { kind: "done", value: held };

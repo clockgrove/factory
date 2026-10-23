@@ -311,7 +311,7 @@ export async function serve(options: ServeOptions): Promise<number> {
           result = runner.cancel(stored.by);
           break;
         case "retry":
-          result = runner.retryNow(stored.by);
+          result = runner.retryNow(stored.by, request.question);
           break;
         case "answer":
           result = runner.answer(
@@ -319,6 +319,7 @@ export async function serve(options: ServeOptions): Promise<number> {
             request.text,
             stored.by,
             request.writtenAt,
+            request.question,
           );
           break;
       }
@@ -362,8 +363,9 @@ export async function serve(options: ServeOptions): Promise<number> {
         // Running steps keep their slot, even while another step's question is open.
         slots -= 1;
         run = true;
-      } else if (state.status === "holding")
-        // A hold takes no slot; a step the service's death interrupted resumes.
+      } else if (runner.held)
+        // Questions that stop every step it could start take no slot; a
+        // step the service's death interrupted resumes.
         run = Object.keys(state.attempts).length > 0;
       // A wait on a human gate (an approval, a required review) has no
       // deadline, so it takes no slot: it polls, and its paths stay owned.
@@ -579,14 +581,18 @@ function acceptedAt(state: ObjectiveState): string {
 }
 
 /**
- * Whether every step left to run waits on a human gate: nothing it can do
- * until a person outside Factory acts.
+ * Whether every step left to run waits on a human gate or an open
+ * question: nothing it can do until a person acts.
  */
 function gated(runner: ObjectiveRunner, workflow: Workflow): boolean {
   const steps = workflow.steps(runner.state);
   return (
     steps.length > 0 &&
-    steps.every((step) => runner.state.retries[step.key]?.wait?.kind === "gate")
+    steps.every(
+      (step) =>
+        runner.state.retries[step.key]?.wait?.kind === "gate" ||
+        runner.heldBy(step.key),
+    )
   );
 }
 

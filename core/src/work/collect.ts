@@ -20,7 +20,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config.js";
-import { hold } from "../engine.js";
+import { hold, objectiveWide } from "../engine.js";
 import type { GitExit } from "../git.js";
 import { validPath } from "../objective.js";
 import { forceRemove, within } from "../paths.js";
@@ -856,8 +856,10 @@ async function scannerRules(
     )
   )
     throw new CollectionStop(
-      hold(
-        "FACTORY_SECRETLINT_CONFIG must be a regular absolute file outside the target checkout. Fix or unset it for the service, then answer retry.",
+      objectiveWide(
+        hold(
+          "FACTORY_SECRETLINT_CONFIG must be a regular absolute file outside the target checkout. Fix or unset it for the service, then answer retry.",
+        ),
       ),
     );
   return readFile(config, "utf8");

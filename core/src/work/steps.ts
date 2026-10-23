@@ -15,7 +15,13 @@ import {
   RESET_BRANCH,
   type Repair,
 } from "../delivery.js";
-import { hold, type Outcome, type Step, type StepContext } from "../engine.js";
+import {
+  hold,
+  type Outcome,
+  objectiveWide,
+  type Step,
+  type StepContext,
+} from "../engine.js";
 import { defaultHead } from "../git.js";
 import { GitHubError } from "../github.js";
 import {
@@ -206,7 +212,7 @@ export function buildSteps(state: ObjectiveState, deps: BuildDeps): Step[] {
       ...Object.entries(state.kept ?? {})
         .filter(([key, value]) => key.endsWith(":base") && value != null)
         .map(([key]) => key),
-      ...(state.hold ? [state.hold.step] : []),
+      ...state.holds.map((hold) => hold.step),
     ]
       .filter((key) => key.startsWith("item:"))
       .map((key) => key.split(":")[1]),
@@ -1972,16 +1978,20 @@ async function objectiveEdited(
           keep: { "objective:accepted": digest },
         };
   if (issue.state !== "open")
-    return hold(
-      `Issue #${state.issue} was closed while Factory was building it. Reopen it and answer \`continue\`, or cancel.`,
-      ["continue", "cancel"],
-      "cancel",
+    return objectiveWide(
+      hold(
+        `Issue #${state.issue} was closed while Factory was building it. Reopen it and answer \`continue\`, or cancel.`,
+        ["continue", "cancel"],
+        "cancel",
+      ),
     );
   if (digest !== accepted)
-    return hold(
-      `Objective #${state.issue} was edited after its plan was accepted. \`continue\` keeps building this plan; \`replan\` plans again from the new text.`,
-      ["continue", "replan", "cancel"],
-      "replan",
+    return objectiveWide(
+      hold(
+        `Objective #${state.issue} was edited after its plan was accepted. \`continue\` keeps building this plan; \`replan\` plans again from the new text.`,
+        ["continue", "replan", "cancel"],
+        "replan",
+      ),
     );
   return undefined;
 }
@@ -2032,7 +2042,8 @@ async function guardedItem(
     try {
       return await work();
     } catch (error) {
-      if (error instanceof GitRefusal) return hold(error.message);
+      if (error instanceof GitRefusal)
+        return objectiveWide(hold(error.message));
       throw error;
     }
   });

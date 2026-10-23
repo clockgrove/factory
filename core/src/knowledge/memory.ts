@@ -265,8 +265,8 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
       digests: {},
     });
   }
-  if (state.hold) {
-    const { item, paths, label, tree } = scope(state.hold.step);
+  for (const hold of state.holds) {
+    const { item, paths, label, tree } = scope(hold.step);
     records.push({
       kind: "failure",
       objective,
@@ -275,8 +275,8 @@ function stateRecords(state: ObjectiveState): MemoryRecord[] {
       ...(tree ? { tree } : {}),
       authority: "observation",
       validity: "historical",
-      summary: `${label} held at ${state.hold.step}: ${firstLine(state.hold.question)}`,
-      body: `${state.hold.question}\n\nAnswers: ${state.hold.answers.join(", ")}`,
+      summary: `${label} held at ${hold.step}: ${firstLine(hold.question)}`,
+      body: `${hold.question}\n\nAnswers: ${hold.answers.join(", ")}`,
       paths,
       digests: {},
     });

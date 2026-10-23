@@ -195,7 +195,7 @@ A recipe gives the plan a reviewed structure (stages, discovery, expansions). It
 
 The selector is a recipe id, optionally prefixed `repository:` or `plugin:`. An unprefixed id uses `.factory/recipes/<id>.json` at the base when that file exists, otherwise the packaged recipe of that name. A broken repository recipe is refused rather than replaced by the packaged one. The packaged recipes are `repository-migration`, `api-feature` (also needs `sharedSelectors`) and `bounded-audit`. Arguments are typed values checked against the recipe, never shell text.
 
-A recipe needs Adaptive workflow `enabled`, `planning.context` selectors that cover every recipe selector, and `planning.adaptiveGraph: true` for its discovery and expansion stages. Preview a draft against the checkout's HEAD before you queue it:
+A recipe needs Adaptive workflow `enabled`, `planning.context` selectors that cover every recipe selector, and `planning.adaptiveGraph: true` for its discovery and expansion stages. Its memory inputs are looked up by their query before planning when `planning.context.memory` is on, and a `required` one needs it on. Preview a draft against the checkout's HEAD before you queue it:
 
 ```sh
 factory recipe --repo OWNER/NAME --file /absolute/path/objective.md

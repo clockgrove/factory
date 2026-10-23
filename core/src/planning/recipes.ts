@@ -841,6 +841,8 @@ export interface RecipeInstallation {
   profileIds: readonly string[];
   /** planning.context selectors: the scope adaptive planning is admitted to; absent, none. */
   contextSelectors?: readonly string[];
+  /** planning.context.memory: repository memory is on, so recipe memory inputs are looked up. */
+  memory: boolean;
 }
 
 /**
@@ -854,6 +856,7 @@ export function recipeInstallation(config: CoreConfig): RecipeInstallation {
   return {
     adaptiveGraph: config.planning.adaptiveGraph,
     profileIds: Object.keys(config.execution.profiles ?? {}),
+    memory: config.planning.context?.memory === true,
     ...(config.planning.context
       ? { contextSelectors: config.planning.context.selectors }
       : {}),
@@ -883,11 +886,16 @@ function capabilityStatus(
   installation: RecipeInstallation,
 ): { available: boolean; detail: string } {
   if (capability === "repository-memory")
-    return {
-      available: false,
-      detail:
-        "required memory lookups by query are not available in this Factory",
-    };
+    return installation.memory
+      ? {
+          available: true,
+          detail: "each memory input is looked up by its query before planning",
+        }
+      : {
+          available: false,
+          detail:
+            "repository memory is off: turn on planning.context.memory to look up required memory inputs",
+        };
   if (!installation.adaptiveGraph) return { available: false, detail: GATED };
   return {
     available: true,

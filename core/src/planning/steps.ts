@@ -845,9 +845,21 @@ export const ACCEPTED_AT = "plan:acceptedAt";
 const PLAN_MARK = (issue: number) => `<!-- factory:${issue}:plan -->`;
 const PART_MARK = (issue: number, part: number) =>
   `<!-- factory:${issue}:plan-data:${part} -->`;
-const COMMENT_LIMIT = 65_000;
+/**
+ * A comment's size limit, below GitHub's 65,536. FACTORY_COMMENT_LIMIT
+ * (tests only; 1,000 to 65,000) lowers it, so a small plan takes the
+ * continuation comments and the `plan:data:*` crash points are reached.
+ */
+const COMMENT_LIMIT = commentLimit(process.env.FACTORY_COMMENT_LIMIT);
 /** Plan JSON per continuation comment, leaving room for its wrapper. */
-const PART_SIZE = 60_000;
+const PART_SIZE = COMMENT_LIMIT - Math.min(5_000, COMMENT_LIMIT / 2);
+
+function commentLimit(value: string | undefined): number {
+  const limit = Number(value);
+  return value && Number.isInteger(limit) && limit >= 1_000
+    ? Math.min(limit, 65_000)
+    : 65_000;
+}
 /** Work Items the summary lists by name; the data lists them all. */
 const LISTED_ITEMS = 200;
 

@@ -23,6 +23,7 @@ import type {
   GitHubSync,
   UnreadableObjective,
 } from "./github-sync.js";
+import { backoffMs, Jobs } from "./jobs.js";
 import { takeServiceLock } from "./lock.js";
 import { RunLog, rotateLogs } from "./log.js";
 import type { Paths } from "./paths.js";
@@ -79,9 +80,10 @@ export interface ServeOptions {
  * `observe` sees an Objective once each time its status (or settledness:
  * terminal with nothing left to run) changes, and once when the service
  * reads an active state file. It gets a copy and runs beside the loop,
- * aborted by `signal` past its deadline; a failure is retried with backoff
- * until it succeeds. `release` ends a run that a new admission of the same
- * issue replaces, or a withdrawal removes, before the new run starts.
+ * aborted by `signal` past its deadline (which frees it at once: jobs.ts);
+ * a failure is retried with backoff until it succeeds. `release` ends a
+ * run that a new admission of the same issue replaces, or a withdrawal
+ * removes, before the new run starts.
  *
  * Knowledge is best effort for the lifecycle: a failed observation or
  * release never holds back admission, withdrawal or retirement. The run's
@@ -99,13 +101,6 @@ export interface StateObserver {
   release(state: ObjectiveState): void;
 }
 
-interface Observation {
-  mark?: string;
-  busy: boolean;
-  failures: number;
-  nextAt: number;
-}
-
 const OBSERVE_BACKOFF_MS = 1000;
 const OBSERVE_DEADLINE_MS = 5 * 60 * 1000;
 
@@ -117,6 +112,9 @@ const settled = (runner: ObjectiveRunner): boolean =>
 const observeMark = (runner: ObjectiveRunner): string =>
   `${runner.state.status}:${settled(runner)}`;
 const OBSERVE_MAX_BACKOFF_MS = 5 * 60 * 1000;
+/** One run's observations, live or late, share this job key. */
+const observeKey = (state: ObjectiveState): string =>
+  `${state.issue}@${runOf(state)}`;
 
 const KEEP_REQUEST_IDS = 50;
 const RESULT_TTL_MS = 60 * 60 * 1000;
@@ -151,25 +149,25 @@ export async function serve(options: ServeOptions): Promise<number> {
   // cost follows active work, never history).
   const runners = new Map<number, ObjectiveRunner>();
   const unreadable = new Map<number, UnreadableObjective>();
-  /** Per Objective: the mark last observed, an observation in flight, the failure backoff. */
-  const observed = new Map<number, Observation>();
+  /** Per Objective: the mark last observed. */
+  const observed = new Map<number, string>();
+  /** Observations in flight and their backoff, by run (`observeKey`). */
+  const observing = new Jobs(log, "observe-failed", {
+    baseMs: OBSERVE_BACKOFF_MS,
+    maxMs: OBSERVE_MAX_BACKOFF_MS,
+    deadlineMs: OBSERVE_DEADLINE_MS,
+  });
   /**
    * Settled observations of runs no longer in memory (retired, replaced or
-   * withdrawn before the observer took them), by `<issue>@<run>`: retried
+   * withdrawn before the observer took them), by `observeKey`: retried
    * with backoff until they land. Each is saved in finished/ (`path`)
    * until then, and startup reads those files back.
    */
-  const late = new Map<
-    string,
-    Observation & { state: ObjectiveState; path?: string }
-  >();
+  const late = new Map<string, { state: ObjectiveState; path?: string }>();
   const keepLate = (state: ObjectiveState, path?: string): void => {
-    late.set(`${state.issue}@${runOf(state)}`, {
+    late.set(observeKey(state), {
       state: structuredClone(state),
       ...(path ? { path } : {}),
-      busy: false,
-      failures: 0,
-      nextAt: 0,
     });
   };
   /** Keep a settled observation on disk too; one that can't be saved is kept in memory and logged. */
@@ -184,40 +182,6 @@ export async function serve(options: ServeOptions): Promise<number> {
       });
       keepLate(state);
     }
-  };
-  /** Run an observer job unless one is in flight or backing off; log a failure and back off. */
-  const attempt = (
-    entry: Observation,
-    issue: number,
-    job: () => Promise<void>,
-    done: () => void,
-  ): void => {
-    if (entry.busy || Date.now() < entry.nextAt) return;
-    entry.busy = true;
-    job()
-      .then(
-        () => {
-          entry.failures = 0;
-          done();
-        },
-        (error: unknown) => {
-          entry.failures += 1;
-          entry.nextAt =
-            Date.now() +
-            Math.min(
-              OBSERVE_BACKOFF_MS * 2 ** (entry.failures - 1),
-              OBSERVE_MAX_BACKOFF_MS,
-            );
-          log.write(issue, {
-            event: "observe-failed",
-            error: String(error),
-            retryAt: new Date(entry.nextAt).toISOString(),
-          });
-        },
-      )
-      .finally(() => {
-        entry.busy = false;
-      });
   };
   /** Checked Objectives waiting for a slot, as of the last tick. */
   const waitingForSlot = new Set<number>();
@@ -284,9 +248,7 @@ export async function serve(options: ServeOptions): Promise<number> {
   const retire = (issue: number): void => {
     const runner = runners.get(issue);
     const unobserved =
-      options.observer &&
-      runner &&
-      observed.get(issue)?.mark !== observeMark(runner);
+      options.observer && runner && observed.get(issue) !== observeMark(runner);
     let path: string | undefined;
     try {
       // Saved before the move, so a restart retries it from finished/.
@@ -310,6 +272,9 @@ export async function serve(options: ServeOptions): Promise<number> {
   const release = (state: ObjectiveState): void => {
     if (!options.observer) return;
     observed.delete(state.issue);
+    // Its observation in flight ends too: one landing later would mark
+    // the next run of the issue.
+    observing.forget(observeKey(state));
     try {
       options.observer.release(structuredClone(state));
     } catch (error) {
@@ -700,43 +665,27 @@ export async function serve(options: ServeOptions): Promise<number> {
     for (const runner of observer ? runners.values() : []) {
       const { state } = runner;
       const mark = observeMark(runner);
-      const entry = observed.get(state.issue) ?? {
-        busy: false,
-        failures: 0,
-        nextAt: 0,
-      };
-      observed.set(state.issue, entry);
-      if (entry.mark === mark) continue;
+      if (observed.get(state.issue) === mark) continue;
       // The mark is kept only once the observation succeeded.
-      const copy = structuredClone(state);
       const end = settled(runner);
-      attempt(
-        entry,
+      observing.run(
         state.issue,
-        () =>
-          observer!.observe(
-            copy,
-            end,
-            AbortSignal.timeout(OBSERVE_DEADLINE_MS),
-          ),
-        () => {
-          entry.mark = mark;
-        },
+        observeKey(state),
+        (signal) => observer!.observe(structuredClone(state), end, signal),
+        { done: () => observed.set(state.issue, mark) },
       );
     }
     for (const [key, entry] of observer ? late : [])
-      attempt(
-        entry,
+      observing.run(
         entry.state.issue,
-        () =>
-          observer!.observe(
-            entry.state,
-            true,
-            AbortSignal.timeout(OBSERVE_DEADLINE_MS),
-          ),
-        () => {
-          late.delete(key);
-          if (entry.path) rmSync(entry.path, { force: true });
+        key,
+        (signal) => observer!.observe(entry.state, true, signal),
+        {
+          done: () => {
+            if (late.get(key) !== entry) return;
+            late.delete(key);
+            if (entry.path) rmSync(entry.path, { force: true });
+          },
         },
       );
     options.sync?.tick({
@@ -810,7 +759,7 @@ export async function serve(options: ServeOptions): Promise<number> {
       if (
         settled(runner) &&
         (options.sync?.idle(issue) ?? true) &&
-        !observed.get(issue)?.busy
+        !observing.active(observeKey(runner.state))
       )
         retire(issue);
     }
@@ -1137,8 +1086,9 @@ function startRecord(
     : [];
   const delay =
     starts.length >= LOOP_STARTS
-      ? Math.min(
-          limits.baseBackoffMs * 2 ** (starts.length - LOOP_STARTS),
+      ? backoffMs(
+          starts.length - LOOP_STARTS + 1,
+          limits.baseBackoffMs,
           MAX_RESUME_DELAY_MS,
         )
       : 0;

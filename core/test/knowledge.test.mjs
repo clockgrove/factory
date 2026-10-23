@@ -409,3 +409,137 @@ test("the service retries a failed observation, across a restart, and one run ke
   );
   assert.equal(count(inst, "SELECT count(*) FROM memory"), 4);
 });
+
+test("planner lookups answer read-only inside the selectors at the base, within the frozen bounds, and refuse the rest by name", async () => {
+  const { configureKnowledge, DEFAULT_BOUNDS } = await import(
+    "../dist/knowledge/settings.js"
+  );
+  const { plannerLookups } = await import("../dist/planning/lookup.js");
+  const { BaseFiles } = await import("../dist/planning/facts.js");
+  const { readShown } = await import("../dist/shown.js");
+  const inst = installation();
+  const checkout = join(inst.root, "..", "..", "checkout");
+  const git = (...args) =>
+    spawnSync("git", ["-C", checkout, ...args], { encoding: "utf8" });
+  mkdirSync(join(checkout, "docs"), { recursive: true });
+  mkdirSync(join(checkout, "src"), { recursive: true });
+  writeFileSync(
+    join(checkout, "docs", "a.md"),
+    "# A\n\n## Part\n\nThe token is hunter2.\n\n## Other\n\nmore\n",
+  );
+  writeFileSync(join(checkout, "docs", "big.md"), "x".repeat(5000));
+  writeFileSync(join(checkout, "src", "x.ts"), "export const x = 1;\n");
+  git("add", ".");
+  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base");
+  const base = git("rev-parse", "HEAD").stdout.trim();
+  const context = {
+    bounds: {
+      ...DEFAULT_BOUNDS,
+      maxRounds: 2,
+      maxRequestsPerRound: 4,
+      maxBytes: 4096,
+    },
+    selectors: ["docs/"],
+    memory: true,
+  };
+  configureKnowledge({
+    repository: REPO,
+    root: inst.root,
+    checkout,
+    planningContext: context,
+    secrets: [],
+  });
+  const config = { planning: { context } };
+  const shown = (html) => readShown(html, { sources: false }).blocks;
+  const adaptive = shown("<h2>Adaptive workflow</h2><p>enabled</p>");
+  // Planning without Adaptive workflow is offered nothing: unchanged.
+  assert.equal(
+    plannerLookups(
+      { kept: {} },
+      "plan:1:1",
+      shown("<h2>Goal</h2><p>g</p>"),
+      config,
+    ),
+    undefined,
+  );
+  const input = {
+    issue: 9,
+    files: new BaseFiles(checkout, base),
+    secrets: ["hunter2"],
+    log() {},
+  };
+  const ask = (kind, path, extra = {}) => ({
+    kind,
+    path,
+    heading: "",
+    query: "",
+    ...extra,
+  });
+  const first = plannerLookups({ kept: {} }, "plan:1:1", adaptive, config);
+  assert.ok(
+    first.schema({ properties: {}, required: [] }).properties.contextLookups,
+  );
+  // null asks nothing: the rest is decoded as before.
+  assert.deepEqual(
+    await first.take({ items: [], contextLookups: null }, input),
+    {
+      value: { items: [] },
+    },
+  );
+  const round1 = await first.take(
+    {
+      items: [],
+      contextLookups: [
+        ask("file", "docs/a.md", { heading: "Part" }),
+        ask("file", "src/x.ts"),
+        ask("file", "docs/../src/x.ts"),
+        ask("paths", ""),
+        ask("memory", "", { query: "parser" }),
+      ],
+    },
+    input,
+  );
+  assert.equal(round1.outcome.kind, "retry");
+  assert.equal(round1.outcome.progress, true);
+  const kept = round1.outcome.keep;
+  const answers = kept["lookups:plan:1:1"][0];
+  assert.deepEqual(
+    answers.map((a) => a.disposition),
+    ["answered", "refused", "refused", "answered", "refused"],
+  );
+  // Secret values are redacted; only admitted paths are listed.
+  assert.equal(answers[0].content, "## Part\n\nThe token is [REDACTED].\n");
+  assert.equal(answers[3].content, "docs/a.md\ndocs/big.md");
+  assert.match(answers[4].detail, /over the cap of 4 requests per round/);
+
+  // The answered round is kept: the next call sees it, with one round left.
+  const second = plannerLookups({ kept }, "plan:1:1", adaptive, config);
+  assert.equal(second.data.roundsLeft, 1);
+  assert.equal(second.bodies[0].content, answers[0].content);
+  const round2 = await second.take(
+    {
+      items: [],
+      contextLookups: [
+        ask("memory", "", { query: "parser" }),
+        ask("file", "docs/big.md"),
+      ],
+    },
+    input,
+  );
+  const [memory, big] = round2.outcome.keep["lookups:plan:1:1"][1];
+  assert.equal(memory.disposition, "no-match");
+  assert.equal(big.disposition, "refused");
+  assert.match(big.detail, /over the \d+ bytes left of the lookup byte cap/);
+
+  // No round left: the schema doesn't offer the field, and an answer is decoded as given.
+  const last = plannerLookups(
+    { kept: round2.outcome.keep },
+    "plan:1:1",
+    adaptive,
+    config,
+  );
+  assert.equal(last.open, false);
+  assert.deepEqual(last.schema({ properties: {} }), { properties: {} });
+  const value = { items: [], contextLookups: [ask("paths", "")] };
+  assert.deepEqual(await last.take(value, input), { value });
+});

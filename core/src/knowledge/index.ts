@@ -1,7 +1,8 @@
 /**
  * The Knowledge capability: the curated playbook, repository memory and
  * Dream. Planning calls {@link planningKnowledge} once per planning call
- * (its single hook, beside the playbook read); the worker, the repair
+ * (its single hook, beside the playbook read), and {@link memoryLookup}
+ * for a memory lookup the planner asks for; the worker, the repair
  * diagnosis and both reviews call {@link roleMemory}; the service calls
  * {@link knowledgeObserver} as Objectives move, and applies `dream`
  * writes (dream.ts applyDream).
@@ -16,13 +17,14 @@ import { adaptiveWorkflow } from "../validate.js";
 import { pinnedPlaybook } from "./dream.js";
 import {
   type MemoryRole,
+  type MemorySection,
   observeObjective,
   pathDigest,
   queryMemory,
   retain,
   sourceRecords,
 } from "./memory.js";
-import { knowledgeSettings } from "./settings.js";
+import { knowledgeSettings, type PlanningContext } from "./settings.js";
 import { type Database, openStore, readStore } from "./store.js";
 
 /**
@@ -174,6 +176,39 @@ export async function roleMemory(input: {
     });
     return "";
   }
+}
+
+/**
+ * One planner-requested memory lookup (planning/lookup.ts): the same query
+ * every role reads through, with the planner's own search text and paths.
+ * Throws when the store can't be read or stays busy; the lookup then
+ * answers that memory is unavailable.
+ */
+export async function memoryLookup(input: {
+  issue: number;
+  context: PlanningContext;
+  text: string;
+  paths: readonly string[];
+  maxBytes: number;
+  files: BaseFiles;
+}): Promise<MemorySection> {
+  const settings = knowledgeSettings();
+  if (!settings) throw new Error("no knowledge store is configured");
+  return readStore(
+    settings.root,
+    (db) =>
+      queryMemory(db, {
+        role: "planning",
+        objective: input.issue,
+        text: input.text,
+        paths: input.paths,
+        maxBytes: input.maxBytes,
+        context: input.context,
+        supplied: [],
+        digest: (path) => pathDigest(input.files, path),
+      }),
+    ROLE_BUSY_MS,
+  );
 }
 
 /**

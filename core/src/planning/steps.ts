@@ -33,6 +33,7 @@ import {
   objectiveCommandProblems,
   sectionText,
 } from "./facts.js";
+import { forgetting, plannerLookups } from "./lookup.js";
 import {
   ACCEPTED_AT,
   currentPlan,
@@ -122,7 +123,7 @@ export function planningStep(
   const { g, n } = position(state);
   const planKey = `plan:${g}:${n}`;
   const planned = state.done[planKey] as PlanRound | undefined;
-  if (!planned) return planRoundStep(planKey, g, n, deps);
+  if (!planned) return forgetting(planRoundStep(planKey, g, n, deps));
   const reviewKey = `review:${g}:${n}`;
   if (cleanDraft(planned) && !state.done[reviewKey])
     return reviewStep(reviewKey, g, n, deps);
@@ -440,6 +441,7 @@ function planRoundStep(
       const cited = revising
         ? await citedSections(previous!.draft, fixes, facts, files)
         : [];
+      const lookups = plannerLookups(state, key, inputs.shown.blocks, config);
       const data = {
         ...planChoices(facts, wire),
         ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
@@ -458,6 +460,7 @@ function planRoundStep(
               })),
             }
           : {}),
+        ...(lookups ? { contextLookups: lookups.data } : {}),
       };
       const local = await localExecutables(inputs, config, signal);
       const prompt = renderCompilationCall({
@@ -473,14 +476,16 @@ function planRoundStep(
         recipe: Boolean(inputs.recipe),
         executionProfiles: Boolean(profiles),
         ...(inputs.predecessors ? { prerequisites: inputs.predecessors } : {}),
+        ...(lookups ? { lookups } : {}),
       });
+      const schema = revising
+        ? revisionSchema(facts, wire)
+        : planSchema(facts, wire);
       const answer = await deps.planner.answer({
         role: "planner",
         phase: "plan",
         prompt,
-        schema: revising
-          ? revisionSchema(facts, wire)
-          : planSchema(facts, wire),
+        schema: lookups ? lookups.schema(schema) : schema,
         readDir: workDir,
         signal,
         log: context.log,
@@ -491,11 +496,20 @@ function planRoundStep(
         ms: answer.ms,
         usage: answer.usage,
       });
-      let full: unknown = answer.value;
+      const taken = lookups
+        ? await lookups.take(answer.value, {
+            issue: state.issue,
+            files,
+            secrets: config.secrets,
+            log: context.log,
+          })
+        : { value: answer.value };
+      if ("outcome" in taken) return taken.outcome;
+      let full: unknown = taken.value;
       if (revising) {
         const revised = applyRevision(
           previous!.answer,
-          answer.value,
+          taken.value,
           facts,
           wire,
         );

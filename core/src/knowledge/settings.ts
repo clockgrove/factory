@@ -8,17 +8,17 @@ import { type Check, flag, object, section, whole } from "../checked.js";
 
 /** Bounds on the context one planning call is given and on Dream's input; a bound left out takes its default. */
 export interface ContextBounds {
-  /** Planner-requested lookup rounds (planner lookups are not on the core yet). */
+  /** Planner-requested lookup rounds per planner step (planning/lookup.ts). */
   maxRounds: number;
-  /** Requests per planner lookup round (planner lookups are not on the core yet). */
+  /** Requests per planner lookup round; the rest are refused by name. */
   maxRequestsPerRound: number;
   /** Memory records supplied at most. */
   maxResults: number;
-  /** UTF-8 bytes of supplied memory, or of Dream's input packet. */
+  /** UTF-8 bytes of supplied memory, of one planner step's lookup answers, or of Dream's input packet. */
   maxBytes: number;
   /** Time spent selecting memory or Dream input. */
   maxElapsedMs: number;
-  /** Provider calls planner lookups may add (planner lookups are not on the core yet). */
+  /** Provider calls planner lookups may add: each round is one, so it caps the rounds too. */
   maxProviderCalls: number;
 }
 

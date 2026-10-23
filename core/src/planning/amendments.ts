@@ -10,6 +10,7 @@ import type { ObjectiveState } from "../state.js";
 import { fact } from "../work/facts.js";
 import { checkPlan } from "./checks.js";
 import { BaseFiles, commandInstructions, finalCommands } from "./facts.js";
+import { forgetting, plannerLookups } from "./lookup.js";
 import {
   ACCEPTED_AT,
   acceptedPlan,
@@ -580,7 +581,7 @@ export function amendmentStep(
   const round = state.done[`${KEY(proposal.id)}:plan`] as
     | AmendRound
     | undefined;
-  if (!round) return amendPlanStep(proposal, deps);
+  if (!round) return forgetting(amendPlanStep(proposal, deps));
   if (!round.rejected && !state.done[`${KEY(proposal.id)}:review`])
     return amendReviewStep(proposal, deps);
   return amendAcceptStep(proposal, deps);
@@ -671,6 +672,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           : []),
       ];
       const base = currentAnswer(state);
+      const lookups = plannerLookups(state, key, inputs.shown.blocks, config);
       const data = {
         ...planChoices(facts, wire),
         ...(inputs.recipe ? { workflowRecipe: inputs.recipe.recipe } : {}),
@@ -684,6 +686,7 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           startedItemIds: [...progress.started],
           reattemptItemIds: [...progress.reattempt],
         },
+        ...(lookups ? { contextLookups: lookups.data } : {}),
       };
       const { workDir, repository } = await planningTree(
         deps,
@@ -709,8 +712,11 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
           ...(inputs.predecessors
             ? { prerequisites: inputs.predecessors }
             : {}),
+          ...(lookups ? { lookups } : {}),
         }),
-        schema: revisionSchema(facts, wire),
+        schema: lookups
+          ? lookups.schema(revisionSchema(facts, wire))
+          : revisionSchema(facts, wire),
         readDir: workDir,
         signal,
         log: context.log,
@@ -722,7 +728,16 @@ function amendPlanStep(proposal: AmendmentProposal, deps: PlanningDeps): Step {
         ms: answer.ms,
         usage: answer.usage,
       });
-      const revised = applyRevision(base, answer.value, facts, wire);
+      const taken = lookups
+        ? await lookups.take(answer.value, {
+            issue: state.issue,
+            files,
+            secrets: config.secrets,
+            log: context.log,
+          })
+        : { value: answer.value };
+      if ("outcome" in taken) return taken.outcome;
+      const revised = applyRevision(base, taken.value, facts, wire);
       const reject = (findings: Finding[]): Outcome =>
         done({
           answer: revised.answer,

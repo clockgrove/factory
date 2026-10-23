@@ -2142,3 +2142,58 @@ function childObjectivesProblem(
     return "A split needs a child Objective with no dependencies";
   return undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Context lookups (planning/lookup.ts)
+
+/** What a planner lookup can ask for: repository memory, a file's text, or tracked paths. */
+export const LOOKUP_KINDS = ["memory", "file", "paths"] as const;
+export type LookupKind = (typeof LOOKUP_KINDS)[number];
+
+/** One planner lookup request, as the wire carries it. */
+export interface LookupRequest {
+  kind: LookupKind;
+  /** memory: "" or an admitted path to scope it; file: an admitted file; paths: "" or a prefix. */
+  path: string;
+  /** file: "" for the whole file, else the Markdown heading of one section. */
+  heading: string;
+  /** memory: what to search for; "" otherwise. */
+  query: string;
+}
+
+/** The field a planner answer may ask for context in. */
+export const LOOKUP_FIELD = "contextLookups";
+
+/**
+ * `schema` with the lookup field added: null to answer now, or the
+ * requests to answer before the planner plans. The schema doesn't cap the
+ * count: Factory answers what fits the bounds and refuses the rest, by name.
+ */
+export function withLookups(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const s = schema as Schema;
+  return {
+    ...s,
+    properties: {
+      ...s.properties,
+      [LOOKUP_FIELD]: {
+        description:
+          "null to answer now. Otherwise the context lookups Factory answers before you plan; the rest of this answer is then discarded, so keep it minimal.",
+        anyOf: [
+          { type: "null" },
+          {
+            type: "array",
+            items: strict({
+              kind: { type: "string", enum: [...LOOKUP_KINDS] },
+              path: text,
+              heading: text,
+              query: text,
+            }),
+          },
+        ],
+      },
+    },
+    required: [...(s.required ?? []), LOOKUP_FIELD],
+  };
+}

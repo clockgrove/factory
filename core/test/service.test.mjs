@@ -1388,6 +1388,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
     "../dist/engine.js"
   );
   const { newObjective } = await import("../dist/state.js");
+  const { reviewArtifactNumbers } = await import("../dist/work/steps.js");
   const keys = ["item:a:work", "item:b:ci", "item:c:work", "item:d:ci"];
   const started = [];
   const outcomes = {};
@@ -1416,6 +1417,13 @@ test("a deferred question asks right after the covering one; stack layers and ba
       // b is the native-stack layer above a.
       upstream: (_, item) => (item === "b" ? ["a"] : []),
       freezable: { claude: { digest: "c", config } },
+      // c keeps a refused result it can check again.
+      revalidatable: (_, key) => key === "item:c:work",
+      reviewArtifacts: (values) =>
+        reviewArtifactNumbers(values, [
+          { command: "npm run shots" },
+          { command: "npm test" },
+        ]),
     },
     mkdtempSync(join(tmpdir(), "factory-defer-")),
     { write() {} },
@@ -1505,7 +1513,7 @@ test("a deferred question asks right after the covering one; stack layers and ba
   assert.equal(asked.cause, "failure");
   assert.deepEqual(
     asked.options.map((option) => option.answer),
-    ["more", "cancel"],
+    ["more", "revalidate", "cancel"],
   );
   assert.ok(
     !started.slice(ran).includes("item:c:work"),
@@ -1595,6 +1603,38 @@ test("a deferred question asks right after the covering one; stack layers and ba
   runner.apply("item:c:work", blame);
   assert.equal(perPath(runner.state)["item:c:work"].used, charged - 1);
   assert.equal(perPath(runner.state)["item:a:work"].used, 2);
+  // `--review-artifacts` goes with a rereview only, names configured
+  // selectors by number (or none alone), and is recorded on the answer.
+  delete runner.state.answers["item:b:ci"];
+  runner.apply(
+    "item:b:ci",
+    hold("Diagnosis needs you.", [
+      { answer: "revalidate", family: "accept", consequence: "Again." },
+      "cancel",
+    ]),
+  );
+  const choose = (answer, values) => {
+    const open = runner.state.holds.find((h) => h.step === "item:b:ci");
+    return runner.transact(() =>
+      runner.answer(
+        answer,
+        undefined,
+        "op",
+        undefined,
+        open.id,
+        undefined,
+        values,
+      ),
+    );
+  };
+  for (const values of [["3"], ["none", "1"], ["x"]])
+    assert.match(
+      choose("revalidate", values)?.message ?? "",
+      /names no configured selector|can't be given with selectors/,
+    );
+  assert.equal(choose("revalidate", ["2"]), null, "past the allowance");
+  assert.equal(choose("more", ["2", "1", "2"]), null);
+  assert.deepEqual(runner.state.answers["item:b:ci"].reviewArtifacts, [1, 2]);
 });
 
 test("a replan answer is the workflow's, spent once applied, and the new plan starts with a fresh repair budget", async () => {
@@ -2514,6 +2554,10 @@ test("unknown and misplaced options are refused with the fix", () => {
     ],
     [["frobnicate"], /Unknown command: frobnicate; see factory help/],
     [["answer", "5", "retry", "--question"], /--question needs a value/],
+    [
+      ["answer", "5", "retry", "--question", "q", "--review-artifacts", "1"],
+      /--review-artifacts goes with revalidate/,
+    ],
     [["cancel", "5", "6"], /factory cancel takes ISSUE; unexpected 6/],
     [["log", "5", "--tail", "x"], /--tail takes a whole number/],
   ];
@@ -2777,6 +2821,7 @@ test("status: one model, the Work Item table, the full --json and the list view"
     ],
     kept: {
       "item:a:flaky": { tree: "t1", command: "npm test" },
+      "item:a:rereview": { reviewArtifacts: [2], by: "op", at: "x" },
       "allowances:rereviews": 1,
       "allowances:granted": { "perPath:item:a:work": 3, resultRereviews: 1 },
     },
@@ -2815,6 +2860,10 @@ test("status: one model, the Work Item table, the full --json and the list view"
   assert.match(cli(inst, "status", "56").out, /#56: done/);
   assert.match(text, /retries at 2026-01-01 09:30:00 GMT\+9/);
   assert.match(text, /Possibly flaky: a: `npm test` failed once/);
+  assert.match(
+    text,
+    /Rereview: a captures review artifacts 2 of the configured selectors \(--review-artifacts, by op\)/,
+  );
   assert.match(
     text,
     /Allowances: planning revisions 0\/4, implementation repairs 4\/5, result rereviews 1\/2; repairs per path: item:a:work 4\/6/,

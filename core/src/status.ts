@@ -80,6 +80,12 @@ export interface ObjectiveView {
   /** Work Items whose validation failed once and passed on its one rerun. */
   flakyRerun: { item: string; command: string }[];
   /**
+   * Work Items whose current result is a rereview with the operator's
+   * `--review-artifacts`: the configured selectors (numbers from 1; empty
+   * for none) it captures instead of all.
+   */
+  rereviews: { item: string; reviewArtifacts: number[]; by: string }[];
+  /**
    * Each autonomy allowance, used and allowed with the operator's grants:
    * across the Objective, and repairs per repair path (target step).
    */
@@ -206,6 +212,7 @@ export function statusOf(
       waitsOn: null,
       running: [],
       flakyRerun: [],
+      rereviews: [],
       nextAction: {
         command: `factory reset ${issue}`,
         reason:
@@ -244,6 +251,7 @@ export function statusOf(
     waitsOn: context.waitsOn,
     running: Object.keys(state.attempts),
     flakyRerun: flakyReruns(state),
+    rereviews: rereviews(state),
     allowances: {
       planningRevisions: planningRevisions(state),
       implementationRepairs: implementationRepairs(state),
@@ -351,6 +359,22 @@ function flakyReruns(state: ObjectiveState): ObjectiveView["flakyRerun"] {
       reruns.push({ item, command: rerun.command });
   }
   return reruns;
+}
+
+/** The rereviews whose review artifacts the operator chose (work/facts.ts `rereview`). */
+function rereviews(state: ObjectiveState): ObjectiveView["rereviews"] {
+  const chosen: ObjectiveView["rereviews"] = [];
+  for (const [key, value] of Object.entries(state.kept ?? {})) {
+    const item = /^item:(.+):rereview$/.exec(key)?.[1];
+    const rereview = value as { reviewArtifacts?: number[]; by?: string };
+    if (item && rereview?.reviewArtifacts)
+      chosen.push({
+        item,
+        reviewArtifacts: rereview.reviewArtifacts,
+        by: rereview.by ?? "",
+      });
+  }
+  return chosen;
 }
 
 /** The one thing that moves the Objective on, or what it waits for. */
@@ -567,6 +591,10 @@ function objectiveText(row: ObjectiveView): string[] {
   for (const flaky of row.flakyRerun)
     lines.push(
       `  Possibly flaky: ${flaky.item}: \`${flaky.command}\` failed once; its rerun passed`,
+    );
+  for (const rereview of row.rereviews)
+    lines.push(
+      `  Rereview: ${rereview.item} captures ${rereview.reviewArtifacts.length ? `review artifacts ${rereview.reviewArtifacts.join(", ")} of the configured selectors` : "no review artifacts"} (--review-artifacts, by ${rereview.by})`,
     );
   if (row.lastEvent) lines.push(`  Last: ${eventLine(row.lastEvent)}`);
   return lines;

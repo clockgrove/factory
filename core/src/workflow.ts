@@ -32,6 +32,8 @@ import {
   RERUN_CLEANUP,
   replanOutcome,
   rerunCleanupStep,
+  revalidatable,
+  reviewArtifactNumbers,
 } from "./work/steps.js";
 
 const MINUTE = 60_000;
@@ -95,6 +97,10 @@ export function objectiveWorkflow(deps?: BuildDeps): Workflow {
           freshable,
           fresh: (state: ObjectiveState, key: string, answer: Answer) =>
             freshOutcome(state, deps, key, answer),
+          // A refused result checked again, unchanged (a result rereview).
+          revalidatable,
+          reviewArtifacts: (values: readonly string[]) =>
+            reviewArtifactNumbers(values, deps.config.reviewArtifacts),
         }
       : {}),
   };

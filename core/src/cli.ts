@@ -189,8 +189,13 @@ const COMMANDS: Record<string, Command> = {
   },
   answer: {
     args: "ISSUE ANSWER [ARG]",
-    flags: { question: "value", text: "value", "text-file": "value" },
-    help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance)",
+    flags: {
+      question: "value",
+      text: "value",
+      "text-file": "value",
+      "review-artifacts": "list",
+    },
+    help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`); --text, or --text-file ABSOLUTE_PATH, the text (`answer` sends it to the next attempt as your guidance); with `revalidate`, --review-artifacts N (repeatable) captures only the configured reviewArtifacts selectors numbered N (from 1), or none, for this rereview",
     check: (args) => {
       const answer = args.positional[2];
       const file = args.flags["text-file"];
@@ -209,7 +214,11 @@ const COMMANDS: Record<string, Command> = {
                 ? "give --text or --text-file, not both"
                 : file !== undefined && !isAbsolute(file)
                   ? "--text-file needs an absolute path"
-                  : undefined)
+                  : args.lists["review-artifacts"] &&
+                      answer !== "revalidate" &&
+                      answer !== "more"
+                    ? "--review-artifacts goes with revalidate: factory answer ISSUE revalidate --question ID --review-artifacts N"
+                    : undefined)
       );
     },
   },
@@ -382,6 +391,7 @@ async function main(argv: string[]): Promise<number> {
       const arg = args.positional[3];
       const { question } = args.flags;
       const text = answerText(args);
+      const reviewArtifacts = args.lists["review-artifacts"];
       return await request(paths, {
         kind: "answer",
         issue: issueOf(args),
@@ -389,6 +399,7 @@ async function main(argv: string[]): Promise<number> {
         ...(arg ? { arg } : {}),
         ...(text ? { text } : {}),
         ...(question !== undefined ? { question } : {}),
+        ...(reviewArtifacts ? { reviewArtifacts } : {}),
       });
     }
     case "retry":

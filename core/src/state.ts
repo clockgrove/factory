@@ -128,6 +128,8 @@ export interface Answer {
   question?: string;
   answer: string;
   text?: string;
+  /** `revalidate --review-artifacts`: the configured selectors' numbers (1-based) this rereview captures; empty for none. */
+  reviewArtifacts?: number[];
   by: string;
   at: string;
 }

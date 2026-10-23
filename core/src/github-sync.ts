@@ -156,8 +156,13 @@ const DEADLINE_MS = 10 * 60_000;
 /** Comments kept waiting for their author's access to be read, per Objective. */
 const MAX_UNCHECKED = 20;
 const COMMAND = /^\/factory\s+(\S+)(?:\s+([\s\S]*))?$/;
-/** `--question ID` right after the answer names the hold it answers. */
-const QUESTION = /^--question\s+(\S+)(?:\s+([\s\S]*))?$/;
+/**
+ * The options right after the answer, before its text: `--question ID`
+ * names the hold it answers, and each `--review-artifacts N` a selector a
+ * `revalidate` captures.
+ */
+const ANSWER_OPTION =
+  /^--(question|review-artifacts)\s+(\S+)(?:\s+([\s\S]*))?$/;
 
 /**
  * GitHub is input and display, never a precondition: every call here runs in
@@ -1048,9 +1053,19 @@ export class GitHubSync {
     const command = comment.body.match(COMMAND);
     if (!command) return;
     const answer = command[1]!.toLowerCase();
-    const bound = QUESTION.exec(command[2]?.trim() ?? "");
-    const question = bound?.[1];
-    const text = (bound ? bound[2] : command[2])?.trim();
+    let rest = command[2]?.trim() ?? "";
+    let question: string | undefined;
+    let reviewArtifacts: string[] | undefined;
+    for (
+      let option = ANSWER_OPTION.exec(rest);
+      option;
+      option = ANSWER_OPTION.exec(rest)
+    ) {
+      if (option[1] === "question") question = option[2];
+      else reviewArtifacts = [...(reviewArtifacts ?? []), option[2]!];
+      rest = option[3]?.trim() ?? "";
+    }
+    const text = rest;
     writeRequest(
       sync.requestsDir,
       answer === "cancel"
@@ -1064,6 +1079,7 @@ export class GitHubSync {
               ...(text ? { text } : {}),
               writtenAt: comment.createdAt,
               ...(question ? { question } : {}),
+              ...(reviewArtifacts ? { reviewArtifacts } : {}),
             },
       comment.login,
       `comment-${comment.id}`,

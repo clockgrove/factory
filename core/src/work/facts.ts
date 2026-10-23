@@ -53,6 +53,12 @@ export interface ItemFacts {
   secret: string;
   /** A read-only QA review refused the integrated result: its `retry` checks again from validation. */
   qaRefused: true;
+  /**
+   * The operator's `revalidate --review-artifacts` for this result: the
+   * configured selectors (numbers from 1; empty for none) its validation
+   * captures instead of all. A repair clears it.
+   */
+  rereview: { reviewArtifacts: number[]; by: string; at: string };
   /** A discovery item's complete result (work/discovery.ts): its dependents, conditions and expansions read it. */
   discovery: DiscoveryResult;
 }

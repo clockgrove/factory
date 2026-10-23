@@ -136,6 +136,12 @@ export interface ValidateInput {
      * installation no longer configures holds before anything runs.
      */
     planned?: readonly ReviewArtifactSelector[];
+    /**
+     * A rereview's `--review-artifacts`: the configured selectors this run
+     * captures instead of all (none when empty). The planned check still
+     * reads `configured`.
+     */
+    selected?: readonly ReviewArtifactSelector[];
     /** Private capture directory, such as `<state>/artifacts/<issue>/<item>` or `.../final`; emptied first. */
     dir: string;
   };
@@ -232,7 +238,9 @@ export async function validateTree(input: ValidateInput): Promise<Validation> {
         ["retry", "replan", "cancel"],
       ),
     );
-  const selectors = capture ? selectorsFor(capture.configured, item) : [];
+  const selectors = capture
+    ? selectorsFor(capture.selected ?? capture.configured, item)
+    : [];
   const refusal = await pinRefusal(
     new Revisions(checkout, commit, signal),
     plan.base,

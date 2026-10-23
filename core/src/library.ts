@@ -109,7 +109,13 @@ export async function serveFactory(options: {
     const code = await serveInstallation(
       options.repository,
       installationPaths(options.repository),
-      options,
+      // The whole drain: this process goes on, so nothing may outlive it.
+      {
+        ...(options.provider !== undefined
+          ? { provider: options.provider }
+          : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
     );
     if (code !== 0)
       throw new Refusal(

@@ -574,6 +574,9 @@ in FACTORY_DISPLAY_TIMEZONE.
 
 const usage = (message: string) => new Refusal("usage", message);
 
+/** How long `factory serve` waits at a stop for steps and jobs to end. */
+const STOP_DRAIN_MS = 20_000;
+
 /**
  * Run one command line in this process, as the `factory` binary does,
  * and resolve with its exit code; a refusal throws Refusal. A host program
@@ -725,7 +728,10 @@ async function serveCommand(
   args: Args,
 ): Promise<number> {
   try {
+    // The process exits once serve returns, ending what still runs: the
+    // stop waits for its drain only briefly (CORE.md#Process model).
     return await serveInstallation(repository, paths, {
+      drainMs: STOP_DRAIN_MS,
       ...(args.flags.provider !== undefined
         ? { provider: args.flags.provider }
         : {}),

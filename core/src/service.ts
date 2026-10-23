@@ -95,6 +95,12 @@ export interface ServeOptions {
   unconfigured?: string;
   /** Stops the service like SIGTERM: a host serving in its own process (library.ts serveFactory). */
   signal?: AbortSignal;
+  /**
+   * The longest a stop waits for its drain (`factory serve`: the process
+   * exits right after, which ends what is still in flight). Absent, it
+   * waits until the drain ends (library.ts serveFactory).
+   */
+  drainMs?: number;
 }
 
 /**
@@ -1069,11 +1075,26 @@ export async function serve(options: ServeOptions): Promise<number> {
     const settledAtStop = new Map(
       [...runners].map(([issue, runner]) => [issue, runner.settled]),
     );
-    await Promise.allSettled([
+    const drained = Promise.allSettled([
       ...[...runners.values()].map((runner) => runner.stop()),
       observing.drain(),
       options.sync?.drain(),
-    ]);
+    ]).then(() => true);
+    const { drainMs } = options;
+    let timer: NodeJS.Timeout | undefined;
+    const ended =
+      drainMs === undefined
+        ? await drained
+        : await Promise.race([
+            drained,
+            new Promise<false>((resolve) => {
+              timer = setTimeout(() => resolve(false), drainMs);
+            }),
+          ]);
+    clearTimeout(timer);
+    // Stopped runners never save again; what still runs ends with the
+    // process, which exits right after.
+    if (!ended) log.write(0, { event: "stop-drain-timeout", afterMs: drainMs });
     options.sync?.flushTransport();
     // An Objective still unfinished is handed off to the next run.
     log.end((issue) =>

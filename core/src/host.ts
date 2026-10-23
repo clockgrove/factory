@@ -123,7 +123,7 @@ function envLimits(): EngineLimits {
 export async function serveInstallation(
   repository: string,
   paths: Paths,
-  options: { provider?: string; signal?: AbortSignal } = {},
+  options: { provider?: string; signal?: AbortSignal; drainMs?: number } = {},
 ): Promise<number> {
   const limits = envLimits();
   let sync: GitHubSync | undefined;
@@ -204,6 +204,7 @@ export async function serveInstallation(
       ? { tickMs: Number(process.env.FACTORY_TICK_MS) }
       : {}),
     ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.drainMs !== undefined ? { drainMs: options.drainMs } : {}),
     limits: {
       ...limits,
       ...(loaded ? { concurrency: loaded.execution.concurrency } : {}),

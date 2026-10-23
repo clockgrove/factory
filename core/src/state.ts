@@ -262,8 +262,13 @@ export interface ObjectiveState {
    * configuration. Absent: no deadline.
    */
   deadline?: string;
-  /** The first save at a terminal status; `by` names who cancelled (`deadline`: the deadline did). */
-  ended?: { at: string; by?: string };
+  /**
+   * The first save at a terminal status; `by` names who cancelled
+   * (`deadline`: the deadline did), and `source` says `by` is the GitHub
+   * login of a `/factory cancel` comment's author (absent: the CLI's host
+   * user, never shown on GitHub).
+   */
+  ended?: { at: string; by?: string; source?: "github" };
 }
 
 /**

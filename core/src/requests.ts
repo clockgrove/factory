@@ -135,7 +135,10 @@ export function isCancel(request: Request): boolean {
 export interface StoredRequest {
   id: string;
   at: string;
+  /** A GitHub login (`source: "github"`), else the host user who ran the CLI. */
   by: string;
+  /** `github`: written for a `/factory` comment, so `by` is its author's login. Absent: the CLI. */
+  source?: "github";
   request: Request;
 }
 
@@ -145,12 +148,19 @@ export function writeRequest(
   by: string,
   /** A fixed id makes writing the same request twice harmless. */
   fixedId?: string,
+  source?: StoredRequest["source"],
 ): string {
   mkdirSync(dir, { recursive: true });
   const at = new Date().toISOString();
   const id =
     fixedId ?? `${at.replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
-  const stored: StoredRequest = { id, at, by, request };
+  const stored: StoredRequest = {
+    id,
+    at,
+    by,
+    ...(source ? { source } : {}),
+    request,
+  };
   const temporary = join(dir, `.${id}.tmp`);
   const fd = openSync(temporary, "w", 0o600);
   try {

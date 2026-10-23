@@ -485,7 +485,11 @@ export async function serve(options: ServeOptions): Promise<number> {
       // replies and shows it cancelled.
       const state = newObjective(request.issue, new Date());
       state.status = "cancelled";
-      state.ended = { at: state.updatedAt, by: stored.by };
+      state.ended = {
+        at: state.updatedAt,
+        by: stored.by,
+        ...(stored.source ? { source: stored.source } : {}),
+      };
       state.appliedRequests = [{ id: stored.id, message: "ok" }];
       if (broken.github) state.modules.github = broken.github;
       saveState(paths.objectives, state);
@@ -504,6 +508,7 @@ export async function serve(options: ServeOptions): Promise<number> {
     const result = runner.transact(() => {
       const state = runner.state;
       const resetting = state.kept?.[RESET] as ResetRecord | undefined;
+      const endedBefore = state.ended;
       let refusal: RequestResult | null = null;
       switch (request.kind) {
         case "cancel":
@@ -529,6 +534,9 @@ export async function serve(options: ServeOptions): Promise<number> {
           refusal = control(state, request.kind, stored);
           break;
       }
+      // A cancel this request made records where it came from.
+      if (state.ended && state.ended !== endedBefore && stored.source)
+        state.ended.source = stored.source;
       const applied = refusal ?? { message: "ok" };
       // A cancel replaces a reset that hasn't landed: its request is
       // answered here, with this save.

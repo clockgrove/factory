@@ -978,7 +978,10 @@ test("switch moves an Objective held on a usage limit to the named provider", as
         id,
         step: "item:a:work",
         question: "Codex usage limit: weekly.",
-        options: offered("wait", "switch", "cancel"),
+        // As the engine saves it: one switch option per target.
+        options: offered("wait", "switch", "cancel").map((option) =>
+          option.answer === "switch" ? { ...option, arg: "claude" } : option,
+        ),
         askedAt: now,
       },
     ],
@@ -999,7 +1002,7 @@ test("switch moves an Objective held on a usage limit to the named provider", as
   const unknown = cli(inst, "answer", "41", "switch", "nope", "--question", id);
   assert.equal(unknown.code, 1);
   assert.equal(refusal(unknown), "invalid_answer");
-  assert.match(unknown.err, /one of claude/);
+  assert.match(unknown.err, /`switch claude`/);
   assert.equal(cli(inst, "answer", "41", "switch", "--question", id).code, 0);
   const state = stateOf(inst, 41);
   assert.deepEqual(state.holds, []);

@@ -126,9 +126,9 @@ const COMMANDS: Record<
     help: "Show an Objective's run log: the last --tail N events (50), --follow for new ones",
   },
   answer: {
-    args: "ISSUE ANSWER [NAME]",
+    args: "ISSUE ANSWER [ARG]",
     flags: { question: true, text: true },
-    help: "Answer open question --question ID (status shows the ids); `switch NAME` runs it on another provider, `adopt` on the changed configuration",
+    help: "Answer open question --question ID with one of its options (status lists them); ARG is the option's argument (`switch NAME`), --text the explanation",
   },
   retry: {
     args: "ISSUE",
@@ -260,12 +260,14 @@ async function main(argv: string[]): Promise<number> {
           throw usage(
             `answer needs --question with the open question's id, so it can't answer a newer one: see \`factory status ${issue}\``,
           );
-        // `answer ISSUE switch NAME` names the provider, as `--text NAME` does.
-        const text = args.flags.text ?? args.positional[3];
+        // `answer ISSUE switch NAME`: the option's argument, never the text.
+        const arg = args.positional[3];
+        const text = args.flags.text;
         return await request(paths, {
           kind: "answer",
           issue,
           answer,
+          ...(arg ? { arg } : {}),
           ...(text ? { text } : {}),
           ...(question !== undefined ? { question } : {}),
         });

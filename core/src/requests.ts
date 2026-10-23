@@ -24,6 +24,8 @@ export type Request =
       kind: "answer";
       issue: number;
       answer: string;
+      /** The option's argument (`switch NAME`), apart from the text. */
+      arg?: string;
       text?: string;
       /** When the answer was written (a comment's time): it only answers a question already asked then. */
       writtenAt?: string;

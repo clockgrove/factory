@@ -9,13 +9,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isObject } from "../checked.js";
 import type { CoreConfig } from "../config.js";
-import {
-  ADOPTS,
-  hold,
-  type Step,
-  switchTargets,
-  type Workflow,
-} from "../engine.js";
+import { ADOPTS, hold, type Step, type Workflow } from "../engine.js";
 import type { Plan } from "../planning/types.js";
 import type { ObjectiveBlock } from "../shown.js";
 import { type ObjectiveState, TERMINAL } from "../state.js";
@@ -296,28 +290,17 @@ function changed(
           "This Objective has no frozen configuration: it was admitted without one. Cancel it and queue it again.",
           ["cancel"],
         );
-      // `switch` re-freezes on another configured provider, or on this
-      // one's current configuration: exactly the targets the engine
-      // accepts (switchTargets), so plain `switch` works when it says so.
-      const targets = switchTargets(frozen, freezable);
-      const named = targets
-        .map((name) =>
-          name === frozen.provider
-            ? `\`${name}\` (its current configuration)`
-            : `\`${name}\``,
-        )
-        .join(", ");
-      const switching = !targets.some((name) => name !== frozen.provider)
-        ? ""
-        : targets.length === 1
-          ? `\`switch\` runs it on provider ${named}`
-          : `\`switch NAME\` runs it on one of these providers: ${named}`;
+      // `switch` stands for one option per configured provider, this one's
+      // included (a re-freeze); the engine names them in the question.
+      const switching = Object.keys(freezable).some(
+        (name) => name !== frozen.provider,
+      );
       const live = freezable[frozen.provider];
       if (!live)
         return hold(
-          `This Objective froze provider "${frozen.provider}", which the configuration no longer names. ${switching ? `${switching}; or restore` : "Restore"} the provider as it was, restart the service and answer retry; or cancel.`,
+          `This Objective froze provider "${frozen.provider}", which the configuration no longer names. Restore the provider as it was, restart the service and answer retry; or cancel.`,
           [
-            ...(switching ? ["switch" as const] : []),
+            "switch",
             {
               answer: "retry",
               family: "retry",
@@ -332,7 +315,7 @@ function changed(
       // (engine.ts ADOPTS); a later change asks again.
       return {
         ...hold(
-          `The configuration changed since this Objective froze it (${frozen.digest.slice(0, 12)}): ${keys.join(", ")}. \`adopt\` runs it on the configuration as it is now (${live.digest.slice(0, 12)})${switching ? `; ${switching}` : ""}; or cancel. To keep the frozen values, restore them, restart the service and answer adopt.`,
+          `The configuration changed since this Objective froze it (${frozen.digest.slice(0, 12)}): ${keys.join(", ")}. \`adopt\` runs it on the configuration as it is now (${live.digest.slice(0, 12)}); or cancel. To keep the frozen values, restore them, restart the service and answer adopt.`,
           ["adopt", ...(switching ? ["switch" as const] : []), "cancel"],
         ),
         keep: { [ADOPTS]: live.digest },
